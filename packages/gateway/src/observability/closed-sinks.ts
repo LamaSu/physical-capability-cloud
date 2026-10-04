@@ -13,6 +13,7 @@
  *     wires them, and keeps a request's trace headers from being continued at all).
  */
 import type { FastifyInstance, FastifyLogFn } from "fastify";
+import { isTelemetrySinkRequest } from "../services/telemetry-privacy.js";
 import { hostname } from "node:os";
 import {
   closedError,
@@ -246,10 +247,14 @@ export function closedRequest(req: unknown): Record<string, unknown> {
   const url = readSafely(readSafely(req, "routeOptions"), "url");
   const route = typeof url === "string" && url !== "" ? url : "unmatched";
   const ip = readSafely(req, "ip");
+  // #458: a request that targets or imitates the public telemetry sink leaves no client value,
+  // not even its keyed hash.
+  const rawUrl = readSafely(raw, "url");
+  const sink = typeof rawUrl === "string" && isTelemetrySinkRequest(rawUrl);
   return {
     method: typeof requestMethod === "string" && METHODS.has(requestMethod) ? requestMethod : "OTHER",
     route: routeTemplates().has(route) ? route : keyedHash(route),
-    ...(typeof ip === "string" ? { client: keyedHash(ip) } : {}),
+    ...(typeof ip === "string" && !sink ? { client: keyedHash(ip) } : {}),
   };
 }
 

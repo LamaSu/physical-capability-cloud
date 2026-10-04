@@ -283,7 +283,9 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
    * Trigger a health check on a device.
    */
   app.post<{ Params: { deviceId: string } }>("/api/devices/:deviceId/health", async (req, reply) => {
-    const result = await facade.checkDeviceHealth(req.params.deviceId);
+    const result = await facade.checkDeviceHealth(req.params.deviceId, {
+      operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+    });
     return sendResult(reply, result);
   });
 }

@@ -13,6 +13,10 @@
  * Onboarding agents that hit a bug, friction, or dead-end call the `pcc_report`
  * tool (wired to this route in agent-package.json) so the team learns about
  * agent friction without the agent needing a key or a human relay.
+ *
+ * `kind: "attempt"` (ADK track item 3, contract attempt.v1) reports one phase of
+ * an onboarding or operating attempt, success or failure, plus a session roll-up.
+ * It shares the guards above; see the "Attempt reports" section at the end.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -34,18 +38,68 @@ const FEEDBACK_FILE = `${DATA_DIR}/feedback.jsonl`;
 // volume. Tunable via env for ops + tests.
 const RATE_MAX = Number.parseInt(process.env.PCC_FEEDBACK_RATE_MAX ?? "60", 10);
 const RATE_WINDOW_MS = Number.parseInt(process.env.PCC_FEEDBACK_RATE_WINDOW_MS ?? "60000", 10);
+// Attempt reports have their own per-IP bucket, so a burst of them can't starve a
+// classic report, plus a global cap per window: behind a proxy that passes on a
+// caller-chosen X-Forwarded-For, per-IP limits can be sidestepped, and the global
+// cap still bounds how fast the durable sink can grow (#458 round 1).
+const ATTEMPT_RATE_MAX = Number.parseInt(process.env.PCC_ATTEMPT_RATE_MAX ?? String(RATE_MAX), 10);
+const ATTEMPT_GLOBAL_MAX = Number.parseInt(process.env.PCC_ATTEMPT_GLOBAL_RATE_MAX ?? "600", 10);
+// State stays bounded: a rejected hit is not recorded, the least recently seen IP
+// is evicted past MAX_TRACKED_IPS, and an idle IP at the front is dropped.
+const MAX_TRACKED_IPS = 10_000;
 const hits = new Map<string, number[]>();
-function rateLimited(ip: string): boolean {
+const attemptHits = new Map<string, number[]>();
+let attemptWindowStart = 0;
+let attemptWindowCount = 0;
+
+function limitedIn(bucket: Map<string, number[]>, ip: string, max: number): boolean {
   const now = Date.now();
-  const arr = (hits.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
-  arr.push(now);
-  hits.set(ip, arr);
-  return arr.length > RATE_MAX;
+  const first = bucket.entries().next().value as [string, number[]] | undefined;
+  if (first && first[0] !== ip) {
+    const last = first[1][first[1].length - 1];
+    if (last === undefined || now - last >= RATE_WINDOW_MS) bucket.delete(first[0]);
+  }
+  const arr = (bucket.get(ip) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+  bucket.delete(ip); // re-set below, so Map order is least recently seen first
+  const limited = arr.length >= max;
+  if (!limited) arr.push(now);
+  bucket.set(ip, arr);
+  if (bucket.size > MAX_TRACKED_IPS) {
+    const oldest = bucket.keys().next().value;
+    if (oldest !== undefined) bucket.delete(oldest);
+  }
+  return limited;
 }
 
-/** Reset the in-memory rate-limit counter. Test-only export. */
+function rateLimited(ip: string): boolean {
+  return limitedIn(hits, ip, RATE_MAX);
+}
+
+function attemptRateLimited(ip: string): boolean {
+  if (limitedIn(attemptHits, ip, ATTEMPT_RATE_MAX)) return true;
+  const now = Date.now();
+  if (now - attemptWindowStart >= RATE_WINDOW_MS) {
+    attemptWindowStart = now;
+    attemptWindowCount = 0;
+  }
+  if (attemptWindowCount >= ATTEMPT_GLOBAL_MAX) return true;
+  attemptWindowCount++;
+  return false;
+}
+
+/** Reset the in-memory rate-limit counters. Test-only export. */
 export function __resetFeedbackRateLimit(): void {
   hits.clear();
+  attemptHits.clear();
+  attemptWindowStart = 0;
+  attemptWindowCount = 0;
+}
+
+/** Sizes of the rate-limit and dedup state. Test-only export. */
+export function __feedbackStateSizes(): { hits: number; attemptHits: number; maxHitsPerIp: number; dedup: number } {
+  let maxHitsPerIp = 0;
+  for (const arr of [...hits.values(), ...attemptHits.values()]) maxHitsPerIp = Math.max(maxHitsPerIp, arr.length);
+  return { hits: hits.size, attemptHits: attemptHits.size, maxHitsPerIp, dedup: recentReports.size };
 }
 
 // Dedup: a retry-looping agent files the "same" failure many times. Collapse reports
@@ -59,16 +113,29 @@ const DEDUP_WINDOW_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 300000; // 5 min default
 })();
 const recentReports = new Map<string, number>();
+// Bounded (#458 round 1): at most MAX_DEDUP_KEYS keys, oldest evicted first.
+const MAX_DEDUP_KEYS = 10_000;
 // PEEK — prune expired keys and report whether this one is present, WITHOUT recording
 // it. The key is marked only after a successful append (markSeen), so a failed write
-// can't permanently dedup a report that never persisted (review #3).
+// can't permanently dedup a report that never persisted (review #3). Keys are
+// inserted in time order (markSeen re-inserts at the end), so expired keys sit at
+// the front and pruning stops at the first live one instead of scanning the map.
 function seenRecently(key: string): boolean {
   const now = Date.now();
-  for (const [k, t] of recentReports) if (now - t > DEDUP_WINDOW_MS) recentReports.delete(k);
+  for (const [k, t] of recentReports) {
+    if (now - t <= DEDUP_WINDOW_MS) break;
+    recentReports.delete(k);
+  }
   return recentReports.has(key);
 }
 function markSeen(key: string): void {
+  recentReports.delete(key);
   recentReports.set(key, Date.now());
+  while (recentReports.size > MAX_DEDUP_KEYS) {
+    const oldest = recentReports.keys().next().value;
+    if (oldest === undefined) break;
+    recentReports.delete(oldest);
+  }
 }
 /** Reset the in-memory dedup window. Test-only export. */
 export function __resetFeedbackDedup(): void {
@@ -247,6 +314,8 @@ async function notifyDiscord(rec: Record<string, unknown>): Promise<void> {
 
     const payload = {
       username: "PCC Feedback",
+      // Never ping @everyone, @here, a role or a user from report text (#458 round 1).
+      allowed_mentions: { parse: [] as string[] },
       embeds: [
         {
           title: `New ${rec.type}`,
@@ -276,11 +345,15 @@ export async function feedbackRoutes(app: FastifyInstance) {
     const b = (req.body ?? {}) as Record<string, any>;
     if (b.website || b.hp) return { status: "ok" }; // honeypot — accept silently, drop
 
-    if (rateLimited(req.ip)) {
+    const isAttempt = b.kind === "attempt";
+    if (isAttempt ? attemptRateLimited(req.ip) : rateLimited(req.ip)) {
       return reply
         .code(429)
         .send({ error: "rate_limited", message: "Too many submissions — try again shortly." });
     }
+
+    // ADK attempt reports have their own contract (section at the end of this file).
+    if (isAttempt) return handleAttemptReport(req, reply, b);
 
     // Accept the canonical agent shape AND tolerate the legacy dashboard shape
     // and the /api/feedback/agent-report aliases — no migration, fields ride along:
@@ -441,9 +514,383 @@ export async function feedbackRoutes(app: FastifyInstance) {
   });
 
   // Admin review / export (gated by X-Admin-Token === WAITLIST_ADMIN_TOKEN).
+  // Optional filters: ?kind=feedback|attempt and ?sessionId=<uuid>. Without them
+  // the response is exactly as before.
   app.get("/api/admin/feedback", async (req, reply) => {
     if (!adminOk(req, reply)) return;
-    const items = readAll(FEEDBACK_FILE);
+    const q = (req.query ?? {}) as Record<string, unknown>;
+    for (const key of ["kind", "sessionId"]) {
+      if (q[key] !== undefined && typeof q[key] !== "string") {
+        return reply.code(400).send({ error: "bad_request", message: `\`${key}\` must be given once.` });
+      }
+    }
+    let items = readAll(FEEDBACK_FILE) as Array<Record<string, unknown>>;
+    if (typeof q.kind === "string" && q.kind !== "") {
+      items = items.filter((r) => (r.kind ?? "feedback") === q.kind);
+    }
+    if (typeof q.sessionId === "string" && q.sessionId !== "") {
+      const sid = q.sessionId.toLowerCase();
+      items = items.filter((r) => r.sessionId === sid);
+    }
     return { total: items.length, items };
+  });
+}
+
+// ── Attempt reports (ADK track item 3; contract attempt.v1) ─────────────────
+//
+// Operator R7: an "attempt" is the whole experience of onboarding and operating a
+// device, success or failure. Each report is one runbook phase, or the `session`
+// roll-up. Contract: returns/pcc-painpoints-work/item3-attempt-reporting-contract-v1.md
+// in the reconciliation workspace. Same public route, honeypot, per-IP rate limit
+// and secret redaction as a classic report; the classic path above is unchanged.
+// Deliberate differences:
+//   - a client sessionId (UUID v4) and seq are required, and dedup keys on them,
+//     so a retried report collapses but distinct phase reports never do;
+//   - emails inside free text are redacted as well as secrets;
+//   - no raw IP is stored; an authenticated principal is stored only as a hash;
+//   - a transcript is never read or stored (operator item 99 decides consent);
+//   - Discord hears only failed / blocked / budget_stop outcomes.
+
+export const ATTEMPT_CONTRACT = "attempt.v1";
+export const ATTEMPT_PHASES = [
+  "prerequisites",
+  "identify",
+  "intake",
+  "research",
+  "build",
+  "register",
+  "verify",
+  "operate",
+  "publish",
+  "session",
+] as const;
+export const ATTEMPT_OUTCOMES = [
+  "ok",
+  "failed",
+  "blocked",
+  "skipped",
+  "budget_stop",
+  "abandoned",
+  "in_progress",
+] as const;
+export const HARNESS_NAMES = ["claude-code", "codex", "pcc-hosted", "other"] as const;
+export const DEVICE_CLASSES = ["lab_instrument", "robot", "printer", "process_agent", "other"] as const;
+export const PROPOSAL_TARGETS = ["runbook", "agent-package", "docs", "code", "process", "other"] as const;
+export const TOKEN_SOURCES = ["self_reported", "harness", "metered", "unknown"] as const;
+
+const ALERT_OUTCOMES = new Set(["failed", "blocked", "budget_stop"]);
+// Tighter than a classic report's caps: attempt text describes a failure, never a
+// conversation (#458 round 1). Consent for transcripts is operator item 99.
+const ATTEMPT_SUMMARY_MAX = 1000;
+const ATTEMPT_DETAIL_MAX = 4000;
+// Unicode direction controls can reorder what a reader sees; attempt text drops them.
+const BIDI_CONTROLS = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ATTEMPT_ID = /^[A-Za-z0-9:._/-]{1,200}$/;
+const MAX_SEQ = 10_000;
+const MAX_DURATION_MS = 86_400_000;
+const MAX_TOKENS = 1_000_000_000;
+const MAX_ROLLUP_PHASES = 16;
+
+// Emails inside attempt free text. The start-of-run lookbehind and bounded
+// quantifiers keep matching linear on this public route.
+const EMAIL_IN_TEXT = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){1,8}/g;
+function redactEmails(s: string): string {
+  return s.replace(EMAIL_IN_TEXT, "[redacted-email]");
+}
+
+/** Attempt free text: bound, redact secrets and emails, drop direction controls, then clamp. */
+function attemptText(v: unknown, max: number): string | null {
+  if (typeof v !== "string") return null;
+  const bounded = v.length > PRE_REDACT_MAX ? v.slice(0, PRE_REDACT_MAX) : v;
+  return clampStr(redactEmails(redactSecrets(bounded)).replace(BIDI_CONTROLS, ""), max);
+}
+
+/** Text for a Discord embed: no newlines, no Markdown, no mentions. */
+function discordSafe(s: unknown): string {
+  return String(s ?? "")
+    .replace(/\s+/g, " ")
+    .replace(/([\\*_`~|>\[\]()#])/g, "\\$1")
+    .replace(/@/g, "@\u200b");
+}
+
+function asObject(v: unknown): Record<string, unknown> | null {
+  return v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function enumValue<T extends string>(v: unknown, allowed: readonly T[]): T | null {
+  if (typeof v !== "string") return null;
+  const n = v.trim().toLowerCase();
+  return (allowed as readonly string[]).includes(n) ? (n as T) : null;
+}
+
+function boundedInt(v: unknown, max: number): number | null {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : Number.NaN;
+  return Number.isInteger(n) && n >= 0 && n <= max ? n : null;
+}
+
+/** `budget-stop` and `Budget_Stop` both mean budget_stop; anything unlisted is "unknown". */
+function attemptOutcome(v: unknown): string {
+  const n = typeof v === "string" ? v.trim().toLowerCase().replace(/-/g, "_") : "";
+  return (ATTEMPT_OUTCOMES as readonly string[]).includes(n) ? n : "unknown";
+}
+
+/** An id is kept only if it is id-shaped and nothing in it looks like a secret. */
+function attemptId(v: unknown): string | null {
+  if (typeof v !== "string" || !ATTEMPT_ID.test(v)) return null;
+  return redactSecrets(v) === v ? v : null;
+}
+
+/** Redact emails in log notes and paths before clampLogs redacts secrets and clamps them. */
+function preRedactLogs(v: unknown): unknown {
+  if (!Array.isArray(v)) return v;
+  return v.slice(0, MAX_LOG_ENTRIES).map((raw) => {
+    const e = asObject(raw);
+    if (e === null) return raw;
+    const out: Record<string, unknown> = { ...e };
+    for (const k of ["note", "path", "endpoint"]) {
+      const val = e[k];
+      if (typeof val === "string") {
+        const bounded = val.length > PRE_REDACT_MAX ? val.slice(0, PRE_REDACT_MAX) : val;
+        out[k] = redactEmails(bounded).replace(BIDI_CONTROLS, "");
+      }
+    }
+    return out;
+  });
+}
+
+/** The session roll-up: real phases only, at most MAX_ROLLUP_PHASES entries. */
+function attemptRollup(v: unknown): Array<{ phase: string; outcome: string; durationMs: number | null }> | null {
+  if (!Array.isArray(v)) return null;
+  const out: Array<{ phase: string; outcome: string; durationMs: number | null }> = [];
+  for (const raw of v.slice(0, MAX_ROLLUP_PHASES)) {
+    const e = asObject(raw);
+    const phase = e === null ? null : enumValue(e.phase, ATTEMPT_PHASES);
+    if (e === null || phase === null || phase === "session") continue;
+    out.push({ phase, outcome: attemptOutcome(e.outcome), durationMs: boundedInt(e.durationMs, MAX_DURATION_MS) });
+  }
+  return out.length > 0 ? out : null;
+}
+
+function attemptIds(v: unknown): Record<string, string> | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  const out: Record<string, string> = {};
+  for (const k of ["kernelId", "capabilityId", "kitId", "jobId"]) {
+    const id = attemptId(o[k]);
+    if (id !== null) out[k] = id;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function attemptDevice(v: unknown): Record<string, string | null> | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  const out = {
+    make: attemptText(o.make, 128),
+    model: attemptText(o.model, 128),
+    class: o.class === undefined || o.class === null ? null : (enumValue(o.class, DEVICE_CLASSES) ?? "other"),
+  };
+  return out.make || out.model || out.class ? out : null;
+}
+
+function attemptHarness(v: unknown): Record<string, string | null> | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  const name = o.name === undefined || o.name === null ? null : (enumValue(o.name, HARNESS_NAMES) ?? "other");
+  const out: Record<string, string | null> = {
+    name,
+    version: attemptText(o.version, 128),
+    model: attemptText(o.model, 128),
+  };
+  if (name === "other" && typeof o.name === "string") out.label = attemptText(o.name, 64);
+  return out.name || out.version || out.model ? out : null;
+}
+
+// No part of a client-sent pack digest is stored: a 64-hex value is exactly what
+// redaction treats as a private key, and even a prefix of one is part of a secret
+// (#458 round 1). The pack version identifies the release.
+function attemptPack(v: unknown): { version: string | null } | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  const version = attemptText(o.version, 64);
+  return version ? { version } : null;
+}
+
+function attemptEnv(v: unknown): Record<string, string | null> | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  const out = { os: attemptText(o.os, 64), python: attemptText(o.python, 64), pccNode: attemptText(o.pccNode, 64) };
+  return out.os || out.python || out.pccNode ? out : null;
+}
+
+/** Tokens are never guessed: counts are stored as sent (bounded) with their source label. */
+function attemptTokens(v: unknown): { in: number | null; out: number | null; source: string } | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  return {
+    in: boundedInt(o.in, MAX_TOKENS),
+    out: boundedInt(o.out, MAX_TOKENS),
+    source: enumValue(o.source, TOKEN_SOURCES) ?? "unknown",
+  };
+}
+
+function attemptProposal(v: unknown): { target: string; path: string | null; text: string } | null {
+  const o = asObject(v);
+  if (o === null) return null;
+  const text = attemptText(o.text, ATTEMPT_SUMMARY_MAX);
+  if (text === null) return null;
+  const path = pathClamp(o.path, FIELD_MAX);
+  return { target: enumValue(o.target, PROPOSAL_TARGETS) ?? "other", path: path === null ? null : redactEmails(path), text };
+}
+
+export type AttemptParse =
+  | { ok: true; fields: Record<string, unknown> }
+  | { ok: false; field: string; message: string };
+
+/** Validate and normalise an attempt report body. Pure; exported for tests. */
+export function parseAttemptReport(b: Record<string, unknown>): AttemptParse {
+  const sid = typeof b.sessionId === "string" ? b.sessionId.trim() : "";
+  if (!UUID_V4.test(sid)) {
+    return { ok: false, field: "sessionId", message: "sessionId must be a client-generated UUID v4." };
+  }
+  const seq = boundedInt(b.seq, MAX_SEQ);
+  if (seq === null) return { ok: false, field: "seq", message: `seq must be an integer from 0 to ${MAX_SEQ}.` };
+  if (typeof b.phase !== "string" || b.phase.trim() === "") {
+    return { ok: false, field: "phase", message: "phase is required." };
+  }
+  if (typeof b.outcome !== "string" || b.outcome.trim() === "") {
+    return { ok: false, field: "outcome", message: "outcome is required." };
+  }
+  const phase = enumValue(b.phase, ATTEMPT_PHASES) ?? "other";
+  const outcome = attemptOutcome(b.outcome);
+  const fields: Record<string, unknown> = {
+    contract: ATTEMPT_CONTRACT,
+    sessionId: sid.toLowerCase(),
+    seq,
+    phase,
+    ...(phase === "other" ? { phaseLabel: attemptText(b.phase, 64) } : {}),
+    outcome,
+    ...(outcome === "unknown" ? { outcomeLabel: attemptText(b.outcome, 64) } : {}),
+    durationMs: boundedInt(b.durationMs, MAX_DURATION_MS),
+    summary: attemptText(b.summary, ATTEMPT_SUMMARY_MAX) ?? `${phase}: ${outcome}`,
+    detail: attemptText(b.detail, ATTEMPT_DETAIL_MAX),
+    logs: clampLogs(preRedactLogs(b.logs)),
+    ...(phase === "session" ? { phases: attemptRollup(b.phases) } : {}),
+    ids: attemptIds(b.ids),
+    device: attemptDevice(b.device),
+    harness: attemptHarness(b.harness),
+    pack: attemptPack(b.pack),
+    env: attemptEnv(b.env),
+    tokens: attemptTokens(b.tokens),
+    proposal: attemptProposal(b.proposal),
+    traceId: attemptText(b.traceId, FIELD_MAX),
+    consent: { transcript: asObject(b.consent)?.transcript === true },
+    // Presence only: the transcript itself is never read (operator item 99).
+    ...("transcript" in b ? { transcriptDropped: true } : {}),
+  };
+  return { ok: true, fields };
+}
+
+async function handleAttemptReport(req: FastifyRequest, reply: FastifyReply, b: Record<string, unknown>) {
+  const parsed = parseAttemptReport(b);
+  if (!parsed.ok) {
+    return reply.code(400).send({ error: "bad_request", field: parsed.field, message: parsed.message });
+  }
+  const f = parsed.fields;
+  const apiKeyId = (req as unknown as { apiKeyId?: string }).apiKeyId;
+  const userId = (req as unknown as { userId?: string }).userId;
+  const principal: [string, string] = apiKeyId ? ["apiKey", apiKeyId] : userId ? ["user", userId] : ["ip", req.ip];
+  const rec: Record<string, unknown> = {
+    id: rid("at"),
+    kind: "attempt",
+    ...f,
+    traceId: f.traceId ?? attemptText((req as unknown as { traceId?: string }).traceId, FIELD_MAX),
+    principal: principal[0] === "ip" ? "anonymous" : principal[0],
+    ...(principal[0] === "ip"
+      ? {}
+      : { principalHash: createHash("sha256").update(JSON.stringify(principal)).digest("hex") }),
+    status: "new",
+    createdAt: new Date().toISOString(),
+    // Sanitised like any attempt text: a User-Agent can carry a token or an email.
+    userAgent: attemptText(req.headers["user-agent"], 200),
+  };
+
+  // The content digest keeps a report with the same (sessionId, seq) but different
+  // content from suppressing the real one; an identical retry still collapses.
+  const contentDigest = createHash("sha256").update(JSON.stringify(f)).digest("hex");
+  const dedupKey = createHash("sha256")
+    .update(JSON.stringify(["attempt", principal, f.sessionId, f.seq, contentDigest]))
+    .digest("hex");
+  if (seenRecently(dedupKey)) {
+    return reply.code(200).send({
+      status: "ok",
+      submitted: false,
+      deduped: true,
+      sessionId: f.sessionId,
+      message: "Thanks — this attempt report (same sessionId and seq) was already recorded.",
+    });
+  }
+
+  append(FEEDBACK_FILE, rec);
+  markSeen(dedupKey);
+  if (ALERT_OUTCOMES.has(String(f.outcome))) {
+    const harness = f.harness as { name?: string | null } | null;
+    // Discord gets escaped, single-line text and never the detail field.
+    notifyDiscord({
+      id: rec.id,
+      type: `attempt ${String(f.phase)}/${String(f.outcome)}`,
+      summary: discordSafe(rec.summary),
+      traceId: rec.traceId === null ? null : discordSafe(rec.traceId),
+      agentId: harness?.name ?? null,
+      createdAt: rec.createdAt,
+      userAgent: discordSafe(rec.userAgent),
+    }).catch(() => {});
+  }
+  try {
+    auditService.log({
+      eventType: "agent.attempt",
+      actor: (req as unknown as { operatorId?: string }).operatorId ?? apiKeyId ?? "anonymous",
+      resourceType: "agent_attempt",
+      resourceId: String(rec.id),
+      action: "create",
+      metadata: {
+        session_id: f.sessionId,
+        seq: f.seq,
+        phase: f.phase,
+        outcome: f.outcome,
+        duration_ms: f.durationMs,
+        harness: (f.harness as { name?: string | null } | null)?.name ?? null,
+        device_class: (f.device as { class?: string | null } | null)?.class ?? null,
+        has_proposal: f.proposal !== null,
+        transcript_dropped: f.transcriptDropped === true,
+      },
+      userAgent: (rec.userAgent as string | null) ?? undefined,
+    });
+  } catch {
+    /* best-effort observability */
+  }
+  try {
+    trackServerEvent("attempt_reported", {
+      attempt_id: rec.id,
+      session_id: f.sessionId,
+      phase: f.phase,
+      outcome: f.outcome,
+      duration_ms: f.durationMs,
+      harness: (f.harness as { name?: string | null } | null)?.name ?? null,
+      device_class: (f.device as { class?: string | null } | null)?.class ?? null,
+      tokens_source: (f.tokens as { source?: string } | null)?.source ?? null,
+      has_proposal: f.proposal !== null,
+    });
+  } catch {
+    /* best-effort telemetry */
+  }
+
+  return reply.code(201).send({
+    status: "ok",
+    id: rec.id,
+    sessionId: f.sessionId,
+    submitted: true,
+    message: "Thanks — attempt report recorded.",
   });
 }

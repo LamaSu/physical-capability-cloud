@@ -4,6 +4,8 @@ import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
+import { writeAuditHook } from "./services/write-audit-hook.js";
+import { telemetryLookalikeHook } from "./services/telemetry-privacy.js";
 initPostHog();
 import { closeConsole, closedLoggerHooks, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
 import { closedError, declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning } from "./observability/closed-schema.js";
@@ -38,6 +40,7 @@ import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { operatorWorkRoutes } from "./routes/operator-work.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { operatorChannelsRoutes } from "./routes/operator-channels.js";
 import { operatorStatusRoutes } from "./routes/operator-status.js";
@@ -128,10 +131,7 @@ import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
 import { nearRoutes } from "./routes/near.js";
 import { litProvisionRoutes } from "./routes/lit-provision.js";
-import { ot2ChatRoutes } from "./routes/ot2-chat.js";
-import { ot2CameraRoutes } from "./routes/ot2-camera.js";
-import { ot2RelayRoutes } from "./routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "./routes/ot2-scope.js";
+import { ot2LegacyGoneRoutes } from "./routes/ot2-legacy-gone.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
@@ -139,7 +139,7 @@ import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
-import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
+import { corsDelegator, irCorsReadProjection, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
 import { scopeChecker } from "./middleware/scope-checker.js";
@@ -303,14 +303,13 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin)
-  await app.register(cors, {
-    origin: corsOriginValidator,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
-    maxAge: 86400, // Cache preflight for 24h
-  });
+  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
+  // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
+  // GET access to the closed IR's public read routes for the governed GenUI view (row 37).
+  await app.register(cors, { delegator: corsDelegator });
+  // ...and such a wildcard response is the server-side IR projection, never the raw body
+  // (astra #562 r1 F1). This is a ROOT hook, so it wraps every route registered below.
+  app.addHook("onSend", irCorsReadProjection);
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
@@ -404,40 +403,13 @@ export async function createGateway(port = 3200) {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
 
-  const HTTP_WRITE_ACTIONS = ["post", "put", "delete", "patch"] as const;
-
-  // Automatic write-operation audit hook — logs all POST/PUT/DELETE requests
-  // to the audit log so every state-changing call is captured without
-  // per-route boilerplate. Individual routes may also log richer events.
-  app.addHook("onResponse", async (request, reply) => {
-    const method = request.method;
-    if (method !== "POST" && method !== "PUT" && method !== "DELETE" && method !== "PATCH") return;
-
-    const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
-      request.headers.authorization ? "authenticated" : "anonymous"
-    );
-
-    try {
-      const { auditService: audit } = await import("./services/audit-service.js");
-      // Every field declared (the closed observability schema, N107b round 2).
-      audit.log({
-        eventType: lit("http.write"),
-        actor,
-        resourceType: lit("http"),
-        action: declare.code(method.toLowerCase(), HTTP_WRITE_ACTIONS),
-        metadata: {
-          method: declare.code(method, METHODS),
-          route: declaredRoute(request),
-          statusCode: declare.metric(reply.statusCode),
-          duration_ms: declare.metric(Math.round(reply.elapsedTime ?? 0)),
-        },
-        ip: request.ip,
-        userAgent: request.headers["user-agent"],
-      });
-    } catch {
-      // Audit failures must never affect request handling
-    }
-  });
+  // Automatic write-operation audit hook (services/write-audit-hook.ts) — logs all
+  // POST/PUT/PATCH/DELETE requests to the audit log. The public telemetry sink's
+  // audit rows omit the caller's IP and User-Agent (#458 round 1).
+  app.addHook("onResponse", writeAuditHook);
+  // An unrouted lookalike of the public telemetry sink gets a fixed 404 before the
+  // default not-found handler can log its raw URL (#458 round 3).
+  app.addHook("onRequest", telemetryLookalikeHook);
 
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);
@@ -698,6 +670,7 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(operatorWorkRoutes);
   await app.register(operatorsPublicRoutes);
   await app.register(operatorChannelsRoutes);
   await app.register(operatorStatusRoutes);
@@ -779,13 +752,13 @@ export async function createGateway(port = 3200) {
   // Lit Protocol key provisioning
   await app.register(litProvisionRoutes);
 
-  // OT-2 remote agent relay (chat + camera + tool-call relay + execution scopes)
-  await app.register(ot2ChatRoutes);
-  await app.register(ot2CameraRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay (/api/ot2/{tool-call,tool-result,scope,chat,camera})
+  // is retired (N4b-gw item 1): every /api/ot2/* request answers 410 Gone with
+  // the /api/relay/:kernelId/... route that replaces it.
+  await app.register(ot2LegacyGoneRoutes);
 
-  // Generic device relay -- works for any device type, namespaced by kernelId
+  // Generic device relay -- works for any device type, namespaced by kernelId.
+  // Default-deny, per kernel (N4b-gw item 4; see RELAY_ROUTE_ACCESS).
   await app.register(deviceRelayRoutes);
 
   // Wizard sessions + compliance

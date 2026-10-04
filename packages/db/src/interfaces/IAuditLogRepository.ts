@@ -10,6 +10,7 @@ export interface IAuditLogRepository {
     eventType?: string | readonly string[];
     actor?: string | readonly string[];
     resourceType?: string | readonly string[];
+    resourceId?: string | readonly string[];
     since?: string;
     limit?: number;
   }): AuditLogRow[];

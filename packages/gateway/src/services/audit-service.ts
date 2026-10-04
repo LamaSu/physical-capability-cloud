@@ -51,9 +51,11 @@ class AuditService {
    * Append an audit entry to the database.
    *
    * Fire-and-forget: this method is synchronous (SQLite is sync) but wrapped
-   * in a try/catch so audit failures never propagate to the caller.
+   * in a try/catch so audit failures never propagate to the caller. Returns
+   * whether the row was written, for callers that must know (the operator
+   * funnel marks a stage recorded only after its durable row exists).
    */
-  log(entry: AuditEntry): void {
+  log(entry: AuditEntry): boolean {
     try {
       const repos = getRepos();
       repos.auditLog.insert({
@@ -67,8 +69,10 @@ class AuditService {
         ip: entry.ip ? keyedHash(entry.ip) : null,
         userAgent: entry.userAgent ? uaClass(entry.userAgent) : null,
       });
+      return true;
     } catch {
       // Audit failures must never crash request handling — swallow silently.
+      return false;
     }
   }
 
@@ -80,6 +84,7 @@ class AuditService {
     eventType?: string | Declared;
     actor?: string | Declared;
     resourceType?: string | Declared;
+    resourceId?: string | Declared;
     since?: string;
     limit?: number;
   }): AuditRecord[] {
@@ -90,6 +95,7 @@ class AuditService {
         limit: opts.limit,
         ...(opts.eventType !== undefined ? { eventType: bothForms(opts.eventType) } : {}),
         ...(opts.resourceType !== undefined ? { resourceType: bothForms(opts.resourceType) } : {}),
+        ...(opts.resourceId !== undefined ? { resourceId: bothForms(opts.resourceId) } : {}),
         ...(opts.actor !== undefined ? { actor: bothForms(opts.actor) } : {}),
       });
       return rows.map((r) => ({

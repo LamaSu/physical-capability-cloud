@@ -19,6 +19,7 @@ import type {
   JobDTO,
   PopulationContext,
   AgentRole,
+  LocationVisibility,
 } from "./types.js";
 import {
   populateKernelDTO,
@@ -26,6 +27,7 @@ import {
   populateKernelList,
   type RawKernel,
 } from "./populators/kernel.populator.js";
+import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { declare, lit } from "../observability/closed-schema.js";
@@ -50,6 +52,13 @@ export interface CreateKernelInput {
    */
   location?: string | { lat: number; lng: number };
   physicalAddress?: string;
+  /**
+   * Board N68: whether reads show this site's exact location and street address ("exact": a
+   * public storefront) or, the default, only the centre of its ~5 km cell ("approximate").
+   * Omitted on an update, the current choice stays. Setting "exact" needs LocationOptInAuthority
+   * for the kernel's operator; "approximate" needs only the usual ownership.
+   */
+  locationVisibility?: LocationVisibility;
   /**
    * Maximum assurance tier the operator claims they can sustain (0-3).
    * Submitted value is persisted as-is — no silent override. Defaults to 2
@@ -94,6 +103,57 @@ export interface CreateKernelInput {
    * `signingAddress`.
    */
   signingPublicKey?: string;
+}
+
+/**
+ * Who may publish a kernel's exact location (board N68). It is the one change that reveals where
+ * an operator is, so a claimed identity is not enough (anyone can self-provision a key that names
+ * an email or an id): it needs the gateway's admin secret, or a wallet the caller PROVED that
+ * equals the kernel's operator. WP-A (#326) sets `provenWallet` for a SIWE session or a key minted
+ * from one; until it merges, only the admin secret can opt a kernel in.
+ */
+export interface LocationOptInAuthority {
+  /** The request carried a valid X-Admin-Key. */
+  admin: boolean;
+  /** The wallet the caller proved control of; null when none. */
+  provenWallet: string | null;
+}
+
+export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null };
+
+/** The two location choices (N68), as a closed vocabulary for the audit record (N107b). */
+const LOCATION_VISIBILITIES: readonly string[] = ["exact", "approximate"];
+
+const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_WALLET = "0x0000000000000000000000000000000000000000";
+
+/** True when `authority` may publish the exact location of a kernel operated by `operatorAddress`. */
+export function mayPublishExactLocation(authority: LocationOptInAuthority, operatorAddress: string): boolean {
+  if (authority.admin === true) return true;
+  const proven = authority.provenWallet;
+  if (typeof proven !== "string" || !WALLET_RE.test(proven)) return false;
+  if (typeof operatorAddress !== "string" || !WALLET_RE.test(operatorAddress)) return false;
+  const owner = operatorAddress.toLowerCase();
+  return owner !== ZERO_WALLET && proven.toLowerCase() === owner;
+}
+
+function exactLocationRefusal(kernelId: string): Error {
+  return Object.assign(
+    new Error(
+      `Publishing the exact location of kernel '${kernelId}' needs the X-Admin-Key header, ` +
+        `or a wallet you proved (SIWE) that is the kernel's operator`,
+    ),
+    { name: "ForbiddenError" },
+  );
+}
+
+/** The stored point's numbers as they are (even {0,0}); {0,0} when the stored value has none. */
+function rawStoredPoint(stored: unknown): { lat: number; lng: number } {
+  if (typeof stored === "object" && stored !== null) {
+    const { lat, lng } = stored as { lat?: unknown; lng?: unknown };
+    if (typeof lat === "number" && typeof lng === "number") return { lat, lng };
+  }
+  return { lat: 0, lng: 0 };
 }
 
 export interface HeartbeatInput {
@@ -296,9 +356,21 @@ export class KernelFacade extends BaseFacade {
     actorId?: string,
     ip?: string,
     userAgent?: string,
+    authority: LocationOptInAuthority = NO_OPT_IN_AUTHORITY,
   ): Promise<Result<{ kernel: KernelDTO; created: boolean }>> {
     return this.execute("register", async () => {
       const repos = this.repos;
+      const requestedVisibility: unknown = body.locationVisibility;
+      if (
+        requestedVisibility !== undefined &&
+        requestedVisibility !== "exact" &&
+        requestedVisibility !== "approximate"
+      ) {
+        throw Object.assign(new Error('locationVisibility must be "exact" or "approximate"'), {
+          name: "BadRequestError",
+          code: "invalid_location_visibility",
+        });
+      }
       const id = body.id || `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const context = this.defaultContext();
 
@@ -338,11 +410,25 @@ export class KernelFacade extends BaseFacade {
         } else if (typeof body.location === "string" && body.location.length > 0) {
           updates.physicalAddress = body.location;
         }
+        // N68: the operator's location choice survives an update that does not name it, so
+        // re-registering (as pcc-node does) never silently un-publishes a storefront. A change
+        // to "exact" needs LocationOptInAuthority for the kernel's operator (after a legacy
+        // claim, the claimant); nothing is written when it is refused.
+        const currentVisibility = locationVisibilityOf(existing.location);
+        const visibility = (requestedVisibility as LocationVisibility | undefined) ?? currentVisibility;
+        if (visibility === "exact" && currentVisibility !== "exact") {
+          const owner = (updates.operatorAddress as string | undefined) ?? existing.operatorAddress;
+          if (!mayPublishExactLocation(authority, owner)) throw exactLocationRefusal(id);
+        }
+        let point: { lat: number; lng: number } | null = null;
         if (typeof body.location === "object" && body.location !== null) {
           const loc = body.location as { lat?: number; lng?: number };
           if (typeof loc.lat === "number" && typeof loc.lng === "number") {
-            updates.location = { lat: loc.lat, lng: loc.lng };
+            point = { lat: loc.lat, lng: loc.lng };
           }
+        }
+        if (point || visibility !== currentVisibility) {
+          updates.location = storedLocation(point ?? rawStoredPoint(existing.location), visibility);
         }
         if (typeof body.maxAssuranceTier === "number") {
           updates.maxAssuranceTier = body.maxAssuranceTier;
@@ -371,6 +457,22 @@ export class KernelFacade extends BaseFacade {
             kernel = current;
           }
         }
+        if (visibility !== currentVisibility) {
+          auditService.log({
+            eventType: "kernel.location_visibility",
+            actor: actorId ?? existing.operatorAddress,
+            resourceType: "kernel",
+            resourceId: id,
+            action: "update",
+            metadata: {
+              from: currentVisibility,
+              to: visibility,
+              authority: authority.admin ? "admin_key" : authority.provenWallet ? "proven_wallet" : "owner",
+            },
+            ip,
+            userAgent,
+          });
+        }
         const capabilities = repos.capabilities.findByKernel(id);
         return {
           kernel: populateKernelDTO(kernel as any as RawKernel, capabilities, context),
@@ -394,6 +496,15 @@ export class KernelFacade extends BaseFacade {
         addressString = addressString || body.location;
       }
 
+      // Authenticated creates are owned by the stable actor identity. A body field cannot
+      // nominate a different owner for a SET-ONCE signing bind.
+      const operatorAddress = actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000";
+      // N68: a new kernel reads coarse unless it opts in, which needs LocationOptInAuthority.
+      const visibility = (requestedVisibility as LocationVisibility | undefined) ?? "approximate";
+      if (visibility === "exact" && !mayPublishExactLocation(authority, operatorAddress)) {
+        throw exactLocationRefusal(id);
+      }
+
       // Proof-of-possession: verify the kernel's signing-key proof and resolve
       // the tagged RegisteredSigner. Only a key cryptographically proven by a
       // matching signature over the kernelId-bound challenge is persisted;
@@ -408,16 +519,14 @@ export class KernelFacade extends BaseFacade {
       const kernelData = {
         id,
         name: body.name || "New Kernel",
-        // Authenticated creates are owned by the stable actor identity. A body
-        // field cannot nominate a different owner for a SET-ONCE signing bind.
-        operatorAddress: actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000",
+        operatorAddress,
         // Legacy random field (not used for auth); kept for the NOT NULL column.
         // The authenticated identity is the tagged signing key below.
         publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
         signingAddress: signerColumns.signingAddress,
         signingKeyAlgorithm: signerColumns.signingKeyAlgorithm,
         signingKeyPublicKey: signerColumns.signingKeyPublicKey,
-        location: geoLocation,
+        location: storedLocation(geoLocation, visibility),
         physicalAddress: addressString,
         status: "online",
         registeredAt: now.toISOString(),
@@ -449,7 +558,7 @@ export class KernelFacade extends BaseFacade {
         resourceType: lit("kernel"),
         resourceId: declare.id(id),
         action: lit("create"),
-        metadata: { name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress) },
+        metadata: { name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress), locationVisibility: declare.code(visibility, LOCATION_VISIBILITIES) },
         ip,
         userAgent,
       });

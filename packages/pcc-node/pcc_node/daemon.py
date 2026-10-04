@@ -1,16 +1,18 @@
-"""Main daemon loop -- real end-to-end PCC protocol.
+"""The node daemon: keeps a registered kernel online. It does not take jobs.
 
-Combines all node subsystems into a single long-running process:
-  1. Load or generate Ed25519 keys
-  2. Run network discovery
-  3. Register kernel with PCC gateway (HTTP POST)
-  4. Announce capabilities (signed)
-  5. Start HTTP polling loop:
-     - Poll /api/operator/jobs every N seconds
-     - Execute each job via JobExecutor
-     - Push evidence bundle back to gateway
-     - Re-announce capabilities every 60s (heartbeat)
-  6. Handle graceful shutdown on SIGINT/SIGTERM
+A long-running process that:
+  1. loads the node's Ed25519 keys;
+  2. runs network discovery when no devices are configured;
+  3. registers the kernel with the PCC gateway;
+  4. sends a heartbeat about once a minute, so the kernel shows online;
+  5. pushes camera frames and, if the operator opted in, diagnostics;
+  6. shuts down cleanly on SIGINT/SIGTERM.
+
+This daemon does not take jobs, and it announces no capabilities, so it
+never lists work it will not do (verdict 68c, finding 3). A job's fields
+never become device commands here. Jobs run only through the operating
+agent's typed operations (pcc_node.operating, ADK item 12), and until one runs
+for this kernel its jobs stay queued.
 """
 
 import json
@@ -23,8 +25,7 @@ from .camera import push_camera_frame, detect_camera_device
 from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
-from .job_executor import JobExecutor
-from .register import register_kernel, announce_capabilities
+from .register import register_kernel, RegistrationError
 from .ws_client import PCCGatewayClient
 
 log = logging.getLogger("pcc-node.daemon")
@@ -206,27 +207,33 @@ def run_daemon(config: NodeConfig):
     try:
         register_kernel(config.pcc_base, config.pcc_api_key, config)
         log.info(f"Kernel {config.kernel_id} registered")
+    except RegistrationError as e:
+        # Fail CLOSED (verdict 133a MED, 133b Q1): a kernel whose registration was REFUSED (a non-2xx)
+        # is not connected. Do NOT create the gateway client, send an "online" heartbeat, write running
+        # state, or log "Daemon running". Also remove the PID file written at startup and any pre-existing
+        # state file -- the same cleanup a clean shutdown does below -- so a later `status` finds no live
+        # PID plus state and cannot report a false "PCC: connected".
+        log.error(f"Kernel registration refused ({e}); the node is NOT registered. Daemon not started.")
+        _remove_pid()
+        try:
+            os.remove(STATE_FILE)
+        except OSError:
+            pass
+        return
     except Exception as e:
         log.warning(f"Kernel registration failed: {e}")
 
     # ------------------------------------------------------------------
-    # 4. Build capabilities + announce
+    # 4. No capability announcements and no job polling (verdict 68c)
     # ------------------------------------------------------------------
-    capabilities = _build_capabilities_from_devices(all_devices)
-
-    try:
-        announce_capabilities(
-            config.pcc_base,
-            config.pcc_api_key,
-            config.kernel_id,
-            all_devices,
-            secret_key=secret_key,
-        )
-    except Exception as e:
-        log.warning(f"Capability announcement failed: {e}")
+    log.info(
+        "This node does not take jobs: pcc-node runs a device only through the "
+        "operating agent's typed operations (pcc_node.operating). Jobs for kernel "
+        f"{config.kernel_id} stay queued until one runs, and no capability is announced."
+    )
 
     # ------------------------------------------------------------------
-    # 5. Create gateway client + job executor
+    # 5. Create the gateway client (heartbeat only)
     # ------------------------------------------------------------------
     gateway_client = PCCGatewayClient(
         gateway_url=config.pcc_base,
@@ -234,8 +241,6 @@ def run_daemon(config: NodeConfig):
         kernel_id=config.kernel_id,
         poll_interval=config.poll_interval,
     )
-
-    job_executor = JobExecutor(devices=all_devices, gateway_client=gateway_client)
 
     # ------------------------------------------------------------------
     # 6. Probe camera
@@ -272,8 +277,8 @@ def run_daemon(config: NodeConfig):
     # ------------------------------------------------------------------
     # 8. Main polling loop
     # ------------------------------------------------------------------
-    last_announce = time.time()
-    announce_interval = 60  # re-announce capabilities every 60s
+    last_heartbeat = time.time()
+    heartbeat_interval = 60  # keep the kernel online
     camera_counter = 0
     camera_cycles = max(1, config.camera_push_interval // max(1, config.poll_interval))
 
@@ -283,26 +288,10 @@ def run_daemon(config: NodeConfig):
     )
 
     # Send initial heartbeat
-    gateway_client.send_heartbeat("online")
+    gateway_client.send_heartbeat("online", accepting_jobs=False)
 
     while running:
         try:
-            # Poll for queued jobs
-            jobs = gateway_client.poll_for_jobs()
-
-            for job in jobs:
-                job_id = job.get("id", "?")
-                log.info(f"Received job {job_id}")
-
-                # Mark seen before execution to prevent duplicate runs
-                gateway_client.mark_job_seen(job_id)
-
-                try:
-                    job_executor.execute(job)
-                    jobs_completed += 1
-                except Exception as e:
-                    log.error(f"Job {job_id} execution error: {e}")
-
             # Push camera frame periodically
             camera_counter += 1
             if camera_counter >= camera_cycles and cam:
@@ -314,13 +303,13 @@ def run_daemon(config: NodeConfig):
                     log.warning(f"Camera push failed: {e}")
                 camera_counter = 0
 
-            # Re-announce capabilities every 60s (heartbeat)
-            if time.time() - last_announce > announce_interval:
+            # Heartbeat about once a minute (no capabilities: see step 4)
+            if time.time() - last_heartbeat > heartbeat_interval:
                 try:
-                    gateway_client.announce_capabilities(capabilities)
+                    gateway_client.send_heartbeat("online", accepting_jobs=False)
                 except Exception as e:
-                    log.warning(f"Heartbeat announce failed: {e}")
-                last_announce = time.time()
+                    log.warning(f"Heartbeat failed: {e}")
+                last_heartbeat = time.time()
 
             # Update state file
             _write_state(config, start_time, jobs_completed)
@@ -405,7 +394,7 @@ def run_daemon(config: NodeConfig):
     # ------------------------------------------------------------------
     log.info("Shutting down daemon...")
     try:
-        gateway_client.send_heartbeat("offline")
+        gateway_client.send_heartbeat("offline", accepting_jobs=False)
     except Exception:
         pass
     _remove_pid()
@@ -413,4 +402,4 @@ def run_daemon(config: NodeConfig):
         os.remove(STATE_FILE)
     except OSError:
         pass
-    log.info(f"Daemon stopped. Jobs completed: {jobs_completed}")
+    log.info("Daemon stopped.")

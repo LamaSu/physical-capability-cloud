@@ -20,6 +20,7 @@ import { extractNodeSignedBundle } from "../services/device-evidence-settlement.
 import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
 import { declare, lit } from "../observability/closed-schema.js";
+import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -287,10 +288,17 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
     }
 
     try {
-      const repos = getRepos();
-      const updated = repos.jobs.updateStatus(jobId, canonicalStatus);
+      // N85(a): a paid job's terminal status belongs to its settlement path.
+      const outcome = writeJobStatusGuarded(jobId, canonicalStatus);
+      if (outcome.kind === "refused") {
+        return reply.code(409).send({
+          error: "settlement_owned_status",
+          currentStatus: outcome.currentStatus,
+          message: SETTLEMENT_OWNED_MESSAGE,
+        });
+      }
 
-      if (!updated) {
+      if (outcome.kind === "not_found") {
         // Job not found — return 200 so the node doesn't fail hard
         return {
           updated: false,

@@ -107,6 +107,8 @@ export interface DemandEnvelope {
    * `stripServerOnlyDemandFields`).
    */
   unmet?: UnmetCapability[];
+  /** Server-owned: true when the intent named more types than the matcher checks */
+  unmetTruncated?: boolean;
   /** ISO 8601 */
   createdAt: Timestamp;
 }
@@ -262,16 +264,16 @@ export const UnmetCapabilitySchema = z
   });
 
 /**
- * Remove the fields only the server may set (`fulfillmentPath`, `unmet`) from
- * an envelope that arrived from outside: `/api/intents/ingest`, the
+ * Remove the fields only the server may set (`fulfillmentPath`, `unmet`,
+ * `unmetTruncated`) from an envelope that arrived from outside: `/api/intents/ingest`, the
  * `@pcc/intent-collector` SDK, or any other caller. Anyone with an API key can
  * post those fields, so trusting them would let a single caller forge unmet
  * demand and steer what the kit bounties fund.
  */
-export function stripServerOnlyDemandFields<T extends Partial<DemandEnvelope>>(
-  envelope: T,
-): Omit<T, "fulfillmentPath" | "unmet"> {
-  const { fulfillmentPath: _fp, unmet: _unmet, ...rest } = envelope;
+export function stripServerOnlyDemandFields<
+  T extends { fulfillmentPath?: unknown; unmet?: unknown; unmetTruncated?: unknown },
+>(envelope: T): Omit<T, "fulfillmentPath" | "unmet" | "unmetTruncated"> {
+  const { fulfillmentPath: _fp, unmet: _unmet, unmetTruncated: _truncated, ...rest } = envelope;
   return rest;
 }
 
@@ -302,12 +304,13 @@ export const DemandEnvelopeSchema = z.object({
  */
 export const ServerCapturedDemandEnvelopeSchema = DemandEnvelopeSchema.extend({
   unmet: z.array(UnmetCapabilitySchema).max(50).optional(),
+  unmetTruncated: z.boolean().optional(),
 });
 
 /**
  * Caller input (`/api/intents/ingest`, SDKs): the envelope WITHOUT any
  * server-only field. `fulfillmentPath` is omitted, and zod strips the unknown
- * `unmet` on parse, so a caller can never assert "unfulfilled" demand
+ * `unmet` and `unmetTruncated` on parse, so a caller can never assert "unfulfilled" demand
  * (PX-13 round-1 finding 5). `DemandEnvelopeSchema` keeps `fulfillmentPath`
  * for existing server-side consumers.
  */

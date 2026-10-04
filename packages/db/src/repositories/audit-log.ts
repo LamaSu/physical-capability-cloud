@@ -23,6 +23,7 @@ export class AuditLogRepository implements IAuditLogRepository {
     eventType?: OneOrMany;
     actor?: OneOrMany;
     resourceType?: OneOrMany;
+    resourceId?: OneOrMany;
     since?: string;
     limit?: number;
   }): AuditLogRow[] {
@@ -36,6 +37,9 @@ export class AuditLogRepository implements IAuditLogRepository {
     }
     if (opts.resourceType?.length) {
       conditions.push(matches(auditLog.resourceType, opts.resourceType));
+    }
+    if (opts.resourceId?.length) {
+      conditions.push(matches(auditLog.resourceId, opts.resourceId));
     }
     if (opts.since) {
       conditions.push(gte(auditLog.timestamp, opts.since));
