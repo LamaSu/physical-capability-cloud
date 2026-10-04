@@ -81,4 +81,6 @@ export * from "./capability-kit.js";
 export * from "./operator-binding.js";
 // Public opportunities: funded offers, kit-build requests, demand aggregates (PX-13)
 export * from "./opportunity.js";
+// Kit-build requests (kits K2 slice 0): KitBuildSpecV1, the kit-meets-spec check, the kit_build_request constructor
+export * from "./kit-build.js";
 export * from "./render-provenance.js";
