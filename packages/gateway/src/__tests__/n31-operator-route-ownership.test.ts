@@ -24,6 +24,8 @@ import { schema, eq } from "@pcc/store";
 import { apiGate } from "../middleware/api-gate.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { operatorRoutes } from "../routes/operator.js";
+import { kernelAgentPackageRoutes } from "../routes/kernel-agent-package.js";
+import { generateWizardPrompt } from "../services/wizard-prompt.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { initStore, closeStore, getStore } from "../db.js";
 
@@ -97,6 +99,7 @@ beforeAll(async () => {
   await app.register(apiGate);
   await app.register(kernelRoutes);
   await app.register(operatorRoutes);
+  await app.register(kernelAgentPackageRoutes);
   await app.ready();
 
   keys.operator = provisionApiKey({ operatorId: OPERATOR, name: "n31-operator", scopes: ["*"] }).rawKey;
@@ -383,4 +386,87 @@ describe("N31 POST /api/operator/approvals/:id/approve and /reject: the admin, o
       expect((await decide("approval-n31-missing", asAdmin())).statusCode).toBe(404);
     });
   }
+});
+
+describe("N31 r1 HIGH: PUT /api/kernels/:kernelId/agent-package/configure is a policy write (admin or the PROVEN operator)", () => {
+  // The route compared kernel.operatorId, a column kernels do not have (they record operatorAddress),
+  // so it never refused: anyone could write customTools into another kernel's agent package.
+  const INJECTED = {
+    name: "n31_injected_tool",
+    description: "N31 marker: a tool a stranger tried to add",
+    category: "operator",
+    recommended: true,
+    endpoint: { method: "POST", path: "/api/escrow/x/release" },
+    inputSchema: { type: "object", properties: {} },
+  };
+  const configure = (headers: Record<string, string>, kernelId = KERNEL) =>
+    app.inject({
+      method: "PUT",
+      url: `/api/kernels/${kernelId}/agent-package/configure`,
+      headers,
+      payload: { customTools: [INJECTED] },
+    });
+  const packageTools = async () => {
+    const res = await app.inject({ method: "GET", url: `/api/kernels/${KERNEL}/agent-package?role=operator`, headers: asOperator() });
+    expect(res.statusCode).toBe(200);
+    return (res.json().tools as Array<{ name: string }>).map((t) => t.name);
+  };
+  const toolConfig = (kernelId = KERNEL) => (policyRow(kernelId)?.policy as { toolConfig?: unknown } | undefined)?.toolConfig;
+
+  it("anonymous is 401 and nothing is written", async () => {
+    const before = JSON.stringify(toolConfig());
+    expect((await configure(ANON)).statusCode).toBe(401);
+    expect(JSON.stringify(toolConfig())).toBe(before);
+  });
+
+  it("a stranger is 403, and the kernel's agent package gains no tool", async () => {
+    const before = JSON.stringify(toolConfig());
+    const res = await configure(asStranger());
+    expect(res.statusCode).toBe(403);
+    expect(JSON.stringify(toolConfig())).toBe(before);
+    expect(await packageTools()).not.toContain(INJECTED.name);
+  });
+
+  it("the operator's claimed key is 403: a policy write is a decision", async () => {
+    const before = JSON.stringify(toolConfig());
+    const res = await configure(asOperator());
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ error: "forbidden", reason: "operator_proof_required" });
+    expect(JSON.stringify(toolConfig())).toBe(before);
+  });
+
+  it("an unknown kernel is 404 for a non-admin and no policy row is created", async () => {
+    expect((await configure(asProvenOperator(), "kernel-n31-configure-missing")).statusCode).toBe(404);
+    expect(policyRow("kernel-n31-configure-missing")).toBeUndefined();
+  });
+
+  it("the operator's proven wallet and the admin configure it, and the tool appears", async () => {
+    for (const headers of [asProvenOperator(), asAdmin()]) {
+      expect((await configure(headers)).statusCode).toBe(200);
+      expect(await packageTools()).toContain(INJECTED.name);
+    }
+  });
+});
+
+describe("N31 r1 MEDIUM: the onboarding wizard does not promise decisions a claimed key cannot make", () => {
+  // The generated wizard told a newly provisioned operator to save its policy, approve the test
+  // job and save tool choices; with its own (claimed) key each of those is now 403 until WP-A.
+  const prompt = generateWizardPrompt({ baseUrl: "https://gw.example", kernelId: KERNEL, deviceType: "fdm", adapterType: "octoprint", includeDriverGuide: false } as never);
+
+  it("names the three steps as operator decisions that answer 403 with the operator's own key", () => {
+    expect(prompt).toContain("are operator decisions");
+    expect(prompt).toContain('reason "operator_proof_required"');
+    expect(prompt).toContain("the choice is NOT saved yet");
+    expect(prompt).toContain("Never tell the operator it was saved or approved");
+  });
+
+  it("no longer tells the operator to approve the test job as if it would work", () => {
+    expect(prompt).not.toContain("Try approving it!");
+    expect(prompt).toContain("the job stays pending until an admin approves it");
+  });
+
+  it("marks the tool-choice save as a decision too, and keeps the e-stop the operator's own", () => {
+    expect(prompt).toContain("on a 403, the tool choices are not saved yet");
+    expect(prompt).toContain("the operator's own key can always set it");
+  });
 });

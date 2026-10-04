@@ -1,136 +1,17 @@
-import crypto from "node:crypto";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 
-const { operatorPolicies, pendingApprovals, shopKernels } = schema;
+const { operatorPolicies, pendingApprovals } = schema;
 
-/**
- * Board N31 (bus #6272; the steward's ruling #6278). These routes used to change any kernel's
- * stop, policy and approvals for any authenticated caller. Who may act on a kernel now:
- *
- *   - "decide": approve, reject, emergency-resume, PUT or PATCH of the policy (PATCH
- *     {emergencyStop:false} is a resume by another name), and an approval submitted with
- *     autoApprove (a pre-made approval decision). It needs the gateway admin secret, or a wallet
- *     the caller PROVED that is the kernel's operator. WP-A (#326) sets req.provenWallet for a
- *     SIWE session or a key minted from one; nothing sets it before that merges, so until then
- *     only the admin decides. A claimed identity never decides: anyone can provision a key that
- *     names any wallet or email.
- *   - "stop or submit": emergency-stop, and an approval submitted as PENDING. Also the kernel's
- *     own principal: the identity its operatorAddress records, which POST /api/kernels takes from
- *     the registering caller. An operator must never lose their own e-stop, and a pending
- *     approval still needs a decision. The residual, a key provisioned under the operator's
- *     identity stopping the kernel or queueing requests, is queue item 136.
- *
- * The reads (GET policy, GET approvals) are unchanged here.
+/*
+ * Board N31: every write here checks who may act on the kernel through auth/kernel-authority.ts
+ * ("decide" for approve, reject, resume and policy writes; "stop_or_submit" for the e-stop and a
+ * pending approval). The reads (GET policy, GET approvals) are unchanged here.
  */
-type KernelAction = "decide" | "stop_or_submit";
-
-interface KernelAuthority {
-  /** The request carried a valid X-Admin-Key. */
-  admin: boolean;
-  /** The wallet the caller proved control of (WP-A); null when none. */
-  provenWallet: string | null;
-  /** The caller's claimed identity: its API key's operator id, or its session's address. */
-  claimed: string | null;
-}
-
-/**
- * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
- * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
- * grants nothing in any environment. (Same rule as routes/kernels.ts; WP-A #326 adds the shared
- * helper, auth/admin-key.ts.)
- */
-function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
-  if (typeof expected !== "string" || expected.trim().length === 0) return false;
-  if (typeof provided !== "string" || provided.length === 0) return false;
-  const a = crypto.createHash("sha256").update(provided, "utf8").digest();
-  const b = crypto.createHash("sha256").update(expected, "utf8").digest();
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-function authorityOf(req: FastifyRequest): KernelAuthority {
-  const r = req as unknown as { provenWallet?: unknown; operatorId?: unknown; userId?: unknown };
-  const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
-  return {
-    admin: hasAdminSecret(req.headers["x-admin-key"]),
-    provenWallet: text(r.provenWallet),
-    claimed: text(r.operatorId) ?? text(r.userId),
-  };
-}
-
-const isAnonymous = (a: KernelAuthority) => !a.admin && a.provenWallet === null && a.claimed === null;
-
-const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
-/** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
-const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
-
-function ownerOf(operatorAddress: unknown): string | null {
-  if (typeof operatorAddress !== "string") return null;
-  const owner = operatorAddress.trim().toLowerCase();
-  return UNOWNED.has(owner) ? null : owner;
-}
-
-/** The admin secret, or a proven wallet equal to the kernel's operator (both compared as addresses). */
-function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean {
-  if (a.admin) return true;
-  const owner = ownerOf(operatorAddress);
-  if (owner === null || !WALLET_RE.test(owner) || a.provenWallet === null || !WALLET_RE.test(a.provenWallet)) return false;
-  return a.provenWallet.toLowerCase() === owner;
-}
-
-/** Anyone who may decide, or the caller whose claimed identity is the kernel's recorded operator. */
-function mayStopOrSubmit(a: KernelAuthority, operatorAddress: unknown): boolean {
-  if (mayDecide(a, operatorAddress)) return true;
-  const owner = ownerOf(operatorAddress);
-  return owner !== null && a.claimed !== null && a.claimed.toLowerCase() === owner;
-}
-
-const AUTHENTICATION_REQUIRED = {
-  error: "authentication_required",
-  message: "This operator action needs an API key or a signed-in wallet.",
-};
-
-const REFUSALS: Record<KernelAction, Record<string, string>> = {
-  decide: {
-    error: "forbidden",
-    reason: "operator_proof_required",
-    message:
-      "This needs the gateway admin secret, or proof that you control the kernel's operator wallet (wallet sign-in proof, WP-A). An API key's claimed identity is not proof.",
-  },
-  stop_or_submit: {
-    error: "forbidden",
-    reason: "not_kernel_operator",
-    message: "Only this kernel's operator or the gateway admin may do this.",
-  },
-};
-
-interface Refusal {
-  status: 403 | 404 | 503;
-  body: Record<string, string>;
-}
-
-/**
- * Null when this caller may take `action` on the kernel; otherwise the refusal to send. The admin
- * may act on any id, registered or not, as before. For anyone else an unregistered kernel is 404
- * (kernel ids are public through GET /api/kernels), and a failed kernel read is 503, never a pass.
- */
-function refuseKernelAction(req: FastifyRequest, a: KernelAuthority, kernelId: string, action: KernelAction): Refusal | null {
-  if (a.admin) return null;
-  let kernel: { operatorAddress: string } | undefined;
-  try {
-    const { db } = getStore();
-    kernel = db.select({ operatorAddress: shopKernels.operatorAddress }).from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
-  } catch (err) {
-    req.log.warn({ kernelId, err }, "kernel read for an operator action failed");
-    return { status: 503, body: { error: "read_failed", message: "The kernel could not be read to check who operates it. Try again shortly." } };
-  }
-  if (!kernel) return { status: 404, body: { error: "kernel_not_found", message: "No kernel with this id is registered." } };
-  const allowed = action === "decide" ? mayDecide(a, kernel.operatorAddress) : mayStopOrSubmit(a, kernel.operatorAddress);
-  return allowed ? null : { status: 403, body: REFUSALS[action] };
-}
 
 /**
  * An operator read the gateway has no real source for yet. It answers 501 with a
