@@ -1153,9 +1153,18 @@ describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that car
   });
 
   it("control: a manifest without credentials is accepted and comes back as sent (the public contract is unchanged)", async () => {
+    // N71 round 5 (astra pack 83d, HIGH #5 residual): this used to carry
+    // `callback: "https://h.invalid/cb?id=7"` — an ORDINARY (non-credential) query,
+    // illustrating round 4's position that a query is fine unless its key looks
+    // credential-shaped. Round 5 supersedes that position: astra's own example
+    // (?session=<secret>) is a query with an unrecognizable key, proving "unless the
+    // key looks suspicious" can never be complete. findEmitterManifestFormIssue now
+    // refuses ANY query on a manifest URL, so this fixture drops the query — the
+    // point of the test (a non-credential, non-URL-query value is accepted) is
+    // unchanged; only the illustration moved to a query-free URL.
     const emits = [
       { id: "decl.self_attested" },
-      { id: "capture.photo_nonced", params: { media: "photo", minClass: "CC1", callback: "https://h.invalid/cb?id=7" }, bind: "capturePhotoCid", via: "captureSnapshot" },
+      { id: "capture.photo_nonced", params: { media: "photo", minClass: "CC1", callback: "https://h.invalid/cb" }, bind: "capturePhotoCid", via: "captureSnapshot" },
     ];
     const res = await register(emits);
     expect(res.statusCode, res.body).toBe(201);

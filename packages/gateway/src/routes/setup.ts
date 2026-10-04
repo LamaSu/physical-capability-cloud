@@ -23,6 +23,7 @@ import {
   isPlainPort,
   isPlainIdentifier,
   valueCarriesCredential,
+  findEmitterManifestFormIssue,
   REDACTED,
   INVALID_ID,
 } from "../redaction.js";
@@ -679,6 +680,16 @@ export async function setupRoutes(app: FastifyInstance) {
         // the resolved value below instead of re-deriving it per branch.
         const resolvedEmits = validatedEmits ?? existing?.emits ?? undefined;
         if (resolvedEmits && valueCarriesCredential(resolvedEmits)) {
+          return reply.code(400).send({ error: "invalid_emitter_manifest" });
+        }
+        // N71 round 5 (astra pack 83d, HIGH #5 residual): valueCarriesCredential
+        // (above) is a shape-based signal and cannot enumerate every non-credential
+        // key name a secret could ride under (astra's own ?session=... example).
+        // findEmitterManifestFormIssue is an INDEPENDENT, closed-form admission gate
+        // run alongside it, never instead of it — see redaction.ts for the full
+        // rationale. Same public code either way; the specific reason is for the
+        // implementer's own tests/report, never echoed to the caller.
+        if (resolvedEmits && findEmitterManifestFormIssue(resolvedEmits)) {
           return reply.code(400).send({ error: "invalid_emitter_manifest" });
         }
         const now = new Date().toISOString();

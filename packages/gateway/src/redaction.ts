@@ -11,14 +11,22 @@
  * Not a security boundary on its own — it reduces accidental leakage; the real
  * control is that the agent should never send secrets. Unit-tested in redaction.test.ts.
  *
- * Also here: scrubbing for DIAGNOSTIC text that leaves the gateway in a response (an adapter's
- * exception message, a status line). redactUrlCredentials replaces every URL-shaped token in the
- * text with a fixed marker (N71 round 4, astra pack 83c: there is no safe partial projection of a
- * URL embedded in arbitrary surrounding text — see the comment on URL_WITH_SCHEME), because an
- * error that quotes the URL a device was configured with quotes its credentials too (Node's fetch
- * does: "Request cannot be constructed from a URL that includes credentials: http://user:pass@host/").
- * redactDiagnostic adds redactSecrets. Neither is a substitute for not putting a value in the
- * message in the first place (N71).
+ * N71 round 5 (astra pack 83d, CRITICAL #1) DELETED the diagnostic-text scrubber that
+ * used to live here (redactUrlCredentials / redactDiagnostic / URL_REDACTED). Rounds
+ * 2-4 each patched a new bypass of "find the URL token and replace it" (an underscore
+ * shielding it from a \b boundary, an apostrophe inside a credential truncating the
+ * kept group, a second back-to-back URL swallowed as "path") — and round 5 found a
+ * WHATWG-valid "scheme:userinfo@host" with no "//" in it at all, which a fetch-alike
+ * would still read the userinfo of. That is a confidentiality hole no regex boundary
+ * can close for good, because the next bypass is always one more delimiter choice
+ * away. The lane's rule now: THE SINK IS THE BOUNDARY — a diagnostic sink
+ * (kernel-service.ts's health-check log; the OTel span in base.facade.ts) emits a
+ * fixed code and, at most, a CLOSED-SET class name. Never a dependency's message,
+ * scrubbed or not.
+ *
+ * Also here, a DIFFERENT role from the above (admission, not disclosure):
+ * findEmitterManifestFormIssue and isPlainIdentifier refuse bad INPUT at the door —
+ * they are not output scrubbers, even though both are "closed-set" in spirit.
  */
 
 export const REDACTED = "[redacted]";
@@ -57,56 +65,6 @@ export function redactOrNull(s: string | null): string | null {
   return s === null ? null : redactSecrets(s);
 }
 
-// N71 round 4 (astra pack 83c, CRITICAL #1): rounds 2-3 tried to parse out a "safe" part of
-// the URL to KEEP (host + path, as $2) and drop only userinfo/query/fragment around it. Both
-// rounds' bugs were in that KEPT group, not the dropped ones:
-//   - round 2/3: $2 excluded a wrapping-delimiter set (quote, angle bracket, backtick,
-//     backslash) so the match wouldn't swallow `url='...'`. But those same characters are
-//     LEGAL inside a real URL's userinfo/query/fragment, so a credential containing one
-//     ended the match early, leaving the rest (the credential's tail, or a second
-//     back-to-back URL) to fall outside the match and pass through .replace()'s /g loop
-//     completely untouched.
-//   - round 3 (astra pack 83c): even after fixing the DROPPED groups' boundary characters,
-//     $2 itself never excluded comma, ':' or '@' — so a second, back-to-back URL (with its
-//     OWN credentials) was consumed as if it were part of the first URL's "path" and
-//     returned unchanged; and because $2 DID still exclude an apostrophe, a legal apostrophe
-//     in an ordinary (credential-free) path truncated $2 — and therefore the whole match —
-//     before the query group could even run, so a credential right after it was never
-//     reached by any group.
-//
-// There is no fix that keeps parsing out a "safe" part of an arbitrary URL embedded in
-// arbitrary surrounding text: any character excluded from the kept group to stop one bypass
-// is legal syntax somewhere else and opens another. So round 4 keeps NOTHING. It matches a
-// URL token conservatively (scheme through the next whitespace) and replaces the WHOLE thing
-// with a fixed marker — never a reconstructed host/path, whether or not THIS token happens to
-// carry a credential. A single bounded field that IS known to hold exactly one URL (not
-// arbitrary prose) can still safely show host/path — but it must get there by parsing that
-// field with the real URL constructor (as e.g. valueCarriesCredential does), never by this
-// regex, and never by re-deriving a substring from matched groups.
-const URL_WITH_SCHEME = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
-
-/** What redactUrlCredentials shows in place of an entire matched URL token. */
-export const URL_REDACTED = "[url]";
-
-/**
- * Replace every URL-shaped token in `s` — scheme through the next whitespace — with a fixed
- * marker. Conservative on purpose (N71 round 4, astra pack 83c): there is no safe partial
- * projection of a URL embedded in arbitrary surrounding text, so the whole token goes, not
- * just its userinfo/query/fragment, and not just the ones that happen to carry a credential.
- * Idempotent; text with no "scheme://" in it is returned unchanged.
- */
-export function redactUrlCredentials(s: string): string {
-  return s.replace(URL_WITH_SCHEME, URL_REDACTED);
-}
-
-/**
- * Scrub free text that is about to leave the gateway in a response (an adapter's exception message):
- * URL credentials first, then secret-shaped substrings (redactSecrets).
- */
-export function redactDiagnostic(s: string): string {
-  return redactSecrets(redactUrlCredentials(s));
-}
-
 // ---------------------------------------------------------------------------
 // N71 round 3 (astra pack 83b): a few /detect and /setup/status fields are not a
 // URL at all — a network name, a storage engine, a port, a NODE_ENV value — so
@@ -143,6 +101,47 @@ export function isPlainPort(value: string): boolean {
 }
 
 /**
+ * Built-in ECMAScript Error subclasses whose CLASS NAME ALONE is safe to disclose: it
+ * carries no message content, only which standard JS error category fired. N71 round 5
+ * (astra pack 83d, CRITICAL #1): kernel-service.ts's checkDeviceHealth used to log
+ * `err.message` (scrubbed, then not even that) when an adapter's getStatus() threw.
+ * There is no scrub that closes every bypass of "find the secret inside arbitrary
+ * prose" (see the file doc comment) — so the fix stops disclosing the message AT ALL,
+ * fixed code + at most a class name. Checked via `instanceof`, never `.name` — same
+ * reasoning as base.facade.ts's typed-error detection: `.name` is a writable string any
+ * thrown value can forge, `instanceof` against a real global constructor cannot be.
+ * Deliberately NOT exhaustive (no AggregateError, no Node `SystemError`): a closed set
+ * is supposed to be small, and every adapter in this repo throws a plain `Error` anyway
+ * (see 83e-n71-report.md's inventory) — this just leaves room for the handful of
+ * standard subclasses a transport/parsing failure could plausibly throw.
+ */
+const KNOWN_BUILTIN_ERROR_CLASSES: ReadonlyArray<readonly [string, new (message?: string) => Error]> = [
+  ["TypeError", TypeError],
+  ["RangeError", RangeError],
+  ["SyntaxError", SyntaxError],
+  ["ReferenceError", ReferenceError],
+  ["URIError", URIError],
+  ["EvalError", EvalError],
+];
+
+/** The literal name shown for anything NOT in the closed set above — including a
+ *  non-Error throw, a bare `Error`, or a custom subclass this set doesn't name. */
+export const UNKNOWN_ERROR_CLASS = "Error";
+
+/** A fixed, closed-set class name for `err` — never `.message`, never `.name` (forgeable).
+ *  Falls back to the literal "Error" for anything not in the known set, a bare `Error`,
+ *  or a non-Error throw. Safe to log or export: it discloses a JS error CATEGORY, never
+ *  content a thrower controls. */
+export function knownErrorClassName(err: unknown): string {
+  if (err instanceof Error) {
+    for (const [name, ctor] of KNOWN_BUILTIN_ERROR_CLASSES) {
+      if (err instanceof ctor) return name;
+    }
+  }
+  return UNKNOWN_ERROR_CLASS;
+}
+
+/**
  * Is `value` a plain identifier — safe to echo back in a diagnostic message (a device or
  * kernel id)? N71 round 3 (astra pack 83b): /setup/validate used to echo whatever a caller's
  * (or the server's own KERNEL_CONFIG's) `id`/`kernelId` field held, with no shape check — so an
@@ -150,6 +149,11 @@ export function isPlainPort(value: string): boolean {
  * non-string (e.g. an array, which stringifies to its contents when interpolated) is never
  * plain either. Checked against `redactSecrets` too: an identifier that happens to also be
  * vendor-key-shaped (`sk-...`) is not "plain" just because its characters are all alnum/hyphen.
+ *
+ * Second use (N71 round 5, astra pack 83d HIGH #5 residual): the SAME grammar is reused,
+ * unchanged, as the emitter-manifest gate's bind/via identifier check — see
+ * findEmitterManifestFormIssue below. Both uses are ADMISSION gates (refuse bad input),
+ * never an output boundary.
  */
 export function isPlainIdentifier(value: unknown): value is string {
   return (
@@ -231,4 +235,133 @@ export function valueCarriesCredential(value: unknown): boolean {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// N71 round 5 (astra pack 83d, HIGH #5 residual): valueCarriesCredential (above) is a
+// SHAPE-based signal — a secret-named key, URL userinfo, a query/fragment key from a
+// small fixed list, or a vendor-key/JWT/hex/bearer shape. Astra's round-5 example
+// defeats all of it: {endpoint: "https://h.invalid/?session=<secret>"} names no
+// recognized key, and the VALUE itself isn't vendor-key-shaped. Nothing about this
+// value's SHAPE reads as a credential — no finite key-name list can ever be complete,
+// because the next bypass is just the next key name nobody thought to list.
+//
+// The determinate fix is not a better shape-matcher; it is to stop admitting a
+// manifest URL's query/fragment/userinfo AT ALL, full stop — a manifest string is for
+// MATCHING, so scheme+host+path is enough. bind/via get the companion fix: a closed
+// identifier grammar (isPlainIdentifier, reused verbatim), derived empirically from
+// every bind/via value that exists in this repo today (see 83e-n71-report.md's
+// inventory — adapter-manifests.ts's production defaults, the CSD fixture, every
+// test). Neither check REPLACES valueCarriesCredential; both are independent, NARROWER
+// admission gates (fail-closed on syntax, not on guessed intent).
+//
+// Explicitly OUT of scope (escalated to the steward as a cross-lane row, per the
+// round-5 brief): per-primitive semantic param schemas — which keys/types a given
+// primitive id's params may hold. `params` stays z.record(z.unknown()) at the
+// spec-schema level (packages/spec, untouched this round); this gate is the
+// GATEWAY's own boundary check on top of it.
+// ---------------------------------------------------------------------------
+
+/** A WHATWG special scheme written as "<scheme>:" — part of N71 round 5's "parses as
+ *  a URL" test. Matters because a special-scheme URL is valid WITHOUT "//" at all
+ *  (`new URL("http:u:pw@host")` succeeds, with userinfo "u:pw" and host "host" — see
+ *  the file doc comment's CRITICAL #1), so neither `new URL()` succeeding nor a literal
+ *  "://" substring alone would catch it if checked in isolation; this is the third,
+ *  independent way a string can "parse as a URL". */
+const SPECIAL_SCHEME_COLON = /^(?:https?|wss?|ftp|file):/i;
+
+/**
+ * Does `s` "parse as a URL", per N71 round 5's definition (three independent ways —
+ * any one is enough): `new URL()` succeeds on it; it contains "://"; or it is the
+ * scheme-colon form for a WHATWG special scheme (http/https/ws/wss/ftp/file) with no
+ * "//" at all. Deliberately broader than any ONE of these alone: rounds 2-4's bypasses
+ * were each exactly one delimiter choice escaping a narrower test.
+ */
+export function looksUrlShaped(s: string): boolean {
+  if (SPECIAL_SCHEME_COLON.test(s)) return true;
+  if (s.includes("://")) return true;
+  try {
+    new URL(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does `s` parse as a URL (looksUrlShaped) AND carry userinfo, a query, or a fragment?
+ * N71 round 5's determinate fix for astra pack 83d CRITICAL #1 / HIGH #5: a manifest
+ * value that is a URL at all gets scheme+host+path only, key name or content
+ * irrelevant. If `s` is scheme-colon-shaped (looksUrlShaped) but `new URL()` itself
+ * still throws on it (a malformed special-scheme string), fail closed and refuse too —
+ * there is no way to otherwise prove the absence of userinfo/query/fragment in it.
+ */
+export function urlFormCarriesExtras(s: string): boolean {
+  if (!looksUrlShaped(s)) return false;
+  let url: URL;
+  try {
+    url = new URL(s);
+  } catch {
+    return true; // scheme-colon-shaped but unparseable — fail closed, refuse
+  }
+  return Boolean(url.username || url.password || url.search || url.hash);
+}
+
+/** Closed set of reasons findEmitterManifestFormIssue can refuse a manifest. Internal
+ *  to the implementer/tests — setup.ts collapses every one to the SAME public
+ *  400 invalid_emitter_manifest; the reason itself is never echoed to a caller. */
+export type EmitterManifestFormIssue = "url_form" | "bind_grammar" | "via_grammar";
+
+/**
+ * F5's determinate admission gate (N71 round 5, astra pack 83d). Walks every
+ * declaration's `params` (recursively), `bind`, and `via` — NOT `id` or
+ * `demonstrated` — looking for:
+ *   - any string that parses as a URL (looksUrlShaped) and carries userinfo, a query,
+ *     or a fragment → "url_form";
+ *   - a `bind` present but not a plain identifier (isPlainIdentifier) → "bind_grammar";
+ *   - a `via` present but not a plain identifier → "via_grammar".
+ * Returns the FIRST issue found, or `null` if the manifest is clean. Independent of,
+ * and run ALONGSIDE, valueCarriesCredential — see the section comment above for why
+ * neither replaces the other, and for what is deliberately NOT checked here.
+ */
+export function findEmitterManifestFormIssue(
+  emits: readonly unknown[],
+): EmitterManifestFormIssue | null {
+  function walkParamValue(v: unknown): EmitterManifestFormIssue | null {
+    if (typeof v === "string") {
+      return urlFormCarriesExtras(v) ? "url_form" : null;
+    }
+    if (Array.isArray(v)) {
+      for (const item of v) {
+        const issue = walkParamValue(item);
+        if (issue) return issue;
+      }
+      return null;
+    }
+    if (v && typeof v === "object") {
+      for (const val of Object.values(v as Record<string, unknown>)) {
+        const issue = walkParamValue(val);
+        if (issue) return issue;
+      }
+    }
+    return null;
+  }
+
+  for (const decl of emits) {
+    if (!decl || typeof decl !== "object") continue;
+    const d = decl as Record<string, unknown>;
+    if (d.params !== undefined) {
+      const issue = walkParamValue(d.params);
+      if (issue) return issue;
+    }
+    if (typeof d.bind === "string") {
+      if (urlFormCarriesExtras(d.bind)) return "url_form";
+      if (!isPlainIdentifier(d.bind)) return "bind_grammar";
+    }
+    if (typeof d.via === "string") {
+      if (urlFormCarriesExtras(d.via)) return "url_form";
+      if (!isPlainIdentifier(d.via)) return "via_grammar";
+    }
+  }
+  return null;
 }

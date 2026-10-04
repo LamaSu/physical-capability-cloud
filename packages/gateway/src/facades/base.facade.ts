@@ -69,93 +69,111 @@ export abstract class BaseFacade {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           span.setAttribute("facade.result", "error");
-          span.recordException(error as Error);
-          span.setStatus({ code: SpanStatusCode.ERROR, message });
+
+          // N71 round 5 (astra pack 83d, HIGH #3 + #4): classify the error into its
+          // final Result FIRST; touch the span LAST, with the classification's own
+          // CODE only — never the original error object, never its message, for ANY
+          // branch below, typed or not. Round 4 proved a typed error's message is
+          // safe-by-construction (instanceof-proven, facade-authored) for the
+          // RESPONSE and pipelineTelemetry — that proof says nothing about the span,
+          // which exports to OTLP in production (otel.ts) regardless of which branch
+          // matched. THE SINK IS THE BOUNDARY: a span is an output sink exactly like
+          // a response or a log line, so it gets a fixed code, nothing else, for
+          // every path, including the typed-error ones. recordException is gone
+          // entirely — there is no synthetic exception event either, to keep the
+          // boundary at one place (setStatus) instead of two.
+          //
           // Detect well-known error CLASSES (never `.name` — see facade-errors.ts,
           // N71 round 4 / astra pack 83c HIGH #3: `.name` is a writable string any
           // thrown value can forge; `instanceof` against these exported classes
-          // cannot be forged by Object.assign, since that cannot rewrite an
-          // object's prototype chain) and map to proper HTTP status codes. A typed
-          // error's message is authored by the facade itself (e.g. "job 'x' not found")
-          // — safe by construction, PROVEN by instanceof — so it is disclosed in the
-          // response and telemetry exactly as before.
+          // cannot be forged by Object.assign, since that cannot rewrite an object's
+          // prototype chain) and map to proper HTTP status codes. A typed error's
+          // message is authored by the facade itself (e.g. "job 'x' not found") —
+          // safe by construction, PROVEN by instanceof — so it is STILL disclosed in
+          // the response and pipelineTelemetry exactly as before. Only the SPAN's
+          // treatment changes this round.
+          let code: string;
+          let outcome: Result<T>;
+
           if (error instanceof NotFoundError) {
             // Use attached code if present, otherwise derive from facade name
-            const code = error.code ?? `${this.facadeName.toUpperCase()}_NOT_FOUND`;
-            span.setAttribute("facade.error_code", code);
+            code = error.code ?? `${this.facadeName.toUpperCase()}_NOT_FOUND`;
             this.emitTelemetry(operation, "failed", { error: message });
-            return err(code, message, 404) as Result<T>;
-          }
-          if (error instanceof BadRequestError) {
+            outcome = err(code, message, 404) as Result<T>;
+          } else if (error instanceof BadRequestError) {
             // Preserve the specific error code if one was attached (e.g. "missing_step_id")
-            const code = error.code ?? "BAD_REQUEST";
-            span.setAttribute("facade.error_code", code);
+            code = error.code ?? "BAD_REQUEST";
             this.emitTelemetry(operation, "failed", { error: message });
-            return err(code, message, 400) as Result<T>;
-          }
-          if (error instanceof ForbiddenError) {
+            outcome = err(code, message, 400) as Result<T>;
+          } else if (error instanceof ForbiddenError) {
+            code = "FORBIDDEN";
             this.emitTelemetry(operation, "failed", { error: message });
-            return err("FORBIDDEN", message, 403) as Result<T>;
-          }
-          if (error instanceof ConflictError) {
+            outcome = err("FORBIDDEN", message, 403) as Result<T>;
+          } else if (error instanceof ConflictError) {
+            code = "SIGNER_ALREADY_BOUND";
             this.emitTelemetry(operation, "failed", { error: message });
-            return err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
-          }
-          if (error instanceof WriteDisabledError) {
-            span.setAttribute("facade.error_code", "WRITE_DISABLED");
+            outcome = err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
+          } else if (error instanceof WriteDisabledError) {
+            code = "WRITE_DISABLED";
             this.emitTelemetry(operation, "failed", { error: message });
-            return err("WRITE_DISABLED", message, 503) as Result<T>;
-          }
-          if (error instanceof BatchDisabledError) {
-            span.setAttribute("facade.error_code", "BATCH_DISABLED");
+            outcome = err("WRITE_DISABLED", message, 503) as Result<T>;
+          } else if (error instanceof BatchDisabledError) {
+            code = "BATCH_DISABLED";
             this.emitTelemetry(operation, "failed", { error: message });
-            return err("BATCH_DISABLED", message, 503) as Result<T>;
-          }
-          // E2: a transient transport/RPC/mempool failure is retryable. Tag it
-          // with a distinct code so activity wrappers retry (rather than
-          // wrapping it as a permanent FacadeError). Positive-match only —
-          // reverts / business errors fall through to the permanent path below.
-          //
-          // N71 round 3 (astra pack 83b): an UNTYPED error's message is whatever a
-          // dependency threw — a DB driver string, a fetch error quoting the URL a
-          // device was configured with, userinfo included. "Scrubbed, not generic" is
-          // not a confidentiality boundary (astra's words) — free text like
-          // "password=..." was never caught by any scrubber either. Neither the
-          // response nor telemetry repeats it; the real text stays only in the OTel
-          // span above (recordException / setStatus), which is not an API response.
-          if (isTransientError(error)) {
-            span.setAttribute("facade.error_code", TRANSIENT_ERROR_CODE);
+            outcome = err("BATCH_DISABLED", message, 503) as Result<T>;
+          } else if (isTransientError(error)) {
+            // E2: a transient transport/RPC/mempool failure is retryable. Tag it
+            // with a distinct code so activity wrappers retry (rather than wrapping
+            // it as a permanent FacadeError). Positive-match only — reverts /
+            // business errors fall through to the permanent path below.
+            //
+            // N71 round 3 (astra pack 83b): an UNTYPED error's message is whatever a
+            // dependency threw — a DB driver string, a fetch error quoting the URL a
+            // device was configured with, userinfo included. "Scrubbed, not generic"
+            // is not a confidentiality boundary (astra's words) — free text like
+            // "password=..." was never caught by any scrubber either. Neither the
+            // response, telemetry, NOR (as of round 5) the span repeats it anywhere.
+            code = TRANSIENT_ERROR_CODE;
             this.emitTelemetry(operation, "failed", { error: "transient_error" });
-            return err(TRANSIENT_ERROR_CODE, "transient_error", 503, {
+            outcome = err(TRANSIENT_ERROR_CODE, "transient_error", 503, {
               retryable: true,
               details: { facade: this.facadeName, operation },
             }) as Result<T>;
-          }
-          // A SQLite UNIQUE-constraint violation (better-sqlite3 / Drizzle) is detected
-          // the same way as round 3 (its own driver `code`, or its fixed message
-          // prefix) — those are PROVENANCE signals about the driver that threw, not
-          // text that is safe to show. N71 round 4 (astra pack 83c, HIGH #4): round 3
-          // reasoned the message was safe because it "names only the table.column" —
-          // but nothing proves an arbitrary thrown value's message actually came from
-          // the driver rather than merely LOOKING like its prefix (`new Error("UNIQUE
-          // constraint failed: devices.id value=<secret>")`), or that its mutable
-          // `code` wasn't set by something else entirely. So the message itself is
-          // NEVER disclosed, even when the heuristic matches — only a fixed, generic
-          // conflict code. routes/job-submit.ts maps THIS CODE (never message text)
-          // to its specific `device_already_exists` 409 for device registration.
-          const isUniqueConstraintViolation =
+          } else if (
+            // A SQLite UNIQUE-constraint violation (better-sqlite3 / Drizzle) is
+            // detected the same way as round 3 (its own driver `code`, or its fixed
+            // message prefix) — those are PROVENANCE signals about the driver that
+            // threw, not text that is safe to show. N71 round 4 (astra pack 83c,
+            // HIGH #4): round 3 reasoned the message was safe because it "names only
+            // the table.column" — but nothing proves an arbitrary thrown value's
+            // message actually came from the driver rather than merely LOOKING like
+            // its prefix (`new Error("UNIQUE constraint failed: devices.id
+            // value=<secret>")`), or that its mutable `code` wasn't set by something
+            // else entirely. So the message itself is NEVER disclosed, even when the
+            // heuristic matches — only a fixed, generic conflict code.
+            // routes/job-submit.ts maps THIS CODE (never message text) to its
+            // specific `device_already_exists` 409 for device registration. N71
+            // round 5 (astra pack 83d, HIGH #4): the message used to reach the span
+            // regardless, via the unconditional recordException/setStatus above —
+            // closed now too.
             (error as { code?: unknown } | null)?.code === "SQLITE_CONSTRAINT_UNIQUE" ||
-            /^UNIQUE constraint failed:/i.test(message);
-          if (isUniqueConstraintViolation) {
-            span.setAttribute("facade.error_code", "CONFLICT");
+            /^UNIQUE constraint failed:/i.test(message)
+          ) {
+            code = "CONFLICT";
             this.emitTelemetry(operation, "failed", { error: "duplicate_entry" });
-            return Errors.conflict("duplicate_entry", {
+            outcome = Errors.conflict("duplicate_entry", {
               facade: this.facadeName,
               operation,
             }) as Result<T>;
+          } else {
+            code = "internal_error";
+            this.emitTelemetry(operation, "failed", { error: "internal_error" });
+            outcome = Errors.internal("internal_error", { facade: this.facadeName, operation });
           }
-          this.emitTelemetry(operation, "failed", { error: "internal_error" });
-          return Errors.internal("internal_error", { facade: this.facadeName, operation });
+
+          span.setAttribute("facade.error_code", code);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: code });
+          return outcome;
         } finally {
           span.end();
         }

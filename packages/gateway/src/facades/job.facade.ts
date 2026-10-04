@@ -475,8 +475,11 @@ export class JobFacade extends BaseFacade {
       }
 
       // Allow-listed here as well as fixed-coded in the service: this is what leaves
-      // the API (N71 round 3, astra pack 83b) — a free-form string would not have been
-      // caught by redactDiagnostic alone (e.g. "password=..." has no URL to scrub).
+      // the API (N71 round 3, astra pack 83b) — a free-form string from a dependency
+      // (e.g. "password=...") is never safe to show regardless of any scrub (N71
+      // round 5, astra pack 83d: the service-side scrubber this comment used to name
+      // was deleted outright — kernel-service.ts's checkDeviceHealth never logs the
+      // message at all any more, scrubbed or not).
       const details =
         typeof result.details === "string" && JobFacade.SAFE_HEALTH_DETAILS.has(result.details)
           ? result.details

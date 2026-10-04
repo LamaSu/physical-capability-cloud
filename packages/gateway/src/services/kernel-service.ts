@@ -18,7 +18,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
-import { redactDiagnostic } from "../redaction.js";
+import { knownErrorClassName } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -591,14 +591,22 @@ export class KernelService {
    * Ping a device adapter for health. `details` is the adapter's own status, or, when
    * the adapter throws, a fixed code — never the exception text.
    *
-   * N71 round 3 (astra pack 83b): round 2 scrubbed the exception message with
-   * redactDiagnostic and returned the rest ("still a usable diagnostic"). Astra showed
-   * that is not a confidentiality boundary: a URL with an apostrophe in its userinfo
-   * defeated the regex (fixed now, redaction.ts), but free text with no URL at all
-   * (`authentication failed: password=...`) was never caught by it either and never
-   * could be by any fixed set of patterns. Astra's remediation: "a fixed public error
-   * code for adapter exceptions instead of arbitrary error text." The real message is
-   * still logged server-side (redacted, defense in depth) — just never returned.
+   * N71 round 3 (astra pack 83b): round 2 scrubbed the exception message with a
+   * URL-boundary regex and returned the rest ("still a usable diagnostic"). Astra
+   * showed that is not a confidentiality boundary: a URL with an apostrophe in its
+   * userinfo defeated the regex, and free text with no URL at all
+   * (`authentication failed: password=...`) was never caught by it either.
+   *
+   * N71 round 5 (astra pack 83d, CRITICAL #1): rounds 3-4 kept trying to SCRUB the
+   * message instead of dropping it — and astra found yet another regex-boundary
+   * bypass (a WHATWG-valid "scheme:userinfo@host" with no "//" at all, which a
+   * fetch-alike would still read the userinfo of). There is no fourth scrubber that
+   * closes this for good: THE SINK IS THE BOUNDARY. This log line never sees
+   * `err.message` in any form, scrubbed or not — only a fixed code plus, at most, a
+   * CLOSED-SET class name (knownErrorClassName — checked via `instanceof`, never
+   * `.name`, which any thrown value can forge). The real message is NOT logged
+   * anywhere by this method any more; if it is ever needed again, that is a new,
+   * explicit decision, not a side effect of a diagnostic string.
    */
   async checkDeviceHealth(deviceId: string): Promise<{ healthy: boolean; details?: string }> {
     const machine = this.machines.get(deviceId);
@@ -612,7 +620,8 @@ export class KernelService {
     } catch (err) {
       console.warn(
         `[kernel-service] health check failed for ${deviceId}:`,
-        err instanceof Error ? redactDiagnostic(err.message) : String(err),
+        "adapter_health_failed",
+        knownErrorClassName(err),
       );
       return { healthy: false, details: "adapter_error" };
     }
