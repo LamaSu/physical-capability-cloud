@@ -75,6 +75,7 @@ let app: FastifyInstance;
 let getRepos: typeof import("../db.js").getRepos;
 let generateApiKey: typeof import("../auth/api-key-auth.js").generateApiKey;
 let getKernelService: typeof import("../services/kernel-service.js").getKernelService;
+let getJobFacade: typeof import("../facades/index.js").getJobFacade;
 let MockFDMAdapter: typeof import("@pcc/kernel").MockFDMAdapter;
 let seq = 0;
 let ipSeq = 10;
@@ -141,6 +142,7 @@ beforeAll(async () => {
   ({ getRepos } = await import("../db.js"));
   ({ generateApiKey } = await import("../auth/api-key-auth.js"));
   ({ getKernelService } = await import("../services/kernel-service.js"));
+  ({ getJobFacade } = await import("../facades/index.js"));
   ({ MockFDMAdapter } = await import("@pcc/kernel"));
   app = (await server.createGateway(0)).app as unknown as FastifyInstance;
   await app.ready();
@@ -1098,6 +1100,11 @@ describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that car
     ["a URL with userinfo in bind", [{ id: "decl.self_attested", bind: `https://svc:${SENTINEL}@h.invalid/hook` }]],
     ["a URL whose query names a secret", [{ id: "decl.self_attested", params: { callback: `https://h.invalid/cb?api_key=${SENTINEL}` } }]],
     ["a URL with userinfo in the second declaration", [{ id: "decl.self_attested" }, { id: "capture.photo_nonced", params: { media: "photo", src: `ftp://u:${SENTINEL}@h.invalid` } }]],
+    // N71 round 4 (astra pack 83c, HIGH #5): a vendor-key-shaped value is a credential even
+    // when it is not itself a URL (via/bind are bare strings, not URLs), and a URL's fragment
+    // (not just its query) can carry a credential-named key too.
+    ["a vendor-key-shaped value in 'via', not a URL at all (astra pack 83c)", [{ id: "decl.self_attested", via: `sk-proj-${SENTINEL}-ABCDEFGHIJ` }]],
+    ["a URL fragment (not the query) names a secret (astra pack 83c)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/#token=${SENTINEL}` } }]],
   ];
 
   it.each(CREDENTIAL_MANIFESTS)("[neg] %s: 400 invalid_emitter_manifest, nothing written, nothing echoed", async (_what, emits) => {
@@ -1151,5 +1158,235 @@ describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that car
     const emits = [{ id: "decl.self_attested", params: { contact: "ops@example.com", profile: "https://medium.invalid/@user" } }];
     const res = await register(emits);
     expect(res.statusCode, res.body).toBe(201);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Round 4: astra's verdict on pack 83c (DO-NOT-SHIP at 9b30fd73)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Round 3 closed the apostrophe bypass and moved most fields to a fixed set / presence
+// only. Four things still carried an arbitrary string from a dependency, a URL, an
+// exception or an env value:
+//   - redactUrlCredentials's "retained" host+path group (see redaction.test.ts for the
+//     direct, function-level reproduction — there is no HTTP response path left that
+//     surfaces it after this round's setup.ts fix, below);
+//   - /setup/detect's displayEnvValue default branch, which ran the SAME url-only scrub
+//     on an env var that might not be a URL at all (KERNEL_ID, KERNEL_CONFIG_FILE, ...);
+//   - /setup/detect's kernelService.devices block, which projected a live device's
+//     id/type/adapterType with no shape check;
+//   - BaseFacade.execute()'s typed-error detection (`error.name === "NotFoundError"`),
+//     forgeable by any thrown value; and its UNIQUE-constraint carve-out, which kept the
+//     driver's own message whenever a mutable `code` or a message prefix matched.
+
+describe("N71 round 4 (astra pack 83c, CRITICAL #2): GET /api/setup/detect's fallback env values and runtime device fields", () => {
+  it("[neg] KERNEL_ID holding a misplaced credential (no URL in it) is reported present, never as its value", async () => {
+    await withEnv({ KERNEL_ID: `password=${SENTINEL}` }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      const entry = envEntryOf(res, "KERNEL_ID");
+      expect(entry?.set).toBe(true);
+      expect(entry?.value).toBeUndefined();
+    });
+  });
+
+  it("[neg] KERNEL_CONFIG_FILE holding a bare secret (nothing for a URL scrub to catch) is reported present, never as its value", async () => {
+    await withEnv({ KERNEL_CONFIG_FILE: SENTINEL }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      const entry = envEntryOf(res, "KERNEL_CONFIG_FILE");
+      expect(entry?.set).toBe(true);
+      expect(entry?.value).toBeUndefined();
+    });
+  });
+
+  it("[neg] a runtime device id that is a credential-bearing URL is withheld, never projected verbatim", async () => {
+    const spy = vi.spyOn(getKernelService(), "listDevices").mockResolvedValue([
+      { id: `http://u:${SENTINEL}@host.invalid`, type: "machine", adapterType: "mock", healthStatus: "healthy" },
+    ] as never);
+    try {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res).kernelService.devices).toEqual([
+        { id: INVALID_ID, type: "machine", adapterType: "mock", healthy: true },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] a runtime device type/adapterType outside the known fixed sets is withheld too", async () => {
+    const spy = vi.spyOn(getKernelService(), "listDevices").mockResolvedValue([
+      {
+        id: "dev_ok",
+        type: `http://u:${SENTINEL}-type@host.invalid` as never,
+        adapterType: `http://u:${SENTINEL}-adapter@host.invalid` as never,
+        healthStatus: "healthy",
+      },
+    ] as never);
+    try {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(res.statusCode).toBe(200);
+      expect(res.body).not.toContain(SENTINEL);
+      expect(bodyOf(res).kernelService.devices).toEqual([
+        { id: "dev_ok", type: INVALID_ID, adapterType: INVALID_ID, healthy: true },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: KERNEL_ID and KERNEL_CONFIG_FILE with ordinary values are STILL presence-only (round 4 tightens the default for everyone, not just misuse)", async () => {
+    await withEnv({ KERNEL_ID: "kernel_dev_001", KERNEL_CONFIG_FILE: "/etc/pcc/kernel.json" }, async () => {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(envEntryOf(res, "KERNEL_ID")).toEqual({ name: "KERNEL_ID", category: "kernel", set: true });
+      expect(envEntryOf(res, "KERNEL_CONFIG_FILE")).toEqual({ name: "KERNEL_CONFIG_FILE", category: "kernel", set: true });
+    });
+  });
+
+  it("control: a runtime device with a plain id and a known type/adapterType passes through unchanged", async () => {
+    const spy = vi.spyOn(getKernelService(), "listDevices").mockResolvedValue([
+      { id: "dev_ok_001", type: "sensor", adapterType: "modbus", healthStatus: "healthy" },
+    ] as never);
+    try {
+      const res = await inj("GET", "/api/setup/detect", keyB);
+      expect(bodyOf(res).kernelService.devices).toEqual([
+        { id: "dev_ok_001", type: "sensor", adapterType: "modbus", healthy: true },
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("N71 round 4 (astra pack 83c, HIGH #3): a forged error name is not proof — BaseFacade must check the error's CLASS, not .name", () => {
+  it("[neg] a dependency's plain Error with .name forged to 'NotFoundError' does not get its message disclosed, and is not treated as a proven 404", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw Object.assign(new Error(`password=${SENTINEL}`), { name: "NotFoundError" });
+    });
+    try {
+      const res = await inj("GET", `/api/devices/${kernelId}`, keyB);
+      expect(res.body).not.toContain(SENTINEL);
+      // Falls through to the same generic internal error as any other untyped
+      // exception — a forged .name buys the dependency nothing.
+      expect(res.statusCode).toBe(500);
+      expect(bodyOf(res)).toMatchObject({ error: "INTERNAL_ERROR", message: "internal_error" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the same forgery does not reach the pipeline telemetry feed either", async () => {
+    const { pipelineTelemetry } = await import("../telemetry.js");
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "findDevicesByKernel").mockImplementation(() => {
+      throw Object.assign(new Error(`password=${SENTINEL}`), { name: "NotFoundError" });
+    });
+    try {
+      await inj("GET", `/api/devices/${kernelId}`, keyB);
+    } finally {
+      spy.mockRestore();
+    }
+    const timelines = pipelineTelemetry.getAllJobIds().map((id) => ({ id, events: pipelineTelemetry.getTimeline(id) }));
+    expect(JSON.stringify(timelines)).not.toContain(SENTINEL);
+  });
+});
+
+describe("N71 round 4 (astra pack 83c, HIGH #4): a UNIQUE-constraint violation becomes a structured conflict, never the driver's message", () => {
+  it("[neg] the facade Result itself never carries the driver's message for a UNIQUE-prefixed violation (not just this route's 409 mapping)", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw new Error(`UNIQUE constraint failed: devices.id value=http://u:${SENTINEL}@host.invalid`);
+    });
+    try {
+      const result = await getJobFacade().registerDevice({
+        kernelId,
+        id: `dev-uniq-r4-${kernelId}`,
+        type: "machine",
+        model: "Uniq",
+        adapterType: "mock",
+      } as never);
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(JSON.stringify(result.error)).not.toContain(SENTINEL);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("[neg] the pipeline telemetry feed does not carry the driver's message for a secret-bearing message with the mutable SQLITE_CONSTRAINT_UNIQUE code either", async () => {
+    const { pipelineTelemetry } = await import("../telemetry.js");
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw Object.assign(new Error(`insert failed: apiKey=${SENTINEL}`), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+    });
+    try {
+      await getJobFacade().registerDevice({
+        kernelId,
+        id: `dev-uniq-r4b-${kernelId}`,
+        type: "machine",
+        model: "Uniq2",
+        adapterType: "mock",
+      } as never);
+    } finally {
+      spy.mockRestore();
+    }
+    const timelines = pipelineTelemetry.getAllJobIds().map((id) => ({ id, events: pipelineTelemetry.getTimeline(id) }));
+    expect(JSON.stringify(timelines)).not.toContain(SENTINEL);
+  });
+
+  it("control: routes/job-submit.ts's /api/devices/register still maps a UNIQUE-prefixed violation to 409 device_already_exists, even when the driver message carries a credential", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw new Error(`UNIQUE constraint failed: devices.id value=http://u:${SENTINEL}@host.invalid`);
+    });
+    try {
+      const res = await inj("POST", "/api/devices/register", keyA, {
+        kernelId,
+        id: `dev-uniq-r4c-${kernelId}`,
+        type: "machine",
+        model: "Uniq3",
+        adapterType: "mock",
+      });
+      expect(res.body).not.toContain(SENTINEL);
+      expect(res.statusCode).toBe(409);
+      expect(bodyOf(res)).toEqual({ error: "device_already_exists" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: the same 409 mapping holds for the SQLITE_CONSTRAINT_UNIQUE code form", async () => {
+    const kernels = getRepos().kernels;
+    const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
+      throw Object.assign(new Error(`insert failed: apiKey=${SENTINEL}`), { code: "SQLITE_CONSTRAINT_UNIQUE" });
+    });
+    try {
+      const res = await inj("POST", "/api/devices/register", keyA, {
+        kernelId,
+        id: `dev-uniq-r4d-${kernelId}`,
+        type: "machine",
+        model: "Uniq4",
+        adapterType: "mock",
+      });
+      expect(res.body).not.toContain(SENTINEL);
+      expect(res.statusCode).toBe(409);
+      expect(bodyOf(res)).toEqual({ error: "device_already_exists" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("control: registering the same device twice (real, unmocked constraint) is still a 409 device_already_exists", async () => {
+    const payload = { kernelId, id: `dev-dup-r4-${kernelId}`, type: "machine", model: "Dup", adapterType: "mock" };
+    expect((await inj("POST", "/api/devices/register", keyA, payload)).statusCode).toBeLessThan(300);
+    const again = await inj("POST", "/api/devices/register", keyA, payload);
+    expect(again.statusCode).toBe(409);
+    expect(bodyOf(again)).toEqual({ error: "device_already_exists" });
   });
 });
