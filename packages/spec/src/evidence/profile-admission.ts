@@ -13,17 +13,36 @@
  *     (`pinnedBundleSetDigest`, see `computeBundleSetDigest`). A caller that
  *     passes a subset (for example the first bundle that verifies) gets
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
- *   - SIGNATURE: every bundle's `bundleHash` verifies under the key registered
- *     for its declared signer (`kernelSignature.signer`), and the leg
- *     (`verifyBundleSignature`: gateway `verifyDeviceSignedEvidence`, the
- *     oracle's registered-key check) names the signer that verified, which
- *     must be the declared one. The bundle's TRUST DOMAIN is that signer's
- *     operator principal in ONE pinned registry snapshot (`signerTrustDomains`),
- *     looked up here, never answered bundle by bundle, so one signer has one
- *     domain (astra pack 271). Levels judge independence between trust domains
- *     (evidence-level.ts, #345's one rule), so a signer whose operator the
- *     registry does not name caps that bundle's inspections below
- *     inspected_output;
+ *   - SIGNATURE, run here: every bundle's Ed25519 signature over its
+ *     `bundleHash` (`signingPreimage`) verifies, through Web Crypto, under the
+ *     key its declared signer names in ONE pinned registry snapshot
+ *     (`registryKeys`, bound by `pinnedRegistryDigest`, see
+ *     `computeRegistryDigest`). A signer id is 0x and the key's first 40 hex
+ *     digits, as kernels declare it. The bundle's TRUST DOMAIN is the operator
+ *     that key's row names (a session key's root's), or none. The key that
+ *     verifies and its domain come from the same pinned row, and rows are
+ *     unique by key and by signer id, so one key has one domain and no other
+ *     registry can stand in (astra packs 271, 275). Levels judge independence
+ *     between trust domains (evidence-level.ts, #345's one rule), so a key
+ *     whose operator the registry does not name caps that bundle's inspections
+ *     below inspected_output;
+ *   - AUTHORIZATION, run here (astra pack 281, DECISIONS 00:26): a valid
+ *     signature by a registered key authorizes nothing by itself. The key's
+ *     row must hold a GRANT that names the subject: the executor of the
+ *     subject's kernel, or a witness for that kernel or that job. The role
+ *     must also fit the bundle: an executor signs any event of the subject, a
+ *     witness inspections only. A session key counts only through a
+ *     delegation rooted in a registered row and committed in the same pinned
+ *     snapshot: it holds its root's grants for the jobs its scope names, for
+ *     events timestamped inside its window, and its root's signature over the
+ *     LO-EV-1 delegation must verify. Anything else is `unauthorized-signer`.
+ *     A key that signs as the executor is the executor's own, never an
+ *     independent inspector: its operator joins the deal's executors when
+ *     levels are judged, and one whose operator the registry does not name
+ *     leaves no inspection independent. So only a witness reaches
+ *     inspected_output; when the profile requires it and no pinned row grants
+ *     a witness for the subject, the shortfall is `no-witness-authorized`
+ *     (steward #6694);
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
  *     opens to its events, and they commit the job and the kernel that
  *     accepted it;
@@ -64,6 +83,29 @@
  *     evidence is one bundle.
  *   - Either way, the pin is never recomputed from `bundles` at evaluation
  *     time; that would make the check vacuous.
+ *   - The registry is pinned the same way: when it pins the evidence set, the
+ *     pinning party builds the rows from what the registry RECORDS and pins
+ *     `computeRegistryDigest` over them. Admission is handed exactly those
+ *     rows and that pin, never a later registry, so a key rotated, reassigned
+ *     or re-granted after the pin cannot change a decision. The rows:
+ *       - executor: the gateway registry binds ONE Ed25519 key to a kernel,
+ *         `shop_kernels.signing_key_public_key` (set only once the kernel's
+ *         signing proof verifies, served as `KernelDTO.signingKey`), owned by
+ *         `shop_kernels.operator_address`. Its row is that key, that
+ *         operator's principal, and the grant { executor, kernelId };
+ *       - witness: NO registry record assigns an independent witness to a
+ *         kernel or a job yet. Until one does (the deal's terms or a registry
+ *         table), no witness row can be built, and no evidence reaches
+ *         inspected_output;
+ *       - session keys: a kernel-sdk bundle is signed by a per-job session key
+ *         and carries its `sessionKeyAuthorization`. Its row is that key,
+ *         `delegatedBy` its root's key, and that authorization as received.
+ *         The gateway's `verifyDeviceSignedEvidence` already checks the
+ *         wall-clock expiry at submission. Revocation and `maxSignatures`
+ *         need state, so they are the pinning party's: a delegation it
+ *         revoked or exhausted is left out of the rows. Admission checks the
+ *         root's signature, the action, the job scope, and that every event
+ *         the key signs falls inside the window.
  *   - Still OPEN on the caller side, and required before this gates money
  *     (astra, pack 39 round 2):
  *       - finalize collection atomically with pinning: define job closure,
@@ -73,7 +115,7 @@
  *         quarantine), never be silently left out of the pin;
  *       - persist the exact manifest and context with the decision: bundle
  *         roots, profile commitment, subject, unit and challenge, the executor
- *         domains and the signer snapshot, and the verifier and program
+ *         domains and the registry snapshot, and the verifier and program
  *         identity, so recovery re-evaluates the same set;
  *       - under v1, present exactly the committed bundle at /settle, and hold
  *         producers to the one-bundle rule (evidence states it in LO-EV-9 and
@@ -99,8 +141,10 @@
  *     over the authenticated bundles, each with its signer's trust domain, and
  *     the deal's `executorTrustDomains`: an inspection is inspected_output only
  *     from a trust domain independent of every executor. An event present in
- *     several bundles counts at the LOWEST level any of them gives it, so a copy
- *     in a fabricated or executor's bundle never lifts it (steward #6478);
+ *     several bundles counts at the HIGHEST level any of its occurrences gets,
+ *     each levelled by its own bundle, exactly as #345 does (steward #6623,
+ *     evidence #6559): with one domain per signer (the pinned snapshot), only a
+ *     copy in a truly independent signer's bundle can lift it;
  *   - if it is an inspection, carries its own positive verdict: evidence's
  *     pinned verdict field (`inspectionVerdict` is pass: cv_inspection_result
  *     `passed: true`, instrument_result `pass: true`, batch_sample_result
@@ -139,7 +183,9 @@
  *      `interpretation.onDeviceFailure`;
  *   6. level: the strongest level the evidence reaches must meet
  *      `acceptanceLevel`, and at least `sampling.minSamples` distinct samples
- *      must qualify. Shortfalls follow `onMissingData`.
+ *      must qualify. Shortfalls follow `onMissingData`. A shortfall from
+ *      inspected_output with no witness granted for the subject is
+ *      `no-witness-authorized`, otherwise `level-not-reached`.
  * A hold never outranks a reject.
  *
  * Every profile term:
@@ -180,6 +226,7 @@
 
 import { isFabricated } from "./is-fabricated.js";
 import {
+  evidenceLevelOfBundles,
   evidenceLevelRank,
   evidenceLevelsOfEvents,
   meetsEvidenceLevel,
@@ -197,9 +244,16 @@ import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./meas
 // The trap-free proxy check, loaded at runtime (no static node:util import, so browser bundles of @pcc/spec build).
 import { isProxy } from "../util/plain-data.js";
 import { getPrimitive } from "./primitives.js";
-import { isTaggedDigest } from "./signing-preimage.js";
+import {
+  isTaggedDigest,
+  parseEd25519PublicKeyHex,
+  parseEd25519SignatureHex,
+  sessionKeyDelegationPreimage,
+  signingPreimage,
+} from "./signing-preimage.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "./subject-binding.js";
-import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, type EvidenceEvent } from "../types/evidence.js";
+import type { SessionAction, SessionKey } from "../identity/ephemeral.js";
+import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, type EvidenceEvent, type SessionKeyAuthorization } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
 import { canonicalize, sha256 } from "../util/canonical.js";
 
@@ -213,6 +267,9 @@ export const NON_NUMERIC_UNIT = "none";
 
 /** Domain separator: a bundle-set digest can never be taken for a bundle hash. */
 export const BUNDLE_SET_DOMAIN = "PCC:evidence-bundle-set:v1";
+
+/** Domain separator for a pinned registry snapshot's digest. */
+export const REGISTRY_SNAPSHOT_DOMAIN = "PCC:evidence-registry-snapshot:v2";
 
 /** The payload field that carries a qualifying observation's record. */
 export const PROFILE_OBSERVATION_FIELD = "profileObservation";
@@ -260,12 +317,16 @@ export type ProfileAdmissionCode =
   | "no-bundles"
   | "bundle-set-pin-invalid"
   | "bundle-set-mismatch"
+  | "registry-pin-invalid"
+  | "registry-mismatch"
   | "unauthenticated-bundle"
+  | "unauthorized-signer"
   | "unbound-bundle"
   | "simulated-evidence"
   | "device-failure"
   | "contradictory-evidence"
   | "level-not-reached"
+  | "no-witness-authorized"
   | "missing-measurements";
 
 export interface ProfileAdmissionReason {
@@ -284,18 +345,54 @@ export interface ProfileAdmissionResult {
   reasons: ProfileAdmissionReason[];
 }
 
-/** The signature leg's answer: the id of the signer whose registered key verified the bundle (its declared `kernelSignature.signer`), or false. */
-export type BundleSignatureAnswer = string | false;
+/** What a grant lets a key sign as (DECISIONS 00:26, astra pack 281). */
+export type SignerRole = "executor" | "witness";
 
 /**
- * One row of the pinned registry snapshot: a registered signer's id, as kernel
- * bundles declare it (`kernelSignature.signer`, 0x + 40 lowercase hex), and the
- * operator principal that owns its key, or null when the registry names none.
+ * One grant: the key may sign as `role` for kernel `kernelId` and, when `jobId`
+ * is named, for that one job of it only.
+ *   - `executor`: the kernel's own key, which signs the work the kernel does
+ *     (any event of the subject).
+ *   - `witness`: an independent inspector for that kernel or that job, which
+ *     signs inspections only (`INSPECTION_EVENT_TYPES`).
+ * Ids are non-empty strings, as subject binding requires of a subject.
  */
-export interface SignerTrustDomain {
-  readonly signer: string;
-  readonly trustDomain: string | null;
+export interface SignerGrant {
+  readonly role: SignerRole;
+  readonly kernelId: string;
+  readonly jobId?: string;
 }
+
+/**
+ * A registered key: its raw 32-byte Ed25519 key as 0x and 64 LOWERCASE hex
+ * digits (one spelling per key), the operator principal that owns it (or null
+ * when the registry names none), and the subjects and role it may sign for.
+ * Registry membership alone authorizes nothing: a bundle counts only for a
+ * subject that one of its key's grants names.
+ */
+export interface RegisteredKeyRow {
+  readonly publicKey: string;
+  readonly trustDomain: string | null;
+  readonly grants: readonly SignerGrant[];
+}
+
+/**
+ * A session key, authorized only through its root's delegation:
+ *   - `delegatedBy` is the publicKey of a registered row in the same snapshot;
+ *   - `authorization` is that root's delegation of this key, exactly as the
+ *     producer sent it (the LO-EV-1 wire form, a kernel-sdk bundle's
+ *     `sessionKeyAuthorization`), so the pin commits it.
+ * It carries its root's operator and grants, narrowed to the jobs its scope
+ * names and to its validity window.
+ */
+export interface DelegatedKeyRow {
+  readonly publicKey: string;
+  readonly delegatedBy: string;
+  readonly authorization: SessionKeyAuthorization;
+}
+
+/** One row of the pinned registry snapshot. */
+export type RegistryKey = RegisteredKeyRow | DelegatedKeyRow;
 
 /** The part of an EvidenceBundle admission reads. */
 export interface AdmissionBundle {
@@ -318,25 +415,30 @@ export interface ProfileAdmissionInput {
    * The operator principals the job was ASSIGNED to (eip155:<chainId>:0x<40
    * lowercase hex>), from the accepted deal, as `subject` comes from the job
    * record: never from the evidence. Empty when the deal names none, and then no
-   * inspection can show independence (at most device_reported).
+   * inspection can show independence (at most device_reported). Otherwise the
+   * operator of every key that signs as the subject's executor joins them when
+   * levels are judged (see AUTHORIZATION in the header).
    */
   executorTrustDomains: readonly string[];
   /**
-   * ONE pinned registry snapshot, as data: every signer the signature leg
-   * verifies against, with the operator principal that owns its key (or null).
-   * From the registry at the same pin as the leg's keys, never from the evidence.
-   * Each bundle's trust domain is looked up here, so a signer has exactly one;
-   * a signer listed twice is refused (astra pack 271).
+   * ONE pinned registry snapshot, as data, from the registry at the pin, never
+   * from the evidence (astra packs 271, 275, 281):
+   *   - a registered row names an Ed25519 key, the operator that owns it (or
+   *     null) and its GRANTS: the role it may sign as, for kernel K and, when
+   *     named, one job of it;
+   *   - a session key's row names its root (a registered row of this snapshot)
+   *     and holds the root's delegation of it, so the pin commits the chain.
+   * Admission verifies every bundle's signature HERE, under the key its
+   * declared signer names, then requires one of that key's grants to name the
+   * subject in a role that fits the bundle. The bundle's trust domain is the
+   * key's operator, or its root's. Registry membership alone authorizes
+   * nothing. Refused: a key listed twice, two keys whose signer ids collide, a
+   * malformed row or grant, and a delegation that does not verify under its
+   * root.
    */
-  signerTrustDomains: readonly SignerTrustDomain[];
-  /**
-   * The registered-key signature leg. When the bundle's `bundleHash` verifies
-   * under the key registered for its declared signer, it answers that signer's
-   * id (the bundle's `kernelSignature.signer`); otherwise false. Anything else
-   * fails the leg: false, a throw, `true` (it names no signer), or a signer
-   * other than the one the bundle declares.
-   */
-  verifyBundleSignature: (bundle: AdmissionBundle) => BundleSignatureAnswer | Promise<BundleSignatureAnswer>;
+  registryKeys: readonly RegistryKey[];
+  /** `computeRegistryDigest(registryKeys)`, from where the registry was pinned (see the caller contract). A malformed pin rejects; rows that do not digest to it are refused. */
+  pinnedRegistryDigest: string;
   /**
    * The primitive leg: is `observation` an authentic instance of `primitiveId`
    * for this job, and is its `profileObservation` record TRUE of it? It must
@@ -385,6 +487,297 @@ export async function computeBundleSetDigest(
       bundleHashes: [...new Set(bundleHashes)].sort(),
     }),
   );
+}
+
+/** A registry key as the snapshot spells it: 0x and 64 lowercase hex digits, the raw 32-byte Ed25519 key. */
+const REGISTRY_KEY = /^0x[0-9a-f]{64}$/;
+
+/** The session action a delegation must allow for its key to sign evidence (identity/ephemeral.ts). */
+const EVIDENCE_SUBMIT: SessionAction = "evidence_submit";
+
+/** A checked row (see `RegistryKey`). */
+interface RegistryRow {
+  /** The key, and the signer id kernels declare for it: 0x and the key's first 40 hex digits. */
+  publicKey: string;
+  signer: string;
+  /** The operator and the grants: a session key's are its root's. */
+  trustDomain: string | null;
+  grants: readonly SignerGrant[];
+  /**
+   * A session key's delegation: its root's key, the authorization as given,
+   * the job ids its scope names, and its validity window in Unix seconds.
+   * Null for a registered key.
+   */
+  delegation: { root: string; authorization: unknown; contractIds: readonly string[]; issuedAt: number; expiresAt: number } | null;
+}
+
+const ROW_FIELDS: readonly string[] = ["publicKey", "trustDomain", "grants"];
+const DELEGATED_ROW_FIELDS: readonly string[] = ["publicKey", "delegatedBy", "authorization"];
+const GRANT_FIELDS: readonly string[] = ["role", "kernelId", "jobId"];
+const AUTHORIZATION_FIELDS: readonly string[] = [
+  "sessionId",
+  "parentAgentId",
+  "publicKey",
+  "issuedAt",
+  "expiresAt",
+  "scope",
+  "parentSignature",
+  "derivationPath",
+];
+const SCOPE_FIELDS: readonly string[] = ["allowedActions", "contractIds", "maxSignatures"];
+
+/** Whether every own key of `value` is one of `allowed`. */
+function onlyFields(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every((k) => allowed.includes(k));
+}
+
+/** A job or kernel id as subject binding requires one: a non-empty string. */
+function isName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** A grant's identity, for order and duplicates: its fields in a fixed order. */
+const grantKey = (g: SignerGrant): string => JSON.stringify([g.role, g.kernelId, g.jobId ?? null]);
+
+/**
+ * A registered row's grants, checked and sorted, or null. They must be a
+ * non-empty list; each grant is a role, a kernel and at most one job, and no
+ * grant appears twice.
+ */
+function readGrants(value: unknown): SignerGrant[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const grants: SignerGrant[] = [];
+  const seen = new Set<string>();
+  for (const g of value) {
+    if (!isRecord(g) || !onlyFields(g, GRANT_FIELDS)) return null;
+    const { role, kernelId, jobId } = g;
+    if ((role !== "executor" && role !== "witness") || !isName(kernelId) || !(jobId === undefined || isName(jobId))) return null;
+    const grant: SignerGrant = jobId === undefined ? { role, kernelId } : { role, kernelId, jobId };
+    if (seen.has(grantKey(grant))) return null;
+    seen.add(grantKey(grant));
+    grants.push(grant);
+  }
+  return grants.sort((a, b) => (grantKey(a) < grantKey(b) ? -1 : grantKey(a) > grantKey(b) ? 1 : 0));
+}
+
+/**
+ * A session key's delegation, checked, or why it is not one. It must be:
+ *   - the LO-EV-1 delegation of THIS row's key (`sessionKeyDelegationPreimage`
+ *     refuses anything outside its input domain);
+ *   - signed by the root's key;
+ *   - allowing evidence_submit, for at least one named job (an empty scope
+ *     means any job, which no subject-scoped grant allows);
+ *   - with issuedAt <= expiresAt.
+ */
+async function readDelegation(
+  authorization: unknown,
+  publicKey: string,
+  rootKey: string,
+): Promise<{ ok: true; contractIds: readonly string[]; issuedAt: number; expiresAt: number } | { ok: false; reason: string }> {
+  const a = authorization;
+  if (!isRecord(a) || !onlyFields(a, AUTHORIZATION_FIELDS) || !isRecord(a.scope) || !onlyFields(a.scope, SCOPE_FIELDS)) {
+    return { ok: false, reason: "is not a session key authorization (the LO-EV-1 wire form)" };
+  }
+  const scope = a.scope;
+  let preimage: Uint8Array;
+  let parentSignature: Uint8Array;
+  try {
+    const sessionKey = parseEd25519PublicKeyHex(a.publicKey);
+    const spelled = (a.publicKey as string).toLowerCase();
+    if ((spelled.startsWith("0x") ? spelled : `0x${spelled}`) !== publicKey) return { ok: false, reason: "delegates another key than its row's" };
+    parentSignature = parseEd25519SignatureHex(a.parentSignature);
+    preimage = sessionKeyDelegationPreimage({
+      sessionId: a.sessionId as string,
+      parentAgentId: a.parentAgentId as SessionKey["parentAgentId"],
+      publicKey: sessionKey,
+      issuedAt: a.issuedAt as number,
+      expiresAt: a.expiresAt as number,
+      scope: {
+        allowedActions: scope.allowedActions as SessionAction[],
+        contractIds: scope.contractIds as string[],
+        maxSignatures: scope.maxSignatures as number,
+      },
+      ...(a.derivationPath !== undefined ? { derivationPath: a.derivationPath as string } : {}),
+    });
+  } catch {
+    return { ok: false, reason: "is not a well-formed session key authorization (LO-EV-1)" };
+  }
+  const allowedActions = scope.allowedActions as string[];
+  const contractIds = scope.contractIds as string[];
+  if (!allowedActions.includes(EVIDENCE_SUBMIT)) return { ok: false, reason: "does not allow evidence_submit" };
+  if (contractIds.length === 0) return { ok: false, reason: "names no job: an empty scope means any job, which no subject-scoped grant allows" };
+  if ((a.issuedAt as number) > (a.expiresAt as number)) return { ok: false, reason: "expires before it is issued" };
+  if (!(await ed25519Verifies(rootKey, preimage, parentSignature))) return { ok: false, reason: `is not signed by its root key ${rootKey}` };
+  return { ok: true, contractIds: Object.freeze([...contractIds]), issuedAt: a.issuedAt as number, expiresAt: a.expiresAt as number };
+}
+
+/**
+ * The rows of a registry snapshot, checked and sorted by key, or why they are
+ * not one (astra packs 271, 275, 281).
+ *   - Each key has one spelling and one row, and no two keys share a signer id
+ *     (0x + the first 40 hex digits), so a bundle's declared signer names at
+ *     most one key.
+ *   - A registered row names its operator and its grants.
+ *   - A session key's row names its root, a registered row of this snapshot,
+ *     and holds the root's delegation of it, which must verify under the
+ *     root's key. The chain is one link: a session key never roots another.
+ */
+async function readRegistry(value: unknown): Promise<{ ok: true; rows: RegistryRow[] } | { ok: false; reason: string }> {
+  if (!Array.isArray(value)) {
+    return {
+      ok: false,
+      reason: "registryKeys (the pinned registry snapshot) must be a list of { publicKey, trustDomain, grants } and { publicKey, delegatedBy, authorization } rows",
+    };
+  }
+  const rows: RegistryRow[] = [];
+  const byKey = new Map<string, RegistryRow>();
+  const signers = new Set<string>();
+  for (let k = 0; k < value.length; k++) {
+    const row: unknown = value[k];
+    const publicKey = isRecord(row) ? row.publicKey : undefined;
+    if (!isRecord(row) || typeof publicKey !== "string" || !REGISTRY_KEY.test(publicKey)) {
+      return { ok: false, reason: `registryKeys[${k}] must be a row whose publicKey is 0x<64 lowercase hex>` };
+    }
+    let checked: RegistryRow;
+    if (Object.prototype.hasOwnProperty.call(row, "delegatedBy")) {
+      const root = row.delegatedBy;
+      if (!onlyFields(row, DELEGATED_ROW_FIELDS) || typeof root !== "string" || !REGISTRY_KEY.test(root) || !isRecord(row.authorization)) {
+        return { ok: false, reason: `registryKeys[${k}] must be { publicKey, delegatedBy: a registered key, authorization: its delegation }` };
+      }
+      const delegation = { root, authorization: row.authorization, contractIds: [], issuedAt: 0, expiresAt: 0 };
+      checked = { publicKey, signer: publicKey.slice(0, 42), trustDomain: null, grants: [], delegation };
+    } else {
+      const trustDomain = row.trustDomain;
+      const grants = readGrants(row.grants);
+      if (
+        !onlyFields(row, ROW_FIELDS) ||
+        !(trustDomain === null || (typeof trustDomain === "string" && parseOperatorPrincipalId(trustDomain) !== null)) ||
+        grants === null
+      ) {
+        return {
+          ok: false,
+          reason: `registryKeys[${k}] must be { publicKey, trustDomain: an operator principal id or null, grants: a non-empty list of { role: executor | witness, kernelId, jobId? }, none twice }`,
+        };
+      }
+      checked = { publicKey, signer: publicKey.slice(0, 42), trustDomain, grants, delegation: null };
+    }
+    if (byKey.has(publicKey)) return { ok: false, reason: `registryKeys lists key ${publicKey} twice: a key has one row` };
+    if (signers.has(checked.signer)) {
+      return { ok: false, reason: `registryKeys lists two keys whose signer id is ${checked.signer}: a declared signer would not name one key` };
+    }
+    byKey.set(publicKey, checked);
+    signers.add(checked.signer);
+    rows.push(checked);
+  }
+  // A session key counts only through a delegation rooted in a registered row of this snapshot.
+  for (const row of rows) {
+    if (row.delegation === null) continue;
+    const root = byKey.get(row.delegation.root);
+    if (root === undefined || root.delegation !== null) {
+      return { ok: false, reason: `session key ${row.publicKey} names ${row.delegation.root} as its root, which is not a registered row of this snapshot` };
+    }
+    const delegation = await readDelegation(row.delegation.authorization, row.publicKey, root.publicKey);
+    if (!delegation.ok) return { ok: false, reason: `the delegation of session key ${row.publicKey} ${delegation.reason}` };
+    row.trustDomain = root.trustDomain;
+    row.grants = root.grants;
+    row.delegation = { ...row.delegation, contractIds: delegation.contractIds, issuedAt: delegation.issuedAt, expiresAt: delegation.expiresAt };
+  }
+  rows.sort((a, b) => (a.publicKey < b.publicKey ? -1 : a.publicKey > b.publicKey ? 1 : 0));
+  return { ok: true, rows };
+}
+
+function registryDigestOf(rows: readonly RegistryRow[]): Promise<SHA256> {
+  return sha256(
+    canonicalize({
+      domain: REGISTRY_SNAPSHOT_DOMAIN,
+      keys: rows.map((r) =>
+        r.delegation === null
+          ? { publicKey: r.publicKey, trustDomain: r.trustDomain, grants: r.grants }
+          : { publicKey: r.publicKey, delegatedBy: r.delegation.root, authorization: r.delegation.authorization },
+      ),
+    }),
+  );
+}
+
+/**
+ * The digest a pinned registry snapshot is committed to:
+ *   sha256(canonicalize({ domain, keys }))
+ * `sha256:`-tagged, over the rows sorted by key, each registered row's grants
+ * sorted, and each delegation as given. The pinning party computes it over the
+ * rows it builds when it pins the evidence set (see the caller contract).
+ * Rejects on rows admission would refuse, a delegation that does not verify
+ * included: there is nothing meaningful to pin.
+ */
+export async function computeRegistryDigest(registryKeys: readonly RegistryKey[]): Promise<SHA256> {
+  const copy = plainDataCopy(registryKeys);
+  if (!copy.ok) throw new Error(`computeRegistryDigest: the registry is not plain JSON data (${copy.reason})`);
+  const registry = await readRegistry(copy.value);
+  if (!registry.ok) throw new Error(`computeRegistryDigest: ${registry.reason}`);
+  return registryDigestOf(registry.rows);
+}
+
+/** Whether `grant` names `subject`: its kernel is the subject's, and its job, if it names one, is the subject's. */
+function grantNames(grant: SignerGrant, subject: EvidenceSubject): boolean {
+  return grant.kernelId === subject.kernelId && (grant.jobId === undefined || grant.jobId === subject.jobId);
+}
+
+/** Whether `row`'s key is the executor for `subject`: one of its grants names it in the executor role. */
+function isExecutorFor(row: RegistryRow, subject: EvidenceSubject): boolean {
+  return row.grants.some((g) => g.role === "executor" && grantNames(g, subject));
+}
+
+/**
+ * Whether any pinned row lets a key witness `subject`: a witness grant that
+ * names it. A session key holds only its root's grants, so it adds no witness
+ * its root, a registered row here, does not already grant.
+ */
+function witnessAuthorized(rows: readonly RegistryRow[], subject: EvidenceSubject): boolean {
+  return rows.some((row) => row.grants.some((g) => g.role === "witness" && grantNames(g, subject)));
+}
+
+/**
+ * Why `row`'s key may not sign `events` for `subject`, or null when it may
+ * (astra pack 281, DECISIONS 00:26).
+ *   - A grant names the subject when its kernel is the subject's and its job,
+ *     if it names one, is the subject's.
+ *   - An executor grant lets the key sign any event of the subject. A witness
+ *     grant lets it sign inspections only.
+ *   - A session key holds its root's grants only for the jobs its delegation's
+ *     scope names, and only for events whose own timestamps fall inside the
+ *     delegation's window, in whole seconds, as the session verifier counts
+ *     them.
+ * Subject binding has already shown that every event names the subject's job
+ * and kernel, so a grant matched against the subject covers every event.
+ */
+function authorizationDenied(row: RegistryRow, subject: EvidenceSubject, events: readonly EvidenceEvent[]): string | null {
+  if (row.delegation !== null) {
+    if (!row.delegation.contractIds.includes(subject.jobId)) {
+      return `session key ${row.signer} is delegated for job(s) ${row.delegation.contractIds.join(", ")}, not job ${subject.jobId}`;
+    }
+    for (const e of events) {
+      const second = Math.floor(Date.parse(e.timestamp) / 1000);
+      if (!(second >= row.delegation.issuedAt && second <= row.delegation.expiresAt)) {
+        return `session key ${row.signer} signed an event timestamped ${e.timestamp}, outside its delegation's window`;
+      }
+    }
+  }
+  if (isExecutorFor(row, subject)) return null;
+  if (!row.grants.some((g) => g.role === "witness" && grantNames(g, subject))) {
+    return `key ${row.signer} holds no grant for kernel ${subject.kernelId}, job ${subject.jobId}: registry membership alone authorizes nothing`;
+  }
+  const other = events.find((e) => !INSPECTION.has(e.type));
+  return other === undefined ? null : `key ${row.signer} is a witness for this subject, which signs inspections only, not ${other.type}`;
+}
+
+/** Whether `signature` is the Ed25519 signature of `message` under the raw `publicKey` (0x + 64 hex), through Web Crypto. */
+async function ed25519Verifies(publicKey: string, message: Uint8Array, signature: Uint8Array): Promise<boolean> {
+  try {
+    // Fresh copies: Web Crypto takes ArrayBuffer-backed bytes.
+    const key = await crypto.subtle.importKey("raw", new Uint8Array(parseEd25519PublicKeyHex(publicKey)), { name: "Ed25519" }, false, ["verify"]);
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, new Uint8Array(signature), new Uint8Array(message));
+  } catch {
+    return false;
+  }
 }
 
 function result(
@@ -561,23 +954,11 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
   }
 }
 
-/** A signer id as kernel bundles declare it (`kernelSignature.signer`): 0x and 40 lowercase hex digits. */
-const SIGNER_ID = /^0x[0-9a-f]{40}$/;
-
-/** The signature leg's answer: the verified signer's id, or null when the leg failed (a throw, false, true, or anything not a signer id). */
-async function signatureLeg(leg: () => BundleSignatureAnswer | Promise<BundleSignatureAnswer>): Promise<string | null> {
-  try {
-    const answer: unknown = await leg();
-    return typeof answer === "string" && SIGNER_ID.test(answer) ? answer : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The lower of two levels; null (no level) is the lowest. */
-function lowerLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
-  if (a === null || b === null) return null;
-  return evidenceLevelRank(a) <= evidenceLevelRank(b) ? a : b;
+/** The higher of two levels; null (no level) is the lowest. */
+function higherLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return evidenceLevelRank(a) >= evidenceLevelRank(b) ? a : b;
 }
 
 /**
@@ -602,7 +983,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   if (typeof input !== "object" || input === null || isProxy === null || isProxy(input)) {
     return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
   }
-  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile", "executorTrustDomains", "signerTrustDomains"] as const;
+  const fields = ["pinnedBundleSetDigest", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile", "executorTrustDomains", "registryKeys", "pinnedRegistryDigest"] as const;
   const read = Object.create(null) as Record<(typeof fields)[number], unknown>;
   for (const key of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
@@ -611,7 +992,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     }
     read[key] = descriptor?.value;
   }
-  for (const key of ["profile", "subject", "bundles", "executorTrustDomains", "signerTrustDomains"] as const) {
+  for (const key of ["profile", "subject", "bundles", "executorTrustDomains", "registryKeys"] as const) {
     const code = codeInData(read[key], `input.${key}`, new Set());
     if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
   }
@@ -619,31 +1000,31 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   // Every read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
   let entry: {
     pinnedBundleSetDigest: unknown;
-    verifyBundleSignature: ProfileAdmissionInput["verifyBundleSignature"];
+    pinnedRegistryDigest: unknown;
     verifyPrimitiveInstance: ProfileAdmissionInput["verifyPrimitiveInstance"];
     subjectCopy: ReturnType<typeof plainDataCopy>;
     bundlesCopy: ReturnType<typeof plainDataCopy>;
     executorsCopy: ReturnType<typeof plainDataCopy>;
-    signersCopy: ReturnType<typeof plainDataCopy>;
+    registryCopy: ReturnType<typeof plainDataCopy>;
     committedDigest: string;
     presentedProfile: MeasurementProfileV1;
   };
   try {
     entry = {
       pinnedBundleSetDigest: read.pinnedBundleSetDigest,
-      verifyBundleSignature: read.verifyBundleSignature as ProfileAdmissionInput["verifyBundleSignature"],
+      pinnedRegistryDigest: read.pinnedRegistryDigest,
       verifyPrimitiveInstance: read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"],
       subjectCopy: plainDataCopy(read.subject),
       bundlesCopy: plainDataCopy(read.bundles),
       executorsCopy: plainDataCopy(read.executorTrustDomains),
-      signersCopy: plainDataCopy(read.signerTrustDomains),
+      registryCopy: plainDataCopy(read.registryKeys),
       committedDigest: read.committedDigest as string,
       presentedProfile: read.profile as MeasurementProfileV1,
     };
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
-  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy, executorsCopy, signersCopy } = entry;
+  const { pinnedBundleSetDigest, pinnedRegistryDigest, verifyPrimitiveInstance, subjectCopy, bundlesCopy, executorsCopy, registryCopy } = entry;
 
   const governance = profileGoverns(entry.committedDigest, entry.presentedProfile);
   if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
@@ -667,32 +1048,11 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
   const executorTrustDomains = deepFreeze([...executors]) as readonly string[];
 
-  // The pinned registry snapshot: each signer's one trust domain (astra pack 271). A signer listed twice is refused,
-  // whatever the domains, so no lookup can depend on which row it reads.
-  const snapshot: unknown = signersCopy.ok ? signersCopy.value : undefined;
-  if (!Array.isArray(snapshot)) {
-    return reject("input-unreadable", "signerTrustDomains (the pinned registry snapshot) must be a list of { signer, trustDomain } rows");
-  }
-  const domainOf = new Map<string, string | null>();
-  for (let k = 0; k < snapshot.length; k++) {
-    const row: unknown = snapshot[k];
-    const signer = isRecord(row) ? row.signer : undefined;
-    const domain = isRecord(row) ? row.trustDomain : undefined;
-    if (
-      typeof signer !== "string" ||
-      !SIGNER_ID.test(signer) ||
-      !(domain === null || (typeof domain === "string" && parseOperatorPrincipalId(domain) !== null))
-    ) {
-      return reject(
-        "input-unreadable",
-        `signerTrustDomains[${k}] must be { signer: 0x<40 lowercase hex>, trustDomain: an operator principal id or null }`,
-      );
-    }
-    if (domainOf.has(signer)) {
-      return reject("input-unreadable", `signerTrustDomains lists signer ${signer} twice: a signer has one trust domain`);
-    }
-    domainOf.set(signer, domain);
-  }
+  // The pinned registry snapshot (astra packs 271, 275): each key's one trust domain, unique by key and by signer id.
+  const registry = await readRegistry(registryCopy.ok ? registryCopy.value : undefined);
+  if (!registry.ok) return reject("input-unreadable", registry.reason);
+  const rowOfSigner = new Map<string, RegistryRow>();
+  for (const row of registry.rows) rowOfSigner.set(row.signer, row);
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
@@ -703,6 +1063,19 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     return result(policyDecision(profile.onMissingData), [
       { code: "no-bundles", detail: "no evidence bundle was presented for the job" },
     ]);
+  }
+
+  // The registry's pin binds the keys and their domains to the registry as it was pinned: a malformed pin, or rows
+  // that are not the pinned ones (a key rotated or reassigned since), are refused before any signature is checked.
+  if (!isTaggedDigest(pinnedRegistryDigest)) {
+    return reject("registry-pin-invalid", "the pinned registry digest is not a sha256: tagged digest, so no registry is committed to");
+  }
+  const presentedRegistry = await registryDigestOf(registry.rows);
+  if (presentedRegistry !== pinnedRegistryDigest) {
+    return reject(
+      "registry-mismatch",
+      `the registry rows digest to ${presentedRegistry}, not the pinned ${pinnedRegistryDigest}: they are not the registry the evidence was pinned with`,
+    );
   }
 
   // The pin is authority: a malformed one is refused outright, never read as
@@ -749,22 +1122,29 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   const seen = new Set<string>();
   // Each bundle as evidence-level reads it: its bound events and its signer's trust domain.
   const authenticated: AuthenticatedBundle[] = [];
+  // The operators of the keys that signed as the subject's executor, and whether one of them names none.
+  const executorDomains = new Set<string>();
+  let executorDomainUnknown = false;
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    const verified = await signatureLeg(() => verifyBundleSignature(bundle));
-    if (verified === null) {
-      return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+    // SIGNATURE, run here (astra packs 271, 275): the declared signer names one key of the pinned registry, the
+    // bundle hash's Ed25519 signature must verify under THAT key, and the bundle's trust domain is that key's row.
+    const signature: unknown = bundle.kernelSignature;
+    const declared: unknown = isRecord(signature) ? signature.signer : undefined;
+    const row = typeof declared === "string" ? rowOfSigner.get(declared) : undefined;
+    if (!isRecord(signature) || signature.algorithm !== "ed25519" || row === undefined) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: its signature is not an ed25519 signature by a key of the pinned registry (registryKeys)`);
     }
-    // The leg must name the signer the bundle declares, and the snapshot must hold it: the trust domain is the
-    // domain of the key that verified, from the one snapshot (astra pack 271).
-    const declared: unknown = isRecord(bundle.kernelSignature) ? bundle.kernelSignature.signer : undefined;
-    if (verified !== declared) {
-      return rejectNow("unauthenticated-bundle", `bundle ${i}: the leg verified signer ${verified}, not the bundle's declared signer`);
+    let signed = false;
+    try {
+      signed = await ed25519Verifies(row.publicKey, signingPreimage(bundle.bundleHash), parseEd25519SignatureHex(signature.value));
+    } catch {
+      signed = false;
     }
-    if (!domainOf.has(verified)) {
-      return rejectNow("unauthenticated-bundle", `bundle ${i}: signer ${verified} is not in the pinned registry snapshot (signerTrustDomains)`);
+    if (!signed) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: its signature does not verify under the registered key of ${row.signer}`);
     }
-    const trustDomain = domainOf.get(verified) ?? null;
+    const trustDomain = row.trustDomain;
     const binding = await verifyEvidenceSubjectBinding({
       bundleHash: bundle.bundleHash,
       events: bundle.events,
@@ -773,6 +1153,14 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     if (!binding.ok) {
       const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
       return rejectNow("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
+    }
+    // AUTHORIZATION (astra pack 281, DECISIONS 00:26): a valid signature by a registered key authorizes nothing by
+    // itself. The key must hold a grant naming this subject, in a role that fits what the bundle holds.
+    const denied = authorizationDenied(row, subject, binding.events);
+    if (denied !== null) return rejectNow("unauthorized-signer", `bundle ${i}: ${denied}`);
+    if (isExecutorFor(row, subject)) {
+      if (trustDomain === null) executorDomainUnknown = true;
+      else executorDomains.add(trustDomain);
     }
     authenticated.push(trustDomain === null ? { events: binding.events } : { events: binding.events, trustDomain });
     // Evaluate only what was hashed: the verified canonical snapshots.
@@ -796,9 +1184,18 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   // completion is a device failure, judged here under onDeviceFailure.
   let contradictions: ContradictionKind[];
   let eventLevels: readonly EventLevel[];
+  let reached: EvidenceLevel | null;
+  // A key that signed as the executor is the executor's own, never an independent inspector (steward #6694): its
+  // operator joins the deal's executors when levels are judged, so only a witness can reach inspected_output. An
+  // executor key whose operator the registry does not name leaves no inspection independent. When the deal names no
+  // executor, none is added: #345 then shows no independence, as before.
+  const levelExecutors =
+    executorTrustDomains.length === 0 || executorDomainUnknown ? [] : [...new Set([...executorTrustDomains, ...executorDomains])];
   try {
     contradictions = deriveContradictions(authenticated);
-    eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains });
+    eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains: levelExecutors });
+    // The strongest level the bundles prove: #345's own function, the maximum over every occurrence.
+    reached = evidenceLevelOfBundles(authenticated, { executorTrustDomains: levelExecutors });
   } catch (err) {
     return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -821,18 +1218,14 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   const required = profile.interpretation.acceptanceLevel;
-  // The level of each distinct event: the LOWEST any of its copies gets (steward #6478).
+  // The level an event counts at: the MAX over its occurrences, each levelled by its own bundle, as #345 takes
+  // it (steward #6623, evidence #6559). A test holds this and `reached` equal to evidence-level.ts on duplicates.
   const levelByHash = new Map<string, EvidenceLevel | null>();
   for (const { bundleIndex, eventIndex, level } of eventLevels) {
     const hash = authenticated[bundleIndex]!.events[eventIndex]!.hash;
-    levelByHash.set(hash, levelByHash.has(hash) ? lowerLevel(levelByHash.get(hash)!, level) : level);
+    levelByHash.set(hash, levelByHash.has(hash) ? higherLevel(levelByHash.get(hash)!, level) : level);
   }
   const levelOf = (e: EvidenceEvent): EvidenceLevel | null => levelByHash.get(e.hash) ?? null;
-  let reached: EvidenceLevel | null = null;
-  for (const e of events) {
-    const level = levelOf(e);
-    if (level !== null && (reached === null || evidenceLevelRank(level) > evidenceLevelRank(reached))) reached = level;
-  }
   const { device } = profile;
   const window = captureWindow(profile, events);
 
@@ -903,7 +1296,19 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
   const qualifying = samples.size;
 
-  if (!meetsEvidenceLevel(reached, required)) {
+  if (!meetsEvidenceLevel(reached, required) && required === "inspected_output" && !witnessAuthorized(registry.rows, subject)) {
+    // Only a witness's inspection reaches inspected_output, and the pinned rows grant no witness for this subject.
+    // No registry record assigns witnesses yet (N132), so say so rather than report a generic shortfall.
+    findings.push({
+      decision: policyDecision(profile.onMissingData),
+      reason: {
+        code: "no-witness-authorized",
+        detail:
+          `the profile requires inspected_output, which only an independent witness's inspection reaches, and no pinned row grants a witness ` +
+          `for kernel ${subject.kernelId}, job ${subject.jobId} (no registry record assigns witnesses yet); the evidence reaches ${reached ?? "no level"}`,
+      },
+    });
+  } else if (!meetsEvidenceLevel(reached, required)) {
     findings.push({
       decision: policyDecision(profile.onMissingData),
       reason: {
