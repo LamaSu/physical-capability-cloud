@@ -46,7 +46,13 @@ export type KernelJobStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "timed_out";
+  | "timed_out"
+  /**
+   * Refused because its device was busy with ANOTHER job, after one bounded
+   * retry (N127). Nothing ran, the device is not at fault, and it is no
+   * failure: no breaker, reputation or failure count reads it as one.
+   */
+  | "rejected_busy";
 
 /**
  * Which deadline a `timed_out` job breached.
@@ -56,12 +62,13 @@ export type KernelJobStatus =
  */
 export type TimeoutCause = "dispatch" | "execution" | "heartbeat";
 
-/** The four terminal statuses (no transitions leave these). */
+/** The terminal statuses (no transitions leave these). */
 export const TERMINAL_JOB_STATUSES = [
   "completed",
   "failed",
   "cancelled",
   "timed_out",
+  "rejected_busy",
 ] as const satisfies readonly KernelJobStatus[];
 
 /** Recorded when a job transitions to `timed_out`. Provenance for the refund. */

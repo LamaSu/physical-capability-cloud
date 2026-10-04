@@ -934,7 +934,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         .where(
           and(
             eq(schema.jobs.id, jobId),
-            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed')`,
+            // 'rejected_busy' (N127): the kernel refused it, busy, so nothing ran and there is nothing to complete.
+            sql`${schema.jobs.status} NOT IN ('completing','evidence_submitted','settled','completed','cancelled','failed','rejected_busy')`,
           ),
         )
         .returning()
