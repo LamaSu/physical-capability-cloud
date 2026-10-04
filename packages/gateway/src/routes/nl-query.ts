@@ -17,6 +17,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { createHash, randomUUID } from "node:crypto";
 import { getRepos } from "../db.js";
 import { jobReadScopeOf, refuseJobRead, scopeAllows, type JobReadScope } from "../readmodels/job-read-gate.js";
+import { getCapabilityFacade, getKernelFacade } from "../facades/index.js";
 import { getIntentClassifier } from "../services/intent-classifier.js";
 import { getEventBus } from "../services/event-bus.js";
 import { capturePrincipal, intentActor } from "../services/unmet-capture.js";
@@ -162,12 +163,16 @@ const JOB_INTENTS: ReadonlySet<string> = new Set(["job_status", "job_history"]);
  *
  * `jobScope` is the caller's job read scope; a job intent answers only the jobs in it, and a
  * job outside it is answered like a job that does not exist.
+ *
+ * Kernels and capabilities are answered through their read models, never as stored rows (board
+ * N68, astra r1): the read models show a site's location coarse unless its operator opted in,
+ * and no street address. Both the returned rows and the answer text come from those reads.
  */
-function executeIntentQuery(
+async function executeIntentQuery(
   intent: string,
   slots: Record<string, string | number | boolean>,
   jobScope: Extract<JobReadScope, { ok: true }> | null,
-): { rows: Record<string, unknown>[]; table: string } {
+): Promise<{ rows: Record<string, unknown>[]; table: string }> {
   const repos = getRepos();
   const readable = (jobId: unknown) => jobScope !== null && scopeAllows(jobScope, jobId);
   const readableJobs = () =>
@@ -199,9 +204,10 @@ function executeIntentQuery(
 
     case "find_capability": {
       const capType = String(slots["capabilityType"] ?? "");
-      const capabilities = capType
-        ? repos.capabilities.findByType(capType)
-        : repos.capabilities.findAll();
+      const facade = getCapabilityFacade();
+      const read = capType ? await facade.listByType(capType) : await facade.list({}, { offset: 0, limit: 20 });
+      if (!read.success) throw new Error(read.error.message);
+      const capabilities = Array.isArray(read.data) ? read.data : read.data.items;
       return {
         rows: (capabilities as unknown as Record<string, unknown>[]).slice(0, 20),
         table: "capabilities",
@@ -211,16 +217,12 @@ function executeIntentQuery(
     case "network_status":
     case "operator_stats":
     case "kernel_health": {
+      const read = await getKernelFacade().list();
+      if (!read.success) throw new Error(read.error.message);
       const kernelId = String(slots["kernelId"] ?? "");
-      if (kernelId) {
-        const kernel = repos.kernels.findById(kernelId);
-        return {
-          rows: kernel ? [kernel as unknown as Record<string, unknown>] : [],
-          table: "shop_kernels",
-        };
-      }
+      const kernels = kernelId ? read.data.filter((k) => k.id === kernelId) : read.data.slice(0, 20);
       return {
-        rows: (repos.kernels.findAll() as unknown as Record<string, unknown>[]).slice(0, 20),
+        rows: kernels as unknown as Record<string, unknown>[],
         table: "shop_kernels",
       };
     }
@@ -392,7 +394,7 @@ export async function nlQueryRoutes(app: FastifyInstance) {
       const sources: QuerySource[] = [];
 
       try {
-        const result = executeIntentQuery(intent, slots, jobScope);
+        const result = await executeIntentQuery(intent, slots, jobScope);
         rows = result.rows;
 
         sources.push({

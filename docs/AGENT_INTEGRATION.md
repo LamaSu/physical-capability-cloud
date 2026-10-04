@@ -114,6 +114,15 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 
 **Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401.
 
+### Operator Work
+
+Scoped to your kernels (kernels whose `operatorAddress` is your API key's operator id or your wallet). Every field is assigned by the gateway; a source that could not be read, or cannot be tied to you yet, is reported in `sources` instead of appearing as an empty list.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/operator/work` | Your work: open job offers for your capability types, offers your kernels claimed, your kernels' jobs and pending approvals. Returns `OperatorWorkDTO` `{schemaId, asOf, kernels, items, total, truncated, sources}`; each item has `phase` + `phaseSource` (who asserted it), `pay` with its `funding` (`escrowed`, `declared_unfunded`, `simulated` or `unknown`; a declared price is never income), and `actions[]` with the route to call. `?limit=` 1-500 (default 200). |
+| GET | `/api/operator/income` | What the escrow records show for your kernels' jobs. Returns `OperatorIncomeDTO` `{rows, totalsByStatus, uncountedRows, historyAvailable: false, reasonIfNot}`; totals are sums of rows only, and no gateway record makes a payout `paid`. |
+
 ### Escrow & Settlement
 
 | Method | Endpoint | Description |
@@ -436,7 +445,9 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   envelope?: WorkEnvelope;           // Build volume
   assuranceTiers: (0|1|2|3)[];       // Which tiers this supports
   pricing: PricingModel;             // {currency, baseCost, minimum, ...}
-  location: {lat, lng};
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell
+  locationCell: string | null;       // the site's geohash-5 cell
   tags?: string[];
   // Enrichment (populated by facades):
   reputation?: number;               // 0-1000, from ERC-8004
@@ -480,8 +491,10 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   id: string;
   name: string;
   operatorAddress: string;
-  location: {lat, lng};
-  physicalAddress: string;
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell; none = no location ({0,0} included)
+  locationCell: string | null;       // the site's geohash-5 cell
+  physicalAddress: string | null;    // only when the operator opted in
   maxAssuranceTier: 0|1|2|3;
   status: "online"|"offline"|"maintenance"|"suspended";
   lastHeartbeat: string;
