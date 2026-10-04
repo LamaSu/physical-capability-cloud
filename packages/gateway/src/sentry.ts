@@ -52,9 +52,10 @@ function serverValues(): SentryServerValues {
 /**
  * The gateway's Sentry options (N107b, the closed observability schema). The SDK collects no
  * request data at all (no URL, query string, headers, cookies, body or address), and every outbound
- * record is rebuilt from closed fields before it is sent: error events, transactions, standalone
- * spans and breadcrumbs (observability/closed-sinks.ts), with trace and span ids remapped under the
- * telemetry key and the envelope's sampling context rebuilt from the server's own values.
+ * record is rebuilt from closed fields and the server's own values before it is sent: error events
+ * (their exception rebuilt from the hint's original exception), transactions, standalone spans and
+ * breadcrumbs (observability/closed-sinks.ts), with trace and span ids remapped under the telemetry
+ * key and the envelope's sampling context rebuilt from the server's own values.
  */
 export function sentryOptions(dsn: string): Sentry.NodeOptions {
   return {
@@ -75,9 +76,9 @@ export function sentryOptions(dsn: string): Sentry.NodeOptions {
         include: { cookies: false, data: false, headers: false, ip: false, query_string: false, url: false },
       }),
     ],
-    beforeSend: (event) => closedSentryEvent(event, serverValues()),
+    beforeSend: (event, hint) => closedSentryEvent(event, serverValues(), hint),
     beforeSendTransaction: (event) => closedSentryTransaction(event, serverValues()),
-    beforeSendSpan: (span) => closedSentrySpan(span),
+    beforeSendSpan: (span) => closedSentrySpan(span, serverValues()),
     beforeBreadcrumb: (breadcrumb) => closedBreadcrumb(breadcrumb),
   };
 }

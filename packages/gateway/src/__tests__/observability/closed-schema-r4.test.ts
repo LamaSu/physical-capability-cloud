@@ -173,6 +173,78 @@ describe("B: errors", () => {
   });
 });
 
+describe("C: Sentry", () => {
+  it("C7: the envelope's fields are the server's own: environment, release, platform; the event id is keyed; no dist or sdk", () => {
+    const event = closedEvent({ event_id: "0123456789abcdef0123456789abcdef", environment: "caller-env", release: "caller-release", dist: "d", platform: "python", sdk: { name: "x", version: "1" } });
+    expect(event.environment).toBe("srv-env");
+    expect(event.release).toBe("srv-release");
+    expect(event.platform).toBe("node");
+    expect(event.event_id).toBe(schema.keyedHexId("0123456789abcdef0123456789abcdef", 32));
+    expect(event.dist).toBeUndefined();
+    expect(event.sdk).toBeUndefined();
+  });
+
+  it("C8: the runtime context is the server's own runtime", () => {
+    const event = closedEvent({ contexts: { runtime: { name: "deno", version: "v0" } } });
+    expect(event.contexts.runtime).toEqual({ name: "node", version: process.version });
+  });
+
+  it("C9: exception frames are rebuilt from the original exception; without one, no frames", () => {
+    const original = new TypeError("boom");
+    const exception = { values: [{ type: "TypeError", value: "boom", stacktrace: { frames: [{ filename: "/caller.js", function: "caller", lineno: 9, colno: 9 }] } }] };
+    const rebuilt = closedEvent({ exception }, { originalException: original });
+    const value = rebuilt.exception.values[0];
+    expect(value.type).toBe("TypeError");
+    expect(value.value).toBe(schema.keyedHash("boom"));
+    const frames = value.stacktrace.frames as Array<Record<string, unknown>>;
+    expect(frames.length).toBeGreaterThan(0);
+    expect(frames[frames.length - 1]!.filename).toBe(THIS_FILE);
+    expect(JSON.stringify(frames)).not.toContain("/caller.js");
+    const without = closedEvent({ exception });
+    expect(without.exception.values[0].stacktrace).toBeUndefined();
+  });
+
+  it("C10: a span's status codes leave as their class and its sample rate is the server's own", () => {
+    const span = closedSpan({ data: { "http.response.status_code": 451, "http.status_code": 204, "sentry.sample_rate": 0.25 } });
+    expect(span.data["http.response.status_code"]).toBe("4xx");
+    expect(span.data["http.status_code"]).toBe("2xx");
+    expect(span.data["sentry.sample_rate"]).toBe(1);
+  });
+
+  it("C11: an error event's time and a breadcrumb's time are the server's clock; an event keeps only the breadcrumb times the server issued", () => {
+    const before = Date.now() / 1000;
+    const event = closedEvent({ timestamp: 1, start_timestamp: 1 });
+    const after = Date.now() / 1000;
+    expect(event.timestamp).toBeGreaterThanOrEqual(before);
+    expect(event.timestamp).toBeLessThanOrEqual(after);
+    expect(event.start_timestamp).toBeUndefined();
+    const crumb = sinks.closedBreadcrumb({ category: "console", timestamp: 2 }) as Record<string, number>;
+    expect(crumb.timestamp).toBeGreaterThanOrEqual(before);
+    const withCrumbs = closedEvent({ breadcrumbs: [crumb, { category: "console", timestamp: 3 }] });
+    expect(withCrumbs.breadcrumbs[0].timestamp).toBe(crumb.timestamp);
+    expect(withCrumbs.breadcrumbs[1].timestamp).toBeUndefined();
+  });
+
+  it("C12: is_segment is derived from the span's own ids, handled from the mechanism's type, and a transaction's type is the constant", () => {
+    expect(closedSpan({ span_id: "a", segment_id: "b", is_segment: true }).is_segment).toBe(false);
+    expect(closedSpan({ span_id: "a", segment_id: "a", is_segment: false }).is_segment).toBe(true);
+    const mechanisms = closedEvent({
+      exception: {
+        values: [
+          { type: "Error", mechanism: { type: "generic", handled: false } },
+          { type: "Error", mechanism: { type: "auto.node.onuncaughtexception", handled: true } },
+          { type: "Error", mechanism: { type: "not-a-mechanism", handled: true } },
+        ],
+      },
+    }).exception.values.map((v: { mechanism: Record<string, unknown> }) => v.mechanism);
+    expect(mechanisms[0]).toEqual({ type: "generic", handled: true });
+    expect(mechanisms[1]).toEqual({ type: "auto.node.onuncaughtexception", handled: false });
+    expect(mechanisms[2].handled).toBeUndefined();
+    const transaction = (sinks.closedSentryTransaction as (e: object, s?: object) => Record<string, unknown>)({ type: "caller-type" }, server);
+    expect(transaction.type).toBe("transaction");
+  });
+});
+
 describe("keyedHash", () => {
   it("never throws: a bigint, a cycle and a throwing toJSON each leave as a hash", () => {
     const cycle: Record<string, unknown> = {};
