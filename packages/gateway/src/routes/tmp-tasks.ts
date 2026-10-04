@@ -8,7 +8,7 @@
  * - Validate benchmark proofs
  */
 
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   TMPMode,
   MilestoneProcurement,
@@ -24,8 +24,10 @@ import {
   ZKProofService,
   OracleVerificationBridge,
   configFromEnv,
+  TIER_ENFORCING_PIPELINES,
 } from "@pcc/verifier";
 import type { BenchmarkProofEnvelope } from "@pcc/verifier";
+import type { TmpTaskRecord, TmpTaskStore } from "../services/tmp-task-store.js";
 
 // ── Authoritative task state (E11e) ──────────────────────────────────
 
@@ -49,6 +51,12 @@ export interface TmpTaskRouteOptions {
    * other answer: no admin. With a resolver wired, the owner path alone applies.
    */
   isAdmin?: (req: FastifyRequest) => boolean | Promise<boolean>;
+  /**
+   * Where tasks live: durable and write-once, because a task's tier and pipeline decide its verdicts
+   * (E11f). The gateway wires FsTmpTaskStore on its volume (server.ts); tests pass MemoryTmpTaskStore.
+   * Without a store, no task is created and none is read: the routes fail closed.
+   */
+  store?: TmpTaskStore;
 }
 
 /** The caller's authenticated principal: the operator behind the API key, else the key, else the session user. */
@@ -75,8 +83,25 @@ const validatorBridge = new TMPValidatorBridge(
 // ── Routes ───────────────────────────────────────────────────────────
 
 export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOptions = {}) {
-  // One store per app instance, not per process (E11e): each entry is created once, by its milestone's owner.
-  const tmpTasks: Map<string, MilestoneProcurement & { owner: string }> = new Map();
+  // A task's terms live in the durable store, created once (E11f). Its lifecycle status (claimed,
+  // completed) is this process's view only: it decides no verdict, and a restart resets it to pending.
+  const lifecycle = new Map<string, { status: MilestoneProcurement["status"]; completedAt?: string }>();
+
+  /** The milestone's task from the store, or null once the reply is sent (404; 503 when unreadable). */
+  async function taskFor(milestoneId: string, reply: FastifyReply): Promise<TmpTaskRecord | null> {
+    let task: TmpTaskRecord | undefined;
+    try {
+      task = await opts.store?.get(milestoneId);
+    } catch {
+      await reply.code(503).send({ error: "task_store_unreadable", message: "the TMP task store could not be read" });
+      return null;
+    }
+    if (!task) {
+      await reply.code(404).send({ error: "not_found", message: `No TMP task for milestone ${milestoneId}` });
+      return null;
+    }
+    return task;
+  }
 
   // ── List available TMP modes ───────────────────────────────────────
 
@@ -146,6 +171,13 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
       if (principal === null) {
         return reply.code(401).send({ error: "unauthenticated", message: "creating a TMP task needs an authenticated caller" });
       }
+      const store = opts.store;
+      if (!store) {
+        return reply.code(503).send({
+          error: "task_store_unavailable",
+          message: "a TMP task is durable, write-once state, and this gateway has no durable task store, so none can be created",
+        });
+      }
       if (opts.milestoneOwner) {
         let owner: string | null;
         try {
@@ -186,6 +218,15 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         });
       }
 
+      // A benchmark task's pipeline must be one that can enforce its tier: validation refuses the others,
+      // so a task on one could never be fulfilled (E11f).
+      if (body.mode === "benchmark" && !TIER_ENFORCING_PIPELINES.includes((body.modeConfig as BenchmarkConfig).proofType)) {
+        return reply.code(400).send({
+          error: "pipeline_unenforceable",
+          message: `a benchmark task's proofType must enforce its tier: one of ${TIER_ENFORCING_PIPELINES.join(", ")}`,
+        });
+      }
+
       if (!ASSURANCE_TIERS.includes(body.assuranceTier)) {
         return reply.code(400).send({
           error: "bad_request",
@@ -193,11 +234,7 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         });
       }
 
-      if (tmpTasks.has(milestoneId)) {
-        return reply.code(409).send({ error: "task_exists", message: "a milestone's TMP task is created once" });
-      }
-
-      const task: MilestoneProcurement & { owner: string } = {
+      const task: TmpTaskRecord = {
         milestoneId,
         mode: body.mode,
         modeConfig: body.modeConfig,
@@ -207,7 +244,15 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         createdAt: new Date().toISOString(),
       };
 
-      tmpTasks.set(milestoneId, task);
+      let created: boolean;
+      try {
+        created = await store.createOnce(task);
+      } catch {
+        return reply.code(503).send({ error: "task_store_unavailable", message: "the TMP task store could not be written" });
+      }
+      if (!created) {
+        return reply.code(409).send({ error: "task_exists", message: "a milestone's TMP task is created once" });
+      }
 
       return reply.code(201).send({ task });
     },
@@ -218,14 +263,9 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
   app.get<{ Params: { id: string } }>(
     "/api/milestones/:id/tmp-task",
     async (req, reply) => {
-      const task = tmpTasks.get(req.params.id);
-      if (!task) {
-        return reply.code(404).send({
-          error: "not_found",
-          message: `No TMP task for milestone ${req.params.id}`,
-        });
-      }
-      return { task };
+      const task = await taskFor(req.params.id, reply);
+      if (!task) return reply;
+      return { task: { ...task, ...lifecycle.get(req.params.id) } };
     },
   );
 
@@ -234,13 +274,8 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
   app.post<{ Params: { id: string } }>(
     "/api/milestones/:id/tmp-bid",
     async (req, reply) => {
-      const task = tmpTasks.get(req.params.id);
-      if (!task) {
-        return reply.code(404).send({
-          error: "not_found",
-          message: `No TMP task for milestone ${req.params.id}`,
-        });
-      }
+      const task = await taskFor(req.params.id, reply);
+      if (!task) return reply;
 
       if (task.mode !== "auction") {
         return reply.code(400).send({
@@ -277,13 +312,8 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
   app.post<{ Params: { id: string } }>(
     "/api/milestones/:id/tmp-pitch",
     async (req, reply) => {
-      const task = tmpTasks.get(req.params.id);
-      if (!task) {
-        return reply.code(404).send({
-          error: "not_found",
-          message: `No TMP task for milestone ${req.params.id}`,
-        });
-      }
+      const task = await taskFor(req.params.id, reply);
+      if (!task) return reply;
 
       if (task.mode !== "pitch") {
         return reply.code(400).send({
@@ -323,13 +353,8 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
   app.post<{ Params: { id: string } }>(
     "/api/milestones/:id/tmp-claim",
     async (req, reply) => {
-      const task = tmpTasks.get(req.params.id);
-      if (!task) {
-        return reply.code(404).send({
-          error: "not_found",
-          message: `No TMP task for milestone ${req.params.id}`,
-        });
-      }
+      const task = await taskFor(req.params.id, reply);
+      if (!task) return reply;
 
       if (task.mode !== "claim") {
         return reply.code(400).send({
@@ -350,8 +375,8 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         });
       }
 
-      // Mark task as active
-      task.status = "active";
+      // Mark the task active, in this process's view (it decides no verdict).
+      lifecycle.set(req.params.id, { status: "active" });
 
       return {
         milestoneId: req.params.id,
@@ -368,13 +393,8 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
   app.post<{ Params: { id: string } }>(
     "/api/milestones/:id/tmp-validate",
     async (req, reply) => {
-      const task = tmpTasks.get(req.params.id);
-      if (!task) {
-        return reply.code(404).send({
-          error: "not_found",
-          message: `No TMP task for milestone ${req.params.id}`,
-        });
-      }
+      const task = await taskFor(req.params.id, reply);
+      if (!task) return reply;
 
       if (task.mode !== "benchmark") {
         return reply.code(400).send({
@@ -404,18 +424,17 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
         submittedAt: new Date().toISOString(),
       };
 
-      // The tier and the pipeline are the task's own, set at creation by the milestone's owner, never the
-      // worker's envelope (N118, E11e).
+      // The tier and the pipeline are the task's own durable record, set once at creation by an admin (or,
+      // with a resolver, the milestone's owner), never the worker's envelope (N118, E11e, E11f).
       const result = await validatorBridge.validate(envelope, {
         acceptedTier: task.acceptedTier,
         proofType: (task.modeConfig as BenchmarkConfig).proofType,
       });
       const acceptance = validatorBridge.formatAcceptance(envelope, result);
 
-      // Update task status if validation passed
+      // Update the task's status, in this process's view, if validation passed.
       if (acceptance.accepted) {
-        task.status = "completed";
-        task.completedAt = new Date().toISOString();
+        lifecycle.set(req.params.id, { status: "completed", completedAt: new Date().toISOString() });
       }
 
       return { result, acceptance };

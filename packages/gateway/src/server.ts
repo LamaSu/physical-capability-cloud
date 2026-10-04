@@ -80,6 +80,7 @@ import { traceRoutes } from "./routes/traces.js";
 import { jobSubmitRoutes } from "./routes/job-submit.js";
 import { pgtrRelayRoutes } from "./routes/pgtr-relay.js";
 import { tmpTaskRoutes } from "./routes/tmp-tasks.js";
+import { FsTmpTaskStore } from "./services/tmp-task-store.js";
 import { setupRoutes } from "./routes/setup.js";
 import { unbrowseRoutes } from "./routes/unbrowse.js";
 import { csdRoutes } from "./routes/csd.js";
@@ -724,8 +725,9 @@ export async function createGateway(port = 3200) {
   await app.register(jobSubmitRoutes);
   await app.register(pgtrRelayRoutes);
   // TMP tasks are owner-bound (E11e). This gateway cannot resolve a milestone's poster yet, so only an
-  // admin key creates them (#6182, the N55 precedent; the deploy consequence is operator item 134).
-  await app.register(tmpTaskRoutes, { isAdmin: hasAdminScope });
+  // admin key creates them (#6182, the N55 precedent; the deploy consequence is operator item 134). Each
+  // task is durable and write-once on this gateway's volume, beside pcc.db (E11f, #6309).
+  await app.register(tmpTaskRoutes, { isAdmin: hasAdminScope, store: new FsTmpTaskStore() });
   await app.register(setupRoutes);
   await app.register(unbrowseRoutes);
   await app.register(csdRoutes);
