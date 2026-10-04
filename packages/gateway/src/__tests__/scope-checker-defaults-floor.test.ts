@@ -213,4 +213,49 @@ describe("scope-checker: defaults compose with governance rows", () => {
     });
   });
 
+  describe("#490 x #589 together: the admin check, rows that only add, and a fail-closed load", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    async function call(method: "GET" | "POST", url: string, scopes: string[]) {
+      const rawKey = issueApiKey(scopes);
+      return app.inject({ method, url, headers: { authorization: `Bearer ${rawKey}` } });
+    }
+
+    it("a table row on an admin route can add a requirement but never stands in for the admin scope", async () => {
+      app = await buildApp();
+      getRepos().governance.insertEndpointScope({
+        id: "scope:test:admin-widgets-extra",
+        method: "GET",
+        routePattern: "/api/admin/widgets",
+        requiredScopes: ["ops:custom"],
+        description: "test-only row on an admin route",
+      });
+      const rowOnly = await call("GET", "/api/admin/widgets", ["ops:custom"]);
+      expect(rowOnly.statusCode).toBe(403);
+      expect(rowOnly.json().required_scopes).toEqual(["admin"]);
+      const adminOnly = await call("GET", "/api/admin/widgets", ["admin"]);
+      expect(adminOnly.statusCode).toBe(403); // the row's added requirement binds too
+      const both = await call("GET", "/api/admin/widgets", ["admin", "ops:custom"]);
+      expect(both.statusCode, both.body).toBe(200);
+      expect(both.json().reached).toBe(true);
+    });
+
+    it("with the governance rows unloadable: a non-admin key is refused on admin routes by the admin check (403) and elsewhere by the load check (503); an admin key gets 503", async () => {
+      app = await buildApp();
+      vi.spyOn(getRepos().governance, "findAllEndpointScopes").mockImplementation(() => {
+        throw new Error("governance table unavailable");
+      });
+      const nonAdminOnAdmin = await call("GET", "/api/admin/widgets", ["contributor:read"]);
+      expect(nonAdminOnAdmin.statusCode).toBe(403);
+      expect(nonAdminOnAdmin.json().required_scopes).toEqual(["admin"]);
+      const nonAdminElsewhere = await call("POST", "/api/contributors", ["contributor:read"]);
+      expect(nonAdminElsewhere.statusCode).toBe(503);
+      const adminOnAdmin = await call("GET", "/api/admin/widgets", ["admin"]);
+      expect(adminOnAdmin.statusCode).toBe(503);
+      expect(adminOnAdmin.json().reached).toBeUndefined();
+    });
+  });
+
 });
