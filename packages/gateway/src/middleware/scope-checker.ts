@@ -214,6 +214,16 @@ function getCallerScopes(req: FastifyRequest): string[] {
   return [];
 }
 
+/**
+ * True only when the caller's API key lists the literal "admin" scope. The wildcard "*" does NOT count:
+ * self-service sign-up (routes/provision.ts) mints every key with ["*"], so a wildcard key is anyone
+ * with an email address, not a trusted principal. A caller without an API key is never an admin here.
+ * The TMP task route's admin exception uses it (#6182).
+ */
+export function hasAdminScope(req: FastifyRequest): boolean {
+  return getCallerScopes(req).includes("admin");
+}
+
 // ── Fastify Plugin ───────────────────────────────────────────────
 
 async function scopeCheckerImpl(app: FastifyInstance) {

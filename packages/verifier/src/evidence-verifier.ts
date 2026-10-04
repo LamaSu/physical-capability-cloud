@@ -9,6 +9,20 @@
  *   4. Consistency checks between events (e.g., power profile matches execution duration)
  *   5. (Optional) Challenge freshness -- anti-replay proof
  *   6. (Optional) Step completeness -- workflow step coverage
+ *
+ * ONLY COMMITTED FIELDS AND AUTHENTICATED INPUTS DECIDE (E11c, N118). The bundle hash commits the
+ * sorted multiset of event hashes, and each event hash commits `type`, `timestamp`, `source` and
+ * `payload`. Nothing else in a bundle is signed: not an event's `id`, not the order of `events`, and
+ * not the bundle-level fields (`assuranceTier`, `id`, `jobId`, `stepId`, `kernelId`, `createdAt`,
+ * `kernelSignature`). So none of them may change a verdict.
+ *   - The evidence a tier requires comes from `options.acceptedTier`: the tier the job was accepted
+ *     at, which the CALLER takes from authoritative, owner-bound state (the accepted plan or its
+ *     poster), never from the bundle. The bundle's own `assuranceTier` is not read at all (E11e).
+ *     Without an accepted tier no requirement can be chosen, so the verdict fails closed.
+ *   - The lifecycle and power events checked in step 4 are chosen by committed fields (timestamp,
+ *     then hash), never by position.
+ *   - A workflow step in step 6 is covered only by a committed `payload.stepId`, never by an id.
+ *   - Event ids still label findings (`evidenceEventId`), as display only.
  *   7. Assurance score rollup
  *   8. Produces a VerificationAttestation
  */
@@ -34,6 +48,12 @@ import { ChallengeService } from "./workflow/challenge-service.js";
 /** Options for digital-workflow-aware verification. All fields are optional --
  *  callers that pass nothing get the existing behavior. */
 export interface DigitalVerifyOptions {
+  /**
+   * The assurance tier the job was ACCEPTED at, taken by the caller from authenticated state (the
+   * accepted plan or its poster), never from the bundle, whose `assuranceTier` is not signed and is
+   * not read (N118, E11e). It chooses the evidence required, and without it the verdict fails closed.
+   */
+  acceptedTier?: AssuranceTier;
   /** Declared workflow steps from the contract. Enables step-completeness checking. */
   workflowSteps?: DigitalWorkflowStep[];
   /** Challenge issued before execution. Together with executionProof, enables anti-replay freshness. */
@@ -42,6 +62,42 @@ export interface DigitalVerifyOptions {
   executionProof?: ExecutionProof;
   /** Block timestamp to use for challenge age check. Defaults to Date.now()/1000. */
   currentBlockTimestamp?: bigint;
+}
+
+/**
+ * The event of `type` that comes first (`earliest`) or last (`latest`) by committed fields: its
+ * timestamp, then its hash. Never by array position, and never by the unsigned `id` (E11c). An
+ * unparseable timestamp sorts where the duration check then fails closed: as the latest start, or
+ * as the earliest completion.
+ */
+function selectByCommittedOrder(
+  events: readonly EvidenceEvent[],
+  type: string,
+  which: "earliest" | "latest",
+): EvidenceEvent | undefined {
+  const unparseableAs = which === "latest" ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
+  let chosen: EvidenceEvent | undefined;
+  let chosenTime = 0;
+  for (const event of events) {
+    if (event.type !== type) continue;
+    const parsed = new Date(event.timestamp).getTime();
+    const time = Number.isNaN(parsed) ? unparseableAs : parsed;
+    const better =
+      chosen === undefined ||
+      (which === "earliest"
+        ? time < chosenTime || (time === chosenTime && event.hash < chosen.hash)
+        : time > chosenTime || (time === chosenTime && event.hash > chosen.hash));
+    if (better) {
+      chosen = event;
+      chosenTime = time;
+    }
+  }
+  return chosen;
+}
+
+/** A tier the verifier knows: an integer 0..3 (a string, NaN or an object is not one). */
+function isAssuranceTier(v: unknown): v is AssuranceTier {
+  return v === 0 || v === 1 || v === 2 || v === 3;
 }
 
 export class EvidenceVerifier {
@@ -99,27 +155,49 @@ export class EvidenceVerifier {
       });
     }
 
-    // 3. Check tier requirements
-    const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === bundle.assuranceTier);
-    if (tierReq) {
-      const eventTypes = new Set(bundle.events.map((e) => e.type));
-      for (const group of tierReq.requiredEventTypes) {
-        const found = group.some((t) => eventTypes.has(t));
-        findings.push({
-          evidenceEventId: "",
-          check: `tier_requirement_${group.join("_or_")}`,
-          passed: found,
-          details: found
-            ? `Required event type present: ${group.filter((t) => eventTypes.has(t)).join(", ")}`
-            : `Missing required event type: one of ${group.join(", ")}`,
-          severity: found ? undefined : "critical",
-        });
+    // 3. Tier requirements, chosen by the ACCEPTED tier only (N118, E11e). The bundle's own assuranceTier
+    // is not signed, so it is not read at all.
+    const acceptedTier = options?.acceptedTier;
+    if (!isAssuranceTier(acceptedTier)) {
+      findings.push({
+        evidenceEventId: "",
+        check: "assurance_tier_accepted",
+        passed: false,
+        details:
+          "No accepted tier was supplied: the bundle's own assuranceTier is not signed, so it cannot choose the evidence required",
+        severity: "critical",
+      });
+    } else {
+      // The bundle's own assuranceTier is never read, not even to compare (E11e): an unsigned field may
+      // not change a verdict in either direction.
+      findings.push({
+        evidenceEventId: "",
+        check: "assurance_tier_accepted",
+        passed: true,
+        details: `The evidence required is the accepted tier ${acceptedTier}'s`,
+      });
+      const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === acceptedTier);
+      if (tierReq) {
+        const eventTypes = new Set(bundle.events.map((e) => e.type));
+        for (const group of tierReq.requiredEventTypes) {
+          const found = group.some((t) => eventTypes.has(t));
+          findings.push({
+            evidenceEventId: "",
+            check: `tier_requirement_${group.join("_or_")}`,
+            passed: found,
+            details: found
+              ? `Required event type present: ${group.filter((t) => eventTypes.has(t)).join(", ")}`
+              : `Missing required event type: one of ${group.join(", ")}`,
+            severity: found ? undefined : "critical",
+          });
+        }
       }
     }
 
-    // 4. Consistency checks
-    const executionStarted = bundle.events.find((e) => e.type === "execution_started");
-    const executionCompleted = bundle.events.find((e) => e.type === "execution_completed");
+    // 4. Consistency checks. The latest start and the earliest completion, by committed fields (E11c):
+    // a positive duration then means every completion follows every start, whatever the order.
+    const executionStarted = selectByCommittedOrder(bundle.events, "execution_started", "latest");
+    const executionCompleted = selectByCommittedOrder(bundle.events, "execution_completed", "earliest");
     if (executionStarted && executionCompleted) {
       const startTime = new Date(executionStarted.timestamp).getTime();
       const endTime = new Date(executionCompleted.timestamp).getTime();
@@ -134,7 +212,7 @@ export class EvidenceVerifier {
       });
 
       // Check power profile consistency (if present)
-      const powerSummary = bundle.events.find((e) => e.type === "power_profile_summary");
+      const powerSummary = selectByCommittedOrder(bundle.events, "power_profile_summary", "earliest");
       if (powerSummary) {
         const powerDuration = (powerSummary.payload as any).durationSeconds;
         const durationRatio = powerDuration / durationSec;
@@ -173,14 +251,15 @@ export class EvidenceVerifier {
 
     // 6. Step completeness check (workflow coverage)
     if (options?.workflowSteps && options.workflowSteps.length > 0) {
+      // A step is covered only by a COMMITTED payload.stepId: the unsigned event id never counts (E11c).
       const traces: StepTrace[] = bundle.events
         .filter(
           (e) =>
-            e.type === "workflow_step_completed" ||
-            e.type === "execution_completed",
+            (e.type === "workflow_step_completed" || e.type === "execution_completed") &&
+            typeof (e.payload as any)?.stepId === "string",
         )
         .map((e) => ({
-          stepId: (e.payload as any).stepId ?? e.id,
+          stepId: (e.payload as any).stepId,
           outputHash: (e.payload as any).outputHash ?? e.hash,
           outputSummary: (e.payload as any).outputSummary ?? "",
           durationMs: (e.payload as any).durationMs,
