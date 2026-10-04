@@ -137,46 +137,116 @@ function within(root: ts.Node, test: (n: ts.Node) => boolean): boolean {
   return found;
 }
 
-const stops = (branch: ts.Node) => within(branch, (n) => ts.isReturnStatement(n) || ts.isThrowStatement(n));
-const sends = (branch: ts.Node) =>
-  within(branch, (n) => ts.isThrowStatement(n) || (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "send"));
+const isSendCall = (n: ts.Node) => ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "send";
+/** Calls that write: a refused path containing one does not stop before the write. */
+const WRITE_CALLS = new Set(["insert", "update", "delete", "run", "exec", "values", "set"]);
+/**
+ * Named SECOND authorizations (#579 r1 item 6): a refusal ANDed with the negation of a call to one
+ * of these (`refusal && !isProvenHolderOfNamedScope(...)`) is still a refusal unless that named
+ * authorization admits the caller. ANDed with anything else, the refusal is no longer certain.
+ */
+const ADMISSIONS = new Set(["isProvenHolderOfNamedScope", "isProvenGrant"]);
 
-const PASS_THROUGH_OPERATORS = new Set([
-  ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken,
-  ts.SyntaxKind.ExclamationEqualsEqualsToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken,
-  ts.SyntaxKind.QuestionQuestionToken,
-]);
+/** What a value is when the request must be refused: truthy (a refusal), falsy (an allowed-check), or unknown. */
+type Refused = "truthy" | "falsy" | "unknown";
+const flipRefused = (s: Refused): Refused => (s === "truthy" ? "falsy" : s === "falsy" ? "truthy" : "unknown");
 
-/** The node a value flows into: up through parentheses, casts, await, !, comparisons and logic. */
-function flowOf(expr: ts.Node): { into: ts.Node | undefined; from: ts.Node } {
+const unwrapNode = (n: ts.Node): ts.Node => (ts.isExpression(n) ? unwrap(n) : n);
+const callsAdmission = (n: ts.Node): boolean =>
+  ts.isCallExpression(n) && ts.isIdentifier(n.expression) && ADMISSIONS.has(n.expression.text)
+    ? true
+    : (ts.forEachChild(n, (c) => (callsAdmission(c) ? true : undefined)) ?? false);
+
+/** `x == null`, `x === undefined` and the like: "eq" flips the refusal, "ne" keeps it; null when not a nullish comparison. */
+function nullCompare(b: ts.BinaryExpression, from: ts.Node): "eq" | "ne" | null {
+  const other = unwrapNode(b.left === from ? b.right : b.left);
+  const nullish = other.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(other) && other.text === "undefined");
+  if (!nullish) return null;
+  const k = b.operatorToken.kind;
+  if (k === ts.SyntaxKind.EqualsEqualsToken || k === ts.SyntaxKind.EqualsEqualsEqualsToken) return "eq";
+  if (k === ts.SyntaxKind.ExclamationEqualsToken || k === ts.SyntaxKind.ExclamationEqualsEqualsToken) return "ne";
+  return null;
+}
+
+/**
+ * Follow a value carrying a refusal (`given`: what it is when the request must be refused) up
+ * through the expressions that pass it on, to the node that consumes it. `!` flips it; `||` and
+ * `??` keep a truthy refusal; `&&` keeps a falsy one, and keeps a truthy one only when its other
+ * side is a negated named admission (ADMISSIONS); a nullish equality flips it. Anything else (a
+ * field of the refusal, another comparison) makes it unknown.
+ */
+function follow(expr: ts.Node, given: Refused): { into: ts.Node | undefined; from: ts.Node; state: Refused } {
   let n = expr;
+  let state = given;
   for (;;) {
     const p = n.parent;
-    if (!p) return { into: undefined, from: n };
-    const passes =
-      ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p) || ts.isSatisfiesExpression(p) ||
-      ts.isNonNullExpression(p) || ts.isAwaitExpression(p) ||
-      (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.ExclamationToken) ||
-      (ts.isBinaryExpression(p) && PASS_THROUGH_OPERATORS.has(p.operatorToken.kind)) ||
-      (ts.isConditionalExpression(p) && p.condition === n) ||
-      (ts.isPropertyAccessExpression(p) && p.expression === n);
-    if (!passes) return { into: p, from: n };
-    n = p;
+    if (!p) return { into: undefined, from: n, state };
+    if (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p) || ts.isSatisfiesExpression(p) || ts.isNonNullExpression(p) || ts.isAwaitExpression(p)) {
+      n = p;
+      continue;
+    }
+    if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.ExclamationToken) {
+      state = flipRefused(state);
+      n = p;
+      continue;
+    }
+    if (ts.isBinaryExpression(p)) {
+      const k = p.operatorToken.kind;
+      const other = unwrapNode(p.left === n ? p.right : p.left);
+      if (k === ts.SyntaxKind.BarBarToken) state = state === "truthy" ? "truthy" : "unknown";
+      else if (k === ts.SyntaxKind.QuestionQuestionToken) state = state === "truthy" && p.left === n ? "truthy" : "unknown";
+      else if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
+        const waiver = ts.isPrefixUnaryExpression(other) && other.operator === ts.SyntaxKind.ExclamationToken && callsAdmission(other);
+        state = state === "falsy" ? "falsy" : state === "truthy" && waiver ? "truthy" : "unknown";
+      } else {
+        const nc = nullCompare(p, n);
+        if (!nc) return { into: p, from: n, state: "unknown" };
+        if (nc === "eq") state = flipRefused(state);
+      }
+      n = p;
+      continue;
+    }
+    return { into: p, from: n, state };
   }
 }
 
 /**
- * Whether a value decides the request: it is returned, or tested by an `if` with a branch that
- * stops (and, for a hook, sends a reply or throws), directly or through the const it initializes.
+ * The refused path stops: it ends in a return or throw, writes nothing, and, for a hook, every
+ * return on it sends a reply (a hook that returns without sending lets the request through).
  */
-function consumed(expr: ts.Node, mustSend: boolean, depth = 0): boolean {
-  const { into, from } = flowOf(expr);
-  if (!into) return false;
-  if (ts.isReturnStatement(into)) return !mustSend || sends(into);
-  if (ts.isArrowFunction(into) && into.body === from) return !mustSend;
+function stopsOnRefusal(statements: readonly ts.Statement[], mustSend: boolean): boolean {
+  const last = statements[statements.length - 1];
+  if (!last || !(ts.isReturnStatement(last) || ts.isThrowStatement(last))) return false;
+  let ok = true;
+  const visit = (n: ts.Node): void => {
+    if (!ok || ts.isFunctionLike(n)) return;
+    if (mustSend && ts.isReturnStatement(n) && !(n.expression && within(n.expression, isSendCall))) ok = false;
+    else if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && WRITE_CALLS.has(n.expression.name.text)) ok = false;
+    else ts.forEachChild(n, visit);
+  };
+  for (const s of statements) visit(s);
+  return ok;
+}
+
+const branchStatements = (s: ts.Statement): readonly ts.Statement[] => (ts.isBlock(s) ? s.statements : [s]);
+
+/**
+ * Whether a value carrying a refusal decides the request: it is returned (from a helper), or it is
+ * tested by an `if` whose REFUSED path stops, directly or through the const it initializes. The
+ * refused path is the then-branch when the condition is truthy on refusal, else the else-branch,
+ * or, with no else, the statements that follow the `if` in its block.
+ */
+function consumed(expr: ts.Node, given: Refused, mustSend: boolean, depth = 0): boolean {
+  const { into, from, state } = follow(expr, given);
+  if (!into || state === "unknown") return false;
+  if (ts.isReturnStatement(into) || (ts.isArrowFunction(into) && into.body === from)) return !mustSend;
   if (ts.isIfStatement(into) && into.expression === from) {
-    const branches = [into.thenStatement, into.elseStatement].filter((b): b is ts.Statement => b !== undefined);
-    return branches.some((b) => stops(b) && (!mustSend || sends(b)));
+    const refused = state === "truthy" ? into.thenStatement : into.elseStatement;
+    if (refused) return stopsOnRefusal(branchStatements(refused), mustSend);
+    const block = into.parent;
+    if (!ts.isBlock(block) && !ts.isSourceFile(block)) return false;
+    const rest = block.statements.slice(block.statements.indexOf(into as ts.Statement) + 1);
+    return stopsOnRefusal(rest, mustSend);
   }
   if (ts.isVariableDeclaration(into) && into.initializer === from && ts.isIdentifier(into.name) && depth === 0) {
     const name = into.name.text;
@@ -185,7 +255,7 @@ function consumed(expr: ts.Node, mustSend: boolean, depth = 0): boolean {
     let used = false;
     const visit = (n: ts.Node): void => {
       if (used) return;
-      if (ts.isIdentifier(n) && n.text === name && n !== into.name && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && consumed(n, mustSend, depth + 1)) {
+      if (ts.isIdentifier(n) && n.text === name && n !== into.name && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && consumed(n, state, mustSend, depth + 1)) {
         used = true;
         return;
       }
@@ -197,16 +267,36 @@ function consumed(expr: ts.Node, mustSend: boolean, depth = 0): boolean {
   return false;
 }
 
-/** Whether `body` calls one of `guards` and consumes its result. */
-function consumesGuard(body: ts.Node, guards: Set<string>, mustSend: boolean): boolean {
+/** Whether `body` calls one of `guards` and consumes its result (each guard with what it returns on refusal). */
+function consumesGuard(body: ts.Node, guards: Map<string, Refused>, mustSend: boolean): boolean {
   let found = false;
   const visit = (n: ts.Node): void => {
     if (found) return;
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && guards.has(n.expression.text) && consumed(n, mustSend)) found = true;
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && guards.has(n.expression.text) && consumed(n, guards.get(n.expression.text)!, mustSend)) found = true;
     else ts.forEachChild(n, visit);
   };
   visit(body);
   return found;
+}
+
+/**
+ * What a same-file helper returns on refusal, when it returns a guard's answer (refuseOperate
+ * returns the refusal: truthy; isRelayOperator returns `refusal === null`: falsy); null when it does
+ * not, or when its returns disagree.
+ */
+function helperPolarity(fn: ts.FunctionLikeDeclaration, guards: Map<string, Refused>): Refused | null {
+  const found = new Set<Refused>();
+  const visit = (n: ts.Node): void => {
+    if (n !== fn && ts.isFunctionLike(n)) return;
+    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && guards.has(n.expression.text)) {
+      const { into, from, state } = follow(n, guards.get(n.expression.text)!);
+      const returned = into !== undefined && (ts.isReturnStatement(into) || (ts.isArrowFunction(into) && into === fn && into.body === from));
+      if (returned && state !== "unknown") found.add(state);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn);
+  return found.size === 1 ? [...found][0]! : null;
 }
 
 /** The text a route path expression resolves to through the file's string constants, if any. */
@@ -283,12 +373,14 @@ function scanSource(fileName: string, text: string): Scan {
 
   // Same-file helpers that consume a guard are guards (e.g. kernels.ts refuseOperate); helpers that
   // also send its refusal may stand as a preHandler.
-  const guards = new Set(GUARD_NAMES);
+  const guards = new Map<string, Refused>([...GUARD_NAMES].map((name) => [name, "truthy" as Refused]));
   for (let grew = true; grew; ) {
     grew = false;
     for (const [name, fn] of functions) {
-      if (!guards.has(name) && fn.body && consumesGuard(fn.body, guards, false)) {
-        guards.add(name);
+      if (guards.has(name) || !fn.body) continue;
+      const polarity = helperPolarity(fn, guards);
+      if (polarity !== null) {
+        guards.set(name, polarity);
         grew = true;
       }
     }
@@ -324,7 +416,10 @@ function scanSource(fileName: string, text: string): Scan {
 
   const handlerGuarded = (handler: ts.Expression): boolean => {
     const h = unwrap(handler);
-    if (ts.isIdentifier(h)) return guards.has(h.text);
+    if (ts.isIdentifier(h)) {
+      const fn = functions.get(h.text);
+      return fn?.body !== undefined && consumesGuard(fn.body, guards, false);
+    }
     return (ts.isArrowFunction(h) || ts.isFunctionExpression(h)) && consumesGuard(h, guards, false);
   };
   const ownPreHandlerGuarded = (options: ts.Expression | undefined): boolean => {
@@ -346,13 +441,20 @@ function scanSource(fileName: string, text: string): Scan {
       const receiver = n.expression.expression;
       const last = n.arguments[n.arguments.length - 1];
       const first = n.arguments[0];
-      if (method === "route" && first && ts.isObjectLiteralExpression(unwrap(first))) {
-        unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.route({...})`);
+      const isApp = ts.isIdentifier(receiver) && receiver.text === ROUTE_RECEIVER;
+      if (method === "route" && first && (isApp || ts.isObjectLiteralExpression(unwrap(first)))) {
+        // #579 r1 item 6: app.route(opts) with a variable is as unreadable as an inline object.
+        const shown = ts.isObjectLiteralExpression(unwrap(first)) ? "{...}" : first.getText(sf);
+        unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.route(${shown})`);
       } else if (MUTATING.has(method) && n.arguments.length >= 2 && last) {
-        const isApp = ts.isIdentifier(receiver) && receiver.text === ROUTE_RECEIVER;
         if (!isApp) {
-          const lastFn = ts.isArrowFunction(unwrap(last)) || ts.isFunctionExpression(unwrap(last));
-          if (lastFn) unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(...)`);
+          // A route-shaped call on another receiver: an inline handler, a handler naming a same-file
+          // function (#579 r1 item 6), or a first argument that is a path.
+          const l = unwrap(last);
+          const routeShaped =
+            ts.isArrowFunction(l) || ts.isFunctionExpression(l) || (ts.isIdentifier(l) && functions.has(l.text)) ||
+            (first !== undefined && ts.isStringLiteralLike(unwrap(first)) && (unwrap(first) as ts.StringLiteralLike).text.startsWith("/"));
+          if (routeShaped) unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(...)`);
         } else {
           const resolved = resolvePath(first!, consts);
           let fn: ts.Node | undefined = n.parent;
@@ -514,6 +616,22 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       "helper(operatorPolicies);",
       "db.run(sql`UPDATE operator_policies SET x = 1`);",
       'db.insert(schema["pendingApprovals"]).values({});',
+      // line 48: #579 r1 item 6 (astra): a refusal on the wrong branch or ANDed away, unreadable registrations.
+      "export async function compound(app: any, child: any) {",
+      '  app.post("/api/probe/:kernelId/inverted", async (req: any) => { if (refuseKernelAction(req, {} as any, "k", "decide")) { db.insert(pendingApprovals).values({}); } else return; });',
+      '  app.post("/api/probe/:kernelId/and-false", async (req: any) => { if (refuseKernelAction(req, {} as any, "k", "decide") && false) return; });',
+      '  app.post("/api/probe/:kernelId/write-then-return", async (req: any) => { if (refuseKernelAction(req, {} as any, "k", "decide")) { db.insert(pendingApprovals).values({}); return; } });',
+      '  app.post("/api/probe/:kernelId/negated", async (req: any, reply: any) => { const r = refuseKernelAction(req, {} as any, "k", "decide"); if (!r) return; return reply.code(r.status).send(r.body); });',
+      '  app.post("/api/probe/:kernelId/waived", async (req: any, reply: any) => { const r = refuseKernelAction(req, {} as any, "k", "decide"); if (r && !isProvenHolderOfNamedScope(req, {} as any, "k")) return reply.code(r.status).send(r.body); });',
+      '  app.post("/api/probe/:kernelId/waived-by-anything", async (req: any, reply: any) => { const r = refuseKernelAction(req, {} as any, "k", "decide"); if (r && !somethingElse()) return reply.code(r.status).send(r.body); });',
+      '  const routeOpts = { method: "POST", url: "/api/probe/:kernelId/route-var", handler: async () => {} };',
+      "  app.route(routeOpts);",
+      "  async function namedHandler() {}",
+      '  child.post("/api/probe/:kernelId/named-other", namedHandler);',
+      // line 59: the allow-path returns early and the refused path WRITES; a named handler at a computed path.
+      '  app.post("/api/probe/:kernelId/negated-to-write", async (req: any) => { if (!refuseKernelAction(req, {} as any, "k", "decide")) return; db.insert(pendingApprovals).values({}); });',
+      "  child.put(otherPath, namedHandler);",
+      "}",
     ].join("\n"),
   );
   const byKey = new Map(probe.routes.map((r) => [r.key, r.guarded]));
@@ -539,6 +657,15 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       'POST probe.ts:opts.prefix + "/x"': false,
       "POST probe.ts:dynamicPath": false,
       "ALL /api/probe/:kernelId/all": false,
+      // #579 r1 item 6: the refused branch must stop, and must not write; an AND keeps the refusal
+      // only when its other side is a named second authorization (ADMISSIONS).
+      "POST /api/probe/:kernelId/inverted": false,
+      "POST /api/probe/:kernelId/and-false": false,
+      "POST /api/probe/:kernelId/write-then-return": false,
+      "POST /api/probe/:kernelId/negated": true,
+      "POST /api/probe/:kernelId/waived": true,
+      "POST /api/probe/:kernelId/waived-by-anything": false,
+      "POST /api/probe/:kernelId/negated-to-write": false,
     });
   });
 
@@ -551,11 +678,20 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       [25, "POST /api/probe/:kernelId/ignored", false],
       [26, "POST /api/probe/:kernelId/unread", false],
       [47, null, null],
+      [49, "POST /api/probe/:kernelId/inverted", false],
+      [51, "POST /api/probe/:kernelId/write-then-return", false],
+      [59, "POST /api/probe/:kernelId/negated-to-write", false],
     ]);
   });
 
   it("refuses the registrations it cannot read, and tells a computed kernel route by its params", () => {
-    expect(probe.unreadable).toEqual(["probe.ts:34 app.route({...})", "probe.ts:35 child.post(...)"]);
+    expect(probe.unreadable).toEqual([
+      "probe.ts:34 app.route({...})",
+      "probe.ts:35 child.post(...)",
+      "probe.ts:56 app.route(routeOpts)",
+      "probe.ts:58 child.post(...)",
+      "probe.ts:60 child.put(...)",
+    ]);
     const computed = probe.routes.filter((r) => r.computed).map((r) => [r.key, isKernelRoute(r)]);
     expect(computed).toEqual([
       ['POST probe.ts:opts.prefix + "/x"', true],
