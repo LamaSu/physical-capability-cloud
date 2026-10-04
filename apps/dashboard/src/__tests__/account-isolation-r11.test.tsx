@@ -143,6 +143,13 @@ describe("DECISIONS 04:14: the slot is the one authority, read at each use", () 
     expect(sends(), "this tab acts as the slot holds, not as a key it kept").toBe(KEY_B);
   });
 
+  it("site data cleared while the tab is open, with no event here: the next request carries no key (the steward's case, #6843)", async () => {
+    const { sends } = await page();
+    expect(sends()).toBe(KEY_A);
+    localStorage.clear(); // jsdom, like a browser, fires no storage event in the tab that cleared it
+    expect(sends(), "nothing kept from before the clear").toBeNull();
+  });
+
   it("another tab signs in as B: this tab sends no key while the change is pending, then the slot's B, never A", async () => {
     const { generation, sends } = await page();
     // That tab's login: the generation moves first, then B is stored. No event has reached this tab.
