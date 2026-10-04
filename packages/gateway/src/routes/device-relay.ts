@@ -77,7 +77,7 @@ import { getStore, getRepos } from "../db.js";
 import { authorityOf, isAnonymous, refuseKernelAction, type KernelAuthority } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
-import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
+import { isToolSafe, getManifest, getManifestSync, warmManifestCache } from "../services/tool-manifest-service.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const {
@@ -176,6 +176,20 @@ function resolveDeviceType(kernelId: string): string {
   return "generic";
 }
 
+/**
+ * #579 r1 (astra, HIGH): a SCOPED call may skip its scope's tool list, command budget and escrow
+ * only for a READ tool of an authoritatively resolved device type. The manifests' safeTools also
+ * list physical controls (category safe_control: home, reset, lights, identify, connect,
+ * disconnect), and resolveDeviceType falls back to "generic" when no device on the kernel names an
+ * adapter with its own manifest, so neither may widen a scope: the fallback fails closed.
+ */
+function isScopeExemptRead(deviceType: string, toolName: string): boolean {
+  if (deviceType === "generic") return false; // the fallback, not an authoritative resolution
+  if (!isToolSafe(deviceType, toolName)) return false;
+  const tool = getManifestSync(deviceType)?.tools.find((t) => t.name === toolName);
+  return tool?.category === "read";
+}
+
 interface ScopeValidation {
   allowed: boolean;
   reason: string;
@@ -186,9 +200,9 @@ function validateToolCall(
   toolName: string,
   deviceType: string,
 ): ScopeValidation {
-  // Safe tools always pass
-  if (isToolSafe(deviceType, toolName)) {
-    return { allowed: true, reason: "safe_tool" };
+  // A read tool of a resolved device type passes; everything else is held to the scope.
+  if (isScopeExemptRead(deviceType, toolName)) {
+    return { allowed: true, reason: "read_tool" };
   }
 
   const refusal = scopeWriteRefusal(scope, toolName);
@@ -360,7 +374,7 @@ const RELAY_DECISION_ROUTES: ReadonlySet<string> = new Set([
 /** A tool call whose tool is not a safe (read-only) tool for this kernel's device: a write. */
 function isWriteToolCall(req: FastifyRequest, kernelId: string): boolean {
   const toolName = (req.body as { toolName?: unknown } | undefined)?.toolName;
-  return typeof toolName !== "string" || !isToolSafe(resolveDeviceType(kernelId), toolName);
+  return typeof toolName !== "string" || !isScopeExemptRead(resolveDeviceType(kernelId), toolName);
 }
 
 /**
@@ -553,7 +567,7 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: st
   // F2: a scoped call needs live scope authority, safe tool or not.
   if (scope.status !== "active") return "scope_not_active";
   if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
-  if (safe) return null;
+  if (isScopeExemptRead(deviceType, call.toolName)) return null;
   if (!(scope.allowedTools as string[]).includes(call.toolName)) return "tool_not_allowed";
   // F3: re-derive the command budget from the rows. Admission increments
   // scope.commandCount, but a legacy row it never saw would not have been
@@ -569,7 +583,7 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect, deviceType: st
       (c) =>
         c.id !== call.id &&
         (c.status === "claimed" || c.status === "executing" || c.status === "completed" || c.status === "failed") &&
-        !isToolSafe(deviceType, c.toolName),
+        !isScopeExemptRead(deviceType, c.toolName),
     );
   if (dispatchedNonSafe.length >= scope.maxCommands) return "max_commands_reached";
   return escrowRefusal(scope) ? "escrow_not_funded" : null;
@@ -822,7 +836,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         });
       }
 
-      if (!isToolSafe(deviceType, toolName)) {
+      if (!isScopeExemptRead(deviceType, toolName)) {
         // Escrow gate carried over from the retired /api/ot2/tool-call.
         let unfundedStatus: string | null;
         try {

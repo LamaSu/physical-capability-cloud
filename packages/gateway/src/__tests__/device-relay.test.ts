@@ -2896,8 +2896,8 @@ describe("N4b-gw r7 F3: the execution lease", () => {
   });
 
   it("a scope that expired after the claim refuses the start", async () => {
-    const scope = await mintScope("agent-f3", ["run_create"]);
-    // The holder's safe call under its scope needs proof (DECISIONS 00:53): its proven wallet.
+    // home is a physical safe_control, so the scope must allow it (#579 r1); it needs proof too (DECISIONS 00:53).
+    const scope = await mintScope("agent-f3", ["run_create", "home"]);
     const res0 = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: asProven("agent-f3"), payload: { toolName: "home", scopeId: scope } });
     expect(res0.statusCode).toBe(201);
     const id = res0.json().id as string;

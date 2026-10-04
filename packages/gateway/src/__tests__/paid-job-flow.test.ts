@@ -603,8 +603,13 @@ describe("Paid Job Flow", () => {
       });
       const { scopeId } = createRes.json();
 
-      // A safe tool (the relay manifest's "health") works whatever the escrow
-      // status, so make the escrow unfunded first.
+      // A READ tool of a resolved device type (the opentrons manifest's "health") works whatever
+      // the escrow status (#579 r1: the generic fallback no longer counts), so give kernel-nyc an
+      // opentrons device and make the escrow unfunded first.
+      getStore().db.insert(schema.kernelDevices).values({
+        id: "dev-pjf-ot2", kernelId: "kernel-nyc", type: "machine", model: "OT-2", firmware: "1.0", status: "idle",
+        contributesToCapabilities: [], lastUpdated: new Date().toISOString(), adapterType: "opentrons",
+      }).run();
       const escrowId = createRes.json().escrowId;
       getRepos().escrows.updateStatus(escrowId, "created");
       const toolRes = await app.inject({
