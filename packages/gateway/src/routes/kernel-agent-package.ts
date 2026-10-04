@@ -20,6 +20,7 @@ import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
+import { locationVisibilityOf, publicLocation, type PublicLocation } from "../facades/populators/public-location.js";
 import {
   suggestTools,
   applyOperatorToolConfig,
@@ -89,6 +90,9 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
         const baseUrl = `${req.protocol}://${req.hostname}`;
         const systemPrompt = buildSystemPrompt(kernel, devices, caps, policy, baseUrl);
 
+        // N68: the package shows the kernel's location as every other read does.
+        const place = publicLocation(kernel.location, locationVisibilityOf(kernel.location));
+
         // Build the agent package
         const agentPackage = {
           schema: "pcc-agent-package/2.0",
@@ -100,7 +104,9 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
           kernel: {
             id: kernel.id,
             name: kernel.name,
-            location: kernel.location,
+            location: place.location,
+            locationPrecision: place.locationPrecision,
+            locationCell: place.locationCell,
             status: kernel.status,
             reputation: kernel.reputation,
           },
@@ -409,6 +415,13 @@ curl -s -X POST $BASE/negotiate/session/$SID/commit | jq '.jobId'
 
 // ── System Prompt Builder ─────────────────────────────────────────
 
+/** The prompt's location line, from the same projection every read uses (N68). */
+function describeLocation(place: PublicLocation): string {
+  if (place.locationPrecision === "none") return "not set";
+  if (place.locationPrecision === "exact") return `${JSON.stringify(place.location)} (exact, published by the operator)`;
+  return `${JSON.stringify(place.location)} (approximate: the centre of geohash cell ${place.locationCell}, about 5 km across)`;
+}
+
 function buildSystemPrompt(
   kernel: any,
   devices: any[],
@@ -427,7 +440,7 @@ function buildSystemPrompt(
 
 ## Your Kernel: ${kernel.name}
 - ID: ${kernel.id}
-- Location: ${JSON.stringify(kernel.location)}
+- Location: ${describeLocation(publicLocation(kernel.location, locationVisibilityOf(kernel.location)))}
 - Status: ${kernel.status}
 - Reputation: ${kernel.reputation}/1000
 

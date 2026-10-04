@@ -7,9 +7,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useSensorStreamStore } from "../stores/sensor-stream-store.js";
 import { useSSEStream } from "../hooks/use-sse-stream.js";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { getAuthHeaders } from "../stores/auth-store.js";
-
-const GATEWAY = "/api";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 export function SensorDashboardPage() {
   const { kernelId } = useParams<{ kernelId?: string }>();
@@ -25,12 +23,12 @@ export function SensorDashboardPage() {
 
   // Fetch channel descriptors
   const channelsUrl = kernelId
-    ? `${GATEWAY}/sensors/channels/${kernelId}`
-    : `${GATEWAY}/sensors/channels`;
+    ? `/api/sensors/channels/${kernelId}`
+    : `/api/sensors/channels`;
 
   const { data: channelData } = useQuery({
     queryKey: ["sensor-channels", kernelId],
-    queryFn: () => fetch(channelsUrl, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch(channelsUrl).then((r) => r.json()),
   });
 
   React.useEffect(() => {
@@ -46,7 +44,7 @@ export function SensorDashboardPage() {
   const { data: anomalyData } = useQuery({
     queryKey: ["sensor-anomalies", kernelId],
     queryFn: () =>
-      fetch(`${GATEWAY}/sensors/anomalies${kernelId ? `?kernelId=${kernelId}` : ""}`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+      authorizedFetch(`/api/sensors/anomalies${kernelId ? `?kernelId=${kernelId}` : ""}`).then((r) => r.json()),
     refetchInterval: 10_000,
   });
 

@@ -12,12 +12,13 @@
  *  - An intent counts only if the SERVER marked it unmet: the payload parses
  *    with `ServerCapturedDemandEnvelopeSchema`, `fulfillmentPath` is
  *    "unfulfilled" and `unmet` is non-empty.
- *  - Breadth (`distinctVerifiedRequesters`) counts only principals the server
- *    authenticated: rows with `actorType === VERIFIED_ACTOR_TYPE`. As of master
- *    ac86a404 no capture point records one — requests, negotiation, A2A and
- *    nl-query all take their actor from the request body — so breadth is 0 and
- *    nothing can clear the public k. Stamping the authenticated principal at
- *    capture is the gateway half (D2).
+ *  - Breadth (`distinctVerifiedRequesters`) counts only PROVEN principals:
+ *    rows with `actorType === VERIFIED_ACTOR_TYPE`. Gateway capture (D2, flag
+ *    PCC_UNMET_CAPTURE_ENABLED, default OFF) sets it only for a proven wallet
+ *    (an /a2a SIWE session, or `req.provenWallet` once gateway binds it) and
+ *    records a plain API-key holder as "authenticated_key", which counts as
+ *    volume only. With the flag off, every capture point takes its actor from
+ *    the request body, so breadth is 0 and nothing can clear the public k.
  *  - `firstSeen` / `lastSeen` come from the row's server timestamp, never from
  *    the envelope's `createdAt`.
  *  - Counting is exact (a Set), not HyperLogLog: the public k threshold must
