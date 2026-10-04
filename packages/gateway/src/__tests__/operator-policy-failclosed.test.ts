@@ -612,3 +612,58 @@ describe("kernel-agent-package.ts: a policy that cannot be read is not described
     expect(res.json().operator_policy.emergencyStop).toBe(false);
   });
 });
+
+// astra pack 150b (HIGH): a stored FALSY non-boolean emergencyStop must fail closed on the routes too,
+// and a policy write may not store a non-boolean emergencyStop at all.
+describe("a malformed falsy emergencyStop fails closed on the routes, and writes must send a boolean (astra pack 150b)", () => {
+  function storeRawPolicy(kernelId: string, policy: Record<string, unknown>): void {
+    getStore().db.run(
+      sql`INSERT OR REPLACE INTO operator_policies (kernel_id, policy, updated_at, updated_by)
+          VALUES (${kernelId}, ${JSON.stringify(policy)}, ${new Date().toISOString()}, ${"test"})`,
+    );
+  }
+
+  it.each([["null", null], ["0", 0], ["the empty string", ""]])(
+    "[neg] POST /api/operator/approvals refuses and stores no approval when the stored emergencyStop is %s",
+    async (_label, value) => {
+      const kernelId = await ownedKernel("falsy-approvals");
+      storeRawPolicy(kernelId, { version: 1, approvalMode: "auto", emergencyStop: value });
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/operator/approvals",
+        headers: asOwner(),
+        payload: { kernelId, capabilityType: "liquid-handler" },
+      });
+      expect(res.statusCode, res.body).toBeGreaterThanOrEqual(500);
+      expect(approvalsFor(kernelId)).toBe(0);
+    },
+  );
+
+  it("[neg] PATCH refuses a non-boolean emergencyStop with 400 invalid_emergency_stop, and stores nothing", async () => {
+    const kernelId = await ownedKernel("patch-nonbool");
+    await putPolicy(kernelId, { version: 1, approvalMode: "auto", emergencyStop: false });
+    const before = rawPolicy(kernelId);
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/operator/policy/${kernelId}`,
+      headers: asOwner(),
+      payload: { emergencyStop: 0 },
+    });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error).toBe("invalid_emergency_stop");
+    expect(rawPolicy(kernelId)).toBe(before);
+  });
+
+  it("[neg] PUT refuses a non-boolean emergencyStop with 400 invalid_emergency_stop", async () => {
+    const kernelId = await ownedKernel("put-nonbool");
+    await putPolicy(kernelId, { version: 1, approvalMode: "auto", emergencyStop: false });
+    const res = await app.inject({
+      method: "PUT",
+      url: `/api/operator/policy/${kernelId}`,
+      headers: asOwner(),
+      payload: { version: 1, approvalMode: "auto", emergencyStop: "false" },
+    });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error).toBe("invalid_emergency_stop");
+  });
+});

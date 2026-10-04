@@ -165,3 +165,25 @@ describe("assertKernelAcceptsJobs", () => {
     }
   });
 });
+
+// astra pack 150b (HIGH): the shared reader validated only the outer object and the flag was read by
+// truthiness, so a stored FALSY non-boolean emergencyStop (null, 0, "") read as "not stopped" and work
+// was handed out. Truthy non-booleans still stop (the safe direction, pinned above); a malformed falsy
+// value now makes the policy unavailable (503), never "not stopped".
+describe("a malformed FALSY emergencyStop is 503 policy_unavailable, never 'not stopped' (astra pack 150b)", () => {
+  it.each([
+    ["null", null],
+    ["the number 0", 0],
+    ["the empty string", ""],
+  ])("stored emergencyStop = %s", (_label, value) => {
+    const id = uid("falsy");
+    storePolicy(id, { version: 1, emergencyStop: value });
+    expect(checkKernelAcceptsJobs(id)).toMatchObject(UNAVAILABLE);
+  });
+
+  it("control: a stored boolean false is still 'not stopped'", () => {
+    const id = uid("false");
+    storePolicy(id, { version: 1, emergencyStop: false });
+    expect(checkKernelAcceptsJobs(id)).toEqual({ ok: true });
+  });
+});
