@@ -17,6 +17,7 @@ import type {
 import { getReputationService } from "../../services/reputation-service.js";
 import { isKernelStale } from "./staleness.js";
 import { normalizeAssuranceTier } from "./job.populator.js";
+import { locationVisibilityOf, publicLocation, publicPhysicalAddress } from "./public-location.js";
 
 /**
  * Raw kernel DB row — matches what KernelRepository.findById/findAll returns.
@@ -28,7 +29,11 @@ export interface RawKernel {
   id: string;
   name: string;
   operatorAddress: string;
-  location: { lat: number; lng: number };
+  /**
+   * The stored `location` JSON: the exact point, plus `visibility: "exact"` when the operator
+   * opted in. Read only through public-location.ts, which projects it for every read (N68).
+   */
+  location: unknown;
   physicalAddress: string;
   maxAssuranceTier: number;
   publicKey: string;
@@ -147,12 +152,19 @@ export function populateKernelDTO(
     signingKey = { algorithm: "secp256k1", address: model.signingAddress };
   }
 
+  // N68: coarse by default; exact coordinates and the street address only when the operator
+  // opted in; {0,0} or an invalid point reads as no location.
+  const visibility = locationVisibilityOf(model.location);
+  const place = publicLocation(model.location, visibility);
+
   return {
     id: model.id,
     name: model.name,
     operatorAddress: model.operatorAddress,
-    location: model.location,
-    physicalAddress: model.physicalAddress ?? "",
+    location: place.location,
+    locationPrecision: place.locationPrecision,
+    locationCell: place.locationCell,
+    physicalAddress: publicPhysicalAddress(model.physicalAddress, visibility),
     maxAssuranceTier,
     status: model.status as KernelDTO["status"],
     lastHeartbeat: model.lastHeartbeat ?? new Date().toISOString(),

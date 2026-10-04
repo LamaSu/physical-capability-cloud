@@ -54,3 +54,5 @@ export {
 export { VNEXT_GOLDEN } from "./golden.js";
 export { preflightVNextFunding, describeRevert } from "./preflight.js";
 export type { PreflightCheck, VNextFundingPreflight } from "./preflight.js";
+export { readUnitConfigs } from "./read.js";
+export type { ReadUnitConfigsCheck, ReadUnitConfigsResult } from "./read.js";

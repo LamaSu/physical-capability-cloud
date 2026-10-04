@@ -4,6 +4,7 @@ import { getCapabilityFacade } from "../facades/index.js";
 import { loadAgentPackage, PCC_MCP_ICON_URL } from "../mcp/http-mcp-server.js";
 import { DOCS_MOUNT_PATH } from "../mcp/docs-mcp-server.js";
 import { getApiCapabilityTypes } from "./capabilities.js";
+import { LOCATION_CELL_RADIUS_METERS } from "../facades/populators/public-location.js";
 
 const PUBLIC_BASE_URL = "https://capability.network";
 const NLWEB_VERSION = "0.55";
@@ -97,6 +98,19 @@ function readQuery(body: AskBody | undefined): string | undefined {
   return undefined;
 }
 
+/**
+ * schema.org `areaServed` for a capability's site, from its projected location (N68): a Place
+ * at the exact point only when the operator opted in; otherwise a GeoCircle around the centre of
+ * the site's ~5 km cell that covers the whole cell; nothing when no location is known.
+ */
+function areaServedOf(capability: CapabilityDTO): Record<string, unknown> | undefined {
+  const point = capability.location;
+  if (!point || capability.locationPrecision === "none") return undefined;
+  const geo = { "@type": "GeoCoordinates", latitude: point.lat, longitude: point.lng };
+  if (capability.locationPrecision === "exact") return { "@type": "Place", geo };
+  return { "@type": "GeoCircle", geoMidpoint: geo, geoRadius: LOCATION_CELL_RADIUS_METERS };
+}
+
 function toNlwebResult(capability: CapabilityDTO) {
   const url = `${PUBLIC_BASE_URL}/api/capabilities/${encodeURIComponent(String(capability.id))}`;
   const description =
@@ -145,6 +159,7 @@ function toNlwebResult(capability: CapabilityDTO) {
     });
   }
 
+  const areaServed = areaServedOf(capability);
   return {
     "@context": "https://schema.org",
     "@type": "Service",
@@ -158,14 +173,7 @@ function toNlwebResult(capability: CapabilityDTO) {
       identifier: capability.kernelId,
       ...(capability.kernelName ? { name: capability.kernelName } : {}),
     },
-    areaServed: {
-      "@type": "Place",
-      geo: {
-        "@type": "GeoCoordinates",
-        latitude: capability.location.lat,
-        longitude: capability.location.lng,
-      },
-    },
+    ...(areaServed ? { areaServed } : {}),
     additionalProperty,
     grounding: {
       source: url,

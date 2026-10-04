@@ -34,6 +34,7 @@ import {
   funnelEnabled,
   getCohortFunnel,
   getFunnelForTraceId,
+  getOperatorFunnel,
   FUNNEL_AUDIT_EVENT,
 } from "../services/funnel-tracker.js";
 
@@ -170,6 +171,21 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
     async (req, reply) => {
       if (!guard(req, reply)) return;
       const funnel = getCohortFunnel({ since: req.query.since });
+      return {
+        since: req.query.since ?? null,
+        funnel,
+        generated_at: new Date().toISOString(),
+        source: "audit_log",
+      };
+    },
+  );
+
+  // ── Operator-onboarding cohort funnel (ADK track item 4) ─────────────────
+  app.get<{ Querystring: { since?: string } }>(
+    "/api/admin/observability/operator-funnel",
+    async (req, reply) => {
+      if (!guard(req, reply)) return;
+      const funnel = getOperatorFunnel({ since: req.query.since });
       return {
         since: req.query.since ?? null,
         funnel,
