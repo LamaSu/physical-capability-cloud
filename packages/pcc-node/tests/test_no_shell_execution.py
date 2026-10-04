@@ -73,7 +73,12 @@ computed argv and ``/usr/bin/env sh``). The rules:
    subprocess import run``). No module is star-imported, the package's own
    included (``from .bridge import *``): a star import binds names, a tracked
    module or a starter among them, that none of these rules can see (#563 r2).
-   ``executables_started()`` resolves calls exactly as ``violations()`` does.
+   No first-party module is bound as an object (``import pcc_node.bridge``,
+   aliased or not, ``import pcc_node``, ``from . import bridge``): a module
+   object carries every name its module binds, at any depth and through any
+   value, so other modules import names from it instead, which the re-export
+   check sees (#563 r3). ``executables_started()`` resolves calls exactly as
+   ``violations()`` does.
 
 The guard reads syntax. It tracks names bound by imports, flow-insensitively,
 and it is not a sandbox: rules 1 and 3 stay the first barriers.
@@ -507,7 +512,14 @@ def _resolve(module, is_package, node):
 
 
 def reexport_violations(sources):
-    """Rule 8, across files: no module imports a name another package module binds to a tracked module.
+    """Rule 8, across files: no module imports a name another package module binds to a tracked module,
+    and no first-party module is bound as an object (#563 r3).
+
+    A module object carries every name its module binds, under attribute paths of any depth
+    (pcc_node.bridge.run, sub.bridge.run), values (b = bridge) and lookups (getattr(bridge, ...)), so it
+    is refused outright: `import pcc_node` or `import pcc_node.x`, aliased or not, and `from . import x`
+    or `from pcc_node import x` where x is one of the package's modules. Other modules import names from
+    a module instead, and the check above sees each one.
 
     sources: {dotted module name: (source, is_package)}.
     """
@@ -528,10 +540,15 @@ def reexport_violations(sources):
                     sub = f"{target}.{alias.name}" if target else alias.name
                     if sub in exported:
                         local_modules[alias.asname or alias.name] = sub
+                        found.append(f"{module}:{node.lineno}: binds the first-party module {sub} as an object; "
+                                     "import names from it instead")
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name in exported and alias.asname:
                         local_modules[alias.asname] = alias.name
+                    if _own(alias.name):
+                        found.append(f"{module}:{node.lineno}: import {alias.name} binds a first-party module "
+                                     "as an object; import names from it instead")
         for node in ast.walk(tree):
             if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                     and node.value.id in local_modules and node.attr in exported[local_modules[node.value.id]]):
@@ -831,6 +848,8 @@ def test_the_import_allowlist_catches(label):
 
 def test_the_packages_own_absolute_imports_are_allowed():
     # pcc_node.x is the package itself, like a relative import; the operating runtime (#471) uses this form.
+    # The census allows both lines; binding the module object (import pcc_node.http_util) is refused
+    # separately, by reexport_violations() (test_a_first_party_module_is_never_bound_as_an_object).
     assert import_violations("from pcc_node.log_capture import canonicalize\nimport pcc_node.http_util\n") == []
     assert import_violations("import pcc_nodes\n") != []  # only the package itself, not a lookalike
 
@@ -847,6 +866,32 @@ def test_a_module_reexported_across_files_is_caught():
     # A name that is not a tracked module may be shared.
     assert reexport_violations({"pcc_node.helper": ("VERSION = '1'\n", False),
                                 "pcc_node.consumer": ("from .helper import VERSION\n", False)}) == []
+
+
+def test_a_first_party_module_is_never_bound_as_an_object():
+    # #563 r3: a module object carries every name its module binds, at any depth and through values.
+    bridge = ("from subprocess import run\n", False)
+    for consumer in (
+        "import pcc_node.bridge\npcc_node.bridge.run(remote_argv, shell=True)\n",  # astra's r3 reproduction
+        "import pcc_node\npcc_node.bridge.run(remote_argv, shell=True)\n",
+        "import pcc_node.bridge as b\nb.run(remote_argv, shell=True)\n",
+        "from . import bridge\nb = bridge\nb.run(remote_argv, shell=True)\n",
+        "from . import bridge\ngetattr(bridge, 'run')(remote_argv, shell=True)\n",
+        "from pcc_node import bridge\n\ndef go(m):\n    m.run(remote_argv, shell=True)\n\ngo(bridge)\n",
+    ):
+        sources = {"pcc_node.bridge": bridge, "pcc_node.consumer": (consumer, False)}
+        assert reexport_violations(sources), consumer
+    # A subpackage's module, through the subpackage object.
+    assert reexport_violations({"pcc_node.sub": ("", True), "pcc_node.sub.bridge": bridge,
+                                "pcc_node.consumer": ("from pcc_node import sub\nsub.bridge.run(argv, shell=True)\n",
+                                                      False)})
+    # Refused even when the module binds nothing tracked today: it might tomorrow.
+    assert reexport_violations({"pcc_node.helper": ("VERSION = '1'\n", False),
+                                "pcc_node.consumer": ("from . import helper\n", False)})
+    # Names imported from the package's modules stay usable, the package's own version among them.
+    assert reexport_violations({"pcc_node.helper": ("VERSION = '1'\n", False),
+                                "pcc_node.consumer": ("from .helper import VERSION\nfrom . import __version__\n",
+                                                      False)}) == []
 
 
 def test_a_starter_reexported_across_files_is_caught():
