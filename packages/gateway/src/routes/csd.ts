@@ -12,6 +12,7 @@
 import type { FastifyInstance } from "fastify";
 import { loadBuiltinCsds, CsdRegistry, CsdSchema, dashboardV1Csd, type CsdUsageRepository } from "@pcc/spec";
 import { getRepos } from "../db.js";
+import { lit } from "../observability/closed-schema.js";
 
 // Module-level registry instance — initialized once at startup
 let _registry: CsdRegistry | null = null;
@@ -35,10 +36,7 @@ export function getCsdRegistry(): CsdRegistry {
         // still work — log a warning to make the demotion visible.
         usageRepo = getRepos().csdUsage;
       } catch (err) {
-        console.warn(
-          `[csd] PCC_CSD_PERSIST=true but store not ready — falling back to in-memory usage:`,
-          err instanceof Error ? err.message : String(err),
-        );
+        console.warn(lit("[csd] PCC_CSD_PERSIST=true but store not ready — falling back to in-memory usage:"), err);
       }
     }
     _registry = loadBuiltinCsds(usageRepo);
@@ -50,10 +48,7 @@ export function getCsdRegistry(): CsdRegistry {
     try {
       _registry.register(dashboardV1Csd);
     } catch (err) {
-      console.warn(
-        "[csd] dashboard-v1 builtin registration failed (best-effort):",
-        err instanceof Error ? err.message : err,
-      );
+      console.warn(lit("[csd] dashboard-v1 builtin registration failed (best-effort):"), err);
     }
   }
   return _registry;
@@ -200,7 +195,7 @@ export async function csdRoutes(app: FastifyInstance) {
 
       // DB persistence for Story IP is deferred to ip.ts routes (best-effort, Wave 2)
     } catch (storyErr) {
-      console.warn("[csd] Story IP registration failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
+      console.warn(lit("[csd] Story IP registration failed (best-effort):"), storyErr);
     }
 
     return { registered: true, url: parsed.data.url, storyIpId };

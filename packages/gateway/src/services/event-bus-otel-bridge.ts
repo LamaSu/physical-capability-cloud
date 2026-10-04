@@ -35,10 +35,13 @@ export function startEventBusOtelBridge(): () => void {
   const tracer = getTracer(TRACER_NAME);
   return subscribe((e: AppEvent) => {
     // Span name follows the existing facade convention: "<sponsor>.<kind>"
-    // so traces group naturally by integration in the UI.
+    // so traces group naturally by integration in the UI. No start or end time is passed: the
+    // tracing SDK's own clock times every span (N107b round 4, C11; sentry-timing-ratchet.test.ts),
+    // since an event's duration_ms is whatever its emitter reported. The event's own time and
+    // duration stay in its attributes.
     const span = tracer.startSpan(`${e.sponsor}.${e.kind}`, {
-      startTime: e.t,
       attributes: {
+        "event.t": e.t,
         "event.kind": e.kind,
         "event.sponsor": e.sponsor,
         "event.level": e.level ?? "info",
@@ -60,6 +63,6 @@ export function startEventBusOtelBridge(): () => void {
     // End immediately — events are already-completed milestones. If a
     // future iteration wants to model a "begin → end" pair as one parent
     // span, that's the `tracked()` helper's job, not this bridge's.
-    span.end(e.duration_ms ? e.t + e.duration_ms : e.t);
+    span.end();
   });
 }

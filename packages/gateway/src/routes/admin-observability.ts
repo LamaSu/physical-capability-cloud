@@ -28,7 +28,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { open } from "node:fs/promises";
 import { dirname } from "node:path";
-import { auditService } from "../services/audit-service.js";
+import { auditService, isStoredId } from "../services/audit-service.js";
 import { analyzeAttempts, weeklyDigest, type AttemptSession } from "../services/attempt-analysis.js";
 import {
   funnelEnabled,
@@ -192,11 +192,13 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
         });
       }
       const stages = getFunnelForTraceId(traceId);
+      // The closed audit log keeps a report's trace id as its keyed hash (N107b); a report filed
+      // before it keeps the id itself (round 2, MEDIUM 4). Either is this trace's.
       const reports = auditService
         .query({ eventType: REPORT_EVENT, limit: 1000 })
         .filter((r) => {
           const meta = (r.metadata ?? {}) as Record<string, unknown>;
-          return meta.trace_id === traceId;
+          return isStoredId(meta.trace_id, traceId);
         })
         .map((r) => ({ report_id: r.resourceId, ...(r.metadata ?? {}) }));
       return {

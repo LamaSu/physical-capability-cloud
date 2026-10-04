@@ -63,6 +63,7 @@ import {
   type OnChainMilestoneV2,
 } from "../contracts/escrow-client.js";
 import { driveSettlement, type DriveOutcome } from "./settlement-crank.js";
+import { declare } from "../observability/closed-schema.js";
 
 // ── Interval bounds (mirror kernel-ttl-sweeper's guard band) ────────────────
 const KEEPER_INTERVAL_LOWER_BOUND_SEC = 60; // 1 min — guard against thrash
@@ -215,9 +216,9 @@ export async function runKeeperSweep(
       // Soft-fail: one unreadable escrow must not abort the sweep.
       result.readErrors += 1;
       logger?.warn?.(
-        `[settlement-keeper] read failed for ${escrow.id} (${address}): ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[settlement-keeper] read failed for ${declare.id(escrow.id)} (${declare.id(address)}): ${declare.id(
+          err instanceof Error ? err.message : String(err),
+        )}`,
       );
       continue;
     }
@@ -300,9 +301,9 @@ export async function runKeeperSweep(
           reason: err instanceof Error ? err.message : String(err),
         });
         logger?.warn?.(
-          `[settlement-keeper] drive failed for ${escrow.id}#${idx}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `[settlement-keeper] drive failed for ${declare.id(escrow.id)}#${idx}: ${declare.id(
+            err instanceof Error ? err.message : String(err),
+          )}`,
         );
       }
     }
@@ -318,9 +319,9 @@ export async function runKeeperSweep(
         // Reconciliation is best-effort — the on-chain release already happened,
         // which is the load-bearing outcome. A failed DB write is logged, not fatal.
         logger?.warn?.(
-          `[settlement-keeper] DB reconcile failed for ${escrow.id}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `[settlement-keeper] DB reconcile failed for ${declare.id(escrow.id)}: ${declare.id(
+            err instanceof Error ? err.message : String(err),
+          )}`,
         );
       }
     }
@@ -402,7 +403,7 @@ export function startSettlementKeeper(reposProvider: () => IRepositories, logger
         }
       },
       (err) => {
-        log.warn(`sweep error: ${err instanceof Error ? err.message : String(err)}`);
+        log.warn(`sweep error: ${declare.id(err instanceof Error ? err.message : String(err))}`);
       },
     );
   }, intervalSec * 1000);

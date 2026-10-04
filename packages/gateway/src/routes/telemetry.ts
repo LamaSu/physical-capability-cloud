@@ -16,6 +16,10 @@ import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** The pipeline statuses the server defines: a status stays readable in the log only as one of them. */
+const TELEMETRY_STATUSES: readonly TelemetryStatus[] = ["started", "completed", "failed", "skipped"];
 
 // Active SSE clients for the live log stream
 const logStreamClients = new Set<FastifyReply>();
@@ -268,10 +272,19 @@ export async function telemetryRoutes(app: FastifyInstance) {
       source,
     });
 
-    logger.info(`Telemetry event emitted: ${phase} → ${status}`, {
-      source: source ?? "api",
-      jobId,
-      metadata: { phase, status, duration_ms },
+    // The structured log is a sink (GET /api/telemetry/logs returns it to any caller) and closes
+    // what it stores (structured-logger.ts, N107b round 4, F). This route takes phase, status,
+    // jobId and source straight from the body (their TS types are not checked at run time), so it
+    // declares each: the phase and status readable only as members of the server's vocabularies,
+    // the job id, the source and the caller's own duration_ms (not a server measurement, round 2 of
+    // #538, Q2) keyed. The event returned below is the caller's own telemetry: a product response,
+    // not the log.
+    logger.info(lit("telemetry event emitted"), {
+      phase: declare.code(phase, PIPELINE_PHASES),
+      status: declare.code(status, TELEMETRY_STATUSES),
+      jobId: declare.id(jobId),
+      source: declare.id(source ?? "api"),
+      ...(duration_ms !== undefined ? { duration_ms: declare.id(duration_ms) } : {}),
     });
 
     return { event };

@@ -125,6 +125,8 @@ import { initStore, closeStore } from "../db.js";
 import { SettlementService, resetSettlementService, getSettlementService } from "../services/settlement-service.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import { PipelineTelemetryService } from "../telemetry.js";
+import { traceCollector } from "../trace-collector.js";
+import { keyedHash } from "../observability/closed-schema.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { KernelConfig } from "@pcc/kernel";
 
@@ -376,6 +378,24 @@ describe("KernelService.submitJob — Sentry spans", () => {
     expect(options.attributes?.["job.type"]).toBe("step-ks-attrs");
     expect(options.attributes?.["job.assurance_tier"]).toBe(1);
   });
+
+  it("the local 'job.lifecycle' trace declares its names and keys the job's values (N107b round 5)", async () => {
+    initKernelService(mockKernelConfig);
+    const { getKernelService } = await import("../services/kernel-service.js");
+    const svc = getKernelService();
+
+    await svc.submitJob({ jobId: "job-tracing-ks-003", stepId: "step-ks-local", assuranceTier: 1 });
+    await new Promise<void>((r) => setTimeout(r, 100));
+
+    const lifecycle = traceCollector.getRecentTraces(50).find((trace) => trace.rootSpan.operation === "job.lifecycle");
+    expect(lifecycle).toBeDefined();
+    expect(lifecycle!.rootSpan.service).toBe("kernel");
+    expect(lifecycle!.rootSpan.attributes).toEqual({
+      "job.id": keyedHash("job-tracing-ks-003"),
+      "job.type": keyedHash("step-ks-local"),
+      "job.assurance_tier": keyedHash(1),
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -454,17 +474,12 @@ describe("PipelineTelemetryService.emit — Sentry breadcrumbs", () => {
     expect(mockAddBreadcrumb).toHaveBeenCalledTimes(phases.length);
   });
 
-  it("breadcrumb has a numeric timestamp (Unix seconds)", () => {
-    const before = Date.now() / 1000;
+  it("breadcrumb takes no time from the producer: Sentry's breadcrumb chokepoint gives it the server's clock (N107b round 4, C11)", () => {
     const telemetry = new PipelineTelemetryService();
     telemetry.emit("job-breadcrumb-ts", "escrow_fund", "started");
-    const after = Date.now() / 1000;
 
-    const call = mockAddBreadcrumb.mock.calls[0][0] as { timestamp: number };
-    expect(typeof call.timestamp).toBe("number");
-    // Should be within the test execution window
-    expect(call.timestamp).toBeGreaterThanOrEqual(before - 1);
-    expect(call.timestamp).toBeLessThanOrEqual(after + 1);
+    const call = mockAddBreadcrumb.mock.calls[0][0] as Record<string, unknown>;
+    expect(call).not.toHaveProperty("timestamp");
   });
 });
 
@@ -522,6 +537,27 @@ describe("Full trace path: processEvidence spans + breadcrumbs", () => {
     expect(ipfsIdx).toBeLessThan(dbIdx);
     expect(dbIdx).toBeLessThan(submitIdx);
     expect(submitIdx).toBeLessThan(releaseIdx);
+  });
+
+  it("the local settlement trace declares its names and flags and keys every id and count (N107b round 5)", async () => {
+    const service = getSettlementService();
+    await service.processEvidence(makeBundle(), "job-004");
+
+    const pipeline = traceCollector.getRecentTraces(50).find((trace) => trace.rootSpan.operation === "settlement.pipeline");
+    expect(pipeline).toBeDefined();
+    const byOperation = Object.fromEntries(pipeline!.spans.map((span) => [span.operation, span]));
+    expect(Object.keys(byOperation).sort()).toEqual([
+      "settlement.db_persist", "settlement.ipfs_archive", "settlement.onchain_release", "settlement.onchain_submit", "settlement.pipeline",
+    ]);
+    expect(byOperation["settlement.pipeline"]!.service).toBe("settlement");
+    expect(byOperation["settlement.pipeline"]!.attributes).toEqual({
+      "job.id": keyedHash("job-004"), "bundle.id": keyedHash("bun-tracing-001"), "bundle.assurance_tier": keyedHash(0),
+    });
+    expect(byOperation["settlement.db_persist"]!.attributes).toEqual({ "job.id": keyedHash("job-004"), "event.count": keyedHash(2) });
+    expect(byOperation["settlement.onchain_submit"]!.attributes).toMatchObject({ "contract.address": keyedHash("none"), "write.enabled": false });
+    expect(byOperation["settlement.onchain_release"]!.attributes).toMatchObject({ "auto_release": false });
+    expect(JSON.stringify(pipeline)).not.toContain("job-004");
+    expect(JSON.stringify(pipeline)).not.toContain("bun-tracing-001");
   });
 
   it("Sentry is not blocking — result is returned regardless of span failures", async () => {

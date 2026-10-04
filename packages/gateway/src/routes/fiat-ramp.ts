@@ -24,6 +24,7 @@ import {
   CdpOnrampClient,
   CdpSpendPermissionService,
 } from "@pcc/payments";
+import { lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Service singletons (lazy-init)
@@ -838,7 +839,7 @@ export async function fiatRampRoutes(app: FastifyInstance) {
         };
       } catch (err) {
         // Fall through to mock if on-chain fails
-        console.warn("[faucet] On-chain mint failed, using mock:", err instanceof Error ? err.message : err);
+        console.warn(lit("[faucet] On-chain mint failed, using mock:"), err);
       }
     }
 

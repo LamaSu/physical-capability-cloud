@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 const LIT_API_URL =
   process.env.LIT_API_URL ?? "https://api.dev.litprotocol.com/core/v1";
@@ -31,7 +32,7 @@ export async function litProvisionRoutes(app: FastifyInstance) {
     }
 
     if (!LIT_ACCOUNT_KEY) {
-      console.log("[LIT] provision failed — no LIT_API_KEY configured");
+      console.log(lit("[LIT] provision failed — no LIT_API_KEY configured"));
       return reply.status(503).send({
         error: "lit_not_configured",
         message:
@@ -52,9 +53,7 @@ export async function litProvisionRoutes(app: FastifyInstance) {
         execute_in_groups: [0],
       });
 
-      console.log(
-        `[LIT] provisioning usage key for kernel=${body.kernelId} operator=${body.operatorDid}`,
-      );
+      console.log(lit("[LIT] provisioning usage key"), declare.id(body.kernelId), declare.id(body.operatorDid));
 
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -75,7 +74,11 @@ export async function litProvisionRoutes(app: FastifyInstance) {
         if (!res.ok) {
           const text = await res.text();
           console.log(
-            `[LIT] provision API error: ${res.status} ${text}`,
+            lit("[LIT] provision API error"),
+            // res.status is the Lit API's (an upstream service's) own status code.
+            declare.metric(res.status),
+            // The response body is the Lit API's free text — not a closed vocabulary.
+            declare.id(text),
           );
           return reply.status(502).send({
             error: "lit_api_error",
@@ -87,7 +90,7 @@ export async function litProvisionRoutes(app: FastifyInstance) {
         usageKey = data.usage_api_key ?? "";
 
         if (!usageKey) {
-          console.log("[LIT] provision returned empty key — response:", data);
+          console.log(lit("[LIT] provision returned empty key — response:"), data);
           return reply.status(502).send({
             error: "lit_empty_key",
             message: "Lit API returned an empty usage key",
@@ -96,13 +99,13 @@ export async function litProvisionRoutes(app: FastifyInstance) {
       } catch (fetchErr: any) {
         clearTimeout(timeout);
         if (fetchErr.name === "AbortError") {
-          console.log("[LIT] provision timed out after 10s");
+          console.log(lit("[LIT] provision timed out after 10s"));
           return reply.status(504).send({
             error: "lit_timeout",
             message: "Lit API did not respond within 10 seconds",
           });
         }
-        console.log(`[LIT] provision network error: ${fetchErr.message}`);
+        console.log(lit("[LIT] provision network error"), fetchErr);
         return reply.status(502).send({
           error: "lit_network_error",
           message: `Could not reach Lit API: ${fetchErr.message}`,
@@ -110,23 +113,21 @@ export async function litProvisionRoutes(app: FastifyInstance) {
       }
 
       auditService.log({
-        eventType: "lit.key_provisioned",
+        eventType: lit("lit.key_provisioned"),
         actor: body.operatorDid,
-        resourceType: "lit_usage_key",
-        resourceId: body.kernelId,
-        action: "create",
-        metadata: { kernelId: body.kernelId, operatorDid: body.operatorDid },
+        resourceType: lit("lit_usage_key"),
+        resourceId: declare.id(body.kernelId),
+        action: lit("create"),
+        metadata: { kernelId: declare.id(body.kernelId), operatorDid: declare.id(body.operatorDid) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
-      trackServerEvent("lit_key_provisioned", {
-        kernelId: body.kernelId,
-        operatorDid: body.operatorDid,
+      trackServerEvent(lit("lit_key_provisioned"), {
+        kernelId: declare.id(body.kernelId),
+        operatorDid: declare.id(body.operatorDid),
       });
 
-      console.log(
-        `[LIT] usage key provisioned for kernel=${body.kernelId}`,
-      );
+      console.log(lit("[LIT] usage key provisioned"), declare.id(body.kernelId));
 
       return reply.status(201).send({
         usageKey,
@@ -134,7 +135,7 @@ export async function litProvisionRoutes(app: FastifyInstance) {
         litNetwork: "chipotle",
       });
     } catch (err: any) {
-      console.log(`[LIT] provision unexpected error: ${err.message}`);
+      console.log(lit("[LIT] provision unexpected error"), err);
       return reply.status(500).send({
         error: "provision_failed",
         message: err.message ?? "Unknown error during Lit key provisioning",

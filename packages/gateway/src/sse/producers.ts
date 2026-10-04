@@ -19,6 +19,7 @@ import {
   resetLogGenerator,
   MOCK_CHANNEL_DESCRIPTORS,
 } from "./mock-data-generator.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -254,7 +255,9 @@ export class ProducerManager {
       p.start();
     }
     console.log(
-      `[producers] Started ${this.producers.length} mock producers: ${this.producers.map((p) => p.name).join(", ")}`,
+      lit("[producers] Started mock producers"),
+      declare.metric(this.producers.length),
+      declare.list(this.producers.map((p) => declare.id(p.name))),
     );
   }
 
@@ -263,7 +266,7 @@ export class ProducerManager {
     for (const p of this.producers) {
       p.stop();
     }
-    console.log("[producers] All mock producers stopped");
+    console.log(lit("[producers] All mock producers stopped"));
   }
 
   /** Start a specific producer by name */

@@ -31,6 +31,7 @@ import { randomBytes } from "node:crypto";
 import { trace } from "@opentelemetry/api";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Rate limiting (per-IP, in-memory) ─────────────────────────────────────
 //
@@ -193,34 +194,36 @@ export async function agentFeedbackRoutes(app: FastifyInstance) {
           if (body.confused_about) span.setAttribute("pcc.confused_about", body.confused_about);
 
           // Persist to the audit log (temporary sink until piece 5 lands).
+          // Every field declared (the closed observability schema, N107b round 2): what the
+          // agent wrote leaves as its keyed hash under its own name.
           auditService.log({
-            eventType: "agent.report",
+            eventType: lit("agent.report"),
             actor: (req as unknown as { operatorId?: string; apiKeyId?: string }).operatorId
               ?? (req as unknown as { apiKeyId?: string }).apiKeyId
               ?? `anonymous:${req.ip}`,
-            resourceType: "agent_report",
+            resourceType: lit("agent_report"),
             resourceId: report_id,
-            action: "create",
+            action: lit("create"),
             metadata: {
-              trace_id,
-              summary: body.summary,
-              detail: body.detail,
-              last_endpoint: body.last_endpoint,
-              last_error_code: body.last_error_code,
-              agent_kind: body.agent_kind,
-              confused_about: body.confused_about,
+              trace_id: declare.id(trace_id),
+              summary: declare.id(body.summary),
+              detail: declare.id(body.detail),
+              last_endpoint: declare.id(body.last_endpoint),
+              last_error_code: declare.id(body.last_error_code),
+              agent_kind: declare.id(body.agent_kind),
+              confused_about: declare.id(body.confused_about),
             },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
 
           // PostHog event for the live dashboard.
-          trackServerEvent("agent_report_filed", {
-            report_id,
-            trace_id,
-            agent_kind: body.agent_kind,
-            last_error_code: body.last_error_code,
-            confused_about: body.confused_about,
+          trackServerEvent(lit("agent_report_filed"), {
+            report_id: declare.id(report_id),
+            trace_id: declare.id(trace_id),
+            agent_kind: declare.id(body.agent_kind),
+            last_error_code: declare.id(body.last_error_code),
+            confused_about: declare.id(body.confused_about),
           });
 
           // Add a span event so any OTel collector subscribed to the

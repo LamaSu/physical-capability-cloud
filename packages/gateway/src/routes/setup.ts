@@ -19,6 +19,7 @@ import { auditService } from "../services/audit-service.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Valid adapter types and device roles
@@ -662,8 +663,7 @@ export async function setupRoutes(app: FastifyInstance) {
           getKernelService().refreshDeviceFromDb(deviceId);
         } catch (e) {
           // Service may not be initialized in some test paths; ignore.
-          const msg = e instanceof Error ? e.message : String(e);
-          (req as any).log?.warn?.({ err: msg, deviceId }, "kernel-service refresh failed");
+          (req as any).log?.warn?.({ err: e, deviceId: declare.id(deviceId) }, lit("kernel-service refresh failed"));
         }
 
         // Auto-create capability rows for each capability the device contributes to
@@ -693,22 +693,31 @@ export async function setupRoutes(app: FastifyInstance) {
           }
         }
 
-        trackServerEvent("device_registered", {
-          deviceId,
-          kernelId,
-          type,
-          adapterType,
-          model,
-          action,
-          capabilitiesRegistered: capabilities?.length ?? 0,
+        trackServerEvent(lit("device_registered"), {
+          deviceId: declare.id(deviceId),
+          kernelId: declare.id(kernelId),
+          type: declare.code(type, VALID_DEVICE_ROLES),
+          adapterType: declare.code(adapterType, VALID_ADAPTER_TYPES),
+          model: declare.id(model),
+          action: declare.code(action, ["updated", "created"]),
+          // capabilities is the caller-supplied array from the request body — declare.id, not metric.
+          capabilitiesRegistered: declare.id(capabilities?.length ?? 0),
         }, (req as any).operatorId ?? (req as any).apiKeyId);
         auditService.log({
-          eventType: action === "created" ? "device.registered" : "device.updated",
+          eventType: declare.code(
+            action === "created" ? "device.registered" : "device.updated",
+            ["device.registered", "device.updated"],
+          ),
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
-          resourceType: "device",
-          resourceId: deviceId,
-          action: action === "created" ? "create" : "update",
-          metadata: { kernelId, type, adapterType, model },
+          resourceType: lit("device"),
+          resourceId: declare.id(deviceId),
+          action: declare.code(action === "created" ? "create" : "update", ["create", "update"]),
+          metadata: {
+            kernelId: declare.id(kernelId),
+            type: declare.code(type, VALID_DEVICE_ROLES),
+            adapterType: declare.code(adapterType, VALID_ADAPTER_TYPES),
+            model: declare.id(model),
+          },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });

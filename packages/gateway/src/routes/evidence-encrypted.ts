@@ -7,6 +7,10 @@ import { trackServerEvent } from "../services/posthog-service.js";
 import type { LitAuthSig } from "@pcc/kernel";
 import { kernelKeyStore, generateDecryptAction, executeDecryptAction, isRealLitEnabled } from "@pcc/kernel";
 import { getRepos } from "../db.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** executeDecryptAction's `role` echoes this file's own `authProof` (packages/kernel/src/lit-action-decrypt.ts JSDoc: "buyer" | "verifier"). */
+const LIT_DECRYPT_ROLES: readonly string[] = ["buyer", "verifier"];
 
 /**
  * Helper: fetch an encrypted bundle row from DB and attach its capsules,
@@ -106,14 +110,14 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       const storage = await getEvidenceStorage();
       const result = await storage.archiveBundle(bundle);
       pipelineTelemetry.emit(bundle.jobId ?? "pipeline-" + Date.now(), "evidence_archive", "completed", { metadata: { cid: result.cid } });
-      trackServerEvent("evidence_archived", { cid: result.cid, jobId: bundle.jobId }, (req as any).operatorId);
+      trackServerEvent(lit("evidence_archived"), { cid: declare.id(result.cid), jobId: declare.id(bundle.jobId) }, (req as any).operatorId);
       auditService.log({
-        eventType: "evidence.archived",
+        eventType: lit("evidence.archived"),
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
-        resourceType: "evidence",
-        resourceId: bundle.id ?? bundle.jobId,
-        action: "archive",
-        metadata: { cid: result.cid, metadataCid: result.metadataCid },
+        resourceType: lit("evidence"),
+        resourceId: declare.id(bundle.id ?? bundle.jobId),
+        action: lit("archive"),
+        metadata: { cid: declare.id(result.cid), metadataCid: declare.id(result.metadataCid) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -144,14 +148,18 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
         ipfsCid: result.cid,
         ipfsMetadataCid: result.metadataCid,
       });
-      trackServerEvent("evidence_archived", { cid: result.cid, bundleId: req.params.bundleId, encrypted: true }, (req as any).operatorId);
+      trackServerEvent(
+        lit("evidence_archived"),
+        { cid: declare.id(result.cid), bundleId: declare.id(req.params.bundleId), encrypted: declare.flag(true) },
+        (req as any).operatorId,
+      );
       auditService.log({
-        eventType: "evidence.archived",
+        eventType: lit("evidence.archived"),
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
-        resourceType: "evidence",
-        resourceId: req.params.bundleId,
-        action: "archive",
-        metadata: { cid: result.cid, metadataCid: result.metadataCid, encrypted: true },
+        resourceType: lit("evidence"),
+        resourceId: declare.id(req.params.bundleId),
+        action: lit("archive"),
+        metadata: { cid: declare.id(result.cid), metadataCid: declare.id(result.metadataCid), encrypted: declare.flag(true) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -254,7 +262,7 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
       // Path 1: Try Lit Action decrypt via Chipotle REST API
       if (useRealLit) {
         try {
-          console.log(`[LIT] attempting Lit Action decrypt for bundleId=${req.params.bundleId}`);
+          console.log(lit("[LIT] attempting Lit Action decrypt"), declare.id(req.params.bundleId));
           const storedKey = kernelKeyStore.retrieve(req.params.bundleId);
           const keyB64 = storedKey ? Buffer.from(storedKey).toString("base64") : "";
 
@@ -274,21 +282,25 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
           });
 
           if (result.authorized && result.key) {
-            console.log(`[LIT] Lit Action decrypt authorized (${result.role}) for bundleId=${req.params.bundleId}`);
+            console.log(
+              lit("[LIT] Lit Action decrypt authorized"),
+              declare.code(result.role, LIT_DECRYPT_ROLES),
+              declare.id(req.params.bundleId),
+            );
             pipelineTelemetry.emit(req.params.bundleId, "evidence_encrypt", "completed", {
               metadata: { path: "lit_action", role: result.role, operation: "decrypt" },
             });
-            trackServerEvent("evidence_encrypted", {
-              bundleId: req.params.bundleId,
-              operation: "decrypt",
-              path: "lit_action",
-              role: result.role,
+            trackServerEvent(lit("evidence_encrypted"), {
+              bundleId: declare.id(req.params.bundleId),
+              operation: lit("decrypt"),
+              path: lit("lit_action"),
+              role: declare.code(result.role, LIT_DECRYPT_ROLES),
             }, (req as any).operatorId);
             return { bundle: { decryptionKey: result.key, role: result.role, path: "lit_action" } };
           }
 
           if (!result.authorized) {
-            console.log(`[LIT] Lit Action decrypt denied: ${result.reason}`);
+            console.log(lit("[LIT] Lit Action decrypt denied"), declare.id(result.reason));
             // Do NOT fall back to local — the on-chain check said no
             return reply.code(403).send({
               error: "access_denied",
@@ -298,22 +310,21 @@ export async function evidenceEncryptedRoutes(app: FastifyInstance) {
           }
         } catch (litErr) {
           // Lit network failure — fall through to local decrypt
-          const litMsg = litErr instanceof Error ? litErr.message : "Lit Action failed";
-          console.log(`[LIT] Lit Action decrypt failed, falling back to local: ${litMsg}`);
+          console.log(lit("[LIT] Lit Action decrypt failed, falling back to local"), litErr);
         }
       }
 
       // Path 2: Local decrypt (mock Lit or real Lit unavailable)
       try {
-        console.log(`[LIT] using local decrypt for bundleId=${req.params.bundleId}`);
+        console.log(lit("[LIT] using local decrypt"), declare.id(req.params.bundleId));
         const decrypted = await litEncryptionService.decryptBundle(bundle as any, body.authSig);
         pipelineTelemetry.emit(req.params.bundleId, "evidence_encrypt", "completed", {
           metadata: { path: "local", operation: "decrypt" },
         });
-        trackServerEvent("evidence_encrypted", {
-          bundleId: req.params.bundleId,
-          operation: "decrypt",
-          path: "local",
+        trackServerEvent(lit("evidence_encrypted"), {
+          bundleId: declare.id(req.params.bundleId),
+          operation: lit("decrypt"),
+          path: lit("local"),
         }, (req as any).operatorId);
         return { bundle: decrypted };
       } catch (err) {

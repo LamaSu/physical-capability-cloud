@@ -397,6 +397,9 @@ describe("Prove Endpoint", () => {
   describe("audit logging", () => {
     it("calls auditService.log on successful prove", async () => {
       const { auditService } = await import("../services/audit-service.js");
+      // N107b codemod: eventType/action/resourceType are lit() and resourceId is declare.id() —
+      // unwrap them the same way the rest of the suite does (see closed-schema-r2.test.ts).
+      const { closedText, closedId } = await import("../observability/closed-schema.js");
       const regId = await registerMachine(app);
 
       await app.inject({
@@ -409,18 +412,23 @@ describe("Prove Endpoint", () => {
         },
       });
 
-      expect(auditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: "operator.proved",
-          action: "prove",
-          resourceType: "registration",
-          resourceId: regId,
-        }),
-      );
+      const calls = (auditService.log as unknown as { mock: { calls: unknown[][] } }).mock.calls as Array<
+        [{ eventType: unknown; action: unknown; resourceType: unknown; resourceId: unknown }]
+      >;
+      const proveCall = calls.find(([entry]) => closedText(entry.eventType) === "operator.proved");
+      expect(proveCall, "an operator.proved audit entry was logged").toBeDefined();
+      const entry = proveCall![0];
+      expect(closedText(entry.action)).toBe("prove");
+      expect(closedText(entry.resourceType)).toBe("registration");
+      expect(closedId(entry.resourceId)).toBe(closedId(regId));
     });
 
     it("includes assuranceTier in audit metadata", async () => {
       const { auditService } = await import("../services/audit-service.js");
+      // N107b codemod: assuranceTier/proofCount/proofs are declare.id() (caller-influenced —
+      // hashed, never a raw number) and autoApproved is declare.flag(). closeValue resolves
+      // every declared field to its emitted form, matching this suite's established pattern.
+      const { closedText, closeValue } = await import("../observability/closed-schema.js");
       const regId = await registerMachine(app);
 
       await app.inject({
@@ -436,14 +444,14 @@ describe("Prove Endpoint", () => {
         },
       });
 
-      expect(auditService.log).toHaveBeenCalledWith(
-        expect.objectContaining({
-          metadata: expect.objectContaining({
-            assuranceTier: expect.any(Number),
-            autoApproved: true,
-          }),
-        }),
-      );
+      const calls = (auditService.log as unknown as { mock: { calls: unknown[][] } }).mock.calls as Array<
+        [{ eventType: unknown; metadata: Record<string, unknown> }]
+      >;
+      const proveCall = calls.find(([entry]) => closedText(entry.eventType) === "operator.proved");
+      expect(proveCall, "an operator.proved audit entry was logged").toBeDefined();
+      const metadata = closeValue(proveCall![0].metadata) as Record<string, unknown>;
+      expect(typeof metadata.assuranceTier).toBe("string"); // a keyed hash, never the raw number
+      expect(metadata.autoApproved).toBe(true);
     });
   });
 

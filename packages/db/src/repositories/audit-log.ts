@@ -1,10 +1,16 @@
-import { eq, and, gte, sql } from "drizzle-orm";
+import { eq, and, gte, inArray, sql, type Column } from "drizzle-orm";
 import { auditLog } from "../schema/index.js";
 import type { StoreDB } from "../connection.js";
 import type { IAuditLogRepository } from "../interfaces/IAuditLogRepository.js";
 
 export type AuditLogInsert = typeof auditLog.$inferInsert;
 export type AuditLogRow = typeof auditLog.$inferSelect;
+
+/** A filter of one value, or of any of several (a row matches when its column equals one of them). */
+type OneOrMany = string | readonly string[];
+
+const matches = (column: Column, value: OneOrMany) =>
+  typeof value === "string" ? eq(column, value) : inArray(column, [...value]);
 
 export class AuditLogRepository implements IAuditLogRepository {
   constructor(private db: StoreDB) {}
@@ -14,22 +20,22 @@ export class AuditLogRepository implements IAuditLogRepository {
   }
 
   query(opts: {
-    eventType?: string;
-    actor?: string;
-    resourceType?: string;
+    eventType?: OneOrMany;
+    actor?: OneOrMany;
+    resourceType?: OneOrMany;
     since?: string;
     limit?: number;
   }): AuditLogRow[] {
     const conditions = [];
 
-    if (opts.eventType) {
-      conditions.push(eq(auditLog.eventType, opts.eventType));
+    if (opts.eventType?.length) {
+      conditions.push(matches(auditLog.eventType, opts.eventType));
     }
-    if (opts.actor) {
-      conditions.push(eq(auditLog.actor, opts.actor));
+    if (opts.actor?.length) {
+      conditions.push(matches(auditLog.actor, opts.actor));
     }
-    if (opts.resourceType) {
-      conditions.push(eq(auditLog.resourceType, opts.resourceType));
+    if (opts.resourceType?.length) {
+      conditions.push(matches(auditLog.resourceType, opts.resourceType));
     }
     if (opts.since) {
       conditions.push(gte(auditLog.timestamp, opts.since));

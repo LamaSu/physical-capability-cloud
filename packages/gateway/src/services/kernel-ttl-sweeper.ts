@@ -28,6 +28,7 @@
 
 import type { IRepositories } from "@pcc/store";
 import { emitKernelLifecycleEvent } from "../facades/kernel.facade.js";
+import { closedError } from "../observability/closed-schema.js";
 
 const SWEEP_INTERVAL_LOWER_BOUND_SEC = 60; // 1 min — guard against thrash
 const SWEEP_INTERVAL_UPPER_BOUND_SEC = 3600; // 1 h — guard against staleness
@@ -175,7 +176,7 @@ export function startKernelTtlSweeper(
         );
       }
     } catch (err) {
-      console.error(`[kernel-ttl-sweeper] sweep failed:`, err);
+      console.error(`[kernel-ttl-sweeper] sweep failed:`, closedError(err));
     }
   }, intervalMs);
   // Don't keep the event loop alive just for the sweeper — vitest needs

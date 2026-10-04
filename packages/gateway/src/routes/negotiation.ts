@@ -42,6 +42,7 @@ import {
 // Liveness gate lives in one shared module so the A2A commit path (a2a-tasks.ts)
 // enforces the identical rule — see session-liveness.ts (N1).
 import { assertSessionLive as assertLive } from "./session-liveness.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 /**
  * Serialize a WorkflowChallenge for the wire — converts the BigInt
@@ -334,8 +335,8 @@ export async function negotiationRoutes(app: FastifyInstance) {
       // the gateway logs instead of opaque 500s. We still return a
       // generic body to the caller (don't leak stack/internals).
       req.log.error(
-        { err: err instanceof Error ? err.message : String(err), kernelId: body.kernelId, capabilityType: body.capabilityType },
-        "[negotiation] session create failed",
+        { err, kernelId: declare.id(body.kernelId), capabilityType: declare.id(body.capabilityType) },
+        lit("[negotiation] session create failed"),
       );
       return reply.status(500).send({
         error: "session_create_failed",
@@ -674,8 +675,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
             paidJobResult = await createJobFromSession(committedRow);
           }
         } catch (err) {
+          // settlementError (the extracted message) still feeds the HTTP response and DB
+          // transition below, unchanged — only the console line is closed, on the raw err.
           settlementError = err instanceof Error ? err.message : String(err);
-          console.warn("[negotiation] Paid job flow wiring failed:", settlementError);
+          console.warn(lit("[negotiation] Paid job flow wiring failed:"), err);
         }
 
         // ── Money-path guard: never return a false 200 in REAL settlement ──
@@ -838,8 +841,10 @@ export async function negotiationRoutes(app: FastifyInstance) {
             .get();
           if (committedRow) paidJobResult = await createJobFromSession(committedRow);
         } catch (err) {
+          // settlementError (the extracted message) still feeds the HTTP response and DB
+          // transition below, unchanged — only the console line is closed, on the raw err.
           settlementError = err instanceof Error ? err.message : String(err);
-          console.warn("[negotiation] retry-settlement wiring failed:", settlementError);
+          console.warn(lit("[negotiation] retry-settlement wiring failed:"), err);
         }
 
         // Same money-path guard as /commit: no false success in REAL mode.

@@ -27,6 +27,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getStoryIPService, getLicensingEngine } from "@pcc/contracts";
 import type { ContributorRole, LicensingTerms } from "@pcc/spec";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Body / Params interfaces
@@ -197,7 +198,7 @@ export async function ipRoutes(app: FastifyInstance) {
             registeredAt: reg.registeredAt,
           });
         } catch (dbErr) {
-          console.warn("[ip] DB persist of IP registration failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          console.warn(lit("[ip] DB persist of IP registration failed (best-effort):"), dbErr);
         }
 
         return { registration: reg };
@@ -254,7 +255,7 @@ export async function ipRoutes(app: FastifyInstance) {
             linkedAt: link.linkedAt,
           });
         } catch (dbErr) {
-          console.warn("[ip] DB persist of derivative link failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          console.warn(lit("[ip] DB persist of derivative link failed (best-effort):"), dbErr);
         }
 
         return { link };
@@ -305,7 +306,7 @@ export async function ipRoutes(app: FastifyInstance) {
             });
           }
         } catch (dbErr) {
-          console.warn("[ip] DB persist of royalty splits failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          console.warn(lit("[ip] DB persist of royalty splits failed (best-effort):"), dbErr);
         }
 
         return result;
@@ -372,7 +373,7 @@ export async function ipRoutes(app: FastifyInstance) {
             settled.push({ recipientAddress: dist.recipientAddress, amount: dist.amount, ipId: dist.ipId, txHash });
             totalDistributed += BigInt(dist.amount);
           } catch (err) {
-            console.warn(`[ip] Royalty settlement failed for ${dist.ipId}:`, err instanceof Error ? err.message : err);
+            console.warn(lit("[ip] Royalty settlement failed"), declare.id(dist.ipId), err);
           }
         }
 
@@ -496,7 +497,7 @@ export async function ipRoutes(app: FastifyInstance) {
             claimedAt: new Date().toISOString(),
           });
         } catch (dbErr) {
-          console.warn("[ip] DB persist of revenue claim failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          console.warn(lit("[ip] DB persist of revenue claim failed (best-effort):"), dbErr);
         }
 
         return result;

@@ -41,6 +41,11 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { auditService } from "../services/audit-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** The `template` slugs this driver is mounted with today (server.ts); a closed,
+ * server-literal set (never request-derived) — see TemplateSessionRoutesOptions above. */
+const TEMPLATE_SLUGS: readonly string[] = ["physical-operator", "data-product"];
 
 /**
  * Generic activity event written to a session's log. The chat console reads
@@ -294,12 +299,12 @@ export async function templateSessionRoutes(
       }
 
       auditService.log({
-        eventType: `${template}.session_started`,
+        eventType: declare.code(`${template}.session_started`, TEMPLATE_SLUGS.map((t) => `${t}.session_started`)),
         actor: req.operatorId ?? req.apiKeyId ?? undefined,
-        resourceType: "template_session",
-        resourceId: sessionId,
-        action: "create",
-        metadata: { template, name, url },
+        resourceType: lit("template_session"),
+        resourceId: declare.id(sessionId),
+        action: lit("create"),
+        metadata: { template: declare.code(template, TEMPLATE_SLUGS), name: declare.id(name), url: declare.id(url) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -359,12 +364,12 @@ export async function templateSessionRoutes(
       }
 
       auditService.log({
-        eventType: `${template}.scrape`,
+        eventType: declare.code(`${template}.scrape`, TEMPLATE_SLUGS.map((t) => `${t}.scrape`)),
         actor: req.operatorId ?? req.apiKeyId ?? undefined,
-        resourceType: "template_session",
-        resourceId: session.id,
-        action: "scrape",
-        metadata: { template, url },
+        resourceType: lit("template_session"),
+        resourceId: declare.id(session.id),
+        action: lit("scrape"),
+        metadata: { template: declare.code(template, TEMPLATE_SLUGS), url: declare.id(url) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -417,12 +422,13 @@ export async function templateSessionRoutes(
       }
 
       auditService.log({
-        eventType: `${template}.ingest_docs`,
+        eventType: declare.code(`${template}.ingest_docs`, TEMPLATE_SLUGS.map((t) => `${t}.ingest_docs`)),
         actor: req.operatorId ?? req.apiKeyId ?? undefined,
-        resourceType: "template_session",
-        resourceId: session.id,
-        action: "ingest_docs",
-        metadata: { template, doc_count: docUrls.length },
+        resourceType: lit("template_session"),
+        resourceId: declare.id(session.id),
+        action: lit("ingest_docs"),
+        // doc_count is the length of the caller-supplied doc_urls array — declare.id, not metric.
+        metadata: { template: declare.code(template, TEMPLATE_SLUGS), doc_count: declare.id(docUrls.length) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });
@@ -465,12 +471,17 @@ export async function templateSessionRoutes(
         });
 
         auditService.log({
-          eventType: `${template}.build_complete`,
+          eventType: declare.code(`${template}.build_complete`, TEMPLATE_SLUGS.map((t) => `${t}.build_complete`)),
           actor: req.operatorId ?? req.apiKeyId ?? undefined,
-          resourceType: "template_session",
-          resourceId: session.id,
-          action: "build",
-          metadata: { template, capability_count: result.capabilities.length, discovery_url: result.discovery_url },
+          resourceType: lit("template_session"),
+          resourceId: declare.id(session.id),
+          action: lit("build"),
+          metadata: {
+            template: declare.code(template, TEMPLATE_SLUGS),
+            // A count derived from what the caller's scraped/ingested URLs produced — declare.id.
+            capability_count: declare.id(result.capabilities.length),
+            discovery_url: declare.id(result.discovery_url),
+          },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });

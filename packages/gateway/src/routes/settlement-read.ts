@@ -54,6 +54,7 @@ import {
   type Finality,
   type Completeness,
 } from "../settlement/unit-state-mapper.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── The port ──────────────────────────────────────────────────────────
 
@@ -291,7 +292,7 @@ export async function settlementReadRoutes(app: FastifyInstance) {
       lifecycle = toLifecycleView(anchors, r.windows());
     } catch (e) {
       if (e instanceof UnreachableUnitStateError) {
-        req.log?.error({ err: e, unitId }, "unreachable unit state from settlement read");
+        req.log?.error({ err: e, unitId: declare.id(unitId) }, lit("unreachable unit state from settlement read"));
         fail(reply, "INDEX_NOT_READY", "Settlement state could not be interpreted; read may be stale or misbound");
         return null;
       }

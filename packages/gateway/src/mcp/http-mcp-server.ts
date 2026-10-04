@@ -36,6 +36,7 @@ import {
   type OpPrincipal,
 } from "./operation-policy.js";
 import { resolveMcpApiBase, mcpApiBaseUnavailableMessage } from "./mcp-api-base.js";
+import { lit } from "../observability/closed-schema.js";
 
 // Branding only (server-card icon) — NOT the proxy data plane. The upstream API
 // origin the proxy forwards to is resolved per-request via resolveMcpApiBase()
@@ -765,7 +766,7 @@ async function registerStreamableMcpSurface(
         request.body,
       );
     } catch (error) {
-      request.log.error({ err: error }, "Streamable HTTP MCP request failed");
+      request.log.error({ err: error }, lit("Streamable HTTP MCP request failed"));
       sendJsonRpcError(reply.raw, 500, "Internal MCP server error");
     }
   });
@@ -792,7 +793,7 @@ async function registerStreamableMcpSurface(
         reply.raw,
       );
     } catch (error) {
-      request.log.error({ err: error }, "Streamable HTTP MCP SSE request failed");
+      request.log.error({ err: error }, lit("Streamable HTTP MCP SSE request failed"));
       sendJsonRpcError(reply.raw, 500, "Internal MCP server error");
     }
   });
@@ -819,7 +820,7 @@ async function registerStreamableMcpSurface(
         reply.raw,
       );
     } catch (error) {
-      request.log.error({ err: error }, "Streamable HTTP MCP delete failed");
+      request.log.error({ err: error }, lit("Streamable HTTP MCP delete failed"));
       sendJsonRpcError(reply.raw, 500, "Internal MCP server error");
     }
   });

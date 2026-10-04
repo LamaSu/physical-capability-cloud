@@ -5,6 +5,10 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
+import { closeConsole, closedLoggerHooks, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
+import { closedError, declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning } from "./observability/closed-schema.js";
+// Request-path console output leaves under the closed observability schema (N107b).
+closeConsole();
 import { randomBytes } from "node:crypto";
 
 import Fastify from "fastify";
@@ -181,10 +185,26 @@ export async function createGateway(port = 3200) {
   initKernelService();
 
   const app = Fastify({
-    logger: true,
+    // Every log line leaves under the closed observability schema (N107b): the request as its
+    // method, route template and client hash, never a URL, header or body value.
+    logger: gatewayLoggerOptions(),
+    // A caller never names the request id that every log line carries (Fastify 4 reads it from a
+    // request-id header by default), and the log keeps only an id the gateway issued.
+    requestIdHeader: false,
+    genReqId: issueRequestId,
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
+
+  // The closed logger's hooks (the route templates the app declares, and the registry of the
+  // server's own requests and replies that its serializers read), and the request scope that closes
+  // request-path console output. All before any route or plugin.
+  closedLoggerHooks(app);
+  app.addHook("onRequest", openRequestScope);
+  // Without a valid PCC_TELEMETRY_KEY every hash uses a per-process key: one warning, loud in
+  // production (round 2, MEDIUM 4). The gateway still starts; refusing to is the operator's call (#5708).
+  const keyWarning = telemetryKeyWarning(process.env.NODE_ENV);
+  if (keyWarning) app.log[keyWarning.level](keyWarning.message);
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -220,7 +240,7 @@ export async function createGateway(port = 3200) {
     // For 5xx errors, report to Sentry before responding
     const statusCode = error.statusCode ?? 500;
     if (statusCode >= 500) {
-      Sentry.captureException(error, { extra: { url: request.url, method: request.method } });
+      Sentry.captureException(error, { extra: { route: declaredRoute(request), method: declare.code(request.method, METHODS) } });
     }
     const body: Record<string, unknown> = {
       error: statusCode >= 500 ? "internal_error" : "request_error",
@@ -303,7 +323,7 @@ export async function createGateway(port = 3200) {
     process.env.COOKIE_SECRET ||
     (process.env.NODE_ENV === "production"
       ? (() => {
-          app.log.error("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed.");
+          app.log.error(lit("[security] COOKIE_SECRET env var is not set in production. Cookies will not be signed."));
           return "insecure-default-do-not-use";
         })()
       : randomBytes(32).toString("hex"));
@@ -384,6 +404,8 @@ export async function createGateway(port = 3200) {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
 
+  const HTTP_WRITE_ACTIONS = ["post", "put", "delete", "patch"] as const;
+
   // Automatic write-operation audit hook — logs all POST/PUT/DELETE requests
   // to the audit log so every state-changing call is captured without
   // per-route boilerplate. Individual routes may also log richer events.
@@ -397,16 +419,17 @@ export async function createGateway(port = 3200) {
 
     try {
       const { auditService: audit } = await import("./services/audit-service.js");
+      // Every field declared (the closed observability schema, N107b round 2).
       audit.log({
-        eventType: "http.write",
+        eventType: lit("http.write"),
         actor,
-        resourceType: "http",
-        action: method.toLowerCase(),
+        resourceType: lit("http"),
+        action: declare.code(method.toLowerCase(), HTTP_WRITE_ACTIONS),
         metadata: {
-          method,
-          url: request.url,
-          statusCode: reply.statusCode,
-          duration_ms: Math.round(reply.elapsedTime ?? 0),
+          method: declare.code(method, METHODS),
+          route: declaredRoute(request),
+          statusCode: declare.metric(reply.statusCode),
+          duration_ms: declare.metric(Math.round(reply.elapsedTime ?? 0)),
         },
         ip: request.ip,
         userAgent: request.headers["user-agent"],
@@ -517,21 +540,21 @@ export async function createGateway(port = 3200) {
   // gateway restarts. Must run before any onboarding routes register so
   // the SDK is ready by the time requests arrive.
   setSessionStore(new OrchestratorSessionStore(getRepos().orchestratorSessions));
-  app.log.info("orchestrator-sdk session store: SQLite-backed");
+  app.log.info(lit("orchestrator-sdk session store: SQLite-backed"));
 
   // Wave 4.4 — bridge orchestrator-sdk's eventBus into PCC's existing OTel
   // pipeline (otel.ts). Every emit() becomes a one-shot span. Bridge runs
   // for the lifetime of the process; no explicit unsubscribe needed since
   // the SDK is GC'd at shutdown.
   startEventBusOtelBridge();
-  app.log.info("orchestrator-sdk event-bus → OTel bridge: active");
+  app.log.info(lit("orchestrator-sdk event-bus → OTel bridge: active"));
 
   // Wave 5 — internal demand-intel hourly/daily snapshot cron.
   // Persists DemandSnapshots into materializedViews. Auth-gated read via
   // /api/admin/demand/*. NOT a public oracle.
   startDemandSnapshotCron({
-    info: (msg) => app.log.info(msg),
-    warn: (msg) => app.log.warn(msg),
+    info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[demand-snapshot] note")),
+    warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[demand-snapshot] note")),
   });
 
   // Job-offers — generic /api/job-offers/* matching primitive. Replaces
@@ -555,20 +578,18 @@ export async function createGateway(port = 3200) {
     }).$client;
     initJobOffersStore(rawSqlite ? { sqlite: rawSqlite } : {});
     startJobOffersSweeper({
-      info: (msg) => app.log.info(msg),
-      warn: (msg) => app.log.warn(msg),
+      info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
+      warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
     });
   } catch (err) {
     // Best-effort wiring — if the store handle is shaped differently in some
     // environments (e.g. tests that build the app without initStore), fall
     // back to a pure in-memory job-offers store so routes still respond.
-    app.log.warn(
-      `[job-offers] could not attach SQLite (${err instanceof Error ? err.message : String(err)}); falling back to in-memory`,
-    );
+    app.log.warn({ err }, lit("[job-offers] could not attach SQLite; falling back to in-memory"));
     initJobOffersStore({});
     startJobOffersSweeper({
-      info: (msg) => app.log.info(msg),
-      warn: (msg) => app.log.warn(msg),
+      info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
+      warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[job-offers-sweeper] note")),
     });
   }
 
@@ -595,13 +616,13 @@ export async function createGateway(port = 3200) {
       initCarrierShipmentStore(rawSqlite ? { sqlite: rawSqlite, strictHydration: strict } : {});
       if (!rawSqlite) {
         app.log[strict ? "error" : "warn"](
-          "[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)",
+          lit("[carrier] no SQLite handle; shipment commitments are in-memory only — in production classification the carrier capability will 503 as unconfigured (durable store missing)"),
         );
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
       app.log[strict ? "error" : "warn"](
-        `[carrier] could not attach SQLite (${msg}); falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration.`,
+        { err },
+        lit("[carrier] could not attach SQLite; falling back to in-memory. In production classification the carrier capability will 503 as unconfigured rather than serve from a store that failed strict hydration."),
       );
       initCarrierShipmentStore({});
     }
@@ -611,8 +632,8 @@ export async function createGateway(port = 3200) {
   // the first /api/tools/search call doesn't pay the load+parse cost. Safe
   // to call if agent-package.json is missing (index just stays empty).
   prewarmToolIndex({
-    info: (msg) => app.log.info(msg),
-    warn: (msg) => app.log.warn(msg),
+    info: (msg) => app.log.info({ note: declare.id(msg) }, lit("[tool-index] note")),
+    warn: (msg) => app.log.warn({ note: declare.id(msg) }, lit("[tool-index] note")),
   });
 
   // Scope-based RBAC — enforces required scopes per endpoint (after apiGate sets key)
@@ -1072,8 +1093,8 @@ export async function createGateway(port = 3200) {
           "./services/settlement-keeper.js"
         );
         const handle = startSettlementKeeper(() => getRepos(), {
-          info: (m) => app.log.info(`[settlement-keeper] ${m}`),
-          warn: (m) => app.log.warn(`[settlement-keeper] ${m}`),
+          info: (m) => app.log.info({ note: declare.id(m) }, lit("[settlement-keeper] note")),
+          warn: (m) => app.log.warn({ note: declare.id(m) }, lit("[settlement-keeper] note")),
         });
         if (process.env.SETTLEMENT_KEEPER_ENABLED === "true") {
           console.log(
@@ -1107,11 +1128,16 @@ if (isMain) {
 
 // Catch unhandled rejections and uncaught exceptions so the process
 // never exits silently. Railway needs log output to diagnose failures.
-process.on("unhandledRejection", (reason) => {
-  console.error("[gateway] Unhandled rejection:", reason);
-});
-process.on("uncaughtException", (err) => {
-  console.error("[gateway] Uncaught exception:", err);
+// Each prints the error closed (N107b): its class, code and code frames, its message as a keyed
+// hash. A rejection from work a request started can echo that request, and these handlers run
+// outside any request scope. Exported for the test.
+export function onUnhandledRejection(reason: unknown): void {
+  console.error("[gateway] Unhandled rejection:", closedError(reason));
+}
+export function onUncaughtException(err: unknown): void {
+  console.error("[gateway] Uncaught exception:", closedError(err));
   process.exit(1);
-});
+}
+process.on("unhandledRejection", onUnhandledRejection);
+process.on("uncaughtException", onUncaughtException);
 

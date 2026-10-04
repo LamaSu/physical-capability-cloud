@@ -11,6 +11,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
+import { declare, lit } from "../observability/closed-schema.js";
 
 export async function pgtrRelayRoutes(app: FastifyInstance) {
   // ── Status ──────────────────────────────────────────────────────────
@@ -163,8 +164,8 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
       });
 
       app.log.info(
-        { txHash, payer, target, amount },
-        "PGTR relay transaction submitted",
+        { txHash: declare.id(txHash), payer: declare.id(payer), target: declare.id(target), amount: declare.id(amount) },
+        lit("PGTR relay transaction submitted"),
       );
 
       return {
@@ -174,7 +175,7 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
         amount,
       };
     } catch (err) {
-      app.log.error({ err, payer, target }, "PGTR relay failed");
+      app.log.error({ err, payer: declare.id(payer), target: declare.id(target) }, lit("PGTR relay failed"));
 
       const message =
         err instanceof Error ? err.message : "Unknown relay error";

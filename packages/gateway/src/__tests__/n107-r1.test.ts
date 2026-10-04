@@ -14,12 +14,19 @@ import { Writable } from "node:stream";
 import type { AddressInfo } from "node:net";
 
 const events = vi.hoisted(() => [] as Array<{ name: string; props: Record<string, unknown>; distinctId?: string }>);
-vi.mock("../services/posthog-service.js", () => ({
-  initPostHog: vi.fn(),
-  trackServerEvent: (name: string, props: Record<string, unknown>, distinctId?: string) => events.push({ name, props, distinctId }),
-  identifyAgent: vi.fn(),
-  shutdownPostHog: vi.fn().mockResolvedValue(undefined),
-}));
+// The PostHog boundary's contract (N107b round 2): the event name and the properties leave closed, a
+// declared field as declared and anything else as its keyed hash. The producer's distinct id is kept
+// as passed (the boundary hashes it).
+vi.mock("../services/posthog-service.js", async () => {
+  const { closedText, closeValue } = await import("../observability/closed-schema.js");
+  return {
+    initPostHog: vi.fn(),
+    trackServerEvent: (name: unknown, props: unknown, distinctId?: unknown) =>
+      events.push({ name: closedText(name), props: closeValue(props ?? {}) as Record<string, unknown>, distinctId: distinctId === undefined ? undefined : String(distinctId) }),
+    identifyAgent: vi.fn(),
+    shutdownPostHog: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 // Built at runtime, so no literal here looks like a secret.
 const mark = (name: string) => ["n107r1", name, "4e2a"].join("-");
@@ -104,12 +111,28 @@ describe("CRITICAL 1 (r1 of #514): a fingerprint carries no header's text", () =
     await raw("GET", "/admin", { "user-agent": "Mozilla/5.0 (X11) Firefox/128.0", "accept-language": "en-US,en;q=0.9", referer: "https://elsewhere.test/a" });
     await settle();
     const honeypot = events.slice(start).find((e) => e.name === "honeypot_triggered")!;
-    expect(honeypot.props).toMatchObject({ uaClass: "browser", acceptLanguage: "en", referer: "cross_origin", path: "/admin" });
-    for (const key of ["ip", "userAgent", "xForwardedFor", "railwayEdge", "cfRay"]) expect(honeypot.props, key).not.toHaveProperty(key);
+    // N107b (the PR steward's closed schema): the Accept-Language is not reported at all.
+    expect(honeypot.props).toMatchObject({ uaClass: "browser", referer: "cross_origin", path: "/admin" });
+    for (const key of ["ip", "userAgent", "xForwardedFor", "railwayEdge", "cfRay", "acceptLanguage", "uaLength"]) expect(honeypot.props, key).not.toHaveProperty(key);
     // The client is a keyed hash, and PostHog's distinct id is built from it, never from the address.
-    expect(honeypot.props.clientId).toMatch(/^[0-9a-f]{16}$/);
+    expect(honeypot.props.clientId).toMatch(/^h:[0-9a-f]{32}$/);
     expect(honeypot.distinctId).toBe(`security:${honeypot.props.clientId}`);
     expect(JSON.stringify(honeypot)).not.toContain("127.0.0.1");
+  });
+});
+
+describe("MEDIUM 1 (r2 of #514), then the steward's ruling #5664: neither the language nor the country is reported", () => {
+  it("Accept-Language zqx and cf-ipcountry ZQ or US: no language field and no country field", async () => {
+    const start = events.length;
+    await raw("GET", "/admin", { "accept-language": "zqx", "cf-ipcountry": "ZQ" });
+    await raw("GET", "/admin", { "cf-ipcountry": "US" });
+    await settle();
+    const honeypots = events.slice(start).filter((e) => e.name === "honeypot_triggered");
+    expect(honeypots).toHaveLength(2);
+    expect(honeypots[0]!.props).not.toHaveProperty("acceptLanguage");
+    for (const honeypot of honeypots) expect(honeypot.props).not.toHaveProperty("cfCountry");
+    const sent = JSON.stringify(honeypots);
+    for (const value of ["zqx", "ZQ", "US"]) expect(sent).not.toContain(`"${value}"`);
   });
 });
 

@@ -307,17 +307,20 @@ describe("POST /api/feedback (public)", () => {
         payload: { type: "bug", summary: "observability wiring test", endpoint: "/api/build/contract", errorCode: "E42", traceId: "tr_obs1", agentId: "claude" },
       });
       expect(spy).toHaveBeenCalledTimes(1);
-      const ev = spy.mock.calls[0][0] as { eventType: string; resourceType: string; resourceId: string; metadata: Record<string, unknown> };
-      expect(ev.eventType).toBe("agent.report"); // the exact event admin-observability queries
-      expect(ev.resourceType).toBe("agent_report");
+      const ev = spy.mock.calls[0][0] as { eventType: unknown; resourceType: unknown; resourceId: string; metadata: Record<string, unknown> };
+      // As the closed audit log stores the call (N107b round 2): the codes are declared, and what the
+      // agent wrote is its keyed hash under the field's own name.
+      const { closedText, closeValue, keyedHash } = await import("../observability/closed-schema.js");
+      expect(closedText(ev.eventType)).toBe("agent.report"); // the exact event admin-observability queries
+      expect(closedText(ev.resourceType)).toBe("agent_report");
       expect(ev.resourceId).toMatch(/^fb-/);
       // metadata field names must match admin-observability.ts's readers
-      expect(ev.metadata).toMatchObject({
-        trace_id: "tr_obs1",
-        summary: "observability wiring test",
-        last_endpoint: "/api/build/contract",
-        last_error_code: "E42",
-        agent_kind: "claude",
+      expect(closeValue(ev.metadata)).toMatchObject({
+        trace_id: keyedHash("tr_obs1"),
+        summary: keyedHash("observability wiring test"),
+        last_endpoint: keyedHash("/api/build/contract"),
+        last_error_code: keyedHash("E42"),
+        agent_kind: keyedHash("claude"),
         confused_about: "bug",
       });
     } finally {

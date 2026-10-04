@@ -18,6 +18,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -273,11 +274,13 @@ export class KernelService {
       metadata: { deviceId, kernelId: this.config.kernelId ?? "default" },
     });
 
-    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
+    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it. The local
+    // collector is a sink any key holder reads (GET /api/traces): the operation and service are
+    // declared, and the job's id, step and tier (a caller's values) leave keyed (N107b round 5).
     const { traceId, spanId: lifecycleLocalSpanId } = startTrace(
-      "job.lifecycle",
-      "kernel",
-      { "job.id": jobId, "job.type": stepId, "job.assurance_tier": assuranceTier },
+      lit("job.lifecycle"),
+      lit("kernel"),
+      { "job.id": declare.id(jobId), "job.type": declare.id(stepId), "job.assurance_tier": declare.id(assuranceTier) },
     );
     // Store traceId on the running job so we can reference it in callbacks
     (this.runningJobs.get(jobId) as unknown as { traceId: string }).traceId = traceId;
@@ -360,7 +363,7 @@ export class KernelService {
                     });
                   } catch (err) {
                     // Settlement pipeline is non-fatal — the job itself succeeded
-                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                    console.warn(lit("[kernel-service] Settlement pipeline failed:"), err);
                   } finally {
                     // Clean up in-memory evidence data
                     this.emitter.cleanup(jobId, stepId);
@@ -443,7 +446,7 @@ export class KernelService {
                   contractAddress,
                 });
               } catch (err) {
-                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                console.warn(lit("[kernel-service] Settlement pipeline failed:"), err);
               } finally {
                 // Clean up in-memory evidence data
                 this.emitter.cleanup(jobId, stepId);

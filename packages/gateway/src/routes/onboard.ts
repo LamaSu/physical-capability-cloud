@@ -17,6 +17,10 @@ import {
 // time so once the flag flips, scoped listing yields correct rows without a
 // data backfill.
 import { tenantOpts } from "../config/tenant-enforce.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** analyzeOnboardingText's `mode` (routes/onboard-analysis.ts) — a type-enforced closed set. */
+const ONBOARD_ANALYSIS_MODES: readonly string[] = ["llm", "heuristic"];
 
 const GATECRAFT_URL = process.env.GATECRAFT_URL ?? "https://gatecraft-production.up.railway.app";
 
@@ -44,13 +48,13 @@ export async function onboardRoutes(app: FastifyInstance) {
     try {
       const sourceDocumentId = coalesceSourceDocumentId(req.body);
       const { analysis, mode, warning } = await analyzeOnboardingText(text, { sourceDocumentId });
-      trackServerEvent("document_analyzed", {
-        mode,
-        type: analysis.suggestedCapabilities[0]?.type ?? "unknown",
+      trackServerEvent(lit("document_analyzed"), {
+        mode: declare.code(mode, ONBOARD_ANALYSIS_MODES),
+        type: declare.id(analysis.suggestedCapabilities[0]?.type ?? "unknown"),
       });
       return { status: "ok", analysis, mode, ...(warning ? { warning } : {}) };
     } catch (e) {
-      req.log.error(e, "[onboard] analyze failed");
+      req.log.error({ err: e }, lit("[onboard] analyze failed"));
       return reply.status(500).send({
         error: "analysis_failed",
         message: (e as Error).message,
@@ -122,16 +126,16 @@ export async function onboardRoutes(app: FastifyInstance) {
         createdAt: registration.createdAt,
         submittedAt: registration.submittedAt,
       });
-    } catch (e) { console.warn("[onboard] DB insert failed, continuing:", (e as Error).message); }
+    } catch (e) { console.warn(lit("[onboard] DB insert failed, continuing:"), e); }
     pipelineTelemetry.emit(registration.id, "operator_register", "completed", { metadata: { name: registration.name, category: registration.category } });
-    trackServerEvent("operator_registered", { name: registration.name, category: registration.category });
+    trackServerEvent(lit("operator_registered"), { name: declare.id(registration.name), category: declare.id(registration.category) });
     auditService.log({
-      eventType: "operator.registered",
+      eventType: lit("operator.registered"),
       actor: (req as any).operatorId ?? (req as any).apiKeyId ?? registration.operator?.walletAddress,
-      resourceType: "registration",
-      resourceId: registration.id,
-      action: "create",
-      metadata: { name: registration.name, category: registration.category },
+      resourceType: lit("registration"),
+      resourceId: declare.id(registration.id),
+      action: lit("create"),
+      metadata: { name: declare.id(registration.name), category: declare.id(registration.category) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -180,12 +184,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     }
     repos.registrations.updateStatus(req.params.id, "approved", { approvedAt: new Date().toISOString() });
     auditService.log({
-      eventType: "operator.approved",
+      eventType: lit("operator.approved"),
       actor: (req as any).operatorId ?? (req as any).apiKeyId,
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "approve",
-      metadata: { name: reg.name },
+      resourceType: lit("registration"),
+      resourceId: declare.id(reg.id),
+      action: lit("approve"),
+      metadata: { name: declare.id(reg.name) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -204,12 +208,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     const reason = body?.reason ?? "No reason provided";
     repos.registrations.updateStatus(req.params.id, "rejected", { description: `REJECTED: ${reason}` });
     auditService.log({
-      eventType: "operator.rejected",
+      eventType: lit("operator.rejected"),
       actor: (req as any).operatorId ?? (req as any).apiKeyId,
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "reject",
-      metadata: { name: reg.name, reason: body?.reason },
+      resourceType: lit("registration"),
+      resourceId: declare.id(reg.id),
+      action: lit("reject"),
+      metadata: { name: declare.id(reg.name), reason: declare.id(body?.reason) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -274,12 +278,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     if (!updated) return reply.status(500).send({ error: "update_failed" });
 
     auditService.log({
-      eventType: "operator.edited",
+      eventType: lit("operator.edited"),
       actor: callerId ?? "anonymous",
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "update",
-      metadata: { fields: Object.keys(patch) },
+      resourceType: lit("registration"),
+      resourceId: declare.id(reg.id),
+      action: lit("update"),
+      metadata: { fields: declare.id(Object.keys(patch)) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -314,12 +318,12 @@ export async function onboardRoutes(app: FastifyInstance) {
     });
 
     auditService.log({
-      eventType: "operator.deleted",
+      eventType: lit("operator.deleted"),
       actor: callerId ?? "anonymous",
-      resourceType: "registration",
-      resourceId: reg.id,
-      action: "delete",
-      metadata: { soft: true, deletedAt },
+      resourceType: lit("registration"),
+      resourceId: declare.id(reg.id),
+      action: lit("delete"),
+      metadata: { soft: declare.flag(true), deletedAt: declare.serverTime(new Date(deletedAt)) },
       ip: req.ip,
       userAgent: req.headers["user-agent"],
     });
@@ -527,14 +531,21 @@ export async function onboardRoutes(app: FastifyInstance) {
         repos.registrations.updateStatus(req.params.id, "active", { approvedAt: now, description: `PROVED: ${proveMetadata}` });
 
         pipelineTelemetry.emit(reg.id, "operator_verify", "completed", { metadata: { proofCount: proofs.length, autoApproved: true, assuranceTier } });
-        trackServerEvent("operator_proved", { proofCount: proofs.length, assuranceTier });
+        // proofs.length reflects which evidence fields the caller chose to submit, and
+        // assuranceTier is derived from that same caller-controlled shape — declare.id, not metric.
+        trackServerEvent(lit("operator_proved"), { proofCount: declare.id(proofs.length), assuranceTier: declare.id(assuranceTier) });
         auditService.log({
-          eventType: "operator.proved",
+          eventType: lit("operator.proved"),
           actor: (req as any).operatorId ?? (req as any).apiKeyId ?? reg.operator?.walletAddress,
-          resourceType: "registration",
-          resourceId: reg.id,
-          action: "prove",
-          metadata: { proofCount: proofs.length, assuranceTier, autoApproved: true, proofs },
+          resourceType: lit("registration"),
+          resourceId: declare.id(reg.id),
+          action: lit("prove"),
+          metadata: {
+            proofCount: declare.id(proofs.length),
+            assuranceTier: declare.id(assuranceTier),
+            autoApproved: declare.flag(true),
+            proofs: declare.id(proofs),
+          },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });
@@ -676,7 +687,7 @@ export async function onboardRoutes(app: FastifyInstance) {
         },
       });
     } catch (err) {
-      app.log.error(err, "Onboard redeem failed");
+      app.log.error({ err }, lit("Onboard redeem failed"));
       return reply.status(502).send({ error: "Identity service unreachable" });
     }
   });

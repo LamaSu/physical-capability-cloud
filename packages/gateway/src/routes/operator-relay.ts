@@ -19,6 +19,7 @@ import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
 import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
+import { declare, lit } from "../observability/closed-schema.js";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -110,7 +111,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       const job = repos.jobs.findById(jobId);
       if (!job) {
         // Return 200 anyway — the node shouldn't hard-fail on this
-        app.log.warn(`operator-relay: evidence for unknown job ${jobId}`);
+        app.log.warn({ jobId: declare.id(jobId) }, lit("operator-relay: evidence for unknown job"));
         return {
           stored: false,
           jobId,
@@ -203,7 +204,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         });
       } catch (insertErr) {
         // Evidence insert failed — still acknowledge receipt
-        app.log.error(`operator-relay: evidence insert failed: ${insertErr}`);
+        app.log.error({ err: insertErr }, lit("operator-relay: evidence insert failed"));
         return {
           stored: false,
           jobId,

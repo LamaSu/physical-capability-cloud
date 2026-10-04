@@ -5,6 +5,7 @@ import { OracleVerificationBridge, StarknetProofAnchoringService, configFromEnv 
 import { getRepos } from "../db.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // Singleton oracle verification bridge — config driven by env vars.
 // Set ORACLE_MOCK=false to activate live UMA/Chainlink verification.
@@ -215,19 +216,24 @@ export async function zkProofRoutes(app: FastifyInstance) {
         const depth = body.treeDepth ?? 0;
         try {
           const anchor = await starknetService.anchorMerkleRoot(body.merkleRoot, depth);
-          trackServerEvent("zk_proof_anchored", {
-            type: "merkle_root",
-            merkleRoot: body.merkleRoot,
-            txHash: anchor.txHash,
-            mock: starknetService.isMock(),
+          trackServerEvent(lit("zk_proof_anchored"), {
+            type: lit("merkle_root"),
+            merkleRoot: declare.id(body.merkleRoot),
+            txHash: declare.id(anchor.txHash),
+            mock: declare.flag(starknetService.isMock()),
           }, (req as any).operatorId);
           auditService.log({
-            eventType: "zk.proof_anchored",
+            eventType: lit("zk.proof_anchored"),
             actor: (req as any).operatorId ?? (req as any).apiKeyId,
-            resourceType: "zk_anchor",
-            resourceId: anchor.txHash,
-            action: "anchor",
-            metadata: { type: "merkle_root", merkleRoot: body.merkleRoot, depth, mock: starknetService.isMock() },
+            resourceType: lit("zk_anchor"),
+            resourceId: declare.id(anchor.txHash),
+            action: lit("anchor"),
+            metadata: {
+              type: lit("merkle_root"),
+              merkleRoot: declare.id(body.merkleRoot),
+              depth: declare.id(depth),
+              mock: declare.flag(starknetService.isMock()),
+            },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
@@ -258,19 +264,19 @@ export async function zkProofRoutes(app: FastifyInstance) {
 
       try {
         const anchor = await starknetService.anchorProof(proof);
-        trackServerEvent("zk_proof_anchored", {
-          type: "proof",
-          proofId: body.proofId,
-          txHash: anchor.txHash,
-          mock: starknetService.isMock(),
+        trackServerEvent(lit("zk_proof_anchored"), {
+          type: lit("proof"),
+          proofId: declare.id(body.proofId),
+          txHash: declare.id(anchor.txHash),
+          mock: declare.flag(starknetService.isMock()),
         }, (req as any).operatorId);
         auditService.log({
-          eventType: "zk.proof_anchored",
+          eventType: lit("zk.proof_anchored"),
           actor: (req as any).operatorId ?? (req as any).apiKeyId,
-          resourceType: "zk_anchor",
-          resourceId: anchor.txHash,
-          action: "anchor",
-          metadata: { type: "proof", proofId: body.proofId, mock: starknetService.isMock() },
+          resourceType: lit("zk_anchor"),
+          resourceId: declare.id(anchor.txHash),
+          action: lit("anchor"),
+          metadata: { type: lit("proof"), proofId: declare.id(body.proofId), mock: declare.flag(starknetService.isMock()) },
           ip: req.ip,
           userAgent: req.headers["user-agent"],
         });

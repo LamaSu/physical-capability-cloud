@@ -27,21 +27,41 @@ const h = vi.hoisted(() => {
   };
 });
 
-vi.mock("../services/audit-service.js", () => ({
+// The audit writer's contract (N107b, round 2): a code is stored as its producer declared it (or
+// as its keyed hash), the actor and the resource id as keyed hashes, the metadata closed.
+vi.mock("../services/audit-service.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/audit-service.js")>("../services/audit-service.js");
+  const { closedId, closedText, closeValue } = await import("../observability/closed-schema.js");
+  return {
+  isStoredId: actual.isStoredId,
+  storedIdKey: actual.storedIdKey,
   auditService: {
     log: (e: Record<string, unknown>) => {
-      h.logged.push({ ...e });
+      h.logged.push({
+        ...e,
+        eventType: closedText(e.eventType),
+        action: closedText(e.action),
+        ...(e.resourceType != null ? { resourceType: closedText(e.resourceType) } : {}),
+        ...(e.actor != null ? { actor: closedId(e.actor) } : {}),
+        ...(e.resourceId != null ? { resourceId: closedId(e.resourceId) } : {}),
+        ...(e.metadata ? { metadata: closeValue(e.metadata, 1) } : {}),
+      });
     },
     query: (opts: { eventType?: string }) =>
       h.logged.filter((r) => !opts?.eventType || r.eventType === opts.eventType),
     stats: () => [],
   },
-}));
+  };
+});
 
-vi.mock("../services/posthog-service.js", () => ({
-  identifyAgent: (...a: unknown[]) => h.identifySpy(...a),
-  trackServerEvent: (...a: unknown[]) => h.trackSpy(...a),
-}));
+// The PostHog boundary's contract: the event name and the properties leave closed.
+vi.mock("../services/posthog-service.js", async () => {
+  const { closedText, closeValue } = await import("../observability/closed-schema.js");
+  return {
+    identifyAgent: (distinctId: unknown, props?: unknown) => h.identifySpy(distinctId, closeValue(props ?? {})),
+    trackServerEvent: (name: unknown, props?: unknown, distinctId?: unknown) => h.trackSpy(closedText(name), closeValue(props ?? {}), distinctId),
+  };
+});
 
 // Import AFTER the mocks are declared.
 import {
@@ -129,6 +149,8 @@ describe("funnelTrackerPlugin (end-to-end)", () => {
     // provision (deduped to 1) + discover = 2 rows
     expect(funnelRows).toHaveLength(2);
     expect(funnelRows.map((r) => r.action).sort()).toEqual(["discover", "provision"]);
+    // Every field is declared, so the closed audit log keeps it readable (N107b round 2).
+    expect(funnelRows.find((r) => r.action === "provision")!.metadata).toMatchObject({ stage: "provision", route: "/api/auth/provision", status: 200 });
 
     // identify called exactly once (on provision)
     expect(h.identifySpy).toHaveBeenCalledTimes(1);

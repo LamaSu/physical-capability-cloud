@@ -28,6 +28,7 @@ import {
 } from "./populators/kernel.populator.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -138,7 +139,11 @@ export function resolveKernelTtlHours(): number {
     parsed > KERNEL_TTL_UPPER_BOUND_HOURS
   ) {
     console.warn(
-      `[kernel-ttl] KERNEL_TTL_HOURS="${raw}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
+      lit("[kernel-ttl] KERNEL_TTL_HOURS out of band; using default"),
+      declare.id(raw),
+      declare.metric(KERNEL_TTL_LOWER_BOUND_HOURS),
+      declare.metric(KERNEL_TTL_UPPER_BOUND_HOURS),
+      declare.metric(KERNEL_TTL_DEFAULT_HOURS),
     );
     return KERNEL_TTL_DEFAULT_HOURS;
   }
@@ -434,17 +439,17 @@ export class KernelFacade extends BaseFacade {
       const inserted = repos.kernels.insert(kernelData);
 
       trackServerEvent(
-        "kernel_registered",
-        { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
+        lit("kernel_registered"),
+        { kernelId: declare.id(id), name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress) },
         actorId,
       );
       auditService.log({
-        eventType: "kernel.created",
+        eventType: lit("kernel.created"),
         actor: actorId ?? kernelData.operatorAddress,
-        resourceType: "kernel",
-        resourceId: id,
-        action: "create",
-        metadata: { name: kernelData.name, operatorAddress: kernelData.operatorAddress },
+        resourceType: lit("kernel"),
+        resourceId: declare.id(id),
+        action: lit("create"),
+        metadata: { name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress) },
         ip,
         userAgent,
       });
