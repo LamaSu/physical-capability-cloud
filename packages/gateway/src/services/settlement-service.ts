@@ -116,17 +116,20 @@ export class SettlementService {
     }
 
     // ── Local trace (alongside Sentry) ──────────────────────────────────────
+    // The local collector is a sink any key holder reads (GET /api/traces): each span's operation
+    // and service are declared, the server's own conditions are declared flags, and every id or
+    // count a bundle or caller supplies leaves keyed (N107b round 5).
     const localTraceId = TraceCollector.newTraceId();
     const localRootSpanId = TraceCollector.newSpanId();
     traceCollector.startSpan({
       traceId: localTraceId,
       spanId: localRootSpanId,
-      operation: "settlement.pipeline",
-      service: "settlement",
+      operation: lit("settlement.pipeline"),
+      service: lit("settlement"),
       attributes: {
-        "job.id": jobId,
-        "bundle.id": bundle.id,
-        "bundle.assurance_tier": bundle.assuranceTier,
+        "job.id": declare.id(jobId),
+        "bundle.id": declare.id(bundle.id),
+        "bundle.assurance_tier": declare.id(bundle.assuranceTier),
       },
     });
 
@@ -149,9 +152,9 @@ export class SettlementService {
             traceId: localTraceId,
             spanId: ipfsSpanId,
             parentSpanId: localRootSpanId,
-            operation: "settlement.ipfs_archive",
-            service: "storage",
-            attributes: { "bundle.id": bundle.id },
+            operation: lit("settlement.ipfs_archive"),
+            service: lit("storage"),
+            attributes: { "bundle.id": declare.id(bundle.id) },
           });
           await Sentry.startSpan(
             { name: "settlement.ipfs_archive", op: "storage", attributes: { "bundle.id": bundle.id } },
@@ -183,9 +186,9 @@ export class SettlementService {
             traceId: localTraceId,
             spanId: dbSpanId,
             parentSpanId: localRootSpanId,
-            operation: "settlement.db_persist",
-            service: "db",
-            attributes: { "job.id": jobId, "event.count": bundle.events.length },
+            operation: lit("settlement.db_persist"),
+            service: lit("db"),
+            attributes: { "job.id": declare.id(jobId), "event.count": declare.id(bundle.events.length) },
           });
           await Sentry.startSpan(
             { name: "settlement.db_persist", op: "db", attributes: { "job.id": jobId, "event.count": bundle.events.length } },
@@ -234,12 +237,12 @@ export class SettlementService {
             traceId: localTraceId,
             spanId: onchainSubmitSpanId,
             parentSpanId: localRootSpanId,
-            operation: "settlement.onchain_submit",
-            service: "blockchain",
+            operation: lit("settlement.onchain_submit"),
+            service: lit("blockchain"),
             attributes: {
-              "job.id": jobId,
-              "contract.address": contractAddress ?? "none",
-              "write.enabled": isWriteEnabled(),
+              "job.id": declare.id(jobId),
+              "contract.address": declare.id(contractAddress ?? "none"),
+              "write.enabled": declare.flag(isWriteEnabled()),
             },
           });
           await Sentry.startSpan(
@@ -346,12 +349,12 @@ export class SettlementService {
             traceId: localTraceId,
             spanId: onchainReleaseSpanId,
             parentSpanId: localRootSpanId,
-            operation: "settlement.onchain_release",
-            service: "blockchain",
+            operation: lit("settlement.onchain_release"),
+            service: lit("blockchain"),
             attributes: {
-              "job.id": jobId,
-              "auto_release": autoRelease,
-              "contract.address": contractAddress ?? "none",
+              "job.id": declare.id(jobId),
+              "auto_release": declare.flag(autoRelease === true),
+              "contract.address": declare.id(contractAddress ?? "none"),
             },
           });
           await Sentry.startSpan(
