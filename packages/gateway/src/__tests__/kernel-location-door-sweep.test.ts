@@ -898,12 +898,18 @@ const SPECIAL_POST_URLS = new Set(SPECIAL_POST_CALLS.map(([url]) => url));
 //
 // This is what finally closes astra's "reached, not called" gap for routes needing a binary
 // body, a signed message, or a row that only exists after a prior POST — e.g. /api/storage
-// (binary + auth), /api/auth/verify (nonce + a locally-generated SIWE signature), and ~35
+// (binary + auth), /api/auth/verify (nonce + a locally-generated SIWE signature), and the many
 // NOT_REACHED entries below that turned out to be the SAME gap (an entity created by a
 // prior, already-reachable POST, keyed by a real id the generic path-param filler could never
 // guess) rather than something structurally unreachable. Every dynamic fixture here was
 // decided by reading that route's handler (not guessed) — see the NOT_REACHED table and its
 // STALE-entry check for the full accounting of what moved and why.
+//
+// N68b (follow-up to #533 r5): ten more of those entries turned out to be the SAME gap, just
+// with a stateless-mock twist round 2-5 missed — astra's r5 reproduction (and this round's own
+// wider re-check of every sibling route sharing the same seed) moved them here too; see this
+// block's own extended comment just above the Object.assign that adds them, and the NOT_REACHED
+// table for the exact 20 entries that remain, each now carrying an executable `witness`.
 // ─────────────────────────────────────────────────────────────────────────────────────────
 interface FixtureCtx {
   app: FastifyInstance;
@@ -2088,6 +2094,99 @@ Object.assign(FIXTURE_POST_BODIES, {
   }) as DynamicFixture,
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// N68b (empirical NOT_REACHED verification, follow-up to #533 r5 — the FOURTH round on the
+// same MEDIUM: "NOT_REACHED claims a route is unreachable when it is reachable"). The
+// cross-family reviewer reproduced four of these at a6268d21 BEFORE this fix (see
+// n68-r6-repro.log, SHA a6268d21e0794cb91b92075e60ad5e1e1c1b7c9f as its first line) — each is
+// moved here with the SAME verified mechanism, generalized to its unreached siblings that share
+// the identical gap (confirmed by reading every handler involved, not guessed):
+//   - asset-outbound.ts's PUT .../budget creates a budget fixtureCall already knows how to drive
+//     (fixtureCall supports PUT; see its own docstring above) — the two framework_limit entries
+//     that claimed this sweep's GET/POST pair "never exercises" PUT were simply wrong about what
+//     this file's own helper can do.
+//   - protocols.ts's automation-status / template / run handlers are ALL stateless reads of
+//     hardcoded seed arrays (mockAutomationStatuses, mockTemplates, mockRuns) — none of them
+//     ever assigns back into the seed (grepped the whole file for `.push(`/`.status =`/index
+//     writes: zero hits outside two unrelated LOCAL arrays inside /validate). A precondition
+//     that a SEEDED row already satisfies is therefore satisfied FOREVER, not just on the one
+//     reproduction, and every sibling route reading the SAME seed under the SAME kind of
+//     precondition is equally reachable:
+//       * node-liquid/node-centrifuge (mockAutomationStatuses[0], protocols.ts:404-416)
+//         satisfies BOTH /episode (any existing pair) and /advance (currentLevel="manual" is
+//         index 0 of 5, not the last — protocols.ts:685-706).
+//       * ptpl_3dprint_qc001 (mockTemplates[1], protocols.ts:209-265, status "draft") satisfies
+//         /publish (status != "published", protocols.ts:521-534) AND /fork, /runs, /validate
+//         (protocols.ts:536-549,587-601,720-765 — no status precondition at all; existence is
+//         the only gate, and none of the four ever flips the template's in-memory status).
+//       * prun_active_001 (mockRuns[0], protocols.ts:377-399, status "running" — NEVER mutated,
+//         see the NOT_REACHED entries for /start and /resume below for why) satisfies /pause
+//         (status=="running", protocols.ts:612-619) AND /cancel (status not in
+//         {completed,cancelled}, protocols.ts:630-637) — but genuinely NOT /start or /resume.
+// ─────────────────────────────────────────────────────────────────────────────────────────
+Object.assign(FIXTURE_POST_BODIES, {
+  "/api/assets/:id/outbound-demand": (async (ctx: FixtureCtx) => {
+    const assetId = `n68b-dynfix-asset-${ctx.ip()}`;
+    await fixtureCall(ctx, "PUT", `/api/assets/${encodeURIComponent(assetId)}/budget`, {
+      ownerDid: "did:n68b-dynfix", budgetCapUSD: 10, dailyCapUSD: 10, requiresOwnerApproval: true,
+    });
+    const r = await fixtureCall(ctx, "POST", `/api/assets/${encodeURIComponent(assetId)}/outbound-demand`, {
+      description: "N68b dynamic fixture outbound demand", requiredCapabilityType: "3d-printing",
+      maxPriceUSD: 5, minAssuranceTier: 0,
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/assets/:id/outbound-demand/:demandId/approve": (async (ctx: FixtureCtx) => {
+    const assetId = `n68b-dynfix-asset-approve-${ctx.ip()}`;
+    await fixtureCall(ctx, "PUT", `/api/assets/${encodeURIComponent(assetId)}/budget`, {
+      ownerDid: "did:n68b-dynfix", budgetCapUSD: 10, dailyCapUSD: 10, requiresOwnerApproval: true,
+    });
+    const created = await fixtureCall(ctx, "POST", `/api/assets/${encodeURIComponent(assetId)}/outbound-demand`, {
+      description: "N68b dynamic fixture outbound demand for approval", requiredCapabilityType: "3d-printing",
+      maxPriceUSD: 5, minAssuranceTier: 0,
+    });
+    const demandId = String(created.json.demandId ?? "");
+    const r = await fixtureCall(
+      ctx, "POST",
+      `/api/assets/${encodeURIComponent(assetId)}/outbound-demand/${encodeURIComponent(demandId)}/approve`,
+      { approved: false, approverDid: "did:n68b-dynfix" },
+    );
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/automation-status/:fromNodeId/:toNodeId/episode": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/automation-status/node-liquid/node-centrifuge/episode", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/automation-status/:fromNodeId/:toNodeId/advance": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/automation-status/node-liquid/node-centrifuge/advance", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/protocols/:id/publish": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/protocols/ptpl_3dprint_qc001/publish", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/protocols/:id/fork": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/protocols/ptpl_3dprint_qc001/fork", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/protocols/:id/runs": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/protocols/ptpl_3dprint_qc001/runs", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/protocols/:id/validate": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/protocols/ptpl_3dprint_qc001/validate", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/protocol-runs/:runId/pause": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/protocol-runs/prun_active_001/pause", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/protocol-runs/:runId/cancel": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/protocol-runs/prun_active_001/cancel", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+});
+
 /** A handful of FIXTURE_POST_BODIES routes also need a non-default header to reach 2xx — the
  *  MCP Streamable-HTTP surfaces (mcp/http-mcp-server.ts, mcp/docs-mcp-server.ts) 406 a plain
  *  JSON-only Accept header with "Not Acceptable: Client must accept both application/json and
@@ -2191,6 +2290,39 @@ const POST_EXCLUSIONS: PostExclusion[] = [
     test: (u) => u === "/api/evidence/:bundleId/lit-decrypt" || u === "/api/evidence/encrypted/:bundleId/grant",
     reason: "external side effect — Lit Protocol threshold-decryption / access-grant surface; real-network gating not independently verified for an automated sweep",
   },
+  // N68b (follow-up to #533 r5): carrier.ts's /shipments and lob.ts's /letters previously
+  // carried a NOT_REACHED entry classified admin_or_owner_only ("even a real job would 403
+  // since the stranger pass is neither submitter nor kernel-operator"). Re-checked fresh: that
+  // was the WRONG blocker. kernels.ts:163 resolves actorId from the caller's own auth context,
+  // and kernel.facade.ts:493 stamps a freshly-created kernel's operatorAddress with THAT SAME
+  // actorId automatically ("Authenticated creates are owned by the stable actor identity") — so
+  // a stranger who registers their OWN kernel+job would clear carrier.ts's/lob.ts's
+  // owner.toLowerCase()===caller.toLowerCase() check (carrier.ts:588; lob.ts's callerId() at
+  // lob.ts:65 resolves the identical req.operatorId??req.userId). Ownership is not a boundary
+  // this sweep structurally respects here, unlike e.g. compliance.ts's attestations/aggregate
+  // (see that NOT_REACHED entry, which verified the OPPOSITE: neither of ITS two ownership
+  // paths is ever satisfiable by anyone). The real and ONLY reason these two stay uncalled is
+  // the category this comment block already covers — moved here per money_movement's own
+  // "prefer POST_EXCLUSIONS for these" rule, instead of a NOT_REACHED entry with an inaccurate
+  // blocker.
+  {
+    test: (u) => u === "/api/carrier/shipments",
+    reason:
+      "mutates money — reserves, buys, and finalizes a real (EASYPOST_API_KEY absent in this " +
+      "test env, so mocked) shipping-label purchase through a multi-step reserve/buy/finalize " +
+      "state machine; the route's own comment self-describes it as \"this money route\" " +
+      "(carrier.ts:582). Excluded on principle, same as the on-chain escrow/settlement entries " +
+      "above — NOT because ownership is unreachable (it is: see this block's own header note).",
+  },
+  {
+    test: (u) => u === "/api/lob/letters",
+    reason:
+      "mutates money — self-described as \"this MONEY route\" (lob.ts:330) that \"spends the " +
+      "deployment's Lob balance\" (lob.ts:347) to create and charge a real (LOB_API_KEY absent " +
+      "in this test env, so mocked) mailed letter. Excluded on principle, same shape as " +
+      "carrier/shipments above — NOT because ownership is unreachable (see this block's own " +
+      "header note).",
+  },
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -2213,160 +2345,246 @@ const POST_EXCLUSIONS: PostExclusion[] = [
 // validates both mechanically (unknown category -> fail; cite that doesn't look like a file:
 // line -> fail) — a reason can still be prose, but it can no longer be ONLY prose.
 // ─────────────────────────────────────────────────────────────────────────────────────────
+// N68b (follow-up to #533 r5, the FOURTH round on this MEDIUM): round 4's category+cite
+// mechanism still let a WRONG blocker claim pass review — it checked the SHAPE of the claim
+// (an allowed category word, a cite that looks like file.ts:line), never whether the claim was
+// TRUE. Closed by construction here: every entry now ALSO carries an executable `witness`. For
+// the categories below that are believed GENUINELY blocked (env_or_feature_gate,
+// admin_or_owner_only, no_creation_route, framework_limit) the witness is a real HTTP call —
+// the BY-CONSTRUCTION test further down actually RUNS it through the same `app` and asserts the
+// response lands on the declared status/code. If it ever lands on 2xx instead, that test fails
+// with "claimed unreachable but reached" — exactly the bug this whole round exists to close.
+// For the two categories that are deliberate SAFETY exclusions rather than genuine
+// unreachability (real_subprocess, external_service) the witness does NOT make a call (it never
+// exercises the hazard); it instead asserts the route is a member of a small, closed,
+// hand-reviewed list for that exact hazard, so the claim stays mechanically checked without
+// ever running the dangerous thing it describes.
+//
+// Two categories from the prior round's closed set are REMOVED here, per this file's own rule
+// ("Remove a category from the closed set when no entry uses it any more"):
+//   - "sse_or_websocket": zero NOT_REACHED entries ever used it — every SSE/WS-shaped POST
+//     route is classified by POST_STREAM_ROUTES above and never reaches this table at all.
+//   - "money_movement": re-checked fresh (N68b) — its two candidate entries (carrier/shipments,
+//     lob/letters) turned out to have an INACCURATE admin_or_owner_only blocker (ownership is
+//     actually self-satisfiable; see compliance.ts's attestations/aggregate below for a case
+//     where it genuinely is NOT), so their true-and-only blocker is the category's own
+//     documented preference ("prefer POST_EXCLUSIONS for these") — both now live in
+//     POST_EXCLUSIONS instead (see that array's N68b addition), leaving zero NOT_REACHED
+//     consumers of "money_movement".
 type NotReachedCategory =
   | "env_or_feature_gate" // an env var or feature flag this sweep deliberately leaves off/absent
   | "admin_or_owner_only" // the sweep's ANON/STRANGER model is specifically meant to respect this gate
-  | "no_creation_route" // no reachable route (POST or otherwise) ever populates the row/store this reads
-  | "real_subprocess" // the handler spawns a real external process (python3, etc.)
-  | "external_service" // the handler makes a real call to a third-party service with no mock mode
-  | "money_movement" // would move money or on-chain state — prefer POST_EXCLUSIONS for these, kept here only if a route is also unreachable for an independent reason
-  | "sse_or_websocket" // a true stream/socket shape, not swept normally
+  | "no_creation_route" // no reachable route (POST or otherwise) ever populates a row satisfying THIS route's own precondition
+  | "real_subprocess" // the handler spawns a real external process (python3, etc.) — deliberate policy exclusion, never called
+  | "external_service" // the handler makes a real call to a third-party service with no mock mode — deliberate policy exclusion, never called
   | "framework_limit"; // a limitation of THIS sweep's own GET/POST method pair or request plumbing, not of the production route
 
 const NOT_REACHED_CATEGORIES: ReadonlySet<NotReachedCategory> = new Set([
   "env_or_feature_gate", "admin_or_owner_only", "no_creation_route", "real_subprocess",
-  "external_service", "money_movement", "sse_or_websocket", "framework_limit",
+  "external_service", "framework_limit",
 ] satisfies NotReachedCategory[]);
 
 /** Must match a `path/to/file.ts:123` (or `:123-456`) shape somewhere in the string — i.e.
  *  point at an ACTUAL line in production source, not just assert a conclusion in prose. */
 const CITE_RE = /\w[\w./-]*\.ts:\d+/;
 
+/** A witness that is actually EXECUTED (the BY-CONSTRUCTION test below calls it through the
+ *  same `app`): for entries believed genuinely blocked, proves the block is real right now, not
+ *  merely plausible in prose. `expect.code` is matched against the JSON body's `error` field
+ *  (this codebase's universal error-shape key) when present. A 2xx response fails the suite. */
+interface CalledWitness {
+  method: "GET" | "POST" | "PUT";
+  /** May contain the literal token ":batchId", resolved at run time via a live GET /api/batches
+   *  lookup — the one entry here whose blocking precondition is live state, not a fixed id. */
+  url: string;
+  body?: unknown;
+  /** True when this route requires no Authorization header (public per api-gate.ts). Every
+   *  other witness gets the stranger's own Bearer token automatically. */
+  noAuth?: true;
+  expect: { status: number[]; code?: string };
+}
+
+/** A witness that is NEVER called (N68b task rule for this shape: "Don't call it"). Proves the
+ *  hazard the category claims by closed-list membership instead of by exercising it — the list
+ *  itself is the reviewable, cite-checked assertion, checked both ways (url ∈ list, and the
+ *  list used IS that hazard's own canonical list) so neither side can drift unnoticed. */
+interface PolicyExclusionWitness {
+  hazard: "real_subprocess" | "external_service";
+  closedList: readonly string[];
+}
+
+type NotReachedWitness = CalledWitness | PolicyExclusionWitness;
+
+function isPolicyExclusionWitness(w: NotReachedWitness): w is PolicyExclusionWitness {
+  return "hazard" in w;
+}
+
+/** The two closed, hand-reviewed lists a PolicyExclusionWitness may cite. */
+const REAL_SUBPROCESS_NOT_REACHED_ROUTES = [
+  "/api/capture/sim", "/api/capture/3d-stream",
+] as const;
+const EXTERNAL_SERVICE_NOT_REACHED_ROUTES = [
+  "/api/onboard/:id/build-agent", "/api/onboard/redeem",
+] as const;
+
 interface NotReachedEntry {
   category: NotReachedCategory;
   /** e.g. "onboard.ts:176-177" or "capture/verifier-factory.ts:115-120" — must match CITE_RE. */
   cite: string;
   reason: string;
+  witness: NotReachedWitness;
 }
 
 const NOT_REACHED: Record<string, NotReachedEntry> = {
-  "/api/assets/:id/outbound-demand": {
-    category: "framework_limit", cite: "asset-outbound.ts:308-314",
-    reason: "loadBudget(assetId) 404s for any synthetic :id — budgets are created only via a prior PUT .../budget, a method this sweep's GET/POST pair never exercises. Re-read fresh round 4: still the only precondition.",
-  },
-  "/api/assets/:id/outbound-demand/:demandId/approve": {
-    category: "framework_limit", cite: "asset-outbound.ts:436-442",
-    reason: "getDemand(:demandId) 404s for any synthetic id — demands are minted via crypto.randomUUID() only after the SAME PUT-gated budget precondition above. Re-read fresh round 4: still holds.",
-  },
-  "/api/automation-status/:fromNodeId/:toNodeId/advance": {
-    category: "no_creation_route", cite: "protocols.ts:685-691",
-    reason: "node ids are compared against hardcoded demo constants (\"node-liquid\" etc), never a DB row; re-read fresh round 4 — confirmed no route anywhere mints a matching node id.",
-  },
-  "/api/automation-status/:fromNodeId/:toNodeId/episode": {
-    category: "no_creation_route", cite: "protocols.ts:663-669",
-    reason: "same hardcoded-node-id shape as /advance above; re-read fresh round 4, still holds.",
-  },
   "/api/batches/:batchId/slots": {
     category: "no_creation_route", cite: "kernel/batch-tracker.ts:24-39",
-    reason: "services.ts:130-156 seeds exactly ONE BatchTracker batch at module load, then immediately seal()s + start()s it before this test ever runs; addSample() 400s \"Cannot add samples to batch in running state\" regardless of :batchId. Re-read fresh round 4: batches.ts (full file) has no OTHER POST that calls batchTracker.createBatch — confirmed no second, still-assembling batch is ever reachable. (The sibling /api/batches/shared/:batchId/claim is a wholly separate in-memory Map, already reached via a dynamic fixture.)",
+    reason: "services.ts:130-156 seeds exactly ONE BatchTracker batch at module load, then immediately seal()s + start()s it before this test ever runs; addSample() 400s \"Cannot add samples to batch in running state\" regardless of :batchId. batches.ts (full file) has no OTHER route that calls batchTracker.createBatch — confirmed no second, still-assembling batch is ever reachable. (The sibling /api/batches/shared/:batchId/claim is a wholly separate in-memory Map, already reached via a dynamic fixture.) Verified empirically at a6268d21 (N68b): the one seeded batch's addSample always 400s with that exact message.",
+    witness: {
+      method: "POST", url: "/api/batches/:batchId/slots", body: {},
+      expect: { status: [400], code: "Cannot add samples to batch in running state" },
+    },
   },
   "/api/capture/anchor": {
     category: "no_creation_route", cite: "capture.ts:690-693",
-    reason: "Gate A only accepts a PASS verdict with anchorCandidate:true. /api/capture/upload's own dynamic fixture (above) DOES now reach 2xx and insert a real verdict row, but with a minimal CC0 manifest carrying no webAuthn/platform/C2PA attestation the real CaptureVerifier's G1..G6 gates produce a FAIL verdict, not a PASS — confirmed by reading the gates (verifier.ts:284-310+); no route in this harness mints a PASS-verdict row.",
-  },
-  "/api/capture/sim": {
-    category: "real_subprocess", cite: "capture-sim.ts:163-226",
-    reason: "spawns a real python3 pcc_genesis_runner.py subprocess regardless of body; re-read fresh round 4, still holds.",
-  },
-  "/api/capture/3d-stream": {
-    category: "real_subprocess", cite: "capture-3d.ts:146-150",
-    reason: "requireAuth + a minimal valid videoBytesBase64 clear validation, but the handler then calls runLingBotInference, which — absent PCC_LINGBOT_STUB — spawns a real LingBot-Map process; re-read fresh round 4, still holds. Not a kernel/capability location surface either way (point maps/poses from the caller's own uploaded video).",
-  },
-  "/api/carrier/shipments": {
-    category: "admin_or_owner_only", cite: "carrier.ts:625-649",
-    reason: "even a real job would 403 since the canary kernel's operator is the OWNER identity, not the stranger pass — exactly the ownership boundary this sweep's ANON/STRANGER model is built to respect, not defeat. Re-read fresh round 4, still holds.",
+    reason: "Gate A only accepts a PASS verdict with anchorCandidate:true. /api/capture/upload's own dynamic fixture (above) DOES reach 2xx and insert a real verdict row, but with a minimal CC0 manifest carrying no webAuthn/platform/C2PA attestation the real CaptureVerifier's G1..G6 gates produce a FAIL verdict, not a PASS — confirmed by reading the gates (verifier.ts:284-310+); no route in this harness mints a PASS-verdict row. Verified empirically at a6268d21 (N68b): any id this sweep can supply 404s first, before the PASS/FAIL question is even reached.",
+    witness: {
+      // Must be UUID-SHAPED (AnchorBodySchema: z.string().uuid(), capture.ts:111) or the
+      // witness would only prove a 400 schema rejection, never reaching the claimed 404.
+      method: "POST", url: "/api/capture/anchor", body: { verdictId: "00000000-0000-4000-8000-000000000000" },
+      expect: { status: [404], code: "verdict_not_found" },
+    },
   },
   "/api/carrier/webhook/easypost": {
     category: "env_or_feature_gate", cite: "carrier.ts:846-851",
-    reason: "503 — EASYPOST_WEBHOOK_SECRET is deliberately cleared in this test env, checked before any signature/business logic. Re-read fresh round 4, still holds.",
+    reason: "503 — EASYPOST_WEBHOOK_SECRET is deliberately cleared in this test env, checked before any signature/business logic. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/carrier/webhook/easypost", body: {}, noAuth: true,
+      expect: { status: [503], code: "webhook_secret_not_configured" },
+    },
   },
   "/api/dht/announce": {
     category: "framework_limit", cite: "middleware/api-gate.ts:35",
-    reason: "api-gate.ts lists \"/api/dht/\" as a public-path prefix, so apiGate never attaches req.apiKeyId/userId for this whole family, and the handler's own auth check (dht-ws.ts:84-88) 401s whenever both are unset — a routing/middleware interaction, not a business-logic gate a real caller could ever clear either.",
+    reason: "api-gate.ts lists \"/api/dht/\" as a public-path prefix (api-gate.ts:35), so apiGate's own onRequest hook returns at its EARLY \"skip public routes\" check (api-gate.ts:151-152) WITHOUT ever attempting resolveApiKey/resolveSession for this whole family — req.apiKeyId/operatorId/userId stay unset whether or not the caller presents a real Bearer token, and the handler's own auth check (dht-ws.ts:84-88) 401s whenever both are unset. A routing/middleware interaction a real caller could not clear either, Bearer token or not — confirmed by reading the full isPublicRoute early-return at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/dht/announce", body: { kernelId: "n68b-witness-kernel", capabilities: ["3d-printing"] },
+      expect: { status: [401], code: "Authentication required for DHT announcements" },
+    },
   },
   "/api/evidence/:bundleId/archive": {
     category: "no_creation_route", cite: "evidence-encrypted.ts:130-131",
-    reason: "findEncryptedByBundleId() has no row for any synthetic bundleId. Re-read fresh round 4: grepped every repos.encryption.insert* call site in the package (zk-proofs.ts's insertCommitment/insertTree/insertProof, evidence-encrypted.ts's own insertGrant) — none of them is the encrypted-bundle insert this lookup needs; no reachable route creates one.",
+    reason: "findEncryptedByBundleId() has no row for any synthetic bundleId. Grepped every repos.encryption.insert* call site in the whole package (zk-proofs.ts's insertCommitment/insertTree/insertProof, evidence-encrypted.ts's own insertGrant) — none of them is the encrypted-bundle insert this lookup needs; no reachable route creates one. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/evidence/n68b-witness-nonexistent-bundle/archive", body: {},
+      expect: { status: [404], code: "not_found" },
+    },
   },
   "/api/fiat-ramp/stripe/credits/deposit": {
     category: "env_or_feature_gate", cite: "fiat-ramp.ts:410-412",
-    reason: "410 Gone — PCC_LEGACY_FIAT_WEBHOOKS unset, returned unconditionally before any body check. Re-read fresh round 4, still holds.",
+    reason: "410 Gone — PCC_LEGACY_FIAT_WEBHOOKS unset, returned unconditionally before any body check. This path was RETIRED by a prior security audit (its own in-file comment: an unsigned webhook \"any authenticated caller could forge\"); re-enabling the flag would restore a named hazard, not flip a neutral toggle. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/fiat-ramp/stripe/credits/deposit", body: { amountUsd: 1 },
+      expect: { status: [410], code: "gone" },
+    },
   },
   "/api/fiat-ramp/webhook/stripe": {
     category: "env_or_feature_gate", cite: "fiat-ramp.ts:706-708",
-    reason: "same PCC_LEGACY_FIAT_WEBHOOKS gate as the credits/deposit entry above, unconditional regardless of body.",
+    reason: "same PCC_LEGACY_FIAT_WEBHOOKS gate as the credits/deposit entry above, unconditional regardless of body — also a security-retired unsigned webhook. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/fiat-ramp/webhook/stripe", body: {},
+      expect: { status: [410], code: "gone" },
+    },
   },
   "/api/fiat-ramp/webhook/yellowcard": {
     category: "env_or_feature_gate", cite: "fiat-ramp.ts:731-733",
-    reason: "same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body.",
+    reason: "same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body — also a security-retired unsigned webhook. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/fiat-ramp/webhook/yellowcard", body: {},
+      expect: { status: [410], code: "gone" },
+    },
   },
   "/api/jobs/:jobId/attestations/aggregate": {
-    category: "admin_or_owner_only", cite: "compliance.ts:119-133",
-    reason: "even a real job would 403 since the stranger pass is neither submitter nor kernel-operator — the ownership boundary this sweep is built to respect. Re-read fresh round 4, still holds.",
+    category: "admin_or_owner_only", cite: "job.facade.ts:230",
+    reason: "N68b widened the lens past the canary's one specific owner, per the reviewer's own method: could a STRANGER satisfy ownership with a self-created job, the way the asset-outbound/automation-status/protocols fixtures above now do? Checked both of compliance.ts:122-127's OR'd ownership paths fresh: (1) job.submittedBy===operatorId — job.facade.ts's submit() (job.facade.ts:230) never assigns `submittedBy` anywhere in its body (grepped the whole method: zero writes to that field; contrast kernels.ts:163's actorId, which kernel.facade.ts:493 DOES stamp onto a new kernel's operatorAddress), so this path is false for every job, self-created or not. (2) kernel.operatorId===operatorId — reads a field distinct from the `operatorAddress` kernel creation actually populates; never written anywhere in the package either. Both paths are structurally dead, not merely unmet by this sweep's stranger identity — a real kernel operator would hit the identical 404 this witness does for any id it cannot mint. (Contrast carrier.ts's /shipments and lob.ts's /letters, now in POST_EXCLUSIONS: THEIR ownership check genuinely is self-satisfiable — this route's is not.)",
+    witness: {
+      method: "POST", url: "/api/jobs/n68b-witness-nonexistent-job/attestations/aggregate", body: { attestations: [] },
+      expect: { status: [404], code: "not_found" },
+    },
   },
   "/api/lit/provision": {
     category: "env_or_feature_gate", cite: "lit-provision.ts:26-40",
-    reason: "503 — LIT_API_KEY is deliberately cleared in this test env, checked right after field validation and before any fetch.",
-  },
-  "/api/lob/letters": {
-    category: "admin_or_owner_only", cite: "lob.ts:375-377",
-    reason: "the plugin config-gate passes (NODE_ENV=test), but the handler then 404s on no job row for a crafted jobId AND would separately 403 \"not_kernel_operator\" since the caller is a stranger, not the owner — an ownership boundary regardless of the id problem.",
+    reason: "503 — LIT_API_KEY is deliberately cleared in this test env, checked right after field validation and before any fetch. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/lit/provision", body: { kernelId: "n68b-witness-kernel", operatorDid: "did:n68b-witness" },
+      expect: { status: [503], code: "lit_not_configured" },
+    },
   },
   "/api/lob/webhook": {
     category: "env_or_feature_gate", cite: "lob.ts:464-469",
-    reason: "503 — LOB_WEBHOOK_SECRET is deliberately cleared; the plugin's \"webhook\" gate passes through (not production) but the handler's own hasWebhookSecret check 503s before any signature check.",
+    reason: "503 — LOB_WEBHOOK_SECRET is deliberately cleared; the plugin's \"webhook\" gate passes through (not production) but the handler's own hasWebhookSecret check 503s before any signature check. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/lob/webhook", body: {}, noAuth: true,
+      expect: { status: [503], code: "webhook_secret_not_configured" },
+    },
   },
   "/api/onboard/:id/build-agent": {
     category: "external_service", cite: "pcc-discovery.ts:113",
-    reason: "the onboard template's onBuild hook (template-agents.ts:149-166) calls publishOperator() from @pcc/orchestrator-sdk, which issues an unconditional real fetch to PCC_BASE_URL/api/onboard/register (pcc-discovery.ts:68-117, the live call at :113) — no test-injection seam like captureVerifier/chainClient/smokeTestFetch exists for this SDK call, and MOCK_PCC_DISCOVERY is unset in this test env, so it is not a MOCK-gated no-op. Confirmed empirically: the sweep's own no-network guard (round 2) blocks the call and records it. Contrast: the sibling /api/orchestrator/data-product/:id/build-agent uses the data-product template's explicit stub onBuild (template-agents.ts:238-248, a \"minimal stub\" per its own doc comment) which does no network I/O — that one DOES reach 2xx via a dynamic fixture below.",
+    reason: "the onboard template's onBuild hook (template-agents.ts:149-166) calls publishOperator() from @pcc/orchestrator-sdk, which issues an unconditional real fetch to PCC_BASE_URL/api/onboard/register (pcc-discovery.ts:68-117, the live call at :113) — no test-injection seam like captureVerifier/chainClient/smokeTestFetch/lingbotSpawner exists for this SDK call, and MOCK_PCC_DISCOVERY is unset in this test env, so it is not a MOCK-gated no-op. This sweep's own no-network guard blocks and records the attempt rather than letting it leave the process — excluded BY POLICY (a real network attempt), never called. Contrast: the sibling /api/orchestrator/data-product/:id/build-agent uses the data-product template's explicit stub onBuild (template-agents.ts:238-248, a \"minimal stub\" per its own doc comment) which does no network I/O — that one DOES reach 2xx via a dynamic fixture below.",
+    witness: { hazard: "external_service", closedList: EXTERNAL_SERVICE_NOT_REACHED_ROUTES },
   },
   "/api/onboard/identify-device": {
     category: "env_or_feature_gate", cite: "identify-device.ts:95-98",
-    reason: "503 — ANTHROPIC_API_KEY is deliberately cleared in this test env, checked after body validation but before any model call.",
+    reason: "503 — ANTHROPIC_API_KEY is deliberately cleared in this test env, checked after body validation but before any model call. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/onboard/identify-device", body: { text: "a 3d printer" }, noAuth: true,
+      expect: { status: [503], code: "Device identification temporarily unavailable" },
+    },
   },
   "/api/onboard/passkey/register-challenge": {
-    category: "env_or_feature_gate", cite: "passkey.ts:72-74",
-    reason: "503 — PCC_PASSKEY_ENABLED feature flag defaults off; no body can enable it.",
+    category: "env_or_feature_gate", cite: "passkey.ts:139-144",
+    reason: "503 — PCC_PASSKEY_ENABLED feature flag defaults off (isPasskeyEnabled() checks `=== \"true\"`, passkey.ts:71-73), checked as the FIRST line of the handler; no body can enable it. Setting the flag would not lead to a safely-callable 2xx either way — the rest of the flow needs a genuine hardware/software WebAuthn attestation this sweep has no way to fabricate. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/onboard/passkey/register-challenge", body: {},
+      expect: { status: [503], code: "passkey_not_enabled" },
+    },
   },
   "/api/onboard/passkey/verify-attestation": {
     category: "env_or_feature_gate", cite: "passkey.ts:231-236",
-    reason: "503, the same feature-flag gate as register-challenge above.",
+    reason: "503, the same feature-flag gate as register-challenge above — same reasoning for why enabling it would not help. Verified empirically at a6268d21 (N68b).",
+    witness: {
+      method: "POST", url: "/api/onboard/passkey/verify-attestation", body: {},
+      expect: { status: [503], code: "passkey_not_enabled" },
+    },
   },
   "/api/onboard/redeem": {
     category: "external_service", cite: "onboard.ts:577-593",
-    reason: "needs a real Gatecraft invite code from the external GATECRAFT_URL identity service; the response status is proxied straight from that service's own reply, which we have no valid code to produce.",
-  },
-  "/api/protocol-runs/:runId/cancel": {
-    category: "no_creation_route", cite: "protocols.ts:591-601",
-    reason: "the sibling POST /api/protocols/:id/runs LOOKS like a creation route but never pushes its minted run into the mockRuns array it returns 202 for (confirmed by reading the whole handler, protocols.ts:587-601) — so no POST in this file ever makes a runId that /:runId/cancel's mockRuns.find() can match. Re-verified fresh round 4, NOT trusting the prior \"hardcoded mock id\" framing at face value.",
-  },
-  "/api/protocol-runs/:runId/pause": {
-    category: "no_creation_route", cite: "protocols.ts:591-601",
-    reason: "same unpersisted-mockRuns gap as /cancel above.",
+    reason: "needs a real Gatecraft invite code from the external GATECRAFT_URL identity service; the response status is proxied straight from that service's own reply, which this sweep has no valid code to produce, and no mock mode exists for it. Excluded BY POLICY (a real network attempt), never called.",
+    witness: { hazard: "external_service", closedList: EXTERNAL_SERVICE_NOT_REACHED_ROUTES },
   },
   "/api/protocol-runs/:runId/resume": {
-    category: "no_creation_route", cite: "protocols.ts:591-601",
-    reason: "same unpersisted-mockRuns gap as /cancel above.",
+    category: "no_creation_route", cite: "protocols.ts:621-628",
+    reason: "N68b correction: prun_active_001 (protocols.ts:377-399) IS a real, permanent seeded row — the PRIOR \"no POST ever makes a runId\" framing reached the right conclusion with the wrong mechanism, since /pause and /cancel above now prove that SAME row is reachable. The actual reason resume (and start, below) stay unreached: none of protocols.ts's start/pause/resume/cancel handlers ever assigns back into mockRuns (grepped the whole file for `.status =`/`.push(` touching it: zero hits) — prun_active_001's status is permanently \"running\" no matter how many times any of them run. resume requires status===\"paused\" (protocols.ts:624), which this one row can never actually be in storage, and the only nominal run-creation route (POST /api/protocols/:id/runs, protocols.ts:587-601) mints a runId it never pushes into mockRuns — so no second row ever exists either. Verified empirically at a6268d21 (N68b): resume on prun_active_001 returns 409 every time.",
+    witness: {
+      method: "POST", url: "/api/protocol-runs/prun_active_001/resume", body: {},
+      expect: { status: [409], code: "invalid_state" },
+    },
   },
   "/api/protocol-runs/:runId/start": {
-    category: "no_creation_route", cite: "protocols.ts:591-601",
-    reason: "same unpersisted-mockRuns gap as /cancel above.",
+    category: "no_creation_route", cite: "protocols.ts:603-610",
+    reason: "same corrected mechanism as resume above: prun_active_001 is a real, permanent seeded row whose status is permanently \"running\" (no handler ever mutates mockRuns) — start requires status in {\"ready\",\"binding\"} (protocols.ts:606), which this row can never reach, and no second run is ever persisted (protocols.ts:587-601 mints a runId it never stores). Verified empirically at a6268d21 (N68b): start on prun_active_001 returns 409 every time.",
+    witness: {
+      method: "POST", url: "/api/protocol-runs/prun_active_001/start", body: {},
+      expect: { status: [409], code: "invalid_state" },
+    },
   },
-  "/api/protocols/:id/fork": {
-    category: "no_creation_route", cite: "protocols.ts:496-506",
-    reason: "POST /api/protocols LOOKS like a creation route (201, a minted id) but never pushes into the mockTemplates array every :id route reads from (confirmed by reading the whole handler — no mockTemplates.push anywhere in it). Re-verified fresh round 4: no route ever makes a real template id.",
+  "/api/capture/sim": {
+    category: "real_subprocess", cite: "capture-sim.ts:163-226",
+    reason: "spawns a real python3 pcc_genesis_runner.py subprocess regardless of body. A test-injection seam exists (setGenesisSpawnerForTests, capture-sim.ts:78) but per this category's own rule this sweep deliberately does not install it — excluded BY POLICY (a real subprocess), never called.",
+    witness: { hazard: "real_subprocess", closedList: REAL_SUBPROCESS_NOT_REACHED_ROUTES },
   },
-  "/api/protocols/:id/publish": {
-    category: "no_creation_route", cite: "protocols.ts:496-506",
-    reason: "same unpersisted-mockTemplates gap as /fork above.",
-  },
-  "/api/protocols/:id/runs": {
-    category: "no_creation_route", cite: "protocols.ts:496-506",
-    reason: "same unpersisted-mockTemplates gap as /fork above (this is the POST variant of :id/runs; it 404s on the same missing template).",
-  },
-  "/api/protocols/:id/validate": {
-    category: "no_creation_route", cite: "protocols.ts:496-506",
-    reason: "same unpersisted-mockTemplates gap as /fork above.",
+  "/api/capture/3d-stream": {
+    category: "real_subprocess", cite: "capture-3d.ts:146-150",
+    reason: "requireAuth + a minimal valid videoBytesBase64 clear validation, but the handler then calls runLingBotInference, which unconditionally does a real OS-level spawn() of python3 (lingbot-adapter.ts:194,272) even when PCC_LINGBOT_STUB=1 — that flag only changes what the SPAWNED script does internally (lingbot-adapter.ts:12,191), not whether a real process is spawned at all. A test-injection seam exists (setLingBotSpawnerForTests, lingbot-adapter.ts:91) that would avoid the spawn entirely, but per this category's own rule this sweep deliberately does not install it — excluded BY POLICY (a real subprocess), never called. Not a kernel/capability location surface either way (point maps/poses from the caller's own uploaded video).",
+    witness: { hazard: "real_subprocess", closedList: REAL_SUBPROCESS_NOT_REACHED_ROUTES },
   },
 };
 
@@ -2764,5 +2982,65 @@ describe("N68: no read of the real gateway shows an operator's exact location or
     // any) were blocked.
     console.log("EXTERNAL_NETWORK_ATTEMPTS:", JSON.stringify(EXTERNAL_NETWORK_ATTEMPTS));
     expect(EXTERNAL_NETWORK_ATTEMPTS).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // N68b (follow-up to #533 r5, closing the MEDIUM "by construction, not by another hand
+  // re-read"): every remaining NOT_REACHED entry's `witness` is exercised here. A CalledWitness
+  // is actually sent through the SAME app this file already booted; a 2xx response means the
+  // entry's unreachability claim was FALSE and this test fails loudly, by name, rather than the
+  // claim silently rotting the way round 5's four examples did. A PolicyExclusionWitness is
+  // never called (that is the whole point for money/subprocess/external-service hazards) — it
+  // is instead checked for closed-list membership, which is itself a mechanical, reviewable
+  // assertion a future edit cannot silently drift out of sync with.
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  it("BY CONSTRUCTION: every NOT_REACHED entry's witness proves its blocker, or proves the policy exclusion without ever calling it", async () => {
+    const bearer = { authorization: `Bearer ${strangerKey}` };
+
+    for (const [url, entry] of Object.entries(NOT_REACHED)) {
+      const w = entry.witness;
+
+      if (isPolicyExclusionWitness(w)) {
+        expect(entry.category, `${url}: witness hazard must equal the entry's own category`).toBe(w.hazard);
+        expect(w.closedList, `${url}: must be a member of its own hazard's closed list`).toContain(url);
+        const canonical =
+          w.hazard === "real_subprocess" ? REAL_SUBPROCESS_NOT_REACHED_ROUTES : EXTERNAL_SERVICE_NOT_REACHED_ROUTES;
+        expect(w.closedList, `${url}: closedList must be that hazard's own canonical list, not a copy`).toBe(canonical);
+        continue; // Never called — see PolicyExclusionWitness's own docstring ("Don't call it").
+      }
+
+      let callUrl = w.url;
+      if (callUrl.includes(":batchId")) {
+        // The one entry whose blocker is live state, not a fixed id: discover the real seeded
+        // batch id instead of guessing one (a synthetic id would 404 for an unrelated reason).
+        const list = await app.inject({ method: "GET", url: "/api/batches", headers: { ...bearer, "x-forwarded-for": ip() } });
+        const batches = (list.json().batches as Array<{ id: string }> | undefined) ?? [];
+        const realId = batches[0]?.id;
+        expect(realId, "witness setup: GET /api/batches must return the one seeded batch").toBeTruthy();
+        callUrl = callUrl.replace(":batchId", encodeURIComponent(realId));
+      }
+
+      const headers: Record<string, string> = { "x-forwarded-for": ip() };
+      if (!w.noAuth) Object.assign(headers, bearer);
+      const res = await app.inject({ method: w.method, url: callUrl, headers, payload: w.body as object });
+
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        throw new Error(
+          `NOT_REACHED["${url}"] claimed unreachable but reached: witness ${w.method} ${callUrl} ` +
+          `returned ${res.statusCode}. body=${res.body.slice(0, 300)}`,
+        );
+      }
+      expect(w.expect.status, `${url}: witness status (body=${res.body.slice(0, 200)})`).toContain(res.statusCode);
+      if (w.expect.code) {
+        let json: Record<string, unknown> = {};
+        try {
+          json = res.json();
+        } catch {
+          // non-JSON body — code match falls through to the raw body substring below.
+        }
+        const codeMatch = json.error === w.expect.code || json.code === w.expect.code || res.body.includes(w.expect.code);
+        expect(codeMatch, `${url}: witness code "${w.expect.code}" (body=${res.body.slice(0, 200)})`).toBe(true);
+      }
+    }
   });
 });
