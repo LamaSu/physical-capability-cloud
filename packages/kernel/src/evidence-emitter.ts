@@ -329,11 +329,14 @@ export class EvidenceEmitter {
     }
 
     // The emitter's own copy of exactly the fields the hash covers, taken FIRST and read through own
-    // descriptors only (copyEventInput), so no adapter code runs inside addEvent at all: no getter,
-    // setter or Proxy trap, before or after the event takes its place (astra pack 273). The event is
-    // hashed and stored from the copy, so nothing the adapter changes afterwards reaches what is
+    // descriptors only (copyEventInput): no getter, setter or Proxy trap of the adapter's runs while
+    // it is taken (astra pack 273). The event is hashed and stored from the copy, and stored by
+    // defining its element (astra pack 277), so nothing the adapter changes afterwards reaches what is
     // stored (steward #6450), and nothing the hash does not cover is stored. Input that is not plain
-    // JSON data fails the call here, before it takes a place.
+    // JSON data fails the call here, before it takes a place. Not covered: the emitter's own
+    // bookkeeping still looks methods up at the time of the call (its Map lookups, the store chain's
+    // Promise then, @pcc/spec's sha256 through crypto.subtle), so code that replaces those can break
+    // ordering or fail a hash, though it cannot reach a stored copy.
     let input: EventInput;
     try {
       input = copyEventInput(rawEvent);
@@ -392,7 +395,9 @@ export class EvidenceEmitter {
           throw new Error(`step ${stepId} of job ${jobId} was cleaned up before this ${bound.type} event was stored`);
         }
         const event: EvidenceEvent = { ...bound, id, hash };
-        stepEv.events.push(event);
+        // Stored by defining the element, never through Array.prototype.push: a push replaced after load
+        // would be handed the stored event and could change it after it was hashed (astra pack 277).
+        ObjectDefineProperty(stepEv.events, stepEv.events.length, dataDescriptor(event));
         // The caller gets a copy: a stored event is never shared, so nothing changes it.
         return StructuredClone(event);
       } catch (err) {

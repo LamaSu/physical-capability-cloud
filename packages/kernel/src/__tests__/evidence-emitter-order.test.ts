@@ -621,6 +621,38 @@ describe("EvidenceEmitter's input boundary runs no adapter code and uses intrins
     expect((emitter.getEvents(JOB, "s1")[0]!.payload as { pages: number }).pages).toBe(3);
   });
 
+  it("Array.prototype.push replaced after load is never handed a stored event, so it cannot change one after hashing (astra pack 277)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const originalPush = Array.prototype.push;
+    const captured: Array<Record<string, any>> = [];
+    // astra's recipe: a push that keeps every event it is handed, then delegates. Held across the store chain.
+    Array.prototype.push = function (this: unknown[], ...items: unknown[]) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (typeof item === "object" && item !== null && (item as { type?: unknown }).type === "execution_completed" && "hash" in item) {
+          originalPush.call(captured, item as Record<string, any>);
+        }
+      }
+      return originalPush.apply(this, items);
+    } as typeof Array.prototype.push;
+    try {
+      await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+    } finally {
+      Array.prototype.push = originalPush;
+    }
+    for (const event of captured) (event.payload as { pages: number }).pages = 99;
+    expect(captured).toEqual([]);
+    const stored = emitter.getEvents(JOB, "s1")[0]!;
+    expect((stored.payload as { pages: number }).pages).toBe(3);
+    expect(await verifyEventHash(stored)).toBe(true);
+    // The kernel signs what it hashed: the bundle hash AND each of its events verify.
+    const bundle = await emitter.finalizeBundle(JOB, "s1");
+    expect(await verifyBundleHash(bundle)).toBe(true);
+    expect(await verifyEventHash(bundle.events[0]!)).toBe(true);
+  });
+
   it("the emitter calls no clone or reflection intrinsic it did not capture at load (a scan of its source)", () => {
     const source = readFileSync(new URL("../evidence-emitter.ts", import.meta.url), "utf8");
     // Comments out, then every call of an intrinsic the boundary or a copy could reach through a global.
@@ -628,6 +660,8 @@ describe("EvidenceEmitter's input boundary runs no adapter code and uses intrins
     const pattern =
       /\b(structuredClone|Object\.(getPrototypeOf|getOwnPropertyDescriptor|defineProperty|create|keys|entries|values|assign)|Reflect\.ownKeys|Array\.isArray|Number\.is(Finite|Integer|SafeInteger)|types\.isProxy)\s*\(/g;
     expect(code.match(pattern) ?? []).toEqual([]);
+    // Nor any method on a step's stored array: an element is only ever defined (astra pack 277).
+    expect(code.match(/\.events\.(?!length\b)[A-Za-z]+\s*\(/g) ?? []).toEqual([]);
     // And the capture itself is there.
     expect(code).toContain("const StructuredClone = globalThis.structuredClone;");
   });
