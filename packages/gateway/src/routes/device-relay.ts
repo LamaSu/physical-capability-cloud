@@ -74,6 +74,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { getStore, getRepos } from "../db.js";
+import { authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
@@ -241,11 +242,6 @@ export const RELAY_ROUTE_ACCESS: Readonly<Record<string, RelayAccess>> = {
   "POST /api/relay/:kernelId/chat/respond": "kernel_operator",
 };
 
-/** operatorAddress values that record no owner (same set as kernel.facade.ts). */
-const UNOWNED_OPERATOR_ADDRESSES = new Set([
-  "",
-  "0x0000000000000000000000000000000000000000",
-]);
 
 /** The authenticated principal apiGate resolved (API key or SIWE), or null. */
 function relayPrincipal(req: FastifyRequest): string | null {
@@ -253,12 +249,13 @@ function relayPrincipal(req: FastifyRequest): string | null {
   return typeof id === "string" && id.length > 0 ? id : null;
 }
 
-/** True only when `principal` is the recorded operator of `kernelId`. */
-function isKernelOperator(kernelId: string, principal: string): boolean {
-  const { db } = getStore();
-  const kernel = db.select().from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
-  if (!kernel || UNOWNED_OPERATOR_ADDRESSES.has(kernel.operatorAddress)) return false;
-  return kernel.operatorAddress === principal;
+/**
+ * True when the caller runs this kernel at the "operate" tier of auth/kernel-authority.ts: the
+ * admin, a proven wallet that is its operator, or the kernel's own principal (its recorded
+ * operatorAddress). N126: the relay's operator check is the shared guard's, not its own copy.
+ */
+function isRelayOperator(req: FastifyRequest, kernelId: string): boolean {
+  return refuseKernelAction(req, authorityOf(req), kernelId, "operate") === null;
 }
 
 /** True when `principal` created an active, unexpired scope on `kernelId`. */
@@ -279,13 +276,14 @@ function holdsActiveScope(kernelId: string, principal: string): boolean {
     .some((scope) => new Date(scope.expiresAt) > now);
 }
 
-/** Operator of the kernel, or the creator of this scope. */
+/** Operator of the kernel (any tier above), or the creator of this scope. */
 function ownsScope(
+  req: FastifyRequest,
   scope: typeof executionScopes.$inferSelect,
   kernelId: string,
   principal: string,
 ): boolean {
-  return scope.createdBy === principal || isKernelOperator(kernelId, principal);
+  return scope.createdBy === principal || isRelayOperator(req, kernelId);
 }
 
 /**
@@ -304,7 +302,7 @@ function ownedScopeOrReply(
     reply.status(404).send({ error: "Scope not found", id: scopeId });
     return null;
   }
-  if (!ownsScope(scope, kernelId, relayPrincipal(req)!)) {
+  if (!ownsScope(req, scope, kernelId, relayPrincipal(req) ?? "")) {
     reply.status(403).send({
       error: "scope_not_yours",
       message: "Only the kernel operator or the scope's creator may use this scope.",
@@ -314,10 +312,35 @@ function ownedScopeOrReply(
   return scope;
 }
 
-/** preHandler for every relay route: default-deny, per kernel. */
+/**
+ * Routes that authorize or drive a device: a DECISION (the steward's #6508 (2), N126). Opening or
+ * revoking an execution scope, and a chat instruction (the kernel's device agent reads and may act
+ * on it), need the admin or a PROVEN wallet that is the kernel's operator. A write tool call is a
+ * decision too (relayAccessGuard checks the tool). A scope grant is a claimed identity, so it never
+ * authorizes actuation until WP-A proves identities (operator item 138 may loosen this).
+ */
+const RELAY_DECISION_ROUTES: ReadonlySet<string> = new Set([
+  "POST /api/relay/:kernelId/scope",
+  "POST /api/relay/:kernelId/scope/:scopeId/revoke",
+  "POST /api/relay/:kernelId/chat",
+]);
+
+/** A tool call whose tool is not a safe (read-only) tool for this kernel's device: a write. */
+function isWriteToolCall(req: FastifyRequest, kernelId: string): boolean {
+  const toolName = (req.body as { toolName?: unknown } | undefined)?.toolName;
+  return typeof toolName !== "string" || !isToolSafe(resolveDeviceType(kernelId), toolName);
+}
+
+/**
+ * preHandler for every relay route: default-deny, per kernel, on the kernel-authority tiers
+ * (N126). A route missing from RELAY_ROUTE_ACCESS is refused. Decisions take the "decide" tier;
+ * every other route takes "operate" (the admin, the proven operator wallet, or the kernel's own
+ * principal), and an operator_or_grant route also admits the holder of an active scope on the
+ * kernel. object_owner routes are checked by their handler against the addressed object.
+ */
 async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
-  const principal = relayPrincipal(req);
-  if (!principal) {
+  const authority = authorityOf(req);
+  if (isAnonymous(authority)) {
     return reply.status(401).send({
       error: "authentication_required",
       message: "The device relay requires the kernel operator's key or an execution scope holder's key.",
@@ -329,11 +352,20 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
   if (!access) {
     return reply.status(403).send({ error: "relay_route_not_allowed", route: routeKey });
   }
-  if (access === "object_owner") return; // the handler checks the addressed object
 
   const { kernelId } = req.params as { kernelId: string };
-  if (isKernelOperator(kernelId, principal)) return;
-  if (access === "operator_or_grant" && holdsActiveScope(kernelId, principal)) return;
+  if (RELAY_DECISION_ROUTES.has(routeKey) || (routeKey === "POST /api/relay/:kernelId/tool-call" && isWriteToolCall(req, kernelId))) {
+    const decision = refuseKernelAction(req, authority, kernelId, "decide");
+    if (decision) return reply.status(decision.status).send(decision.body);
+    return;
+  }
+  if (access === "object_owner") return; // the handler checks the addressed object
+
+  const refusal = refuseKernelAction(req, authority, kernelId, "operate");
+  if (!refusal) return;
+  const principal = relayPrincipal(req);
+  if (access === "operator_or_grant" && refusal.status === 403 && principal && holdsActiveScope(kernelId, principal)) return;
+  if (refusal.status !== 403) return reply.status(refusal.status).send(refusal.body);
 
   return reply.status(403).send({
     error: "relay_access_denied",
@@ -628,8 +660,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     const { db } = getStore();
     // The guard admitted this caller as the operator or an active scope holder.
-    const callerId = relayPrincipal(req)!;
-    const isOperator = isKernelOperator(kernelId, callerId);
+    const callerId = relayPrincipal(req) ?? "";
+    const isOperator = isRelayOperator(req, kernelId);
     const deviceType = resolveDeviceType(kernelId);
 
     // Non-safe tools require a scope, and anyone but the operator must name
@@ -1321,8 +1353,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           .get()
       : undefined;
     const allowed = scope
-      ? ownsScope(scope, kernelId, principal)
-      : isKernelOperator(kernelId, principal);
+      ? ownsScope(req, scope, kernelId, principal)
+      : isRelayOperator(req, kernelId);
     if (!allowed) {
       return reply.status(403).send({
         error: "tool_result_not_yours",
@@ -1764,7 +1796,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         try {
           return (
             credentialStands(req, principal) &&
-            (isKernelOperator(kernelId, principal) || holdsActiveScope(kernelId, principal))
+            (isRelayOperator(req, kernelId) || holdsActiveScope(kernelId, principal))
           );
         } catch {
           return false;
