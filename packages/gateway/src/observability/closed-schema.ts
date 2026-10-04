@@ -18,6 +18,13 @@
  *   - the chokepoints declare what they build themselves: a request's method and route template, a
  *     response's status and time, an error's class and code, the request id;
  *   - the User-Agent is a coarse class: bot, browser, sdk or unknown.
+ *
+ * Round 4 (the PR steward's escalated property, bus #6139): every emitted leaf, key and value, is a
+ * producer declaration or keyed, with no trust by a key's name, a value's shape, its type or its
+ * range. What a chokepoint keeps readable it keeps by membership: in a closed vocabulary the server
+ * defines (error classes and codes, route templates, pino's levels) or in a registry the server fills
+ * (the declared values below, the request ids it issued, its own requests and replies, the V8 call
+ * sites of its errors). A coarse class a chokepoint computes (a status as "4xx") is a transformation.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHmac, randomBytes } from "node:crypto";
@@ -33,9 +40,33 @@ const KEY = ENV_KEY && ENV_KEY.length >= 32 ? Buffer.from(ENV_KEY, "utf8") : ran
 /** True when PCC_TELEMETRY_KEY is unset or short: hashes then do not correlate across restarts. */
 export const TELEMETRY_KEY_EPHEMERAL = !(ENV_KEY && ENV_KEY.length >= 32);
 
-/** A value as every sink may carry it: an HMAC-SHA256 under the server secret, truncated. */
+/** The text a value is hashed as: itself for a string, else its JSON, else its string form; never a throw. */
+function hashText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    const json = JSON.stringify(value);
+    if (json !== undefined) return json;
+  } catch {
+    // a bigint, a cycle or a throwing toJSON: hashed by its string form below
+  }
+  try {
+    return String(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
+/**
+ * A value as every sink may carry it: an HMAC-SHA256 under the server secret, truncated. It never
+ * throws (round 4 of #538): a value JSON cannot hold no longer drops the entry or the log call it is in.
+ */
 export function keyedHash(value: unknown): string {
-  const text = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
+  let text: string;
+  try {
+    text = hashText(value);
+  } catch {
+    text = "[unhashable]";
+  }
   return "h:" + createHmac("sha256", KEY).update(text).digest("hex").slice(0, 32);
 }
 
@@ -182,7 +213,15 @@ export function declaredRoute(req: { routeOptions?: { url?: string } }): Declare
 
 // ── Errors ─────────────────────────────────────────────────────────────────
 
-const CLASS_NAME = /^[A-Z][A-Za-z0-9]{0,63}$/;
+/** A property read that never throws (a getter, a revoked proxy): undefined when it would. */
+export function readSafely(target: unknown, key: string): unknown {
+  if (target === null || (typeof target !== "object" && typeof target !== "function")) return undefined;
+  try {
+    return (target as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * The error codes an error may carry readable (round 2 of #538, M3: never by spelling): the system
@@ -197,44 +236,124 @@ const ERROR_CODES: ReadonlySet<string> = new Set([
   "SQLITE_CONSTRAINT_PRIMARYKEY", "SQLITE_CONSTRAINT_FOREIGNKEY", "SQLITE_CONSTRAINT_NOTNULL",
   "SQLITE_CONSTRAINT_CHECK", "SQLITE_MISMATCH", "SQLITE_RANGE", "SQLITE_NOTADB",
 ]);
-const STACK_FRAME = /^\s*at (?:[\w$.<>\[\] ]+ \()?[^()\s]+:\d+:\d+\)?\s*$/;
 
-/** An error's class as the error chokepoint builds it: the constructor the code ran, never its data. */
-function classOf(err: unknown): string {
-  if (!(err instanceof Error) && (err === null || typeof err !== "object")) return "NonError";
-  const name = (err as { constructor?: { name?: unknown } }).constructor?.name;
-  return typeof name === "string" && CLASS_NAME.test(name) ? name : "Error";
+/**
+ * The error classes whose names leave readable (round 4 of #538, B5): JavaScript's built-in error
+ * classes, the runtime's own (DOMException, AbortError, SystemError) and Fastify's. Any other class
+ * name leaves as its keyed hash: code can name a class at run time (a computed key), so a class name
+ * is trusted by membership, never by its spelling.
+ */
+export const ERROR_CLASSES: ReadonlySet<string> = new Set([
+  "Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError", "AggregateError",
+  "DOMException", "AbortError", "SystemError", "FastifyError",
+]);
+
+/**
+ * An error's class as the error chokepoint builds it: the class its prototype names (never an own
+ * `constructor` property, which data can carry), readable from ERROR_CLASSES and keyed otherwise;
+ * "NonError" for anything that is not an Error.
+ */
+export function errorClassName(err: unknown): string {
+  if (!(err instanceof Error)) return "NonError";
+  let name: unknown;
+  try {
+    name = (Object.getPrototypeOf(err) as { constructor?: { name?: unknown } } | null)?.constructor?.name;
+  } catch {
+    name = undefined;
+  }
+  return typeof name === "string" && ERROR_CLASSES.has(name) ? name : keyedHash(name);
 }
 
 /** An error's class, declared: for a producer that reports a failure's kind without its message. */
 export function errorClassOf(err: unknown): Declared {
-  return make(classOf(err));
+  return make(errorClassName(err));
+}
+
+// ── Code frames ────────────────────────────────────────────────────────────
+
+/** A code location V8 recorded for an error: its script, line and column. */
+export interface CodeFrame {
+  readonly file: string;
+  readonly line: number;
+  readonly column: number;
 }
 
 /**
- * An error as a sink may carry it, built here: its class (the constructor the code ran), its code
- * when it is a known system, Fastify or SQLite code (any other as its keyed hash), its HTTP status
- * as a class ("4xx"; the exact status a response carries comes from the response itself), its
- * message as a keyed hash (a message can echo a request) and its code frames.
+ * The code frames of each error whose stack this process formatted, taken from V8's own call sites
+ * (round 4 of #538, B6). No stack text is parsed: a frame written into a message, a name or an
+ * assigned stack is text, and only a call site V8 recorded is a frame. A function's name is left out,
+ * because code can name a function at run time (a computed key, Object.defineProperty); a frame is
+ * where the code is, never what it was called.
+ */
+const FRAMES = new WeakMap<object, readonly CodeFrame[]>();
+const MAX_FRAMES = 12;
+
+type PrepareStackTrace = (error: Error, sites: NodeJS.CallSite[]) => unknown;
+
+function framesOf(sites: readonly NodeJS.CallSite[]): CodeFrame[] {
+  const frames: CodeFrame[] = [];
+  for (const site of sites) {
+    if (frames.length >= MAX_FRAMES) break;
+    try {
+      const file = site.getFileName();
+      const line = site.getLineNumber();
+      const column = site.getColumnNumber();
+      if (typeof file === "string" && file !== "" && typeof line === "number" && typeof column === "number") frames.push({ file, line, column });
+    } catch {
+      // a call site that cannot be read is left out
+    }
+  }
+  return frames;
+}
+
+/**
+ * Wraps the runtime's Error.prepareStackTrace (V8 calls it once per error, the first time its stack
+ * is read): the call sites are recorded, and the stack text is still what the wrapped function makes.
+ */
+function installFrameRecorder(): void {
+  const previous = Error.prepareStackTrace as PrepareStackTrace | undefined;
+  Error.prepareStackTrace = function recordFrames(this: unknown, error: Error, sites: NodeJS.CallSite[]): unknown {
+    try {
+      if (typeof error === "object" && error !== null) FRAMES.set(error, framesOf(sites));
+    } catch {
+      // recording never breaks a stack
+    }
+    if (previous) return previous.call(this, error, sites);
+    return `${Error.prototype.toString.call(error)}${sites.map((site) => `\n    at ${String(site)}`).join("")}`;
+  };
+}
+installFrameRecorder();
+
+/** The code frames V8 recorded for an error (its stack is formatted first if nothing has read it); none for anything else. */
+export function codeFrames(err: unknown): readonly CodeFrame[] {
+  if (typeof err !== "object" || err === null) return [];
+  if (!FRAMES.has(err)) readSafely(err, "stack");
+  return FRAMES.get(err) ?? [];
+}
+
+/**
+ * An error as a sink may carry it, built here: its class (ERROR_CLASSES, else keyed), its code when it
+ * is a known system, Fastify or SQLite code (any other as its keyed hash), its HTTP status as a class
+ * ("4xx"; the exact status a response carries comes from the response itself), its message as a
+ * keyed hash (a message can echo a request) and its code frames (V8's call sites). Anything that is
+ * not an Error is "NonError" with its keyed hash: a plain object's fields are never read as an error's.
  */
 export function closedError(err: unknown): Record<string, unknown> {
-  if (!(err instanceof Error) && (err === null || typeof err !== "object")) {
-    return { type: "NonError", ...(err !== undefined ? { message: closedText(err) } : {}) };
-  }
-  const e = err as { code?: unknown; message?: unknown; stack?: unknown; statusCode?: unknown };
-  const code = e.code === undefined || e.code === null ? undefined
-    : typeof e.code === "string" && ERROR_CODES.has(e.code) ? e.code : keyedHash(e.code);
-  const status = typeof e.statusCode === "number" && Number.isInteger(e.statusCode) && e.statusCode >= 100 && e.statusCode <= 599
-    ? `${Math.floor(e.statusCode / 100)}xx` : undefined;
-  const frames = typeof e.stack === "string"
-    ? e.stack.split("\n").slice(1).filter((line) => STACK_FRAME.test(line)).slice(0, 12).map((line) => line.trim())
-    : undefined;
+  if (!(err instanceof Error)) return { type: "NonError", ...(err !== undefined ? { message: closedText(err) } : {}) };
+  const rawCode = readSafely(err, "code");
+  const statusCode = readSafely(err, "statusCode");
+  const message = readSafely(err, "message");
+  const code = rawCode === undefined || rawCode === null ? undefined
+    : typeof rawCode === "string" && ERROR_CODES.has(rawCode) ? rawCode : keyedHash(rawCode);
+  const status = typeof statusCode === "number" && Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599
+    ? `${Math.floor(statusCode / 100)}xx` : undefined;
+  const frames = codeFrames(err).map((frame) => `at ${frame.file}:${frame.line}:${frame.column}`);
   return {
-    type: classOf(err),
+    type: errorClassName(err),
     ...(code !== undefined ? { code } : {}),
     ...(status !== undefined ? { statusClass: status } : {}),
-    ...(typeof e.message === "string" ? { message: closedText(e.message) } : {}),
-    ...(frames && frames.length ? { stack: frames } : {}),
+    ...(typeof message === "string" ? { message: closedText(message) } : {}),
+    ...(frames.length > 0 ? { stack: frames } : {}),
   };
 }
 
@@ -299,15 +418,19 @@ export function closeValue(value: unknown, depth = 0): unknown {
 
 /**
  * A free-text line (a log message, a console argument): a declared message as itself, with its
- * printf arguments closed first; anything else as the keyed hash of the formatted text.
+ * printf arguments closed first; anything else as the keyed hash of the formatted text (a string
+ * message alone formats as itself). It never throws: a message String() cannot convert is hashed whole.
  */
 export function closedMessage(message: unknown, ...args: unknown[]): string {
   if (isDeclared(message)) {
     const text = String(emitted(message));
     return args.length > 0 ? format(text, ...args.map((arg) => (isDeclared(arg) ? emitted(arg) : keyedHash(arg)))) : text;
   }
-  const text = args.length > 0 ? format(message as string, ...args) : String(message);
-  return keyedHash(text);
+  try {
+    return keyedHash(format(message, ...args));
+  } catch {
+    return keyedHash(message);
+  }
 }
 
 // ── The telemetry key at boot ──────────────────────────────────────────────
