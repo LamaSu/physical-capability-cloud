@@ -29,7 +29,6 @@ import {
   NON_NUMERIC_UNIT,
   PROFILE_OBSERVATION_FIELD,
   profileAdmitsBundle,
-  signedBy,
   unverifiableProfileTerms,
   type AdmissionBundle,
   type ProfileAdmissionInput,
@@ -183,18 +182,18 @@ async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promis
   return out;
 }
 
-/** The registered-key leg: verifies under the signer's key and names its operator, the bundle's trust domain. */
+/** The registered-key leg: verifies under the declared signer's key and names that signer (astra pack 271). */
 const verifySignature = (b: AdmissionBundle) => {
   const signer = (b.kernelSignature as { signer?: string }).signer ?? "";
   const k = KEYS[signer];
   const ok = k !== undefined && verify(null, signingPreimage(b.bundleHash), k.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
-  return ok ? { trustDomain: DOMAINS[signer]! } : (false as const);
+  return ok ? signer : (false as const);
 };
-/** The same leg's answer as a record with no prototype (`signedBy`), the form an asynchronous leg must resolve with. */
-const signedAnswer = (b: AdmissionBundle) => {
-  const answer = verifySignature(b);
-  return answer === false ? answer : signedBy(answer.trustDomain);
-};
+/** The pinned registry snapshot: each signer's one trust domain, the operator that owns its key. */
+const SIGNER_DOMAINS = [
+  { signer: SIGNER_A, trustDomain: DOMAINS[SIGNER_A]! },
+  { signer: SIGNER_B, trustDomain: DOMAINS[SIGNER_B]! },
+];
 
 const PILOT: Draft[] = [
   { type: "execution_started", t: 0, device: PRINTER },
@@ -266,6 +265,7 @@ async function input(
     pinnedBundleSetDigest,
     verifyBundleSignature: verifySignature,
     executorTrustDomains: [OPERATOR_A],
+    signerTrustDomains: SIGNER_DOMAINS,
     verifyPrimitiveInstance: () => true,
     ...over,
   };
@@ -373,14 +373,21 @@ async function buildCases(): Promise<void> {
   const asyncPrimitiveFails = await input(p, pilot, { verifyPrimitiveInstance: async () => false });
   add("reject: an async primitive leg answers false", asyncPrimitiveFails);
   RECIPE.asyncPrimitiveFails = asyncPrimitiveFails;
-  add("admit: async legs that answer (a record with no prototype, and true)", await input(p, pilot, { verifyBundleSignature: async (b) => signedAnswer(b), verifyPrimitiveInstance: async () => true }));
-  add("reject: an async signature leg answering an ordinary record", await input(p, pilot, { verifyBundleSignature: async (b) => verifySignature(b) }));
+  add("admit: async legs that answer (a signer id, and true)", await input(p, pilot, { verifyBundleSignature: async (b) => verifySignature(b), verifyPrimitiveInstance: async () => true }));
   add("reject: a signature leg answering bare true, naming no signer", await input(p, pilot, { verifyBundleSignature: (() => true) as unknown as () => false }));
-  add("admit: a signature leg naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { verifyBundleSignature: () => ({ trustDomain: null }) }));
-  add("reject: the executor's own camera, every bundle signed by A", await input(p, pilot, { verifyBundleSignature: (b) => (verifySignature(b) === false ? false : { trustDomain: OPERATOR_A }) }));
+  add("reject: a signature leg answering a domain record, the old contract", await input(p, pilot, { verifyBundleSignature: (() => ({ trustDomain: OPERATOR_B })) as unknown as () => false }));
+  add("reject: a leg naming another signer than the bundle declares", await input(p, pilot, { verifyBundleSignature: (b) => (verifySignature(b) === SIGNER_A ? SIGNER_B : verifySignature(b)) }));
+  const unknownOperators = [{ signer: SIGNER_A, trustDomain: null }, { signer: SIGNER_B, trustDomain: null }];
+  add("admit: a snapshot naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { signerTrustDomains: unknownOperators }));
+  add("reject: a snapshot naming no operator, for an inspected profile", await input(p, pilot, { signerTrustDomains: unknownOperators }));
+  const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_A)];
+  add("reject: the executor's own camera, one key signing both bundles (astra pack 271)", await input(p, sameKey));
+  add("reject: a signer missing from the snapshot", await input(p, pilot, { signerTrustDomains: [SIGNER_DOMAINS[0]!] }));
+  add("reject: a snapshot listing one signer twice", await input(p, pilot, { signerTrustDomains: [...SIGNER_DOMAINS, { signer: SIGNER_B, trustDomain: OPERATOR_A }] }));
+  add("reject: a malformed snapshot row", await input(p, pilot, { signerTrustDomains: [{ signer: SIGNER_A.toUpperCase(), trustDomain: OPERATOR_A }, SIGNER_DOMAINS[1]!] }));
   add("reject: no executor assigned", await input(p, pilot, { executorTrustDomains: [] }));
   add("reject: executorTrustDomains naming no operator principal", await input(p, pilot, { executorTrustDomains: ["not-a-principal"] }));
-  add("reject: a leg answering with a thenable", await input(p, pilot, { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f({ trustDomain: OPERATOR_B }) })) as unknown as () => false }));
+  add("reject: a leg answering with a thenable", await input(p, pilot, { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f(SIGNER_A) })) as unknown as () => false }));
   add("reject: a leg answering 1, truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (() => 1) as unknown as () => boolean }));
   add("reject: an async leg answering \"true\", truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (async () => "true") as unknown as () => Promise<boolean> }));
   add("reject: evidence from another job", await input(p, await toBundles(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)));

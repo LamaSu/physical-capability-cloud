@@ -358,6 +358,45 @@ describe("isOperatorPrincipalId: exactly what principal-id.ts parseOperatorPrinc
   });
 });
 
+describe("isSignerId: exactly ^0x[0-9a-f]{40}$, the signer id kernel bundles declare, by code unit (astra pack 271)", () => {
+  const isSignerId = (admissionModule as Record<string, unknown>).isSignerId as (v: unknown) => boolean;
+  const SIGNER = /^0x[0-9a-f]{40}$/;
+  const h40 = "0123456789abcdef0123456789abcdef01234567";
+
+  it("agrees on edge cases", () => {
+    expect(typeof isSignerId).toBe("function");
+    const cases = [`0x${h40}`, `0X${h40}`, `0x${h40.toUpperCase()}`, `0x${h40.slice(1)}`, `0x${h40}0`, `0x${h40}\n`, ` 0x${h40}`, h40 + "ab", "", "0x", `0x${h40.slice(0, 39)}g`, `0x${h40.slice(0, 39)}${ch(0x0663)}`];
+    for (const s of cases) expect(isSignerId(s), JSON.stringify(s)).toBe(SIGNER.test(s));
+  });
+
+  it("agrees on 20,000 near-miss strings, with edits at every position", () => {
+    const rand = lcg(271);
+    const alphabet = ["0", "9", "a", "f", "g", "A", "F", "x", "X", "\n", ch(0xd800), ch(0x0663)];
+    let accepted = 0;
+    for (let n = 0; n < 20_000; n++) {
+      const chars = `0x${h40}`.split("");
+      const edits = Math.floor(rand() * 3);
+      for (let e = 0; e < edits; e++) {
+        const at = Math.floor(rand() * (chars.length + 1));
+        const kind = rand();
+        if (kind < 0.5) chars[at] = alphabet[Math.floor(rand() * alphabet.length)]!;
+        else if (kind < 0.75) chars.splice(at, 1);
+        else chars.splice(at, 0, alphabet[Math.floor(rand() * alphabet.length)]!);
+      }
+      const s = chars.join("");
+      const expected = SIGNER.test(s);
+      if (isSignerId(s) !== expected) expect.fail(`isSignerId(${JSON.stringify(s)}) !== ${expected}`);
+      if (expected) accepted++;
+    }
+    expect(accepted).toBeGreaterThan(2000);
+    expect(20_000 - accepted).toBeGreaterThan(2000);
+  });
+
+  it("is false for non-strings", () => {
+    for (const v of [undefined, null, 1, [`0x${h40}`], { toString: () => `0x${h40}` }, new String(`0x${h40}`)]) expect(isSignerId(v)).toBe(false);
+  });
+});
+
 describe("exported data and RegExps", () => {
   const MODULES = [["profile-admission", admissionModule], ["evidence-level", levelModule]] as const;
 
