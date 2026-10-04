@@ -495,3 +495,52 @@ describe("SafetyGateway.recordDevice{Failure,Success} — real outcomes trip/res
     }
   });
 });
+
+// ── isCircuitOpen — a read-only look at the breaker ───────────────────────────
+
+describe("SafetyGateway.isCircuitOpen — read-only breaker state", () => {
+  it("is false for a device the breaker has never seen, and for a closed one", () => {
+    const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 3, cooldownMs: 60_000 } });
+    expect(gw.isCircuitOpen("dev-never-seen")).toBe(false);
+
+    gw.recordDeviceFailure("dev-closed");
+    gw.recordDeviceFailure("dev-closed"); // 2 of 3
+    expect(gw.isCircuitOpen("dev-closed")).toBe(false);
+  });
+
+  it("is true once real failures trip the breaker, and false again after an operator reset", () => {
+    const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 3, cooldownMs: 60_000 } });
+    const dev = "dev-trips";
+
+    gw.recordDeviceFailure(dev);
+    gw.recordDeviceFailure(dev);
+    gw.recordDeviceFailure(dev);
+    expect(gw.isCircuitOpen(dev)).toBe(true);
+
+    gw.resetCircuit(dev);
+    expect(gw.isCircuitOpen(dev)).toBe(false);
+  });
+
+  it("does not move an open breaker whose cooldown elapsed: only admission does that", async () => {
+    vi.useFakeTimers();
+    try {
+      const gw = new SafetyGateway({ circuitBreaker: { failureThreshold: 1, cooldownMs: 1_000 } });
+      const dev = "dev-readonly";
+
+      gw.recordDeviceFailure(dev); // open
+      vi.advanceTimersByTime(2_000); // cooldown elapsed
+
+      // Looking does not take the breaker to half_open, however often it is done.
+      expect(gw.isCircuitOpen(dev)).toBe(true);
+      expect(gw.isCircuitOpen(dev)).toBe(true);
+      expect(gw.getStatus().circuits.get(dev)?.state).toBe("open");
+
+      // Admission does, and a half-open breaker is not open: its test command may run.
+      expect((await gw.validateOnly(makeCmd({ deviceId: dev }))).allowed).toBe(true);
+      expect(gw.getStatus().circuits.get(dev)?.state).toBe("half_open");
+      expect(gw.isCircuitOpen(dev)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
