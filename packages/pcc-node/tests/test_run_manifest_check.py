@@ -6,7 +6,8 @@ import sys
 
 import pytest
 
-from tests.run_manifest_check import collected_ids, executed_cases, problems
+from tests.run_manifest_check import (collected_ids, executed_cases, module_problems, plugin_problems, problems,
+                                      summary_problems)
 
 CHECK = pathlib.Path(__file__).resolve().parent / "run_manifest_check.py"
 
@@ -95,3 +96,58 @@ def test_the_command_line_exit_codes(tmp_path):
                          capture_output=True, text=True, timeout=30)
     assert bad.returncode == 1
     assert "never ran" in bad.stdout
+
+
+# #572 r1 (MEDIUM): a test module must not install a plugin that drops items from both lists.
+HOSTILE_MODULES = {
+    "pytest_plugins": 'pytest_plugins = ("tests.bypass",)\n',
+    "annotated pytest_plugins": 'pytest_plugins: tuple = ("tests.bypass",)\n',
+    "pytest_plugins by import": "from tests.bypass import plugins as pytest_plugins\n",
+    "a hook function": "def pytest_collection_modifyitems(config, items):\n    items.clear()\n",
+    "a hook in a class": "class Plugin:\n    def pytest_collection_modifyitems(self, items):\n        items.clear()\n",
+    "a hook bound by assignment": "pytest_collection_modifyitems = drop\n",
+    "globals()": 'globals()["pytest_plugins"] = ("tests.bypass",)\n',
+    "vars() write": 'import sys\nvars(sys.modules[__name__])["pytest_plugins"] = ("x",)\n',
+    "an attribute write": 'import sys\nsys.modules[__name__].pytest_plugins = ("x",)\n',
+    "setattr pytest_plugins": 'import sys\nsetattr(sys.modules[__name__], "pytest_plugins", ("x",))\n',
+    "setattr computed": "import sys\nsetattr(sys.modules[__name__], name, value)\n",
+    "the plugin manager": "def test_x(request):\n    request.config.pluginmanager.register(Plugin())\n",
+}
+SAFE_MODULES = {
+    "reading vars()": "import ui_server\nnames = [n for n, _ in vars(ui_server).items()]\n",
+    "monkeypatch.setattr": 'def test_x(monkeypatch):\n    monkeypatch.setattr(cli, "DIAG_ACK_PATH", "x")\n',
+    "setattr with a plain constant name": 'setattr(obj, "timeout", 5)\n',
+    "an ordinary test": "import pytest\n\n@pytest.mark.parametrize('x', [1])\ndef test_x(x):\n    assert x\n",
+}
+
+
+@pytest.mark.parametrize("label", sorted(HOSTILE_MODULES))
+def test_a_module_that_could_install_a_plugin_is_refused(label):
+    assert plugin_problems(HOSTILE_MODULES[label]), label
+
+
+@pytest.mark.parametrize("label", sorted(SAFE_MODULES))
+def test_ordinary_test_code_is_allowed(label):
+    assert plugin_problems(SAFE_MODULES[label]) == [], label
+
+
+def test_the_suites_own_modules_pass(tmp_path):
+    assert module_problems() == []
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "conftest.py").write_text("def pytest_collection_modifyitems(items):\n    pass\n")  # the diff sees conftest
+    (tests / "test_a.py").write_text('pytest_plugins = ("tests.bypass",)\n')
+    (tests / "bypass.py").write_text("def pytest_collection_modifyitems(config, items):\n    items.clear()\n")
+    assert [line.split(" ")[0] for line in module_problems(tests)] == ["tests/bypass.py", "tests/test_a.py"]
+
+
+def test_the_collection_summary_must_count_what_it_listed():
+    ids = collected_ids(COLLECTED)
+    assert summary_problems(COLLECTED, ids) == []
+    assert summary_problems("tests/test_a.py::test_one\n\n1 test collected in 0.01s\n", ["tests/test_a.py::test_one"]) == []
+    # A hook that drops items after collection: pytest still counts them in its summary.
+    assert summary_problems(COLLECTED.replace("3 tests collected", "5 tests collected"), ids) == [
+        "the independent collection counted 5 tests but listed 3: a hook dropped items after collection"]
+    assert summary_problems(COLLECTED.replace("3 tests collected", "3/5 tests collected (2 deselected)"), ids)
+    assert summary_problems("tests/test_a.py::test_one\n", ["tests/test_a.py::test_one"]) == [
+        "the independent collection printed no 'N tests collected' summary"]

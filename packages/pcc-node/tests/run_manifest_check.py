@@ -11,19 +11,97 @@ script closes that gap by comparing two independent lists:
   which records each case's file).
 
 It fails unless the two lists hold the same node IDs, each exactly once, and every executed
-case passed (no skipped, error or failure element). Standard library only.
+case passed (no skipped, error or failure element).
+
+The independent collection still imports every test module, so a module could change it from
+inside: ``pytest_plugins`` loads a plugin whose collection hook drops items from BOTH lists
+(astra on #572 r1, MEDIUM). Two checks close that route:
+
+- no test module (every .py under tests/ but conftest.py, whose hooks the comparison already
+  sees) binds a ``pytest_*`` name (``pytest_plugins`` among them), defines a ``pytest_*`` hook,
+  writes a ``pytest_*`` attribute or into ``vars(...)``, calls ``globals()`` or ``locals()``, or
+  touches ``.pluginmanager``;
+- the independent collection's own summary ("N tests collected") must count exactly the IDs it
+  listed, with nothing deselected: a hook that drops items after collection leaves the two apart.
+
+Standard library only.
 
 Usage: python3 run_manifest_check.py COLLECTED_TXT JUNIT_XML
 """
 
+import ast
+import pathlib
+import re
 import sys
 import xml.etree.ElementTree as ET
+
+TESTS = pathlib.Path(__file__).resolve().parent
+SUMMARY_RE = re.compile(r"^(?:(\d+)/)?(\d+) tests? collected(?: \((\d+) deselected\))?")
 
 
 def collected_ids(text):
     """The node IDs in ``pytest --collect-only -q`` output: one per line, before the summary."""
     ids = [line.strip() for line in text.splitlines() if "::" in line]
     return ids
+
+
+def summary_problems(text, ids):
+    """Why the collection's own summary disagrees with the IDs it listed; [] if it agrees."""
+    for line in text.splitlines():
+        match = SUMMARY_RE.match(line.strip())
+        if match:
+            selected, collected, deselected = match.groups()
+            if selected is not None or deselected is not None:
+                return [f"the independent collection deselected tests: {line.strip()}"]
+            if int(collected) != len(ids):
+                return [f"the independent collection counted {collected} tests but listed {len(ids)}: "
+                        "a hook dropped items after collection"]
+            return []
+    return ["the independent collection printed no 'N tests collected' summary"]
+
+
+def plugin_problems(source):
+    """Why a test module could install a pytest plugin or hook from inside; [] if it cannot."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name.startswith("pytest_"):
+            found.append(f"defines {node.name}")
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.id.startswith("pytest_"):
+            found.append(f"binds {node.id}")
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if (alias.asname or alias.name).startswith("pytest_"):
+                    found.append(f"imports as {alias.asname or alias.name}")
+        elif isinstance(node, ast.Attribute):
+            if node.attr == "pluginmanager":
+                found.append("touches .pluginmanager")
+            elif isinstance(node.ctx, (ast.Store, ast.Del)) and node.attr.startswith("pytest_"):
+                found.append(f"writes the attribute {node.attr}")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in ("globals", "locals"):
+                found.append(f"calls {node.func.id}()")
+            elif node.func.id == "setattr" and len(node.args) >= 2 and not (
+                    isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
+                    and not node.args[1].value.startswith("pytest_")):
+                found.append("calls setattr with a pytest_* or computed name")
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Delete)):
+            targets = node.targets if isinstance(node, (ast.Assign, ast.Delete)) else [node.target]
+            for target in targets:
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Call)
+                        and isinstance(target.value.func, ast.Name) and target.value.func.id == "vars"):
+                    found.append("writes into vars(...)")
+    return found
+
+
+def module_problems(tests_dir=TESTS):
+    """plugin_problems() for every test module but conftest.py, as readable lines."""
+    found = []
+    for path in sorted(tests_dir.rglob("*.py")):
+        if path.name == "conftest.py" or "__pycache__" in path.parts:
+            continue
+        for why in plugin_problems(path.read_text(encoding="utf-8")):
+            found.append(f"{path.relative_to(tests_dir.parent)} {why}: a test module must not install pytest plugins or hooks")
+    return found
 
 
 def executed_cases(xml_text):
@@ -70,10 +148,11 @@ def main(argv):
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
     with open(argv[1], encoding="utf-8") as fh:
-        collected = collected_ids(fh.read())
+        text = fh.read()
+    collected = collected_ids(text)
     with open(argv[2], encoding="utf-8") as fh:
         executed = executed_cases(fh.read())
-    found = problems(collected, executed)
+    found = module_problems() + summary_problems(text, collected) + problems(collected, executed)
     if found:
         print(f"run manifest check FAILED ({len(found)} problems):")
         for line in found:
