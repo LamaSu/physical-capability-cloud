@@ -778,7 +778,7 @@ export async function setupRoutes(app: FastifyInstance) {
           // text) and never a raw deviceId (caller text) — a fixed code, a closed-set
           // error class, and a validated echo of the id, same shape as the upsert
           // catch below.
-          (req as any).log?.warn?.(
+          req.log.warn(
             { code: "kernel_service_refresh_failed", errorClass: knownErrorClassName(e), deviceId: logSafeId(deviceId) },
             "kernel-service refresh failed",
           );
@@ -859,7 +859,7 @@ export async function setupRoutes(app: FastifyInstance) {
         // error for operators" used to mean err.message verbatim — THE SINK IS THE
         // BOUNDARY applies to the logger too, so it is now a fixed code plus the
         // closed-set error class, same as every other sink this round.
-        (req as any).log?.error?.(
+        req.log.error(
           { code: "setup_register_device_upsert_failed", errorClass: knownErrorClassName(err), deviceId: logSafeId(deviceId) },
           "setup/register-device upsert failed",
         );
@@ -1059,7 +1059,7 @@ export async function setupRoutes(app: FastifyInstance) {
       // (astra pack 83e): the scanner's sweep across every sink in this file found
       // this catch used the same err.message pattern as the two astra named — fixed
       // code, closed-set class, validated ids, same as the others.
-      (req as any).log?.error?.(
+      req.log.error(
         {
           code: "setup_test_job_submission_failed",
           errorClass: knownErrorClassName(err),

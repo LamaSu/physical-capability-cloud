@@ -29,6 +29,8 @@
  * they are not output scrubbers, even though both are "closed-set" in spirit.
  */
 
+import { isAddress } from "viem";
+
 export const REDACTED = "[redacted]";
 
 // Boundary strategy (review r3 #1 + r4 #1): use a negative lookbehind for an
@@ -219,6 +221,21 @@ export function logSafeSmallInt(value: unknown, min: number, max: number): numbe
  */
 export function logSafeInt(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * N71 round 7 (astra pack 83f, scanner ruling (2)): a safe Ethereum-address
+ * formatter. `value` itself when it is a well-formed 0x+40hex address (viem's
+ * own `isAddress`, the same check settlement.facade.ts's validateAddress()
+ * already runs before any sink call in that file), else the fixed literal
+ * below. settlement.facade.ts's addresses are caller-supplied route params —
+ * well-formed, but still worth a declared formatter rather than a prose-only
+ * "validated earlier in this function" claim, which the round-7 scanner (no
+ * name/prose allowlist) cannot mechanically verify on its own.
+ */
+export const INVALID_ADDRESS = "[invalid address]";
+export function logSafeAddress(value: unknown): string {
+  return typeof value === "string" && isAddress(value) ? value : INVALID_ADDRESS;
 }
 
 /**

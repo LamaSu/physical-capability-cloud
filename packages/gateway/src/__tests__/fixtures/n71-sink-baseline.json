@@ -1,0 +1,811 @@
+{
+  "agent-bridge.ts": {
+    "console.log": [
+      "agentId",
+      "result.data.revoked"
+    ],
+    "console.error": [
+      "agentId",
+      "result.error"
+    ],
+    "console.warn": [
+      "err"
+    ]
+  },
+  "db.ts": {
+    "console.log": [
+      "dbPath"
+    ]
+  },
+  "otel.ts": {
+    "otel.resourceFromAttributes": [
+      "process.env.OTEL_SERVICE_NAME",
+      "process.env.OTEL_SERVICE_VERSION"
+    ],
+    "console.log": [
+      "otlpEndpoint"
+    ],
+    "console.error": [
+      "err"
+    ]
+  },
+  "sentry.ts": {
+    "Sentry.init": [
+      "SENTRY_DSN",
+      "process.env.NODE_ENV"
+    ],
+    "console.log": [
+      "\"[sentry] Distributed tracing initialised (dsn=…\" + SENTRY_DSN.slice(-12) + \")\""
+    ]
+  },
+  "server.ts": {
+    "Sentry.setupFastifyErrorHandler": [
+      "app"
+    ],
+    "Sentry.captureException": [
+      "error",
+      "request.method",
+      "request.url"
+    ],
+    "log.info": [
+      "m",
+      "msg"
+    ],
+    "log.warn": [
+      "String(err)",
+      "err.message",
+      "m",
+      "msg"
+    ],
+    "console.log": [
+      "address",
+      "dashboardPath",
+      "handle.intervalSec",
+      "port",
+      "process.pid"
+    ],
+    "console.warn": [
+      "err"
+    ],
+    "console.error": [
+      "err",
+      "reason"
+    ]
+  },
+  "services.ts": {
+    "console.error": [
+      "err"
+    ],
+    "console.log": [
+      "process.env[\"EVIDENCE_STORAGE\"]"
+    ],
+    "console.warn": [
+      "(err as Error).message"
+    ],
+    "<unresolved-callee>": [
+      "_evidenceStorage.init()",
+      "_evidenceStorage.stop()"
+    ]
+  },
+  "telemetry.ts": {
+    "pipelineTelemetry._addEvent": [
+      "event",
+      "jobId"
+    ],
+    "pipelineTelemetry.set": [
+      "(this.minuteBuckets.get(bucket) ?? 0) + 1",
+      "bucket",
+      "buf",
+      "jobId"
+    ],
+    "pipelineTelemetry.get": [
+      "bucket",
+      "jobId"
+    ],
+    "pipelineTelemetry.delete": [
+      "k",
+      "oldest"
+    ],
+    "Sentry.addBreadcrumb": [
+      "event.duration_ms",
+      "event.source",
+      "jobId",
+      "new Date(event.timestamp).getTime() / 1000"
+    ],
+    "pipelineTelemetry.addEvent": [
+      "event.duration_ms",
+      "event.source",
+      "jobId"
+    ],
+    "pipelineTelemetry.push": [
+      "event",
+      "evts.length",
+      "evts[0].timestamp",
+      "jobId",
+      "last.timestamp"
+    ]
+  },
+  "tracing.ts": {
+    "Sentry.startSpan": [
+      "fn",
+      "opts.attributes",
+      "opts.operation",
+      "opts.service"
+    ]
+  },
+  "contracts/batch-settlement.ts": {
+    "console.log": [
+      "_smartAccount.smartAccountAddress"
+    ],
+    "console.error": [
+      "err"
+    ]
+  },
+  "mcp/docs-mcp-server.ts": {
+    "log.error": [
+      "error"
+    ]
+  },
+  "mcp/http-mcp-server.ts": {
+    "log.error": [
+      "error"
+    ]
+  },
+  "mcp/mcp-app-view.ts": {
+    "console.warn": [
+      "message"
+    ]
+  },
+  "middleware/security-monitor.ts": {
+    "log.warn": [
+      "bot.reason",
+      "clientIpOf(req)",
+      "fp.path",
+      "h",
+      "path",
+      "rate.count"
+    ]
+  },
+  "middleware/x402-gate.ts": {
+    "log.error": [
+      "err"
+    ]
+  },
+  "readmodels/legacy-settlement.ts": {
+    "log.error": [
+      "error",
+      "jobId"
+    ],
+    "log.warn": [
+      "error",
+      "jobId",
+      "source"
+    ]
+  },
+  "routes/agent-feedback.ts": {
+    "otel.setAttribute": [
+      "body.agent_kind",
+      "body.confused_about",
+      "body.last_endpoint",
+      "body.last_error_code",
+      "report_id",
+      "trace_id"
+    ],
+    "otel.addEvent": [
+      "body.summary.length",
+      "report_id",
+      "trace_id"
+    ]
+  },
+  "routes/build.ts": {
+    "pipelineTelemetry.emit": [
+      "\"pipeline-\" + Date.now()",
+      "assuranceTier",
+      "type"
+    ]
+  },
+  "routes/capture-3d.ts": {
+    "pipelineTelemetry.emit": [
+      "err.code",
+      "err.message",
+      "jobId",
+      "result.durationMs",
+      "result.trace.frameCount",
+      "result.trace.model"
+    ],
+    "log.error": [
+      "err",
+      "err.code"
+    ]
+  },
+  "routes/capture-sim.ts": {
+    "pipelineTelemetry.emit": [
+      "err.code",
+      "err.message",
+      "jobId",
+      "result.durationMs",
+      "result.trace.frameCount",
+      "result.trace.model",
+      "result.trace.scene.simulator",
+      "result.trace.scene.taskId"
+    ],
+    "log.error": [
+      "err",
+      "err.code"
+    ]
+  },
+  "routes/capture.ts": {
+    "pipelineTelemetry.emit": [
+      "(err as Error).message",
+      "challenge.challengeId",
+      "effectiveLimit",
+      "jobId",
+      "result.gatesFailed",
+      "result.gatesPassed",
+      "rows.length",
+      "ttl",
+      "tx.blockNumber",
+      "tx.gasUsed",
+      "tx.txHash",
+      "verdict.jobId",
+      "verdictId"
+    ],
+    "log.error": [
+      "err"
+    ]
+  },
+  "routes/carrier.ts": {
+    "log.error": [
+      "bought.shipmentId",
+      "bought.trackingCode",
+      "code",
+      "created.shipmentId",
+      "entry.eventId",
+      "err",
+      "err.code",
+      "err.detail",
+      "jobId",
+      "missingAtBoot",
+      "params.jobId",
+      "reason",
+      "trackerEvent.trackingCode"
+    ],
+    "log.warn": [
+      "!!headerValue",
+      "caller",
+      "entry.eventId",
+      "err.code",
+      "err.detail",
+      "err.status",
+      "existing.ownerId",
+      "jobId",
+      "rawBody.length",
+      "trackerEvent.providerMode",
+      "trackerEvent.trackingCode"
+    ],
+    "log.info": [
+      "result.ledgered === true",
+      "trackerEvent.trackingCode"
+    ]
+  },
+  "routes/csd.ts": {
+    "console.warn": [
+      "String(err)",
+      "err",
+      "err.message",
+      "storyErr",
+      "storyErr.message"
+    ]
+  },
+  "routes/dht-ws.ts": {
+    "pipelineTelemetry.emit": [
+      "\"pipeline-\" + Date.now()",
+      "filter.type",
+      "results.length"
+    ],
+    "<unresolved-callee>": [
+      "socket.close(4001, \"Authentication required for DHT peer connections\")"
+    ]
+  },
+  "routes/diagnostic-logs.ts": {
+    "log.info": [
+      "`diagnostic-logs: received bundle ${uploadId} from kernel ${kernelId ?? \"?\"} ` + `(${bundleSize ?? 0} bytes, ${logLineCount ?? 0} lines)`"
+    ]
+  },
+  "routes/discover.ts": {
+    "log.warn": [
+      "message"
+    ],
+    "<unresolved-callee>": [
+      "bonjour.destroy()",
+      "bonjour.find({ type: \"ipp\" }, (service: { name: string; host: string; port: number; txt?: Record<string, string>; }) => { const host = service.host; const port = service.port ?? 631; const path = serv",
+      "browser.stop()"
+    ]
+  },
+  "routes/evidence-encrypted.ts": {
+    "console.log": [
+      "litMsg",
+      "litStatus.network",
+      "req.params.bundleId",
+      "result.reason",
+      "result.role"
+    ],
+    "pipelineTelemetry.emit": [
+      "\"pipeline-\" + Date.now()",
+      "bundle.jobId",
+      "req.params.bundleId",
+      "result.cid",
+      "result.role"
+    ],
+    "<unresolved-callee>": [
+      "storage.archiveBundle(bundle)",
+      "storage.archiveEncryptedBundle(bundle)",
+      "storage.retrieveBundle(req.params.cid)"
+    ]
+  },
+  "routes/feedback.ts": {
+    "console.error": [
+      "err",
+      "res.status"
+    ]
+  },
+  "routes/fiat-ramp.ts": {
+    "console.warn": [
+      "err",
+      "err.message"
+    ]
+  },
+  "routes/identify-device.ts": {
+    "log.error": [
+      "err"
+    ]
+  },
+  "routes/ip.ts": {
+    "console.warn": [
+      "dbErr",
+      "dbErr.message",
+      "dist.ipId",
+      "err",
+      "err.message"
+    ]
+  },
+  "routes/jobs.ts": {
+    "log.error": [
+      "error",
+      "req.params.jobId"
+    ],
+    "log.warn": [
+      "error",
+      "req.params.jobId",
+      "source"
+    ]
+  },
+  "routes/lit-provision.ts": {
+    "console.log": [
+      "body.kernelId",
+      "body.operatorDid",
+      "data",
+      "err.message",
+      "fetchErr.message",
+      "res.status",
+      "text"
+    ]
+  },
+  "routes/lob.ts": {
+    "log.error": [
+      "missingAtBoot"
+    ],
+    "log.warn": [
+      "!!signature",
+      "!!timestamp",
+      "b.jobId",
+      "caller",
+      "existing.ownerId",
+      "timestamp"
+    ],
+    "log.info": [
+      "event.eventType",
+      "event.lobLetterId"
+    ]
+  },
+  "routes/negotiation.ts": {
+    "pipelineTelemetry.emit": [
+      "body.capabilityType",
+      "body.kernelId",
+      "sessionId"
+    ],
+    "log.error": [
+      "String(err)",
+      "body.capabilityType",
+      "body.kernelId",
+      "err.message"
+    ],
+    "console.warn": [
+      "settlementError"
+    ]
+  },
+  "routes/onboard.ts": {
+    "log.error": [
+      "e",
+      "err"
+    ],
+    "console.warn": [
+      "(e as Error).message"
+    ],
+    "pipelineTelemetry.emit": [
+      "proofs.length",
+      "reg.id",
+      "registration.category",
+      "registration.id",
+      "registration.name"
+    ],
+    "Sentry.startSpan": [
+      "req.params.id"
+    ]
+  },
+  "routes/operator-channels.ts": {
+    "console.log": [
+      "`[op-channel] ${ch.transport} transport not implemented; would dispatch to ` + `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` + `describe=\"${ch.describe.slice(0, 80)}\" payload="
+    ],
+    "console.warn": [
+      "ch.id",
+      "ch.operatorSlug",
+      "e.reason"
+    ]
+  },
+  "routes/operator-relay.ts": {
+    "log.warn": [
+      "jobId"
+    ],
+    "log.error": [
+      "insertErr"
+    ]
+  },
+  "routes/operator-work.ts": {
+    "log.error": [
+      "error"
+    ],
+    "log.warn": [
+      "error",
+      "source"
+    ]
+  },
+  "routes/operator.ts": {
+    "log.warn": [
+      "err",
+      "kernelId",
+      "req.params.kernelId",
+      "status"
+    ]
+  },
+  "routes/paid-job-flow.ts": {
+    "console.log": [
+      "addTx",
+      "addr",
+      "assuranceTier",
+      "ms.amount",
+      "ms.stepId",
+      "normalizedMilestones.length",
+      "tokenAddr",
+      "totalFundAmount",
+      "txHash"
+    ],
+    "console.warn": [
+      "addr",
+      "archiveErr",
+      "archiveErr.message",
+      "easErr",
+      "easErr.message",
+      "evErr",
+      "evErr.message",
+      "zkErr",
+      "zkErr.message"
+    ],
+    "pipelineTelemetry.emit": [
+      "String(e1)",
+      "String(e2)",
+      "String(evErr)",
+      "anchorBundleId",
+      "auditTrail.length",
+      "bundleHash",
+      "bundleId",
+      "capabilityType",
+      "e1.message",
+      "e2.message",
+      "easBridge.attestationUid",
+      "easBridge.submitted",
+      "easMeta.schema",
+      "escrowAddress",
+      "escrowId",
+      "evErr.message",
+      "ipfsCid",
+      "isMockSettlement()",
+      "jobId",
+      "kernelId",
+      "oracleResponse.result.reason",
+      "paymentMethod",
+      "proof.id",
+      "result.jobId",
+      "scopeId",
+      "session.capabilityType",
+      "session.id",
+      "session.kernelId",
+      "sessionId",
+      "starknetTxHash"
+    ],
+    "<unresolved-callee>": [
+      "storage.archiveBundle({ id: anchorBundleId, jobId, stepId: job.stepId, kernelId: job.kernelId, assuranceTier: jobAssuranceTier, bundleHash, events: anchorEvents, // StoredSignature → the strict spec S"
+    ]
+  },
+  "routes/passkey.ts": {
+    "log.error": [
+      "err"
+    ],
+    "log.warn": [
+      "err"
+    ]
+  },
+  "routes/pgtr-relay.ts": {
+    "log.info": [
+      "amount",
+      "payer",
+      "target",
+      "txHash"
+    ],
+    "log.error": [
+      "err",
+      "payer",
+      "target"
+    ]
+  },
+  "routes/provision.ts": {
+    "log.warn": [
+      "String(opWalletErr)",
+      "errMsg",
+      "opWalletErr.message",
+      "record.id",
+      "walletErrMsg"
+    ]
+  },
+  "routes/requests.ts": {
+    "log.warn": [
+      "err"
+    ],
+    "<unresolved-callee>": [
+      "(store.db as any).delete(schema.capabilityRequests).run()"
+    ]
+  },
+  "routes/settlement-read.ts": {
+    "log.error": [
+      "e",
+      "unitId"
+    ]
+  },
+  "routes/settlement.ts": {
+    "pipelineTelemetry.emit": [
+      "\"epoch-\" + summary.epochId",
+      "summary.epochId",
+      "summary.totalIntents"
+    ]
+  },
+  "routes/storage.ts": {
+    "log.error": [
+      "err"
+    ]
+  },
+  "routes/support-messages.ts": {
+    "console.error": [
+      "err",
+      "res.status"
+    ]
+  },
+  "routes/telemetry.ts": {
+    "pipelineTelemetry.getTimeline": [
+      "jobId",
+      "summary.jobId"
+    ],
+    "pipelineTelemetry.emit": [
+      "duration_ms",
+      "jobId",
+      "level",
+      "sanitizedMetadata",
+      "source"
+    ]
+  },
+  "routes/tool-search.ts": {
+    "log.info": [
+      "m"
+    ],
+    "log.warn": [
+      "String(e)",
+      "e.message",
+      "m"
+    ]
+  },
+  "routes/wizard.ts": {
+    "console.error": [
+      "message"
+    ]
+  },
+  "routes/aggregator/invoke.ts": {
+    "log.warn": [
+      "String(err)",
+      "err.message"
+    ]
+  },
+  "routes/aggregator/search.ts": {
+    "log.warn": [
+      "String(e)",
+      "e.message"
+    ]
+  },
+  "services/agent-heartbeat-monitor.ts": {
+    "console.error": [
+      "agentId",
+      "cbErr",
+      "err"
+    ],
+    "console.log": [
+      "`[heartbeat-monitor] Started (interval=${this.checkIntervalMs}ms, ` + `suspicious>=${this.suspiciousThreshold}, rogue>=${this.rogueThreshold})`",
+      "agentId",
+      "card.id",
+      "card.name",
+      "count"
+    ],
+    "console.warn": [
+      "agentId",
+      "missed"
+    ]
+  },
+  "services/cid-blob-storage.ts": {
+    "console.warn": [
+      "(err as Error).message"
+    ],
+    "<unresolved-callee>": [
+      "heliaCid.toString()",
+      "this.fs.addBytes(bytes)",
+      "this.fs.cat(cidParsed)",
+      "this.fs.cat(cidParsed, { offset: start, length: end - start + 1 })",
+      "this.helia.stop()"
+    ]
+  },
+  "services/erc8004-identity-sweeper.ts": {
+    "console.log": [
+      "m"
+    ],
+    "console.warn": [
+      "m"
+    ]
+  },
+  "services/event-bus-otel-bridge.ts": {
+    "otel.startSpan": [
+      "e.duration_ms",
+      "e.kind",
+      "e.level",
+      "e.session_id",
+      "e.sponsor",
+      "e.t",
+      "e.text",
+      "e.text.slice(0, 1021)"
+    ],
+    "otel.recordException": [
+      "e.kind",
+      "e.sponsor",
+      "e.text"
+    ],
+    "otel.setStatus": [
+      "e.text"
+    ],
+    "otel.end": [
+      "e.t",
+      "e.t + e.duration_ms"
+    ]
+  },
+  "services/kernel-ttl-sweeper.ts": {
+    "console.warn": [
+      "raw"
+    ],
+    "console.log": [
+      "result.capabilitiesExpired",
+      "result.kernelsExpired",
+      "result.scannedCapabilities",
+      "result.scannedKernels"
+    ],
+    "console.error": [
+      "err"
+    ]
+  },
+  "services/oracle-client.ts": {
+    "console.warn": [
+      "`[oracle] Mock verification REFUSED for paid tier ${request.assuranceTier} ` + `(job ${request.jobId}) — no real oracle configured. Failing closed (verified:false).`"
+    ]
+  },
+  "services/settlement-keeper.ts": {
+    "console.warn": [
+      "`[settlement-keeper] SETTLEMENT_KEEPER_INTERVAL_SEC=\"${raw}\" out of band ` + `[${KEEPER_INTERVAL_LOWER_BOUND_SEC},${KEEPER_INTERVAL_UPPER_BOUND_SEC}]; using ${KEEPER_INTERVAL_DEFAULT_SEC}`",
+      "m"
+    ],
+    "console.log": [
+      "m"
+    ]
+  },
+  "services/settlement-service.ts": {
+    "console.warn": [
+      "`[settlement] Refusing to settle job ${jobId}: bundle ${bundle.id} contains ` + `fabricated (simulated/mock) events at paid tier ${bundle.assuranceTier}. ` + `Evidence archived + persisted but NOT set",
+      "dbErr",
+      "dbErr.message",
+      "err",
+      "err.message",
+      "storyErr",
+      "storyErr.message"
+    ],
+    "Sentry.startSpan": [
+      "bundle.events.length",
+      "bundle.id",
+      "contractAddress",
+      "isWriteEnabled()",
+      "jobId"
+    ],
+    "pipelineTelemetry.emit": [
+      "String(err)",
+      "String(storyErr)",
+      "bundle.id",
+      "contractAddress",
+      "err.message",
+      "job?.capabilityId",
+      "jobId",
+      "link.childIpId",
+      "link.parentIpId",
+      "result.cid",
+      "result.evidenceTxHash",
+      "result.releaseTxHash",
+      "storyErr.message"
+    ],
+    "console.log": [
+      "childIpId",
+      "royaltyAmount",
+      "royaltyPercent"
+    ]
+  },
+  "sse/producers.ts": {
+    "console.log": [
+      "this.producers.length",
+      "this.producers.map((p) => p.name).join(\", \")"
+    ]
+  },
+  "readmodels/job-execution.ts": {
+    "<unresolved-callee>": [
+      "db .select() .from(jobs)",
+      "db .select() .from(jobs) .where(and(eq(jobs.cwmId, cwm), eq(jobs.stepId, job.stepId)))",
+      "db .select() .from(jobs) .where(and(eq(jobs.cwmId, cwm), eq(jobs.stepId, job.stepId))) .all()",
+      "db .select() .from(negotiationSessions)",
+      "db .select() .from(negotiationSessions) .where( cwm ? or(eq(negotiationSessions.escrowAddress, escrow.contractAddress), eq(negotiationSessions.cwmId, cwm)) : eq(negotiationSessions.escrowAddress, escr",
+      "db .select() .from(negotiationSessions) .where(eq(negotiationSessions.jobId, job.id))",
+      "db .select() .from(negotiationSessions) .where(eq(negotiationSessions.jobId, job.id)) .all()",
+      "db.select().from(escrows)",
+      "db.select().from(escrows).where(eq(escrows.contractAddress, address))",
+      "db.select().from(escrows).where(eq(escrows.contractAddress, address)).all()",
+      "db.select().from(escrows).where(eq(escrows.cwmId, cwmId))",
+      "db.select().from(escrows).where(eq(escrows.cwmId, cwmId)).all()"
+    ]
+  },
+  "readmodels/operator-work.ts": {
+    "<unresolved-callee>": [
+      "db .select() .from(schema.pendingApprovals)",
+      "db .select() .from(schema.pendingApprovals) .where(and(eq(schema.pendingApprovals.kernelId, id), eq(schema.pendingApprovals.status, \"pending\")))",
+      "db .select() .from(schema.pendingApprovals) .where(and(eq(schema.pendingApprovals.kernelId, id), eq(schema.pendingApprovals.status, \"pending\"))) .all()",
+      "db.select().from(schema.disputes)",
+      "db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId))",
+      "db.select().from(schema.disputes).where(eq(schema.disputes.escrowId, escrowId)).all()",
+      "db.select().from(schema.shopKernels)",
+      "db.select().from(schema.shopKernels).all()"
+    ]
+  },
+  "services/posthog-service.ts": {
+    "<unresolved-callee>": [
+      "posthog.capture({ distinctId: distinctId || \"pcc-gateway\", event, properties: { ...properties, source: \"gateway\", environment: process.env.NODE_ENV, }, })",
+      "posthog.identify({ distinctId, properties: { ...properties, kind: \"agent_journey\", source: \"gateway\", environment: process.env.NODE_ENV, }, })",
+      "posthog?.shutdown?.()"
+    ]
+  }
+}

@@ -78,7 +78,7 @@ import {
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
 import { swfAccrue } from "../routes/swf.js";
-import { logSafeSmallInt } from "../redaction.js";
+import { logSafeSmallInt, logSafeAddress, logSafeInt } from "../redaction.js";
 
 /**
  * Whether on-chain escrow operations route through the EAS-gated
@@ -326,7 +326,11 @@ export class SettlementFacade extends BaseFacade {
       const result = useEasV2()
         ? await chainFundEscrowV2(address)
         : await chainFundEscrow(address);
-      pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
+      // N71 round 7 (astra pack 83f, scanner ruling (2)): address is validated via
+      // validateAddress() above, but the scanner proves safety by DECLARATION, not
+      // by a prose "checked earlier in this function" claim — logSafeAddress
+      // re-asserts the same 0x+40hex shape at the sink itself.
+      pipelineTelemetry.emit(logSafeAddress(address), "escrow_fund", "completed", { metadata: { escrow: logSafeAddress(address) } });
       trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
       auditService.log({
         eventType: "escrow.funded",
@@ -383,8 +387,10 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       const result = await chainReleaseMilestone(milestoneIndex, attestation, address);
-      pipelineTelemetry.emit(address, "settlement_complete", "completed", {
-        metadata: { escrow: address, milestoneIndex, released: true },
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt at
+      // the sink itself (see fundEscrow's comment above).
+      pipelineTelemetry.emit(logSafeAddress(address), "settlement_complete", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex), released: true },
       });
       auditService.log({
         eventType: "escrow.released",
@@ -438,8 +444,9 @@ export class SettlementFacade extends BaseFacade {
       // only for truthiness) — THE SINK IS THE BOUNDARY means it is dropped from
       // telemetry rather than forwarded unexamined; it remains fully available via
       // auditService.log below (a permissioned audit trail, not a scanned sink).
-      pipelineTelemetry.emit(address, "verification_result", "completed", {
-        metadata: { escrow: address, milestoneIndex, dispute: true },
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "verification_result", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex), dispute: true },
       });
       auditService.log({
         eventType: "escrow.disputed",
@@ -473,8 +480,9 @@ export class SettlementFacade extends BaseFacade {
       const result = useEasV2()
         ? await chainDepositBondV2(milestoneIndex, address)
         : await chainDepositBond(milestoneIndex, address);
-      pipelineTelemetry.emit(address, "escrow_fund", "completed", {
-        metadata: { escrow: address, milestoneIndex, action: "depositBond" },
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "escrow_fund", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex), action: "depositBond" },
       });
       auditService.log({
         eventType: "escrow.bond_deposited",
@@ -518,8 +526,9 @@ export class SettlementFacade extends BaseFacade {
       // text (checked only for truthiness, not hash-shaped) — dropped from telemetry
       // for the same reason as fileDispute's `reason` above; it stays in
       // auditService.log below and in the caller's own request.
-      pipelineTelemetry.emit(address, "verification_request", "completed", {
-        metadata: { escrow: address, milestoneIndex },
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "verification_request", "completed", {
+        metadata: { escrow: logSafeAddress(address), milestoneIndex: logSafeInt(milestoneIndex) },
       });
       auditService.log({
         eventType: "escrow.evidence_submitted",
@@ -570,10 +579,11 @@ export class SettlementFacade extends BaseFacade {
       // the same reason as the two sinks above. attestation.tier is kept only
       // through logSafeSmallInt: it is typed `number` but arrives from the request
       // body unchecked, so anything but an integer 0-3 is logged as null.
-      pipelineTelemetry.emit(address, "verification_result", "completed", {
+      // N71 round 7: address/milestoneIndex through logSafeAddress/logSafeInt.
+      pipelineTelemetry.emit(logSafeAddress(address), "verification_result", "completed", {
         metadata: {
-          escrow: address,
-          milestoneIndex,
+          escrow: logSafeAddress(address),
+          milestoneIndex: logSafeInt(milestoneIndex),
           tier: logSafeSmallInt(attestation.tier, 0, 3),
         },
       });
@@ -756,11 +766,17 @@ export class SettlementFacade extends BaseFacade {
       }
 
       const summary = await flushSettlements();
+      // N71 round 7 (scanner ruling (2)): summary.epochId/totalIntents are
+      // server-computed (EpochSummary from the batch settlement system — an
+      // internally-incremented counter and count, never caller input), but the
+      // scanner proves safety by declaration, not by a prose "it's server-
+      // computed" claim — logSafeInt re-asserts "non-negative safe integer" at
+      // the sink itself, the same shape these values already have.
       pipelineTelemetry.emit(
-        `epoch-${summary.epochId}`,
+        `epoch-${logSafeInt(summary.epochId)}`,
         "settlement_claim",
         "completed",
-        { metadata: { epochId: summary.epochId, totalIntents: summary.totalIntents } },
+        { metadata: { epochId: logSafeInt(summary.epochId), totalIntents: logSafeInt(summary.totalIntents) } },
       );
 
       return {

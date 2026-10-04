@@ -30,13 +30,25 @@ import {
 /** Shared tracer for all facade spans */
 const facadeTracer = trace.getTracer("pcc-gateway-facades", "2.0.0");
 
+/**
+ * N71 round 7 (astra pack 83f): the closed set of facade names every BaseFacade
+ * subclass's own super() call passes (verified empirically — every subclass in the
+ * gateway package, grep-checked). Narrowing `facadeName` from `string` to this union
+ * makes it a provably-closed value by DECLARATION (a literal-type union, not a name
+ * allowlist): the sink scanner resolves its static type and accepts any value whose
+ * type is wholly composed of literal types. Adding a new BaseFacade subclass with a
+ * name outside this set is a compile error here, by design — the set is extended
+ * deliberately, not silently.
+ */
+export type FacadeName = "job" | "kernel" | "settlement" | "capability" | "compliance" | "AgentFacade";
+
 export abstract class BaseFacade {
-  protected readonly facadeName: string;
+  protected readonly facadeName: FacadeName;
 
   /** Roles that are allowed to call methods on this facade */
   protected abstract readonly allowedRoles: readonly AgentRole[];
 
-  constructor(facadeName: string) {
+  constructor(facadeName: FacadeName) {
     this.facadeName = facadeName;
   }
 
@@ -184,8 +196,15 @@ export abstract class BaseFacade {
             outcome = Errors.internal("internal_error", { facade: this.facadeName, operation });
           }
 
-          span.setAttribute("facade.error_code", code);
-          span.setStatus({ code: SpanStatusCode.ERROR, message: code });
+          // N71 round 7 (astra pack 83f, CRITICAL #1): the span is a sink exactly
+          // like telemetry (OTLP-exported) — it gets the SAME fixed class-level code
+          // (facadeErrorTelemetryCode), never the richer `code` local above, which
+          // may carry an attached override (error.code) this round cannot prove is
+          // always literal across every throw site. `outcome` (the response) is
+          // unaffected — it keeps the richer `code`/`message` pair, same boundary as
+          // pipelineTelemetry above.
+          span.setAttribute("facade.error_code", facadeErrorTelemetryCode(error));
+          span.setStatus({ code: SpanStatusCode.ERROR, message: facadeErrorTelemetryCode(error) });
           return outcome;
         } finally {
           span.end();

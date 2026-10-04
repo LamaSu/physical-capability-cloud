@@ -24,6 +24,8 @@
  * not disclosure).
  */
 
+import { isTransientError, TRANSIENT_ERROR_CODE } from "./transient-error.js";
+
 export class NotFoundError extends Error {
   readonly code?: string;
   constructor(entity: string, id: string, code?: string) {
@@ -74,15 +76,19 @@ export class BatchDisabledError extends Error {
 
 /**
  * N71 round 7 (astra pack 83f, CRITICAL #1): a closed, fixed error-code map for
- * TELEMETRY only — never a typed error's own `.message` (NotFoundError interpolates
- * the caller-controlled id into it; see the constructor above). Checked via
- * `instanceof` (never `.name` — see the file doc comment), and every branch returns
- * one literal from this fixed list. Deliberately does NOT read `error.code` (the
- * optional, sometimes caller-influenced override BaseFacade.execute() uses for the
- * HTTP response's `code` field, e.g. ConflictError's "settlement_owned_status") — the
- * response is the same caller's own boundary and may keep that richer code and the
- * typed message; the shared telemetry/SSE stream (consumed across tenants/dashboards)
- * gets only the fixed class-level code below, recognized by the sink scanner as a
+ * TELEMETRY AND THE SPAN — never a typed error's own `.message` (NotFoundError
+ * interpolates the caller-controlled id into it; see the constructor above), and
+ * never the richer `code` local BaseFacade.execute() computes for the HTTP response
+ * (which may carry an attached override, e.g. ConflictError's
+ * "settlement_owned_status" — not provably literal across every throw site this
+ * round can verify). Checked via `instanceof` (never `.name` — see the file doc
+ * comment) plus the SAME two non-instanceof classifications execute()'s catch block
+ * uses (isTransientError; the SQLite UNIQUE-constraint duck-type), so every branch
+ * returns one literal from this fixed list, with NO branch falling through to a
+ * different one than execute() itself would select. The response is the same
+ * caller's own boundary and may keep the richer code/message; the shared
+ * telemetry/SSE/span streams (consumed across tenants/dashboards, OTLP-exported)
+ * get only the fixed class-level code below, recognized by the sink scanner as a
  * formatter by declaration.
  */
 export function facadeErrorTelemetryCode(error: unknown): string {
@@ -92,5 +98,8 @@ export function facadeErrorTelemetryCode(error: unknown): string {
   if (error instanceof ConflictError) return "CONFLICT";
   if (error instanceof WriteDisabledError) return "WRITE_DISABLED";
   if (error instanceof BatchDisabledError) return "BATCH_DISABLED";
-  return "INTERNAL_ERROR";
+  if (isTransientError(error)) return TRANSIENT_ERROR_CODE;
+  if ((error as { code?: unknown } | null)?.code === "SQLITE_CONSTRAINT_UNIQUE") return "CONFLICT";
+  if (error instanceof Error && /^UNIQUE constraint failed:/i.test(error.message)) return "CONFLICT";
+  return "internal_error";
 }
