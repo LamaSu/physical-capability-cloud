@@ -116,16 +116,26 @@ const CameraTypes: readonly string[] = StructuredClone(KERNEL_PULL_CAPTURE_TYPES
 const DefaultTierRequirements: TierEvidenceRequirements[] = StructuredClone(DEFAULT_TIER_REQUIREMENTS);
 // -- end of the load-time captures --
 
-/** Whether `descriptor` describes a data property: it OWNS `value` (one written on Object.prototype is not its own). */
-function isDataDescriptor(descriptor: PropertyDescriptor): boolean {
-  return ObjectGetOwnPropertyDescriptor(descriptor, "value") !== undefined;
+/**
+ * The brand of an OWNED snapshot (DECISIONS 05:05; astra pack 313): a record the emitter made itself (from
+ * ObjectCreate(null), or a literal that defines every field) or copied as own data through descriptors. It
+ * is a type-level key with no value. The default-deny check reads a field with a dot only from a value whose
+ * type carries it, and lets a type carry it only where such a record is made, or where a snapshot is named.
+ */
+declare const OWNED: unique symbol;
+/** `T` as an owned snapshot (see OWNED). */
+type Owned<T> = T & { readonly [OWNED]: true };
+/** An empty list, owned: a fresh array literal the emitter fills by defining its elements. */
+function ownedList<T>(): Owned<T[]> {
+  return [] as unknown as Owned<T[]>;
 }
 
 /** An own data property's value, read without running a getter or a Proxy trap; otherwise undefined. */
 function ownDataValue(target: unknown, key: string): unknown {
   if (target === null || typeof target !== "object" || IsProxy(target)) return undefined;
   const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
-  return descriptor !== undefined && isDataDescriptor(descriptor) ? descriptor.value : undefined;
+  // The descriptor's OWN value: an accessor's descriptor has none, and one written on Object.prototype is not its own.
+  return descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
 /** What ownField answers for a Proxy or an accessor: no value to read (a module-private identity). */
@@ -137,7 +147,7 @@ function ownField(target: unknown, key: PropertyKey): unknown {
   if (IsProxy(target)) return UNREADABLE;
   const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
   if (descriptor === undefined) return undefined;
-  return isDataDescriptor(descriptor) ? descriptor.value : UNREADABLE;
+  return hasOwn(descriptor, "value") ? descriptor.value : UNREADABLE;
 }
 
 /**
@@ -153,8 +163,9 @@ function ownElements(value: unknown): unknown[] | null {
   for (let i = 0; i < length; i++) {
     const descriptor = ObjectGetOwnPropertyDescriptor(value, i);
     if (descriptor === undefined) continue;
-    if (!isDataDescriptor(descriptor)) return null;
-    append(out, descriptor.value);
+    const element = hasOwn(descriptor, "value") ? descriptor.value : UNREADABLE;
+    if (element === UNREADABLE) return null;
+    append(out, element);
   }
   return out;
 }
@@ -201,14 +212,16 @@ function deviceLabel(event: unknown): string {
   return typeof deviceId === "string" ? deviceId : "an unknown device";
 }
 
-/** In-memory store for evidence events per job step */
+/** In-memory store for evidence events per job step: an owned record (registerStep makes it). */
 interface StepEvidence {
   jobId: string;
   stepId: string;
-  events: EvidenceEvent[];
+  events: Owned<EvidenceEvent[]>;
+  /** The stored events' hashes, in the same order: what the bundle hash covers, read without reading an event. */
+  hashes: Owned<string[]>;
   assuranceTier: AssuranceTier;
   /** The escrow unit (milestone) and its challenge nonce, when the job names one: the emitter's own copy. */
-  unit: StepUnitContext | undefined;
+  unit: Owned<StepUnitContext> | undefined;
   /**
    * Settles once every addEvent called so far on the step has stored its event or failed. Each
    * call stores only after it, so the step's events are in call order (N123). It always fulfils,
@@ -220,6 +233,9 @@ interface StepEvidence {
   /** Set when the step is cleaned up: an add still pending then fails instead of storing. */
   detached: boolean;
 }
+
+/** A step's record, owned (see OWNED). */
+type StepRecord = Owned<StepEvidence>;
 
 /** `0x` + 64 lowercase hex each (LO-EV-9 unit binding). */
 export interface StepUnitContext {
@@ -313,17 +329,18 @@ async function ready(): Promise<void> {}
  * step was cleaned up meanwhile (pack 259). It fulfils with undefined, or rejects with the reason it
  * did not store.
  */
-async function storeInTurn(stepEv: StepEvidence, previous: Promise<void>, event: EvidenceEvent): Promise<void> {
+async function storeInTurn(stepEv: StepRecord, previous: Promise<void>, event: EvidenceEvent, type: string, hash: string): Promise<void> {
   try {
     await pinned(previous);
     // Cleaned up while this add waited: nothing reads the record any more, so the event is not
     // stored and the call fails, rather than report storage nothing can see (pack 259).
     if (stepEv.detached) {
-      throw new ErrorCtor(`step ${stepEv.stepId} of job ${stepEv.jobId} was cleaned up before this ${event.type} event was stored`);
+      throw new ErrorCtor(`step ${stepEv.stepId} of job ${stepEv.jobId} was cleaned up before this ${type} event was stored`);
     }
     // Stored by defining the element, never through Array.prototype.push: a push replaced after load
     // would be handed the stored event and could change it after it was hashed (astra pack 277).
     append(stepEv.events, event);
+    append(stepEv.hashes, hash);
   } finally {
     defineField(stepEv, "pending", stepEv.pending - 1);
   }
@@ -339,7 +356,7 @@ async function settledTurn(turn: Promise<void>): Promise<void> {
 }
 
 /** The step's record, if it is registered: two map levels, read through the Map methods captured at load. */
-function stepRecord(steps: Map<string, Map<string, StepEvidence>>, jobId: string, stepId: string): StepEvidence | undefined {
+function stepRecord(steps: Map<string, Map<string, StepRecord>>, jobId: string, stepId: string): StepRecord | undefined {
   const byStep = MapPrototypeGet(steps, jobId);
   return byStep === undefined ? undefined : MapPrototypeGet(byStep, stepId);
 }
@@ -360,7 +377,7 @@ function sha256Text(text: string): SHA256 {
 }
 
 /** @pcc/spec's hashEvent, byte for byte: the canonical JSON of the four fields an event's hash covers. */
-function hashEventFields(input: EventInput): SHA256 {
+function hashEventFields(input: OwnedInput): SHA256 {
   return sha256Text(Canonicalize({ type: input.type, timestamp: input.timestamp, source: input.source, payload: input.payload }));
 }
 
@@ -378,10 +395,10 @@ function sortByCodeUnit(list: string[]): string[] {
   return list;
 }
 
-/** @pcc/spec's hashBundle, byte for byte: the canonical JSON of the events' hashes, sorted. */
-function hashBundleEvents(events: readonly EvidenceEvent[]): SHA256 {
+/** @pcc/spec's hashBundle, byte for byte: the canonical JSON of the events' hashes, sorted (a copy is sorted, not the step's list). */
+function hashBundleEvents(eventHashes: readonly string[]): SHA256 {
   const hashes: string[] = [];
-  for (let i = 0; i < events.length; i++) append(hashes, listAt(events, i)!.hash);
+  for (let i = 0; i < eventHashes.length; i++) append(hashes, listAt(eventHashes, i)!);
   return sha256Text(Canonicalize(sortByCodeUnit(hashes)));
 }
 
@@ -413,12 +430,18 @@ function joinGroup(group: readonly unknown[], separator: string): string {
   return out;
 }
 
+/** What ownProperty reads: whether the property is present, and its value. Owned: a literal defining both. */
+type OwnRead = Owned<{ present: boolean; value: unknown }>;
+
 /** An own property of `target`, read from its descriptor: absent, or its value. An accessor is refused and never runs. */
-function ownProperty(target: object, key: PropertyKey, at: string): { present: boolean; value: unknown } {
+function ownProperty(target: object, key: PropertyKey, at: string): OwnRead {
   const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
-  if (descriptor === undefined) return { present: false, value: undefined };
-  if (!isDataDescriptor(descriptor)) throw new EvidenceInputError(`${at} is an accessor`);
-  return { present: true, value: descriptor.value };
+  if (descriptor === undefined) return { present: false, value: undefined } as OwnRead;
+  if (hasOwn(descriptor, "value")) {
+    const value: unknown = descriptor.value;
+    return { present: true, value } as OwnRead;
+  }
+  throw new EvidenceInputError(`${at} is an accessor`);
 }
 
 /**
@@ -437,7 +460,8 @@ function ownProperty(target: object, key: PropertyKey, at: string): { present: b
  * finite number that is not an integer outside the safe range (D5; -0 is copied as 0, as JSON carries
  * it), an ordinary array whose every index holds plain data and which has no other member, and an
  * object whose prototype is Object.prototype or null and whose members are plain data. The copy is
- * made of ordinary arrays and objects, built by defining properties, so no setter runs.
+ * made of ordinary arrays and null-prototype records, built by defining properties, so no setter runs
+ * and no member is read from a prototype (DECISIONS 05:05).
  */
 function copyPlain(value: unknown, at: string, depth: number): unknown {
   if (value === null || typeof value === "boolean" || typeof value === "string") return value;
@@ -467,16 +491,20 @@ function copyPlain(value: unknown, at: string, depth: number): unknown {
     return out;
   }
   if (prototype !== ObjectPrototype && prototype !== null) throw new EvidenceInputError(`${at} is not a plain object`);
-  const out: Record<string, unknown> = {};
+  const out = ObjectCreate(null) as Record<string, unknown>;
   const keys = ReflectOwnKeys(value);
   for (let k = 0; k < keys.length; k++) {
     const key = listAt(keys, k)!;
     if (typeof key === "symbol") throw new EvidenceInputError(`${at} has a symbol-keyed member`);
     if (key === "__proto__") throw new EvidenceInputError(`${at} has a member named __proto__`);
     const descriptor = ObjectGetOwnPropertyDescriptor(value, key)!;
-    if (!isDataDescriptor(descriptor)) throw new EvidenceInputError(`${at}.${key} is an accessor`);
-    if (descriptor.enumerable !== true) throw new EvidenceInputError(`${at}.${key} is not enumerable`);
-    ObjectDefineProperty(out, key, dataDescriptor(copyPlain(descriptor.value, `${at}.${key}`, depth + 1)));
+    if (hasOwn(descriptor, "value")) {
+      const member: unknown = descriptor.value;
+      if (descriptor.enumerable !== true) throw new EvidenceInputError(`${at}.${key} is not enumerable`);
+      ObjectDefineProperty(out, key, dataDescriptor(copyPlain(member, `${at}.${key}`, depth + 1)));
+    } else {
+      throw new EvidenceInputError(`${at}.${key} is an accessor`);
+    }
   }
   return out;
 }
@@ -485,16 +513,25 @@ function copyPlain(value: unknown, at: string, depth: number): unknown {
 interface EventInput {
   type: string;
   timestamp: string;
-  source: Record<string, unknown>;
-  payload: Record<string, unknown>;
+  source: OwnedRecord;
+  payload: OwnedRecord;
 }
+
+/** One event as checkTierRequirements assessed it: the caller's event (unknown), its own type, and its camera issue. Owned literals. */
+type Assessed = Owned<{ event: unknown; type: string | null; cameraIssue: string | null }>;
+/** A payload field the step commits, and its value: owned literals. */
+type Commit = Owned<{ field: string; value: string }>;
+/** A null-prototype record of own data (copyPlain's), owned. */
+type OwnedRecord = Owned<Record<string, unknown>>;
+/** The emitter's copy of an event's hashed fields, owned. */
+type OwnedInput = Owned<EventInput>;
 
 /**
  * The four fields the hash covers, copied through own descriptors (copyPlain); the event's other
  * fields are never read. type and timestamp must be strings and source a plain object; an absent or
  * null payload is an empty one, as before.
  */
-function copyEventInput(rawEvent: unknown): EventInput {
+function copyEventInput(rawEvent: unknown): OwnedInput {
   if (rawEvent === null || typeof rawEvent !== "object" || IsProxy(rawEvent)) throw new EvidenceInputError("event is not a plain object");
   const type = ownProperty(rawEvent, "type", "event.type").value;
   const timestamp = ownProperty(rawEvent, "timestamp", "event.timestamp").value;
@@ -506,17 +543,18 @@ function copyEventInput(rawEvent: unknown): EventInput {
   if (sourceCopy === null || typeof sourceCopy !== "object" || ArrayIsArray(sourceCopy)) {
     throw new EvidenceInputError("event.source is not an object");
   }
-  const payloadCopy = payload === undefined || payload === null ? {} : copyPlain(payload, "event.payload", 1);
+  const payloadCopy = payload === undefined || payload === null ? ObjectCreate(null) : copyPlain(payload, "event.payload", 1);
   if (payloadCopy === null || typeof payloadCopy !== "object" || ArrayIsArray(payloadCopy)) {
     throw new EvidenceInputError("event.payload is not an object");
   }
-  return { type, timestamp, source: sourceCopy as Record<string, unknown>, payload: payloadCopy as Record<string, unknown> };
+  // copyPlain's records are null-prototype records of own data it defined itself: owned snapshots.
+  return { type, timestamp, source: sourceCopy as OwnedRecord, payload: payloadCopy as OwnedRecord } as OwnedInput;
 }
 
 /** A payload member's own value (undefined when absent), read from the emitter's own copy. */
-function ownMember(payload: Record<string, unknown>, field: string): unknown {
+function ownMember(payload: OwnedRecord, field: string): unknown {
   const descriptor = ObjectGetOwnPropertyDescriptor(payload, field);
-  return descriptor === undefined ? undefined : descriptor.value;
+  return descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
 export class EvidenceEmitter {
@@ -527,7 +565,7 @@ export class EvidenceEmitter {
    * Steps by job, then by step id. Two map levels, never a joined `job:step` string, so ids such
    * as ("a:b", "c") and ("a", "b:c") never share a record (astra pack 259).
    */
-  readonly #steps: Map<string, Map<string, StepEvidence>> = new MapCtor();
+  readonly #steps: Map<string, Map<string, StepRecord>> = new MapCtor();
   /** The callbacks registered with onBundle. */
   readonly #listeners: Array<(bundle: EvidenceBundle) => void> = [];
   /**
@@ -555,7 +593,10 @@ export class EvidenceEmitter {
   ) {
     this.#kernelId = kernelId;
     this.#hasRealSignFn = !!signFn;
-    this.#warn = FunctionPrototypeBind(ConsoleAtLoad.warn, ConsoleAtLoad);
+    // The console's own warn, read through its descriptor when the emitter is built (no getter runs; one a
+    // prototype serves is not taken): the test-only signer's warning, or nothing when there is none.
+    const warn = ownDataValue(ConsoleAtLoad, "warn");
+    this.#warn = typeof warn === "function" ? FunctionPrototypeBind(warn as (...data: unknown[]) => void, ConsoleAtLoad) : () => {};
     // TEST-ONLY default — replace with a real wallet signFn in production
     this.#signFn = signFn ?? (async (data: string) => {
       this.#warn(
@@ -577,12 +618,19 @@ export class EvidenceEmitter {
   }
 
   /**
-   * Attach an IPFS storage service for automatic archiving. Its isReady and archiveBundle are bound
-   * now, so replacing them on the service later changes nothing here.
+   * Attach an IPFS storage service for automatic archiving. Its isReady and archiveBundle are read as
+   * its OWN data properties, through their descriptors (ownField: no getter runs; a Proxy, an accessor,
+   * an inherited or a missing method is refused), and bound now, so replacing them on the service later
+   * changes nothing here (astra pack 313). EvidenceStorageService defines both on each instance.
    */
   setStorageService(service: EvidenceStorageService): void {
-    this.#storageIsReady = FunctionPrototypeBind(service.isReady, service);
-    this.#storageArchive = FunctionPrototypeBind(service.archiveBundle, service);
+    const isReady = ownField(service as unknown, "isReady");
+    const archiveBundle = ownField(service as unknown, "archiveBundle");
+    if (typeof isReady !== "function" || typeof archiveBundle !== "function") {
+      throw new ErrorCtor("setStorageService: isReady and archiveBundle must be the service's own methods (not accessors, inherited, or a Proxy's)");
+    }
+    this.#storageIsReady = FunctionPrototypeBind(isReady as () => boolean, service);
+    this.#storageArchive = FunctionPrototypeBind(archiveBundle as (bundle: EvidenceBundle) => Promise<ArchiveResult>, service);
     this.#storage = service;
   }
 
@@ -603,7 +651,7 @@ export class EvidenceEmitter {
    */
   registerStep(jobId: string, stepId: string, assuranceTier: AssuranceTier, unit?: StepUnitContext): void {
     // Each of the unit's two fields is read once, checked and kept: the record never holds the caller's object.
-    let unitCopy: StepUnitContext | undefined;
+    let unitCopy: Owned<StepUnitContext> | undefined;
     if (unit !== undefined && unit !== null) {
       // Own data only: an accessor (whose getter never runs), a Proxy or an inherited field fails the check below.
       const settlementUnitId = ownField(unit as unknown, "settlementUnitId");
@@ -611,7 +659,7 @@ export class EvidenceEmitter {
       if (!(isUnitField(settlementUnitId) && isUnitField(challengeNonce))) {
         throw new ErrorCtor("registerStep: settlementUnitId and challengeNonce must be 0x + 64 lowercase hex");
       }
-      unitCopy = { settlementUnitId, challengeNonce };
+      unitCopy = { settlementUnitId, challengeNonce } as Owned<StepUnitContext>;
     }
     // A step whose adds are still pending is never replaced: they would store into a record
     // nothing reads, and report success (astra pack 259). Once they have settled, a later run of
@@ -621,19 +669,21 @@ export class EvidenceEmitter {
     }
     let steps = MapPrototypeGet(this.#steps, jobId);
     if (steps === undefined) {
-      steps = new MapCtor<string, StepEvidence>();
+      steps = new MapCtor<string, StepRecord>();
       MapPrototypeSet(this.#steps, jobId, steps);
     }
-    MapPrototypeSet(steps, stepId, {
+    const record = {
       jobId,
       stepId,
-      events: [],
+      events: ownedList<EvidenceEvent>(),
+      hashes: ownedList<string>(),
       assuranceTier,
       unit: unitCopy,
       stored: pinned(ready()),
       pending: 0,
       detached: false,
-    });
+    } as StepRecord;
+    MapPrototypeSet(steps, stepId, record);
   }
 
   /**
@@ -663,7 +713,7 @@ export class EvidenceEmitter {
     // plain JSON data fails the call here, before it takes a place. From here on the call runs only
     // the emitter's own code, spec's canonicalize and the id function captured from spec (see the
     // module comment for what each of those looks up).
-    let input: EventInput;
+    let input: OwnedInput;
     try {
       input = copyEventInput(rawEvent);
     } catch (err) {
@@ -689,9 +739,9 @@ export class EvidenceEmitter {
         throw new ErrorCtor("event payload.challengeNonce is reserved for the step's unit, and this step has none");
       }
     }
-    const commit: Array<{ field: string; value: string }> = unit
-      ? [{ field: "jobId", value: jobId }, { field: "settlementUnitId", value: unit.settlementUnitId }, { field: "challengeNonce", value: unit.challengeNonce }]
-      : [{ field: "jobId", value: jobId }];
+    const commit: Commit[] = unit
+      ? [{ field: "jobId", value: jobId } as Commit, { field: "settlementUnitId", value: unit.settlementUnitId } as Commit, { field: "challengeNonce", value: unit.challengeNonce } as Commit]
+      : [{ field: "jobId", value: jobId } as Commit];
     for (let c = 0; c < commit.length; c++) {
       const field = listAt(commit, c)!.field;
       const value = listAt(commit, c)!.value;
@@ -708,20 +758,22 @@ export class EvidenceEmitter {
     // event then takes its place and is stored on the step's chain, after the step's earlier events
     // are stored or have failed. An event refused above never takes a place; nor does one whose
     // hash throws.
+    const id = IdsEvidence();
+    const hash = hashEventFields(input);
     const event = {
       type: input.type,
       timestamp: input.timestamp,
       source: input.source,
       payload,
-      id: IdsEvidence(),
-      hash: hashEventFields(input),
+      id,
+      hash,
     } as unknown as EvidenceEvent;
     defineField(stepEv, "pending", stepEv.pending + 1);
-    const turn = pinned(storeInTurn(stepEv, stepEv.stored, event));
+    const turn = pinned(storeInTurn(stepEv, stepEv.stored, event, input.type, hash));
     defineField(stepEv, "stored", pinned(settledTurn(turn)));
     await pinned(turn);
     // The caller gets a copy: a stored event is never shared, so nothing changes it.
-    return StructuredClone(event);
+    return StructuredClone<EvidenceEvent>(event);
   }
 
   /** Finalize and sign an evidence bundle for a job step */
@@ -745,16 +797,18 @@ export class EvidenceEmitter {
     }
     // A deep copy, so the bundle shares no object with the stored record, and a change made to
     // either while the bundle is hashed and signed never reaches the other (astra pack 261).
-    const events: EvidenceEvent[] = StructuredClone(stepEv.events);
+    const events = StructuredClone<EvidenceEvent[]>(stepEv.events);
     if (events.length === 0) {
       throw new ErrorCtor(`No evidence events for ${jobId}:${stepId}`);
     }
 
-    const bundleHashValue = hashBundleEvents(events);
+    // The stored hashes, read at the same moment as the events: the bundle hash covers exactly them.
+    const bundleHashValue = hashBundleEvents(stepEv.hashes);
     const signature = await pinned(this.#signFn(bundleHashValue));
 
+    const bundleId = IdsBundle();
     const bundle: EvidenceBundle = {
-      id: IdsBundle(),
+      id: bundleId,
       jobId: stepEv.jobId,
       stepId: stepEv.stepId,
       kernelId: this.#kernelId,
@@ -779,8 +833,8 @@ export class EvidenceEmitter {
               name: "evidence.ipfs_archive",
               op: "storage",
               attributes: {
-                "bundle.id": bundle.id,
-                "job.id": bundle.jobId,
+                "bundle.id": bundleId,
+                "job.id": stepEv.jobId,
                 "kernel.id": this.#kernelId,
               },
             },
@@ -833,7 +887,7 @@ export class EvidenceEmitter {
     // 309). A Proxy, an accessor or a field of the wrong shape fails closed: the tier is not met.
     const requirementList = ownElements(requirements as unknown);
     if (requirementList === null) return { met: false, missing: ["the tier requirements are not plain data"] };
-    let tierReq: { groups: string[][]; minimumEvents: number } | undefined;
+    let tierReq: Owned<{ groups: string[][]; minimumEvents: number }> | undefined;
     for (let r = 0; r < requirementList.length; r++) {
       const candidate = listAt(requirementList, r);
       const candidateTier = ownField(candidate, "tier");
@@ -842,7 +896,7 @@ export class EvidenceEmitter {
       const groups = ownGroups(ownField(candidate, "requiredEventTypes"));
       const minimumEvents = ownField(candidate, "minimumEvents");
       if (groups === null || typeof minimumEvents !== "number") return { met: false, missing: [`the requirements for tier ${tier} are not plain data`] };
-      tierReq = { groups, minimumEvents };
+      tierReq = { groups, minimumEvents } as Owned<{ groups: string[][]; minimumEvents: number }>;
       break;
     }
     if (tierReq === undefined) {
@@ -859,13 +913,13 @@ export class EvidenceEmitter {
     const jobId = typeof jobIdField === "string" ? jobIdField : "";
     const eventList = ownElements(events as unknown);
     if (eventList === null) return { met: false, missing: ["the events are not plain data"] };
-    const assessed: Array<{ event: unknown; type: string | null; cameraIssue: string | null }> = [];
+    const assessed: Assessed[] = [];
     for (let i = 0; i < eventList.length; i++) {
       const event = listAt(eventList, i);
       const typeField = ownField(event, "type");
       const type = typeof typeField === "string" ? typeField : null;
       const cameraIssue = type !== null && includesValue(CameraTypes, type) ? KernelPullCaptureIssue(event, jobId) : null;
-      append(assessed, { event, type, cameraIssue });
+      append(assessed, { event, type, cameraIssue } as Assessed);
     }
     const countedTypes: string[] = [];
     for (let i = 0; i < assessed.length; i++) {
@@ -898,7 +952,7 @@ export class EvidenceEmitter {
   /** A copy of the events stored for a job step, in call order. */
   getEvents(jobId: string, stepId: string): EvidenceEvent[] {
     // A copy, as from addEvent: changing it (or pushing into it) changes nothing stored.
-    return StructuredClone(stepRecord(this.#steps, jobId, stepId)?.events ?? []);
+    return StructuredClone<EvidenceEvent[]>(stepRecord(this.#steps, jobId, stepId)?.events ?? []);
   }
 
   /** Subscribe to finalized bundles */

@@ -1,10 +1,9 @@
 /**
  * The DEFAULT-DENY check behind evidence-emitter-builtins.test.ts (steward DECISIONS 01:30, #6668,
- * #6792 and 04:06; astra packs 289, 291, 293, 299, 303, 307 and 309). It is a copy of @pcc/spec's
- * src/__tests__/builtin-reads-check.ts (#519 @a416bbcd), identical below this paragraph but for the
- * provenance rule (astra pack 309: isCallerValue, the conversions, OWN_DATA_READERS), which #519's
- * copy takes once pack 311's verdict on it is in. The two packages' tests differ only in the
- * `CheckOptions` they pass, and a test file of one package cannot import the other's.
+ * #6792, 04:06 and 05:05; astra packs 289, 291, 293, 299, 303, 307, 309 and 313). It is a copy of
+ * @pcc/spec's src/__tests__/builtin-reads-check.ts (#519), identical below this paragraph: the two
+ * packages' tests differ only in the `CheckOptions` they pass, and a test file of one package cannot
+ * import the other's.
  *
  * It walks EVERY node of the trusted path that runs after load, and a node passes only if it is one
  * of the forms named below, under that form's condition. Anything else is reported, so syntax
@@ -27,27 +26,24 @@
  *   - `this`; `super(...)` in a constructor;
  *   - a template whose every substitution is a primitive (an object's toString would be looked up);
  *   - a property read: on a built-in only `length` of an array or a string (own data); on a module
- *     namespace never; on `unknown` or `any` never; on anything else, allowed. This one trusts the
- *     static type, which holds only for objects the code made, so a value from outside gets an
- *     object type only with proof (astra pack 309):
- *       - an entry point's parameter whose type may be an object is the CALLER's object, whose
- *         fields may be inherited, accessors, or missing and served by a prototype. It is used only
- *         as unknown: tested (`typeof`, `===` or `!==`, `!`, a condition), handed to an own-data
- *         reader or to in-repo code at a parameter declared `unknown` or `any`, or held where an
- *         `unknown` is expected. Never read, aliased, held as a typed value or destructured where it
- *         is received;
- *       - an OPAQUE value (`unknown`, `any`, `object`, `{}`: nothing to read) becomes a readable
- *         shape (by `as` or `<T>`, by a type predicate, or as an implicit `any`), and an assertion
- *         claims fields its operand's type lacks (`{} as T`), only where CheckOptions.provenance
- *         names the place, with where its own data comes from. A fresh `ObjectCreate(null)` is the
- *         code's own empty record;
- *       - an opaque value (or an array of them) is handed to code the check does not walk only if
- *         that code is an own-data reader, or the call site is a named collaborator. An own-data
- *         reader reads only its operands' own data or identity: one of OWN_DATA_READERS, by the path
- *         it was captured from at load; an in-repo capture named in CheckOptions.ownDataReaders;
- *         `Reflect.apply` of one of those; or the reject of an executor of the Promise captured at
- *         load.
- *     An assertion to a PRIMITIVE type is a claim the operators then rely on, and is not named;
+ *     namespace or on `unknown` or `any` never. On anything else, the receiver must be OWNED
+ *     (DECISIONS 05:05; astra packs 309 and 313): a static type is no evidence of where a field comes
+ *     from. Owned means one of:
+ *       - an owned snapshot: its type carries the brand, `[OWNED]`, a `declare const OWNED: unique
+ *         symbol` in a primordials file;
+ *       - a const bound to a fresh `ObjectCreate(null)` record, or to an object literal that defines
+ *         the field;
+ *       - a property descriptor, whose `enumerable` and `configurable` are always its own, and whose
+ *         `value`, `writable`, `get` and `set` are read where the trusted hasOwn proves them its own.
+ *     The brand is MINTED only on what the code makes: the trusted `ObjectCreate(null)` itself, an
+ *     object literal that defines every field the type has (none optional), an array literal, or an
+ *     owned value of the very same type. Anything else taken as an owned type (an assertion, a type
+ *     predicate, an implicit `any`) is allowed only where CheckOptions.provenance names the place,
+ *     with the snapshot it comes from. Nothing outside the check supplies one: an entry point's
+ *     parameter, or a parameter of a function handed to code the check does not walk, may not have
+ *     an owned type, and neither may what such code answers (a Map's get, what the code stored, aside).
+ *     An assertion to a type parameter or to `never` is refused outright: it takes any value as
+ *     whatever it is instantiated with (astra pack 313);
  *   - an element read, whose key must be a string, number or symbol (ToPropertyKey of anything
  *     else looks up its toString):
  *       - an integer-indexed element of a typed array, always;
@@ -60,6 +56,14 @@
  *         the same literal key). A call or an assignment in between could remove the property;
  *       - any key of a binding declared `const x = ObjectCreate(null)`, with the trusted
  *         ObjectCreate (CheckOptions.primordials), which has no prototype;
+ *   - an object (or an opaque value) handed to code the check does not walk only if that code reads
+ *     nothing of it through [[Get]]: an own-data reader (OWN_DATA_READERS by the path it was captured
+ *     from, an in-repo capture named in CheckOptions.ownDataReaders, Reflect.apply of one, an
+ *     executor's reject), a built-in read through its internal slots (a Map, Set, Date), a dense
+ *     literal list of primitives, or a call site named as a collaborator;
+ *   - a write by Object.defineProperty, or by a helper named in CheckOptions.writers (its first
+ *     parameter is what it writes), only onto an owned snapshot, a value the code just made, a private
+ *     field or a native promise; and an owned container is never widened where it is written;
  *   - a call whose callee is an identifier, `this.#private`, or `super`, under any parentheses, `!`,
  *     `as`, `satisfies` or `<T>`, and `new` of an identifier, when the TARGET is fixed, seen code
  *     (astra pack 303):
@@ -79,8 +83,9 @@
  *     compound arithmetic assignment need primitive operands (an object's valueOf or toString would
  *     be looked up);
  *   - assignment to a local, to `this.#private`, to an integer element of a typed array, to a
- *     property or element of a binding declared `const x = ObjectCreate(null)` (a write elsewhere
- *     could run an inherited setter), or to `length` of an array, with a primitive value (an array's
+ *     property or element of a binding declared `const x = ObjectCreate(null)`, to a property of an
+ *     owned snapshot (its fields are its own: a write elsewhere could run an inherited setter), or to
+ *     `length` of an array, with a primitive value (an array's
  *     length is own data: setting it runs no setter, and shrinking deletes only own elements);
  *   - the conditional operator, parentheses, `as`, `!` (non-null), `satisfies` and `<T>` assertions;
  *   - arrow functions and function expressions (their bodies are walked);
@@ -131,6 +136,12 @@ export interface CheckOptions {
    * its reason. Closed, like the collaborators.
    */
   ownDataReaders?: ReadonlyMap<string, string>;
+  /**
+   * In-repo helpers that write onto their FIRST parameter through Object.defineProperty (append,
+   * defineField): `path:Name`, with the reason. Each call of one is judged as the write it makes: its
+   * first argument must be an owned snapshot or a value the code just made (astra pack 313).
+   */
+  writers?: ReadonlyMap<string, string>;
 }
 
 /** A file's path relative to `root`, with forward slashes; a file outside `root` keeps its whole path. */
@@ -150,6 +161,7 @@ function collaboratorProblems(options: CheckOptions, matches: Matches): string[]
     ["collaborator", "declaration or call site", options.collaborators],
     ["provenance", "conversion", options.provenance],
     ["own-data reader", "capture", options.ownDataReaders],
+    ["writer", "helper", options.writers],
   ];
   for (const [kind, what, list] of lists) {
     for (const [key, reason] of list ?? new Map<string, string>()) {
@@ -197,6 +209,8 @@ const OWN_DATA_READERS = new Set([
   // binds a function to a `this` it holds and never reads (the function operand is judged as a call target)
   "uncurried Function.prototype.bind",
 ]);
+/** Intrinsic constructors whose `new` always makes a fresh object (by the path they were captured from). */
+const FRESH_CONSTRUCTORS = new Set(["Array", "Map", "Set", "WeakSet", "WeakMap", "Date", "Error", "TypeError", "RangeError", "Uint8Array"]);
 /** What a key may be: ToPropertyKey of anything else looks up its toString or valueOf. */
 const PROPERTY_KEY = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.ESSymbolLike;
 
@@ -307,7 +321,7 @@ export function closureReads(
   seedFiles: readonly string[],
   options: CheckOptions,
   inRepo: (fileName: string) => boolean,
-): { reached: string[]; found: string[]; collaboratorsUsed: string[]; provenanceUsed: string[]; readersUsed: string[] } {
+): { reached: string[]; found: string[]; collaboratorsUsed: string[]; provenanceUsed: string[]; readersUsed: string[]; writersUsed: string[] } {
   const matches: Matches = new Map();
   const roots = trustedClosure(program, seedFiles, inRepo, options, matches);
   const seeds = new Set(seedFiles.map((file) => program.getSourceFile(file)!));
@@ -319,6 +333,7 @@ export function closureReads(
     collaboratorsUsed: [...matches.keys()].filter((key) => options.collaborators?.has(key) === true).sort(),
     provenanceUsed: [...matches.keys()].filter((key) => options.provenance?.has(key) === true).sort(),
     readersUsed: [...matches.keys()].filter((key) => options.ownDataReaders?.has(key) === true).sort(),
+    writersUsed: [...matches.keys()].filter((key) => options.writers?.has(key) === true).sort(),
   };
 }
 
@@ -425,11 +440,12 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
    * Whether the LAST thing `condition` evaluates is the trusted `hasOwn(receiver, key)`: the
    * condition is that call, or a chain of `&&` whose rightmost operand is.
    */
-  const endsWithHasOwn = (condition: ts.Expression, receiver: ts.Expression, key: ts.Expression): boolean => {
+  const endsWithHasOwn = (condition: ts.Expression, receiver: ts.Expression, key: ts.Expression | string): boolean => {
     let c = unwrap(condition);
     while (ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) c = unwrap(c.right);
-    return ts.isCallExpression(c) && ts.isIdentifier(c.expression) && isTrustedHasOwn(c.expression) && c.arguments.length === 2 &&
-      sameOperand(c.arguments[0]!, receiver) && sameOperand(c.arguments[1]!, key);
+    if (!(ts.isCallExpression(c) && ts.isIdentifier(c.expression) && isTrustedHasOwn(c.expression) && c.arguments.length === 2 && sameOperand(c.arguments[0]!, receiver))) return false;
+    const k = unwrap(c.arguments[1]!);
+    return typeof key === "string" ? (ts.isStringLiteral(k) || ts.isNoSubstitutionTemplateLiteral(k)) && k.text === key : sameOperand(k, key);
   };
   /**
    * Whether `read` is the FIRST thing `from` evaluates: it sits on the left spine of `from`, where
@@ -466,12 +482,13 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     }
   };
   /**
-   * A read of `receiver[key]` proven OWN by the trusted hasOwn, with nothing running in between:
-   * `hasOwn(x, k) ? x[k] : ...`, `hasOwn(x, k) && x[k]`, or `if (hasOwn(x, k))` whose branch begins
-   * with the read. The guard ends with that hasOwn call, and the read is the first thing the guarded
-   * part evaluates: code running in between (a call, an assignment) could remove the property.
+   * A read of `receiver[key]` (or `receiver.name`, with the key the name's string) proven OWN by the
+   * trusted hasOwn, with nothing running in between: `hasOwn(x, k) ? x[k] : ...`, `hasOwn(x, k) &&
+   * x[k]`, or `if (hasOwn(x, k))` whose branch begins with the read. The guard ends with that hasOwn
+   * call, and the read is the first thing the guarded part evaluates: code running in between (a
+   * call, an assignment) could remove the property.
    */
-  const provenOwn = (read: ts.Node, receiver: ts.Expression, key: ts.Expression): boolean => {
+  const provenOwn = (read: ts.Node, receiver: ts.Expression, key: ts.Expression | string): boolean => {
     for (let child: ts.Node = read, parent = read.parent; parent !== undefined && !ts.isFunctionLike(parent); child = parent, parent = parent.parent) {
       if (ts.isConditionalExpression(parent) && parent.whenTrue === child && endsWithHasOwn(parent.condition, receiver, key)) return firstEvaluated(child, read);
       if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && parent.right === child && endsWithHasOwn(parent.left, receiver, key)) {
@@ -522,7 +539,8 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     if (ts.isIdentifier(t)) return true;
     if (isPrivateMember(t)) return true;
     if (ts.isElementAccessExpression(t)) return isTypedElement(t) || isNullPrototypeRecord(t.expression);
-    if (ts.isPropertyAccessExpression(t)) return isNullPrototypeRecord(t.expression) || isArrayLength(t);
+    // An owned snapshot's fields are its own (a null-prototype record, or a literal with no optional field): no setter runs.
+    if (ts.isPropertyAccessExpression(t)) return isNullPrototypeRecord(t.expression) || isArrayLength(t) || isOwned(typeOf(t.expression));
     return false;
   };
 
@@ -880,18 +898,6 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
   };
   const isEntryParameter = (declaration: ts.Node): declaration is ts.ParameterDeclaration =>
     ts.isParameter(declaration) && ts.isFunctionLike(declaration.parent) && isEntryPoint(declaration.parent);
-  /**
-   * Whether `identifier` is, here, an entry point's parameter whose declared type may be an object:
-   * the caller's object, whose fields may be inherited, accessors, or missing and served by a
-   * prototype. Its type says nothing about which. (An `unknown` or `any` cannot be read at all until
-   * it is taken as an object type, which is a conversion: see `conversionAllowed`.)
-   */
-  const isCallerValue = (identifier: ts.Identifier): boolean => {
-    const declaration = symbolOf(identifier)?.declarations?.[0];
-    if (declaration === undefined || !isEntryParameter(declaration) || !mayBeObject(checker.getTypeAtLocation(declaration))) return false;
-    const here = checker.getTypeAtLocation(identifier);
-    return isLoose(here) || mayBeObject(here);
-  };
   /** Where an opaque callee was taken from: `Object.getOwnPropertyDescriptor`, `node:util.types.isProxy`, `uncurried Object.prototype.hasOwnProperty`. */
   const capturedPath = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): string | undefined => {
     const e = unwrap(expression);
@@ -954,104 +960,125 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     matched.add(declaration);
     return true;
   };
+  const elementOf = (type: ts.Type): ts.Type | undefined =>
+    checker.isArrayType(type) || checker.isTupleType(type) ? checker.getIndexTypeOfType(type, ts.IndexKind.Number) : undefined;
   /**
-   * Whether `argument` is passed where the callee holds it as unknown: code the check walks, at a
-   * parameter declared unknown or any (or an unconstrained type parameter taken as unknown or any
-   * here), or an own-data reader.
+   * The brand's key: `[OWNED]`, where OWNED is a `declare const OWNED: unique symbol` in a primordials
+   * file. Only an owned snapshot's type carries it (DECISIONS 05:05).
    */
-  const passedAsUnknown = (call: ts.CallExpression | ts.NewExpression, argument: ts.Node): boolean => {
-    const index = ((call.arguments ?? []) as readonly ts.Node[]).indexOf(argument);
-    if (index < 0) return false;
-    const callee = unwrap(call.expression);
-    if (!walkedTarget(callee)) return isOwnDataReader(callee, call);
-    const parameter = checker.getResolvedSignature(call)?.getDeclaration()?.parameters[index];
-    if (parameter === undefined || parameter.dotDotDotToken !== undefined) return false;
-    const declared = checker.getTypeAtLocation(parameter);
-    if (isLoose(declared)) return true;
-    if ((declared.flags & ts.TypeFlags.TypeParameter) === 0) return false;
-    const constraint = checker.getBaseConstraintOfType(declared);
-    const expected = checker.getContextualType(argument as ts.Expression);
-    return (constraint === undefined || isLoose(constraint)) && expected !== undefined && isLoose(expected);
+  const isBrandKey = (property: ts.Symbol): boolean =>
+    (property.declarations ?? []).some((d) => {
+      if (!(ts.isPropertySignature(d) || ts.isPropertyDeclaration(d)) || !ts.isComputedPropertyName(d.name) || !ts.isIdentifier(d.name.expression)) return false;
+      const key = declarationOf(d.name.expression);
+      return key !== undefined && ts.isVariableDeclaration(key) && ts.isIdentifier(key.name) && key.name.text === "OWNED" && inPrimordials(key);
+    });
+  /** Whether every value of this type is an owned snapshot: each part, null and undefined aside, carries the brand. */
+  const isOwned = (type: ts.Type): boolean => {
+    const t = checker.getNonNullableType(type);
+    const parts = t.isUnion() ? t.types : [t];
+    return parts.length > 0 && parts.every((part) => (part.flags & ts.TypeFlags.Never) === 0 && checker.getPropertiesOfType(part).some(isBrandKey));
+  };
+  /** Whether the brand appears anywhere in this type: a part of it, an element, a type argument, or a property's type. */
+  const containsOwned = (type: ts.Type, seen: Set<ts.Type> = new Set()): boolean => {
+    if (seen.has(type)) return false;
+    seen.add(type);
+    if (type.isUnion() || type.isIntersection()) return type.types.some((t) => containsOwned(t, seen));
+    if ((type.flags & ts.TypeFlags.Object) === 0) return false;
+    if (checker.getPropertiesOfType(type).some(isBrandKey)) return true;
+    if ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference && checker.getTypeArguments(type as ts.TypeReference).some((t) => containsOwned(t, seen))) return true;
+    for (const info of checker.getIndexInfosOfType(type)) if (containsOwned(info.type, seen)) return true;
+    if (fromLib(type.getSymbol())) return false;
+    return checker.getPropertiesOfType(type).some((p) => containsOwned(checker.getTypeOfSymbol(p), seen));
+  };
+  /** The engine's property descriptor type (lib PropertyDescriptor or TypedPropertyDescriptor). */
+  const isPropertyDescriptorType = (type: ts.Type): boolean => {
+    const t = checker.getNonNullableType(type);
+    const symbol = t.getSymbol() ?? t.aliasSymbol;
+    return fromLib(symbol) && (symbol!.getName() === "PropertyDescriptor" || symbol!.getName() === "TypedPropertyDescriptor");
+  };
+  /** The initializer of a const `identifier` names, through parentheses and assertions; undefined for anything else. */
+  const constInitializer = (identifier: ts.Identifier): ts.Expression | undefined => {
+    const declaration = checker.getSymbolAtLocation(identifier)?.declarations?.[0];
+    return declaration !== undefined && isConst(declaration) && declaration.initializer !== undefined ? unwrap(declaration.initializer) : undefined;
+  };
+  /** Whether a const object literal defines `name` itself (no spread): a property it makes its own. */
+  const literalDefines = (identifier: ts.Identifier, name: string): boolean => {
+    const init = constInitializer(identifier);
+    if (init === undefined || !ts.isObjectLiteralExpression(init) || init.properties.some((p) => ts.isSpreadAssignment(p))) return false;
+    return init.properties.some((p) => p.name !== undefined && (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) && p.name.text === name);
   };
   /**
-   * Whether this use treats a caller's value as unknown (astra pack 309):
-   *   - tested: `typeof`, `===` or `!==`, `!`, a condition, the left of `&&` (an object is truthy,
-   *     so `&&` never yields it), or a statement that drops it;
-   *   - passed where the callee holds it as unknown (passedAsUnknown);
-   *   - held where an unknown or any is expected: a binding declared so, a member or element of
-   *     that type, a return value of that type;
-   *   - a read of a member whose declaration is a named collaborator: the collaborator's.
-   * An assertion, the branches of `?:`, the operands of `||` and `??`, and the right of `&&` and `,`
-   * pass the value on: their own use is judged.
+   * Whether `expression` makes a new object right here: `ObjectCreate(null)`, an object or array
+   * literal, `new` of an intrinsic constructor or of a class declared in the repository, or a call of
+   * an in-repo function each of whose returns makes one (newList).
    */
-  const usedAsUnknown = (value: ts.Expression): boolean => {
-    let at: ts.Expression = value;
-    for (;;) {
-      const p = at.parent;
-      if (ts.isParenthesizedExpression(p) || ts.isNonNullExpression(p) || ts.isAsExpression(p) || ts.isSatisfiesExpression(p) || ts.isTypeAssertionExpression(p)) at = p;
-      else if (ts.isConditionalExpression(p) && p.condition !== at) at = p;
-      else if (
-        ts.isBinaryExpression(p) &&
-        (p.operatorToken.kind === ts.SyntaxKind.BarBarToken || p.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
-          ((p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || p.operatorToken.kind === ts.SyntaxKind.CommaToken) && p.right === at))
-      ) {
-        at = p;
-      } else break;
+  const freshExpression = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+    const e = unwrap(expression);
+    if (isFreshObjectCreate(e) || ts.isObjectLiteralExpression(e) || ts.isArrayLiteralExpression(e)) return true;
+    if (ts.isNewExpression(e)) {
+      const declarations = ts.isIdentifier(e.expression) ? symbolOf(e.expression)?.declarations ?? [] : [];
+      return walkedTarget(e.expression) || (declarations.length > 0 && declarations.every((d) => isLoadTimeConst(d) && capturedPath(d.initializer!) !== undefined && isIntrinsicPath(capturedPath(d.initializer!)!)));
     }
-    const parent = at.parent;
-    if (ts.isTypeOfExpression(parent) || ts.isExpressionStatement(parent)) return true;
-    if (ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken) return true;
-    if ((ts.isIfStatement(parent) || ts.isWhileStatement(parent) || ts.isDoStatement(parent)) && parent.expression === at) return true;
-    if ((ts.isForStatement(parent) || ts.isConditionalExpression(parent)) && parent.condition === at) return true;
-    if (ts.isBinaryExpression(parent)) {
-      const op = parent.operatorToken.kind;
-      if (op === ts.SyntaxKind.EqualsEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken) return true;
-      if ((op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.CommaToken) && parent.left === at) return true;
-      if (op === ts.SyntaxKind.EqualsToken && parent.right === at) return isLoose(typeOf(parent.left));
-      return false;
-    }
-    if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression !== at) return passedAsUnknown(parent, at);
-    if (ts.isVariableDeclaration(parent) && parent.initializer === at) return isLoose(checker.getTypeAtLocation(parent.name));
-    if (ts.isPropertyAssignment(parent) || ts.isShorthandPropertyAssignment(parent) || ts.isArrayLiteralExpression(parent) || ts.isReturnStatement(parent) || ts.isArrowFunction(parent)) {
-      const expected = checker.getContextualType(at);
-      return expected !== undefined && isLoose(expected);
-    }
-    if (ts.isPropertyAccessExpression(parent) && parent.expression === at) {
-      const member = symbolOf(parent.name)?.declarations ?? [];
-      return member.length > 0 && member.every((d) => options.collaborators?.has(closureKey(d, options.root)) === true);
+    if (!ts.isCallExpression(e) || !ts.isIdentifier(e.expression)) return false;
+    const fn = symbolOf(e.expression)?.declarations?.[0];
+    if (fn === undefined || !ts.isFunctionDeclaration(fn) || fn.body === undefined || seen.has(fn) || isIntrinsic(fn) || isThirdParty(fn)) return false;
+    seen.add(fn);
+    const returns: ts.ReturnStatement[] = [];
+    const walk = (n: ts.Node): void => {
+      if (ts.isFunctionLike(n) && n !== fn) return;
+      if (ts.isReturnStatement(n)) returns.push(n);
+      ts.forEachChild(n, walk);
+    };
+    walk(fn.body);
+    // A return of a const the function itself bound to a fresh value (`const out = newList(n); ... return out;`).
+    return returns.length > 0 && returns.every((r) => r.expression !== undefined && (freshExpression(r.expression, seen) || isFreshLocal(r.expression)));
+  };
+  /** Whether a captured path names an intrinsic constructor whose `new` makes a fresh object. */
+  const isIntrinsicPath = (path: string): boolean => FRESH_CONSTRUCTORS.has(path);
+  /** A const bound to a value the code just made (freshExpression). */
+  const isFreshLocal = (expression: ts.Expression): boolean => {
+    const e = unwrap(expression);
+    if (!ts.isIdentifier(e)) return false;
+    if (isNullPrototypeRecord(e)) return true;
+    const init = constInitializer(e);
+    return init !== undefined && freshExpression(init);
+  };
+  /**
+   * Whether `receiver` is owned where `name` is read from it (DECISIONS 05:05): its type carries the
+   * brand; it is a const bound to a fresh null-prototype record, or to an object literal that defines
+   * `name`; or it is a property descriptor, whose `enumerable` and `configurable` are always its own,
+   * and whose `value`, `writable`, `get` and `set` are read only where the trusted hasOwn proves them
+   * its own (an accessor's descriptor has no own `value`, and one written on Object.prototype is not its own).
+   */
+  const ownedReceiver = (read: ts.Node, receiver: ts.Expression, name: string): boolean => {
+    if (isOwned(typeOf(receiver))) return true;
+    const r = unwrap(receiver);
+    if (ts.isIdentifier(r) && (isNullPrototypeRecord(r) || literalDefines(r, name))) return true;
+    if (isPropertyDescriptorType(typeOf(receiver))) {
+      if (name === "enumerable" || name === "configurable") return true;
+      return provenOwn(read, r, name);
     }
     return false;
   };
-  const elementOf = (type: ts.Type): ts.Type | undefined =>
-    checker.isArrayType(type) || checker.isTupleType(type) ? checker.getIndexTypeOfType(type, ts.IndexKind.Number) : undefined;
-  /** Whether a value of this type has something to read: it may be an object, and is not opaque. */
-  const readable = (type: ts.Type): boolean => (type.isUnion() ? type.types : [type]).some((t) => mayBeObject(t) && !isOpaque(t));
+  /** Whether a type is a type parameter, or `never`, or a union or intersection with one: what an assertion launders into. */
+  const launderingTarget = (type: ts.Type): boolean =>
+    (type.flags & (ts.TypeFlags.TypeParameter | ts.TypeFlags.Never)) !== 0 || ((type.isUnion() || type.isIntersection()) && type.types.some(launderingTarget));
+  /** Whether a type has a property it may lack: an object literal minted as it would read that one from a prototype. */
+  const hasOptionalProperty = (type: ts.Type): boolean =>
+    (checker.getNonNullableType(type).isUnion() ? (checker.getNonNullableType(type) as ts.UnionType).types : [checker.getNonNullableType(type)]).some((t) =>
+      checker.getPropertiesOfType(t).some((p) => (p.flags & ts.SymbolFlags.Optional) !== 0));
   /**
-   * Whether taking a value of type `from` as `to` makes readable what `from` held opaque: an opaque
-   * value (unknown, any, `object`, `{}`) taken as a readable shape, or an array of them taken as an
-   * array of readable shapes.
+   * Whether a value of type `from` may be taken as `to`, which carries the brand (a mint): the trusted
+   * `ObjectCreate(null)` itself (a fresh, empty record with no prototype), an object literal that
+   * defines every property `to` has (none optional), or an owned value of that very type.
    */
-  const exposes = (from: ts.Type, to: ts.Type | undefined): boolean => {
-    if (to === undefined) return false;
-    if (isOpaque(from)) return readable(to);
-    if (from.isUnion()) return from.types.some((part) => exposes(part, to));
-    const element = elementOf(from);
-    if (element === undefined || !isOpaque(element)) return false;
-    return (to.isUnion() ? to.types : [to]).some((t) => {
-      const target = elementOf(t);
-      return target !== undefined && readable(target);
-    });
-  };
-  /**
-   * Whether asserting a value of type `from` as `to` claims named fields `from` does not have: `{} as
-   * T`, a base as a subtype. Each such field is read through [[Get]], and an absent one is read from
-   * a prototype.
-   */
-  const addsFields = (from: ts.Type, to: ts.Type): boolean => {
-    const target = checker.getNonNullableType(to);
-    if (isOpaque(from) || !mayBeObject(target) || checker.isTypeAssignableTo(from, target)) return false;
-    const present = new Set(checker.getPropertiesOfType(checker.getNonNullableType(from)).map((p) => p.getName()));
-    return checker.getPropertiesOfType(target).some((p) => !present.has(p.getName()));
+  const mintAllowed = (operand: ts.Expression, to: ts.Type): boolean => {
+    if (isFreshObjectCreate(operand)) return true;
+    const e = unwrap(operand);
+    if (ts.isObjectLiteralExpression(e)) return !hasOptionalProperty(to) && !e.properties.some((p) => ts.isSpreadAssignment(p));
+    if (ts.isArrayLiteralExpression(e)) return !e.elements.some((element) => ts.isSpreadElement(element));
+    const from = typeOf(operand);
+    return isOwned(from) && checker.isTypeAssignableTo(from, to) && checker.isTypeAssignableTo(to, from);
   };
   /** The trusted `ObjectCreate(null)` itself: a fresh, empty null-prototype object, typed as the code will fill it. */
   const isFreshObjectCreate = (expression: ts.Expression): boolean => {
@@ -1062,12 +1089,20 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
   /** A conversion's label: `as T` for an assertion, `is T` for a type predicate, with T's text on one line. */
   const conversionLabel = (node: ts.AsExpression | ts.TypeAssertion | ts.TypePredicateNode): string =>
     `${ts.isTypePredicateNode(node) ? "is" : "as"} ${(node.type ?? node).getText().replace(/\s+/g, " ")}`;
+  /** Records that a named entry matched `node`; false when `key` is not in `list`. */
+  const named = (list: ReadonlyMap<string, string> | undefined, key: string, node: ts.Node): boolean => {
+    if (list?.has(key) !== true) return false;
+    let matched = matches.get(key);
+    if (matched === undefined) matches.set(key, (matched = new Set()));
+    matched.add(node);
+    return true;
+  };
   /**
-   * An `unknown` or `any` taken as an object type: its fields become readable, and nothing has read
-   * them as own data. Allowed only where `CheckOptions.provenance` names the place, with where its
-   * own data comes from (astra pack 309).
+   * A value taken as an owned snapshot's type by an assertion or a type predicate (a MINT), where
+   * mintAllowed does not allow it: allowed only where `CheckOptions.provenance` names the place, with
+   * the snapshot it comes from (DECISIONS 05:05).
    */
-  const conversion = (node: ts.AsExpression | ts.TypeAssertion | ts.TypePredicateNode): void => {
+  const mint = (node: ts.AsExpression | ts.TypeAssertion | ts.TypePredicateNode): void => {
     const label = conversionLabel(node);
     const enclosing = ts.isTypePredicateNode(node) ? node.parent : enclosingNamed(node);
     const scopeNode = enclosing ?? node.getSourceFile();
@@ -1080,36 +1115,126 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     walk(scopeNode);
     const base = `${enclosing !== undefined ? closureKey(enclosing, options.root) : `${relativeName(node.getSourceFile().fileName, options.root)}:(top level)`}:${label}`;
     const key = same.length > 1 ? `${base}#${same.indexOf(node) + 1}` : base;
-    if (options.provenance?.has(key) === true) {
-      let matched = matches.get(key);
-      if (matched === undefined) matches.set(key, (matched = new Set()));
-      matched.add(node);
-      return;
-    }
-    report(node, `an unknown or any taken as an object type, whose fields nothing has read as own data: read them through an own-data reader, or name ${key} in provenance with where its own data comes from (astra pack 309)`);
+    if (named(options.provenance, key, node)) return;
+    report(node, `an owned snapshot minted from a value no snapshot made: mint one from ObjectCreate(null) or a literal, or name ${key} in provenance with the snapshot it comes from (DECISIONS 05:05)`);
   };
-
-  /** An `any` passed or held where an object type is expected: the implicit form of an assertion. */
+  /** An `any` passed or held where an owned type, or a type parameter, is expected: the implicit form of a mint. */
   const checkFlow = (expression: ts.Expression | undefined): void => {
     if (expression === undefined || isFreshObjectCreate(expression)) return;
-    const type = typeOf(expression);
-    if ((type.flags & ts.TypeFlags.Any) === 0 && !(elementOf(type) !== undefined && (elementOf(type)!.flags & ts.TypeFlags.Any) !== 0)) return;
-    if (exposes(type, checker.getContextualType(expression))) {
-      report(expression, "an any taken as an object type without an assertion: its fields become readable, and nothing has read them as own data (astra pack 309)");
+    if ((typeOf(expression).flags & ts.TypeFlags.Any) === 0) return;
+    const expected = checker.getContextualType(expression);
+    if (expected !== undefined && (containsOwned(expected) || launderingTarget(expected))) {
+      report(expression, "an any held where an owned snapshot (or a type parameter) is expected: no snapshot made it (DECISIONS 05:05)");
     }
   };
   /**
-   * The operands of a call into code the check does not walk: an unknown or any there (or an array
-   * of them) may be read through [[Get]] by that code, unless it is an own-data reader. A caller's
-   * value named directly is judged by checkIdentifier.
+   * Whether a container of owned values (an array's elements, a Map's or Set's type arguments) is taken
+   * as one whose elements are of a different type: a write through the wider type could store a value
+   * no snapshot made (array and method covariance).
    */
-  const checkOpaqueOperands = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): void => {
-    if (walkedTarget(callee) || isOwnDataReader(callee, call)) return;
+  const widensElements = (actual: ts.Type, expected: ts.Type): boolean => {
+    const same = (a: ts.Type, b: ts.Type): boolean => checker.isTypeAssignableTo(a, b) && checker.isTypeAssignableTo(b, a);
+    const actualElement = checker.getIndexTypeOfType(checker.getNonNullableType(actual), ts.IndexKind.Number);
+    const expectedElement = checker.getIndexTypeOfType(checker.getNonNullableType(expected), ts.IndexKind.Number);
+    if (actualElement !== undefined && expectedElement !== undefined) return containsOwned(actualElement) && !same(actualElement, expectedElement);
+    const a = checker.getNonNullableType(actual) as ts.TypeReference;
+    const b = checker.getNonNullableType(expected) as ts.TypeReference;
+    if (!((a as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) || !((b as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference)) return false;
+    const actualArgs = checker.getTypeArguments(a);
+    const expectedArgs = checker.getTypeArguments(b);
+    return actualArgs.some((t, i) => containsOwned(t) && (expectedArgs[i] === undefined || !same(t, expectedArgs[i]!)));
+  };
+  /** The paths of the captured intrinsics that write a property onto their first operand. */
+  const DEFINERS = new Set(["Object.defineProperty", "Reflect.defineProperty"]);
+  /** The writer `fn` is, when CheckOptions.writers names it: a helper whose first parameter is the object it writes. */
+  const isWriter = (fn: ts.Node): boolean => (ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && options.writers?.has(closureKey(fn, options.root)) === true;
+  /**
+   * Whether `target` may be written: an owned snapshot (its writes are typed), a const the code just
+   * made (a fresh record, literal or `new`), `this.#field`, or the first parameter of a named writer
+   * (whose own call sites are judged). A value of any other type may be an owned snapshot held through
+   * a wider type, and a write there could store what no snapshot made (astra pack 313).
+   */
+  const definableTarget = (target: ts.Expression): boolean => {
+    if (isOwned(typeOf(target)) || isFreshLocal(target) || freshExpression(target) || isPrivateMember(unwrap(target))) return true;
+    // A native promise's own `constructor`, pinned (pinned()): a promise is written only that one constant.
+    const kinds = kindsOf(typeOf(target));
+    if (kinds.length > 0 && kinds.every((k) => k === "object:Promise" || k === "object:PromiseLike")) return true;
+    const t = unwrap(target);
+    if (!ts.isIdentifier(t)) return false;
+    const declaration = symbolOf(t)?.declarations?.[0];
+    if (declaration === undefined || !ts.isParameter(declaration)) return false;
+    const fn = declaration.parent;
+    if (!isWriter(fn) || (fn as ts.SignatureDeclaration).parameters.indexOf(declaration) !== 0) return false;
+    named(options.writers, closureKey(fn, options.root), fn);
+    return true;
+  };
+  /**
+   * The checks on a call that writes (an intrinsic definer, or a named writer): its target must be
+   * definable, and an owned container may not be widened where it is written (array, Map and Set
+   * covariance would let a wider value in).
+   */
+  const checkWrite = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): void => {
+    const path = capturedPath(callee);
+    const declaration = ts.isIdentifier(unwrap(callee)) ? symbolOf(unwrap(callee))?.declarations?.[0] : undefined;
+    const writer = declaration !== undefined && isWriter(declaration);
+    if (!(writer || (path !== undefined && DEFINERS.has(path)))) return;
+    const target = call.arguments?.[0];
+    if (target === undefined) return;
+    if (!definableTarget(target)) {
+      report(target, "a write to an object that is not an owned snapshot or a value this code just made: through a wider type it could store what no snapshot made (astra pack 313)");
+    }
+    const expected = checker.getContextualType(target);
+    if (expected !== undefined && widensElements(typeOf(target), expected)) {
+      report(target, "an owned container widened where it is written: a wider value could be stored in it (astra pack 313)");
+    }
+  };
+  /**
+   * Whether `parameter` belongs to a function written as an argument of code the check does not walk
+   * (a callback an intrinsic, a node: built-in or a collaborator calls): that code supplies its value.
+   */
+  const suppliedOutside = (parameter: ts.ParameterDeclaration): boolean => {
+    const fn = parameter.parent;
+    if (!(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return false;
+    let at: ts.Node = fn;
+    while (ts.isParenthesizedExpression(at.parent)) at = at.parent;
+    const call = at.parent;
+    return (ts.isCallExpression(call) || ts.isNewExpression(call)) && call.expression !== at && !walkedTarget(unwrap(call.expression)) && !isPromiseExecutor(fn);
+  };
+  /** An array literal written right here, dense, of primitives and functions (Reflect.apply's argument list): its elements are the code's own. */
+  const primitiveArgumentList = (argument: ts.Expression): boolean => {
+    const a = unwrap(argument);
+    return ts.isArrayLiteralExpression(a) && a.elements.every((element) =>
+      !ts.isSpreadElement(element) && !ts.isOmittedExpression(element) && (!mayBeObject(typeOf(element)) || isCallableType(typeOf(element))) && !holdsLoose(typeOf(element)));
+  };
+  /** A built-in object an intrinsic reads through its internal slots, not its properties: a Map, Set, WeakSet, Date or typed array. */
+  const slotObject = (type: ts.Type): boolean => {
+    const kinds = kindsOf(type);
+    return kinds.length > 0 && kinds.every((k) => k.startsWith("object:") && k !== "object:Promise" && k !== "object:PromiseLike" && k !== "object:Error" && k !== "object:RegExp" && k !== "object:Function");
+  };
+  /** Paths whose answer is what the code itself put there (a Map's get), so an owned type for it is the stored value's. */
+  const OWNED_ANSWERS = new Set(["uncurried Map.prototype.get", "uncurried Map.prototype.set", "Object.defineProperty"]);
+  /**
+   * The operands and answer of a call into code the check does not walk (an intrinsic, a node:
+   * built-in, a capture, a collaborator): an object handed to it may be read through [[Get]] (its
+   * toJSON, toString, then or constructor looked up) unless it is an own-data reader, and its answer
+   * may not claim an owned type (DECISIONS 05:05).
+   */
+  const checkOpaqueCall = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): void => {
+    if (walkedTarget(callee)) return;
+    // A call through a parameter runs what its callers pass: callTargetFixed judged that.
+    const parameter = ts.isIdentifier(unwrap(callee)) ? symbolOf(unwrap(callee))?.declarations?.[0] : undefined;
+    if (parameter !== undefined && ts.isParameter(parameter)) return;
+    const path = capturedPath(callee);
+    // A new Map, Set or array is empty: its type arguments describe what the code will put in it (writes are checked).
+    const fresh = ts.isNewExpression(call) && path !== undefined && FRESH_CONSTRUCTORS.has(path);
+    if (!fresh && containsOwned(typeOf(call)) && !(path !== undefined && OWNED_ANSWERS.has(path))) {
+      report(call, "an owned type for what code the check does not walk answers: no snapshot made it (DECISIONS 05:05)");
+    }
+    if (isOwnDataReader(callee, call)) return;
     for (const argument of call.arguments ?? []) {
-      const a = unwrap(argument);
-      if (ts.isIdentifier(a) && isCallerValue(a)) continue;
-      if (holdsLoose(typeOf(argument))) {
-        unseenTarget(call, callee, "an opaque value (unknown, any, object) handed to code the check does not walk, which may read it through [[Get]] (astra pack 309)");
+      const type = typeOf(argument);
+      if (holdsLoose(type) || (mayBeObject(type) && !isCallableType(type) && !slotObject(type) && !primitiveArgumentList(argument))) {
+        unseenTarget(call, callee, "an object handed to code the check does not walk, which may read it through [[Get]] (DECISIONS 05:05)");
         return;
       }
     }
@@ -1131,19 +1256,13 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     const symbol = checker.getSymbolAtLocation(node);
     if (fromLib(symbol) && !READ_ONLY_GLOBALS.has(node.text)) report(node, "a global, used after load");
     if (node.text === "arguments" && symbol === undefined) report(node, "arguments");
-    if (isCallerValue(node) && !usedAsUnknown(node)) {
-      report(node, "a caller's value used as other than unknown: test it, compare it, or pass it to an own-data reader or where an unknown is expected (astra pack 309)");
-    }
   };
 
   /** Checks `node` itself; returns false when its subtree must not be walked (type positions). */
   const checkNode = (node: ts.Node): boolean => {
     if (ts.isTypePredicateNode(node)) {
-      // A type predicate on an unknown or any parameter: a conversion, wherever it is called.
-      const fn = node.parent;
-      const name = ts.isIdentifier(node.parameterName) ? node.parameterName.text : undefined;
-      const parameter = ts.isFunctionLike(fn) ? fn.parameters.find((q) => ts.isIdentifier(q.name) && q.name.text === name) : undefined;
-      if (node.type !== undefined && parameter !== undefined && exposes(checker.getTypeAtLocation(parameter), checker.getTypeFromTypeNode(node.type))) conversion(node);
+      // A type predicate that narrows to an owned type mints, wherever it is called (DECISIONS 05:05).
+      if (node.type !== undefined && containsOwned(checker.getTypeFromTypeNode(node.type))) mint(node);
       return false;
     }
     if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) return false; // erased
@@ -1152,9 +1271,11 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     switch (node.kind) {
       // A caller's value, and an any held where an object type is expected (astra pack 309).
       case ts.SyntaxKind.Parameter: {
+        // Where a value comes from outside (an entry point's caller, or code the check does not walk that calls a
+        // function handed to it), an owned type would be the caller's claim: anything can be handed in typed so.
         const n = node as ts.ParameterDeclaration;
-        if (isEntryParameter(n) && !ts.isIdentifier(n.name) && mayBeObject(checker.getTypeAtLocation(n))) {
-          report(n, "a caller's object destructured where it is received: its fields are read through [[Get]] (astra pack 309)");
+        if (containsOwned(checker.getTypeAtLocation(n)) && (isEntryParameter(n) || suppliedOutside(n))) {
+          report(n, "an owned type where code outside the check supplies the value: no snapshot made it (DECISIONS 05:05)");
         }
         return true;
       }
@@ -1253,8 +1374,13 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
         const n = node as ts.PropertyAccessExpression;
         if (n.expression.kind === ts.SyntaxKind.ThisKeyword && ts.isPrivateIdentifier(n.name)) return true;
         const name = n.name.text;
-        for (const kind of kindsOf(typeOf(n.expression))) {
+        const kinds = kindsOf(typeOf(n.expression));
+        for (const kind of kinds) {
           if (!(name === "length" && (kind === "array" || kind === "string"))) report(n, `.${name} on a ${kind}`);
+        }
+        // A static type is no evidence of where a field comes from (DECISIONS 05:05): the receiver must be owned.
+        if (kinds.length === 0 && !ownedReceiver(n, n.expression, name)) {
+          report(n, `.${name} on a receiver that is not an owned snapshot: its type says nothing about where the field comes from (DECISIONS 05:05)`);
         }
         return true;
       }
@@ -1280,7 +1406,10 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
           unseenTarget(n, callee, "a call into code the check does not walk, which may invoke a function operand the check cannot see");
         }
         for (const argument of n.arguments) checkFlow(argument);
-        if (ts.isIdentifier(callee) || isPrivateMember(callee) || callee.kind === ts.SyntaxKind.SuperKeyword) checkOpaqueOperands(n, callee);
+        if (ts.isIdentifier(callee) || isPrivateMember(callee) || callee.kind === ts.SyntaxKind.SuperKeyword) {
+          checkOpaqueCall(n, callee);
+          checkWrite(n, callee);
+        }
         return true;
       }
       case ts.SyntaxKind.NewExpression: {
@@ -1291,7 +1420,7 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
           unseenTarget(n, n.expression, "a construction by code the check does not walk, which may invoke a function operand the check cannot see");
         }
         for (const argument of n.arguments ?? []) checkFlow(argument);
-        if (ts.isIdentifier(n.expression)) checkOpaqueOperands(n, n.expression);
+        if (ts.isIdentifier(n.expression)) checkOpaqueCall(n, n.expression);
         return true;
       }
       case ts.SyntaxKind.PrefixUnaryExpression: {
@@ -1370,7 +1499,11 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
       case ts.SyntaxKind.AsExpression:
       case ts.SyntaxKind.TypeAssertionExpression: {
         const n = node as ts.AsExpression | ts.TypeAssertion;
-        if (!isFreshObjectCreate(n.expression) && (exposes(typeOf(n.expression), typeOf(n)) || addsFields(typeOf(n.expression), typeOf(n)))) conversion(n);
+        if (launderingTarget(typeOf(n))) {
+          report(n, "an assertion to a type parameter or to never: it takes any value as whatever it is instantiated with (astra pack 313)");
+        } else if (containsOwned(typeOf(n)) && !mintAllowed(n.expression, typeOf(n))) {
+          mint(n);
+        }
         return true;
       }
       case ts.SyntaxKind.ConditionalExpression:
@@ -1413,6 +1546,7 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
           for (const kind of kinds) {
             if (!(name === "length" && (kind === "array" || kind === "string"))) report(element, `destructuring .${name} from a ${kind}`);
           }
+          if (kinds.length === 0 && !isOwned(typeOf(n))) report(element, `destructuring .${name} from a value that is not an owned snapshot (DECISIONS 05:05)`);
           if (element.dotDotDotToken !== undefined) report(element, "a rest element (it copies through [[Get]])");
         }
         return true;

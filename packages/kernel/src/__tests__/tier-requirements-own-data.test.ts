@@ -43,6 +43,28 @@ function stored(type: string, i: number, deviceType: EvidenceSource["deviceType"
 }
 
 const TIER1_TYPES = ["gcode_hash_verified", "execution_completed", "power_profile_summary"];
+const JOB = "job-own-data-001";
+const IMAGE_HASH = `sha256:${"cd".repeat(32)}`;
+
+/** A complete LO-SE-1 kernel-pull camera_snapshot for `jobId`, as the PullCameraAdapter emits it (camera-gate-intrinsics.test.ts). */
+function camera(jobId: string): EvidenceEvent {
+  const timestamp = new Date(1_700_000_000_000).toISOString();
+  const payload: Record<string, unknown> = {
+    jobId,
+    acquiredAt: timestamp,
+    imageHash: IMAGE_HASH,
+    storageRef: `photo:${IMAGE_HASH}`,
+    frameStored: false,
+    rawSizeBytes: 15_000,
+    captureMode: "kernel-pull",
+    captureClass: "CC0",
+    device: { path: "/dev/video0", identity: "SER-1" },
+    declaredChallengeId: null,
+    declaredChallengeAnchor: null,
+    antiSpoofScore: 1,
+  };
+  return { id: "e-cam", hash: "sha256:cam", type: "camera_snapshot" as EvidenceEvent["type"], timestamp, source: { deviceId: "cam-lose1", deviceType: "camera", kernelId: KERNEL_ID }, payload };
+}
 const tier1 = (): EvidenceEvent[] => TIER1_TYPES.map((type, i) => stored(type, i, type === "power_profile_summary" ? "power_monitor" : "controller"));
 
 /** Runs `body` with `values` written on Object.prototype (as data, or a getter counting its runs), then removes them. */
@@ -163,14 +185,19 @@ describe("checkTierRequirements reads the caller's requirements, events and opti
       expect(answer.missing).toContain(notOwn);
       expect(runs.n).toBe(0);
     }
-    {
-      const runs = { n: 0 };
-      const viaProxy = emitter.checkTierRequirements(tier1(), 1, undefined, counted({ jobId: "job-1" }, runs));
-      const viaAccessor = emitter.checkTierRequirements(tier1(), 1, undefined, accessor({} as { jobId?: string }, "jobId", "job-1", runs));
-      expect(viaProxy).toEqual(emitter.checkTierRequirements(tier1(), 1, undefined, {}));
-      expect(viaAccessor).toEqual(viaProxy);
-      expect(runs.n).toBe(0);
+  });
+
+  it("an unreadable options.jobId fails the tier where the job binds evidence: a camera capture for the job no longer counts (astra pack 313 LOW)", () => {
+    // Tier 2 needs camera evidence, and an LO-SE-1 capture counts only for the job it names.
+    const events = [...tier1(), camera(JOB)];
+    expect(emitter.checkTierRequirements(events, 2, undefined, { jobId: JOB })).toEqual({ met: true, missing: [] });
+    const runs = { n: 0 };
+    for (const options of [counted({ jobId: JOB }, runs), accessor({} as { jobId?: string }, "jobId", JOB, runs), {}]) {
+      const answer = emitter.checkTierRequirements(events, 2, undefined, options);
+      expect(answer.met).toBe(false);
+      expect(answer.missing.some((m) => m.startsWith("camera_snapshot from cam-lose1: not an LO-SE-1 capture for this job"))).toBe(true);
     }
+    expect(runs.n).toBe(0);
   });
 });
 
@@ -184,5 +211,28 @@ describe("registerStep reads the caller's unit as own data (astra pack 309)", ()
     expect(() => emitter.registerStep("job", "accessor", 1, accessor({ ...UNIT }, "challengeNonce", UNIT.challengeNonce, runs))).toThrow(refused);
     expect(() => emitter.registerStep("job", "proxy", 1, counted({ ...UNIT }, runs))).toThrow(refused);
     expect(runs.n).toBe(0);
+  });
+});
+
+describe("setStorageService takes the service's two methods as its own data (astra pack 313 MEDIUM)", () => {
+  const methods = () => ({ isReady: (): boolean => true, archiveBundle: async () => ({ cid: "c", metadataCid: "m" }) });
+
+  it("accepts own methods, as EvidenceStorageService defines them on each instance", () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const service = methods();
+    expect(() => emitter.setStorageService(service as never)).not.toThrow();
+    expect(emitter.getStorageService()).toBe(service);
+  });
+
+  it("refuses an accessor, an inherited method, a method served by Object.prototype and a Proxy, running no getter or trap", () => {
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const runs = { n: 0 };
+    const refused = /setStorageService: isReady and archiveBundle must be the service's own methods/;
+    expect(() => emitter.setStorageService(accessor(methods(), "isReady", () => true, runs) as never)).toThrow(refused);
+    expect(() => emitter.setStorageService(Object.create(methods()) as never)).toThrow(refused);
+    expect(() => withPrototype(methods(), () => emitter.setStorageService({} as never))).toThrow(refused);
+    expect(() => emitter.setStorageService(counted(methods(), runs) as never)).toThrow(refused);
+    expect(runs.n).toBe(0);
+    expect(emitter.getStorageService()).toBe(null);
   });
 });

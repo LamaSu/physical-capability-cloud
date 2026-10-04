@@ -75,6 +75,16 @@ function dataDescriptor(value: unknown): PropertyDescriptor {
   return descriptor;
 }
 
+/**
+ * The brand of an OWNED snapshot (DECISIONS 05:05; astra pack 313): a record the code made itself
+ * (from ObjectCreate(null), or a literal that defines every field) or copied as own data through
+ * descriptors. A type-level key with no value: the default-deny check reads a field with a dot only
+ * from a value whose type carries it, and lets a type carry it only where such a record is made.
+ */
+declare const OWNED: unique symbol;
+/** `T` as an owned snapshot (see OWNED). */
+export type Owned<T> = T & { readonly [OWNED]: true };
+
 /** Install `value` as `list`'s own data property at `index`; no setter a prototype serves runs. */
 export function defineIndex<T>(list: T[], index: number, value: T): void {
   ObjectDefineProperty(list, index, dataDescriptor(value));

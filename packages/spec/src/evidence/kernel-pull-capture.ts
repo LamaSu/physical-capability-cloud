@@ -90,6 +90,7 @@ import {
   hasOwn,
   trim,
   uncurryThis,
+  type Owned,
 } from "../util/primordials.js";
 
 /** The camera event types this contract governs. */
@@ -136,8 +137,11 @@ interface Fields {
 interface CheckContext {
   jobId: string;
   timestamp: unknown;
-  payload: Fields;
+  payload: OwnedFields;
 }
+
+/** Fields and the check context are the module's own records: owned literals (see Owned). */
+type OwnedFields = Owned<Fields>;
 
 /** The event's own fields the check reads, in the order an accessor among them is reported. */
 const EVENT_KEYS: readonly string[] = ObjectFreeze(["type", "timestamp", "source", "payload"]);
@@ -163,7 +167,7 @@ const ALL_KEYS: readonly string[] = ObjectFreeze([...CAPTURE_KEYS, ...INSPECTION
  * back from a table of functions would be a call target the default-deny check cannot see (astra
  * pack 303). An unknown key fails closed.
  */
-function fieldIssue(key: string, v: unknown, context: CheckContext): string | null {
+function fieldIssue(key: string, v: unknown, context: Owned<CheckContext>): string | null {
   switch (key) {
     case "jobId":
       return v === context.jobId ? null : `payload.jobId ${show(v)} is not this job's ${show(context.jobId)}`;
@@ -226,7 +230,7 @@ export function kernelPullCaptureIssue(event: unknown, jobId: string): string | 
     const key = listAt(EVENT_KEYS, i)!;
     const descriptor = ObjectGetOwnPropertyDescriptor(event, key);
     if (descriptor !== undefined && !hasOwn(descriptor, "value")) return `event.${key} is an accessor, not an own data property`;
-    top[key] = descriptor === undefined ? undefined : descriptor.value;
+    top[key] = descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor.value : undefined;
   }
 
   const type = top.type;
@@ -250,7 +254,7 @@ export function kernelPullCaptureIssue(event: unknown, jobId: string): string | 
   if (keys !== null) return keys;
 
   const checked = snapshot ? CAPTURE_KEYS : ALL_KEYS;
-  const context: CheckContext = { jobId, timestamp: top.timestamp, payload };
+  const context = { jobId, timestamp: top.timestamp, payload } as Owned<CheckContext>;
   for (let i = 0; i < checked.length; i++) {
     const key = listAt(checked, i)!;
     const issue = fieldIssue(key, fieldValue(payload, key), context);
@@ -264,7 +268,7 @@ export function kernelPullCaptureIssue(event: unknown, jobId: string): string | 
  * getter ever runs; or the reason `value` is not a plain object of own,
  * enumerable data properties.
  */
-function plainDataFields(value: unknown, what: string): Fields | string {
+function plainDataFields(value: unknown, what: string): OwnedFields | string {
   if (value === null || typeof value !== "object") return `${what} ${show(value)} is not an object`;
   const proxy = proxyIssue(value, what);
   if (proxy !== null) return proxy;
@@ -279,13 +283,13 @@ function plainDataFields(value: unknown, what: string): Fields | string {
       return `${what}.${StringCtor(key)} is an accessor, not an own data property`;
     }
     if (!descriptor.enumerable) return `${what}.${StringCtor(key)} is not enumerable, so the event hash does not cover it`;
-    values[key] = descriptor.value;
+    values[key] = hasOwn(descriptor, "value") ? descriptor.value : undefined;
   }
-  return { keys, values };
+  return { keys, values } as unknown as OwnedFields;
 }
 
 /** The value `fields` holds for `key`, or undefined: read from its null-prototype record, never from a prototype. */
-function fieldValue(fields: Fields, key: string): unknown {
+function fieldValue(fields: OwnedFields, key: string): unknown {
   const values = fields.values;
   return hasOwn(values, key) ? values[key] : undefined;
 }
@@ -294,7 +298,7 @@ function fieldValue(fields: Fields, key: string): unknown {
  * The event as isFabricated reads it: a null-prototype record holding the
  * null-prototype copies of the source's and the payload's own data properties.
  */
-function fabricationView(source: Fields, payload: Fields): EvidenceEvent {
+function fabricationView(source: OwnedFields, payload: OwnedFields): EvidenceEvent {
   const view = ObjectCreate(null) as Record<string, unknown>;
   view.source = source.values;
   view.payload = payload.values;
@@ -302,7 +306,7 @@ function fabricationView(source: Fields, payload: Fields): EvidenceEvent {
 }
 
 /** The reason `fields` does not have exactly the `expected` keys, or null. */
-function keySetIssue(fields: Fields, expected: readonly string[], what: string): string | null {
+function keySetIssue(fields: OwnedFields, expected: readonly string[], what: string): string | null {
   const keys = fields.keys;
   for (let i = 0; i < keys.length; i++) {
     const key = listAt(keys, i);
@@ -349,7 +353,8 @@ function findingsIssue(value: unknown): string | null {
     const descriptor = ObjectGetOwnPropertyDescriptor(value, i);
     if (descriptor === undefined) return `payload.findings has a hole at index ${i}`;
     if (!hasOwn(descriptor, "value")) return `payload.findings[${i}] is an accessor, not an own data property`;
-    if (typeof descriptor.value !== "string") return `payload.findings[${i}] ${show(descriptor.value)} is not a string`;
+    const element: unknown = hasOwn(descriptor, "value") ? descriptor.value : undefined;
+    if (typeof element !== "string") return `payload.findings[${i}] ${show(element)} is not a string`;
   }
   if (ReflectOwnKeys(value).length !== length + 1) return "payload.findings has an own key besides its indices and length";
   return null;

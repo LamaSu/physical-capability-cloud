@@ -43,14 +43,10 @@ const EMITTER_FILE = "packages/kernel/src/evidence-emitter.ts";
  * or call site, or several, or gives no reason, fails the check.
  */
 const COLLABORATORS = new Map([
-  // Declarations the closure reaches but does not enter: setStorageService binds them as the storage collaborator.
+  // A declaration the closure reaches but does not enter.
   [
-    "packages/kernel/src/evidence-storage.ts:EvidenceStorageService.isReady",
-    "the storage collaborator setStorageService takes in: asked only whether to archive a bundle already hashed and signed",
-  ],
-  [
-    "packages/kernel/src/evidence-storage.ts:EvidenceStorageService.archiveBundle",
-    "the storage collaborator: handed the signed bundle after hashing and signing; nothing it returns reaches a stored event, a hash or a signature (astra pack 299, answer 1)",
+    "packages/spec/src/evidence/is-fabricated.ts:isFabricated",
+    "the canonical fabrication predicate (is-fabricated.ts), shared by every detector: it reads event.source?.simulated and event.payload?.mock. On this path it is handed only null-prototype views holding own data the path read through descriptors (fabricated() in the emitter, fabricationView() in kernel-pull-capture)",
   ],
   // Call sites whose target is supplied at run time, or is third-party code.
   [
@@ -90,50 +86,46 @@ const COLLABORATORS = new Map([
     `${EMITTER_FILE}:EvidenceEmitter.setStorageService:FunctionPrototypeBind()#2`,
     "binds the storage collaborator's archiveBundle to the service: the bound function is this.#storageArchive(), named above",
   ],
-  // A call that hands an opaque value to code the check does not walk (astra pack 309).
+  // Calls that hand an object or an opaque value to code the check does not walk (astra pack 309, DECISIONS 05:05).
+  [
+    `${EMITTER_FILE}:EvidenceEmitter.#addEvent:StructuredClone()`,
+    "structuredClone of the event the emitter just stored: a literal it built from copyEventInput's copy, every field its own; the caller gets a copy that shares nothing with the store",
+  ],
+  [
+    `${EMITTER_FILE}:events:StructuredClone()`,
+    "structuredClone of the step's stored events, the emitter's own literals: the bundle shares no object with the store (astra pack 261)",
+  ],
+  [
+    `${EMITTER_FILE}:EvidenceEmitter.getEvents:StructuredClone()`,
+    "structuredClone of the step's stored events, the emitter's own literals: the caller's copy changes nothing stored",
+  ],
   [
     "packages/spec/src/util/canonical.ts:canonicalize:StringCtor()",
     "canonicalize's last case: a bigint or a symbol, which String writes with no lookup, or a function, whose toString String would look up; no function reaches canonicalize on the emitter's path, which hashes copyPlain's copies (JSON data only) and its own records",
   ],
 ]);
 /**
- * Where an unknown is taken as an object type, each with where its own data comes from (astra pack
- * 309). Closed, like the collaborators: an unnamed conversion fails, and so does an entry that is
- * unexplained, stale or ambiguous.
+ * Where a value no fresh record or literal made is minted as an owned snapshot (DECISIONS 05:05), each
+ * with the snapshot it comes from. Closed, like the collaborators: an unnamed mint fails, and so does an
+ * entry that is unexplained, stale or ambiguous.
  */
 const PROVENANCE = new Map([
   [
-    `${EMITTER_FILE}:fabricated:as EvidenceEvent`,
-    "the view fabricated() builds on null-prototype records: only the event's own source.simulated and payload.mock, as ownField read them through descriptors (no getter ran; a Proxy or an accessor returned early, as fabricated); isFabricated reads only those two fields",
+    `${EMITTER_FILE}:copyEventInput:as OwnedRecord#1`,
+    "copyPlain's copy of the event's own source: a null-prototype record it built by defining own data read through descriptors (a Proxy, an accessor, a hole, a symbol key, __proto__ or a non-plain object is refused)",
   ],
   [
-    `${EMITTER_FILE}:event:as EvidenceEvent`,
-    "the event #addEvent builds: type and timestamp are the strings copyEventInput checked, source and payload its copies of the event's own data (read through descriptors), id and hash computed here; of a stored event the emitter reads only type and hash, both its own",
+    `${EMITTER_FILE}:copyEventInput:as OwnedRecord#2`,
+    "copyPlain's copy of the event's own payload (a fresh null-prototype record when it is absent or null), as the source",
   ],
-  [
-    `${EMITTER_FILE}:EvidenceEmitter.getStorageService:as EvidenceStorageService | null`,
-    "the storage service setStorageService was handed, handed back as it was given: the emitter reads nothing of it (it calls only the isReady and archiveBundle bound in setStorageService)",
-  ],
-  [
-    "packages/spec/src/evidence/kernel-pull-capture.ts:fabricationView:as EvidenceEvent",
-    "a null-prototype record holding plainDataFields' null-prototype records of the source's and the payload's own data properties, read through descriptors (no getter ran; a Proxy or an accessor was refused before)",
-  ],
-  [
-    `${EMITTER_FILE}:copyEventInput:as Record<string, unknown>#1`,
-    "copyPlain's copy of the event's own source: own data read through descriptors, a Proxy, an accessor, a hole or a non-plain object refused; the emitter reads it only through descriptors (ownMember) and canonicalize's own keys",
-  ],
-  [
-    `${EMITTER_FILE}:copyEventInput:as Record<string, unknown>#2`,
-    "copyPlain's copy of the event's own payload (an empty record when it is absent or null): as the source; the emitter reads it only through descriptors (ownMember) and canonicalize's own keys",
-  ],
-  [
-    "packages/spec/src/util/canonical.ts:keys:as Record<string, unknown>",
-    "canonicalize takes the object's own enumerable keys (Object.keys captured at load); nothing is read through the conversion",
-  ],
-  [
-    "packages/spec/src/util/canonical.ts:record:as Record<string, unknown>",
-    "canonicalize reads a member only where the trusted hasOwn says it is the object's own, with nothing in between (the check's proven-own read)",
-  ],
+]);
+/** In-repo helpers that write onto their first parameter (astra pack 313): each call is judged as the write it makes. */
+const WRITERS = new Map([
+  [`${EMITTER_FILE}:append`, "defines value after list's last element: its first parameter is the list it writes, and the value is typed as the list's element"],
+  [`${EMITTER_FILE}:defineField`, "defines record[key]: its first parameter is the record it writes, and the value is typed as that field"],
+  [`${EMITTER_FILE}:sortByCodeUnit`, "sorts its list in place by defining elements: its first parameter is the list, a copy hashBundleEvents made"],
+  [`${EMITTER_FILE}:pinned`, "defines a native promise's own constructor (the Promise captured at load): its first parameter is the promise"],
+  ["packages/spec/src/util/primordials.ts:defineIndex", "defines list[index]: its first parameter is the list it writes, and the value is typed as the list's element"],
 ]);
 /** In-repo captures that are own-data readers, which the check cannot name by the path they were taken from (astra pack 309). */
 const OWN_DATA_READER_CAPTURES = new Map([
@@ -151,6 +143,7 @@ const CLOSURE_OPTIONS: CheckOptions = {
   collaborators: COLLABORATORS,
   provenance: PROVENANCE,
   ownDataReaders: OWN_DATA_READER_CAPTURES,
+  writers: WRITERS,
 };
 
 describe("the emitter's trusted path passes the default-deny check (DECISIONS 01:30 and 04:06, steward #6668 and #6792, astra packs 289, 291, 293, 299, 303, 307 and 309)", () => {
@@ -162,9 +155,13 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
       primordials: /[\\/]__tests__[\\/]builtin-reads-fixture\.ts$/,
       awaitWrappers: new Set(["awaitedHere"]),
       root: REPO,
-      collaborators: new Map([["packages/kernel/src/__tests__/builtin-reads-fixture.ts:okNamedCollaborator:verify()", "the collaborator this self-test names"]]),
-      provenance: new Map([["packages/kernel/src/__tests__/builtin-reads-fixture.ts:okNamedConversion:as { tier: number }", "the conversion this self-test names"]]),
+      collaborators: new Map([
+        ["packages/kernel/src/__tests__/builtin-reads-fixture.ts:okNamedCollaborator:verify()", "the collaborator this self-test names"],
+        ["packages/kernel/src/__tests__/builtin-reads-fixture.ts:collaboratorAnswer:collaboratorFn()", "the collaborator whose answer this self-test reads"],
+      ]),
+      provenance: new Map([["packages/kernel/src/__tests__/builtin-reads-fixture.ts:okNamedMint:as Owned<{ tier: number }>", "the mint this self-test names"]]),
       ownDataReaders: new Map([["packages/kernel/src/__tests__/builtin-reads-fixture.ts:namedTest", "the reader this self-test names"]]),
+      writers: new Map([["packages/kernel/src/__tests__/builtin-reads-fixture.ts:put", "the writer this self-test names: its first parameter is the list it writes"]]),
     };
     const head = [
       "const ObjectCreate = Object.create; const HasOwnProperty = Object.prototype.hasOwnProperty; const ReflectApply = Reflect.apply; const StringCharAt = String.prototype.charAt;",
@@ -173,13 +170,15 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
       "import { verify } from \"node:crypto\";",
       "declare const bytes: Uint8Array; declare const list: number[]; declare const ro: readonly string[]; declare const s: string;",
       "declare const p: Promise<number>; declare const m: Map<string, number>; function f(x: number): number { return x; } declare const g: () => number;",
-      "declare const n: number; declare const rec: { length: number; then: number; inner: { x: number } }; declare const loose: any;",
+      "declare const n: number; declare const rec: Owned<{ length: number; then: number; inner: Owned<{ x: number }> }>; declare const loose: any;",
       "declare const maybe: Uint8Array | null; declare const o: { toString(): string }; declare function shrink(): boolean; let t = \"abc\"; const resetT = () => { t = \"\"; };",
       "class Derived extends Uint8Array {} declare const derived: Derived; declare const both: Uint8Array & { tag: 1 }; function applyTwice(fn: (x: number) => number, x: number): number { return fn(fn(x)); }",
       "const capturedVerify = verify; const capturedGet = Map.prototype.get; const capturedNs = nc.hash; const capturedLater = (() => verify)();",
       "const Uint8ArrayCtor = Uint8Array; const PromiseCtor = Promise; JSON.stringify(1);",
-      "declare const rec2: Record<string, number>; declare const supplied: { verify: () => boolean; fn: () => number }; function inspect(v: unknown): boolean { return typeof v === \"object\"; } function takesTyped(x: { tier: number }): number { return x.tier; }",
-      "const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor; const ArrayIsArray = Array.isArray; const JSONStringify = JSON.stringify;",
+      "declare const OWNED: unique symbol; type Owned<T> = T & { readonly [OWNED]: true }; function readTier(o: Owned<{ tier: number }>): number { return o.tier; }",
+      "declare const rec2: Record<string, number>; declare const supplied: Owned<{ verify: () => boolean; fn: () => number }>; function inspect(v: unknown): boolean { return typeof v === \"object\"; }",
+      "const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor; const ArrayIsArray = Array.isArray; const JSONStringify = JSON.stringify; const ObjectDefineProperty = Object.defineProperty; const StructuredClone = globalThis.structuredClone;",
+      "function put<T>(list: T[], value: T): void { ObjectDefineProperty(list, list.length, { value, writable: true, enumerable: true, configurable: true }); } declare const collaboratorFn: () => { tier: number };",
       "const namedTest = (() => ArrayIsArray)(); const unnamedTest = (() => JSONStringify)();",
     ];
     const allowed = [
@@ -208,8 +207,15 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
       "export function okOwnDataReader(c: { tier: number }) { return ArrayIsArray(c) ? null : ObjectGetOwnPropertyDescriptor(c, \"tier\"); }",
       "export function okNarrowedToPrimitive(c: { tier: number } | string) { return typeof c === \"string\" ? c.length : 0; }",
       "export function okFreshRecord() { const r = ObjectCreate(null) as { tier: number }; r.tier = 1; return r.tier; }",
-      "export function okNamedConversion(v: unknown) { return (v as { tier: number }).tier; }",
       "export function okNamedReader(c: { tier: number }) { return namedTest(c); }",
+      // DECISIONS 05:05, astra pack 313: a field is read with a dot only from an owned snapshot (a fresh record or a literal minted as one,
+      // or one a named place mints), a const literal that defines it, or a property descriptor's own field; a write lands only on one too.
+      "export function okOwnedFresh() { const r = ObjectCreate(null) as Owned<{ tier: number }>; r.tier = 1; return readTier(r); }",
+      "export function okOwnedLiteral() { const r = { tier: 1 } as Owned<{ tier: number }>; return r.tier + rec.inner.x; }",
+      "export function okLocalLiteral() { const o = { tier: 1 }; return o.tier; }",
+      "export function okDescriptor() { const d = ObjectGetOwnPropertyDescriptor(rec2, \"x\"); return d === undefined ? 0 : hasOwn(d, \"value\") ? d.value : d.enumerable; }",
+      "export function okNamedMint(v: unknown) { return (v as Owned<{ tier: number }>).tier; }",
+      "export function okFreshList() { const out: number[] = []; put(out, 1); return out; }",
     ];
     const refused = [
       "export function a() { return bytes.length; }",
@@ -286,25 +292,38 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
       // astra pack 309: a caller's object read through [[Get]], aliased, handed on typed, or destructured; an unknown taken as an object
       // type with no named provenance (by assertion, by an implicit any, or by a type predicate); an unknown handed to code the check does not walk.
       "export function readsCallerObject(c: { tier: number }) { return c.tier; }",
-      "export function readsCallerArray(c: number[]) { return c.length; }",
-      "export function aliasesCallerObject(c: { tier: number }) { const copy = c; return copy; }",
-      "export function handsCallerOnTyped(c: { tier: number }) { return takesTyped(c); }",
       "export function callerToOpaque(c: { tier: number }) { return JSONStringify(c); }",
       "export function destructuresCaller({ tier }: { tier: number }) { return tier; }",
       "export function laundersUnknown(v: unknown) { return (v as { tier: number }).tier; }",
-      "export function laundersElements(v: readonly unknown[]) { return (v as ReadonlyArray<{ tier: number }>).length; }",
-      "export function laundersImplicitAny() { const x: { tier: number } = loose; return x; }",
-      "export function predicateConverts(v: unknown): v is { tier: number } { return v !== null; }",
       "export function unknownToOpaque(v: unknown) { return JSONStringify(v); }",
       "export function claimsFields() { const r = { a: 1 } as { a: number; tier: number }; return r.tier; }",
       "export function laundersNarrowedObject(v: unknown) { return typeof v === \"object\" && v !== null ? (v as { tier: number }).tier : 0; }",
       "export function objectToOpaque(v: unknown) { return typeof v === \"object\" && v !== null ? JSONStringify(v) : \"\"; }",
       "export function unnamedReader(c: { tier: number }) { return unnamedTest(c); }",
+      // astra pack 313: an unconstrained generic, a never chain, a closure, a public method's this and a collaborator's answer launder no
+      // longer: each read is on a receiver that is not owned. And nothing outside mints: not an entry point's parameter, an any, a
+      // predicate, an opaque callee's answer; no write lands on a wider alias; no owned container is widened where it is written.
+      "export function cast<T>(v: unknown): T { return v as T; }",
+      "export function genericLaunder(c: { tier: number }) { const x: unknown = c; return cast<{ tier: number }>(x).tier; }",
+      "export function neverLaunder(c: { tier: number }) { const x: unknown = c; return (x as never as { tier: number }).tier; }",
+      "export function closureLaunder(c: { tier: number }) { const x: unknown = c; const get = (): unknown => x; return (get() as { tier: number }).tier; }",
+      "export class PublicThis { tier = 1; read() { return this.tier; } }",
+      "export function collaboratorAnswer() { return collaboratorFn().tier; }",
+      "export function ownedParameter(o: Owned<{ tier: number }>) { return o; }",
+      "export function ownedFromAny() { const o: Owned<{ tier: number }> = loose; return o; }",
+      "export function predicateMints(v: unknown): v is Owned<{ tier: number }> { return v !== null; }",
+      "export function unnamedMint(v: unknown) { return v as Owned<{ tier: number }>; }",
+      "export function clonedOwned() { const r = { tier: 1 } as Owned<{ tier: number }>; return StructuredClone(r); }",
+      "export function writeThroughWider() { const r = ObjectCreate(null) as Owned<{ x: unknown }>; const wide: object = r; ObjectDefineProperty(wide, \"x\", { value: 1 }); return r; }",
+      "export function widened(v: unknown) { const list: Owned<{ tier: number }>[] = []; put<unknown>(list, v); return list; }",
+      "export function mintsOptional() { const r = { tier: 1 } as Owned<{ tier: number; extra?: number }>; return r.tier; }",
+      "export function descriptorUnproven() { const d = ObjectGetOwnPropertyDescriptor(rec2, \"x\"); return d === undefined ? 0 : d.value; }",
+      "export function destructuresUnowned() { const { tier } = collaboratorFn(); return tier; }",
     ];
     const text = [...head, ...allowed, ...refused].join("\n");
     const lines = builtinReads(programOf(KERNEL_DIR, fileName, text), fileName, options);
     // A collaborator entry that is unexplained, stale or ambiguous is reported on its own line.
-    expect(lines.filter((line) => line.startsWith("collaborator ") || line.startsWith("provenance ") || line.startsWith("own-data reader "))).toEqual([]);
+    expect(lines.filter((line) => line.startsWith("collaborator ") || line.startsWith("provenance ") || line.startsWith("own-data reader ") || line.startsWith("writer "))).toEqual([]);
     const reported = new Set(lines.map((line) => Number(line.split(" ")[0]!.split(":")[1])));
     const firstAllowed = head.length + 1;
     const firstRefused = head.length + allowed.length + 1;
@@ -317,6 +336,30 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
       if (reported.has(firstAllowed + k)) wrong.push(`allowed line reported: ${allowed[k]} => ${lines.filter((l) => l.includes(`:${firstAllowed + k} `)).join("; ")}`);
     }
     for (let k = 0; k < refused.length; k++) if (!reported.has(firstRefused + k)) wrong.push(`refused line not reported: ${refused[k]}`);
+    // Astra pack 313's forms, each refused for its own reason.
+    const because: Array<[string, string]> = [
+      ["function cast<", "an assertion to a type parameter"],
+      ["function genericLaunder", "not an owned snapshot"],
+      ["function neverLaunder", "to never"],
+      ["function closureLaunder", "not an owned snapshot"],
+      ["class PublicThis", "not an owned snapshot"],
+      ["function collaboratorAnswer", "not an owned snapshot"],
+      ["function ownedParameter", "where code outside the check supplies the value"],
+      ["function ownedFromAny", "an any held where an owned snapshot"],
+      ["function predicateMints", "minted from a value no snapshot made"],
+      ["function unnamedMint", "minted from a value no snapshot made"],
+      ["function clonedOwned", "an owned type for what code the check does not walk answers"],
+      ["function writeThroughWider", "a write to an object that is not an owned snapshot"],
+      ["function widened", "an owned container widened where it is written"],
+      ["function mintsOptional", "minted from a value no snapshot made"],
+      ["function descriptorUnproven", "not an owned snapshot"],
+      ["function destructuresUnowned", "destructuring .tier from a value that is not an owned snapshot"],
+    ];
+    for (const [needle, reason] of because) {
+      const k = refused.findIndex((line) => line.includes(needle));
+      const at = lines.filter((l) => l.includes(`:${firstRefused + k} `));
+      if (k < 0 || !at.some((l) => l.includes(reason))) wrong.push(`${needle}: no report says "${reason}" (${at.join("; ")})`);
+    }
     expect(wrong).toEqual([]);
   }, 60_000);
 
@@ -382,7 +425,7 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
           "const C = class { value = JSON; static fixed = 1; };",
           "export function make() { return new C().value; }",
           "export function both() { return [runA(), runB()]; }",
-          "declare const supplied: { fn: () => number };",
+          "const supplied = { fn: (): number => 1 };",
         ].join("\n"),
       ],
       [join(dir, "a", "shared.ts"), "export function run() { return JSON; }"],
@@ -420,12 +463,11 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
     const program = ts.createProgram([EMITTER], { ...compilerOptions(KERNEL_DIR), ...SPEC_SOURCE });
     // Every import resolves and every type is known, so no receiver is silently `any` (which the check refuses anyway).
     expect(program.getSemanticDiagnostics(program.getSourceFile(EMITTER)).map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "))).toEqual([]);
-    const { reached, found, collaboratorsUsed, provenanceUsed, readersUsed } = closureReads(program, [EMITTER], CLOSURE_OPTIONS, inRepo);
+    const { reached, found, collaboratorsUsed, provenanceUsed, readersUsed, writersUsed } = closureReads(program, [EMITTER], CLOSURE_OPTIONS, inRepo);
     // Not vacuous: the closure enters what decides camera evidence, what hashes and what names.
     for (const name of [
       "evidence/kernel-pull-capture.ts:kernelPullCaptureIssue",
       "evidence/kernel-pull-capture.ts:fieldIssue",
-      "evidence/is-fabricated.ts:isFabricated",
       "util/canonical.ts:canonicalize",
       "util/ids.ts:generateId",
       "util/primordials.ts:sortedStrings",
@@ -436,6 +478,7 @@ describe("the emitter's trusted path passes the default-deny check (DECISIONS 01
     expect(collaboratorsUsed).toEqual([...COLLABORATORS.keys()].sort());
     expect(provenanceUsed).toEqual([...PROVENANCE.keys()].sort());
     expect(readersUsed).toEqual([...OWN_DATA_READER_CAPTURES.keys()].sort());
+    expect(writersUsed).toEqual([...WRITERS.keys()].sort());
     expect(found).toEqual([]);
   }, 120_000);
 });

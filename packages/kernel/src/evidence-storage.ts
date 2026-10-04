@@ -29,16 +29,19 @@ export class EvidenceStorageService {
     this.fs = unixfs(this.helia);
   }
 
-  /** Check whether the IPFS node is running */
-  isReady(): boolean {
+  /**
+   * Check whether the IPFS node is running. An own property of each instance, as archiveBundle is: the
+   * evidence emitter takes a storage service's two methods only as its own data (astra pack 313).
+   */
+  readonly isReady = (): boolean => {
     return this.fs !== null;
-  }
+  };
 
   /**
    * Archive a plain evidence bundle to IPFS.
    * Returns CIDs for the full bundle and its public metadata.
    */
-  async archiveBundle(bundle: EvidenceBundle): Promise<ArchiveResult> {
+  readonly archiveBundle = async (bundle: EvidenceBundle): Promise<ArchiveResult> => {
     if (!this.fs) throw new Error("IPFS not initialized — call init() first");
 
     const encoder = new TextEncoder();
@@ -65,7 +68,7 @@ export class EvidenceStorageService {
       cid: bundleCid.toString(),
       metadataCid: metaCid.toString(),
     };
-  }
+  };
 
   /**
    * Archive an encrypted evidence bundle to IPFS.
