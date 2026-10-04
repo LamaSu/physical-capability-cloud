@@ -437,6 +437,16 @@ function cloneRecord(record: IntakeRecord): IntakeRecord {
   return { schema: record.schema, answers: { ...record.answers } };
 }
 
+/** An event hash that matches nothing: what a fixture value with no exact JSON form gets (intakeValueHash is null). */
+const NO_HASH = `sha256:${"0".repeat(64)}`;
+
+/** intakeValueHash of a fixture that must have an exact JSON form. */
+function hashOf(value: unknown): string {
+  const hash = intakeValueHash(value);
+  if (hash === null) throw new Error("test fixture has no exact JSON form");
+  return hash;
+}
+
 /** The authenticated confirmation event a store would hold for `answer`. */
 function confirmationEvent(
   fieldId: string,
@@ -447,8 +457,8 @@ function confirmationEvent(
     schema: "pcc.intake-confirmation.v1",
     eventId: answer.confirmation!.eventId,
     fieldId,
-    valueHash: intakeValueHash(answer.value),
-    ...(answer.source ? { sourceHash: intakeValueHash(answer.source) } : {}),
+    valueHash: intakeValueHash(answer.value) ?? NO_HASH,
+    ...(answer.source ? { sourceHash: intakeValueHash(answer.source) ?? NO_HASH } : {}),
     confirmedBy: { principal: "operator:acme", authMethod: "siwe" },
     subject: { deviceRef: "dev-1", projectRef: "proj-1" },
     sequence: 1,
@@ -1773,7 +1783,7 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
     const cases: [string, string, (events: Map<string, IntakeConfirmationEvent>) => void][] = [
       ["a revoked event", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, revoked: true })],
       ["a superseded event", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, supersededBy: "evt-newer" })],
-      ["a value-hash mismatch", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, valueHash: intakeValueHash("unattended") })],
+      ["a value-hash mismatch", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, valueHash: hashOf("unattended") })],
       ["a fieldId mismatch", field, (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, fieldId: "safety.hazards" })],
       ["an unknown event id (the store returns null)", field, (e) => e.delete(`evt-${field}`)],
       [
@@ -1784,7 +1794,7 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
       [
         "a source-hash mismatch on a sourced answer",
         sourcedField,
-        (e) => e.set(`evt-${sourcedField}`, { ...e.get(`evt-${sourcedField}`)!, sourceHash: intakeValueHash({ doc: "other" }) }),
+        (e) => e.set(`evt-${sourcedField}`, { ...e.get(`evt-${sourcedField}`)!, sourceHash: hashOf({ doc: "other" }) }),
       ],
       [
         "a missing source hash on a sourced answer",
@@ -1797,7 +1807,7 @@ describe("validateIntake — confirmation and payout resolve from authority (ast
       [
         "a source hash on an answer that has no source",
         field,
-        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, sourceHash: intakeValueHash({ doc: "manual" }) }),
+        (e) => e.set(`evt-${field}`, { ...e.get(`evt-${field}`)!, sourceHash: hashOf({ doc: "manual" }) }),
       ],
       [
         "a malformed event (no challenge)",
@@ -2109,6 +2119,63 @@ describe("intakeValueHash", () => {
   it("matches a published sha256 vector for a plain string value", () => {
     // canonicalize("abc") is the JSON text "abc" including the quotes (5 bytes).
     expect(intakeValueHash("abc")).toBe(`sha256:${createHash("sha256").update('"abc"').digest("hex")}`);
+  });
+});
+
+describe("intakeValueHash is total (steward #6637: under #359's canonicalize, NaN made it throw)", () => {
+  const cycle: Record<string, unknown> = { a: 1 };
+  cycle.self = cycle;
+  const accessor = Object.defineProperty({}, "x", { enumerable: true, get: () => 1 });
+  const hidden = Object.defineProperty({ a: 1 }, "b", { enumerable: false, value: 2 });
+  const refused: Array<[string, unknown]> = [
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["-Infinity", Number.NEGATIVE_INFINITY],
+    ["an integer of 2^53", 2 ** 53],
+    ["an integer of -(2^53)", -(2 ** 53)],
+    ["an integral double like 1e300 (D5: an integer beyond 2^53)", 1e300],
+    ["a nested NaN", [{ min: Number.NaN, max: 1 }]],
+    ["a nested unsafe integer", { limits: [{ min: 0, max: 2 ** 60 }] }],
+    ["undefined", undefined],
+    ["an undefined member", { a: undefined }],
+    ["a bigint", BigInt(10)],
+    ["a function", () => 1],
+    ["a symbol", Symbol("s")],
+    ["a Date", new Date(0)],
+    ["a Map", new Map([["a", 1]])],
+    ["a cycle", cycle],
+    ["an accessor", accessor],
+    ["a non-enumerable property", hidden],
+  ];
+  for (const [label, value] of refused) {
+    it(`refuses ${label} with null and never throws`, () => {
+      expect(() => intakeValueHash(value)).not.toThrow();
+      expect(intakeValueHash(value)).toBeNull();
+    });
+  }
+
+  it("a NaN can no longer hash like null (a lenient canonicalizer writes both as null)", () => {
+    expect(intakeValueHash({ min: Number.NaN })).toBeNull();
+    expect(intakeValueHash({ min: null })).toMatch(/^sha256:[0-9a-f]{64}$/);
+  });
+
+  it("the largest safe integers and ordinary JSON still hash", () => {
+    for (const value of [Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 0.5, -1e-9, 123456.789, [1, "a", null, true], { a: { b: [] } }]) {
+      expect(intakeValueHash(value), JSON.stringify(value)).toMatch(/^sha256:[0-9a-f]{64}$/);
+    }
+  });
+
+  it("production path: an answer holding an integer beyond 2^53 is never confirmed, and validateIntake neither throws nor calls the input unreadable", () => {
+    const record = cloneRecord(buildFullValidRecord());
+    const limits = record.answers["safety.limits"]!;
+    limits.value = [{ quantity: "infill", unit: "%", min: 10, max: 2 ** 60 }];
+    let report: ReturnType<typeof validateIntake> | undefined;
+    expect(() => {
+      report = ready(record, "accept-jobs");
+    }).not.toThrow();
+    expect(report!.structuralErrors).not.toContain("(root): input could not be read");
+    expect(report!.unconfirmed).toContain("safety.limits");
+    expect(report!.ok).toBe(false);
   });
 });
 
@@ -3775,8 +3842,8 @@ describe("astra pack 120c", () => {
         schema: "pcc.intake-confirmation.v1",
         eventId: a.confirmation.eventId,
         fieldId,
-        valueHash: intakeValueHash(a.value),
-        ...(a.source ? { sourceHash: intakeValueHash(a.source) } : {}),
+        valueHash: intakeValueHash(a.value) ?? NO_HASH,
+        ...(a.source ? { sourceHash: intakeValueHash(a.source) ?? NO_HASH } : {}),
         confirmedBy: { principal: "operator:acme", authMethod: "siwe" },
         subject: { deviceRef: device, projectRef: "proj-1" },
         sequence: 1,

@@ -489,10 +489,17 @@ function confirmationHolds(fieldId: string, answer: IntakeAnswer, authority: Int
   const event = parsed.data;
   if (event.eventId !== answer.confirmation.eventId) return false;
   if (event.fieldId !== fieldId) return false;
-  if (event.valueHash !== intakeValueHash(answer.value)) return false;
+  // A value with no exact JSON form hashes to null, and a null hash confirms nothing.
+  const valueHash = intakeValueHash(answer.value);
+  if (valueHash === null || event.valueHash !== valueHash) return false;
   // The source is bound too: an event that carries a source hash confirms THAT
   // source, so an answer that dropped or changed it is not the confirmed one.
-  const expectedSourceHash = answer.source === undefined ? undefined : intakeValueHash(answer.source);
+  let expectedSourceHash: string | undefined;
+  if (answer.source !== undefined) {
+    const sourceHash = intakeValueHash(answer.source);
+    if (sourceHash === null) return false;
+    expectedSourceHash = sourceHash;
+  }
   if (event.sourceHash !== expectedSourceHash) return false;
   // Subject binding: the event must be about THIS device (and project, both ways) and confirmed by THIS operator.
   if (event.subject.deviceRef !== subject.deviceRef) return false;
