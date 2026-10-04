@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import type { MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@pcc/spec";
+import type { ApprovalStatus, MaintenanceEvent, OperatorCertification, OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getRepos, getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
@@ -43,6 +43,29 @@ const mockMaintenance: MaintenanceEvent[] = [
   { id: "maint-2", machineId: "reg-001", type: "inspection", description: "Quarterly belt tension check", scheduledAt: "2026-03-20T14:00:00Z", status: "upcoming" },
   { id: "maint-3", machineId: "reg-001", type: "scheduled", description: "Firmware update v5.2.0", scheduledAt: "2026-03-01T10:00:00Z", completedAt: "2026-03-01T10:30:00Z", status: "completed" },
 ];
+
+
+/**
+ * Run `fn` inside one SQLite BEGIN IMMEDIATE transaction on the store's connection: the write lock
+ * is taken before `fn` reads anything, so no other connection can commit in between; COMMIT on
+ * return, ROLLBACK on any throw (the same pattern as services/carrier-shipment-store.ts).
+ */
+function inImmediateTransaction<T>(fn: () => T): T {
+  const sqlite = (getStore().db as unknown as { $client: { prepare(sql: string): { run(): unknown } } }).$client;
+  sqlite.prepare("BEGIN IMMEDIATE").run();
+  try {
+    const out = fn();
+    sqlite.prepare("COMMIT").run();
+    return out;
+  } catch (err) {
+    try {
+      sqlite.prepare("ROLLBACK").run();
+    } catch {
+      /* already rolled back */
+    }
+    throw err;
+  }
+}
 
 export async function operatorRoutes(app: FastifyInstance) {
   // List operator's machines
@@ -726,31 +749,40 @@ export async function operatorRoutes(app: FastifyInstance) {
       const approval = await requireConsumeAuthority(req, reply);
       if (!approval) return reply;
 
-      const accepts = checkKernelAcceptsJobs(approval.kernelId);
-      if (!accepts.ok) return replyKernelNotAccepting(reply, accepts);
-
+      // The policy read and the conditional consume are ONE atomic step (astra pack consume1-576).
+      // BEGIN IMMEDIATE takes the database write lock first, so another gateway process sharing this
+      // SQLite file cannot commit an emergency stop between the check and the update: a stop that
+      // committed earlier is seen by the check and refused, and a later one waits for this commit.
+      type ConsumeOutcome =
+        | { kind: "refused"; refusal: Extract<ReturnType<typeof checkKernelAcceptsJobs>, { ok: false }> }
+        | { kind: "not_consumable"; status: string }
+        | { kind: "consumed" };
+      let outcome: ConsumeOutcome;
       try {
-        const { db } = getStore();
-        const result = db.update(pendingApprovals)
-          .set({ status: "consumed" })
-          .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "approved")))
-          .run();
-        const changed = (result as unknown as { changes: number }).changes ?? 0;
-
-        if (changed === 0) {
-          const row = db.select().from(pendingApprovals)
-            .where(eq(pendingApprovals.id, req.params.id))
-            .get();
-          return reply.status(409).send({
-            error: "approval_not_consumable",
-            status: row?.status ?? approval.status,
-          });
-        }
-
-        return { consumed: true, approvalId: req.params.id };
+        outcome = inImmediateTransaction((): ConsumeOutcome => {
+          const accepts = checkKernelAcceptsJobs(approval.kernelId);
+          if (!accepts.ok) return { kind: "refused", refusal: accepts };
+          const { db } = getStore();
+          const result = db.update(pendingApprovals)
+            .set({ status: "consumed" satisfies ApprovalStatus })
+            .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "approved")))
+            .run();
+          const changed = (result as unknown as { changes: number }).changes ?? 0;
+          if (changed === 0) {
+            const row = db.select().from(pendingApprovals).where(eq(pendingApprovals.id, req.params.id)).get();
+            return { kind: "not_consumable", status: row?.status ?? approval.status };
+          }
+          return { kind: "consumed" };
+        });
       } catch {
         return reply.status(500).send({ error: "Failed to consume" });
       }
+
+      if (outcome.kind === "refused") return replyKernelNotAccepting(reply, outcome.refusal);
+      if (outcome.kind === "not_consumable") {
+        return reply.status(409).send({ error: "approval_not_consumable", status: outcome.status });
+      }
+      return { consumed: true, approvalId: req.params.id };
     },
   );
 }
