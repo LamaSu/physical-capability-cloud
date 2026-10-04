@@ -338,6 +338,33 @@ describe("live data", () => {
     expect(t).toContain("stale heartbeat");
   });
 
+  it("Kernels renders a kernel whose location is malformed, without crashing", async () => {
+    stubFetch({
+      ...EMPTY,
+      "/api/kernels": {
+        status: 200,
+        body: {
+          kernels: [
+            {
+              id: "kernel-c",
+              name: "Shop C",
+              status: "online",
+              isStale: false,
+              location: { lat: "37.7", lng: null },
+              locationPrecision: "exact",
+              physicalAddress: null,
+              capabilityCount: 0,
+              capabilityTypes: [],
+            },
+          ],
+        },
+      },
+    });
+    const t = await renderPage(<KernelsPage />);
+    expect(t).toContain("Shop C");
+    expect(t).toContain("Location unreadable");
+  });
+
   it("Command Center counts only fresh online kernels and in-flight jobs", async () => {
     stubFetch({
       ...EMPTY,
