@@ -3,12 +3,15 @@
  * to TMP Benchmark mode.
  *
  * When a TMP contract in Benchmark mode needs to validate a deliverable,
- * the bridge routes the proof through the appropriate PCC verifier:
+ * the bridge routes the proof through the pipeline the TASK requires (its
+ * own record, never the worker's choice), at the task's accepted tier:
  *
- *   sensor_evidence       -> EvidenceVerifier (bundle hash + tier checks)
- *   zk_proof              -> ZKProofService (mock Noir verification)
- *   merkle_commitment     -> CommitmentService (Merkle proof verification)
- *   bittensor_verification -> BittensorSubnetBridge (decentralized consensus)
+ *   sensor_evidence        -> EvidenceVerifier (bundle hash + the accepted tier's requirements)
+ *   bittensor_verification -> BittensorSubnetBridge (decentralized consensus at the accepted tier)
+ *   oracle_verification    -> OracleVerificationBridge (oracle consensus at the accepted tier)
+ *   zk_proof, merkle_commitment -> refused (tier_unenforceable): neither evidences a tier's
+ *                             required events (E11e). The constructor keeps their services
+ *                             for its callers.
  */
 
 import type { Address, AssuranceTier, Timestamp, SHA256, EvidenceBundle, ZKProof } from "@pcc/spec";
@@ -208,7 +211,7 @@ export class TMPValidatorBridge {
     }
 
     // The tier comes from the caller's authenticated context, never the bundle (N118): the verifier
-    // fails closed without it and rejects a bundle that claims another one.
+    // fails closed without it and never reads the bundle's own, unsigned assuranceTier (E11e).
     const attestation = await this.evidenceVerifier.verify(bundle, { acceptedTier: context?.acceptedTier });
 
     return {
