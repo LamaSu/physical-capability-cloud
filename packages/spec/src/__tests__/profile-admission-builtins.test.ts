@@ -1,9 +1,11 @@
 /**
  * profile-admission.ts, and every in-repo function it can reach, pass the DEFAULT-DENY check in
- * builtin-reads-check.ts (steward DECISIONS 01:30, #6792 and 04:06; astra packs 289, 291, 293 and
- * 297): every node that runs after load is one of the forms the check names, under that form's
+ * builtin-reads-check.ts (steward DECISIONS 01:30, #6792 and 04:06; astra packs 289, 291, 293, 297
+ * and 303): every node that runs after load is one of the forms the check names, under that form's
  * condition, or it fails. The trusted path is COMPUTED from the program (DECISIONS 04:06): no hand
- * list of modules, so a new callee joins without anyone naming it.
+ * list of modules, so a new callee joins without anyone naming it. A call whose target the check
+ * cannot see (a function value supplied at run time) fails closed unless its call site is a named
+ * collaborator, with its reason (astra pack 303).
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +25,22 @@ const OPTIONS: CheckOptions = {
   primordials: /[\\/]src[\\/]util[\\/](primordials|plain-data)\.ts$/,
   // awaitedHere pins a promise's constructor; legAnswer answers a boolean or an ownPromise (util/primordials.ts).
   awaitWrappers: new Set(["awaitedHere", "legAnswer"]),
+  root: REPO,
+};
+/**
+ * Admission's collaborators: the call sites whose target is supplied at run time, each with its
+ * reason. Closed: an entry that matches no call site, or several, fails the check.
+ */
+const ADMISSION_OPTIONS: CheckOptions = {
+  ...OPTIONS,
+  collaborators: new Map([
+    [
+      "packages/spec/src/evidence/profile-admission.ts:admit:verifyPrimitiveInstance()",
+      "the PRIMITIVE leg: the caller's verifier (ProfileAdmissionInput.verifyPrimitiveInstance, composed by the oracle from its verifier registry). " +
+        "Admission takes it once from the input at the boundary and calls it only through legAnswer: exactly true, or a native promise fulfilled with " +
+        "exactly true (followed by the then captured at load), verifies; a throw or any other answer is not verified. Its code is the caller's, outside this check.",
+    ],
+  ]),
 };
 
 describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, steward #6792, astra packs 289, 291)", () => {
@@ -33,10 +51,10 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "import * as nc from \"node:crypto\";",
       "import { verify } from \"node:crypto\";",
       "declare const bytes: Uint8Array; declare const list: number[]; declare const ro: readonly string[]; declare const s: string;",
-      "declare const p: Promise<number>; declare const m: Map<string, number>; declare const f: (x: number) => number;",
+      "declare const p: Promise<number>; declare const m: Map<string, number>; function f(x: number): number { return x; } declare const g: () => number;",
       "declare const n: number; declare const rec: { length: number; then: number; inner: { x: number } }; declare const loose: any;",
       "declare const maybe: Uint8Array | null; declare const o: { toString(): string }; declare function shrink(): boolean; let t = \"abc\"; const resetT = () => { t = \"\"; };",
-      "class Derived extends Uint8Array {} declare const derived: Derived; declare const both: Uint8Array & { tag: 1 };",
+      "class Derived extends Uint8Array {} declare const derived: Derived; declare const both: Uint8Array & { tag: 1 }; function applyTwice(fn: (x: number) => number, x: number): number { return fn(fn(x)); }",
       "const capturedVerify = verify; const capturedGet = Map.prototype.get; const capturedNs = nc.hash; const capturedLater = (() => verify)();",
       "const Uint8ArrayCtor = Uint8Array;",
     ];
@@ -53,6 +71,10 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "export function okOps(a: number, b: string) { let c = a; c += 1; c++; return `${a}${b}` + (a < c ? -a : ~a) + (typeof b === \"string\" ? 1 : 0); }",
       "export function okLiterals() { return { a: 1, [\"b\"]: 2, c: [1, 2, 3], d() { return 1; } }; }",
       "export function okControl(x: number) { try { switch (x) { case 1: return 1; default: break; } } catch { return 0; } finally { x = 0; } while (x < 1) x++; do { x--; } while (x > 0); return x; }",
+      // astra pack 303: a call through a parameter is seen when every caller passes code written in place.
+      "export function okHigherOrder() { return applyTwice((x) => x + 1, 1); }",
+      "export const okStaticField = class { static value = f(1); };",
+      "export function okNamedCollaborator(input: { verify: () => boolean }) { const verify = input.verify; return verify(); }",
     ];
     const refused = [
       "export function a() { return bytes.length; }",
@@ -114,9 +136,23 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "export function shadowedRange() { for (let i = 0; i < s.length; i++) { const s = \"\"; return s[i]; } return \"\"; }",
       "export function shadowedIndex() { for (let i = 0; i < s.length; i++) { const i = 99; return s[i]; } return \"\"; }",
       "export function reassignedByCall() { for (let i = 0; i < t.length; i++) { resetT(); return t[i]; } return \"\"; }",
+      // astra pack 303: a call whose target is supplied at run time fails closed, unless its call site is named.
+      "export function callParam(cb: () => number) { return cb(); }",
+      "export function callFromData(input: { fn: () => number }) { const fn = input.fn; return fn(); }",
+      "export function callDeclared() { return g(); }",
+      "export function callLet() { let k = f; k = f; return k(1); }",
+      "export class Holder { #run: (x: number) => number = f; go() { return this.#run(1); } }",
+      // astra pack 303: an instance field's initializer runs at `new`, after load, even in a class evaluated at load.
+      "export const instanceField = class { value = JSON; };",
     ];
     const text = [...head, ...allowed, ...refused].join("\n");
-    const lines = builtinReads(programOf(SPEC_DIR, fileName, text), fileName, OPTIONS);
+    const fixtureOptions: CheckOptions = {
+      ...OPTIONS,
+      collaborators: new Map([["packages/spec/src/__tests__/builtin-reads-fixture.ts:okNamedCollaborator:verify()", "the collaborator this self-test names"]]),
+    };
+    const lines = builtinReads(programOf(SPEC_DIR, fileName, text), fileName, fixtureOptions);
+    // A collaborator entry that is unexplained, stale or ambiguous is reported on its own line.
+    expect(lines.filter((line) => line.startsWith("collaborator "))).toEqual([]);
     const reported = new Set(lines.map((line) => Number(line.split(" ")[0]!.split(":")[1])));
     const firstAllowed = head.length + 1;
     const firstRefused = head.length + allowed.length + 1;
@@ -179,14 +215,13 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
         ].join("\n"),
       ],
     ]);
-    const collaborators = new Map([["closure-lib.ts:Store.save", "the collaborator this self-test names"]]);
-    const { reached, found, collaboratorsUsed } = closureReads(
-      programOfFiles(SPEC_DIR, files),
-      [seed],
-      { primordials: /^$/, awaitWrappers: new Set() },
-      (fileName) => fileName.startsWith(dir),
-      collaborators,
-    );
+    const options: CheckOptions = {
+      primordials: /^$/,
+      awaitWrappers: new Set(),
+      root: dir,
+      collaborators: new Map([["closure-lib.ts:Store.save", "the collaborator this self-test names"]]),
+    };
+    const { reached, found, collaboratorsUsed } = closureReads(programOfFiles(SPEC_DIR, files), [seed], options, (fileName) => fileName.startsWith(dir));
     expect(reached).toEqual(expect.arrayContaining(["closure-seed.ts:(the whole file)", "closure-lib.ts:used", "closure-lib.ts:helper", "closure-lib.ts:viaValue"]));
     expect(reached).not.toContain("closure-lib.ts:notCalled");
     expect(reached).not.toContain("closure-lib.ts:Store.save");
@@ -198,28 +233,76 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
     expect(collaboratorsUsed).toEqual(["closure-lib.ts:Store.save"]);
   }, 60_000);
 
+  it("the closure fails closed on a call target it cannot see, runs an instance field after load, and holds collaborator entries exact (astra pack 303)", () => {
+    const dir = join(SPEC_DIR, "src", "__tests__");
+    const seed = join(dir, "unseen-seed.ts");
+    const files = new Map([
+      [
+        seed,
+        [
+          "import { run as runA } from \"./a/shared.js\";",
+          "import { run as runB } from \"./b/shared.js\";",
+          "export function callback(cb: () => unknown) { return cb(); }",
+          "export function viaHelper() { return apply(() => 1); }",
+          "function apply(fn: () => unknown) { return fn(); }",
+          "export function fromData(input: { fn: () => number }) { const fn = input.fn; return fn() + fn(); }",
+          "const C = class { value = JSON; static fixed = 1; };",
+          "export function make() { return new C().value; }",
+          "export function both() { return [runA(), runB()]; }",
+        ].join("\n"),
+      ],
+      [join(dir, "a", "shared.ts"), "export function run() { return JSON; }"],
+      [join(dir, "b", "shared.ts"), "export function run() { return Math; }"],
+    ]);
+    const options: CheckOptions = {
+      primordials: /^$/,
+      awaitWrappers: new Set(),
+      root: dir,
+      collaborators: new Map([
+        ["a/shared.ts:run", "named by its path from the root"],
+        ["b/shared.ts:run", ""],
+        ["shared.ts:run", "a base name alone names no file"],
+        ["unseen-seed.ts:fromData:fn()#1", "the first of two calls, named"],
+      ]),
+    };
+    const { found, collaboratorsUsed } = closureReads(programOfFiles(SPEC_DIR, files), [seed], options, (fileName) => fileName.startsWith(dir));
+    const at = (where: string) => found.filter((line) => line.startsWith(`${where} `));
+    expect(at("unseen-seed.ts:3"), "a caller's callback: supplied at run time").toHaveLength(1);
+    expect(at("unseen-seed.ts:5"), "apply's fn: its one caller passes an arrow").toEqual([]);
+    expect(at("unseen-seed.ts:6"), "the second call through data: not named").toHaveLength(1);
+    expect(at("unseen-seed.ts:6")[0]).toContain("unseen-seed.ts:fromData:fn()#2");
+    expect(at("unseen-seed.ts:7"), "the instance field's JSON runs at new; the static field runs at load").toHaveLength(1);
+    expect(at("a/shared.ts:1"), "named: not entered").toEqual([]);
+    expect(at("b/shared.ts:1"), "named (without a reason): not entered").toEqual([]);
+    expect(found.filter((line) => line.startsWith("collaborator "))).toEqual([
+      "collaborator b/shared.ts:run: no reason is given",
+      "collaborator shared.ts:run: matches no declaration or call site (a stale entry)",
+    ]);
+    expect(collaboratorsUsed).toEqual(["a/shared.ts:run", "b/shared.ts:run", "unseen-seed.ts:fromData:fn()#1"]);
+  }, 60_000);
+
   it("profile-admission.ts, and every in-repo function it can reach, computed from the program, have none (DECISIONS 04:06)", () => {
     const program = ts.createProgram([ADMISSION], compilerOptions(SPEC_DIR));
     // Every import resolves and every type is known, so no receiver is silently `any` (which the check refuses anyway).
     expect(program.getSemanticDiagnostics(program.getSourceFile(ADMISSION)).map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "))).toEqual([]);
-    const { reached, found, collaboratorsUsed } = closureReads(program, [ADMISSION], OPTIONS, inRepo);
+    const { reached, found, collaboratorsUsed } = closureReads(program, [ADMISSION], ADMISSION_OPTIONS, inRepo);
     // Not vacuous: the closure enters the levels, the binding, the plain-data copy, the profile check, canonical JSON and the promise helpers.
     for (const name of [
-      "evidence-level.ts:evidenceLevelsOfEvents",
-      "subject-binding.ts:verifyEvidenceSubjectBinding",
-      "plain-data.ts:plainDataCopy",
-      "measurement-profile.ts:validateMeasurementProfile",
-      "canonical.ts:canonicalize",
-      "is-fabricated.ts:isFabricated",
-      "primordials.ts:ownPromise",
-      "primordials.ts:awaitedHere",
-      "primordials.ts:sortedStrings",
-      "primordials.ts:listAt",
+      "evidence/evidence-level.ts:evidenceLevelsOfEvents",
+      "evidence/subject-binding.ts:verifyEvidenceSubjectBinding",
+      "util/plain-data.ts:plainDataCopy",
+      "evidence/measurement-profile.ts:validateMeasurementProfile",
+      "util/canonical.ts:canonicalize",
+      "evidence/is-fabricated.ts:isFabricated",
+      "util/primordials.ts:ownPromise",
+      "util/primordials.ts:awaitedHere",
+      "util/primordials.ts:sortedStrings",
+      "util/primordials.ts:listAt",
     ]) {
-      expect(reached, name).toContain(name);
+      expect(reached, name).toContain(`packages/spec/src/${name}`);
     }
-    // Admission hands its results to no collaborator: everything it reaches is checked.
-    expect(collaboratorsUsed).toEqual([]);
+    // The one call whose target admission cannot see is the caller's verifier, named with its reason.
+    expect(collaboratorsUsed).toEqual(["packages/spec/src/evidence/profile-admission.ts:admit:verifyPrimitiveInstance()"]);
     expect(found).toEqual([]);
   }, 120_000);
 });

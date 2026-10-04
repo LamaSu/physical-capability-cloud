@@ -487,8 +487,12 @@ export type InspectionVerdict = "pass" | "fail" | "none" | "malformed";
 interface PinnedVerdict {
   /** The payload key that carries the verdict. */
   readonly field: string;
-  /** The closed value domain of that key: pass or fail for a valid value, malformed otherwise. */
-  readonly read: (value: unknown) => "pass" | "fail" | "malformed";
+  /**
+   * The closed value domain of that key: a boolean, or "PASS"/"FAIL". A tag, not a function, so the
+   * reader verdictOfPayload calls is named in place (astra pack 303: a call through a value read from
+   * a table is a target the default-deny check cannot see).
+   */
+  readonly domain: "boolean" | "pass-fail";
 }
 
 function readBooleanVerdict(value: unknown): "pass" | "fail" | "malformed" {
@@ -521,9 +525,9 @@ const PINNED_VERDICTS: Readonly<Record<string, PinnedVerdict>> = pinnedVerdicts(
 /** The table above, as a frozen null-prototype record of frozen entries. */
 function pinnedVerdicts(): Readonly<Record<string, PinnedVerdict>> {
   const table = ObjectCreate(null) as Record<string, PinnedVerdict>;
-  table.instrument_result = ObjectFreeze({ field: "pass", read: readBooleanVerdict });
-  table.cv_inspection_result = ObjectFreeze({ field: "passed", read: readBooleanVerdict });
-  table.batch_sample_result = ObjectFreeze({ field: "status", read: readPassFailVerdict });
+  table.instrument_result = ObjectFreeze({ field: "pass", domain: "boolean" });
+  table.cv_inspection_result = ObjectFreeze({ field: "passed", domain: "boolean" });
+  table.batch_sample_result = ObjectFreeze({ field: "status", domain: "pass-fail" });
   return ObjectFreeze(table);
 }
 
@@ -614,8 +618,7 @@ function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
     const descriptor = ObjectGetOwnPropertyDescriptor(payload, pinned.field);
     // An own "value" only: a value written on Object.prototype never makes an accessor read as data.
     if (descriptor === undefined || !hasOwn(descriptor, "value")) return "malformed";
-    const read = pinned.read;
-    return read(descriptor.value);
+    return pinned.domain === "boolean" ? readBooleanVerdict(descriptor.value) : readPassFailVerdict(descriptor.value);
   }
   return verdictLooking ? "malformed" : "none";
 }
