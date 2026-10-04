@@ -384,10 +384,13 @@ export function assertScheduleIsWellFormed(schedule: Pick<RateSchedule, "segment
         throw new Error(`RateSchedule segments[${i}].${field} ${v} is not an integer in 0..2^53-1`);
       }
     }
+    // A real needs a canonical JSON form too: every double of magnitude 2^53 or more is an integer outside
+    // the safe range, which the canonical form refuses to write (evidence profile v1 §1, D5), so such a
+    // body would have no hash at all.
     for (const field of REAL_SEGMENT_FIELDS) {
       const v = fields[field];
-      if (typeof v === "number" && !Number.isFinite(v)) {
-        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not a finite number`);
+      if (typeof v === "number" && !(Number.isFinite(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER)) {
+        throw new Error(`RateSchedule segments[${i}].${field} ${v} is not a finite number of magnitude at most 2^53-1`);
       }
     }
     // And the segment schema's own kinds, types and ranges: bps at most 10000, a positive scale or decay, the
