@@ -99,6 +99,13 @@ const SNAPSHOT = {
 };
 
 describe("KernelDetailPage", () => {
+  it("renders a kernel whose location is malformed, without crashing (merge-up: the N68 label keeps the finite guard)", async () => {
+    stubKernel({ status: 200, body: { kernel: { ...SNAPSHOT.kernel, location: { lat: "37.7", lng: null }, locationPrecision: "exact" } } });
+    const t = await render("kernel-real-1");
+    expect(t).toContain("Real Workshop");
+    expect(t).toContain("Location unreadable");
+  });
+
   it("renders the gateway's snapshot for a real kernel", async () => {
     stubKernel({ status: 200, body: SNAPSHOT });
     const t = await render("kernel-real-1");
