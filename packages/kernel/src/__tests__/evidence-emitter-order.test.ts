@@ -10,7 +10,7 @@
  * back or fail chosen events' digests through a spy on it.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { verifyEventHash, type EvidenceEvent, type EvidenceSource } from "@pcc/spec";
+import { verifyBundleHash, verifyEventHash, type EvidenceBundle, type EvidenceEvent, type EvidenceSource, type Signature } from "@pcc/spec";
 import { EvidenceEmitter } from "../evidence-emitter.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -186,5 +186,127 @@ describe("EvidenceEmitter stores a step's events in call order (N123)", () => {
     digests.release();
     expect((await held).error).toBeUndefined();
     expect(types(emitter, "s1")).toEqual(["execution_started"]);
+  });
+});
+
+
+/** A signer that waits at a gate: `inside` resolves once it is signing; release() lets it finish. */
+function gatedSigner(): { signFn: (data: string) => Promise<Signature>; inside: Promise<void>; release: () => void } {
+  let entered!: () => void;
+  const inside = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const signFn = async (data: string): Promise<Signature> => {
+    entered();
+    await gate;
+    return { signer: `0x${"11".repeat(20)}`, algorithm: "secp256k1", value: `sig_${data.slice(0, 16)}` } as Signature;
+  };
+  return { signFn, inside, release };
+}
+
+/** A finalizeBundle call settled into a value at once. */
+function settledBundle(call: Promise<EvidenceBundle>): Promise<{ bundle?: EvidenceBundle; error?: string }> {
+  return call.then(
+    (bundle) => ({ bundle }),
+    (err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }),
+  );
+}
+
+// The step's lifecycle around its chain (astra pack 259): finalizing, registering again, cleaning
+// up, and the job/step key.
+describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
+  it("finalizeBundle signs one snapshot: its hash covers exactly its events, whatever is added while it signs", async () => {
+    const signer = gatedSigner();
+    const emitter = new EvidenceEmitter(KERNEL, signer.signFn);
+    emitter.registerStep(JOB, "s1", 0);
+    await emitter.addEvent(JOB, "s1", raw("execution_started", 0));
+
+    const finalizing = emitter.finalizeBundle(JOB, "s1");
+    await signer.inside;
+    await emitter.addEvent(JOB, "s1", raw("execution_completed", 1)); // stored while the bundle is being signed
+    signer.release();
+    const bundle = await finalizing;
+
+    expect(bundle.events.map((e) => e.type)).toEqual(["execution_started"]);
+    expect(await verifyBundleHash(bundle), "the bundle hash covers its events").toBe(true);
+    expect(types(emitter), "the later event is stored in the step, after the bundle").toEqual(["execution_started", "execution_completed"]);
+  });
+
+  it("finalizeBundle waits for an add accepted before it", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const digests = controlDigests();
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const add = settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { mark: "held" })));
+    const finalizing = settledBundle(emitter.finalizeBundle(JOB, "s1"));
+
+    await digests.done();
+    digests.release();
+    const { bundle, error } = await finalizing;
+    expect(error, "finalizeBundle failed").toBeUndefined();
+    expect(bundle?.events.map((e) => e.type)).toEqual(["execution_completed"]);
+    expect((await add).event?.id).toBe(bundle?.events[0]?.id);
+  });
+
+  it("finalizeBundle refuses to sign a step with an accepted add that could not be stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    controlDigests();
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const failed = await settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { mark: "fails" })));
+    const stored = await settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 1)));
+    expect([failed.error, stored.error]).toEqual(["digest failed", undefined]);
+
+    const { bundle, error } = await settledBundle(emitter.finalizeBundle(JOB, "s1"));
+    expect(bundle, "a bundle signed without the lost event").toBeUndefined();
+    expect(error).toBe(`an event of step s1 of job ${JOB} could not be stored (execution_progress: digest failed), so its evidence is incomplete`);
+  });
+
+  it("registerStep refuses a step whose adds are still pending, so no accepted event is detached", async () => {
+    const digests = controlDigests();
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const pending = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" })));
+
+    expect(() => emitter.registerStep(JOB, "s1", 0)).toThrow(`registerStep: step s1 of job ${JOB} still has events being stored`);
+    digests.release();
+    expect((await pending).error).toBeUndefined();
+    expect(types(emitter)).toEqual(["execution_started"]);
+  });
+
+  it("registerStep replaces a step whose adds have all settled (a later run starts a fresh record)", async () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    await emitter.addEvent(JOB, "s1", raw("execution_started", 0));
+    emitter.registerStep(JOB, "s1", 0);
+    expect(types(emitter)).toEqual([]);
+  });
+
+  it("an add pending when its step is cleaned up fails, and stores nothing", async () => {
+    const digests = controlDigests();
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const pending = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" })));
+    emitter.cleanup(JOB, "s1");
+    digests.release();
+
+    expect((await pending).error).toBe(`step s1 of job ${JOB} was cleaned up before this execution_started event was stored`);
+    expect(emitter.getEvents(JOB, "s1")).toEqual([]);
+  });
+
+  it("keeps jobs and steps apart whose ids would join to the same job:step string", async () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep("a:b", "c", 0);
+    await expect(emitter.addEvent("a", "b:c", raw("execution_started", 0))).rejects.toThrow("No step registered for a:b:c");
+
+    emitter.registerStep("a", "b:c", 0);
+    await emitter.addEvent("a:b", "c", raw("execution_started", 0));
+    await emitter.addEvent("a", "b:c", raw("execution_completed", 1));
+    expect(emitter.getEvents("a:b", "c").map((e) => [e.type, (e.payload as { jobId: string }).jobId])).toEqual([["execution_started", "a:b"]]);
+    expect(emitter.getEvents("a", "b:c").map((e) => [e.type, (e.payload as { jobId: string }).jobId])).toEqual([["execution_completed", "a"]]);
   });
 });
