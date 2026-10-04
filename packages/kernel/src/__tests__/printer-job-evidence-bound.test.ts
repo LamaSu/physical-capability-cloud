@@ -1414,3 +1414,41 @@ describe("a print's releases are each attempted, the step's lease last, whatever
     expect.soft((await printOn(printer, emitter, "print-ids-next")).success, "the printer's next job").toBe(true);
   });
 });
+
+describe("a print's timeouts are timer delays, refused before anything is held otherwise (astra pack 216)", () => {
+  const settled = <T,>(p: Promise<T>) => p.then((value) => ({ value }), (err: unknown) => ({ rejected: err instanceof Error ? "an Error" : "a reason with no text form" }));
+  /** A print on `printer` that completes normally. */
+  async function printOn(printer: TestPrinter, emitter: EvidenceEmitter, jobId: string) {
+    const run = runPrintJob({ adapter: printer, emitter, jobId, jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete();
+    return drive(run);
+  }
+
+  it("astra's recipe: a settle timeout whose conversion throws is refused, and the failed print leaves no step behind", async () => {
+    const printer = testPrinter("timeout-216");
+    const { emitter, bundles } = recordingEmitter();
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-216", jobName: "a.pdf", totalPages: 1, evidenceSettleTimeoutMs: Symbol("bad") as unknown as number })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's evidenceSettleTimeoutMs must be a number of milliseconds from 0 to 2147483647");
+    expect.soft(printer.commands, "commands sent").toEqual([]);
+    expect.soft(emitter.getEvents("print-216", "print-216"), "the step's events").toEqual([]);
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect.soft((await printOn(printer, emitter, "print-216")).success, "the same step, printed with good timeouts").toBe(true);
+  });
+
+  it.each([
+    ["timeoutMs", Number.NaN],
+    ["timeoutMs", Number.POSITIVE_INFINITY],
+    ["evidenceQuiesceTimeoutMs", -1],
+    ["evidenceQuiesceTimeoutMs", "15000"],
+    ["evidenceSettleTimeoutMs", 2_147_483_648],
+  ] as const)("%s = %s is refused before anything is held", async (name, ms) => {
+    const printer = testPrinter(`timeout-216-${name}-${String(ms)}`);
+    const { emitter } = recordingEmitter();
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-216-each", jobName: "a.pdf", totalPages: 1, [name]: ms as unknown as number })));
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe(`the print's ${name} must be a number of milliseconds from 0 to 2147483647`);
+    expect.soft(printer.commands, "commands sent").toEqual([]);
+    expect.soft((await printOn(printer, emitter, "print-216-each")).success, "the same step, printed with good timeouts").toBe(true);
+  });
+});

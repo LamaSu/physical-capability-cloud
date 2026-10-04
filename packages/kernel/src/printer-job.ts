@@ -244,6 +244,15 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   }
 }
 
+/**
+ * A timer's delay in milliseconds: a number from 0 to 2^31 - 1 (so not NaN, nor infinite). Node
+ * fires a longer one after 1 ms, and converting a value that is not a number can throw (astra
+ * pack 216).
+ */
+function isTimerDelay(ms: unknown): ms is number {
+  return typeof ms === "number" && ms >= 0 && ms <= 2_147_483_647;
+}
+
 /** One release of a print's cleanup: attempted, and logged if it throws, so the next is attempted too (astra pack 213). */
 function release(jobId: string, what: string, step: () => void): void {
   try {
@@ -280,6 +289,11 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
   // included: ids that are not text could throw from any of those, so they are refused before
   // anything is held (astra pack 213, as in JobRunner).
   if (typeof jobId !== "string" || typeof stepId !== "string") return failure("the print's job id and step id must be text");
+  // Each timeout arms a timer, and a delay that cannot be one could make settle() reject in the
+  // final release, after the step was registered: refused before anything is held (astra pack 216).
+  for (const [name, ms] of [["timeoutMs", timeoutMs], ["evidenceQuiesceTimeoutMs", evidenceQuiesceTimeoutMs], ["evidenceSettleTimeoutMs", evidenceSettleTimeoutMs]] as const) {
+    if (!isTimerDelay(ms)) return failure(`the print's ${name} must be a number of milliseconds from 0 to 2147483647`);
+  }
 
   // Every refusal below comes before the start command, and before registerStep, which
   // would overwrite the step of a print already running under the same ids. The checks,
@@ -577,13 +591,16 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
     // its step (cleanup), so getEvents() for it is empty from then on. An addEvent still
     // running at that bound appends to the detached record, which nothing reads.
     // Each release is attempted even if another throws, and the lease is always released
-    // (astra pack 213). settle() cannot reject: the chain's handler catches every failure.
+    // (astra pack 213). The step is detached even if settle() rejects (astra pack 216).
     try {
       release(jobId, "closing the evidence session", () => session.close());
       if (!succeeded) {
         sealed = true;
-        if (!settleTimedOut) await settle();
-        release(jobId, "detaching the step", () => emitter.cleanup(jobId, stepId));
+        try {
+          if (!settleTimedOut) await settle();
+        } finally {
+          release(jobId, "detaching the step", () => emitter.cleanup(jobId, stepId));
+        }
       }
     } finally {
       // Released last, so a later print of this step registers a fresh record.
