@@ -370,7 +370,10 @@ class EchoEmitter extends EvidenceEmitter {
     this.calls.push(added.catch(() => undefined));
     if (rawEvent.type === "execution_progress" && this.echo) {
       this.echoes += 1;
-      this.echo(this.echoes);
+      const n = this.echoes;
+      // On the next turn of the event loop, as a device's emits arrive on I/O. The emitter hashes
+      // synchronously now (steward #6668), so an echo made inside addEvent would never let a timer run.
+      setImmediate(() => this.echo?.(n));
     }
     return added;
   }
@@ -385,7 +388,7 @@ describe("R4: a device that emits again whenever an event is recorded", () => {
     ["the flood runs for the whole of a 500 ms execution", true],
   ])("run() resolves, and nothing is recorded after the bundle (%s)", async (_when, longRun) => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
-    // setImmediate is real: the flood runs as fast as real hashing, between clock steps.
+    // setImmediate is real: the device echoes on it, so the flood runs between clock steps.
     const turn = () => new Promise((resolve) => setImmediate(resolve));
     const emitter = new EchoEmitter(KERNEL_ID);
     let bundle: EvidenceBundle | undefined;

@@ -1,18 +1,41 @@
 /**
- * EvidenceEmitter stores a step's events in the order addEvent is called, whatever order their
- * hashes finish in (N123). addEvent hashes each event (hashEvent: an async SHA-256 digest) before
- * it stores it, so overlapping calls on one step used to store in digest-finish order: a slow
- * digest put an event after later ones (refvertical #6343; the IPP binding flakes of #474, #456
- * and #6307). The digests still run concurrently; only the storing waits for the step's earlier
- * events.
+ * EvidenceEmitter stores a step's events in the order addEvent is called (N123), and every call it
+ * makes goes through a binding it captured when its module loaded (steward #6651, #6668).
  *
- * hashEvent calls crypto.subtle.digest once per event (sha256 in @pcc/spec), so these tests hold
- * back or fail chosen events' digests through a spy on it.
+ * N123: addEvent used to hash each event with an asynchronous digest (crypto.subtle, through
+ * @pcc/spec's hashEvent) before it stored it, so overlapping calls on one step stored in
+ * digest-finish order: a slow digest put an event after later ones (refvertical #6343; the IPP
+ * binding flakes of #474, #456 and #6307). It now hashes each event at its call, synchronously,
+ * with node:crypto's one-shot digest captured at load, and stores it on the step's chain in call
+ * order. crypto.subtle.digest is never asked, so these tests replace it with one that holds,
+ * fails or forges a digest, and show that it changes nothing.
+ *
+ * The closed allowlist parses evidence-emitter.ts with the TypeScript compiler and accepts a call
+ * only to a load-time capture, a function or class declared in the file, a private member of the
+ * emitter, or a callback registered with onBundle. The replacement tests then replace each
+ * residual the steward named (Map, Promise, the digest, RegExp, ids, Sentry, the emitter's own
+ * properties) during addEvent, getEvents and finalizeBundle.
  */
 import { readFileSync } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import * as SentryModule from "@sentry/node";
+import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { verifyBundleHash, verifyEventHash, type EvidenceBundle, type EvidenceEvent, type EvidenceSource, type Signature } from "@pcc/spec";
+import {
+  hashBundle,
+  hashEvent,
+  ids,
+  verifyBundleHash,
+  verifyEventHash,
+  type EvidenceBundle,
+  type EvidenceEvent,
+  type EvidenceSource,
+  type Signature,
+} from "@pcc/spec";
 import { EvidenceEmitter } from "../evidence-emitter.js";
+
+// A plain function, so vi.restoreAllMocks() leaves it: the emitter takes startSpan once, when it loads.
+vi.mock("@sentry/node", () => ({ startSpan: (_options: unknown, callback: () => unknown) => callback() }));
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -27,35 +50,29 @@ const raw = (type: string, second: number, payload: Record<string, unknown> = {}
 }) as never;
 
 /**
- * Holds back the digest of every event whose payload has mark "held" until release(), and fails
- * the digest of every event marked "fails". The other digests run as usual: done() resolves once
- * they have finished and every continuation waiting on them has run. `requested` lists the event
- * types whose digests were asked for, in order.
+ * Replaces crypto.subtle.digest, on crypto.subtle and on its prototype, with one that never finishes
+ * the digest of an event whose payload has mark "held", fails the digest of one marked "fails", and
+ * forges every other (32 zero bytes). `requested` lists the event types whose digests were asked
+ * for: the emitter hashes with the digest it captured at load, so it asks for none. restore() puts
+ * the real digest back.
  */
-function controlDigests(): { release: () => void; done: () => Promise<void>; requested: string[] } {
+function hostileDigests(): { requested: string[]; restore: () => void } {
   const subtle = globalThis.crypto.subtle;
-  const real = subtle.digest.bind(subtle);
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const others: Array<Promise<unknown>> = [];
   const requested: string[] = [];
-  vi.spyOn(subtle, "digest").mockImplementation(((algorithm: Parameters<typeof real>[0], data: Parameters<typeof real>[1]) => {
+  const hostile = ((_algorithm: AlgorithmIdentifier, data: BufferSource) => {
     const text = new TextDecoder().decode(data as Uint8Array);
     requested.push(/"type":"([a-z_]+)"/.exec(text)?.[1] ?? "?");
+    if (text.includes('"mark":"held"')) return new Promise<ArrayBuffer>(() => {});
     if (text.includes('"mark":"fails"')) return Promise.reject(new Error("digest failed"));
-    if (text.includes('"mark":"held"')) return gate.then(() => real(algorithm, data));
-    const digest = real(algorithm, data);
-    others.push(digest);
-    return digest;
-  }) as typeof subtle.digest);
+    return Promise.resolve(new ArrayBuffer(32));
+  }) as typeof subtle.digest;
+  const onInstance = vi.spyOn(subtle, "digest").mockImplementation(hostile);
+  const onPrototype = vi.spyOn(Object.getPrototypeOf(subtle) as SubtleCrypto, "digest").mockImplementation(hostile);
   return {
-    release,
     requested,
-    done: async () => {
-      await Promise.allSettled(others);
-      await new Promise((resolve) => setImmediate(resolve));
+    restore: () => {
+      onInstance.mockRestore();
+      onPrototype.mockRestore();
     },
   };
 }
@@ -87,7 +104,8 @@ async function unhandledDuring(run: () => Promise<void>): Promise<unknown[]> {
 const types = (emitter: EvidenceEmitter, stepId = "s1") => emitter.getEvents(JOB, stepId).map((e) => e.type);
 
 // Refvertical's reproduction (#6343), as they wrote it: at master cd9d8770 it recorded
-// ["execution_completed","execution_progress"].
+// ["execution_completed","execution_progress"]. The emitter no longer asks crypto.subtle for a
+// digest, so the slow one it sets up never runs: the order holds by construction.
 it("two overlapping addEvent calls on one step record in call order", async () => {
   const subtle = globalThis.crypto.subtle;
   const real = subtle.digest.bind(subtle);
@@ -108,23 +126,25 @@ it("two overlapping addEvent calls on one step record in call order", async () =
 });
 
 describe("EvidenceEmitter stores a step's events in call order (N123)", () => {
-  it("stores nothing ahead of an earlier event whose digest has not finished, then all in call order", async () => {
-    const digests = controlDigests();
+  it("hashes each event at its call with the digest captured at load: a held, failing or forging crypto.subtle.digest is never asked, and every event stores in call order", async () => {
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
-    const calls = [
-      settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" }))),
-      settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 1))),
-      settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 2))),
-    ];
+    const digests = hostileDigests();
+    let results: Array<{ event?: EvidenceEvent; error?: string }> = [];
+    const unhandled = await unhandledDuring(async () => {
+      const calls = [
+        settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" }))),
+        settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 1, { mark: "fails" }))),
+        settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 2))),
+      ];
+      // Each took its place at its call, and stores on the step's chain after the one before it.
+      expect(types(emitter), "stored before the chain ran").toEqual([]);
+      results = await Promise.all(calls);
+    });
+    digests.restore();
 
-    await digests.done(); // the later two digests have finished; the first is still held
-    expect(types(emitter), "stored while the first digest was held").toEqual([]);
-    // The hashes run concurrently: every digest was asked for at its call, none waits its turn.
-    expect(digests.requested).toEqual(["execution_started", "execution_progress", "execution_completed"]);
-
-    digests.release();
-    const results = await Promise.all(calls);
+    expect(digests.requested, "digests asked of crypto.subtle").toEqual([]);
+    expect(unhandled, "rejections no handler took").toEqual([]);
     expect(results.map((r) => r.error)).toEqual([undefined, undefined, undefined]);
     const stored = emitter.getEvents(JOB, "s1");
     expect(stored.map((e) => e.type)).toEqual(["execution_started", "execution_progress", "execution_completed"]);
@@ -133,62 +153,39 @@ describe("EvidenceEmitter stores a step's events in call order (N123)", () => {
     for (const event of stored) expect(await verifyEventHash(event), event.type).toBe(true);
   });
 
-  it("an event whose digest fails takes no place, and lets no later event ahead of an earlier one", async () => {
-    const digests = controlDigests();
-    const emitter = new EvidenceEmitter(KERNEL);
-    emitter.registerStep(JOB, "s1", 0);
-    let results: Array<{ event?: EvidenceEvent; error?: string }> = [];
-    const unhandled = await unhandledDuring(async () => {
-      const calls = [
-        settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" }))),
-        settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 1, { mark: "fails" }))),
-        settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 2))),
-      ];
-      await digests.done(); // the second digest has failed and the third has finished; the first is held
-      expect(types(emitter), "stored while the first digest was held").toEqual([]);
-      digests.release();
-      results = await Promise.all(calls);
-    });
-
-    expect(unhandled, "rejections no handler took").toEqual([]);
-    expect(results.map((r) => r.error)).toEqual([undefined, "digest failed", undefined]);
-    expect(types(emitter)).toEqual(["execution_started", "execution_completed"]);
-  });
-
   it("an event the step refuses rejects at once, takes no place, and holds no other event back", async () => {
-    const digests = controlDigests();
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
-    const first = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" })));
-    const refused = settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 1, { jobId: "another-job" })));
-    const third = settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 2)));
+    const settledOrder: string[] = [];
+    const track = (label: string, call: Promise<EvidenceEvent>) =>
+      settled(call).then((result) => {
+        settledOrder.push(label);
+        return result;
+      });
+    const first = track("first", emitter.addEvent(JOB, "s1", raw("execution_started", 0)));
+    const refused = track("refused", emitter.addEvent(JOB, "s1", raw("execution_progress", 1, { jobId: "another-job" })));
+    const third = track("third", emitter.addEvent(JOB, "s1", raw("execution_completed", 2)));
 
-    // Refused before its turn: it never waits behind the held digest.
     expect((await refused).error).toBe(`event payload.jobId another-job does not match the step's ${JOB}`);
-    await digests.done();
-    expect(types(emitter), "stored while the first digest was held").toEqual([]);
-
-    digests.release();
     expect((await first).error).toBeUndefined();
     expect((await third).error).toBeUndefined();
+    // Refused at its call: it settled before the event called ahead of it was stored.
+    expect(settledOrder).toEqual(["refused", "first", "third"]);
     expect(types(emitter)).toEqual(["execution_started", "execution_completed"]);
   });
 
-  it("orders each step on its own: a held digest on one step holds back no other step's events", async () => {
-    const digests = controlDigests();
+  it("orders each step on its own: cleaning up a step with an add pending fails that add and touches no other step's", async () => {
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
     emitter.registerStep(JOB, "s2", 0);
-    const held = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" })));
-    const other = await settled(emitter.addEvent(JOB, "s2", raw("execution_started", 1)));
+    const onS1 = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0)));
+    const onS2 = settled(emitter.addEvent(JOB, "s2", raw("execution_started", 1)));
+    emitter.cleanup(JOB, "s1");
 
-    expect(other.error).toBeUndefined();
+    expect((await onS1).error).toBe(`step s1 of job ${JOB} was cleaned up before this execution_started event was stored`);
+    expect((await onS2).error).toBeUndefined();
     expect(types(emitter, "s2")).toEqual(["execution_started"]);
     expect(types(emitter, "s1")).toEqual([]);
-
-    digests.release();
-    expect((await held).error).toBeUndefined();
-    expect(types(emitter, "s1")).toEqual(["execution_started"]);
   });
 });
 
@@ -404,42 +401,40 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
 
   it("finalizeBundle waits for an add accepted before it", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const digests = controlDigests();
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
-    const add = settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { mark: "held" })));
+    const add = settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 0)));
     const finalizing = settledBundle(emitter.finalizeBundle(JOB, "s1"));
+    expect(types(emitter), "stored when finalizeBundle was called").toEqual([]);
 
-    await digests.done();
-    digests.release();
     const { bundle, error } = await finalizing;
     expect(error, "finalizeBundle failed").toBeUndefined();
     expect(bundle?.events.map((e) => e.type)).toEqual(["execution_completed"]);
     expect((await add).event?.id).toBe(bundle?.events[0]?.id);
   });
 
-  it("finalizeBundle refuses to sign a step with an accepted add that could not be stored", async () => {
+  // An accepted add can fail only one way now: its hash is taken at its call, before it takes a
+  // place, so what can still stop it is its step being cleaned up while it waits its turn.
+  it("an add accepted before finalizeBundle that cannot be stored, its step cleaned up, leaves no bundle signed", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    controlDigests();
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
-    const failed = await settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { mark: "fails" })));
-    const stored = await settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 1)));
-    expect([failed.error, stored.error]).toEqual(["digest failed", undefined]);
+    const add = settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 0)));
+    const finalizing = settledBundle(emitter.finalizeBundle(JOB, "s1"));
+    emitter.cleanup(JOB, "s1");
 
-    const { bundle, error } = await settledBundle(emitter.finalizeBundle(JOB, "s1"));
-    expect(bundle, "a bundle signed without the lost event").toBeUndefined();
-    expect(error).toBe(`an event of step s1 of job ${JOB} could not be stored (execution_progress: digest failed), so its evidence is incomplete`);
+    expect((await add).error).toBe(`step s1 of job ${JOB} was cleaned up before this execution_completed event was stored`);
+    const { bundle, error } = await finalizing;
+    expect(bundle, "a bundle signed without the event").toBeUndefined();
+    expect(error).toBe(`step s1 of job ${JOB} was cleaned up while its bundle was being finalized`);
   });
 
   it("registerStep refuses a step whose adds are still pending, so no accepted event is detached", async () => {
-    const digests = controlDigests();
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
-    const pending = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" })));
+    const pending = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0)));
 
     expect(() => emitter.registerStep(JOB, "s1", 0)).toThrow(`registerStep: step s1 of job ${JOB} still has events being stored`);
-    digests.release();
     expect((await pending).error).toBeUndefined();
     expect(types(emitter)).toEqual(["execution_started"]);
   });
@@ -453,12 +448,10 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
   });
 
   it("an add pending when its step is cleaned up fails, and stores nothing", async () => {
-    const digests = controlDigests();
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
-    const pending = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0, { mark: "held" })));
+    const pending = settled(emitter.addEvent(JOB, "s1", raw("execution_started", 0)));
     emitter.cleanup(JOB, "s1");
-    digests.release();
 
     expect((await pending).error).toBe(`step s1 of job ${JOB} was cleaned up before this execution_started event was stored`);
     expect(emitter.getEvents(JOB, "s1")).toEqual([]);
@@ -653,16 +646,618 @@ describe("EvidenceEmitter's input boundary runs no adapter code and uses intrins
     expect(await verifyEventHash(bundle.events[0]!)).toBe(true);
   });
 
-  it("the emitter calls no clone or reflection intrinsic it did not capture at load (a scan of its source)", () => {
+});
+
+// -- The closed allowlist (steward #6651, #6668) --
+
+const CAPTURE_BEGIN = "// -- captured when this module loads";
+const CAPTURE_END = "// -- end of the load-time captures --";
+
+/** A call outside the allowlist, or a form that calls without a call expression: where, what, and why it is refused. */
+interface Violation {
+  line: number;
+  text: string;
+  why: string;
+}
+
+/** What the allowlist admits besides rules (a) to (c) of checkAllowlist, by name. */
+interface AllowlistRules {
+  /** Private fields that may also be assigned in one named method besides the constructor: field -> method. */
+  attachedIn: Record<string, string>;
+  /** Callees a collaborator supplied (a registered callback): name -> the one method that may call it. */
+  collaborators: Record<string, string>;
+  /** Captures that make new callables: callable only in the capture block, a constructor, and makerMethods. */
+  makers: string[];
+  makerMethods: string[];
+}
+
+/**
+ * The emitter's: the storage service's isReady and archiveBundle are bound when it is attached, and
+ * #finalizeBundle calls the callbacks registered with onBundle. uncurryThis and FunctionPrototypeBind
+ * make callables, so they run only where a collaborator is taken in.
+ */
+const EMITTER_RULES: AllowlistRules = {
+  attachedIn: { "#storageIsReady": "setStorageService", "#storageArchive": "setStorageService" },
+  collaborators: { listener: "#finalizeBundle" },
+  makers: ["uncurryThis", "FunctionPrototypeBind"],
+  makerMethods: ["setStorageService"],
+};
+
+/**
+ * The closed allowlist, over the TypeScript syntax tree of `source`. Outside the load-time capture
+ * block (the top-level const declarations between the two marker comments, which run once, at load),
+ * every call expression, `new` expression and tagged template must target:
+ *   (a) a name declared in the capture block;
+ *   (b) a function or class declared at the top level of the module;
+ *   (c) `this.#name`: a private method of the enclosing class, or a private field assigned only in the
+ *       constructor or its initializer (or in the one method `rules.attachedIn` names for it);
+ *   or, by name, a collaborator's callback in the one method `rules.collaborators` gives it, and
+ *   `super(...)` in a class that extends a capture. Anything else is a violation: a member call
+ *   (x.push, map.get, promise.then, regex.test, Captured.call), a computed or parenthesized callee, a
+ *   parameter or global called, an import called directly. So is every form that calls without a call
+ *   expression: for-of and for-in, spread, array destructuring, instanceof, `in` on a property key, an
+ *   await whose operand is not `pinned(...)`, `using`, `yield*`, a decorator and `with`.
+ */
+function checkAllowlist(source: string, rules: AllowlistRules): { violations: Violation[]; captured: string[]; checked: number } {
+  const file = ts.createSourceFile("checked.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const violations: Violation[] = [];
+  const refuse = (node: ts.Node, why: string): void => {
+    const line = file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1;
+    violations.push({ line, text: node.getText(file).split("\n")[0]!.trim(), why });
+  };
+  const begin = source.indexOf(CAPTURE_BEGIN);
+  const end = source.indexOf(CAPTURE_END);
+  if (begin < 0 || end < begin || source.indexOf(CAPTURE_BEGIN, begin + 1) >= 0 || source.indexOf(CAPTURE_END, end + 1) >= 0) {
+    return { violations: [{ line: 0, text: "", why: "no single capture block between the two markers" }], captured: [], checked: 0 };
+  }
+  const inBlock = (node: ts.Node): boolean => node.getStart(file) > begin && node.getEnd() < end;
+
+  const captured = new Set<string>();
+  const local = new Set<string>();
+  for (const statement of file.statements) {
+    if (inBlock(statement)) {
+      if (!ts.isVariableStatement(statement) || (statement.declarationList.flags & ts.NodeFlags.Const) === 0) {
+        refuse(statement, "the capture block holds const declarations only");
+        continue;
+      }
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) captured.add(declaration.name.text);
+        else refuse(declaration, "a capture binds one name");
+      }
+    } else if ((ts.isFunctionDeclaration(statement) || ts.isClassDeclaration(statement)) && statement.name) {
+      local.add(statement.name.text);
+    }
+  }
+
+  // Each class: its private methods, where each private field is assigned, and what it extends.
+  interface ClassInfo {
+    methods: Set<string>;
+    assignedIn: Map<string, Set<string>>;
+    heritage: string | null;
+  }
+  const classes = new Map<ts.Node, ClassInfo>();
+  const memberName = (member: ts.ClassElement): string =>
+    ts.isConstructorDeclaration(member) ? "constructor" : member.name && (ts.isIdentifier(member.name) || ts.isPrivateIdentifier(member.name)) ? member.name.text : "?";
+  const isThisPrivate = (node: ts.Node): node is ts.PropertyAccessExpression & { name: ts.PrivateIdentifier } =>
+    ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword && ts.isPrivateIdentifier(node.name);
+  for (const statement of file.statements) {
+    if (!ts.isClassDeclaration(statement)) continue;
+    const info: ClassInfo = { methods: new Set(), assignedIn: new Map(), heritage: null };
+    const extended = statement.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]?.expression;
+    if (extended && ts.isIdentifier(extended)) info.heritage = extended.text;
+    for (const member of statement.members) {
+      const name = memberName(member);
+      if (ts.isMethodDeclaration(member) && ts.isPrivateIdentifier(member.name)) info.methods.add(member.name.text);
+      if (ts.isPropertyDeclaration(member) && ts.isPrivateIdentifier(member.name)) {
+        info.assignedIn.set(member.name.text, new Set(member.initializer ? ["constructor"] : []));
+      }
+      const walk = (node: ts.Node): void => {
+        const kind = ts.isBinaryExpression(node) ? node.operatorToken.kind : undefined;
+        if (kind !== undefined && kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment) {
+          const left = (node as ts.BinaryExpression).left;
+          if (isThisPrivate(left)) {
+            const sites = info.assignedIn.get(left.name.text) ?? new Set<string>();
+            sites.add(name);
+            info.assignedIn.set(left.name.text, sites);
+          }
+        }
+        ts.forEachChild(node, walk);
+      };
+      walk(member);
+    }
+    classes.set(statement, info);
+  }
+
+  const unwrap = (node: ts.Expression): ts.Expression => {
+    let target = node;
+    while (ts.isParenthesizedExpression(target) || ts.isNonNullExpression(target) || ts.isAsExpression(target) || ts.isTypeAssertionExpression(target) || ts.isSatisfiesExpression(target)) {
+      target = target.expression;
+    }
+    return target;
+  };
+  let checked = 0;
+  const checkCallee = (call: ts.Node, callee: ts.Expression, cls: ClassInfo | null, member: string | null): void => {
+    checked += 1;
+    const target = unwrap(callee);
+    if (target.kind === ts.SyntaxKind.SuperKeyword) {
+      if (cls?.heritage && captured.has(cls.heritage)) return;
+      return refuse(call, "super() of a class that does not extend a capture");
+    }
+    if (ts.isIdentifier(target)) {
+      const name = target.text;
+      if (rules.makers.includes(name) && member !== "constructor" && !rules.makerMethods.includes(member ?? "")) {
+        return refuse(call, `${name} makes a callable, which only the capture block, a constructor and ${rules.makerMethods.join(", ") || "no method"} may do`);
+      }
+      if (captured.has(name) || local.has(name)) return;
+      if (rules.collaborators[name] !== undefined && rules.collaborators[name] === member) return;
+      return refuse(call, "neither a load-time capture nor a function declared in the module");
+    }
+    if (isThisPrivate(target)) {
+      const name = target.name.text;
+      if (cls?.methods.has(name)) return;
+      const sites = cls?.assignedIn.get(name);
+      if (sites && sites.size > 0 && [...sites].every((site) => site === "constructor" || rules.attachedIn[name] === site)) return;
+      return refuse(call, "a private field assigned outside the constructor (and its named attach method)");
+    }
+    return refuse(call, "a member or computed callee, looked up when the call runs");
+  };
+  const isPinned = (node: ts.Expression): boolean => {
+    const target = unwrap(node);
+    return ts.isCallExpression(target) && ts.isIdentifier(target.expression) && target.expression.text === "pinned";
+  };
+  const visit = (node: ts.Node, cls: ClassInfo | null, member: string | null): void => {
+    if (inBlock(node)) return;
+    if (ts.isImportDeclaration(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
+    if (ts.isClassDeclaration(node)) cls = classes.get(node) ?? null;
+    if (ts.isClassElement(node) && node.parent !== undefined && ts.isClassLike(node.parent)) member = memberName(node);
+    if (ts.isCallExpression(node)) checkCallee(node, node.expression, cls, member);
+    else if (ts.isNewExpression(node)) {
+      checked += 1;
+      const target = unwrap(node.expression);
+      if (!ts.isIdentifier(target) || !(captured.has(target.text) || local.has(target.text))) refuse(node, "new of neither a capture nor a class declared in the module");
+    } else if (ts.isTaggedTemplateExpression(node)) checkCallee(node, node.tag, cls, member);
+    else if (ts.isDecorator(node)) refuse(node, "a decorator is a call");
+    else if (ts.isForOfStatement(node)) refuse(node, "for-of calls an iterator looked up when it runs");
+    else if (ts.isForInStatement(node)) refuse(node, "for-in walks keys a Proxy can trap");
+    else if (ts.isSpreadElement(node)) refuse(node, "spread calls an iterator looked up when it runs");
+    else if (ts.isSpreadAssignment(node)) refuse(node, "object spread reads through getters and traps");
+    else if (ts.isArrayBindingPattern(node)) refuse(node, "array destructuring calls an iterator");
+    else if (ts.isBinaryExpression(node)) {
+      const kind = node.operatorToken.kind;
+      if (kind === ts.SyntaxKind.InstanceOfKeyword) refuse(node, "instanceof calls a Symbol.hasInstance looked up when it runs");
+      else if (kind === ts.SyntaxKind.InKeyword && !ts.isPrivateIdentifier(node.left)) refuse(node, "`in` on a property key runs a Proxy trap");
+      else if (kind === ts.SyntaxKind.EqualsToken && ts.isArrayLiteralExpression(node.left)) refuse(node, "array destructuring calls an iterator");
+    } else if (ts.isAwaitExpression(node)) {
+      if (!isPinned(node.expression)) refuse(node, "an await on a promise whose constructor is not pinned looks up then");
+    } else if (ts.isYieldExpression(node) && node.asteriskToken) refuse(node, "yield* calls an iterator");
+    else if (ts.isVariableDeclarationList(node) && (node.flags & ts.NodeFlags.Using) !== 0) refuse(node, "using calls Symbol.dispose");
+    else if (ts.isWithStatement(node)) refuse(node, "with looks names up on an object");
+    ts.forEachChild(node, (child) => visit(child, cls, member));
+  };
+  visit(file, null, null);
+  return { violations, captured: [...captured], checked };
+}
+
+const show = (violations: Violation[]): string[] => violations.map((v) => `line ${v.line}: ${v.text} (${v.why})`);
+
+/**
+ * Waits a turn of the event loop, so vitest's runner has chained on the test's promise (its timeout
+ * race reads the promise's constructor and calls then) before a test replaces what that uses.
+ */
+const runnerSettled = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** What registerStep, addEvent, getEvents and finalizeBundle on one step handed back. */
+interface Outcome {
+  added: EvidenceEvent;
+  listed: EvidenceEvent[];
+  bundle: EvidenceBundle;
+}
+
+/** registerStep, addEvent, getEvents and finalizeBundle on `stepId`, awaiting only the promises the emitter returns. */
+async function callsOnStep(emitter: EvidenceEmitter, stepId: string): Promise<Outcome> {
+  emitter.registerStep(JOB, stepId, 0);
+  const added = await emitter.addEvent(JOB, stepId, raw("execution_completed", 0, { pages: 3 }));
+  const listed = emitter.getEvents(JOB, stepId);
+  const bundle = await emitter.finalizeBundle(JOB, stepId);
+  return { added, listed, bundle };
+}
+
+/**
+ * With every replacement undone: the step stores exactly the event added, with `payload`; its hash
+ * and the bundle's verify against their content (spec's verifiers); and what the calls handed back
+ * were detached copies, so changing them changes nothing stored.
+ */
+async function expectIntact(emitter: EvidenceEmitter, stepId: string, outcome: Outcome, payload: Record<string, unknown> = { pages: 3, jobId: JOB }): Promise<void> {
+  const stored = emitter.getEvents(JOB, stepId);
+  expect(stored.map((e) => e.payload), "what the step stores").toEqual([payload]);
+  expect(await verifyEventHash(stored[0]!), "the stored event's hash covers its content").toBe(true);
+  expect(outcome.added, "what addEvent handed back").toEqual(stored[0]);
+  expect(outcome.listed, "what getEvents handed back").toEqual(stored);
+  expect(outcome.bundle.events, "the bundle's events").toEqual(stored);
+  expect(await verifyBundleHash(outcome.bundle), "the bundle hash covers its events").toBe(true);
+  (outcome.added.payload as Record<string, unknown>).pages = 97;
+  (outcome.listed[0]!.payload as Record<string, unknown>).pages = 98;
+  (outcome.bundle.events[0]!.payload as Record<string, unknown>).pages = 99;
+  expect(emitter.getEvents(JOB, stepId), "the step, after the copies were changed").toEqual(stored);
+  expect((await emitter.finalizeBundle(JOB, stepId)).bundleHash, "a bundle of the step, signed again").toBe(outcome.bundle.bundleHash);
+}
+
+/** A step record of the emitter's shape, whose events array the attacker keeps. */
+function attackerHeldRecord(): { record: Record<string, unknown>; events: EvidenceEvent[] } {
+  const events: EvidenceEvent[] = [];
+  return { record: { jobId: JOB, stepId: "s1", events, assuranceTier: 0, unit: undefined, stored: Promise.resolve(), pending: 0, detached: false }, events };
+}
+
+describe("EvidenceEmitter calls only what it captured at load: the closed allowlist (steward #6651, #6668)", () => {
+  it("every call in evidence-emitter.ts targets a load-time capture, a function declared there, a private member, or an onBundle callback", () => {
     const source = readFileSync(new URL("../evidence-emitter.ts", import.meta.url), "utf8");
-    // Comments out, then every call of an intrinsic the boundary or a copy could reach through a global.
-    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-    const pattern =
-      /\b(structuredClone|Object\.(getPrototypeOf|getOwnPropertyDescriptor|defineProperty|create|keys|entries|values|assign)|Reflect\.ownKeys|Array\.isArray|Number\.is(Finite|Integer|SafeInteger)|types\.isProxy)\s*\(/g;
-    expect(code.match(pattern) ?? []).toEqual([]);
-    // Nor any method on a step's stored array: an element is only ever defined (astra pack 277).
-    expect(code.match(/\.events\.(?!length\b)[A-Za-z]+\s*\(/g) ?? []).toEqual([]);
-    // And the capture itself is there.
-    expect(code).toContain("const StructuredClone = globalThis.structuredClone;");
+    const { violations, captured, checked } = checkAllowlist(source, EMITTER_RULES);
+    expect(show(violations), "calls outside the allowlist").toEqual([]);
+    // The checker saw the file: its capture block, and the calls after it.
+    expect(captured).toEqual(
+      expect.arrayContaining(["MapPrototypeGet", "MapPrototypeSet", "PromiseCtor", "OneShotHash", "Canonicalize", "IdsEvidence", "IdsBundle", "SentryStartSpan", "StructuredClone", "ObjectDefineProperty"]),
+    );
+    expect(checked, "calls checked").toBeGreaterThan(100);
+  });
+
+  it("refuses every other way to call: a member, computed, parameter or global callee, and the forms that call without a call expression (a self-test)", () => {
+    const planted = [
+      "x.push(1);",
+      "arr.map(f);",
+      "this.foo();",
+      "map.get(k);",
+      "promise.then(f);",
+      "regex.test(s);",
+      "obj.method();",
+      "Captured.call(null, x);",
+      'obj["method"]();',
+      "(0, obj.method)();",
+      "f(x);",
+      "x?.();",
+      "new Map();",
+      "String(x);",
+      "f`tagged`;",
+      "for (const y of xs) Captured(y);",
+      "for (const key in obj) Captured(key);",
+      "Captured(...xs);",
+      "const copy = [...xs];",
+      "const merged = { ...obj };",
+      "const [first] = xs;",
+      "[x] = xs;",
+      "x instanceof Y;",
+      '"k" in obj;',
+      "await promise;",
+      "this.#rebound();",
+      "uncurryThis(f);",
+    ];
+    const head = [
+      "// -- captured when this module loads --",
+      "const Captured = globalThis.structuredClone;",
+      "const uncurryThis = Function.prototype.bind.bind(Function.prototype.call);",
+      "// -- end of the load-time captures --",
+      "function local(): void {}",
+      "function pinned<T>(value: T): T { return value; }",
+      "class Local {}",
+      "export class Probe {",
+      "  #field = Captured;",
+      "  #rebound: () => void = local;",
+      "  #method(): void {}",
+      "  rebind(): void { this.#rebound = local; }",
+      "  async probe(x: any, arr: any[], f: any, map: Map<unknown, unknown>, k: unknown, promise: Promise<unknown>, regex: RegExp, s: string, obj: any, xs: any[], Y: any): Promise<void> {",
+      "    Captured(x); local(); this.#field(x); this.#method(); new Local(); await pinned(promise); if (#field in obj) local();",
+    ];
+    const source = [...head, ...planted.map((line) => `    ${line}`), "  }", "}"].join("\n");
+    const { violations } = checkAllowlist(source, { attachedIn: {}, collaborators: {}, makers: ["uncurryThis"], makerMethods: [] });
+    // Exactly one violation per planted line, at that line, naming what it found there; none for the allowed calls above.
+    expect(show(violations).map((v) => v.split(":")[0])).toEqual(planted.map((_, i) => `line ${head.length + 1 + i}`));
+    for (let i = 0; i < planted.length; i++) expect(planted[i], show(violations)[i]).toContain(violations[i]!.text);
+  });
+
+  it("hashes byte for byte as @pcc/spec's hashEvent and hashBundle do (globals untouched)", async () => {
+    const emitter = new EvidenceEmitter(KERNEL, async (data) => ({ signer: `0x${"11".repeat(20)}`, algorithm: "secp256k1", value: `sig_${data.slice(0, 16)}` }) as Signature);
+    emitter.registerStep(JOB, "s1", 0);
+    const payloads: Array<Record<string, unknown>> = [
+      { pages: 3 },
+      {},
+      { text: "café \u{1F600} 中", lone: "\ud800 and \udfff", escaped: 'quote " backslash \\ newline \n tab \t nul \u0000' },
+      { keys: { b: 1, a: 2, B: 3, _: 4, "é": 5, "\u{1F600}": 6, "": 7, "10": 8, "9": 9 } },
+      { numbers: [0.5, 1e-300, -0, 2 ** 53 - 1, -(2 ** 53 - 1), -1e-7, 123.456], flags: [true, false, null] },
+      { nested: { deep: [[[1]], { x: null, y: [] }] } },
+    ];
+    const added: EvidenceEvent[] = [];
+    for (let i = 0; i < payloads.length; i++) added.push(await emitter.addEvent(JOB, "s1", raw("execution_progress", i, payloads[i])));
+    for (const event of added) {
+      expect(event.hash, event.timestamp).toBe(await hashEvent({ type: event.type, timestamp: event.timestamp, source: event.source, payload: event.payload }));
+    }
+    const bundle = await emitter.finalizeBundle(JOB, "s1");
+    expect(bundle.bundleHash).toBe(await hashBundle(bundle.events));
+    // The bundle hash sorts the event hashes, which these events do not store in sorted order.
+    const hashes = bundle.events.map((e) => e.hash);
+    expect([...hashes].sort()).not.toEqual(hashes);
+  });
+
+  it("Map.prototype.get and set replaced after load are never called: no attacker-held record or array is handed an event (steward #6668)", async () => {
+    await runnerSettled();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    const real = { get: Map.prototype.get, set: Map.prototype.set };
+    // astra's push recipe, a level up: a get that hands the store a step record whose events array the attacker keeps.
+    const attacker = attackerHeldRecord();
+    const attackerSteps = new Map<unknown, unknown>([["s1", attacker.record]]);
+    const handed: unknown[] = [];
+    let calls = 0;
+    let outcome: Outcome | undefined;
+    try {
+      Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) {
+        if (key === JOB || key === "s1") calls++;
+        return key === JOB ? attackerSteps : key === "s1" ? attacker.record : real.get.call(this, key);
+      };
+      Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+        if (key === JOB || key === "s1") {
+          calls++;
+          handed.push(value);
+        }
+        return real.set.call(this, key, value);
+      };
+      outcome = await callsOnStep(emitter, "s1");
+    } finally {
+      Map.prototype.get = real.get;
+      Map.prototype.set = real.set;
+    }
+    expect(calls, "calls of the replaced get and set").toBe(0);
+    expect(attacker.events, "events handed to the attacker's array").toEqual([]);
+    expect(handed, "records handed to the replaced set").toEqual([]);
+    await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("Promise.prototype.then, .constructor and Promise[Symbol.species] replaced after load are never consulted: every await is on a promise with its own constructor (steward #6668)", async () => {
+    await runnerSettled();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    const realThen = Promise.prototype.then;
+    const constructorDescriptor = Object.getOwnPropertyDescriptor(Promise.prototype, "constructor")!;
+    const speciesDescriptor = Object.getOwnPropertyDescriptor(Promise, Symbol.species)!;
+    const consulted: string[] = [];
+    const handed: unknown[] = [];
+    // What a then given the chance would do: keep what it is handed, change it, and pass on a forged hash.
+    const tamper = (value: unknown): unknown => {
+      handed.push(value);
+      if (typeof value === "object" && value !== null && "payload" in value) (value as { payload: Record<string, unknown> }).payload.pages = 66;
+      return typeof value === "string" && value.startsWith("sha256:") ? `sha256:${"0".repeat(64)}` : value;
+    };
+    let outcome: Outcome | undefined;
+    try {
+      Promise.prototype.then = function (this: Promise<unknown>, onFulfilled?: ((value: unknown) => unknown) | null, onRejected?: ((reason: unknown) => unknown) | null) {
+        consulted.push("then");
+        return realThen.call(this, (value: unknown) => (onFulfilled ? onFulfilled(tamper(value)) : tamper(value)), onRejected);
+      } as typeof Promise.prototype.then;
+      // An await on a promise without its own constructor reads this one, finds it is not Promise, and calls then.
+      Object.defineProperty(Promise.prototype, "constructor", { configurable: true, get: () => (consulted.push("constructor"), Object) });
+      Object.defineProperty(Promise, Symbol.species, { configurable: true, get: () => (consulted.push("species"), Promise) });
+      // Inline, not callsOnStep: an async helper's own promise would be awaited here, and read the replaced constructor.
+      emitter.registerStep(JOB, "s1", 0);
+      const added = await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+      const listed = emitter.getEvents(JOB, "s1");
+      const bundle = await emitter.finalizeBundle(JOB, "s1");
+      outcome = { added, listed, bundle };
+    } finally {
+      Promise.prototype.then = realThen;
+      Object.defineProperty(Promise.prototype, "constructor", constructorDescriptor);
+      Object.defineProperty(Promise, Symbol.species, speciesDescriptor);
+    }
+    expect(consulted, "what was consulted on Promise").toEqual([]);
+    expect(handed, "values a then was handed").toEqual([]);
+    await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("crypto.subtle.digest, node:crypto's hash and createHash, a planted Hash handle and TextEncoder, replaced after load, change no hash: the digest is the one-shot hash captured at load (steward #6668)", async () => {
+    await runnerSettled();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    const nodeCrypto = createRequire(import.meta.url)("node:crypto") as typeof import("node:crypto");
+    const saved = { hash: nodeCrypto.hash, createHash: nodeCrypto.createHash, TextEncoder: globalThis.TextEncoder };
+    const probe = nodeCrypto.createHash("sha256");
+    const hashPrototype = Object.getPrototypeOf(probe) as object;
+    // createHash's wrapper reads its native handle through this symbol: an accessor planted for it forges
+    // the digest even when update and digest were captured, which is why the emitter uses the one-shot hash.
+    const kHandle = Object.getOwnPropertySymbols(probe).find((symbol) => symbol.description === "kHandle");
+    expect(kHandle, "node:crypto's Hash keeps its handle under Symbol(kHandle)").toBeDefined();
+    const forged = "0".repeat(64);
+    let calls = 0;
+    let outcome: Outcome | undefined;
+    const digests = hostileDigests();
+    try {
+      nodeCrypto.hash = ((..._args: unknown[]) => (calls++, forged)) as typeof nodeCrypto.hash;
+      nodeCrypto.createHash = ((..._args: unknown[]) => (calls++, { update: () => undefined, digest: () => forged })) as unknown as typeof nodeCrypto.createHash;
+      syncBuiltinESMExports();
+      Object.defineProperty(hashPrototype, kHandle!, { configurable: true, get: () => (calls++, { update: () => true, digest: () => forged }), set: () => {} });
+      globalThis.TextEncoder = class {
+        encode(): Uint8Array {
+          calls++;
+          return new Uint8Array(0);
+        }
+      } as unknown as typeof TextEncoder;
+      outcome = await callsOnStep(emitter, "s1");
+    } finally {
+      nodeCrypto.hash = saved.hash;
+      nodeCrypto.createHash = saved.createHash;
+      syncBuiltinESMExports();
+      delete (hashPrototype as Record<symbol, unknown>)[kHandle!];
+      globalThis.TextEncoder = saved.TextEncoder;
+      digests.restore();
+    }
+    expect(calls, "calls of a replaced digest").toBe(0);
+    expect(digests.requested, "digests asked of crypto.subtle").toEqual([]);
+    await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("RegExp.prototype.test and exec replaced after load decide nothing: a unit field is checked character by character (steward #6668)", async () => {
+    await runnerSettled();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    const real = { test: RegExp.prototype.test, exec: RegExp.prototype.exec };
+    const unit = { settlementUnitId: `0x${"ab".repeat(32)}`, challengeNonce: `0x${"cd".repeat(32)}` };
+    const malformed = [
+      { ...unit, settlementUnitId: `0x${"AB".repeat(32)}` },
+      { ...unit, challengeNonce: "nonce" },
+      { ...unit, settlementUnitId: `${unit.settlementUnitId}\n` },
+    ];
+    const refusals: string[] = [];
+    let calls = 0;
+    let outcome: Outcome | undefined;
+    try {
+      // Every pattern matches: a malformed unit would pass a RegExp check.
+      RegExp.prototype.test = () => (calls++, true);
+      RegExp.prototype.exec = () => (calls++, [""] as unknown as RegExpExecArray);
+      for (const bad of malformed) {
+        try {
+          emitter.registerStep(JOB, "bad", 0, bad);
+        } catch (err) {
+          refusals.push((err as Error).message);
+        }
+      }
+      // No pattern matches: a well-formed unit would fail a RegExp check.
+      RegExp.prototype.test = () => (calls++, false);
+      RegExp.prototype.exec = () => (calls++, null);
+      emitter.registerStep(JOB, "s1", 0, unit);
+      const added = await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+      const listed = emitter.getEvents(JOB, "s1");
+      const bundle = await emitter.finalizeBundle(JOB, "s1");
+      outcome = { added, listed, bundle };
+    } finally {
+      RegExp.prototype.test = real.test;
+      RegExp.prototype.exec = real.exec;
+    }
+    expect(calls, "calls of the replaced test and exec").toBe(0);
+    expect(refusals).toEqual(malformed.map(() => "registerStep: settlementUnitId and challengeNonce must be 0x + 64 lowercase hex"));
+    await expectIntact(emitter, "s1", outcome!, { pages: 3, jobId: JOB, ...unit });
+  });
+
+  it("@pcc/spec's ids functions replaced after load are never called: ids come from the functions captured at load", async () => {
+    await runnerSettled();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    const mutable = ids as unknown as Record<"evidence" | "bundle", () => string>;
+    const saved = { evidence: mutable.evidence, bundle: mutable.bundle };
+    let calls = 0;
+    let outcome: Outcome | undefined;
+    try {
+      mutable.evidence = () => (calls++, "ev_forged");
+      mutable.bundle = () => (calls++, "bun_forged");
+      outcome = await callsOnStep(emitter, "s1");
+    } finally {
+      mutable.evidence = saved.evidence;
+      mutable.bundle = saved.bundle;
+    }
+    expect(calls, "calls of the replaced id functions").toBe(0);
+    expect(outcome!.added.id).toMatch(/^ev_[0-9a-z]+$/);
+    expect(outcome!.added.id).not.toBe("ev_forged");
+    expect(outcome!.bundle.id).toMatch(/^bun_[0-9a-z]+$/);
+    expect(outcome!.bundle.id).not.toBe("bun_forged");
+    await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("Sentry.startSpan replaced after load, and a storage service's methods replaced after it is attached, are never called: the archive runs through what was captured (steward #6668)", async () => {
+    await runnerSettled();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    const archived: EvidenceBundle[] = [];
+    const service = {
+      isReady: (): boolean => true,
+      archiveBundle: async (bundle: EvidenceBundle) => {
+        archived.push(bundle);
+        return { cid: "bafy-bundle", metadataCid: "bafy-meta" };
+      },
+    };
+    emitter.setStorageService(service as never);
+    const sentry = SentryModule as unknown as { startSpan: (options: unknown, callback: () => unknown) => unknown };
+    const savedStartSpan = sentry.startSpan;
+    let calls = 0;
+    let outcome: Outcome | undefined;
+    try {
+      sentry.startSpan = () => (calls++, Promise.resolve({ cid: "bafy-forged", metadataCid: "bafy-forged" }));
+      service.isReady = () => (calls++, false);
+      service.archiveBundle = async () => (calls++, { cid: "bafy-forged", metadataCid: "bafy-forged" });
+      outcome = await callsOnStep(emitter, "s1");
+    } finally {
+      sentry.startSpan = savedStartSpan;
+    }
+    expect(calls, "calls of the replaced startSpan, isReady and archiveBundle").toBe(0);
+    expect(emitter.getLastIpfsResult()).toEqual({ cid: "bafy-bundle", metadataCid: "bafy-meta" });
+    expect(archived.map((bundle) => bundle.id), "bundles archived").toEqual([outcome!.bundle.id]);
+    expect(emitter.getStorageService()).toBe(service);
+    await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("properties an adapter writes on the emitter change nothing: its state, signer and collaborators are JS private fields (steward #6668)", async () => {
+    const signature = { signer: `0x${"11".repeat(20)}`, algorithm: "secp256k1", value: "sig_real" } as Signature;
+    const emitter = new EvidenceEmitter(KERNEL, async () => signature);
+    const attacker = attackerHeldRecord();
+    let calls = 0;
+    // The names these had before they were private, as an adapter holding the emitter would write them.
+    Object.assign(emitter, {
+      kernelId: "kernel-forged",
+      stepEvidence: new Map([[JOB, new Map([["s1", attacker.record]])]]),
+      step: () => (calls++, attacker.record),
+      signFn: async () => (calls++, { ...signature, value: "sig_forged" }),
+      _hasRealSignFn: false,
+      bundleListeners: [() => void calls++],
+      storageService: { isReady: () => (calls++, true), archiveBundle: async () => (calls++, { cid: "bafy-forged", metadataCid: "bafy-forged" }) },
+      lastIpfsResult: { cid: "bafy-forged", metadataCid: "bafy-forged" },
+    });
+    const outcome = await callsOnStep(emitter, "s1");
+    expect(calls, "calls of what the adapter wrote").toBe(0);
+    expect(attacker.events, "events handed to the attacker's array").toEqual([]);
+    expect(outcome.bundle.kernelSignature).toEqual(signature);
+    expect(outcome.bundle.kernelId).toBe(KERNEL);
+    expect("_testSigned" in outcome.bundle).toBe(false);
+    expect(emitter.isTestSigner()).toBe(false);
+    expect(emitter.getLastIpfsResult()).toBeUndefined();
+    await expectIntact(emitter, "s1", outcome);
+  });
+
+  // The residual, named: a promise that fulfils with an object reads that object's `then`. A then planted on
+  // Object.prototype is therefore handed what callers receive and what a collaborator resolves with, and can
+  // change it; it is never handed what the step stores, and the chain's links fulfil with undefined.
+  it("an Object.prototype.then planted after load is handed only what callers and the signer resolve with: what is stored and hashed stays intact", async () => {
+    await runnerSettled();
+    const signature = { signer: `0x${"11".repeat(20)}`, algorithm: "secp256k1", value: "sig_real" } as Signature;
+    const emitter = new EvidenceEmitter(KERNEL, async () => signature);
+    emitter.registerStep(JOB, "s1", 0);
+    const handed: unknown[] = [];
+    const received: unknown[] = [];
+    try {
+      Object.defineProperty(Object.prototype, "then", {
+        configurable: true,
+        writable: true,
+        value(this: { payload?: Record<string, unknown> }, resolve: (value: unknown) => void) {
+          handed.push(this);
+          if (this.payload) this.payload.pages = 66;
+          resolve("forged");
+        },
+      });
+      received.push(await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 })));
+      received.push(emitter.getEvents(JOB, "s1"));
+      received.push(await emitter.finalizeBundle(JOB, "s1"));
+    } finally {
+      delete (Object.prototype as { then?: unknown }).then;
+    }
+    // What it was handed: addEvent's copy for its caller, the signer's signature, and finalizeBundle's bundle.
+    expect(handed).toHaveLength(3);
+    expect(handed[0]).toMatchObject({ type: "execution_completed", payload: { pages: 66, jobId: JOB } });
+    expect(handed[1]).toBe(signature);
+    expect(handed[2]).toMatchObject({ jobId: JOB, stepId: "s1", kernelId: KERNEL });
+    // So the callers were handed what it chose, and the bundle carries the signature it chose.
+    expect([received[0], received[2]]).toEqual(["forged", "forged"]);
+    expect((handed[2] as EvidenceBundle).kernelSignature).toBe("forged");
+    // What the step stores, and every hash, is untouched.
+    const stored = emitter.getEvents(JOB, "s1");
+    expect(stored.map((e) => e.payload)).toEqual([{ pages: 3, jobId: JOB }]);
+    expect(received[1]).toEqual(stored);
+    expect(await verifyEventHash(stored[0]!)).toBe(true);
+    expect(await verifyBundleHash(handed[2] as EvidenceBundle), "the bundle it was handed still matches its hash").toBe(true);
+    const again = await emitter.finalizeBundle(JOB, "s1");
+    expect(again.kernelSignature).toEqual(signature);
+    expect(again.bundleHash).toBe((handed[2] as EvidenceBundle).bundleHash);
   });
 });

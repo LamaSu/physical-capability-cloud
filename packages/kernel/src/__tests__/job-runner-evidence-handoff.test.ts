@@ -12,8 +12,10 @@
  *     device both run, and both record the device's events.
  * R7 to R9 reproduce those findings through the public JobRunner API.
  *
- * Every test here runs on the fake clock. Hashing is moved onto microtasks (the mock
- * below), so the clock alone decides when a run moves on: nothing waits on real I/O.
+ * Every test here runs on the fake clock. The emitter hashes synchronously, with a digest it
+ * captured at load (steward #6668), and anything else hashing through @pcc/spec does so on
+ * microtasks (the mock below), so the clock alone decides when a run moves on: nothing waits
+ * on real I/O.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,24 +34,20 @@ vi.mock("@sentry/node", () => ({
   captureException: () => {},
 }));
 
-/** A test can hold an event's hashing, as a slow hash would, by returning a promise here. */
+/**
+ * A test can hold an event's addEvent, as a slow hash once did, by returning a promise here: the
+ * spy in beforeEach waits on it before the emitter is given the event. (The emitter's own hash
+ * cannot be held: it is synchronous, with a digest captured at load, steward #6668.)
+ */
 const hashing = vi.hoisted(() => ({ gate: null as ((event: unknown) => Promise<void> | undefined) | null }));
 
-// The real hashes run on crypto.subtle, whose callbacks come from real I/O. Hash on a
-// microtask instead (still SHA-256 of the canonical form), so a fake-clock test never
-// races real time.
+// spec's hashes run on crypto.subtle, whose callbacks come from real I/O. Hash on a microtask
+// instead (still SHA-256 of the canonical form), so a fake-clock test never races real time.
 vi.mock("@pcc/spec", async (importOriginal) => {
   const spec = await importOriginal<typeof import("@pcc/spec")>();
   const { createHash } = await import("node:crypto");
   const digest = (value: unknown) => `sha256:${createHash("sha256").update(spec.canonicalize(value)).digest("hex")}`;
-  return {
-    ...spec,
-    hashEvent: async (event: unknown) => {
-      await hashing.gate?.(event);
-      return digest(event);
-    },
-    hashBundle: async (events: unknown) => digest(events),
-  };
+  return { ...spec, hashEvent: async (event: unknown) => digest(event), hashBundle: async (events: unknown) => digest(events) };
 });
 
 type Emitted = Omit<EvidenceEvent, "id" | "hash">;
@@ -229,6 +227,12 @@ beforeEach(() => {
   // The test signer, the tier warning and dropped events all warn; keep the output readable.
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
+  // Holds an event at addEvent's boundary while hashing.gate says so.
+  const addEvent = EvidenceEmitter.prototype.addEvent;
+  vi.spyOn(EvidenceEmitter.prototype, "addEvent").mockImplementation(async function (this: EvidenceEmitter, jobId, stepId, event) {
+    await hashing.gate?.(event);
+    return addEvent.call(this, jobId, stepId, event);
+  });
 });
 
 afterEach(() => {
@@ -370,7 +374,7 @@ describe("R10: an addEvent still hashing when a failed run returns", () => {
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const hashHeld = deferred();
     let held = 0;
-    // addEvent looks its step up, then awaits the hash, then appends (evidence-emitter.ts:108-124).
+    // gcode_received's addEvent is held before the emitter is given the event, as a slow hash held it once.
     hashing.gate = (event) => {
       if ((event as Emitted).type !== "gcode_received") return undefined;
       held += 1;
