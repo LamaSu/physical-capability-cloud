@@ -17,7 +17,6 @@ import { getKernelService } from "../services/kernel-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import {
-  redactUrlCredentials,
   isKnownNodeEnv,
   isKnownPccNetwork,
   isKnownStorageType,
@@ -57,6 +56,14 @@ const VALID_DEVICE_ROLES: DeviceRole[] = ["machine", "sensor", "camera"];
  * check against — the same choice astra's remediation offers for a URL ("presence
  * only, or parse + project safe components"); an address has no safe component to
  * project, so presence-only is the one that applies.
+ *
+ * N71 round 4 (astra pack 83c, CRITICAL #2): the round-3 DEFAULT branch ran a URL-aware
+ * scrub (redactUrlCredentials) on every OTHER env var — "safe" only if the misplaced
+ * credential happened to be inside a URL. KERNEL_ID, KERNEL_CONFIG_FILE and others are
+ * not URLs at all (`KERNEL_ID=password=...` has no "scheme://" for any scrub to catch),
+ * so round 3's default returned them completely unscrubbed. The default is now
+ * presence-only: a value is shown ONLY from an explicit case above, never from a
+ * fallback scrub. Adding a new displayable env var means adding its own case here.
  */
 function displayEnvValue(name: string, value: string): string | undefined {
   switch (name) {
@@ -73,9 +80,10 @@ function displayEnvValue(name: string, value: string): string | undefined {
     case "X402_FACILITATOR_URL":
       return undefined; // presence-only (N71 round 3)
     default:
-      // Everything else keeps the round-2 behavior: a URL-aware scrub, now fixed to
-      // not stop at a quote inside the credential (see redaction.ts, astra pack 83b).
-      return redactUrlCredentials(value);
+      // N71 round 4 (astra pack 83c, CRITICAL #2): presence-only — never a fallback
+      // scrub of arbitrary text (see redaction.ts, astra pack 83c: a scrub of
+      // arbitrary text is never a confidentiality boundary).
+      return undefined;
   }
 }
 
@@ -363,10 +371,17 @@ export async function setupRoutes(app: FastifyInstance) {
       const svc = getKernelService();
       kernelServiceReady = true;
       const devices = await svc.listDevices();
+      // N71 round 4 (astra pack 83c, CRITICAL #2): a live device's id/type/adapterType
+      // come from the runtime KernelService, not from a fixed server-side allow-list —
+      // shape-check each before projecting it, the same way /setup/validate already
+      // does for a config-supplied device id (isPlainIdentifier) and a config-supplied
+      // type/adapterType (checked against these same fixed sets).
       kernelServiceDevices = devices.map((d) => ({
-        id: d.id,
-        type: d.type,
-        adapterType: d.adapterType,
+        id: isPlainIdentifier(d.id) ? d.id : INVALID_ID,
+        type: (VALID_DEVICE_ROLES as readonly string[]).includes(d.type) ? d.type : INVALID_ID,
+        adapterType: (VALID_ADAPTER_TYPES as readonly string[]).includes(d.adapterType)
+          ? d.adapterType
+          : INVALID_ID,
         healthy: d.healthStatus === "healthy",
       }));
     } catch {
