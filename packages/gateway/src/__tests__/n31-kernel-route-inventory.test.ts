@@ -27,20 +27,30 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC_ROOT = path.join(__dirname, "..");
 const MUTATING = new Set(["post", "put", "patch", "delete"]);
 /**
- * The guards: auth/kernel-authority.ts's refuseKernelAction, and master's #400 relayAccessGuard
- * (routes/device-relay.ts: the relay plugin's preHandler, a default-deny per-route table over the
- * kernel's recorded operator). Unifying #400's ownership check into kernel-authority.ts is a
- * tracked follow-up.
+ * The guards: auth/kernel-authority.ts's refuseKernelAction and refuseKernelRequest. A function
+ * counts as a guard when it calls one (the same-file helper rule below), and a preHandler counts
+ * when it is one, by name or inline. Master's #400 relayAccessGuard does not call the shared guard
+ * yet, so the relay routes stay KNOWN_UNGUARDED until N31b moves it onto the kernel-authority
+ * tiers (the gateway owner's #6568 (c); the steward's N126).
  */
-const GUARD_NAMES = new Set(["refuseKernelAction", "refuseKernelRequest", "relayAccessGuard"]);
+const GUARD_NAMES = new Set(["refuseKernelAction", "refuseKernelRequest"]);
 const GUARDED_TABLES = new Set(["operatorPolicies", "pendingApprovals"]);
 
 /**
  * Kernel routes with no ownership check yet, found by this inventory (bus #6505). The stacked PR
  * on #575 guards each and removes it from this list. Keys are "METHOD path".
  */
-// The device relay is guarded on master by #400's relayAccessGuard (merged after #575 opened).
+// Master's #400 guards the relay with relayAccessGuard at the CLAIMED tier for every route; it
+// counts here once it calls the shared guard with #6508's tiers (N31b, N126).
 const KNOWN_UNGUARDED = new Set([
+  "POST /api/relay/:kernelId/tool-call",
+  "POST /api/relay/:kernelId/tool-call/:callId/start",
+  "POST /api/relay/:kernelId/tool-result",
+  "POST /api/relay/:kernelId/scope",
+  "POST /api/relay/:kernelId/scope/:scopeId/revoke",
+  "POST /api/relay/:kernelId/camera/frame",
+  "POST /api/relay/:kernelId/chat",
+  "POST /api/relay/:kernelId/chat/respond",
   "POST /api/kernels/:kernelId/heartbeat",
   "POST /api/kernels/:kernelId/capabilities",
   // The digital-kernel manifest's verify (kernel-marketplace.ts isAdminAuthorized) accepts a
@@ -278,14 +288,6 @@ describe("N31 route inventory: packages/gateway/src", () => {
     }
     expect(kernelRoutes.filter((r) => r.guarded).map((r) => r.key).sort()).toEqual([
       "PATCH /api/operator/policy/:kernelId",
-      "POST /api/relay/:kernelId/camera/frame",
-      "POST /api/relay/:kernelId/chat",
-      "POST /api/relay/:kernelId/chat/respond",
-      "POST /api/relay/:kernelId/scope",
-      "POST /api/relay/:kernelId/scope/:scopeId/revoke",
-      "POST /api/relay/:kernelId/tool-call",
-      "POST /api/relay/:kernelId/tool-call/:callId/start",
-      "POST /api/relay/:kernelId/tool-result",
       "PUT /api/kernels/:kernelId/agent-package/configure",
       "PUT /api/operator/policy/:kernelId",
     ]);
