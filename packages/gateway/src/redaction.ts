@@ -350,10 +350,10 @@ export function findEmitterManifestFormIssue(
   for (const decl of emits) {
     if (!decl || typeof decl !== "object") continue;
     const d = decl as Record<string, unknown>;
-    if (d.params !== undefined) {
-      const issue = walkParamValue(d.params);
-      if (issue) return issue;
-    }
+    // The URL-form rule covers EVERY string in the declaration: its id, params at any depth,
+    // bind and via. Each one is stored and returned as part of a public artifact.
+    const formIssue = walkParamValue(d);
+    if (formIssue) return formIssue;
     if (typeof d.bind === "string") {
       if (urlFormCarriesExtras(d.bind)) return "url_form";
       if (!isPlainIdentifier(d.bind)) return "bind_grammar";
