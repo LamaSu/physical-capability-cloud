@@ -389,6 +389,9 @@ export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOpti
   );
 
   // ── Validate benchmark proof ───────────────────────────────────────
+  // A verdict here proves the bundle's INTEGRITY (its events are the ones its hash commits), not its ORIGIN:
+  // no kernel or device signature is checked yet (row N124). Nothing in this repo moves money or writes
+  // reputation on a TMP verdict, and any consumer that would must wait for N124.
 
   app.post<{ Params: { id: string } }>(
     "/api/milestones/:id/tmp-validate",
