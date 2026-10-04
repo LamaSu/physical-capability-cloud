@@ -271,11 +271,11 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/kernels` | List all kernels. Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. |
+| GET | `/api/kernels` | List all kernels (PUBLIC). Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. Each site's location is coarse (about 5 km) unless its operator opted in; see KernelDTO. |
 | GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. |
 | GET | `/api/kernels/:kernelId/devices` | List devices. Returns `{devices: DeviceStatusDTO[]}`. |
 | GET | `/api/kernels/:kernelId/jobs` | List jobs for kernel. Returns `{jobs: JobDTO[]}`. |
-| POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. |
+| POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. `locationVisibility: "exact"` publishes the exact site and street address (a public storefront); it needs `X-Admin-Key`, or a wallet you proved (SIWE) that is the kernel's operator, else 403. `"approximate"` (the default) needs only ownership; omitted on an update, the current choice stays. |
 | POST | `/api/kernels/:kernelId/heartbeat` | Send heartbeat. |
 | POST | `/api/kernels/:kernelId/announce` | Announce capabilities to the network. |
 
@@ -480,6 +480,8 @@ curl -X POST https://capability.network/api/kernels \
   }'
 ```
 
+The gateway stores the exact `location` and `physicalAddress`, but every read shows the site coarse: the centre of its geohash-5 cell (about 5 km across), with `physicalAddress: null`. A public storefront can publish its exact location with `"locationVisibility": "exact"` (see the kernels table above). A kernel registered without coordinates reads as no location, never as `{0,0}`.
+
 Register the device:
 ```bash
 curl -X POST https://capability.network/api/setup/register-device \
@@ -611,7 +613,9 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   envelope?: WorkEnvelope;           // Build volume
   assuranceTiers: (0|1|2|3)[];       // Which tiers this supports
   pricing: PricingModel;             // {currency, baseCost, minimum, ...}
-  location: {lat, lng};
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell
+  locationCell: string | null;       // the site's geohash-5 cell
   tags?: string[];
   // Enrichment (populated by facades):
   reputation?: number;               // 0-1000, from ERC-8004
@@ -655,8 +659,10 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   id: string;
   name: string;
   operatorAddress: string;
-  location: {lat, lng};
-  physicalAddress: string;
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell; none = no location ({0,0} included)
+  locationCell: string | null;       // the site's geohash-5 cell
+  physicalAddress: string | null;    // only when the operator opted in
   maxAssuranceTier: 0|1|2|3;
   status: "online"|"offline"|"maintenance"|"suspended";
   lastHeartbeat: string;
