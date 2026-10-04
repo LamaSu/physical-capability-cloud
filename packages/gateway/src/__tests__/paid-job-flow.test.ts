@@ -10,10 +10,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
+import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { schema, eq } from "@pcc/store";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -73,13 +74,38 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+  // Stand-in for apiGate: an API key sets operatorId and userId.
+  app.decorateRequest("operatorId", null);
+  app.decorateRequest("userId", null);
+  app.decorateRequest("apiKeyId", null);
+  app.addHook("onRequest", async (req) => {
+    const key = req.headers["x-test-key"];
+    if (typeof key === "string") {
+      req.operatorId = key;
+      req.userId = key as `0x${string}`;
+    }
+  });
+  // Job reads are object-authorized (#382, readmodels F3). This runs after the stand-in above,
+  // so a request with x-test-key keeps that operator; one without it reads as the seeded
+  // kernel-nyc operator.
+  actAsJobParty(app);
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay is retired (N4b-gw); tool calls go through
+  // /api/relay/:kernelId as the scope's holder.
+  await app.register(deviceRelayRoutes);
   await app.register(jobRoutes);
   await app.ready();
   return app;
+}
+
+/** Headers for a principal, e.g. the buyer agent holding the job's scope. */
+const asKey = (id: string) => ({ "x-test-key": id });
+
+/** The recorded operator of a seeded kernel. */
+function operatorOf(kernelId: string): string {
+  const row = getStore().db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, kernelId)).get();
+  return row!.operatorAddress;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +234,11 @@ describe("Paid Job Flow", () => {
       expect(res.statusCode).toBe(201);
       const body = res.json();
 
-      // Verify scope in DB
+      // Verify scope in DB (read by its holder through the device relay)
       const scopeRes = await app.inject({
         method: "GET",
-        url: `/api/ot2/scope/${body.scopeId}`,
+        url: `/api/relay/kernel-nyc/scope/${body.scopeId}`,
+        headers: asKey("user-agent-001"),
       });
 
       expect(scopeRes.statusCode).toBe(200);
@@ -299,16 +326,17 @@ describe("Paid Job Flow", () => {
       const { jobId, scopeId } = createRes.json();
 
       // Simulate some tool calls under the scope
-      await app.inject({
+      const call = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-003"),
         payload: {
-          kernelId: "kernel-nyc",
           scopeId,
           toolName: "ot2_aspirate",
           args: { volume: 100, well: "A1" },
         },
       });
+      expect(call.statusCode).toBe(201);
 
       // Complete the job
       const completeRes = await app.inject({
@@ -400,7 +428,8 @@ describe("Paid Job Flow", () => {
       // report scopesRevoked === 0 accordingly.
       const scopeRes = await app.inject({
         method: "GET",
-        url: `/api/ot2/scope/${scopeId}`,
+        url: `/api/relay/kernel-nyc/scope/${scopeId}`,
+        headers: asKey("user-agent-005"),
       });
 
       expect(scopeRes.statusCode).toBe(200);
@@ -443,7 +472,7 @@ describe("Paid Job Flow", () => {
       expect(body.session).toBeDefined();
     });
 
-    it("returns settled status after job completion", async () => {
+    it("NEGATIVE: a mock-settled job reads simulated, never settled or paid (readmodels F1)", async () => {
       // Create and complete
       const createRes = await app.inject({
         method: "POST",
@@ -470,7 +499,12 @@ describe("Paid Job Flow", () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
 
-      expect(body.status).toBe("settled");
+      // MOCK_SETTLEMENT writes a mock-escrow- record and marks it released: no real money
+      // exists for this job, so it is simulated, whatever the job row says.
+      expect(body.status).toBe("simulated");
+      expect(body.settled).toBe(false);
+      expect(body.paidAmount).toBeNull();
+      expect(body.simulated).toBe(true);
       expect(body.evidenceHash).toBeDefined();
       expect(body.evidenceBundleId).toBeDefined();
     });
@@ -505,9 +539,9 @@ describe("Paid Job Flow", () => {
       // Tool call should succeed — escrow is mock-funded
       const toolRes = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-008"),
         payload: {
-          kernelId: "kernel-nyc",
           scopeId,
           toolName: "ot2_aspirate",
           args: { volume: 50 },
@@ -529,19 +563,122 @@ describe("Paid Job Flow", () => {
       });
       const { scopeId } = createRes.json();
 
-      // Safe tool (ot2_health) should always work
+      // A safe tool (the relay manifest's "health") works whatever the escrow
+      // status, so make the escrow unfunded first.
+      const escrowId = createRes.json().escrowId;
+      getRepos().escrows.updateStatus(escrowId, "created");
       const toolRes = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-009"),
         payload: {
-          kernelId: "kernel-nyc",
           scopeId,
-          toolName: "ot2_health",
+          toolName: "health",
           args: {},
         },
       });
 
       expect(toolRes.statusCode).toBe(201);
+    });
+
+    // Carried over from the retired legacy OT-2 tool-call route (N4b-gw item 1).
+    it("refuses a scoped write while the job's escrow is not funded (402), and records the refusal", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: {
+          kernelId: "kernel-nyc",
+          capabilityType: "liquid-handler",
+          userAgentId: "user-agent-010",
+        },
+      });
+      const { scopeId, escrowId } = createRes.json();
+      getRepos().escrows.updateStatus(escrowId, "created");
+
+      const toolRes = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-010"),
+        payload: { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } },
+      });
+
+      expect(toolRes.statusCode).toBe(402);
+      expect(toolRes.json().reason).toBe("escrow_not_funded");
+      expect(toolRes.json().escrowStatus).toBe("created");
+      const { db } = getStore();
+      const row = db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.id, toolRes.json().callId)).get();
+      expect(row!.status).toBe("rejected");
+      const scope = db.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, scopeId)).get();
+      expect(scope!.commandCount).toBe(0);
+    });
+
+    it("refuses a scoped write when the escrow lookup fails (503), instead of letting it through", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: {
+          kernelId: "kernel-nyc",
+          capabilityType: "liquid-handler",
+          userAgentId: "user-agent-011",
+        },
+      });
+      const { scopeId } = createRes.json();
+      const spy = vi.spyOn(getRepos().escrows, "findByCwm").mockImplementation(() => {
+        throw new Error("escrow store unavailable");
+      });
+
+      const toolRes = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-011"),
+        payload: { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } },
+      });
+      spy.mockRestore();
+
+      expect(toolRes.statusCode).toBe(503);
+      expect(toolRes.json().error).toBe("escrow_check_unavailable");
+    });
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // N4b-gw: a relay scope can bind only a job on its own kernel
+  // ═══════════════════════════════════════════════════════════════════════
+
+  describe("Relay scope minting and jobs", () => {
+    it("refuses an operator binding a scope to a job on another kernel", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-012" },
+      });
+      const { jobId } = createRes.json();
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nanoclaw/scope",
+        headers: asKey(operatorOf("kernel-nanoclaw")),
+        payload: { createdBy: operatorOf("kernel-nanoclaw"), allowedTools: ["ot2_aspirate"], jobId },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("job_not_on_kernel");
+    });
+
+    it("lets the job's own kernel operator bind a scope to it", async () => {
+      const createRes = await app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-013" },
+      });
+      const { jobId } = createRes.json();
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-nyc/scope",
+        headers: asKey(operatorOf("kernel-nyc")),
+        payload: { createdBy: operatorOf("kernel-nyc"), allowedTools: ["ot2_aspirate"], jobId },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(res.json().jobId).toBe(jobId);
     });
   });
 
@@ -571,9 +708,9 @@ describe("Paid Job Flow", () => {
       // ── Step 2: Execute tool calls under scope ─────────────────────
       const call1 = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-e2e"),
         payload: {
-          kernelId: "kernel-nyc",
           scopeId,
           toolName: "ot2_aspirate",
           args: { volume: 50, well: "A1" },
@@ -583,9 +720,9 @@ describe("Paid Job Flow", () => {
 
       const call2 = await app.inject({
         method: "POST",
-        url: "/api/ot2/tool-call",
+        url: "/api/relay/kernel-nyc/tool-call",
+        headers: asKey("user-agent-e2e"),
         payload: {
-          kernelId: "kernel-nyc",
           scopeId,
           toolName: "ot2_dispense",
           args: { volume: 50, well: "B1" },
@@ -619,7 +756,10 @@ describe("Paid Job Flow", () => {
 
       expect(settlementRes.statusCode).toBe(200);
       const settlement = settlementRes.json();
-      expect(settlement.status).toBe("settled");
+      // Mock settlement: the mock-escrow record says released, but no real money exists.
+      expect(settlement.status).toBe("simulated");
+      expect(settlement.settled).toBe(false);
+      expect(settlement.paidAmount).toBeNull();
       expect(settlement.evidenceHash).toBeDefined();
       expect(settlement.milestones.length).toBeGreaterThan(0);
       expect(settlement.milestones[0].status).toBe("released");
@@ -629,7 +769,8 @@ describe("Paid Job Flow", () => {
       // completeBody.scopesRevoked === 0 above already asserts none were revoked.
       const scopeRes = await app.inject({
         method: "GET",
-        url: `/api/ot2/scope/${scopeId}`,
+        url: `/api/relay/kernel-nyc/scope/${scopeId}`,
+        headers: asKey("user-agent-e2e"),
       });
       expect(scopeRes.statusCode).toBe(200);
       expect(scopeRes.json().status).toBe("active");

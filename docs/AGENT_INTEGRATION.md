@@ -112,6 +112,15 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
 
+### Operator Work
+
+Scoped to your kernels (kernels whose `operatorAddress` is your API key's operator id or your wallet). Every field is assigned by the gateway; a source that could not be read, or cannot be tied to you yet, is reported in `sources` instead of appearing as an empty list.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/operator/work` | Your work: open job offers for your capability types, offers your kernels claimed, your kernels' jobs and pending approvals. Returns `OperatorWorkDTO` `{schemaId, asOf, kernels, items, total, truncated, sources}`; each item has `phase` + `phaseSource` (who asserted it), `pay` with its `funding` (`escrowed`, `declared_unfunded`, `simulated` or `unknown`; a declared price is never income), and `actions[]` with the route to call. `?limit=` 1-500 (default 200). |
+| GET | `/api/operator/income` | What the escrow records show for your kernels' jobs. Returns `OperatorIncomeDTO` `{rows, totalsByStatus, uncountedRows, historyAvailable: false, reasonIfNot}`; totals are sums of rows only, and no gateway record makes a payout `paid`. |
+
 ### Escrow & Settlement
 
 | Method | Endpoint | Description |
@@ -804,7 +813,7 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Device updates | `GET /sse/stream/device/:deviceId` | Health changes, sensor readings |
 | Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
 | Notifications | `GET /sse/notifications` | Global notification stream |
-| Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
+| Camera stream | `GET /api/relay/:kernelId/camera/stream` | Frame notifications from a kernel's camera (kernel operator or active scope holder) |
 
 Example:
 ```bash
