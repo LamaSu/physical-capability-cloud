@@ -37,6 +37,18 @@ function copyPath(src: Record<string, unknown>, dst: Record<string, unknown>, pa
   d[segs[segs.length - 1]!] = Array.isArray(cur) ? [...cur] : cur;
 }
 
+/** Whether a dotted path of OWN properties is PRESENT, i.e. its value is not undefined. This uses
+ *  the same traversal and test as the renderer's readOwnPath, so the projection resolves an ordered
+ *  alternative exactly as readField does. */
+function presentPath(src: Record<string, unknown>, path: string): boolean {
+  let cur: unknown = src;
+  for (const seg of path.split(".")) {
+    if (PROTO_KEYS.has(seg) || !isPlain(cur) || !Object.prototype.hasOwnProperty.call(cur, seg)) return false;
+    cur = cur[seg];
+  }
+  return cur !== undefined;
+}
+
 /** The projection of a bindable route's response body: only the fields the closed IR reads.
  *  An unknown path or a non-object body gives {}, which the IR view renders as unavailable. A
  *  non-array rows value is dropped the same way ("unexpected response shape"), and so is a
@@ -44,12 +56,20 @@ function copyPath(src: Record<string, unknown>, dst: Record<string, unknown>, pa
 export function projectIrRead(path: string, body: unknown): Record<string, unknown> {
   const shape = irReadShape(path);
   if (!shape || !isPlain(body)) return {};
-  const fields = new Set(shape.fields);
-  for (const schema of shape.schemas) {
-    for (const f of SCHEMA_FIELDS[schema].fields) for (const k of Array.isArray(f.key) ? f.key : [f.key as string]) fields.add(k);
-  }
   const out: Record<string, unknown> = {};
-  for (const f of fields) copyPath(body, out, f);
+  for (const f of shape.fields) copyPath(body, out, f);
+  // A card field with ORDERED alternatives (e.g. ["status", "job.status"]) is read by the renderer
+  // from its FIRST PRESENT key only, and the card fails if that value is invalid (readField). So the
+  // projection keeps exactly that one path, and only if it is a primitive leaf; it NEVER falls back to
+  // a later alternative. Otherwise an invalid response would project to a valid-looking card
+  // (astra #562 r2 F3).
+  for (const schema of shape.schemas) {
+    for (const f of SCHEMA_FIELDS[schema].fields) {
+      const keys = Array.isArray(f.key) ? f.key : [f.key as string];
+      const first = keys.find((k) => presentPath(body, k));
+      if (first !== undefined) copyPath(body, out, first);
+    }
+  }
   if (shape.rowsKey !== null && Object.prototype.hasOwnProperty.call(body, shape.rowsKey)) {
     const rows = body[shape.rowsKey];
     if (Array.isArray(rows)) {

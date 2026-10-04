@@ -52,7 +52,7 @@ describe("#562 r1 F1 reproduced (verify before fix): a wildcard response is the 
     expect(dlpHits(body)).toEqual([]);
     expect(Array.isArray(body.items) && body.items.length).toBeGreaterThan(0);
     for (const k of keysOf(body.items)) expect(["name", "id", "type", "kernelId", "available"]).toContain(k);
-    for (const k of Object.keys(body)) expect(["items", "total", "offset", "limit", "hasMore", "asOf"]).toContain(k);
+    for (const k of Object.keys(body)) expect(["items", "asOf"]).toContain(k); // no page metadata: no IR sink reads it (#562 r2 F2)
   });
 });
 
@@ -114,7 +114,7 @@ describe("projectIrRead (unit)", () => {
       items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true, location: { lat: 1.2345, lng: 2.3456 }, operatorAddress: "0x1" }, inherited, 7],
       total: 3, offset: 0, limit: 50, hasMore: false, asOf: "2026-10-03T00:00:00.000Z", secret: "x", __proto__: { polluted: 1 },
     } as any);
-    expect(out).toEqual({ items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true }, {}, {}], total: 3, offset: 0, limit: 50, hasMore: false, asOf: "2026-10-03T00:00:00.000Z" });
+    expect(out).toEqual({ items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true }, {}, {}], asOf: "2026-10-03T00:00:00.000Z" });
   });
   it("a PROFILE field whose value is an object is dropped whole (it could carry fields the IR never reads)", async () => {
     const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
