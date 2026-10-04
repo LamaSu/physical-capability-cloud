@@ -186,7 +186,11 @@ describe("legacySettlementStatus: money states come only from the settlement rec
   it("places a job whose money is held or unrecorded in its stage", () => {
     expect(statusOf({ job: job({ status: "pending" }) })).toBe("pending");
     expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked()) })).toBe("funded");
-    expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked(escrow({ status: "created" }), [milestone({ status: "created" })])) })).toBe("pending");
+    // The V2 chain path records an unfunded escrow as "created" and its milestone as "pending"
+    // (paid-job-flow.ts:595); no writer puts "created" in a milestone row.
+    expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked(escrow({ status: "created" }), [milestone({ status: "pending" })])) })).toBe("pending");
+    // A milestone word no writer produces is not a stage (#515: MILESTONE_WORDS).
+    expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked(escrow({ status: "created" }), [milestone({ status: "created" })])) })).toBe("unknown");
     for (const status of ["queued", "active", "preparing", "executing"]) {
       expect(statusOf({ job: job({ status }) }), status).toBe("executing");
     }
