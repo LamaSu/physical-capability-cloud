@@ -880,10 +880,16 @@ function readGrants(value: unknown): readonly SignerGrant[] | null {
   return ObjectFreeze(grants);
 }
 
-/** Lowercase hex of `bytes`, digit by digit. */
-function lowerHex(bytes: Uint8Array): string {
+/**
+ * Lowercase hex of the first `count` bytes of `bytes`, digit by digit. The
+ * count is the caller's, never read from the array: a typed array's `length`
+ * is an accessor inherited from %TypedArray%.prototype, which code running
+ * after load can replace, and a shorter key here would sign a preimage that
+ * names no key (astra pack 289). An element read never consults a prototype.
+ */
+function lowerHex(bytes: Uint8Array, count: number): string {
   let out = "";
-  for (let i = 0; i < bytes.length; i++) out = `${out}${HEX_DIGITS[bytes[i]! >> 4]!}${HEX_DIGITS[bytes[i]! & 15]!}`;
+  for (let i = 0; i < count; i++) out = `${out}${HEX_DIGITS[bytes[i]! >> 4]!}${HEX_DIGITS[bytes[i]! & 15]!}`;
   return out;
 }
 
@@ -968,7 +974,7 @@ function delegationPreimage(d: {
     `"contractIds":${jsonStrings(sortedStrings(d.contractIds))},"maxSignatures":${d.maxSignatures}}`;
   const path = d.derivationPath === undefined ? "" : `,"derivationPath":${JSONStringify(d.derivationPath)}`;
   return utf8(
-    `{"sessionId":${JSONStringify(d.sessionId)},"parentAgentId":${JSONStringify(d.parentAgentId)},"publicKey":"${lowerHex(d.publicKey)}",` +
+    `{"sessionId":${JSONStringify(d.sessionId)},"parentAgentId":${JSONStringify(d.parentAgentId)},"publicKey":"${lowerHex(d.publicKey, 32)}",` +
       `"issuedAt":${d.issuedAt},"expiresAt":${d.expiresAt},"scope":${scope}${path}}`,
   );
 }

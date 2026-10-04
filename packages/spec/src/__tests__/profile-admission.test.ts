@@ -759,6 +759,17 @@ describe("profile admission — #519: a delegation's bytes are LO-EV-1's, rebuil
     expect(r.reasons[0]!.detail).toMatch(/is not signed by its root key/);
   });
 
+  it("refuses a root signature over a preimage that names no key, which no LO-EV-1 delegation is (astra pack 289)", async () => {
+    const session = delegateWith({ sessionId: "session-0001", parentAgentId: "agent-1", allowedActions: ["evidence_submit"], contractIds: [JOB] });
+    const { issuedAt, expiresAt } = session.authorization;
+    // A signs the canonical delegation JSON with an EMPTY publicKey; the authorization still names the full session key.
+    const keyless = `{"sessionId":"session-0001","parentAgentId":"agent-1","publicKey":"","issuedAt":${issuedAt},"expiresAt":${expiresAt},"scope":{"allowedActions":["evidence_submit"],"contractIds":["${JOB}"],"maxSignatures":7}}`;
+    const parentSignature = sign(null, Buffer.from(keyless, "utf8"), key.privateKey).toString("hex");
+    const r = await run(session, { ...session.authorization, parentSignature });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(r.reasons[0]!.detail).toMatch(/is not signed by its root key/);
+  });
+
   it("counts a delegation's window in whole seconds, floored, as the session verifier does", async () => {
     const p = inspectedPageProfile();
     const camera = await toBundle(PILOT.slice(2), p, SIGNER_B);

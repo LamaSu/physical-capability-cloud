@@ -29,6 +29,7 @@ import {
   computeBundleSetDigest,
   computeRegistryDigest,
   NON_NUMERIC_UNIT,
+  REGISTRY_SNAPSHOT_DOMAIN,
   PROFILE_OBSERVATION_FIELD,
   profileAdmitsBundle,
   unverifiableProfileTerms,
@@ -465,6 +466,12 @@ async function buildCases(): Promise<void> {
   const expired = delegate(key, 0xc5, { expiresAt: Math.floor(T0 / 1000) + 5 });
   add("reject: a session key whose window the events fall outside", await input(p, [await toBundle(PILOT.slice(0, 2), p, expired.signer), pilot[1]!], { registryKeys: [...REGISTRY, sessionRow(expired)] }));
   add("reject: a delegation its named root did not sign", await input(p, pilot, { registryKeys: [...REGISTRY, sessionRow(delegate(keyB, 0xc6))], pinnedRegistryDigest: REGISTRY_PIN }));
+  // astra pack 289: A signs the canonical delegation JSON with an EMPTY publicKey, which names no key; the row and the
+  // authorization name the full session key. Its pin is computed here over the rows, so only the signature can refuse it.
+  const keyless = `{"sessionId":"session-0001","parentAgentId":"eip155:84532:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:7","publicKey":"","issuedAt":${session.authorization.issuedAt},"expiresAt":${session.authorization.expiresAt},"scope":{"allowedActions":["evidence_submit"],"contractIds":["${JOB}"],"maxSignatures":1000}}`;
+  const keylessRows = [...REGISTRY, { ...sessionRow(session), authorization: { ...session.authorization, parentSignature: sign(null, Buffer.from(keyless, "utf8"), key.privateKey).toString("hex") } }];
+  const keylessPin = `sha256:${createHash("sha256").update(canonicalize({ domain: REGISTRY_SNAPSHOT_DOMAIN, keys: [...keylessRows].sort((a, b) => (a.publicKey < b.publicKey ? -1 : 1)) })).digest("hex")}`;
+  add("reject: a delegation whose root signed a preimage naming no key (astra pack 289)", await input(p, bySession, { registryKeys: keylessRows, pinnedRegistryDigest: keylessPin }));
   const widened = [...REGISTRY, sessionRow(delegate(key, 0xc3, { contractIds: [JOB, "job-other"] }))];
   add("reject: a delegation re-scoped after the pin", await input(p, bySession, { registryKeys: widened, pinnedRegistryDigest: await pinOf(withSession) }));
   // Only a witness reaches inspected_output (steward #6694).
@@ -869,6 +876,7 @@ function both(a: Apply, b: Apply): Apply {
 const HashPrototype = Object.getPrototypeOf(createHash("sha256")) as object;
 const ArrayIteratorPrototype = Object.getPrototypeOf([][Symbol.iterator]()) as object;
 const SubtleCryptoPrototype = Object.getPrototypeOf(globalThis.crypto.subtle) as object;
+const TypedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 
 function forged(v: unknown): unknown {
   if (typeof v !== "string") return v;
@@ -1007,6 +1015,11 @@ const PATCH_ROWS: Array<[string, Apply]> = [
   // astra pack 281: grants, delegations and the delegation preimage read own data and captured intrinsics only.
   ["Object.prototype.role, kernelId, jobId, grants, delegatedBy and trustDomain", pollute(() => ({ role: "executor", kernelId: KERNEL, jobId: JOB, grants: EXECUTOR_GRANTS, delegatedBy: KEY_A, trustDomain: null }))],
   ["Math.floor", replace(Math, "floor", () => () => 0)],
+  // astra pack 289: a typed array's length, byteLength and byteOffset are accessors on %TypedArray%.prototype.
+  ["%TypedArray%.prototype length, byteLength and byteOffset", both(
+    replaceGetter(TypedArrayPrototype, "length", () => () => 0),
+    both(replaceGetter(TypedArrayPrototype, "byteLength", () => () => 0), replaceGetter(TypedArrayPrototype, "byteOffset", () => () => 0)),
+  )],
   ["String.prototype.toLowerCase", replace(String.prototype, "toLowerCase", () => () => "0x" + "00".repeat(32))],
   ["Hash.prototype.update", replace(HashPrototype, "update", (o) => function (this: unknown) { return ReflectApply(o, this, ["tampered"]); })],
   ["Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
