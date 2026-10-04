@@ -219,6 +219,11 @@ describe("E11f HIGH 1: a task is durable and write-once, across restarts and app
     const res = await asAdmin(app, "m-1", benchmark(3));
     expect(res.statusCode).toBe(503);
     expect(res.json().error).toBe("task_store_unavailable");
+    // The missing store is named first, before authority or the body is judged, whoever asks.
+    for (const refused of [await create(app, "m-1", OTHER, benchmark(3)), await asAdmin(app, "m-1", benchmark(undefined))]) {
+      expect(refused.statusCode).toBe(503);
+      expect(refused.json().error).toBe("task_store_unavailable");
+    }
     expect((await app.inject({ method: "GET", url: "/api/milestones/m-1/tmp-task" })).statusCode).toBe(404);
     await app.close();
   });
