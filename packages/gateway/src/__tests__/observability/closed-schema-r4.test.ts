@@ -19,7 +19,7 @@
  *   F   the structured log stored what its producer passed;
  *   and keyedHash threw on a value JSON cannot hold, which dropped the entry it was in.
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { Readable, Writable } from "node:stream";
@@ -246,6 +246,27 @@ describe("C: Sentry", () => {
 });
 
 describe("F: the structured log", () => {
+  // #403 (merged): the log is a job read. The admin reads every line, and asking for one job's
+  // lines is reading that job, so the job must exist (the seeded job-001).
+  const ADMIN = "n107b-r4-admin";
+  const asAdmin = { "x-admin-key": ADMIN };
+  let savedAdmin: string | undefined;
+  let savedDb: string | undefined;
+  beforeAll(async () => {
+    savedAdmin = process.env.PCC_ADMIN_KEY;
+    savedDb = process.env.PCC_DB_PATH;
+    process.env.PCC_ADMIN_KEY = ADMIN;
+    process.env.PCC_DB_PATH = ":memory:";
+    (await import("../../db.js")).initStore({ seed: true });
+  });
+  afterAll(async () => {
+    (await import("../../db.js")).closeStore();
+    if (savedAdmin === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdmin;
+    if (savedDb === undefined) delete process.env.PCC_DB_PATH;
+    else process.env.PCC_DB_PATH = savedDb;
+  });
+
   it("telemetry emit: a phase and a status in the server's vocabulary stay readable, the job id and source are keyed, the entry's own fields are the logger's", async () => {
     const { telemetryRoutes } = await import("../../routes/telemetry.js");
     const app = Fastify({ logger: false });
@@ -256,7 +277,7 @@ describe("F: the structured log", () => {
     await app.ready();
     const res = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload: { jobId: "job-r4", phase: "job_submit", status: "completed", source: "caller-source" } });
     expect(res.statusCode).toBe(200);
-    const logs = await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=1" });
+    const logs = await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=1", headers: asAdmin });
     const [entry] = (logs.json() as { entries: Array<Record<string, unknown>> }).entries;
     expect(entry).toMatchObject({ phase: "job_submit", status: "completed", jobId: schema.keyedHash("job-r4"), source: schema.keyedHash("caller-source"), level: "info" });
     expect(entry!.message).toBe("telemetry event emitted");
@@ -271,15 +292,15 @@ describe("F: the structured log", () => {
     });
     await app.register(telemetryRoutes);
     await app.ready();
-    const res = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload: { jobId: "job-filter-r3", phase: "job_submit", status: "completed", source: "src-filter-r3" } });
+    const res = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload: { jobId: "job-001", phase: "job_submit", status: "completed", source: "src-filter-r3" } });
     expect(res.statusCode).toBe(200);
     const entries = async (query: string) =>
-      ((await app.inject({ method: "GET", url: `/api/telemetry/logs?${query}` })).json() as { entries: Array<Record<string, unknown>> }).entries;
-    const byJob = await entries("jobId=job-filter-r3");
+      ((await app.inject({ method: "GET", url: `/api/telemetry/logs?${query}`, headers: asAdmin })).json() as { entries: Array<Record<string, unknown>> }).entries;
+    const byJob = await entries("jobId=job-001");
     expect(byJob).toHaveLength(1);
-    expect(byJob[0]!.jobId).toBe(schema.keyedHash("job-filter-r3"));
+    expect(byJob[0]!.jobId).toBe(schema.keyedHash("job-001"));
     expect(await entries("source=src-filter-r3")).toHaveLength(1);
-    expect(await entries("level=info&jobId=job-filter-r3")).toHaveLength(1);
+    expect(await entries("level=info&jobId=job-001")).toHaveLength(1);
     expect(await entries("jobId=job-filter-other")).toHaveLength(0);
     await app.close();
   });

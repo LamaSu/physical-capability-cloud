@@ -142,10 +142,18 @@ describe("MEDIUM (Q2, codemod r2): the telemetry log carries no caller-chosen du
       });
       expect(res.statusCode).toBe(200);
     }
-    const logs = await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=500" });
-    expect(logs.statusCode).toBe(200);
-    expect(logs.body).not.toContain(m);
-    expect(logs.body).not.toContain(String(NUMBER));
+    // #403 (merged): the log is a job read; the admin reads every line.
+    const savedAdmin = process.env.PCC_ADMIN_KEY;
+    process.env.PCC_ADMIN_KEY = "n107b-r3-admin";
+    try {
+      const logs = await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=500", headers: { "x-admin-key": "n107b-r3-admin" } });
+      expect(logs.statusCode).toBe(200);
+      expect(logs.body).not.toContain(m);
+      expect(logs.body).not.toContain(String(NUMBER));
+    } finally {
+      if (savedAdmin === undefined) delete process.env.PCC_ADMIN_KEY;
+      else process.env.PCC_ADMIN_KEY = savedAdmin;
+    }
     await app.close();
   });
 });

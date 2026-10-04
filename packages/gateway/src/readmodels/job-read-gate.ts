@@ -48,7 +48,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { batchOwnership } from "./batch-ownership.js";
-import { declare, lit } from "../observability/closed-schema.js";
+import { declare, keyedHash, lit } from "../observability/closed-schema.js";
 import {
   JOB_READ_REFUSAL,
   decideJobRead,
@@ -445,6 +445,14 @@ export function recordOwnersOf(record: unknown, ctx: { batchId?: string } = {}):
  * message can name any job. A record whose owners cannot be known (a malformed binding, a slot or
  * batch no live batch has) is kept only for an unscoped admin. Refused like the other gates: 401 without a
  * credential, 403 without a proven wallet, 503 when the records the rule needs cannot be read.
+ *
+ * #538's closed structured log (structured-logger.ts) stores an id its producer declared
+ * (declare.id) as its keyed hash, so its line names a job or kernel by keyedHash(id). Such a value
+ * counts as the job or kernel it is the keyed hash of, among those the caller may read: the
+ * filter compares it with the keyed hashes of exactly those ids (computed once, when a keyed value
+ * is first met). A keyed value that is no readable id's hash is a job or kernel the caller may not
+ * read, so the line is left out. A field whose producer did not declare it is stored with its key
+ * keyed too, so it binds nothing, and its line is an unscoped admin's only (the free-text rule).
  */
 export type JobRecordFilter =
   | { ok: true; keep: (record: unknown) => boolean }
@@ -461,14 +469,29 @@ export function jobRecordFilterOf(req: FastifyRequest): JobRecordFilter {
     operated = kernels.kernels;
   }
   const admin = scope.as === "admin";
+  let keyedJobs: ReadonlySet<string> | undefined;
+  let keyedKernels: ReadonlySet<string> | undefined;
+  const jobAllowed = (jobId: string): boolean => {
+    if (scopeAllows(scope, jobId)) return true;
+    if (scope.jobIds === null || !jobId.startsWith("h:")) return false;
+    keyedJobs ??= new Set([...scope.jobIds].map((id) => keyedHash(id)));
+    return keyedJobs.has(jobId);
+  };
+  const kernelAllowed = (kernelId: string): boolean => {
+    if (operated === null) return false;
+    if (operated.has(kernelId)) return true;
+    if (!kernelId.startsWith("h:")) return false;
+    keyedKernels ??= new Set([...operated].map((id) => keyedHash(id)));
+    return keyedKernels.has(kernelId);
+  };
   return {
     ok: true,
     keep: (record) => {
       const owners = recordOwnersOf(record);
       if (!owners) return false;
-      if (owners.jobs.length > 0) return owners.jobs.every((jobId) => scopeAllows(scope, jobId));
+      if (owners.jobs.length > 0) return owners.jobs.every(jobAllowed);
       if (admin) return true;
-      if (owners.kernels.length > 0) return operated !== null && owners.kernels.every((kernelId) => operated!.has(kernelId));
+      if (owners.kernels.length > 0) return owners.kernels.every(kernelAllowed);
       return false;
     },
   };

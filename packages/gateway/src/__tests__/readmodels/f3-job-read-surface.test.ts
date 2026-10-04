@@ -53,7 +53,9 @@ beforeAll(async () => {
   const { pipelineTelemetry, PIPELINE_PHASES } = await import("../../telemetry.js");
   pipelineTelemetry.emit("job-001", PIPELINE_PHASES[0]!, "started");
   const { logger } = await import("../../structured-logger.js");
-  logger.log("info", "f3 r2 job-001 line", { source: "f3-test", jobId: "job-001" } as never);
+  // #538's closed log: the message a literal, the binding declared (stored as its keyed hash).
+  const closed = await import("../../observability/closed-schema.js");
+  logger.log("info", closed.lit("f3 r2 job-001 line"), { source: closed.lit("f3-test"), jobId: closed.declare.id("job-001") });
   const { batchTracker, sensorPipeline } = await import("../../services.js");
   const batch = batchTracker.createBatch("kernel-nyc", "dev-f3", "cap-nyc-fdm", {});
   batchTracker.addSample(batch.id, { position: "A1", jobId: "job-001", stepId: "step-001", userId: OPERATOR_NYC as never, sampleLabel: "f3" } as never);

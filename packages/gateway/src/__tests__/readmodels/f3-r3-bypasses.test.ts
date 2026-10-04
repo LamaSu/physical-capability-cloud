@@ -71,8 +71,12 @@ beforeAll(async () => {
 
   const { logger } = await import("../../structured-logger.js");
   // job-001's line, with its binding nested; and a line that names job-001 only in its text.
-  logger.log("info", "r3 nested binding line", { source: "f3-r3", metadata: { jobId: "job-001" } } as never);
-  logger.log("info", "r3 free text names job-001", { source: "f3-r3" } as never);
+  // #538's closed log: the messages literals, the nested binding declared (its keyed hash).
+  const closed = await import("../../observability/closed-schema.js");
+  logger.log("info", closed.lit("r3 nested binding line"), { source: closed.lit("f3-r3"), metadata: { jobId: closed.declare.id("job-001") } });
+  logger.log("info", closed.lit("r3 free text names job-001"), { source: closed.lit("f3-r3") });
+  // A line no job owns that names kernel-nyc, declared (its keyed hash): the kernel's operator's (#538 merge-up).
+  logger.log("info", closed.lit("r3 kernel-nyc only line"), { source: closed.lit("f3-r3"), kernelId: closed.declare.id("kernel-nyc") });
 
   app = Fastify({ logger: false });
   app.addHook("onRequest", async (req) => {
@@ -223,6 +227,13 @@ describe("HIGH: the record filter reads bindings at any depth, and leaves a reco
     const admin = await get("/api/telemetry/logs", ADMIN_H);
     expect(admin.body).toContain("r3 nested binding line");
     expect(admin.body).toContain("r3 free text names job-001");
+  });
+
+  it("#538 merge-up: a line naming only a declared (keyed) kernel is its operator's and the admin's, never a stranger's", async () => {
+    expect((await get("/api/telemetry/logs", OPERATOR_H)).body).toContain("r3 kernel-nyc only line");
+    expect((await get("/api/telemetry/logs", ADMIN_H)).body).toContain("r3 kernel-nyc only line");
+    expect((await get("/api/telemetry/logs", STRANGER_H)).body).not.toContain("r3 kernel-nyc only line");
+    expect((await get("/api/telemetry/logs", BUYER_H)).body).not.toContain("r3 kernel-nyc only line");
   });
 
   it("identity first on the mixed-record log routes: no credential is 401, an unproven one 403", async () => {
