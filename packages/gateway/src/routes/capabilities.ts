@@ -4,6 +4,26 @@ import type { Result, ParamDef, CapabilityTemplate } from "@pcc/spec";
 import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/index.js";
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
+
+// ── POST /api/capabilities — accepted top-level body fields ─────────────────
+//
+// Mirrors CreateCapabilityInput (facades/capability.facade.ts). Any top-level
+// body key outside this set is silently dropped by CapabilityFacade.create()
+// today — G12 surfaces that instead of hiding it (see ignoredFields below).
+const CAPABILITY_CREATE_FIELDS = new Set([
+  "id",
+  "kernelId",
+  "type",
+  "name",
+  "description",
+  "location",
+  "pricing",
+  "materials",
+  "assuranceTiers",
+  "sla",
+  "availability",
+]);
 
 // ── WoT Thing Description helpers ────────────────────────────────────────────
 //
@@ -691,8 +711,14 @@ export async function capabilityRoutes(app: FastifyInstance) {
 
   /**
    * Create a capability instance (upsert-style).
-   * Returns 201 + { capability, created: true } on creation.
-   * Returns 200 + { capability, created: false } when the capability already exists.
+   * Returns 201 + { capability, created: true } on creation. If the body had
+   * top-level keys outside CreateCapabilityInput, also includes `ignoredFields`
+   * (sorted) — those keys are NOT persisted. A "requirementsSchema" key adds
+   * a `hints` pointer at CSD registration instead.
+   * Returns 200 + { capability, created: false } when the capability already
+   * exists (POST never updates one) — includes `ignoredFields` (every
+   * provided key except id/kernelId/type) and a `note` pointing at the
+   * dedicated availability-update endpoint.
    * Returns 400 when kernelId or type is missing.
    * Returns 500 on DB failure with { error, message }.
    */
@@ -701,6 +727,7 @@ export async function capabilityRoutes(app: FastifyInstance) {
     if (!kernelId || !type) {
       return reply.code(400).send({ error: "kernelId and type required" });
     }
+    const bodyKeys = Object.keys(req.body ?? {});
     const result = await facade.create(req.body);
     if (!result.success) {
       return reply.code(result.error.httpStatus).send({
@@ -711,8 +738,45 @@ export async function capabilityRoutes(app: FastifyInstance) {
     }
     const { capability, created } = result.data;
     if (created) {
-      return reply.code(201).send({ capability, created: true });
+      // Operator-onboarding funnel (ADK track item 4): capability_published.
+      // Telemetry must never break capability creation.
+      try {
+        recordOperatorStage(kernelId, "capability_published", {
+          capabilityId: (capability as { id?: string } | undefined)?.id ?? null,
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+        });
+      } catch {
+        /* funnel tracking must never break capability creation */
+      }
+      const ignoredFields = bodyKeys.filter((k) => !CAPABILITY_CREATE_FIELDS.has(k)).sort();
+      const hints = ignoredFields.includes("requirementsSchema")
+        ? [
+            "requirementsSchema is not stored on a capability: a capability's typed parameters belong in its CSD (register one with POST /api/csd).",
+          ]
+        : undefined;
+      return reply.code(201).send({
+        capability,
+        created: true,
+        ...(ignoredFields.length > 0 ? { ignoredFields } : {}),
+        ...(hints ? { hints } : {}),
+      });
     }
-    return { capability, created: false };
+    // A differing kernelId or type is ignored too (astra pack 111 MEDIUM 4): the
+    // existing row is returned unchanged, so say so rather than hide it.
+    const body = req.body as unknown as Record<string, unknown>;
+    const conflicts = (["kernelId", "type"] as const).filter(
+      (k) => body[k] !== undefined && body[k] !== (capability as unknown as Record<string, unknown>)[k],
+    );
+    const ignoredFields = bodyKeys
+      .filter((k) => k !== "id" && ((k !== "kernelId" && k !== "type") || conflicts.includes(k as "kernelId" | "type")))
+      .sort();
+    return {
+      capability,
+      created: false,
+      ignoredFields,
+      ...(conflicts.length > 0 ? { conflicts } : {}),
+      note:
+        "This capability already exists; POST /api/capabilities never updates it. To change availability, use PUT /api/capabilities/:id/availability.",
+    };
   });
 }
