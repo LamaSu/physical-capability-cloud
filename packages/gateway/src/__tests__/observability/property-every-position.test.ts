@@ -662,12 +662,26 @@ describe("N107b round 4, the property: a marker in every position of every sink 
     for (const { label, value } of positionsOf(breadcrumb, ALL_KINDS)) send(`breadcrumb ${label}`, () => sinks.closedBreadcrumb(value as object));
     // The one declared-by-construction source (C11): a transaction's and a span's start, end and
     // exclusive times leave as the Sentry SDK took them, because no producer can supply them: no
-    // gateway code passes a time to a Sentry or OpenTelemetry span API (sentry-timing-ratchet.test.ts).
-    // Fed a marker directly, they keep a number and nothing else; every other position keeps nothing.
+    // gateway code passes a time to a Sentry or OpenTelemetry span API (sentry-timing-ratchet.test.ts,
+    // closed against computed keys, element access, aliases and functions passed as values in N107c).
+    // Fed a marker directly, an SDK time keeps a finite number and nothing else: the four number
+    // kinds keep the numeric marker (by construction), and no other kind leaves any marker (a numeric
+    // string, a Date, a bigint, a boxed number: no number of the marker's).
+    const NUMBER_KINDS: ReadonlySet<string> = new Set(["number", "fraction", "float", "negative"]);
     const sdkTimes = results.filter((r) => SDK_TIME_POSITION.test(r.label));
     const leaked = violations("Sentry", results.filter((r) => !SDK_TIME_POSITION.test(r.label)));
     expect(new Set(sdkTimes.map((r) => r.label.replace(/ = .*$/, ""))), "the SDK-time positions").toEqual(new Set(SDK_TIME_PATHS));
-    expect(sdkTimes.filter((r) => r.text === undefined || markerIn(r.text).includes("string")).map((r) => r.label), "an SDK time keeps only a number").toEqual([]);
+    const sdkTimeKind = (r: Result) => r.label.replace(/^.* = /, "");
+    const sdkTimeLeaks = sdkTimes.flatMap((r) => {
+      if (isNoOutput(r.text)) return [`${r.label}: NO OUTPUT`];
+      const kept = markerIn(r.text!).filter((found) => !(found === "number" && NUMBER_KINDS.has(sdkTimeKind(r))));
+      return kept.length > 0 ? [`${r.label}: ${kept.join("+")}`] : [];
+    });
+    expect(sdkTimeLeaks, "an SDK time keeps a finite number and nothing else").toEqual([]);
+    expect(
+      sdkTimes.filter((r) => NUMBER_KINDS.has(sdkTimeKind(r)) && !markerIn(r.text ?? "").includes("number")).map((r) => r.label),
+      "the exclusion is exactly that: a finite number stays",
+    ).toEqual([]);
     expect(leaked, "positions that reached Sentry").toBe("");
   });
 
