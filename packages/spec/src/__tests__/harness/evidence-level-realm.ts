@@ -112,7 +112,7 @@ const DOMAIN_CANDIDATES: Array<[string, string]> = [
   ["39 hex", principal("1", "ab".repeat(19) + "a")],
   ["trailing newline", `${principal("1")}\n`],
   ["EIP155 prefix", `EIP155:1:0x${"ab".repeat(20)}`],
-  ["fullwidth digit", principal("１")],
+  ["fullwidth digit", principal("\uff11")],
 ];
 
 const meetsPairs: Array<[EvidenceLevel | null, EvidenceLevel]> = [

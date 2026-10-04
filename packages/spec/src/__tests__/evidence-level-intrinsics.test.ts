@@ -275,7 +275,7 @@ describe("the operator principal id predicate equals /^eip155:([1-9][0-9]*):0x[0
       valid("9999999999999999"), valid("1000000000000000"), valid("10000000000000000"), valid("18446744073709551616"),
       valid("1", hex.toUpperCase()), valid("1", hex.slice(0, 39)), valid("1", `${hex}a`), valid("1", `${hex.slice(0, 39)}g`),
       `${valid("1")}\n`, `${valid("1")} `, ` ${valid("1")}`, `EIP155:1:0x${hex}`, `eip155:1:0X${hex}`, `eip155::0x${hex}`,
-      `eip155:1:${hex}`, `eip155:1::0x${hex}`, `eip155:1:0x${hex}\u0000`, valid("١"), valid("１"), valid("1١"),
+      `eip155:1:${hex}`, `eip155:1::0x${hex}`, `eip155:1:0x${hex}\u0000`, valid("\u0661"), valid("\uff11"), valid("1\u0661"),
       "", "eip155:", "eip155:1", "eip155:1:", "eip155:1:0x", `eip15:1:0x${hex}`, `eip1555:1:0x${hex}`,
     ];
     for (const s of cases) expect(accepts(s), JSON.stringify(s)).toBe(oldAccepts(s));
@@ -287,7 +287,7 @@ describe("the operator principal id predicate equals /^eip155:([1-9][0-9]*):0x[0
       seed = (seed * 1103515245 + 12345) & 0x7fffffff;
       return seed % n;
     };
-    const alphabet = "0123456789abcdefABCDEFgx:eip\n ١１";
+    const alphabet = "0123456789abcdefABCDEFgx:eip\n \u0661\uff11";
     const digits = (n: number) => {
       let out = "";
       for (let i = 0; i < n; i++) out += "0123456789"[rand(10)];
