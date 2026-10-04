@@ -36,7 +36,6 @@ def _start(tmp_path, args=(), env=None, stdin=None, interactive=False, config=No
          mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
          mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}) as register, \
          mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
-         mock.patch("pcc_node.cli.announce_capabilities"), \
          mock.patch("pcc_node.cli.run_daemon"):
         result = CliRunner().invoke(main, ["start", "-c", str(config_path), "--api-key", "k", *args],
                                     env={"PCC_BASE": "", **(env or {})}, input=stdin)

@@ -601,3 +601,63 @@ describe("buildPayoutMap — type echoes", () => {
     expect(p.bps).toBe(50n);
   });
 });
+
+// ── pcc-economics D2: co-authors share ONE role allocation ───────────────
+
+describe("buildPayoutMap — co-authors without groupBps share one role allocation", () => {
+  it("two co-authors of one role on one schedule split the rate; they are not each paid the full rate", () => {
+    const sched = constantSchedule(200);
+    const manifest = makeManifest([
+      { role: "integrator", recipient: ADDR(0xa1), schedule: sched, ipId: "ip-adapter" },
+      { role: "integrator", recipient: ADDR(0xa2), schedule: sched, ipId: "ip-adapter" },
+    ]);
+    const r = buildPayoutMap({
+      milestoneIndex: 0,
+      jobValue: 1_000_000n,
+      capabilityIpId: CAP_IP_ID,
+      compositionManifest: manifest,
+      evaluationContext: ctx(),
+      scheduleByHash: new Map([[sched.scheduleHash, sched]]),
+    });
+    // Before the fix: 200 + 200 = 400 bps for one 200-bps role, and both passed setPayoutMap's
+    // (recipient, roleTag) dedup because the recipients differ.
+    expect(r.payouts.map((p) => p.bps)).toEqual([100n, 100n]);
+    expect(r.operatorResidualBps).toBe(9800);
+  });
+
+  it("an odd rate splits exactly in bps: the earliest co-author takes the leftover bps", () => {
+    const sched = constantSchedule(5);
+    const manifest = makeManifest([
+      { role: "protocol-author", recipient: ADDR(0xb1), schedule: sched, ipId: "ip-csd" },
+      { role: "protocol-author", recipient: ADDR(0xb2), schedule: sched, ipId: "ip-csd" },
+      { role: "protocol-author", recipient: ADDR(0xb3), schedule: sched, ipId: "ip-csd" },
+    ]);
+    const r = buildPayoutMap({
+      milestoneIndex: 0,
+      jobValue: 1_000_000n,
+      capabilityIpId: CAP_IP_ID,
+      compositionManifest: manifest,
+      evaluationContext: ctx(),
+      scheduleByHash: new Map([[sched.scheduleHash, sched]]),
+    });
+    expect(r.payouts.map((p) => p.bps)).toEqual([2n, 2n, 1n]);
+    expect(r.operatorResidualBps).toBe(9995);
+  });
+
+  it("the same person in two different roles is still paid for each role", () => {
+    const sched = constantSchedule(100);
+    const manifest = makeManifest([
+      { role: "integrator", recipient: ADDR(0xc1), schedule: sched, ipId: "ip-adapter" },
+      { role: "protocol-author", recipient: ADDR(0xc1), schedule: sched, ipId: "ip-adapter" },
+    ]);
+    const r = buildPayoutMap({
+      milestoneIndex: 0,
+      jobValue: 1_000_000n,
+      capabilityIpId: CAP_IP_ID,
+      compositionManifest: manifest,
+      evaluationContext: ctx(),
+      scheduleByHash: new Map([[sched.scheduleHash, sched]]),
+    });
+    expect(r.payouts.map((p) => p.bps)).toEqual([100n, 100n]);
+  });
+});
