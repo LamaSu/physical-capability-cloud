@@ -11,16 +11,19 @@
 
 import { z } from "zod";
 import type { CompositionManifest } from "../types/composition-manifest.js";
-import { computeManifestHash } from "../types/composition-manifest.js";
+import { computeManifestHash, CompositionManifestSchema } from "../types/composition-manifest.js";
 import type { TrainingManifest } from "../types/training-manifest.js";
 import { computeTrainingManifestHash, TrainingManifestSchema } from "../types/training-manifest.js";
 import { cmpStr } from "./hash.js";
-import { numberWithoutCanonicalForm } from "./input.js";
+import { snapshotJson } from "./input.js";
 import {
+  AppliesToSchema,
+  BpsSchema,
   ID_PATTERN,
   IdSchema,
   LabelSchema,
   MAX_SPLIT_DEPTH,
+  RateSourceSchema,
   RoleSchema,
   type AppliesTo,
   type Clause,
@@ -44,7 +47,8 @@ export type AdapterRefusalCode =
   | "GRAPH_EMPTY"
   | "ID_TOO_LONG"
   | "INVALID_ID"
-  | "MANIFEST_INVALID";
+  | "MANIFEST_INVALID"
+  | "INPUT_INVALID";
 
 export interface AdapterRefusal {
   code: AdapterRefusalCode;
@@ -63,21 +67,25 @@ function composedId(...parts: string[]): string | null {
  * A caller-supplied lookup table read safely: only the table's own keys count (never "constructor" or
  * "__proto__" from Object.prototype), and only a valid Id is a party.
  */
-function lookupParty(table: Readonly<Record<string, string>>, key: string): string | undefined {
+function lookupParty(table: Readonly<Record<string, unknown>>, key: string): string | undefined {
   if (!Object.prototype.hasOwnProperty.call(table, key)) return undefined;
   const v: unknown = table[key];
   return typeof v === "string" && ID_PATTERN.test(v) ? v : undefined;
 }
 
 /**
- * A manifest's hash, or why it has none. The canonical form cannot write a number that is not finite or
- * of magnitude 2^53 or more, and under the evidence profile's D5 `canonicalize` throws on one. Such a
- * manifest is refused before hashing, the same with or without D5; anything else the hash refuses is
- * caught, so an adapter never throws.
+ * Each adapter reads its input exactly once, into a plain copy that holds only what the canonical form
+ * writes (economics/input.ts). Every later step validates, hashes and pays from that one copy, so no
+ * accessor or proxy can show the hash one manifest and the payout another (astra EC5 H1), and a
+ * structure the copy refuses (an accessor, a cycle, nesting past the input bound, a number with no
+ * canonical form) is refused the same way with or without D5 in `canonicalize`.
  */
-function manifestHash(manifest: unknown, hash: () => string): { ok: true; hash: string } | { ok: false; reason: string } {
-  const loose = numberWithoutCanonicalForm(manifest);
-  if (loose !== null) return { ok: false, reason: `the manifest has no canonical JSON form: ${loose} (send such a value as a decimal string)` };
+const readOnce = (value: unknown) => snapshotJson(value, { canonical: true });
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** A hash of the copy, or why it has none: anything the hash still refuses is a refusal, never a throw. */
+function guardedHash(hash: () => string): { ok: true; hash: string } | { ok: false; reason: string } {
   try {
     return { ok: true, hash: hash() };
   } catch (e) {
@@ -104,6 +112,14 @@ export interface ManifestAdapterInput {
   idPrefix: string;
 }
 
+const ManifestAdapterInputSchema = z.object({
+  manifest: CompositionManifestSchema,
+  pinnedRates: z.array(z.object({ bps: BpsSchema, rateSource: RateSourceSchema })),
+  partyByAddress: z.record(z.string(), z.unknown()),
+  appliesTo: AppliesToSchema,
+  idPrefix: z.string(),
+});
+
 /**
  * Entries that share (role, ipId, rateScheduleHash) are one allocation shared by co-authors: by their
  * `groupBps` when every entry carries one (they must total exactly 10000), or equally when none does.
@@ -113,9 +129,20 @@ export interface ManifestAdapterInput {
 export function clausesFromCompositionManifest(
   input: ManifestAdapterInput,
 ): AdapterResult<{ clauses: Clause[]; splits: Split[] }> {
+  const copy = readOnce(input);
+  if (!copy.ok) return { ok: false, refusals: [{ code: "INPUT_INVALID", message: copy.reason, path: [] }] };
+  const parsed = ManifestAdapterInputSchema.safeParse(copy.value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue === undefined ? [] : issue.path.map(String);
+    const code = path[0] === "manifest" ? "MANIFEST_INVALID" : "INPUT_INVALID";
+    return { ok: false, refusals: [{ code, message: issue?.message ?? "invalid input", path }] };
+  }
   const refusals: AdapterRefusal[] = [];
-  const m = input.manifest;
-  const hashed = manifestHash(m, () => computeManifestHash(m));
+  const { manifest: m, pinnedRates, partyByAddress, appliesTo, idPrefix } = parsed.data;
+  // The hash covers the manifest as written, unknown fields included, so it is taken over the copy itself.
+  const written = (copy.value as { manifest: CompositionManifest }).manifest;
+  const hashed = guardedHash(() => computeManifestHash(written));
   if (!hashed.ok) return { ok: false, refusals: [{ code: "MANIFEST_INVALID", message: hashed.reason, path: ["manifest"] }] };
   if (hashed.hash.toLowerCase() !== m.manifestHash.toLowerCase()) {
     return {
@@ -123,7 +150,7 @@ export function clausesFromCompositionManifest(
       refusals: [{ code: "MANIFEST_HASH_MISMATCH", message: "the manifest body does not hash to its manifestHash", path: ["manifest"] }],
     };
   }
-  const rateByHash = new Map(input.pinnedRates.map((r) => [r.rateSource.scheduleHash.toLowerCase(), r] as const));
+  const rateByHash = new Map(pinnedRates.map((r) => [r.rateSource.scheduleHash.toLowerCase(), r] as const));
 
   const groups = new Map<string, typeof m.entries>();
   for (const e of m.entries) {
@@ -150,7 +177,7 @@ export function clausesFromCompositionManifest(
     }
     const parties: string[] = [];
     for (const e of entries) {
-      const party = lookupParty(input.partyByAddress, e.contributorAddress.toLowerCase());
+      const party = lookupParty(partyByAddress, e.contributorAddress.toLowerCase());
       if (party === undefined) {
         refusals.push({ code: "UNKNOWN_CONTRIBUTOR", message: `contributor ${e.contributorAddress} is not an agreement party`, path: [...at, e.contributorAddress] });
       } else {
@@ -168,8 +195,8 @@ export function clausesFromCompositionManifest(
     }
     if (parties.length !== entries.length) return;
 
-    const clauseId = composedId(input.idPrefix, `c${index}`);
-    const splitId = composedId(input.idPrefix, `s${index}`);
+    const clauseId = composedId(idPrefix, `c${index}`);
+    const splitId = composedId(idPrefix, `s${index}`);
     if (clauseId === null || splitId === null) {
       refusals.push({ code: "ID_TOO_LONG", message: "idPrefix makes an invalid id", path: ["idPrefix"] });
       return;
@@ -191,7 +218,7 @@ export function clausesFromCompositionManifest(
       role,
       to,
       subject: first.ipId,
-      appliesTo: input.appliesTo,
+      appliesTo,
       underLicense: null,
       rule: { kind: "percent", bps: pinned.bps, of: "net", min: null, max: null, rateSource: pinned.rateSource },
     });
@@ -223,28 +250,39 @@ export function splitsFromTrainingManifest(
   input: LineageInput,
   idPrefix: string,
 ): AdapterResult<{ splits: Split[]; rootSplitId: string }> {
+  if (typeof idPrefix !== "string") return { ok: false, refusals: [{ code: "INPUT_INVALID", message: "idPrefix is not a string", path: ["idPrefix"] }] };
+  // The whole lineage, every level, is copied once before anything is checked, hashed or paid (astra EC5 H1).
+  const copy = readOnce(input);
+  if (!copy.ok) return { ok: false, refusals: [{ code: "INPUT_INVALID", message: copy.reason, path: [] }] };
   const splits: Split[] = [];
   const refusals: AdapterRefusal[] = [];
 
-  const build = (li: LineageInput, depth: number, seen: ReadonlySet<string>): string | null => {
-    const m = li.manifest;
-    const at = ["lineage", m.modelIpId];
-    if (seen.has(m.modelIpId)) {
-      refusals.push({ code: "LINEAGE_CYCLE", message: `model ${m.modelIpId} is its own ancestor`, path: at });
+  const build = (li: unknown, depth: number, seen: ReadonlySet<string>): string | null => {
+    // The copy is plain data, but its shape is the caller's: each field is checked before it is used.
+    if (!isRecord(li) || !isRecord(li.manifest) || !isRecord(li.datasetParty)) {
+      refusals.push({ code: "INPUT_INVALID", message: "a lineage level needs a manifest and a datasetParty object", path: ["lineage"] });
+      return null;
+    }
+    const written = li.manifest; // as written: what the hash covers, unknown fields included
+    const id = typeof written.modelIpId === "string" ? written.modelIpId : "";
+    const at = ["lineage", id];
+    if (seen.has(id)) {
+      refusals.push({ code: "LINEAGE_CYCLE", message: `model ${id} is its own ancestor`, path: at });
       return null;
     }
     if (depth > 5) {
       refusals.push({ code: "LINEAGE_TOO_DEEP", message: "model lineage deeper than 5", path: at });
       return null;
     }
-    const valid = TrainingManifestSchema.safeParse(m);
+    const valid = TrainingManifestSchema.safeParse(written);
     if (!valid.success) {
       // For example dataset weights that do not total 10000: subdividing by them would pay a dataset
       // more than its declared share.
       refusals.push({ code: "MANIFEST_INVALID", message: valid.error.issues.map((i) => i.message).join("; "), path: at });
       return null;
     }
-    const hashed = manifestHash(m, () => computeTrainingManifestHash(m));
+    const m = valid.data;
+    const hashed = guardedHash(() => computeTrainingManifestHash(written as TrainingManifest));
     if (!hashed.ok) {
       refusals.push({ code: "MANIFEST_INVALID", message: hashed.reason, path: at });
       return null;
@@ -253,15 +291,18 @@ export function splitsFromTrainingManifest(
       refusals.push({ code: "MANIFEST_HASH_MISMATCH", message: "training manifest does not hash to its manifestHash", path: at });
       return null;
     }
-    if (!ID_PATTERN.test(m.modelIpId) || !ID_PATTERN.test(li.modelAuthorParty)) {
+    const author = li.modelAuthorParty;
+    if (typeof author !== "string" || !ID_PATTERN.test(m.modelIpId) || !ID_PATTERN.test(author)) {
       refusals.push({ code: "INVALID_ID", message: "the model id and the model author's party must be valid agreement ids", path: at });
       return null;
     }
-    if (!Number.isInteger(li.passThroughBps) || li.passThroughBps < 0 || li.passThroughBps > 10000) {
+    const passThrough = li.passThroughBps;
+    if (typeof passThrough !== "number" || !Number.isInteger(passThrough) || passThrough < 0 || passThrough > 10000) {
       refusals.push({ code: "EXPANSION_SHARE_UNDECLARED", message: "passThroughBps must be an integer in 0..10000", path: at });
       return null;
     }
-    if ((m.baseModelIpId !== undefined) !== (li.baseModel !== undefined)) {
+    const base = li.baseModel;
+    if ((m.baseModelIpId !== undefined) !== (base !== undefined)) {
       refusals.push({
         code: "EXPANSION_SHARE_UNDECLARED",
         message: "a declared base model needs an explicit weight and lineage, and only then",
@@ -295,13 +336,13 @@ export function splitsFromTrainingManifest(
       }
     }
     const inputMembers: SplitMember[] = [];
-    if (li.baseModel !== undefined) {
-      const bw = li.baseModel.weightBps;
-      if (!Number.isInteger(bw) || bw < 0 || bw > 10000) {
+    if (base !== undefined) {
+      const bw = isRecord(base) ? base.weightBps : undefined;
+      if (!isRecord(base) || typeof bw !== "number" || !Number.isInteger(bw) || bw < 0 || bw > 10000) {
         refusals.push({ code: "EXPANSION_SHARE_UNDECLARED", message: "baseModel.weightBps must be an integer in 0..10000", path: at });
         return null;
       }
-      const baseRoot = build(li.baseModel.lineage, depth + 1, new Set([...seen, m.modelIpId]));
+      const baseRoot = build(base.lineage, depth + 1, new Set([...seen, m.modelIpId]));
       if (baseRoot === null) return null;
       if (bw > 0) inputMembers.push({ to: { split: baseRoot }, weight: bw, role: null, subject: null });
       if (bw < 10000 && datasetMembers.length > 0) {
@@ -313,12 +354,12 @@ export function splitsFromTrainingManifest(
     }
 
     const root = splits[idx]!;
-    if (li.passThroughBps < 10000) {
-      root.members.push({ to: { party: li.modelAuthorParty }, weight: 10000 - li.passThroughBps, role: "model-author", subject: m.modelIpId });
+    if (passThrough < 10000) {
+      root.members.push({ to: { party: author }, weight: 10000 - passThrough, role: "model-author", subject: m.modelIpId });
     }
-    if (li.passThroughBps > 0 && inputMembers.length > 0) {
+    if (passThrough > 0 && inputMembers.length > 0) {
       splits.push({ splitId: inputsId, label: `Training inputs of ${m.modelIpId}`.slice(0, 200), members: inputMembers });
-      root.members.push({ to: { split: inputsId }, weight: li.passThroughBps, role: null, subject: null });
+      root.members.push({ to: { split: inputsId }, weight: passThrough, role: null, subject: null });
     }
     if (root.members.length === 0) {
       refusals.push({ code: "EXPANSION_SHARE_UNDECLARED", message: "the model allocation would go nowhere", path: at });
@@ -327,7 +368,7 @@ export function splitsFromTrainingManifest(
     return rootId;
   };
 
-  const rootSplitId = build(input, 0, new Set());
+  const rootSplitId = build(copy.value, 0, new Set());
   if (rootSplitId === null || refusals.length > 0) return { ok: false, refusals };
   return { ok: true, splits, rootSplitId };
 }
@@ -391,7 +432,20 @@ export function splitsFromContributionGraph(
   usedComponents: ReadonlySet<string>,
   idPrefix: string,
 ): AdapterResult<{ splits: Split[]; rootPayee: { split: string } }> {
-  const parsed = ContributionGraphSchema.safeParse(graphInput);
+  if (typeof idPrefix !== "string") return { ok: false, refusals: [{ code: "INPUT_INVALID", message: "idPrefix is not a string", path: ["idPrefix"] }] };
+  // Read once, like the manifest adapters: the schema and everything after it see one plain copy.
+  const copy = readOnce(graphInput);
+  if (!copy.ok) return { ok: false, refusals: [{ code: "GRAPH_INVALID", message: copy.reason, path: [] }] };
+  // The components that run in the unit are read once too, through the Set's own iterator, so every
+  // edge is judged against the same set.
+  const used = new Set<string>();
+  try {
+    if (!(usedComponents instanceof Set)) throw new TypeError("not a Set");
+    for (const c of Set.prototype.values.call(usedComponents)) if (typeof c === "string") used.add(c);
+  } catch {
+    return { ok: false, refusals: [{ code: "INPUT_INVALID", message: "usedComponents is not a Set of component refs", path: ["usedComponents"] }] };
+  }
+  const parsed = ContributionGraphSchema.safeParse(copy.value);
   if (!parsed.success) {
     return {
       ok: false,
@@ -445,7 +499,7 @@ export function splitsFromContributionGraph(
     const kept: SplitMember[] = [];
     for (const e of outgoing(id)) {
       const target = nodes.get(e.to)!;
-      const eligible = !target.participationRequired || usedComponents.has(target.componentRef!);
+      const eligible = !target.participationRequired || used.has(target.componentRef!);
       const payable = e.accepted && eligible && resolve(e.to) !== null;
       if (payable) kept.push({ to: { split: splitIdOf(e.to)! }, weight: e.weight, role: null, subject: null });
       else if (n.party !== null) retain += e.weight; // dropped share stays with the node that would have passed it on
@@ -465,7 +519,7 @@ export function splitsFromContributionGraph(
     }
   }
   const root = nodes.get(g.root)!;
-  const rootEligible = !root.participationRequired || usedComponents.has(root.componentRef!);
+  const rootEligible = !root.participationRequired || used.has(root.componentRef!);
   const rootMembers = rootEligible ? resolve(g.root) : null;
   if (rootMembers === null) {
     return { ok: false, refusals: [{ code: "GRAPH_EMPTY", message: "nothing in the graph is payable in this unit", path: [g.root] }] };

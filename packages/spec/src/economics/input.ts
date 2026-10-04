@@ -18,16 +18,33 @@ export const MAX_INPUT_NODES = 1_000_000;
 
 export type SnapshotResult = { ok: true; value: unknown } | { ok: false; reason: string };
 
+export interface SnapshotOptions {
+  /**
+   * Copy only what the canonical form writes, the same with or without the evidence profile's D5:
+   *   - an object member whose value is undefined is dropped, as `canonicalize` drops it;
+   *   - a number it cannot write is refused: one that is not finite, or of magnitude above 2^53 - 1
+   *     (every double from 2^53 up is an integer outside the safe range, which D5 refuses).
+   */
+  canonical?: boolean;
+}
+
 class NotPlainData extends Error {}
 
-export function snapshotJson(value: unknown): SnapshotResult {
+export function snapshotJson(value: unknown, options: SnapshotOptions = {}): SnapshotResult {
+  const canonical = options.canonical === true;
   let nodes = 0;
   const onPath = new Set<object>();
 
   const copy = (v: unknown, depth: number, where: string): unknown => {
     nodes += 1;
     if (nodes > MAX_INPUT_NODES) throw new NotPlainData(`more than ${MAX_INPUT_NODES} values`);
-    if (v === null || typeof v === "string" || typeof v === "boolean" || typeof v === "number") return v;
+    if (v === null || typeof v === "string" || typeof v === "boolean") return v;
+    if (typeof v === "number") {
+      if (canonical && !(Number.isFinite(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER)) {
+        throw new NotPlainData(`${where} is ${v}, a number the canonical form cannot write (send it as a decimal string)`);
+      }
+      return v;
+    }
     if (typeof v !== "object") throw new NotPlainData(`${where} is a ${typeof v}, not JSON data`);
     if (depth >= MAX_INPUT_DEPTH) throw new NotPlainData(`${where} nests deeper than ${MAX_INPUT_DEPTH}`);
     if (onPath.has(v)) throw new NotPlainData(`${where} contains itself`);
@@ -55,6 +72,7 @@ export function snapshotJson(value: unknown): SnapshotResult {
         const d = Object.getOwnPropertyDescriptor(v, key);
         if (d === undefined || !d.enumerable) continue; // as JSON.stringify: only own enumerable keys
         if (!("value" in d)) throw new NotPlainData(`${where}.${key} is an accessor`);
+        if (canonical && d.value === undefined) continue; // canonicalize drops an undefined member
         // defineProperty, not assignment: a "__proto__" key stays an ordinary own key and is refused by
         // the closed schema, instead of replacing the copy's prototype.
         Object.defineProperty(out, key, {
@@ -78,40 +96,3 @@ export function snapshotJson(value: unknown): SnapshotResult {
   }
 }
 
-/**
- * Where `value` holds a number the canonical form cannot write, or null: one that is not finite, or of
- * magnitude 2^53 or more (every such double is an integer outside the safe range). Under the evidence
- * profile's D5, `canonicalize` refuses these, so a body holding one has no hash. A caller that checks
- * first refuses it as its own input error, the same with or without D5, instead of throwing.
- *
- * Numbers only: accessors are not read, and a cycle, a Proxy trap or a structure past the input bounds
- * is left to the caller's guarded hash.
- */
-export function numberWithoutCanonicalForm(value: unknown): string | null {
-  let nodes = 0;
-  const onPath = new Set<object>();
-  const walk = (v: unknown, depth: number, where: string): string | null => {
-    if (typeof v === "number") return Number.isFinite(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER ? null : `${where} is ${v}`;
-    if (v === null || typeof v !== "object") return null;
-    nodes += 1;
-    if (nodes > MAX_INPUT_NODES || depth >= MAX_INPUT_DEPTH || onPath.has(v)) return null;
-    onPath.add(v);
-    try {
-      const isArray = Array.isArray(v);
-      for (const key of Object.keys(v)) {
-        const d = Object.getOwnPropertyDescriptor(v, key);
-        if (d === undefined || !("value" in d)) continue;
-        const found = walk(d.value, depth + 1, isArray ? `${where}[${key}]` : `${where}.${key}`);
-        if (found !== null) return found;
-      }
-      return null;
-    } finally {
-      onPath.delete(v);
-    }
-  };
-  try {
-    return walk(value, 0, "$");
-  } catch {
-    return null;
-  }
-}

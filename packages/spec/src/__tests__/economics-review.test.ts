@@ -574,7 +574,18 @@ describe("M7, L7: training manifests and lookup tables", () => {
     const m = { ...body, manifestHash: computeManifestHash(body) } as unknown as CompositionManifest;
     const rateSource = { scheduleHash: `0x${"ab".repeat(32)}`, evaluatedAt: 0, context: { jobValueCents: 0, jobsPerDay: 0, captureClass: null } };
     const r = clausesFromCompositionManifest({ manifest: m, pinnedRates: [{ bps: 10, rateSource }], partyByAddress: {}, appliesTo: { allUnits: true }, idPrefix: "p" });
-    expect(r.ok ? "ok" : r.refusals.map((x) => x.code).join(",")).toBe("UNKNOWN_CONTRIBUTOR");
+    // Since astra EC5 the manifest is schema-checked first, so "__proto__" is refused as an address
+    // before any lookup. A real address the table does not hold as its own key is still no party.
+    expect(r.ok ? "ok" : r.refusals.map((x) => x.code).join(",")).toBe("MANIFEST_INVALID");
+    const real = { ...body, entries: [{ ...body.entries[0]!, contributorAddress: a(0x13) }] };
+    const r2 = clausesFromCompositionManifest({
+      manifest: { ...real, manifestHash: computeManifestHash(real) },
+      pinnedRates: [{ bps: 10, rateSource }],
+      partyByAddress: {},
+      appliesTo: { allUnits: true },
+      idPrefix: "p",
+    });
+    expect(r2.ok ? "ok" : r2.refusals.map((x) => x.code).join(",")).toBe("UNKNOWN_CONTRIBUTOR");
   });
 });
 
