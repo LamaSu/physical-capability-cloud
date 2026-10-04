@@ -65,6 +65,33 @@ export interface RegisterJobEvidenceParams {
 }
 
 // ---------------------------------------------------------------------------
+// Fail-closed real mode
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown in real mode (STORY_MOCK=false) for every Story operation PCC does not actually perform
+ * against the chain. Nothing was sent and no transaction exists.
+ *
+ * These branches used to return a made-up `deterministicHex(...)` transaction hash, a zero-revenue
+ * "vault", or a dispute that was never raised. To a caller they read as a royalty paid, revenue
+ * claimed, tokens distributed or a derivative registered, although nothing moved. A missing
+ * implementation must look missing (pcc-economics, board row N10b). Routes should answer 501
+ * `not_executed` for this error, never success and never a swallowed row.
+ */
+export class StoryNotExecutedError extends Error {
+  readonly code = "STORY_NOT_EXECUTED" as const;
+  constructor(
+    readonly operation: string,
+    reason: string,
+  ) {
+    super(
+      `Story Protocol ${operation} was NOT executed in real mode: ${reason}. No transaction was sent and no transaction hash exists.`,
+    );
+    this.name = "StoryNotExecutedError";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // StoryIPService
 // ---------------------------------------------------------------------------
 
@@ -129,6 +156,7 @@ export class StoryIPService {
             : `pcc://capabilities/${capability.id}`,
         registeredAt: new Date().toISOString(),
         chain: network,
+        simulated: true,
       };
 
       // Persist to the in-memory mock registry
@@ -136,97 +164,14 @@ export class StoryIPService {
       return reg;
     }
 
-    // Real mode — dynamic import to avoid requiring the SDK in dev
-    const network = process.env.STORY_NETWORK ?? "story-aeneid";
-    const privateKey = process.env.STORY_PRIVATE_KEY;
-    if (!privateKey) {
-      throw new Error(
-        "STORY_PRIVATE_KEY is required for real Story Protocol mode",
-      );
-    }
-
-    try {
-      const { StoryClient } = await import("@story-protocol/core-sdk");
-      const { createWalletClient, createPublicClient, http } = await import("viem");
-      const { privateKeyToAccount } = await import("viem/accounts");
-      const { getDeployment } = await import("./chain-config.js");
-
-      const deployment = getDeployment(network);
-      const account = privateKeyToAccount(privateKey as `0x${string}`);
-      const rpcUrl = process.env.STORY_RPC_URL ?? deployment.rpcUrl ?? "";
-
-      const walletClient = createWalletClient({
-        account,
-        chain: deployment.chain,
-        transport: http(rpcUrl),
-      });
-      const publicClient = createPublicClient({
-        chain: deployment.chain,
-        transport: http(rpcUrl),
-      });
-
-      const client = StoryClient.newClient({
-        account,
-        transport: http(rpcUrl),
-        chainId: network === "story" ? "mainnet" : "aeneid",
-      } as Parameters<typeof StoryClient.newClient>[0]);
-
-      const response = await (client.ipAsset as {
-        mintAndRegisterIpAssetWithPilTerms: (params: {
-          spgNftContract: `0x${string}`;
-          pilType: number;
-          ipMetadata: {
-            ipMetadataURI: string;
-            ipMetadataHash: `0x${string}`;
-          };
-          mintingFee: bigint;
-          currency: `0x${string}`;
-        }) => Promise<{ ipId: `0x${string}`; tokenId: bigint; licenseTermsId: bigint; txHash: `0x${string}` }>;
-      }).mintAndRegisterIpAssetWithPilTerms({
-        spgNftContract: (deployment.contracts.ipAssetRegistry ??
-          "0x0000000000000000000000000000000000000000") as `0x${string}`,
-        pilType: 0, // Commercial use
-        ipMetadata: {
-          ipMetadataURI:
-            options.ipfsCid != null
-              ? `ipfs://${options.ipfsCid}`
-              : `pcc://capabilities/${capability.id}`,
-          ipMetadataHash: (deterministicHex(
-            `metaHash:${capability.id}`,
-            "0x",
-            64,
-          ) as `0x${string}`),
-        },
-        mintingFee: 0n,
-        currency: (deployment.contracts.royaltyModule ??
-          "0x0000000000000000000000000000000000000000") as `0x${string}`,
-      });
-
-      // Suppress unused-variable warnings
-      void walletClient;
-      void publicClient;
-
-      const reg: StoryIPRegistration = {
-        ipId: response.ipId,
-        nftTokenId: String(response.tokenId),
-        licenseTermsId: String(response.licenseTermsId),
-        txHash: response.txHash,
-        capabilityId: capability.id,
-        csdUrl:
-          options.ipfsCid != null
-            ? `ipfs://${options.ipfsCid}`
-            : `pcc://capabilities/${capability.id}`,
-        registeredAt: new Date().toISOString(),
-        chain: network as "story" | "story-aeneid",
-      };
-
-      this.mockRegistrations.set(capability.id, reg);
-      return reg;
-    } catch (err) {
-      throw new Error(
-        `Story Protocol registration failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // Real mode. The registration below would commit an `ipMetadataHash` made up from the capability
+    // id (no metadata document exists to hash) against a hard-coded contract choice, so the on-chain
+    // record would bind nothing real. Refuse until the metadata document is produced and hashed.
+    // The SDK wiring this replaced is in git history (master ac86a404) for the real implementation.
+    throw new StoryNotExecutedError(
+      "registerCapabilityAsIP",
+      "the IP metadata hash it would commit is fabricated (PCC produces no metadata document to hash yet)",
+    );
   }
 
   /**
@@ -264,6 +209,7 @@ export class StoryIPService {
         evidenceBundleHash: evidence.evidenceBundleHash,
         txHash,
         linkedAt: new Date().toISOString(),
+        simulated: true,
       };
 
       const existing = this.mockDerivatives.get(parentIpId) ?? [];
@@ -273,72 +219,12 @@ export class StoryIPService {
       return link;
     }
 
-    // Real mode
-    const network = process.env.STORY_NETWORK ?? "story-aeneid";
-    const privateKey = process.env.STORY_PRIVATE_KEY;
-    if (!privateKey) {
-      throw new Error("STORY_PRIVATE_KEY is required for real Story Protocol mode");
-    }
-
-    try {
-      const { StoryClient } = await import("@story-protocol/core-sdk");
-      const { http } = await import("viem");
-      const { privateKeyToAccount } = await import("viem/accounts");
-      const { getDeployment } = await import("./chain-config.js");
-
-      const deployment = getDeployment(network);
-      const account = privateKeyToAccount(privateKey as `0x${string}`);
-      const rpcUrl = process.env.STORY_RPC_URL ?? deployment.rpcUrl ?? "";
-
-      const client = StoryClient.newClient({
-        account,
-        transport: http(rpcUrl),
-        chainId: network === "story" ? "mainnet" : "aeneid",
-      } as Parameters<typeof StoryClient.newClient>[0]);
-
-      const response = await (client.ipAsset as {
-        registerDerivativeWithLicenseTokens: (params: {
-          childIpId: `0x${string}`;
-          licenseTokenIds: bigint[];
-          txOptions?: { waitForTransaction: boolean };
-        }) => Promise<{ txHash: `0x${string}` }>;
-      }).registerDerivativeWithLicenseTokens({
-        childIpId: deterministicHex(
-          `childIp:${evidence.jobId}:${evidence.evidenceBundleHash}`,
-          "0x",
-        ) as `0x${string}`,
-        licenseTokenIds: [1n],
-        txOptions: { waitForTransaction: true },
-      });
-
-      const licenseTokenId = String(
-        parseInt(deterministicHex(`licToken:${evidence.jobId}`, "", 8), 16),
-      );
-      const childIpId = deterministicHex(
-        `childIp:${evidence.jobId}:${evidence.evidenceBundleHash}`,
-        "0x",
-      );
-
-      const link: StoryDerivativeLink = {
-        parentIpId,
-        childIpId,
-        licenseTokenId,
-        jobId: evidence.jobId,
-        evidenceBundleHash: evidence.evidenceBundleHash,
-        txHash: response.txHash,
-        linkedAt: new Date().toISOString(),
-      };
-
-      const existing = this.mockDerivatives.get(parentIpId) ?? [];
-      existing.push(link);
-      this.mockDerivatives.set(parentIpId, existing);
-
-      return link;
-    } catch (err) {
-      throw new Error(
-        `Story derivative registration failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    // Real mode. The call below registers a child IP id derived from a hash of the job id (never
+    // registered as an IP) with a hard-coded license token id 1, and returns a made-up licenseTokenId.
+    throw new StoryNotExecutedError(
+      "registerJobAsDerivative",
+      "the child IP id and license token it would use are fabricated, not registered",
+    );
   }
 
   // ── Royalty Distribution ─────────────────────────────────────────────────
@@ -350,19 +236,16 @@ export class StoryIPService {
   async distributeRoyaltyTokens(
     ipId: string,
     splits: StoryRoyaltySplit["splits"],
-  ): Promise<{ txHash: string; distributed: number }> {
+  ): Promise<{ txHash: string; distributed: number; simulated: boolean }> {
     if (this.mock) {
       const txHash = deterministicHex(`splitTx:${ipId}`, "0x", 64);
       const distributed = splits.reduce((s, item) => s + item.percentage, 0);
       this.mockSplits.set(ipId, splits);
-      return { txHash, distributed };
+      return { txHash, distributed, simulated: true };
     }
 
-    // Real mode — transfer Royalty Tokens via ipAccount.execute()
-    const txHash = deterministicHex(`splitTx:${ipId}:real`, "0x", 64);
-    const distributed = splits.reduce((s, item) => s + item.percentage, 0);
-    this.mockSplits.set(ipId, splits);
-    return { txHash, distributed };
+    // Real mode: transferring Royalty Tokens (ipAccount.execute) is not implemented.
+    throw new StoryNotExecutedError("distributeRoyaltyTokens", "Royalty Token transfer is not implemented");
   }
 
   /**
@@ -373,7 +256,7 @@ export class StoryIPService {
     ipId: string,
     amount: string,
     payerAddress: string,
-  ): Promise<{ txHash: string }> {
+  ): Promise<{ txHash: string; simulated: boolean }> {
     if (this.mock) {
       const txHash = deterministicHex(
         `payTx:${ipId}:${amount}:${payerAddress}`,
@@ -384,16 +267,11 @@ export class StoryIPService {
       const existing = BigInt(this.mockRevenue.get(ipId) ?? "0");
       const amountBig = BigInt(amount);
       this.mockRevenue.set(ipId, String(existing + amountBig));
-      return { txHash };
+      return { txHash, simulated: true };
     }
 
-    // Real mode — client.royalty.payRoyaltyOnBehalf()
-    const txHash = deterministicHex(
-      `payTx:${ipId}:${amount}:${payerAddress}:real`,
-      "0x",
-      64,
-    );
-    return { txHash };
+    // Real mode: client.royalty.payRoyaltyOnBehalf() is not implemented.
+    throw new StoryNotExecutedError("payJobRoyalty", "paying a royalty on behalf of a job is not implemented");
   }
 
   /**
@@ -402,7 +280,7 @@ export class StoryIPService {
   async claimRevenue(
     ipId: string,
     tokenIds?: string[],
-  ): Promise<{ txHash: string; claimed: string }> {
+  ): Promise<{ txHash: string; claimed: string; simulated: boolean }> {
     if (this.mock) {
       const txHash = deterministicHex(
         `claimTx:${ipId}:${tokenIds?.join(",") ?? "all"}`,
@@ -412,16 +290,11 @@ export class StoryIPService {
       const claimed = this.mockRevenue.get(ipId) ?? "0";
       // Reset vault after claim
       this.mockRevenue.set(ipId, "0");
-      return { txHash, claimed };
+      return { txHash, claimed, simulated: true };
     }
 
-    // Real mode — client.royalty.claimAllRevenue()
-    const txHash = deterministicHex(
-      `claimTx:${ipId}:real`,
-      "0x",
-      64,
-    );
-    return { txHash, claimed: "0" };
+    // Real mode: client.royalty.claimAllRevenue() is not implemented.
+    throw new StoryNotExecutedError("claimRevenue", "claiming vault revenue is not implemented");
   }
 
   /**
@@ -464,19 +337,13 @@ export class StoryIPService {
         unclaimedRevenue,
         tokenHolders,
         lastPaymentAt: new Date().toISOString(),
+        simulated: true,
       };
     }
 
-    // Real mode — would query the on-chain vault state
-    const vaultAddress = deterministicHex(`vault:${ipId}:real`, "0x");
-    return {
-      ipId,
-      vaultAddress,
-      totalRevenue: "0",
-      unclaimedRevenue: "0",
-      tokenHolders: [],
-      lastPaymentAt: new Date().toISOString(),
-    };
+    // Real mode: the on-chain vault is not read. Returning zeros from a made-up vault address would
+    // state "no revenue" as a fact.
+    throw new StoryNotExecutedError("getRevenueSnapshot", "reading the Royalty Vault is not implemented");
   }
 
   // ── Disputes ─────────────────────────────────────────────────────────────
@@ -498,6 +365,7 @@ export class StoryIPService {
         reason: evidence.reason,
         status: "pending",
         createdAt: new Date().toISOString(),
+        simulated: true,
       };
 
       const existing = this.mockDisputes.get(ipId) ?? [];
@@ -507,23 +375,8 @@ export class StoryIPService {
       return dispute;
     }
 
-    // Real mode — client.dispute.raiseDispute()
-    const disputeId = deterministicId(`dispute:${ipId}:${evidence.hash}:real`);
-    const dispute: StoryDispute = {
-      disputeId,
-      ipId,
-      initiator: deterministicHex(`initiator:${ipId}:real`, "0x"),
-      evidenceHash: evidence.hash,
-      reason: evidence.reason,
-      status: "pending",
-      createdAt: new Date().toISOString(),
-    };
-
-    const existing = this.mockDisputes.get(ipId) ?? [];
-    existing.push(dispute);
-    this.mockDisputes.set(ipId, existing);
-
-    return dispute;
+    // Real mode: client.dispute.raiseDispute() is not implemented.
+    throw new StoryNotExecutedError("raiseDispute", "raising a Story dispute is not implemented");
   }
 
   // ── Queries ──────────────────────────────────────────────────────────────
@@ -535,6 +388,8 @@ export class StoryIPService {
   async getIPRegistration(
     capabilityId: string,
   ): Promise<StoryIPRegistration | null> {
+    // Real mode: this in-process map is not chain state, so "null" would falsely mean "not registered".
+    if (!this.mock) throw new StoryNotExecutedError("getIPRegistration", "reading Story IP registrations is not implemented");
     return this.mockRegistrations.get(capabilityId) ?? null;
   }
 
@@ -542,6 +397,7 @@ export class StoryIPService {
    * Get all derivative IP Assets (jobs) of a given IP Asset.
    */
   async getDerivatives(ipId: string): Promise<StoryDerivativeLink[]> {
+    if (!this.mock) throw new StoryNotExecutedError("getDerivatives", "reading Story derivative links is not implemented");
     return this.mockDerivatives.get(ipId) ?? [];
   }
 
@@ -554,6 +410,7 @@ export class StoryIPService {
   async getLineage(
     ipId: string,
   ): Promise<{ ancestors: string[]; descendants: string[] }> {
+    if (!this.mock) throw new StoryNotExecutedError("getLineage", "reading the Story IP graph is not implemented");
     const ancestors: string[] = [];
     const descendants: string[] = [];
 

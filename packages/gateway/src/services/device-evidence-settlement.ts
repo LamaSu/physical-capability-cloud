@@ -563,7 +563,9 @@ export interface PinnedEvidenceRow {
  * (review R1 on LO-EV-9):
  *  - the pinned row must exist and belong to this job and its kernel;
  *  - a device anchor must pass the same subject binding + registered-signer
- *    signature check /complete ran;
+ *    signature check /complete ran, for the same job-and-kernel subject. That
+ *    subject names no settlement unit, so a row whose events commit one was
+ *    never settleable here (E11 F1);
  *  - a gateway anchor's bundleHash must recompute from its stored envelope, the
  *    exact bytes GET /api/evidence/:hash serves.
  */
@@ -587,6 +589,8 @@ export async function verifyPinnedSettlementEvidence(input: {
         assuranceTier: row.assuranceTier,
         ...(row.sessionKeyAuthorization ? { sessionKeyAuthorization: row.sessionKeyAuthorization } : {}),
         events: input.events,
+        // The subject /complete used: no settlement unit or challenge, so a pinned row whose
+        // events commit either is refused here too (E11 F1).
         subject: { jobId: input.jobId, kernelId: input.kernelId },
       },
       {

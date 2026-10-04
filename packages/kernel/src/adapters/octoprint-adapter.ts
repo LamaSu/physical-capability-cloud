@@ -13,6 +13,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface OctoPrintConfig {
   /** Printer URL (e.g., "http://192.168.1.50:5000") */
@@ -26,6 +27,9 @@ export interface OctoPrintConfig {
   /** Use mock mode (no real HTTP calls) */
   mockMode?: boolean;
 }
+
+/** OctoPrint states in which a print is under way; leaving them ends it. */
+const ACTIVE_PRINT_STATES = new Set(["Printing", "Printing from SD", "Pausing", "Paused", "Resuming", "Cancelling", "Finishing"]);
 
 interface PrinterState {
   state: string; // "Operational", "Printing", "Paused", "Error", "Offline"
@@ -52,6 +56,9 @@ export class OctoPrintAdapter implements MachineAdapter {
   private lastState: PrinterState | null = null;
   private mockProgress = 0;
   private mockStatus: MachineStatus = "idle";
+  /** The poll loop, each poll in flight and each real command in flight: what can still emit. */
+  private readonly work = new OutstandingWork();
+  private endPolling: (() => void) | null = null;
 
   constructor(id: string, config: OctoPrintConfig) {
     this.id = id;
@@ -90,7 +97,10 @@ export class OctoPrintAdapter implements MachineAdapter {
 
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
     if (this.config.mockMode) return this.executeMock(command);
+    return this.work.track(this.executeReal(command));
+  }
 
+  private async executeReal(command: MachineCommand): Promise<MachineCommandResult> {
     try {
       switch (command.type) {
         case "load_gcode": {
@@ -168,6 +178,18 @@ export class OctoPrintAdapter implements MachineAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once the poll loop has reported how the print ended (execution_completed or
+   * execution_failed) and stopped, or was stopped by "stop" or dispose(), and once no poll or
+   * command is in flight; at once when none is. In real mode the completion comes only from
+   * the loop, up to one poll interval after the printer finished. A print the loop never sees
+   * end (it is never polled while active, or the API stays unreachable) keeps this pending:
+   * the runner then keeps the device from the next job.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     this.stopPolling();
     this.listeners = [];
@@ -226,15 +248,20 @@ export class OctoPrintAdapter implements MachineAdapter {
     this.stopPolling();
     const interval = this.config.pollIntervalMs ?? 2000;
 
-    this.pollTimer = setInterval(async () => {
-      try {
-        const state = await this.fetchPrinterState();
-        this.handleStateChange(state);
-        this.lastState = state;
-      } catch {
-        // Silently handle poll failures
-      }
+    this.endPolling = this.work.begin();
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.poll());
     }, interval);
+  }
+
+  private async poll(): Promise<void> {
+    try {
+      const state = await this.fetchPrinterState();
+      this.handleStateChange(state);
+      this.lastState = state;
+    } catch {
+      // Silently handle poll failures
+    }
   }
 
   private stopPolling(): void {
@@ -242,6 +269,8 @@ export class OctoPrintAdapter implements MachineAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   private handleStateChange(state: PrinterState): void {
@@ -261,18 +290,30 @@ export class OctoPrintAdapter implements MachineAdapter {
       });
     }
 
-    // Detect completion
-    if (prev && prev.state === "Printing" && state.state === "Operational" && prev.progress > 95) {
-      this.emit({
-        type: "execution_completed",
-        timestamp: new Date().toISOString(),
-        source: this.source,
-        payload: {
-          jobName: prev.job.name,
-          finalBedTemp: state.temperatures.bed.actual,
-          finalNozzleTemp: state.temperatures.tool0.actual,
-        },
-      });
+    // Detect the end of the print: the printer has left every active state.
+    if (prev && ACTIVE_PRINT_STATES.has(prev.state) && !ACTIVE_PRINT_STATES.has(state.state)) {
+      const completed =
+        state.state === "Operational" && (state.progress >= 100 || (prev.state === "Printing" && prev.progress > 95));
+      if (completed) {
+        this.emit({
+          type: "execution_completed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: {
+            jobName: prev.job.name,
+            finalBedTemp: state.temperatures.bed.actual,
+            finalNozzleTemp: state.temperatures.tool0.actual,
+          },
+        });
+      } else {
+        // Cancelled, errored or disconnected mid-print: the loop reports it, then stops.
+        this.emit({
+          type: "execution_failed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { jobName: prev.job.name, state: state.state, progress: state.progress },
+        });
+      }
       this.stopPolling();
     }
   }
