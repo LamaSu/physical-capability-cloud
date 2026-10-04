@@ -4,6 +4,8 @@ import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
+import { writeAuditHook } from "./services/write-audit-hook.js";
+import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook } from "./services/telemetry-privacy.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -34,9 +36,11 @@ import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { operatorWorkRoutes } from "./routes/operator-work.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { operatorChannelsRoutes } from "./routes/operator-channels.js";
 import { operatorStatusRoutes } from "./routes/operator-status.js";
+import { capabilityAvailabilityRoutes } from "./routes/capability-availability.js";
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { composeRoutes } from "./routes/compose.js";
@@ -88,6 +92,7 @@ import { contributorRoutes } from "./routes/contributors.js";
 import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
 import { statusRoutes } from "./routes/status.js";
+import { healthRoutes } from "./routes/health.js";
 import { subnetRoutes } from "./routes/subnet.js";
 import { photoVerificationRoutes } from "./routes/photo-verification.js";
 import { humanVerificationRoutes } from "./routes/human-verification.js";
@@ -133,7 +138,7 @@ import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
-import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
+import { corsDelegator, irCorsReadProjection, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
 import { scopeChecker } from "./middleware/scope-checker.js";
@@ -179,7 +184,9 @@ export async function createGateway(port = 3200) {
   initKernelService();
 
   const app = Fastify({
-    logger: true,
+    // Default pino logger, with a request serializer that never logs the public
+    // telemetry sink's raw URL, IP or host details (#458 round 3).
+    logger: GATEWAY_LOGGER_OPTIONS,
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
@@ -281,14 +288,13 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin)
-  await app.register(cors, {
-    origin: corsOriginValidator,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
-    maxAge: 86400, // Cache preflight for 24h
-  });
+  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
+  // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
+  // GET access to the closed IR's public read routes for the governed GenUI view (row 37).
+  await app.register(cors, { delegator: corsDelegator });
+  // ...and such a wildcard response is the server-side IR projection, never the raw body
+  // (astra #562 r1 F1). This is a ROOT hook, so it wraps every route registered below.
+  app.addHook("onSend", irCorsReadProjection);
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
@@ -382,37 +388,13 @@ export async function createGateway(port = 3200) {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
 
-  // Automatic write-operation audit hook — logs all POST/PUT/DELETE requests
-  // to the audit log so every state-changing call is captured without
-  // per-route boilerplate. Individual routes may also log richer events.
-  app.addHook("onResponse", async (request, reply) => {
-    const method = request.method;
-    if (method !== "POST" && method !== "PUT" && method !== "DELETE" && method !== "PATCH") return;
-
-    const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
-      request.headers.authorization ? "authenticated" : "anonymous"
-    );
-
-    try {
-      const { auditService: audit } = await import("./services/audit-service.js");
-      audit.log({
-        eventType: "http.write",
-        actor,
-        resourceType: "http",
-        action: method.toLowerCase(),
-        metadata: {
-          method,
-          url: request.url,
-          statusCode: reply.statusCode,
-          duration_ms: Math.round(reply.elapsedTime ?? 0),
-        },
-        ip: request.ip,
-        userAgent: request.headers["user-agent"],
-      });
-    } catch {
-      // Audit failures must never affect request handling
-    }
-  });
+  // Automatic write-operation audit hook (services/write-audit-hook.ts) — logs all
+  // POST/PUT/PATCH/DELETE requests to the audit log. The public telemetry sink's
+  // audit rows omit the caller's IP and User-Agent (#458 round 1).
+  app.addHook("onResponse", writeAuditHook);
+  // An unrouted lookalike of the public telemetry sink gets a fixed 404 before the
+  // default not-found handler can log its raw URL (#458 round 3).
+  app.addHook("onRequest", telemetryLookalikeHook);
 
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);
@@ -476,23 +458,8 @@ export async function createGateway(port = 3200) {
   // from it.
   await app.register(agentIntrospectionRoutes);
 
-  // Health check
-  app.get("/api/health", async () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "0.1.0",
-  }));
-
-  // Bare /health alias — monitors and curl-based healthchecks commonly hit
-  // /health directly (not /api/health). Without this, SERVE_DASHBOARD=true's
-  // SPA fallback (setNotFoundHandler below) would catch bare /health and
-  // return index.html — a false-positive 200 for anything watching for a
-  // real healthcheck. Same payload as /api/health.
-  app.get("/health", async () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "0.1.0",
-  }));
+  // Health check: GET /api/health + bare /health alias (routes/health.ts)
+  await app.register(healthRoutes);
 
   // Security monitor — attack detection, honeypots, rate tracking, fingerprinting
   // Must be registered early so the onRequest hook fires before route handlers
@@ -690,9 +657,12 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(operatorWorkRoutes);
   await app.register(operatorsPublicRoutes);
   await app.register(operatorChannelsRoutes);
   await app.register(operatorStatusRoutes);
+  // N83 (rehearsal R0 G11): the owner sets a capability's availability.
+  await app.register(capabilityAvailabilityRoutes);
   await app.register(captureRoutes);
   await app.register(skillsRoutes);
   // On-Ramp UI artifact registry — POST/GET/PUT/DELETE /api/artifacts + the
@@ -921,7 +891,7 @@ export async function createGateway(port = 3200) {
           schema: "pcc-agent-view/1.0",
           name: "Physical Capability Cloud",
           description:
-            "A decentralized control plane for discovering, contracting, running, and verifying physical manufacturing and laboratory capabilities.",
+            "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.",
           apiBase: "https://capability.network",
           auth: {
             method: "api-key",

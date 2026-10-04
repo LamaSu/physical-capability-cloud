@@ -14,6 +14,7 @@ import { ot2RelayRoutes } from "../routes/ot2-relay.js";
 import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -73,6 +74,8 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app); // job reads are object-authorized (F3)
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
   await app.register(ot2RelayRoutes);
@@ -443,7 +446,7 @@ describe("Paid Job Flow", () => {
       expect(body.session).toBeDefined();
     });
 
-    it("returns settled status after job completion", async () => {
+    it("NEGATIVE: a mock-settled job reads simulated, never settled or paid (readmodels F1)", async () => {
       // Create and complete
       const createRes = await app.inject({
         method: "POST",
@@ -470,7 +473,12 @@ describe("Paid Job Flow", () => {
       expect(res.statusCode).toBe(200);
       const body = res.json();
 
-      expect(body.status).toBe("settled");
+      // MOCK_SETTLEMENT writes a mock-escrow- record and marks it released: no real money
+      // exists for this job, so it is simulated, whatever the job row says.
+      expect(body.status).toBe("simulated");
+      expect(body.settled).toBe(false);
+      expect(body.paidAmount).toBeNull();
+      expect(body.simulated).toBe(true);
       expect(body.evidenceHash).toBeDefined();
       expect(body.evidenceBundleId).toBeDefined();
     });
@@ -619,7 +627,10 @@ describe("Paid Job Flow", () => {
 
       expect(settlementRes.statusCode).toBe(200);
       const settlement = settlementRes.json();
-      expect(settlement.status).toBe("settled");
+      // Mock settlement: the mock-escrow record says released, but no real money exists.
+      expect(settlement.status).toBe("simulated");
+      expect(settlement.settled).toBe(false);
+      expect(settlement.paidAmount).toBeNull();
       expect(settlement.evidenceHash).toBeDefined();
       expect(settlement.milestones.length).toBeGreaterThan(0);
       expect(settlement.milestones[0].status).toBe("released");

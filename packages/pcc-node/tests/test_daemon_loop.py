@@ -155,176 +155,53 @@ class TestIsRunning:
 # ---------------------------------------------------------------------------
 
 class TestRunDaemonLoop:
-    """Tests the full run_daemon function with all external calls mocked.
+    """run_daemon with every external call mocked, for exactly one loop pass.
 
-    We test the daemon logic directly rather than running the full loop,
-    because sending SIGINT from a timer thread is unreliable on Windows.
-    Instead we patch the inner ``while running`` loop to execute exactly once.
+    The loop's interruptible sleep calls time.sleep, and the harness makes it
+    raise KeyboardInterrupt, which ends the run after the first pass. The
+    daemon takes no jobs and announces no capabilities (verdict 68c,
+    finding 3): these tests replace ones that asserted it polled, executed,
+    marked jobs seen and announced.
     """
 
-    def test_daemon_executes_jobs_from_poll(self):
-        """Daemon polls for jobs and calls executor.execute() for each one."""
-        from pcc_node import daemon as daemon_module
-
-        jobs_executed = []
-
-        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
-             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
-             mock.patch.object(daemon_module, "register_kernel", return_value={}), \
-             mock.patch.object(daemon_module, "announce_capabilities"), \
-             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
-             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
-             mock.patch("pcc_node.daemon.JobExecutor") as MockExecutor, \
-             mock.patch("pcc_node.daemon.start_ui_server", create=True):
-
-            mock_client = mock.MagicMock()
-            MockClient.return_value = mock_client
-            mock_client.send_heartbeat.return_value = True
-            mock_client.announce_capabilities.return_value = True
-            mock_client.mark_job_seen = mock.MagicMock()
-
-            # Return one job on first poll, then stop the loop
-            poll_count = {"n": 0}
-            def fake_poll():
-                poll_count["n"] += 1
-                if poll_count["n"] == 1:
-                    return [{"id": "j-test", "capabilityType": "document-printing"}]
-                # Signal stop after first cycle by raising KeyboardInterrupt
-                raise KeyboardInterrupt("test done")
-            mock_client.poll_for_jobs.side_effect = fake_poll
-
-            mock_executor = mock.MagicMock()
-            MockExecutor.return_value = mock_executor
-            mock_executor.execute.side_effect = lambda job: jobs_executed.append(job["id"]) or {}
-
-            config = NodeConfig(
-                kernel_id="k-test",
-                kernel_name="test-node",
-                pcc_base="http://pcc-test",
-                pcc_api_key="test-key",
-                poll_interval=0,
-                devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}],
-            )
-
-            try:
-                daemon_module.run_daemon(config)
-            except (KeyboardInterrupt, SystemExit):
-                pass
-
-        assert "j-test" in jobs_executed
-        mock_client.send_heartbeat.assert_called()
-
-    def test_daemon_marks_jobs_seen_before_execution(self):
-        """Jobs must be marked seen BEFORE execution to prevent duplicate runs."""
-        from pcc_node import daemon as daemon_module
-
-        mark_seen_calls = []
-        execute_calls = []
-
-        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
-             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
-             mock.patch.object(daemon_module, "register_kernel", return_value={}), \
-             mock.patch.object(daemon_module, "announce_capabilities"), \
-             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
-             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
-             mock.patch("pcc_node.daemon.JobExecutor") as MockExecutor, \
-             mock.patch("pcc_node.daemon.start_ui_server", create=True):
-
-            mock_client = mock.MagicMock()
-            MockClient.return_value = mock_client
-            mock_client.send_heartbeat.return_value = True
-            mock_client.mark_job_seen.side_effect = lambda jid: mark_seen_calls.append(jid)
-
-            call_count = {"n": 0}
-            def fake_poll():
-                call_count["n"] += 1
-                if call_count["n"] == 1:
-                    return [{"id": "j-order", "capabilityType": "document-printing"}]
-                raise KeyboardInterrupt
-            mock_client.poll_for_jobs.side_effect = fake_poll
-
-            mock_executor = mock.MagicMock()
-            MockExecutor.return_value = mock_executor
-            mock_executor.execute.side_effect = lambda job: execute_calls.append(job["id"]) or {}
-
-            config = NodeConfig(
-                kernel_id="k-test",
-                kernel_name="test-node",
-                pcc_base="http://pcc-test",
-                pcc_api_key="test-key",
-                poll_interval=0,
-                devices=[],
-            )
-
-            try:
-                daemon_module.run_daemon(config)
-            except (KeyboardInterrupt, SystemExit):
-                pass
-
-        assert "j-order" in mark_seen_calls
-        assert "j-order" in execute_calls
-
-    def test_daemon_announces_capabilities_on_startup(self):
-        """Capabilities are announced once at startup."""
+    def _run_once(self, config):
         from pcc_node import daemon as daemon_module
 
         with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
              mock.patch.object(daemon_module, "discover_network", return_value=[]), \
-             mock.patch.object(daemon_module, "register_kernel", return_value={}), \
-             mock.patch.object(daemon_module, "announce_capabilities") as mock_announce, \
+             mock.patch.object(daemon_module, "register_kernel", return_value={}) as mock_register, \
+             mock.patch("pcc_node.register.announce_capabilities") as mock_announce, \
              mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
              mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
-             mock.patch("pcc_node.daemon.JobExecutor"), \
-             mock.patch("pcc_node.daemon.start_ui_server", create=True):
-
-            mock_client = mock.MagicMock()
-            MockClient.return_value = mock_client
-            mock_client.poll_for_jobs.side_effect = KeyboardInterrupt
-
-            config = NodeConfig(
-                kernel_id="k-test3",
-                pcc_base="http://pcc-test",
-                pcc_api_key="key",
-                poll_interval=0,
-                devices=[{"id": "p1", "protocol": "ipp"}],
-            )
-
+             mock.patch("pcc_node.ui_server.start_ui_server"), \
+             mock.patch.object(daemon_module.time, "sleep", side_effect=KeyboardInterrupt):
+            mock_client = MockClient.return_value
+            mock_client.poll_for_jobs.return_value = [{"id": "j-test", "capabilityType": "document-printing"}]
             try:
                 daemon_module.run_daemon(config)
             except (KeyboardInterrupt, SystemExit):
                 pass
+        return mock_client, mock_register, mock_announce
 
-        # announce_capabilities called during startup (before poll loop)
-        mock_announce.assert_called_once()
+    def _config(self, **overrides):
+        values = dict(kernel_id="k-test", kernel_name="test-node", pcc_base="http://pcc-test",
+                      pcc_api_key="key", poll_interval=1,
+                      devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}])
+        values.update(overrides)
+        return NodeConfig(**values)
+
+    def test_the_daemon_keeps_the_kernel_online_without_taking_jobs(self):
+        client, _, _ = self._run_once(self._config())
+        client.send_heartbeat.assert_any_call("online", accepting_jobs=False)
+        client.poll_for_jobs.assert_not_called()
+        client.mark_job_seen.assert_not_called()
+
+    def test_the_daemon_announces_no_capabilities(self):
+        client, _, announce = self._run_once(self._config())
+        announce.assert_not_called()
+        client.announce_capabilities.assert_not_called()
 
     def test_daemon_registers_kernel_on_startup(self):
-        """Kernel is registered with the gateway on startup."""
-        from pcc_node import daemon as daemon_module
-
-        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
-             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
-             mock.patch.object(daemon_module, "register_kernel") as mock_register, \
-             mock.patch.object(daemon_module, "announce_capabilities"), \
-             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
-             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
-             mock.patch("pcc_node.daemon.JobExecutor"), \
-             mock.patch("pcc_node.daemon.start_ui_server", create=True):
-
-            mock_client = mock.MagicMock()
-            MockClient.return_value = mock_client
-            mock_client.poll_for_jobs.side_effect = KeyboardInterrupt
-
-            config = NodeConfig(
-                kernel_id="k-reg",
-                pcc_base="http://pcc-test",
-                pcc_api_key="key",
-                poll_interval=0,
-                devices=[],
-            )
-
-            try:
-                daemon_module.run_daemon(config)
-            except (KeyboardInterrupt, SystemExit):
-                pass
-
-        mock_register.assert_called_once_with("http://pcc-test", "key", config)
+        config = self._config(kernel_id="k-reg", devices=[])
+        _, register, _ = self._run_once(config)
+        register.assert_called_once_with("http://pcc-test", "key", config)
