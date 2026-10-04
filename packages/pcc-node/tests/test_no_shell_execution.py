@@ -36,15 +36,42 @@ computed argv and ``/usr/bin/env sh``). The rules:
 6. A module is never reached through another module's attribute
    (``subprocess.os``), and an attribute chain goes past a tracked module's
    first attribute only through the few the package uses (``SAFE_CHAINS``:
-   ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f).
-7. A tracked module is imported whole, by its own name (``import X`` or
-   ``import X as Y``), and only its starters are imported by name
-   (``from subprocess import run``). A dotted import (``import
-   asyncio.subprocess``, ``import os.path``), a ``from`` import of a
-   submodule (``from asyncio.subprocess import create_subprocess_shell``)
-   and any other ``from`` import (``from os import path``, ``from subprocess
-   import os``) are refused: each binds a module or a function under a name
-   the guard does not resolve (#563 r1, HIGH).
+   ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f). That holds
+   however the path is named: ``from subprocess import os``, ``import os.path
+   as p`` and ``from os.path import os`` resolve to the same paths, and no
+   path passes a dunder. A chain's head, or anything past it, is never bound
+   to a name or passed as a value, where its attributes would escape these
+   rules (``path = os.path``) (verdict 105e).
+7. Nothing reaches a tracked module, an object's internals or a frame
+   through any other object (verdict 105f). On any object, no attribute is
+   named like a module the guard tracks (``pathlib.os``; ``.code`` stays
+   usable, since HTTP errors carry it), no dunder is used but the plain few in
+   ``ALLOWED_DUNDERS`` (``pathlib.__dict__``, ``().__class__``), and no frame
+   or traceback attribute (``f_globals``, ``tb_frame``). ``getattr`` and
+   ``hasattr`` take only a constant name, which those same rules judge, and
+   are never passed as values. No import names a module through another
+   module (``from pathlib import os``) or a dunder outside the allowlist
+   (``from os import __dict__``), and a name is imported as one thing only
+   (an alias reused for another module in an uncalled function would
+   otherwise hide which module it is). ``inspect``, ``gc``, ``sys._getframe``,
+   ``operator.attrgetter`` and ``breakpoint()`` are refused, and so is every
+   module that turns a string into a module or a callable: ``pkgutil``,
+   ``pydoc``, ``zipimport``, ``site`` and ``logging.config``.
+
+8. The package imports only what ``ALLOWED_IMPORTS`` lists (verdict 105g):
+   the exact set of modules its sources import today, kept exact by a census
+   test, so a new module is a reviewed change (``string``, ``runpy``,
+   ``pickle`` and every other module are refused). No private name
+   (``_run_code``, ``_syscmd_ver``) is reached through an imported module or
+   imported from one. A refused builtin is never passed as a value
+   (``map(eval, ...)``). ``ProcessPoolExecutor`` and ``CGIHTTPRequestHandler``
+   start processes, so they are refused by name, anywhere, as are ``click.edit``
+   and ``click.launch``. ``click`` is never passed as a value. No package
+   module re-exports a tracked module to another (``from .helper import
+   platform``, where helper.py did ``import os as platform``).
+
+The guard reads syntax. It tracks names bound by imports, flow-insensitively,
+and it is not a sandbox: rules 1 and 3 stay the first barriers.
 """
 
 import ast
@@ -71,12 +98,15 @@ REFUSED = {
     "yaml": {"load", "unsafe_load", "full_load", "load_all", "unsafe_load_all"},
     "code": {"interact", "InteractiveInterpreter", "InteractiveConsole"},
     "builtins": {"eval", "exec", "compile", "__import__"},
-    "sys": {"modules"},
+    "sys": {"modules", "_getframe", "_current_frames"},
+    "operator": {"attrgetter", "methodcaller"},
+    "logging": {"config"},  # dictConfig/fileConfig build any callable named by a string
 }
 # Modules with no business in pcc-node: each can run code or start processes.
 REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "nt", "_posixsubprocess",
-                   "commands", "codeop", "shelve", "builtins"}
-REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__"}
+                   "commands", "codeop", "shelve", "builtins", "inspect", "gc",
+                   "pkgutil", "pydoc", "zipimport", "site"}
+REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__", "breakpoint"}
 # The executables pcc-node runs, by bare name (test_the_allowlist_is_what_the_package_runs keeps
 # this list exactly that). A path, or any other executable, is refused.
 EXECUTABLES = {"arp", "dd", "ffmpeg", "journalctl", "sysctl", "v4l2-ctl"}
@@ -87,6 +117,39 @@ MODULE_NAMES = MODULES | REFUSED_IMPORTS
 # keeps this list exactly what the package uses).
 SAFE_CHAINS = {("os", "path"), ("os", "environ"), ("sys", "stdin")}
 LOOKUPS = {"getattr", "hasattr"}
+# Rule 7: the dunders any object may use, the frame attributes none may, and the module names no
+# attribute may carry (.code stays usable: HTTP errors carry it).
+ALLOWED_DUNDERS = {"__name__", "__qualname__", "__doc__", "__init__", "__dataclass_fields__", "__version__"}
+# Rule 8: every module the package imports, exactly (test_the_package_imports_only_what_it_lists keeps this
+# list exactly that). A new import is a reviewed change to it.
+ALLOWED_IMPORTS = {
+    "ast", "base64", "click", "concurrent.futures", "cryptography.hazmat.primitives.ciphers.aead", "csv",
+    "dataclasses", "datetime", "errno", "glob", "hashlib", "hmac", "html", "http.server", "httpx", "ipaddress",
+    "json", "logging", "logging.handlers", "nacl.encoding", "nacl.signing", "os", "pathlib", "platform", "re",
+    "secrets", "shutil", "signal", "socket", "ssl", "stat", "subprocess", "sys", "threading", "time", "typing",
+    "urllib.error", "urllib.parse", "urllib.request", "zeroconf",
+}
+# Names that start processes, refused anywhere (as an attribute of any object, or imported from any module).
+REFUSED_ANYWHERE = {"ProcessPoolExecutor", "CGIHTTPRequestHandler"}
+# click's helpers that start an editor or an opener process.
+CLICK_REFUSED = {"edit", "launch"}
+FRAME_ATTRS = {"f_globals", "f_locals", "f_builtins", "f_back", "f_code", "tb_frame", "tb_next",
+               "gi_frame", "gi_code", "cr_frame", "cr_code", "ag_frame", "ag_code"}
+# Deliberately over-broad (verdict 105g): every attribute of any object is checked against these
+# names, so an ordinary field such as job.operator or device.site is refused too. Rename the field
+# rather than shrink this set.
+REACH_NAMES = MODULE_NAMES - {"code"}
+
+
+def _reaches(name):
+    """Why an attribute or lookup of this name, on any object, breaks rule 7, or None."""
+    if name in REACH_NAMES:
+        return "names a module the guard tracks"
+    if name.startswith("__") and name not in ALLOWED_DUNDERS:
+        return "is a dunder"
+    if name in FRAME_ATTRS:
+        return "is a frame attribute"
+    return None
 # Calls that rebind names behind the syntax tree's back.
 REBINDERS = {"globals", "locals", "vars", "setattr", "delattr"}
 _MATCH_BINDINGS = tuple(getattr(ast, n) for n in ("MatchAs", "MatchStar") if hasattr(ast, n))
@@ -119,38 +182,99 @@ def _root(name):
     return name.split(".")[0]
 
 
+def _tracked(tree):
+    """The names a module binds to tracked modules or to paths into them, and the imports that break a rule.
+
+    Returns (modules, names, prefixed, refusals):
+    - modules: local name -> module, for `import subprocess as sp` and `import os.path` (which binds os);
+    - names: local name -> (module, attr), for `from os import system as s`;
+    - prefixed: local name -> (module, [attr, ...]), for `import os.path as p` and `from os.path import join`;
+    - refusals: (node, reason) for each import that breaks a rule.
+    """
+    modules, names, prefixed, refusals = {}, {}, {}, []
+    imported = {}  # local name -> {what it was imported as}, every scope (rule 7)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                imported.setdefault(alias.asname or parts[0], set()).add(alias.name if alias.asname else parts[0])
+                if parts[0] in REFUSED_IMPORTS:
+                    refusals.append((node, f"import {alias.name}"))
+                if any(part in MODULE_NAMES for part in parts[1:]):
+                    refusals.append((node, f"import {alias.name} reaches another module"))
+                if parts[0] not in MODULES:
+                    continue
+                if len(parts) > 1 and parts[1] in REFUSED.get(parts[0], ()):
+                    refusals.append((node, f"import {alias.name}"))
+                if alias.asname is None:
+                    modules[parts[0]] = parts[0]  # `import os.path` binds os itself
+                elif len(parts) == 1:
+                    modules[alias.asname] = parts[0]
+                else:
+                    prefixed[alias.asname] = (parts[0], parts[1:])
+        elif isinstance(node, ast.ImportFrom):
+            source = "." * node.level + (node.module or "")
+            for alias in node.names:
+                imported.setdefault(alias.asname or alias.name, set()).add(f"{source}:{alias.name}")
+                if alias.name in REFUSED_ANYWHERE or (node.module == "click" and alias.name in CLICK_REFUSED):
+                    refusals.append((node, f"from {source} import {alias.name} starts a process"))
+                if node.level == 0 and alias.name.startswith("_") and not alias.name.startswith("__"):
+                    refusals.append((node, f"from {source} import {alias.name}: a private name"))
+                if alias.name in MODULE_NAMES:
+                    refusals.append((node, f"from {source} import {alias.name} reaches a module through another"))
+                elif alias.name.startswith("__") and alias.name not in ALLOWED_DUNDERS:
+                    refusals.append((node, f"from {source} import {alias.name}"))
+            if not node.module:
+                continue
+            parts = node.module.split(".")
+            if parts[0] in REFUSED_IMPORTS:
+                refusals.append((node, f"from {node.module} import ..."))
+            if parts[0] not in MODULES:
+                continue
+            if len(parts) > 1 and parts[1] in REFUSED.get(parts[0], ()):
+                refusals.append((node, f"from {node.module} import ..."))
+            for alias in node.names:
+                if alias.name == "*":
+                    refusals.append((node, f"from {node.module} import *"))
+                    continue
+                local = alias.asname or alias.name
+                if len(parts) == 1:
+                    names[local] = (node.module, alias.name)
+                    if alias.name in REFUSED.get(node.module, ()):
+                        refusals.append((node, f"from {node.module} import {alias.name}"))
+                else:
+                    prefixed[local] = (parts[0], [*parts[1:], alias.name])
+                if any(part in MODULE_NAMES for part in parts[1:]):
+                    refusals.append((node, f"from {node.module} import {alias.name} reaches another module"))
+    tracked_locals = set(modules) | set(names) | set(prefixed)
+    for local, sources in imported.items():
+        if local in tracked_locals and len(sources) > 1:
+            refusals.append((tree, f"{local} is imported as more than one thing ({', '.join(sorted(sources))})"))
+    return modules, names, prefixed, refusals
+
+
 def violations(source, filename="<src>"):
     """Every rule the source breaks, as "line: reason" strings."""
     tree = ast.parse(source, filename)
-    modules = {}  # local name -> module, for `import subprocess as sp`
-    names = {}    # local name -> (module, attr), for `from os import system as s`
+    modules, names, prefixed, refusals = _tracked(tree)
     found = []
 
     def bad(node, why):
         found.append(f"{getattr(node, 'lineno', 0)}: {why}")
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if _root(alias.name) in REFUSED_IMPORTS:
-                    bad(node, f"import {alias.name}")
-                if alias.name in MODULES:
-                    modules[alias.asname or alias.name] = alias.name
-                elif _root(alias.name) in MODULES:
-                    bad(node, f"import {alias.name}: a tracked module is imported whole, by its own name")
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            if _root(node.module) in REFUSED_IMPORTS:
-                bad(node, f"from {node.module} import ...")
-            if node.module in MODULES:
-                for alias in node.names:
-                    names[alias.asname or alias.name] = (node.module, alias.name)
-                    if alias.name == "*" or alias.name in REFUSED.get(node.module, ()):
-                        bad(node, f"from {node.module} import {alias.name}")
-                    elif (node.module, alias.name) not in ALLOWED_STARTS:
-                        bad(node, f"from {node.module} import {alias.name}: only a starter is imported by name")
-            elif _root(node.module) in MODULES:
-                bad(node, f"from {node.module} import ...: a tracked module's submodule")
+    for node, why in refusals:
+        bad(node, why)
 
+    # Names bound by any import (rule 8), and the ones bound to click.
+    import_bound, click_names = set(), set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for alias in n.names:
+                import_bound.add(alias.asname or alias.name.split(".")[0])
+                if alias.name == "click":
+                    click_names.add(alias.asname or "click")
+        elif isinstance(n, ast.ImportFrom) and n.level == 0:
+            import_bound.update(alias.asname or alias.name for alias in n.names)
     # Names used as the object of an attribute access (os in os.path.join), and called expressions.
     attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
     call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
@@ -185,9 +309,43 @@ def violations(source, filename="<src>"):
                     bad(node, f"{module}.{attr} through getattr")
             elif node.id == "__builtins__":
                 bad(node, "__builtins__")
+            elif (node.id in names or node.id in prefixed) and id(node) not in attribute_bases \
+                    and id(node) not in call_funcs:
+                # An imported chain head (from os import path) passed on as a value (verdict 105e).
+                module, attrs = (names[node.id][0], [names[node.id][1]]) if node.id in names else prefixed[node.id]
+                if len(attrs) >= 2 or (module, attrs[0]) in SAFE_CHAINS:
+                    bad(node, f"{'.'.join([module, *attrs])} used as a value")
         # Rebinding getattr/hasattr on another object (a module, from outside it).
         if isinstance(node, ast.Attribute) and node.attr in LOOKUPS and isinstance(node.ctx, (ast.Store, ast.Del)):
             bad(node, f"rebinds {node.attr} on another object")
+        # Rule 7, on any object: no module name, dunder or frame attribute (verdict 105f).
+        if isinstance(node, ast.Attribute):
+            why = _reaches(node.attr)
+            if why:
+                bad(node, f".{node.attr} {why}")
+            if node.attr in REFUSED_ANYWHERE:
+                bad(node, f".{node.attr} starts a process")
+            # Rule 8: no private name through an imported module (runpy._run_code, platform._syscmd_ver).
+            if (isinstance(node.value, ast.Name) and node.value.id in import_bound
+                    and node.attr.startswith("_") and not node.attr.startswith("__")):
+                bad(node, f"{node.value.id}.{node.attr}: a private name of an imported module")
+            if isinstance(node.value, ast.Name) and node.value.id in click_names and node.attr in CLICK_REFUSED:
+                bad(node, f"click.{node.attr} starts a process")
+        # Rule 8: a refused builtin passed as a value (map(eval, ...)); click passed as a value.
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and id(node) not in call_funcs:
+            if node.id in REFUSED_BUILTINS:
+                bad(node, f"{node.id} used as a value can run code from data")
+            elif node.id in click_names and id(node) not in attribute_bases:
+                bad(node, "click used as a value hides click.edit and click.launch")
+        # getattr/hasattr: a constant name only, judged like an attribute, and never passed on.
+        if isinstance(node, ast.Name) and node.id in LOOKUPS and id(node) not in call_funcs:
+            bad(node, f"{node.id} used as a value can look up anything")
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in LOOKUPS:
+            name = node.args[1] if len(node.args) >= 2 else None
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                bad(node, f"{node.func.id} with a computed name can look up anything")
+            elif _reaches(name.value):
+                bad(node, f"{node.func.id}(..., {name.value!r}): the name {_reaches(name.value)}")
         # Any reference to a refused attribute, called or not (invoke = os.system).
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in modules:
             module = modules[node.value.id]
@@ -195,18 +353,26 @@ def violations(source, filename="<src>"):
                 bad(node, f"{module}.{node.attr}")
             elif node.attr.startswith("__"):
                 bad(node, f"{module}.{node.attr}")
-        # Any attribute path from a tracked module: never to another module, and past the
-        # first attribute only through SAFE_CHAINS, one step deep.
-        path = _attribute_path(node, modules)
+        # Any attribute path from a tracked module, however its root was imported: never to
+        # another module or through a dunder, and past the first attribute only through
+        # SAFE_CHAINS, one step deep.
+        path = _attribute_path(node, modules, names, prefixed)
         if path is not None:
             module, attrs = path
             dotted = ".".join([module, *attrs])
             if attrs[-1] in MODULE_NAMES:
                 bad(node, f"{dotted} reaches another module")
+            elif any(a.startswith("__") for a in attrs):
+                bad(node, f"{dotted} reaches a dunder")
             elif len(attrs) == 2 and (module, attrs[0]) not in SAFE_CHAINS:
                 bad(node, f"{dotted} reaches past the module")
             elif len(attrs) > 2:
                 bad(node, f"{dotted} reaches too deep")
+            # A chain's head (os.path), or anything past it, bound to a name or passed as a value
+            # takes its attributes out of sight of these rules (verdict 105e: path = os.path).
+            if (id(node) not in attribute_bases and id(node) not in call_funcs
+                    and (len(attrs) >= 2 or (module, attrs[0]) in SAFE_CHAINS)):
+                bad(node, f"{dotted} used as a value")
         # An allowed starter bound to another name, or passed as a value, escapes the call checks.
         if id(node) not in call_funcs:
             ref = None
@@ -255,68 +421,125 @@ def violations(source, filename="<src>"):
     return found
 
 
-def _attribute_path(node, modules):
-    """(module, [attr, ...]) when *node* is an attribute path from a tracked module name."""
+def _attribute_path(node, modules, names=None, prefixed=None):
+    """(module, [attr, ...]) when *node* is an attribute path from a tracked name, however it was imported."""
     attrs = []
     while isinstance(node, ast.Attribute):
         attrs.append(node.attr)
         node = node.value
-    if attrs and isinstance(node, ast.Name) and node.id in modules:
-        return modules[node.id], attrs[::-1]
+    if not attrs or not isinstance(node, ast.Name):
+        return None
+    attrs.reverse()
+    if node.id in modules:
+        return modules[node.id], attrs
+    if names and node.id in names:
+        module, attr = names[node.id]
+        return module, [attr, *attrs]
+    if prefixed and node.id in prefixed:
+        module, prefix = prefixed[node.id]
+        return module, [*prefix, *attrs]
     return None
 
 
 def chains_used(source):
     """The (module, attr) pairs a source reaches past: os.path in os.path.join."""
     tree = ast.parse(source)
-    modules = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name in MODULES:
-                    modules[alias.asname or alias.name] = alias.name
+    modules, names, prefixed, _ = _tracked(tree)
     used = set()
     for node in ast.walk(tree):
-        path = _attribute_path(node, modules)
+        path = _attribute_path(node, modules, names, prefixed)
         if path is not None and len(path[1]) >= 2:
             used.add((path[0], path[1][0]))
     return used
 
 
-def executables_started(source):
-    """The fixed executables a source starts, as written.
+def _own(module):
+    """The package's own modules, imported absolutely (pcc_node.x), are not outside surface."""
+    return module == PACKAGE.name or module.startswith(PACKAGE.name + ".")
 
-    A call counts only when it resolves, through the source's imports, to an allowed starter,
-    as violations() resolves it: a local function or method that happens to be named call or
-    run is not a starter (runtime.py's call("GET", path) is an HTTP request). These are the
-    only import forms rule 7 permits, so every start the package can contain is counted; a
-    start reached any other way (from asyncio.subprocess import ...) is refused outright.
-    """
-    tree = ast.parse(source)
-    modules = {}  # local name -> module, for `import subprocess as sp`
-    names = {}    # local name -> (module, attr), for `from subprocess import run`
-    for node in ast.walk(tree):
+
+def imported_modules(source):
+    """Every absolute module a source imports from outside the package, by its full dotted name."""
+    found = set()
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name in MODULES:
-                    modules[alias.asname or alias.name] = alias.name
-        elif isinstance(node, ast.ImportFrom) and node.module in MODULES:
-            for alias in node.names:
-                names[alias.asname or alias.name] = (node.module, alias.name)
+            found.update(alias.name for alias in node.names if not _own(alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and not _own(node.module):
+            found.add(node.module)
+    return found
+
+
+def import_violations(source):
+    """Rule 8: imports of modules outside ALLOWED_IMPORTS."""
+    return [f"imports {m}, which ALLOWED_IMPORTS does not list" for m in sorted(imported_modules(source) - ALLOWED_IMPORTS)]
+
+
+def _module_names():
+    """Each package source, by its dotted module name, and whether it is a package (__init__)."""
+    out = {}
+    for path in _sources():
+        parts = list(path.relative_to(PACKAGE.parent).with_suffix("").parts)
+        is_package = parts[-1] == "__init__"
+        if is_package:
+            parts = parts[:-1]
+        out[".".join(parts)] = (path.read_text(encoding="utf-8"), is_package)
+    return out
+
+
+def _resolve(module, is_package, node):
+    """The package module an ImportFrom names, absolute or relative, or None."""
+    if node.level == 0:
+        return node.module
+    base = module.split(".") if is_package else module.split(".")[:-1]
+    base = base[: len(base) - (node.level - 1)] if node.level > 1 else base
+    return ".".join(base + ([node.module] if node.module else []))
+
+
+def reexport_violations(sources):
+    """Rule 8, across files: no module imports a name another package module binds to a tracked module.
+
+    sources: {dotted module name: (source, is_package)}.
+    """
+    exported = {}
+    for module, (source, _) in sources.items():
+        modules, names, prefixed, _refusals = _tracked(ast.parse(source))
+        exported[module] = set(modules) | set(names) | set(prefixed)
+    found = []
+    for module, (source, is_package) in sources.items():
+        tree = ast.parse(source)
+        local_modules = {}  # local name -> package module it is bound to (from . import helper)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                target = _resolve(module, is_package, node)
+                for alias in node.names:
+                    if target in exported and alias.name in exported[target]:
+                        found.append(f"{module}:{node.lineno}: imports {alias.name}, which {target} binds to a tracked module")
+                    sub = f"{target}.{alias.name}" if target else alias.name
+                    if sub in exported:
+                        local_modules[alias.asname or alias.name] = sub
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in exported and alias.asname:
+                        local_modules[alias.asname] = alias.name
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                    and node.value.id in local_modules and node.attr in exported[local_modules[node.value.id]]):
+                found.append(f"{module}:{node.lineno}: {node.value.id}.{node.attr} reaches a tracked module "
+                             f"through {local_modules[node.value.id]}")
+    return found
+
+
+def executables_started(source):
+    """The fixed executables a source starts, as written."""
     started = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in modules:
-            resolved = (modules[func.value.id], func.attr)
-        elif isinstance(func, ast.Name):
-            resolved = names.get(func.id)
-        else:
-            resolved = None
-        if resolved not in ALLOWED_STARTS:
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name not in {a for _, a in ALLOWED_STARTS}:
             continue
-        argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
+        argv = node.args[0] if node.args else None
         first = argv.elts[0] if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts else argv
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             started.add(first.value)
@@ -335,9 +558,19 @@ def test_the_package_sources_are_scanned():
 def test_no_module_starts_a_shell_or_runs_code_it_was_sent():
     hits = []
     for path in _sources():
-        for v in violations(path.read_text(encoding="utf-8"), str(path)):
+        source = path.read_text(encoding="utf-8")
+        for v in violations(source, str(path)) + import_violations(source):
             hits.append(f"{path.relative_to(PACKAGE)}:{v}")
+    hits += reexport_violations(_module_names())
     assert hits == [], "pcc-node must never start a shell or run code it was sent:\n" + "\n".join(hits)
+
+
+def test_the_package_imports_only_what_it_lists():
+    # A new import is a reviewed change to ALLOWED_IMPORTS; an unused entry is removed (verdict 105g).
+    used = set()
+    for path in _sources():
+        used |= imported_modules(path.read_text(encoding="utf-8"))
+    assert used == ALLOWED_IMPORTS
 
 
 def test_the_allowlist_is_what_the_package_runs():
@@ -446,22 +679,68 @@ EVASIONS = {
     "node -e": "import subprocess\nsubprocess.run(['node', '-e', payload])",
     "awk": "import subprocess\nsubprocess.run(['awk', payload])",
     "a path to an allowed name": "import subprocess\nsubprocess.run(['/tmp/x/arp', '-a'])",
-    # #563 r1 (HIGH): a tracked module reached through a dotted import or a from import.
-    "from asyncio.subprocess import create_subprocess_shell":
-        "from asyncio.subprocess import create_subprocess_shell\nasync def launch(payload):\n"
-        "    await create_subprocess_shell(payload)",
-    "from asyncio.subprocess import create_subprocess_exec":
-        "from asyncio.subprocess import create_subprocess_exec\ncreate_subprocess_exec(remote_exe)",
-    "import asyncio.subprocess": "import asyncio.subprocess\nasyncio.subprocess.create_subprocess_shell(x)",
-    "import asyncio.subprocess as asp": "import asyncio.subprocess as asp\nasp.create_subprocess_shell(x)",
-    "from asyncio import subprocess": "from asyncio import subprocess as asp\nasp.create_subprocess_shell(x)",
-    "import os.path binds os": "import os.path\nos.system('id')",
-    "from os import path": "from os import path\npath.os.system('id')",
-    "from os.path import os": "from os.path import os\nos.system('id')",
-    "import importlib.util binds importlib": "import importlib.util\nimportlib.import_module(name)",
-    "from importlib import util": "from importlib import util\nutil.spec_from_file_location(n, p)",
-    "from subprocess import os": "from subprocess import os\nos.system('id')",
-    "from os import sys": "from os import sys\nsys.modules['os'].system('id')",
+    # Verdict 105e (on #454): a module reached through an import, or through a name bound to a safe chain.
+    "a module imported from another": "from subprocess import os as platform\nplatform.system('id')",
+    "a safe chain bound to a name": "import os\npath = os.path\npath.os.system('id')",
+    "a submodule import binds its root": "import os.path\nos.system('id')",
+    "a submodule imported under a name": "import os.path as p\np.os.system('id')",
+    "a module from a submodule's names": "from os.path import os as o\no.system('id')",
+    "a safe chain imported by name": "from os import path\npath.os.system('id')",
+    "a safe chain imported by name, passed on": "from os import environ\nrun_with(environ)",
+    "a safe chain's head passed as a value": "import os\nrun_with(os.environ)",
+    "a value past a safe chain": "import os\ng = os.path.genericpath\ng.os.system('id')",
+    "a dunder past a safe chain": "import os\nk = os.environ.__class__\nk.__init__.__globals__['system']('id')",
+    "a starred import from a submodule": "from os.path import *\njoin('a', 'b')",
+    "a module imported from another, passed on": "from subprocess import os as platform\nrun_with(platform)",
+    "a module path from a submodule's names": "from os.path import genericpath as g\ng.os.system('id')",
+    "a dunder method past a safe chain": "import os\nos.path.__getattribute__('os').system('id')",
+    # Verdict 105f (on #503): a dunder from-imported, a tracked module through an untracked one, an alias
+    # imported as two modules, and the same routes through any object.
+    "a dunder from-imported": "from os import __dict__ as namespace\nnamespace['system']('id')",
+    "a tracked module from an untracked one": "from pathlib import os\nos.system('id')",
+    "an alias imported as two modules": "import os as platform\n\ndef unused():\n    import yaml as platform\n\nplatform.system('id')",
+    "a tracked module through an untracked module's attribute": "import shutil\nshutil.os.system('id')",
+    "a dunder on an untracked module": "import pathlib\npathlib.__dict__['os'].system('id')",
+    "the object graph from a literal": "classes = ().__class__.__base__.__subclasses__()",
+    "getattr of a module name on any object": "import pathlib\ngetattr(pathlib, 'os').system('id')",
+    "getattr with a computed name": "import pathlib\ngetattr(pathlib, name).system('id')",
+    "getattr passed as a value": "import functools, pathlib\nfunctools.reduce(getattr, ['os'], pathlib).system('id')",
+    "a frame's globals through a traceback": "import sys\nsys.exc_info()[2].tb_frame.f_globals['os'].system('id')",
+    "sys._getframe": "import sys\nsys._getframe().f_globals['os'].system('id')",
+    "import inspect": "import inspect, pathlib\ndict(inspect.getmembers(pathlib))['os'].system('id')",
+    "import gc": "import gc\nm = [o for o in gc.get_objects() if getattr(o, '__name__', '') == 'os'][0]\nm.system('id')",
+    "pkgutil.resolve_name": "import pkgutil\npkgutil.resolve_name('os').system('id')",
+    "pydoc.locate": "import pydoc\npydoc.locate('os').system('id')",
+    "import logging.config": "import logging.config\nlogging.config.dictConfig(spec)",
+    "from logging import config": "from logging import config\nconfig.dictConfig(spec)",
+    "from logging.config import dictConfig": "from logging.config import dictConfig\ndictConfig(spec)",
+    "logging.config by attribute": "import logging\nlogging.config.dictConfig(spec)",
+    "operator.attrgetter": "import operator, pathlib\noperator.attrgetter('os')(pathlib).system('id')",
+    "breakpoint()": "breakpoint()",
+    "a relative dunder import": "from . import __builtins__ as b\nb['eval'](x)",
+    "a dotted import naming a module": "import xml.os",
+    # Verdict 105g (on #505): a builtin passed on, private surfaces, and process starters by name.
+    "eval passed to map": "list(map(eval, [payload]))",
+    "exec passed as a callback": "run_later(exec, payload)",
+    "runpy._run_code": "from runpy import _run_code\n_run_code(payload, {})",
+    "a private name by attribute": "import platform\nplatform._syscmd_ver()",
+    "a private name of an untracked module": "import shutil\nshutil._copyxattr(a, b)",
+    "ProcessPoolExecutor": "import concurrent.futures\n\ndef work():\n    return 1\n\nconcurrent.futures.ProcessPoolExecutor().submit(work).result()",
+    "ProcessPoolExecutor imported": "from concurrent.futures import ProcessPoolExecutor\nProcessPoolExecutor().submit(work)",
+    "ProcessPoolExecutor through a value": "import concurrent.futures as cf\npool = cf.ProcessPoolExecutor",
+    "CGIHTTPRequestHandler": "from http.server import CGIHTTPRequestHandler\nhandler = CGIHTTPRequestHandler",
+    "click.edit": "import click\nclick.edit(text)",
+    "click.launch": "import click\nclick.launch(url)",
+    "from click import launch": "from click import launch\nlaunch(url)",
+    "click as a value": "import click\ntool = click\ntool.edit(text)",
+}
+# Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each caught by import_violations().
+IMPORT_EVASIONS = {
+    "string.Formatter": "import pathlib\nfrom string import Formatter\nFormatter().get_field('0.os.system', (pathlib,), {})[0]('id')",
+    "import string": "import string\nstring.Formatter().get_field('0.os', (pathlib,), {})",
+    "import runpy": "import runpy\nrunpy._run_code(payload, {})",
+    "import pickle": "import pickle\npickle._loads(blob)",
+    "a submodule not listed": "import concurrent.futures.process",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
@@ -476,9 +755,26 @@ SAFE = {
     "os.environ chain": "import os\nvalue = os.environ.get('X')",
     "sys.stdin chain": "import sys\ninteractive = sys.stdin.isatty()",
     "an unrelated name that contains getattr": "import os\nmy_getattr = 1\nflags = getattr(os, 'O_NOFOLLOW', 0)",
-    # Rule 7 keeps the starters' own from import: it is judged at the call.
-    "an imported starter with a fixed argv": "from subprocess import run\nrun(['arp', '-a'], capture_output=True)",
-    "an aliased module import": "import subprocess as sp\nsp.run(['dd', 'if=/dev/zero', 'count=1'])",
+    # Verdict 105e: what the stricter rule 6 still allows.
+    "a constant bound to a name": "import os\nseparator = os.sep",
+    "os.path from a submodule import": "import os.path\nfull = os.path.join('a', 'b')",
+    "a safe chain imported by name, used in place": "from os import environ\nhome = environ.get('HOME')",
+    # Verdict 105f: what rule 7 still allows (each is in the package today).
+    "an HTTP error's code": "try:\n    pass\nexcept Exception as e:\n    status = e.code",
+    "a type's name": "name = type(e).__name__",
+    "super().__init__": "class A(B):\n    def __init__(self):\n        super().__init__()",
+    "dataclass fields": "fields = cls.__dataclass_fields__",
+    "the package's own version": "from . import __version__",
+    "exc_info without frames": "import sys\nkind = sys.exc_info()[0]",
+    "a constant hasattr on an object": "supported = hasattr(info, 'server')",
+    "the same import in two scopes": "import os\n\ndef f():\n    import os\n    return os.getcwd()",
+    "a logger": "import logging\nlog = logging.getLogger('pcc-node')\nlogging.basicConfig(level=logging.INFO)",
+    "a rotating log file": "from logging.handlers import RotatingFileHandler\nhandler = RotatingFileHandler(path, maxBytes=1, backupCount=1)",
+    # Verdict 105g: what rule 8 still allows (each is in the package today).
+    "a thread pool": "import concurrent.futures\nwith concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:\n    pool.submit(work)",
+    "click's options and output": "import click\n\n@click.option('--x')\ndef f(x):\n    click.echo(x)",
+    "click's parameter source": "import click\nif source == click.core.ParameterSource.COMMANDLINE:\n    pass",
+    "a package-private helper": "from .crypto import _refuse_legacy\n_refuse_legacy(path)",
 }
 
 
@@ -487,27 +783,31 @@ def test_the_guard_catches(label):
     assert violations(EVASIONS[label]), label
 
 
+@pytest.mark.parametrize("label", sorted(IMPORT_EVASIONS))
+def test_the_import_allowlist_catches(label):
+    assert import_violations(IMPORT_EVASIONS[label]), label
+
+
+def test_the_packages_own_absolute_imports_are_allowed():
+    # pcc_node.x is the package itself, like a relative import; the operating runtime (#471) uses this form.
+    assert import_violations("from pcc_node.log_capture import canonicalize\nimport pcc_node.http_util\n") == []
+    assert import_violations("import pcc_nodes\n") != []  # only the package itself, not a lookalike
+
+
+def test_a_module_reexported_across_files_is_caught():
+    # Verdict 105g: helper.py binds os under another name; consumer.py imports it (or reaches it).
+    helper = ("import os as platform\n", False)
+    for consumer in ("from .helper import platform\nplatform.system('id')\n",
+                     "from pcc_node.helper import platform\nplatform.system('id')\n",
+                     "from . import helper\nhelper.platform.system('id')\n",
+                     "import pcc_node.helper as h\nh.platform.system('id')\n"):
+        sources = {"pcc_node.helper": helper, "pcc_node.consumer": (consumer, False)}
+        assert reexport_violations(sources), consumer
+    # A name that is not a tracked module may be shared.
+    assert reexport_violations({"pcc_node.helper": ("VERSION = '1'\n", False),
+                                "pcc_node.consumer": ("from .helper import VERSION\n", False)}) == []
+
+
 @pytest.mark.parametrize("label", sorted(SAFE))
 def test_the_guard_allows(label):
     assert violations(SAFE[label]) == [], label
-
-
-# The allowlist check's own proof: a start counts when it resolves to an allowed starter
-# through any import form, and a call that only shares a starter's name does not count.
-STARTS = {
-    "subprocess.run": ("import subprocess\nsubprocess.run(['arp', '-a'])", {"arp"}),
-    "an aliased module": ("import subprocess as sp\nsp.Popen(('dd', 'if=x'))", {"dd"}),
-    "an imported starter": ("from subprocess import check_output\ncheck_output(['sysctl', '-n', 'x'])", {"sysctl"}),
-    "an aliased starter": ("from subprocess import call as c\nc(['journalctl'])", {"journalctl"}),
-    "args= keyword": ("import subprocess\nsubprocess.run(args=['v4l2-ctl', '--all'])", {"v4l2-ctl"}),
-    "create_subprocess_exec": ("import asyncio\nasyncio.create_subprocess_exec('ffmpeg', '-i', dev)", {"ffmpeg"}),
-    "a local function named call": ("def call(method, path):\n    return method\ncall('GET', '/status')", set()),
-    "a method named run": ("client.run(['GET', '/x'])", set()),
-    "a starter name from another module": ("from helpers import run\nrun(['GET'])", set()),
-}
-
-
-@pytest.mark.parametrize("label", sorted(STARTS))
-def test_the_allowlist_check_counts_only_real_starts(label):
-    source, expected = STARTS[label]
-    assert executables_started(source) == expected, label
