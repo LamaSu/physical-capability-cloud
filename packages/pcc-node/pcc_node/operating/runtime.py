@@ -33,8 +33,9 @@ only part that touches the device, and it keeps these promises:
    is only a 4xx the operation's binding declares in ``request.refusals``: the
    device's own promise that it sends that answer before any side effect. A stop
    before anything was sent is ``<reason>:not_started``, and a device that could
-   not be reached is ``device_unreachable``. A cancel or a lost lease that
-   interrupts the log fetch, after the run finished, is ``<reason>:run_finished``.
+   not be reached is ``device_unreachable``. A cancel, a lost lease or the
+   deadline that interrupts the log fetch, after the run finished, is
+   ``<reason>:run_finished``: never success (verdict 117d).
 6. **Each job is its own log chain**, starting at GENESIS, so every job's
    evidence verifies on its own.
 
@@ -422,7 +423,11 @@ def _request(method: str, url: str, body: Any = None, *, deadline: float, clock:
     send_headers.update(headers or {})
     payload = None
     if body is not None:
-        payload = json.dumps(body).encode("utf-8")
+        try:
+            # Standard JSON only: NaN and the infinities are not JSON (verdict 117d).
+            payload = json.dumps(body, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            raise _Abort("body_not_json")  # nothing has been sent
         send_headers["Content-Type"] = "application/json"
     if payload is not None or method in _METHODS:
         send_headers["Content-Length"] = str(len(payload or b""))  # putrequest does not add it
@@ -469,9 +474,13 @@ def _now() -> str:
 
 
 def _claim_ok(claim: Any) -> bool:
-    return (all(isinstance(getattr(claim, name, None), str) and getattr(claim, name)
-                for name in ("job_id", "kernel_id", "claim_token"))
-            and callable(getattr(claim, "lease_alive", None)))
+    # Attributes by name only: the no-shell guard refuses a computed getattr (its rule 7).
+    try:
+        fields = (claim.job_id, claim.kernel_id, claim.claim_token)
+        lease_alive = claim.lease_alive
+    except AttributeError:
+        return False
+    return all(isinstance(f, str) and f for f in fields) and callable(lease_alive)
 
 
 class AdapterRuntime:
@@ -493,7 +502,6 @@ class AdapterRuntime:
         *,
         source: str = "device",
         clock: Callable[[], float] = time.monotonic,
-        sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         self._base = _check_base_url(url)
         self._signer = LogCapture(public_hex, secret_hex).signer  # fails closed without Ed25519
@@ -502,7 +510,6 @@ class AdapterRuntime:
         self._bindings = dict(bindings)
         self._source = source
         self._clock = clock
-        self._sleep = sleep
         # Generation-scoped cancel (verdict 117b): a cancel names the run in progress, or the
         # next run if none is, and no run can erase it.
         self._gen_lock = threading.Lock()
@@ -605,7 +612,7 @@ class AdapterRuntime:
                             stop=stop, max_bytes=max_bytes, headers=headers)
 
         try:
-            json.dumps(body)
+            json.dumps(body, allow_nan=False)  # standard JSON only: no NaN or infinities (verdict 117d)
         except (TypeError, ValueError):
             return RunResult(False, error="param_not_json:not_started")
         key = idempotency_key(claim.job_id, claim.kernel_id, claim.claim_token)
@@ -667,8 +674,9 @@ class AdapterRuntime:
                 if fetched.status == 200 and fetched.body is not None:
                     log_text = fetched.body if isinstance(fetched.body, str) else canonicalize(fetched.body)
             except _Abort as halt:
-                if halt.reason in ("cancelled", "lease_lost"):
-                    # Control was lost after the run finished: say so, never report success (verdict 117c).
+                if halt.reason in ("cancelled", "lease_lost", "timeout"):
+                    # Control or the deadline was lost after the run finished: say so, never report
+                    # success (verdicts 117c and 117d).
                     return RunResult(False, output=record, evidence=self._evidence(operation, run_id, record, None, claim),
                                      error=f"{halt.reason}:run_finished")
                 log.warning("run %s: log not fetched (%s)", run_id, halt.reason)  # the log is optional
@@ -676,16 +684,20 @@ class AdapterRuntime:
             return RunResult(False, output=record, error="record_not_portable")
         evidence = self._evidence(operation, run_id, record, log_text, claim)
         if state in binding.done:
+            reason = _stop_reason(deadline, self._clock, stop)
+            if reason:
+                # The device finished, but a cancel, a lost lease or the deadline landed while the
+                # terminal response was decoded or the log and evidence were built. This post-I/O
+                # window must not report success either (verdict 117e).
+                return RunResult(False, output=record, evidence=evidence, error=f"{reason}:run_finished")
             return RunResult(True, output=record, evidence=evidence)
         return RunResult(False, output=record, evidence=evidence, error=f"run_{state}")
 
     def _wait(self, seconds: float, deadline: float, stop: Stop) -> None:
         """The pause between polls, in slices, cut short by a cancel, a lost lease or the deadline.
 
-        An injected ``sleep`` is called for one slice at a time too, so it cannot carry a run past
-        any of them (verdict 117c).
+        There is no sleep hook: an injected callable could block past all of them (verdict 117d).
         """
-        nap = self._sleep or time.sleep
         end = self._clock() + seconds
         while True:
             reason = _stop_reason(deadline, self._clock, stop)
@@ -696,7 +708,7 @@ class AdapterRuntime:
                 if self._clock() >= deadline:
                     raise _Abort("timeout", True)
                 return
-            nap(min(_WATCH_S, left))
+            time.sleep(min(_WATCH_S, left))
 
     def _evidence(self, operation: str, run_id: str, record: Any, log_text: Optional[str], claim: Any) -> Optional[dict]:
         """The device's own account of the run, as signed log-chain entries bound to the claim.
