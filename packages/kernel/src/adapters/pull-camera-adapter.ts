@@ -58,6 +58,7 @@ import type { EvidenceEvent, EvidenceSource, WorkflowChallenge } from "@pcc/spec
 
 import type { PhotoCaptureService } from "../photo-capture-service.js";
 import type { CameraAdapter, CaptureContext } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 /** Where the frames come from. Every field is required configuration; none is defaulted. */
 export interface CameraDeviceSpec {
@@ -212,6 +213,8 @@ export class PullCameraAdapter implements CameraAdapter {
   /** A frozen copy of the configuration, each field read once: what is validated is what every check and grab uses. */
   private readonly device: CameraDeviceSpec;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  /** Captures and inspections in flight: the only things that emit (#502's quiesceEvidence contract). */
+  private readonly work = new OutstandingWork();
 
   constructor(
     id: string,
@@ -255,7 +258,11 @@ export class PullCameraAdapter implements CameraAdapter {
   }
 
   /** Acquire one frame from the device, for `context.jobId`, and emit it as a signed-to-be camera_snapshot. */
-  async captureSnapshot(context?: CaptureContext): Promise<{ imageHash: string; storageRef: string }> {
+  captureSnapshot(context?: CaptureContext): Promise<{ imageHash: string; storageRef: string }> {
+    return this.work.track(this.snapshot(context));
+  }
+
+  private async snapshot(context: CaptureContext | undefined): Promise<{ imageHash: string; storageRef: string }> {
     const acquired = await this.acquire(context);
     this.emit({
       type: "camera_snapshot",
@@ -270,9 +277,16 @@ export class PullCameraAdapter implements CameraAdapter {
    * Inspect a FRESH frame acquired now for `context.jobId`; nothing captured
    * earlier is reused. v1 runs the anti-spoof heuristic only, and says so.
    */
-  async runInspection(
+  runInspection(
     referenceHash?: string,
     context?: CaptureContext,
+  ): Promise<{ passed: boolean; confidence: number; findings: string[]; imageHash: string }> {
+    return this.work.track(this.inspect(referenceHash, context));
+  }
+
+  private async inspect(
+    referenceHash: string | undefined,
+    context: CaptureContext | undefined,
   ): Promise<{ passed: boolean; confidence: number; findings: string[]; imageHash: string }> {
     const acquired = await this.acquire(context);
     const score = acquired.antiSpoofScore;
@@ -293,6 +307,14 @@ export class PullCameraAdapter implements CameraAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Resolves once no capture or inspection is in flight; at once when none is. Each acquires its
+   * frame, then emits, before it returns (as PhotoCameraAdapter, #502).
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {
