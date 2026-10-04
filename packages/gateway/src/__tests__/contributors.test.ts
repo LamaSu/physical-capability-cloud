@@ -423,6 +423,64 @@ describe("POST /api/contributors/schedules", () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it("refuses to seal a schedule whose later segments can never apply (open-ended segment first)", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: ALICE,
+        schedule: {
+          version: 1,
+          segments: [
+            { kind: "constant", startTime: 0, endTime: null, bps: 40 },
+            { kind: "constant", startTime: 1000, endTime: null, bps: 80 },
+          ],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<{ error: string }>().error).toBe("malformed_schedule");
+  });
+
+  it("refuses to seal overlapping segments", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/contributors/schedules",
+      payload: {
+        publishedBy: ALICE,
+        schedule: {
+          version: 1,
+          segments: [
+            { kind: "constant", startTime: 0, endTime: 2000, bps: 40 },
+            { kind: "constant", startTime: 1000, endTime: null, bps: 80 },
+          ],
+        },
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<{ error: string }>().error).toBe("malformed_schedule");
+  });
+
+  it("refuses to seal numbers the economics compiler could not read the same way", async () => {
+    const publish = (segment: string, version = 1) =>
+      app.inject({
+        method: "POST",
+        url: "/api/contributors/schedules",
+        headers: { "content-type": "application/json" },
+        // Raw JSON: 1e400 is valid JSON text that parses as Infinity, which JSON.stringify cannot send.
+        payload: `{"publishedBy":"${ALICE}","schedule":{"version":${version},"segments":[${segment}]}}`,
+      });
+    for (const res of [
+      await publish('{"kind":"piecewise-value","startTime":0,"endTime":null,"thresholdCents":9007199254740993,"bpsLow":40,"bpsHigh":40}'),
+      await publish('{"kind":"adoption-indexed","startTime":0,"endTime":null,"scale":1e400,"floorBps":0,"capBps":500}'),
+      await publish('{"kind":"constant","startTime":0,"endTime":null,"bps":40}', 1_000_000_001),
+    ]) {
+      expect(res.statusCode).toBe(400);
+      expect(res.json<{ error: string }>().error).toBe("malformed_schedule");
+    }
+    expect((await publish('{"kind":"constant","startTime":0,"endTime":null,"bps":40}', 1_000_000_000)).statusCode).toBe(200);
+  });
+
   it("rejects mismatched caller-claimed scheduleHash with 400", async () => {
     const wrongHash = "0x" + "f".repeat(64);
     const res = await app.inject({
