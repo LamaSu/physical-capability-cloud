@@ -53,7 +53,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createCipheriv, pbkdf2Sync, randomBytes as cryptoRandomBytes } from "node:crypto";
+import { createCipheriv, createHash, pbkdf2Sync, randomBytes as cryptoRandomBytes } from "node:crypto";
 import nodeHttpMod from "node:http";
 import nodeHttpsMod from "node:https";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
@@ -926,7 +926,7 @@ type DynamicFixture = (ctx: FixtureCtx) => Promise<{ status: number; body: strin
  *  (not silently masked). */
 async function fixtureCall(
   ctx: FixtureCtx,
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   url: string,
   payload?: unknown,
   extraHeaders?: Record<string, string>,
@@ -941,6 +941,79 @@ async function fixtureCall(
     // non-JSON or empty body — fine, callers that don't need it won't look.
   }
   return { status: res.statusCode, body: res.body, json };
+}
+
+// ── Pizza-demo family shared fixture helper ─────────────────────────────────────────────────
+// Round 4 re-triage: pizza-demo.ts's planComposition(outcomeChain:["make-pizza","delivered-
+// pizza"]) ALWAYS routes to graph-search's Dijkstra traversal (compose.ts:539-541 — an explicit
+// outcomeChain short-circuits past the in-memory /api/compose/_dev/register-candidate pool
+// entirely), so seeding THAT pool can never satisfy it (the prior round-4 reasoning that it
+// "could in principle" was wrong — re-read fresh). graph-search.ts DOES expose real dev-seed
+// routes though: POST /api/capabilities/graph/_dev/register-node + register-edge
+// (graph-search.ts:691-720), persisted via upsert (never dupes) into the SAME SQLite snapshot
+// searchGraph() reads (graph-search.ts:504-505). One make-pizza node (empty inputTypes, so it
+// qualifies as a start candidate per findStartNodes, graph-search.ts:334-342) feeding one
+// deliver-pizza node (outputTypes includes "delivered-pizza", so it qualifies as an end
+// candidate per findEndNodes, graph-search.ts:345-349) via one edge is a real, legal 2-step
+// path within pizza-demo's own $30 default budget and assuranceTier:1 floor — confirmed
+// empirically below, not just in theory. Those _dev endpoints require auth (not in
+// api-gate.ts's PUBLIC_PREFIXES/PUBLIC_EXACT, confirmed by reading api-gate.ts fresh this
+// round), so the ANONYMOUS pass (ctx.key === null) provisions its own throwaway key first;
+// fixtureCall only auto-attaches ctx.key's Bearer when ctx.key is truthy, so a KEYED pass's
+// own stranger key is reused as-is. Every downstream pizza-demo fixture below (confirm/cancel/
+// accept/pickup/complete/reject) places a FRESH order via this helper, then drives its own
+// extra step(s) on that SAME order/job — closing the cascade of 6 other NOT_REACHED entries
+// whose own stated reason was "pizza-order, itself blocked below, never populates this Map".
+const PIZZA_SHOP_CAP_ID = "n68-dynfix-pizza-shop";
+const PIZZA_DRIVER_CAP_ID = "n68-dynfix-pizza-driver";
+/** Matches pizza-demo.ts's own default deliveryLocation fallback — zero haversine distance,
+ *  always inside the composeReq's 25km radius regardless of registration order. */
+const PIZZA_LOC = { lat: 37.77, lng: -122.42 };
+
+async function pizzaAuthHeader(ctx: FixtureCtx): Promise<Record<string, string>> {
+  if (ctx.key) return {}; // fixtureCall already attaches ctx.key's own Bearer automatically
+  const prov = await fixtureCall(ctx, "POST", "/api/auth/provision", {
+    email: `n68-dynfix-pizzagraph-${ctx.ip()}@example.invalid`,
+    name: "N68 dynamic fixture",
+  });
+  const apiKey = String(prov.json.api_key ?? "");
+  return apiKey ? { authorization: `Bearer ${apiKey}` } : {};
+}
+
+async function createPizzaOrderForFixture(
+  ctx: FixtureCtx,
+): Promise<{ status: number; body: string; json: Record<string, unknown>; orderId: string }> {
+  const auth = await pizzaAuthHeader(ctx);
+  const nodeShop = await fixtureCall(ctx, "POST", "/api/capabilities/graph/_dev/register-node", {
+    capabilityId: PIZZA_SHOP_CAP_ID, capabilityType: "make-pizza", kernelId: "kernel-n68-pizza-dynfix-shop",
+    estimatedPriceUSD: 5, estimatedDurationMs: 60_000, assuranceTier: 1,
+    location: PIZZA_LOC, available: true, inputTypes: [], outputTypes: ["n68-dynfix-pizza-wip"],
+  }, auth);
+  const nodeDriver = await fixtureCall(ctx, "POST", "/api/capabilities/graph/_dev/register-node", {
+    capabilityId: PIZZA_DRIVER_CAP_ID, capabilityType: "deliver-pizza", kernelId: "kernel-n68-pizza-dynfix-driver",
+    estimatedPriceUSD: 5, estimatedDurationMs: 60_000, assuranceTier: 1,
+    location: PIZZA_LOC, available: true, inputTypes: ["n68-dynfix-pizza-wip"], outputTypes: ["delivered-pizza"],
+  }, auth);
+  const edge = await fixtureCall(ctx, "POST", "/api/capabilities/graph/_dev/register-edge", {
+    fromCapabilityId: PIZZA_SHOP_CAP_ID, toCapabilityId: PIZZA_DRIVER_CAP_ID, capabilityTypeFlow: "n68-dynfix-pizza-wip",
+    estimatedHandoffPriceUSD: 0, estimatedHandoffDurationMs: 0,
+  }, auth);
+  if (nodeShop.status !== 201 || nodeDriver.status !== 201 || edge.status !== 201) {
+    return {
+      status: -3,
+      body: `dynamic fixture graph setup failed: shop=${nodeShop.status} driver=${nodeDriver.status} edge=${edge.status}`,
+      json: {},
+      orderId: "",
+    };
+  }
+  const order = await fixtureCall(ctx, "POST", "/api/demo/pizza-order", {
+    userId: "n68-dynfix-pizza-user",
+    description: "N68 dynamic fixture order",
+    deliveryAddress: "1 Market St, San Francisco, CA",
+    deliveryLocation: PIZZA_LOC,
+  });
+  const orderId = String((order.json.order as Record<string, unknown> | undefined)?.orderId ?? "");
+  return { status: order.status, body: order.body, json: order.json, orderId };
 }
 
 const FIXTURE_POST_BODIES: Record<string, object | DynamicFixture> = {
@@ -1717,6 +1790,302 @@ Object.assign(FIXTURE_POST_BODIES, {
     });
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // round 4 (cross-family review of #533, the SAME MEDIUM still open): round 3's own
+  // deferring-language guard had a blind spot — "too complex to confidently craft" doesn't
+  // contain any of its trigger phrases — and the round-3 rating fixture (above) already
+  // proved /api/onboard/register populates a real registration, directly contradicting the
+  // round-2 reasons on the sibling registrations/:id/* routes below. Every entry here was
+  // re-read fresh this round, NOT trusted from a prior reason.
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+
+  // ── capture/upload: the route returns 200 for ANY verdict (PASS or FAIL) the verifier
+  // produces — it never branches on result.verdict (capture.ts:649-660). CaptureManifestSchema
+  // (spec/types/capture.ts:656-668) requires only {class, declaredAt, deviceFingerprint,
+  // mediaHash} — every other field (webAuthnAssertion, c2paManifest, sensorFusion, ...) is
+  // OPTIONAL. "Too complex to confidently craft a PASSING manifest" was true but irrelevant:
+  // this route doesn't need a passing one. mediaHash must equal sha256(captureBytes), computed
+  // locally. requireAuth passes with any key. ─────────────────────────────────────────────────
+  "/api/capture/upload": (async (ctx: FixtureCtx) => {
+    const bytes = Buffer.from(`N68 dynamic fixture capture bytes ${ctx.ip()}`, "utf8");
+    const mediaHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const r = await fixtureCall(ctx, "POST", "/api/capture/upload", {
+      manifest: {
+        class: "CC0",
+        declaredAt: new Date().toISOString(),
+        deviceFingerprint: "n68-dynfix-device",
+        mediaHash,
+      },
+      captureBytesBase64: bytes.toString("base64"),
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── onboard/registrations/:id/{approve,reject,activate}: no admin-key or ownership check
+  // at all on approve/reject (onboard.ts:174-217) — a fresh registration is status "submitted"
+  // (onboard.ts:95), which both accept. activate needs status "approved" first
+  // (onboard.ts:334-336), so its fixture chains register -> approve -> activate. ─────────────
+  "/api/onboard/registrations/:id/approve": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/register", {
+      name: "N68 dynamic fixture machine (approve)", category: "custom",
+    });
+    const regId = String((created.json.registration as Record<string, unknown> | undefined)?.id ?? "");
+    if (!regId) return { status: -3, body: "dynamic fixture setup failed: no registration id" };
+    const r = await fixtureCall(ctx, "POST", `/api/onboard/registrations/${encodeURIComponent(regId)}/approve`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/onboard/registrations/:id/reject": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/register", {
+      name: "N68 dynamic fixture machine (reject)", category: "custom",
+    });
+    const regId = String((created.json.registration as Record<string, unknown> | undefined)?.id ?? "");
+    if (!regId) return { status: -3, body: "dynamic fixture setup failed: no registration id" };
+    const r = await fixtureCall(ctx, "POST", `/api/onboard/registrations/${encodeURIComponent(regId)}/reject`, {
+      reason: "N68 dynamic fixture reject",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/onboard/registrations/:id/activate": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/register", {
+      name: "N68 dynamic fixture machine (activate)", category: "custom",
+    });
+    const regId = String((created.json.registration as Record<string, unknown> | undefined)?.id ?? "");
+    if (!regId) return { status: -3, body: "dynamic fixture setup failed: no registration id" };
+    await fixtureCall(ctx, "POST", `/api/onboard/registrations/${encodeURIComponent(regId)}/approve`, {});
+    const r = await fixtureCall(ctx, "POST", `/api/onboard/registrations/${encodeURIComponent(regId)}/activate`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── onboard/registrations/:id/prove: ownership check only fires when BOTH callerId AND
+  // regOperator are truthy and differ (onboard.ts:354-361) — GET /api/auth/validate resolves
+  // the CURRENT pass's own operatorId, which we stuff into operator.walletAddress at
+  // registration time, so the two always match for whichever pass has a key. ─────────────────
+  "/api/onboard/registrations/:id/prove": (async (ctx: FixtureCtx) => {
+    const validated = await fixtureCall(ctx, "GET", "/api/auth/validate");
+    const myOperatorId = String(validated.json.operatorId ?? "");
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/register", {
+      name: "N68 dynamic fixture machine (prove)", category: "custom",
+      operator: { walletAddress: myOperatorId, displayName: "N68 dynamic fixture" },
+    });
+    const regId = String((created.json.registration as Record<string, unknown> | undefined)?.id ?? "");
+    if (!regId) return { status: -3, body: "dynamic fixture setup failed: no registration id" };
+    const r = await fixtureCall(ctx, "POST", `/api/onboard/registrations/${encodeURIComponent(regId)}/prove`, {
+      evidence: { deviceHealth: { status: "idle", model: "N68 dynamic fixture", firmware: "1.0.0" } },
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── onboard/:id/{ingest-docs,scrape} + orchestrator/data-product/:id/{build-agent,ingest-docs,scrape}:
+  // template-session.ts registers these sub-routes at BOTH the "/api/onboard" prefix
+  // (server.ts:803-808) and the "/api/orchestrator/data-product" prefix (server.ts:809-813).
+  // <prefix>/start (template-session.ts:251-273) needs only {name: "..."}, no auth shown, and
+  // mints a real session via randomUUID(); scrape/ingest-docs then only require that session to
+  // exist (template-session.ts:317,378) — no further state, and both degrade gracefully (still
+  // 200) even if their hook throws. /api/onboard/:id/build-agent is DIFFERENT: its "onboard"
+  // template agent's onBuild hook (template-agents.ts:149-166) calls publishOperator(), which
+  // makes a real outbound fetch (confirmed below) — so it is excluded here and left in
+  // NOT_REACHED with category "external_service". The sibling
+  // /api/orchestrator/data-product/:id/build-agent uses the data-product template's explicit
+  // stub onBuild (template-agents.ts:238-248, "minimal stub" per its own doc comment) which does
+  // no network I/O, so that one DOES reach 2xx via the dynamic fixture below. ─────────────────
+  "/api/onboard/:id/ingest-docs": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/start", { name: "N68 Dynamic Fixture Co" });
+    const sessionId = String(created.json.session_id ?? "");
+    if (!sessionId) return { status: -3, body: "dynamic fixture setup failed: no session_id" };
+    const r = await fixtureCall(ctx, "POST", `/api/onboard/${encodeURIComponent(sessionId)}/ingest-docs`, {
+      doc_urls: ["local://n68-dynfix-doc"],
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/onboard/:id/scrape": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/onboard/start", { name: "N68 Dynamic Fixture Co" });
+    const sessionId = String(created.json.session_id ?? "");
+    if (!sessionId) return { status: -3, body: "dynamic fixture setup failed: no session_id" };
+    const r = await fixtureCall(ctx, "POST", `/api/onboard/${encodeURIComponent(sessionId)}/scrape`, {
+      url: "https://n68-dynfix.example.invalid",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/orchestrator/data-product/:id/build-agent": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/orchestrator/data-product/start", { name: "N68 Dynamic Fixture Data Co" });
+    const sessionId = String(created.json.session_id ?? "");
+    if (!sessionId) return { status: -3, body: "dynamic fixture setup failed: no session_id" };
+    const r = await fixtureCall(ctx, "POST", `/api/orchestrator/data-product/${encodeURIComponent(sessionId)}/build-agent`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/orchestrator/data-product/:id/ingest-docs": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/orchestrator/data-product/start", { name: "N68 Dynamic Fixture Data Co" });
+    const sessionId = String(created.json.session_id ?? "");
+    if (!sessionId) return { status: -3, body: "dynamic fixture setup failed: no session_id" };
+    const r = await fixtureCall(ctx, "POST", `/api/orchestrator/data-product/${encodeURIComponent(sessionId)}/ingest-docs`, {
+      doc_urls: ["local://n68-dynfix-doc"],
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/orchestrator/data-product/:id/scrape": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/orchestrator/data-product/start", { name: "N68 Dynamic Fixture Data Co" });
+    const sessionId = String(created.json.session_id ?? "");
+    if (!sessionId) return { status: -3, body: "dynamic fixture setup failed: no session_id" };
+    const r = await fixtureCall(ctx, "POST", `/api/orchestrator/data-product/${encodeURIComponent(sessionId)}/scrape`, {
+      url: "https://n68-dynfix.example.invalid",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── verification/:requestId/{respond,dispute}: /api/verification/submit is fully public,
+  // no auth, and mints a real hvreq_ id plus real assignedVerifiers (human-verification.ts:
+  // 75-135). respond needs the verifierId to be one of THOSE assigned verifiers (human-
+  // verification.ts:300-304) — grabbed straight from submit's own response. dispute needs the
+  // disputer to have ALREADY responded (human-verification.ts:388-393), so its fixture chains
+  // submit -> respond -> dispute with the SAME verifier id throughout. ────────────────────────
+  "/api/verification/:requestId/respond": (async (ctx: FixtureCtx) => {
+    const submitted = await fixtureCall(ctx, "POST", "/api/verification/submit", {
+      bundleHash: "sha256:" + "0".repeat(64), photoRef: "n68-dynfix-photo", referenceRef: "n68-dynfix-ref",
+    });
+    const requestId = String(submitted.json.requestId ?? "");
+    const verifiers = (submitted.json.assignedVerifiers as Array<Record<string, unknown>> | undefined) ?? [];
+    const verifierId = String(verifiers[0]?.id ?? "");
+    if (!requestId || !verifierId) return { status: -3, body: "dynamic fixture setup failed: no requestId/verifierId" };
+    const r = await fixtureCall(ctx, "POST", `/api/verification/${encodeURIComponent(requestId)}/respond`, {
+      verifierId, verdict: "match", signature: "0xn68dynfix",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/verification/:requestId/dispute": (async (ctx: FixtureCtx) => {
+    const submitted = await fixtureCall(ctx, "POST", "/api/verification/submit", {
+      bundleHash: "sha256:" + "1".repeat(64), photoRef: "n68-dynfix-photo-2", referenceRef: "n68-dynfix-ref-2",
+    });
+    const requestId = String(submitted.json.requestId ?? "");
+    const verifiers = (submitted.json.assignedVerifiers as Array<Record<string, unknown>> | undefined) ?? [];
+    const verifierId = String(verifiers[0]?.id ?? "");
+    if (!requestId || !verifierId) return { status: -3, body: "dynamic fixture setup failed: no requestId/verifierId" };
+    await fixtureCall(ctx, "POST", `/api/verification/${encodeURIComponent(requestId)}/respond`, {
+      verifierId, verdict: "no_match", signature: "0xn68dynfix",
+    });
+    const r = await fixtureCall(ctx, "POST", `/api/verification/${encodeURIComponent(requestId)}/dispute`, {
+      disputerId: verifierId, reason: "N68 dynamic fixture dispute", evidenceCid: "bafkn68dynfix",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── disputes/:disputeId/resolve: getDispute() (reputation.ts:688) reads the SAME in-memory
+  // store /api/compositions/:compositionId/disputes (already dynamically fixture'd above)
+  // writes to via saveDispute() — a fresh dispute is "pending" (reputation.ts:647), which
+  // ResolveDisputeSchema + the status check both accept. ──────────────────────────────────────
+  "/api/disputes/:disputeId/resolve": (async (ctx: FixtureCtx) => {
+    const compositionId = `n68-dynfix-comp-resolve-${ctx.ip()}`;
+    await fixtureCall(ctx, "POST", `/api/compositions/${encodeURIComponent(compositionId)}/step-outcome`, {
+      compositionId, stepIndex: 0, capabilityId: "cap-n68-dynfix-resolve", agentId: "n68-dynfix-agent",
+      status: "success", startedAt: new Date().toISOString(),
+    });
+    const disputed = await fixtureCall(ctx, "POST", `/api/compositions/${encodeURIComponent(compositionId)}/disputes`, {
+      disputerId: "n68-dynfix-disputer-resolve", stepIndex: 0, reason: "timeout",
+      description: "N68 dynamic fixture dispute for resolve",
+    });
+    const disputeId = String((disputed.json.dispute as Record<string, unknown> | undefined)?.disputeId ?? "");
+    if (!disputeId) return { status: -3, body: "dynamic fixture setup failed: no disputeId" };
+    const r = await fixtureCall(ctx, "POST", `/api/disputes/${encodeURIComponent(disputeId)}/resolve`, {
+      resolverId: "n68-dynfix-resolver", decision: "rejected", resolutionNote: "N68 dynamic fixture resolution",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── wizard/sessions/:id/complete: a session created by this pass's own key has no ownerId
+  // bound by anything OTHER than the creator (isOwnerOrUnbound, wizard.ts:129-133) — same pass
+  // throughout satisfies it trivially. All 5 platform-setup steps need `completed:true` first
+  // (wizard.ts:271-300 for PUT .../steps/:step; wizard.ts:338+ for complete's own check) — any
+  // truthy `data` object marks a step complete, so 5 PUT calls (steps 0..4) precede complete. ──
+  "/api/wizard/sessions/:id/complete": (async (ctx: FixtureCtx) => {
+    const created = await fixtureCall(ctx, "POST", "/api/wizard/sessions", { track: "platform-setup" });
+    const sessionId = String((created.json.session as Record<string, unknown> | undefined)?.id ?? "");
+    if (!sessionId) return { status: -3, body: "dynamic fixture setup failed: no wizard session id" };
+    for (let step = 0; step < 5; step++) {
+      await fixtureCall(ctx, "PUT", `/api/wizard/sessions/${encodeURIComponent(sessionId)}/steps/${step}`, {
+        data: { ok: true },
+      });
+    }
+    const r = await fixtureCall(ctx, "POST", `/api/wizard/sessions/${encodeURIComponent(sessionId)}/complete`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+
+  // ── pizza-demo family: pizza-order + the 6 downstream order/job routes whose own prior
+  // NOT_REACHED reasons said "pizza-order, itself blocked below, never populates this Map" —
+  // see createPizzaOrderForFixture's doc comment above for why that blocker doesn't hold once
+  // the graph-search dev-seed routes are used instead of compose's candidate pool. None of
+  // confirm/cancel/accept/pickup/complete/reject check ownership (confirmed by reading every
+  // handler, pizza-demo.ts:448-776 — pure state-machine gates on the looked-up order/job's OWN
+  // `.status`), so each fixture below only needs to drive ITS OWN freshly-created order/job
+  // through the preconditions its target route requires. ───────────────────────────────────
+  "/api/demo/pizza-order": (async (ctx: FixtureCtx) => {
+    const r = await createPizzaOrderForFixture(ctx);
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/demo/orders/:id/confirm": (async (ctx: FixtureCtx) => {
+    const setup = await createPizzaOrderForFixture(ctx);
+    if (!setup.orderId) return { status: -3, body: `dynamic fixture setup failed: ${setup.body}` };
+    const r = await fixtureCall(ctx, "POST", `/api/demo/orders/${encodeURIComponent(setup.orderId)}/confirm`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/demo/orders/:id/cancel": (async (ctx: FixtureCtx) => {
+    // cancel accepts status "proposed" OR "awaiting_shop" — a freshly-created order is already
+    // "proposed", so no confirm step is needed first (pizza-demo.ts:488).
+    const setup = await createPizzaOrderForFixture(ctx);
+    if (!setup.orderId) return { status: -3, body: `dynamic fixture setup failed: ${setup.body}` };
+    const r = await fixtureCall(ctx, "POST", `/api/demo/orders/${encodeURIComponent(setup.orderId)}/cancel`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/demo/jobs/:jobId/accept": (async (ctx: FixtureCtx) => {
+    const setup = await createPizzaOrderForFixture(ctx);
+    if (!setup.orderId) return { status: -3, body: `dynamic fixture setup failed: ${setup.body}` };
+    const confirmed = await fixtureCall(ctx, "POST", `/api/demo/orders/${encodeURIComponent(setup.orderId)}/confirm`, {});
+    const jobId = String((confirmed.json.job as Record<string, unknown> | undefined)?.jobId ?? "");
+    if (!jobId) return { status: -3, body: `dynamic fixture setup failed: no make-pizza jobId, confirm=${confirmed.status}` };
+    const r = await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(jobId)}/accept`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/demo/jobs/:jobId/reject": (async (ctx: FixtureCtx) => {
+    // reject accepts status "queued" OR "accepted" — reject the make-pizza job while still
+    // queued, right after confirm/dispatch, no accept step needed first (pizza-demo.ts:760).
+    const setup = await createPizzaOrderForFixture(ctx);
+    if (!setup.orderId) return { status: -3, body: `dynamic fixture setup failed: ${setup.body}` };
+    const confirmed = await fixtureCall(ctx, "POST", `/api/demo/orders/${encodeURIComponent(setup.orderId)}/confirm`, {});
+    const jobId = String((confirmed.json.job as Record<string, unknown> | undefined)?.jobId ?? "");
+    if (!jobId) return { status: -3, body: `dynamic fixture setup failed: no make-pizza jobId, confirm=${confirmed.status}` };
+    const r = await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(jobId)}/reject`, { reason: "N68 dynamic fixture reject" });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/demo/jobs/:jobId/complete": (async (ctx: FixtureCtx) => {
+    // Completes the make-pizza leg (status "accepted" -> "complete", pizza-demo.ts:607-623) —
+    // the shortest chain that reaches this route's success path.
+    const setup = await createPizzaOrderForFixture(ctx);
+    if (!setup.orderId) return { status: -3, body: `dynamic fixture setup failed: ${setup.body}` };
+    const confirmed = await fixtureCall(ctx, "POST", `/api/demo/orders/${encodeURIComponent(setup.orderId)}/confirm`, {});
+    const makeJobId = String((confirmed.json.job as Record<string, unknown> | undefined)?.jobId ?? "");
+    if (!makeJobId) return { status: -3, body: `dynamic fixture setup failed: no make-pizza jobId, confirm=${confirmed.status}` };
+    await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(makeJobId)}/accept`, {});
+    const r = await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(makeJobId)}/complete`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/demo/jobs/:jobId/pickup": (async (ctx: FixtureCtx) => {
+    // pickup requires type "deliver-pizza" AND status "accepted" (pizza-demo.ts:572-578) — only
+    // reachable after the make-pizza leg completes and dispatches the delivery job (confirm ->
+    // accept make-pizza -> complete make-pizza -> accept delivery -> pickup delivery).
+    const setup = await createPizzaOrderForFixture(ctx);
+    if (!setup.orderId) return { status: -3, body: `dynamic fixture setup failed: ${setup.body}` };
+    const confirmed = await fixtureCall(ctx, "POST", `/api/demo/orders/${encodeURIComponent(setup.orderId)}/confirm`, {});
+    const makeJobId = String((confirmed.json.job as Record<string, unknown> | undefined)?.jobId ?? "");
+    if (!makeJobId) return { status: -3, body: `dynamic fixture setup failed: no make-pizza jobId, confirm=${confirmed.status}` };
+    await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(makeJobId)}/accept`, {});
+    const completed = await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(makeJobId)}/complete`, {});
+    const completedOrder = completed.json.order as Record<string, unknown> | undefined;
+    const orderJobs = completedOrder?.jobs as Record<string, unknown> | undefined;
+    const deliveryJobId = String(orderJobs?.delivery ?? "");
+    if (!deliveryJobId) return { status: -3, body: `dynamic fixture setup failed: no delivery jobId, complete=${completed.status}` };
+    await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(deliveryJobId)}/accept`, {});
+    const r = await fixtureCall(ctx, "POST", `/api/demo/jobs/${encodeURIComponent(deliveryJobId)}/pickup`, {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
 });
 
 /** A handful of FIXTURE_POST_BODIES routes also need a non-default header to reach 2xx — the
@@ -1835,60 +2204,170 @@ const POST_EXCLUSIONS: PostExclusion[] = [
 // longer called (excluded, deregistered, or now reaches 2xx) — this map decays with the route
 // table, it doesn't accumulate forever.
 // ─────────────────────────────────────────────────────────────────────────────────────────
-const NOT_REACHED: Record<string, { reason: string }> = {
-  "/api/assets/:id/outbound-demand": { reason: "Even with a schema-valid body, loadBudget(assetId) 404s — no budget row for synthetic :id; budgets only exist via a prior PUT .../budget, asset-outbound.ts:308-314 (a PUT precondition — out of this sweep's GET/POST method pair; re-checked round 2, still holds)" },
-  "/api/assets/:id/outbound-demand/:demandId/approve": { reason: "getDemand(:demandId) 404s — no demand row for any synthetic id; demands are minted via crypto.randomUUID(), asset-outbound.ts:436-442 (depends on the same PUT-gated budget precondition above; re-checked round 2, still holds)" },
-  "/api/automation-status/:fromNodeId/:toNodeId/advance": { reason: "404 not_found — node ids never match mock \"node-liquid\" etc; these are hardcoded demo constants, not DB rows, so no POST can mint a matching one; no body used, per protocols.ts:685-691 (re-checked round 2, still holds)" },
-  "/api/automation-status/:fromNodeId/:toNodeId/episode": { reason: "404 not_found, same hardcoded-mock-id reason, per protocols.ts:663-669 (re-checked round 2, still holds)" },
-  "/api/batches/:batchId/slots": { reason: "round 2 re-check: even the REAL batch id (not a kernelId/capId/operatorId guess) doesn't help — services.ts:130-156 seeds exactly ONE BatchTracker batch at module load, then immediately seals() + start()s it before this test ever runs; addSample() 400s \"Cannot add samples to batch in running state\" regardless of :batchId. No reachable route creates a SECOND, still-assembling batch (batches.ts has no POST that calls batchTracker.createBatch) — the sibling /api/batches/shared/:batchId/claim (a wholly separate in-memory Map) IS now reached via a dynamic fixture; this one remains structurally dead, batches.ts:50-63, kernel/batch-tracker.ts:24-39,65-70" },
-  "/api/capture/anchor": { reason: "selectVerdict(verdictId) 404s for any crafted UUID; rows only exist after a successful /api/capture/upload (itself unreachable below) — a dead chain, not an id-guessing problem; re-checked round 2, still holds, capture.ts:682-688" },
-  "/api/capture/sim": { reason: "Requires spawning a real python3 pcc_genesis_runner.py subprocess; not reliably available in this harness regardless of body, capture-sim.ts:163-226 (re-checked round 2 — /api/capture/3d-stream below is the analogous case; same category, same conclusion)" },
-  "/api/capture/upload": { reason: "Requires a correctly-hashed CaptureManifest passing CaptureVerifier G1..G6 (@pcc/verifier); too complex to confidently craft from validation alone, capture.ts:582-596 (re-checked round 2, still holds)" },
-  "/api/capture/3d-stream": { reason: "astra round-2 finding 1(c): this url matched the old broad SKIP regex on the substring \"stream\" in its NAME — it is NOT an SSE/stream route at all (a single JSON request/response, capture-3d.ts), so it is swept normally now (not in POST_STREAM_ROUTES). requireAuth passes with any key, and a minimal valid videoBytesBase64 clears body validation, but the handler then calls runLingBotInference (capture-3d.ts:146-150), which — absent PCC_LINGBOT_STUB — spawns a real python3 LingBot-Map process; same category as /api/capture/sim (not reliably available in this harness) and not a kernel/capability location surface (point maps/poses from the CALLER's own uploaded video, never operator data)" },
-  "/api/carrier/shipments": { reason: "getJobFacade().getById(jobId) 404s for any synthetic jobId; even a real job would 403 since canary kernel's operator is the OWNER not stranger — an ownership gate, not an id-guessing problem this sweep's ANONYMOUS/STRANGER model is meant to defeat; re-checked round 2, still holds, carrier.ts:625-649" },
-  "/api/carrier/webhook/easypost": { reason: "503 — EASYPOST_WEBHOOK_SECRET unset in test env, checked before any signature/business logic, carrier.ts:846-851 (unconditional env gate; re-checked round 2, still holds)" },
-  "/api/demo/jobs/:jobId/accept": { reason: "404 not_found — in-memory `jobs` Map empty, per pizza-demo.ts:539-540" },
-  "/api/demo/jobs/:jobId/complete": { reason: "404 not_found, same reason; even if reached, `order.deliveryLocation` in the response is the CALLER's own self-supplied address, not an operator/kernel secret, per pizza-demo.ts:605-606,619-621" },
-  "/api/demo/jobs/:jobId/pickup": { reason: "404 not_found, same reason, per pizza-demo.ts:572-574" },
-  "/api/demo/jobs/:jobId/reject": { reason: "404 not_found, same empty-Map reason, per pizza-demo.ts:758-759" },
-  "/api/demo/orders/:id/cancel": { reason: "404 not_found, same empty-Map reason, per pizza-demo.ts:486-487" },
-  "/api/demo/orders/:id/confirm": { reason: "404 not_found — in-memory `orders` Map is empty for any guessable id, per pizza-demo.ts:452-453" },
-  "/api/demo/pizza-order": { reason: "even with a valid body, compose engine's planComposition finds no make-pizza/deliver-pizza provider (fixture only seeds a 3d-printing capability) → 404/402, per pizza-demo.ts:358-387" },
-  "/api/disputes/:disputeId/resolve": { reason: "ResolveDisputeSchema-valid body clears the 400, but then 404 dispute_not_found — :disputeId never matches a real dispute-<uuid>, per reputation.ts:677-695" },
-  "/api/dht/announce": { reason: "structurally unreachable with ANY body: api-gate.ts:35 lists \"/api/dht/\" as a public-path prefix, so apiGate never attaches req.apiKeyId/userId for this whole family — and the handler's own auth check (dht-ws.ts:84-88) 401s whenever both are unset, even with a valid stranger Bearer key, per n68-medium1-repro diag2 log" },
-  "/api/evidence/:bundleId/archive": { reason: "404 — findEncryptedByBundleId() has no row for the synthetic bundleId param (kernel/cap/operatorId, none seeded as an encrypted-bundle id), evidence-encrypted.ts:130-131" },
-  "/api/fiat-ramp/stripe/credits/deposit": { reason: "410 Gone — PCC_LEGACY_FIAT_WEBHOOKS unset, route returns 410 unconditionally before any body check, fiat-ramp.ts:410-412" },
-  "/api/fiat-ramp/webhook/stripe": { reason: "410 Gone — same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body, fiat-ramp.ts:706-708" },
-  "/api/fiat-ramp/webhook/yellowcard": { reason: "410 Gone — same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body, fiat-ramp.ts:731-733" },
-  "/api/jobs/:jobId/attestations/aggregate": { reason: "repos.jobs.findById(:jobId) 404s — param never matches a real job; even if it did, stranger isn't submitter/kernel-operator (403) — an ownership gate, re-checked round 2, still holds, compliance.ts:119-133" },
-  "/api/lit/provision": { reason: "503 — LIT_API_KEY unset in test env (excluded cred), checked right after field validation and before any fetch, lit-provision.ts:26-40" },
-  "/api/lob/letters": { reason: "plugin config-gate passes (NODE_ENV=test → computeMissingLobConfig()=[] per lob.ts:190-213), but handler then 404s on no job row for crafted jobId AND would 403 \"not_kernel_operator\" regardless since caller=stranger≠owner, lob.ts:353-357,375-377" },
-  "/api/lob/webhook": { reason: "503 — LOB_WEBHOOK_SECRET unset (excluded LOB_* cred); plugin \"webhook\" gate passes through (not production) but handler's own hasWebhookSecret check 503s before any signature check, lob.ts:464-469" },
-  "/api/onboard/:id/build-agent": { reason: "Registered by template-session.ts, mounted at prefix \"/api/onboard\" (server.ts:803-808) — not literally in onboard.ts; 404 session_not_found, :id never a real session uuid, per template-session.ts:440-441" },
-  "/api/onboard/:id/ingest-docs": { reason: "same relocation as above; 404 session_not_found runs BEFORE the doc_urls body check, per template-session.ts:382-383" },
-  "/api/onboard/:id/scrape": { reason: "same relocation; 404 session_not_found runs BEFORE the url body check, per template-session.ts:318-319" },
-  "/api/onboard/identify-device": { reason: "503 — ANTHROPIC_API_KEY unset in test env (explicitly excluded cred), checked after body validation but before any model call, identify-device.ts:95-98" },
-  "/api/onboard/passkey/register-challenge": { reason: "503 — PCC_PASSKEY_ENABLED unset (feature flag defaults off); no body can enable it, per passkey.ts:72-74,139-144" },
-  "/api/onboard/passkey/verify-attestation": { reason: "503, same feature-flag gate, per passkey.ts:231-236" },
-  "/api/onboard/redeem": { reason: "400 → would need a real Gatecraft invite code; external identity service (GATECRAFT_URL) we have no valid code for, status just proxied from gcRes, per onboard.ts:577-593" },
-  "/api/onboard/registrations/:id/activate": { reason: "404 not_found — :id (kernelId/capId/operatorId) never matches a seeded `reg-<ts>` registration row; registrations table is never populated in this fixture, per onboard.ts:332-333" },
-  "/api/onboard/registrations/:id/approve": { reason: "404 not_found, same reason, per onboard.ts:176-177" },
-  "/api/onboard/registrations/:id/prove": { reason: "404 not_found, same reason (checked before the ownership/evidence checks), per onboard.ts:350-351" },
-  "/api/onboard/registrations/:id/reject": { reason: "404 not_found, same reason, per onboard.ts:198-199" },
-  "/api/orchestrator/data-product/:id/build-agent": { reason: "Registered by template-session.ts, mounted at prefix \"/api/orchestrator/data-product\" (server.ts:809-813); 404 session_not_found, per template-session.ts:440-441" },
-  "/api/orchestrator/data-product/:id/ingest-docs": { reason: "same relocation; 404 session_not_found, per template-session.ts:382-383" },
-  "/api/orchestrator/data-product/:id/scrape": { reason: "same relocation; 404 session_not_found, per template-session.ts:318-319" },
-  "/api/protocol-runs/:runId/cancel": { reason: "404 not_found — runId never matches mock \"prun_active_001\", per protocols.ts:630-632" },
-  "/api/protocol-runs/:runId/pause": { reason: "404 not_found, same reason, per protocols.ts:612-614" },
-  "/api/protocol-runs/:runId/resume": { reason: "404 not_found, same reason, per protocols.ts:621-623" },
-  "/api/protocol-runs/:runId/start": { reason: "404 not_found, same reason, per protocols.ts:603-605" },
-  "/api/protocols/:id/fork": { reason: "404 not_found — :id never matches mock \"ptpl_bioassay001\"/\"ptpl_3dprint_qc001\", per protocols.ts:536-538" },
-  "/api/protocols/:id/publish": { reason: "404 not_found, same reason, per protocols.ts:521-523" },
-  "/api/protocols/:id/runs": { reason: "404 not_found (POST variant), same reason, per protocols.ts:587-589" },
-  "/api/protocols/:id/validate": { reason: "404 not_found, same reason, per protocols.ts:720-722" },
-  "/api/verification/:requestId/dispute": { reason: "404 — verificationRequests Map has no entry for synthetic requestId (kernel/cap/operatorId); requests only exist via /submit's random hvreq_ ids, human-verification.ts:391-394" },
-  "/api/verification/:requestId/respond": { reason: "404 — same verificationRequests Map miss for synthetic requestId, human-verification.ts:298-301" },
-  "/api/wizard/sessions/:id/complete": { reason: "404 — sessions.get(:id) can't match; session ids are server-generated uuidv4(), per wizard.ts:313-317" },
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// round 4 (cross-family review of #533, the SAME MEDIUM still open): a phrase blocklist will
+// always miss some wording ("too complex to confidently craft" slipped past round 3's
+// DEFERRING_LANGUAGE_RE untouched). Replaced the implicit "trust the prose" contract with an
+// explicit one: every entry now carries a `category` drawn from a CLOSED set of structural
+// blocker shapes, plus a `cite` pointing at the production line that proves it. STRUCTURAL
+// validates both mechanically (unknown category -> fail; cite that doesn't look like a file:
+// line -> fail) — a reason can still be prose, but it can no longer be ONLY prose.
+// ─────────────────────────────────────────────────────────────────────────────────────────
+type NotReachedCategory =
+  | "env_or_feature_gate" // an env var or feature flag this sweep deliberately leaves off/absent
+  | "admin_or_owner_only" // the sweep's ANON/STRANGER model is specifically meant to respect this gate
+  | "no_creation_route" // no reachable route (POST or otherwise) ever populates the row/store this reads
+  | "real_subprocess" // the handler spawns a real external process (python3, etc.)
+  | "external_service" // the handler makes a real call to a third-party service with no mock mode
+  | "money_movement" // would move money or on-chain state — prefer POST_EXCLUSIONS for these, kept here only if a route is also unreachable for an independent reason
+  | "sse_or_websocket" // a true stream/socket shape, not swept normally
+  | "framework_limit"; // a limitation of THIS sweep's own GET/POST method pair or request plumbing, not of the production route
+
+const NOT_REACHED_CATEGORIES: ReadonlySet<NotReachedCategory> = new Set([
+  "env_or_feature_gate", "admin_or_owner_only", "no_creation_route", "real_subprocess",
+  "external_service", "money_movement", "sse_or_websocket", "framework_limit",
+] satisfies NotReachedCategory[]);
+
+/** Must match a `path/to/file.ts:123` (or `:123-456`) shape somewhere in the string — i.e.
+ *  point at an ACTUAL line in production source, not just assert a conclusion in prose. */
+const CITE_RE = /\w[\w./-]*\.ts:\d+/;
+
+interface NotReachedEntry {
+  category: NotReachedCategory;
+  /** e.g. "onboard.ts:176-177" or "capture/verifier-factory.ts:115-120" — must match CITE_RE. */
+  cite: string;
+  reason: string;
+}
+
+const NOT_REACHED: Record<string, NotReachedEntry> = {
+  "/api/assets/:id/outbound-demand": {
+    category: "framework_limit", cite: "asset-outbound.ts:308-314",
+    reason: "loadBudget(assetId) 404s for any synthetic :id — budgets are created only via a prior PUT .../budget, a method this sweep's GET/POST pair never exercises. Re-read fresh round 4: still the only precondition.",
+  },
+  "/api/assets/:id/outbound-demand/:demandId/approve": {
+    category: "framework_limit", cite: "asset-outbound.ts:436-442",
+    reason: "getDemand(:demandId) 404s for any synthetic id — demands are minted via crypto.randomUUID() only after the SAME PUT-gated budget precondition above. Re-read fresh round 4: still holds.",
+  },
+  "/api/automation-status/:fromNodeId/:toNodeId/advance": {
+    category: "no_creation_route", cite: "protocols.ts:685-691",
+    reason: "node ids are compared against hardcoded demo constants (\"node-liquid\" etc), never a DB row; re-read fresh round 4 — confirmed no route anywhere mints a matching node id.",
+  },
+  "/api/automation-status/:fromNodeId/:toNodeId/episode": {
+    category: "no_creation_route", cite: "protocols.ts:663-669",
+    reason: "same hardcoded-node-id shape as /advance above; re-read fresh round 4, still holds.",
+  },
+  "/api/batches/:batchId/slots": {
+    category: "no_creation_route", cite: "kernel/batch-tracker.ts:24-39",
+    reason: "services.ts:130-156 seeds exactly ONE BatchTracker batch at module load, then immediately seal()s + start()s it before this test ever runs; addSample() 400s \"Cannot add samples to batch in running state\" regardless of :batchId. Re-read fresh round 4: batches.ts (full file) has no OTHER POST that calls batchTracker.createBatch — confirmed no second, still-assembling batch is ever reachable. (The sibling /api/batches/shared/:batchId/claim is a wholly separate in-memory Map, already reached via a dynamic fixture.)",
+  },
+  "/api/capture/anchor": {
+    category: "no_creation_route", cite: "capture.ts:690-693",
+    reason: "Gate A only accepts a PASS verdict with anchorCandidate:true. /api/capture/upload's own dynamic fixture (above) DOES now reach 2xx and insert a real verdict row, but with a minimal CC0 manifest carrying no webAuthn/platform/C2PA attestation the real CaptureVerifier's G1..G6 gates produce a FAIL verdict, not a PASS — confirmed by reading the gates (verifier.ts:284-310+); no route in this harness mints a PASS-verdict row.",
+  },
+  "/api/capture/sim": {
+    category: "real_subprocess", cite: "capture-sim.ts:163-226",
+    reason: "spawns a real python3 pcc_genesis_runner.py subprocess regardless of body; re-read fresh round 4, still holds.",
+  },
+  "/api/capture/3d-stream": {
+    category: "real_subprocess", cite: "capture-3d.ts:146-150",
+    reason: "requireAuth + a minimal valid videoBytesBase64 clear validation, but the handler then calls runLingBotInference, which — absent PCC_LINGBOT_STUB — spawns a real LingBot-Map process; re-read fresh round 4, still holds. Not a kernel/capability location surface either way (point maps/poses from the caller's own uploaded video).",
+  },
+  "/api/carrier/shipments": {
+    category: "admin_or_owner_only", cite: "carrier.ts:625-649",
+    reason: "even a real job would 403 since the canary kernel's operator is the OWNER identity, not the stranger pass — exactly the ownership boundary this sweep's ANON/STRANGER model is built to respect, not defeat. Re-read fresh round 4, still holds.",
+  },
+  "/api/carrier/webhook/easypost": {
+    category: "env_or_feature_gate", cite: "carrier.ts:846-851",
+    reason: "503 — EASYPOST_WEBHOOK_SECRET is deliberately cleared in this test env, checked before any signature/business logic. Re-read fresh round 4, still holds.",
+  },
+  "/api/dht/announce": {
+    category: "framework_limit", cite: "middleware/api-gate.ts:35",
+    reason: "api-gate.ts lists \"/api/dht/\" as a public-path prefix, so apiGate never attaches req.apiKeyId/userId for this whole family, and the handler's own auth check (dht-ws.ts:84-88) 401s whenever both are unset — a routing/middleware interaction, not a business-logic gate a real caller could ever clear either.",
+  },
+  "/api/evidence/:bundleId/archive": {
+    category: "no_creation_route", cite: "evidence-encrypted.ts:130-131",
+    reason: "findEncryptedByBundleId() has no row for any synthetic bundleId. Re-read fresh round 4: grepped every repos.encryption.insert* call site in the package (zk-proofs.ts's insertCommitment/insertTree/insertProof, evidence-encrypted.ts's own insertGrant) — none of them is the encrypted-bundle insert this lookup needs; no reachable route creates one.",
+  },
+  "/api/fiat-ramp/stripe/credits/deposit": {
+    category: "env_or_feature_gate", cite: "fiat-ramp.ts:410-412",
+    reason: "410 Gone — PCC_LEGACY_FIAT_WEBHOOKS unset, returned unconditionally before any body check. Re-read fresh round 4, still holds.",
+  },
+  "/api/fiat-ramp/webhook/stripe": {
+    category: "env_or_feature_gate", cite: "fiat-ramp.ts:706-708",
+    reason: "same PCC_LEGACY_FIAT_WEBHOOKS gate as the credits/deposit entry above, unconditional regardless of body.",
+  },
+  "/api/fiat-ramp/webhook/yellowcard": {
+    category: "env_or_feature_gate", cite: "fiat-ramp.ts:731-733",
+    reason: "same PCC_LEGACY_FIAT_WEBHOOKS gate, unconditional regardless of body.",
+  },
+  "/api/jobs/:jobId/attestations/aggregate": {
+    category: "admin_or_owner_only", cite: "compliance.ts:119-133",
+    reason: "even a real job would 403 since the stranger pass is neither submitter nor kernel-operator — the ownership boundary this sweep is built to respect. Re-read fresh round 4, still holds.",
+  },
+  "/api/lit/provision": {
+    category: "env_or_feature_gate", cite: "lit-provision.ts:26-40",
+    reason: "503 — LIT_API_KEY is deliberately cleared in this test env, checked right after field validation and before any fetch.",
+  },
+  "/api/lob/letters": {
+    category: "admin_or_owner_only", cite: "lob.ts:375-377",
+    reason: "the plugin config-gate passes (NODE_ENV=test), but the handler then 404s on no job row for a crafted jobId AND would separately 403 \"not_kernel_operator\" since the caller is a stranger, not the owner — an ownership boundary regardless of the id problem.",
+  },
+  "/api/lob/webhook": {
+    category: "env_or_feature_gate", cite: "lob.ts:464-469",
+    reason: "503 — LOB_WEBHOOK_SECRET is deliberately cleared; the plugin's \"webhook\" gate passes through (not production) but the handler's own hasWebhookSecret check 503s before any signature check.",
+  },
+  "/api/onboard/:id/build-agent": {
+    category: "external_service", cite: "pcc-discovery.ts:113",
+    reason: "the onboard template's onBuild hook (template-agents.ts:149-166) calls publishOperator() from @pcc/orchestrator-sdk, which issues an unconditional real fetch to PCC_BASE_URL/api/onboard/register (pcc-discovery.ts:68-117, the live call at :113) — no test-injection seam like captureVerifier/chainClient/smokeTestFetch exists for this SDK call, and MOCK_PCC_DISCOVERY is unset in this test env, so it is not a MOCK-gated no-op. Confirmed empirically: the sweep's own no-network guard (round 2) blocks the call and records it. Contrast: the sibling /api/orchestrator/data-product/:id/build-agent uses the data-product template's explicit stub onBuild (template-agents.ts:238-248, a \"minimal stub\" per its own doc comment) which does no network I/O — that one DOES reach 2xx via a dynamic fixture below.",
+  },
+  "/api/onboard/identify-device": {
+    category: "env_or_feature_gate", cite: "identify-device.ts:95-98",
+    reason: "503 — ANTHROPIC_API_KEY is deliberately cleared in this test env, checked after body validation but before any model call.",
+  },
+  "/api/onboard/passkey/register-challenge": {
+    category: "env_or_feature_gate", cite: "passkey.ts:72-74",
+    reason: "503 — PCC_PASSKEY_ENABLED feature flag defaults off; no body can enable it.",
+  },
+  "/api/onboard/passkey/verify-attestation": {
+    category: "env_or_feature_gate", cite: "passkey.ts:231-236",
+    reason: "503, the same feature-flag gate as register-challenge above.",
+  },
+  "/api/onboard/redeem": {
+    category: "external_service", cite: "onboard.ts:577-593",
+    reason: "needs a real Gatecraft invite code from the external GATECRAFT_URL identity service; the response status is proxied straight from that service's own reply, which we have no valid code to produce.",
+  },
+  "/api/protocol-runs/:runId/cancel": {
+    category: "no_creation_route", cite: "protocols.ts:591-601",
+    reason: "the sibling POST /api/protocols/:id/runs LOOKS like a creation route but never pushes its minted run into the mockRuns array it returns 202 for (confirmed by reading the whole handler, protocols.ts:587-601) — so no POST in this file ever makes a runId that /:runId/cancel's mockRuns.find() can match. Re-verified fresh round 4, NOT trusting the prior \"hardcoded mock id\" framing at face value.",
+  },
+  "/api/protocol-runs/:runId/pause": {
+    category: "no_creation_route", cite: "protocols.ts:591-601",
+    reason: "same unpersisted-mockRuns gap as /cancel above.",
+  },
+  "/api/protocol-runs/:runId/resume": {
+    category: "no_creation_route", cite: "protocols.ts:591-601",
+    reason: "same unpersisted-mockRuns gap as /cancel above.",
+  },
+  "/api/protocol-runs/:runId/start": {
+    category: "no_creation_route", cite: "protocols.ts:591-601",
+    reason: "same unpersisted-mockRuns gap as /cancel above.",
+  },
+  "/api/protocols/:id/fork": {
+    category: "no_creation_route", cite: "protocols.ts:496-506",
+    reason: "POST /api/protocols LOOKS like a creation route (201, a minted id) but never pushes into the mockTemplates array every :id route reads from (confirmed by reading the whole handler — no mockTemplates.push anywhere in it). Re-verified fresh round 4: no route ever makes a real template id.",
+  },
+  "/api/protocols/:id/publish": {
+    category: "no_creation_route", cite: "protocols.ts:496-506",
+    reason: "same unpersisted-mockTemplates gap as /fork above.",
+  },
+  "/api/protocols/:id/runs": {
+    category: "no_creation_route", cite: "protocols.ts:496-506",
+    reason: "same unpersisted-mockTemplates gap as /fork above (this is the POST variant of :id/runs; it 404s on the same missing template).",
+  },
+  "/api/protocols/:id/validate": {
+    category: "no_creation_route", cite: "protocols.ts:496-506",
+    reason: "same unpersisted-mockTemplates gap as /fork above.",
+  },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -2222,23 +2701,38 @@ describe("N68: no read of the real gateway shows an operator's exact location or
     expect(notReachedMissingEntry).toEqual([]);
     expect(staleNotReached).toEqual([]);
 
-    // ── cross-family review of #533 (round 3, the one OPEN MEDIUM): round 2 promised that
-    // "every remaining NOT_REACHED entry was re-checked against the same standard" — but
-    // several reasons just SAID that and deferred the actual work ("not chased", "not
-    // attempted", "not independently re-verified", "this round", ...), and one
-    // (/api/capture/challenge) stated a blocker (no test override) that was already false by
-    // the time it was written (the fake chain client is installed above, before the gateway
-    // import). A NOT_REACHED reason must be a STRUCTURAL fact proven by reading the code —
-    // not a promise to look later. Permanent guard: no reason may contain language that defers
-    // work to a future round. Re-triaged every flag from this exact assertion (round 3) into a
-    // dynamic fixture, a verified POST_EXCLUSIONS entry, or an accurate structural blocker —
-    // see the NOT_REACHED table itself for the resolution of each.
-    const DEFERRING_LANGUAGE_RE = /not chased|not attempted|not independently re-verified|deliberately not|this round|not verified/i;
+    // ── cross-family review of #533 (round 3): round 2 promised every remaining NOT_REACHED
+    // entry was re-checked, but several reasons just SAID that and deferred the actual work.
+    // Permanent guard: no reason may contain language that defers work to a future round.
+    // Kept as a SECOND net (round 4 below is the primary one) — a phrase list alone proved
+    // incomplete ("too complex to confidently craft" slipped past round 3's own list
+    // untouched, astra round-4 finding), so it is extended here rather than trusted alone.
+    const DEFERRING_LANGUAGE_RE =
+      /not chased|not attempted|not independently re-verified|deliberately not|this round|not verified|too complex|confidently|not craft|unclear|later/i;
     const deferringNotReached = Object.entries(NOT_REACHED)
       .filter(([, entry]) => DEFERRING_LANGUAGE_RE.test(entry.reason))
       .map(([url]) => url);
     console.log("NOT_REACHED entries with deferring language:", JSON.stringify(deferringNotReached));
     expect(deferringNotReached).toEqual([]);
+
+    // ── cross-family review of #533 (round 4, the SAME MEDIUM still open): a phrase
+    // blocklist will always miss some wording — the primary guard is now structural, not
+    // lexical. Every entry's `category` must be one of the CLOSED set NOT_REACHED_CATEGORIES
+    // enumerates (an entry with a typo'd or invented category fails outright, not silently
+    // passing), and every entry's `cite` must look like an actual `file.ts:line` pointer
+    // (CITE_RE) — prose alone, with no citation shape, also fails outright. Neither check
+    // replaces reading the code; both make it impossible to SKIP citing it. ──
+    const unknownCategoryNotReached = Object.entries(NOT_REACHED)
+      .filter(([, entry]) => !NOT_REACHED_CATEGORIES.has(entry.category))
+      .map(([url, entry]) => `${url} (category=${JSON.stringify(entry.category)})`);
+    console.log("NOT_REACHED entries with an unknown category:", JSON.stringify(unknownCategoryNotReached));
+    expect(unknownCategoryNotReached).toEqual([]);
+
+    const missingCiteNotReached = Object.entries(NOT_REACHED)
+      .filter(([, entry]) => !CITE_RE.test(entry.cite))
+      .map(([url, entry]) => `${url} (cite=${JSON.stringify(entry.cite)})`);
+    console.log("NOT_REACHED entries with a missing/invalid cite:", JSON.stringify(missingCiteNotReached));
+    expect(missingCiteNotReached).toEqual([]);
 
     // At least these three — the review's own named examples — must reach a genuine 2xx with
     // a meaningful body, not just a blank-body validation 400.
