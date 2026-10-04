@@ -380,9 +380,12 @@ export interface SettlementAxis {
    *   status_ambiguous     the milestone says COMPLETED, which may or may not mean released
    *   milestone_shared     another job could claim this job's milestone (`shared_by_jobs`)
    *   no_single_milestone  no milestone, or more than one, is for this job's step
+   *   job_row_conflict     the job row says settled while this job's milestone record says not
+   *                        released or refunded: one of the two records is wrong (F1, #382)
    */
   payoutUnknownReason:
     | "records_conflict"
+    | "job_row_conflict"
     | "status_unrecognized"
     | "status_ambiguous"
     | "milestone_shared"
@@ -420,6 +423,11 @@ export type JobExecutionNoticeCode =
   | "simulated_settlement"
   /** The job's milestone record and the escrow record disagree about money. */
   | "settlement_records_conflict"
+  /**
+   * The job row says `settled`, but this job's milestone record says not released or
+   * refunded: one of them is wrong, so the payout is unknown.
+   */
+  | "settlement_row_conflict"
   /** The job's recorded settlement identifiers point at different records. */
   | "settlement_link_conflict"
   /** A milestone or escrow status is not in the canonical money map, so the payout is unknown. */

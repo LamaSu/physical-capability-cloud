@@ -129,7 +129,7 @@ auto-expire after 30 minutes; committed sessions are immutable. Requires
 | `pcc_get_job` | Full job detail including evidence bundles and timeline. |
 | `pcc_list_protocols` | Protocol templates (multi-step manufacturing workflows). |
 | `pcc_list_evidence` | List all evidence bundles. |
-| `pcc_get_evidence` | A specific bundle's IPFS CID, ZK proof status, Bittensor verification scores, evaluator attestations. |
+| `pcc_get_evidence` | One bundle's summary by `bundleId` (tier, event count, hash, verified flag, storage CID), or every bundle of a job by `jobId`. |
 
 ### Escrow and settlement (3)
 
