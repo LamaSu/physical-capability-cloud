@@ -322,10 +322,12 @@ export class KernelService {
               this.runningJobs.delete(jobId);
               // Feed the REAL execution outcome into the safety breaker. Admission
               // used validateOnly (which records nothing), so this is the only
-              // place a genuine device success/failure reaches the breaker.
+              // place a genuine device success/failure reaches the breaker. A busy
+              // refusal is neither: the runner refused before commanding the device,
+              // because another job holds it (#5205), so it records nothing.
               if (result.success) {
                 gateway.recordDeviceSuccess(deviceId);
-              } else {
+              } else if (result.busy === undefined) {
                 gateway.recordDeviceFailure(deviceId);
               }
               try {
@@ -409,9 +411,10 @@ export class KernelService {
         .then(async (result) => {
           this.runningJobs.delete(jobId);
           // Feed the REAL execution outcome into the safety breaker (fallback path).
+          // A busy refusal never commanded the device, so it records nothing (#5205).
           if (result.success) {
             gateway.recordDeviceSuccess(deviceId);
-          } else {
+          } else if (result.busy === undefined) {
             gateway.recordDeviceFailure(deviceId);
           }
           try {

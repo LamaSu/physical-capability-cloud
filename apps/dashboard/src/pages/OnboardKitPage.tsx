@@ -26,6 +26,7 @@ const STEPS = [
       "MachineAdapter — any device that runs jobs (getStatus, execute, getProgress, onEvidence)",
       "SensorAdapter — power, temperature, vibration monitoring (startRecording, stopRecording)",
       "CameraAdapter — vision/QC inspection (captureSnapshot, runInspection)",
+      "Every adapter implements quiesceEvidence(): it resolves once the job's evidence is all emitted; the kernel refuses an adapter without it",
       "Templates provided for HTTP REST, OPC-UA, Modbus TCP, and SiLA 2 protocols",
     ],
     badge: "Core",

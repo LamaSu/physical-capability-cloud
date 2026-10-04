@@ -7,14 +7,12 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import {
   mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
 } from "../api/mock-onboarding-data.js";
 
 const tabs = ["overview", "approvals", "earnings", "certifications", "maintenance"] as const;
-
-const API = import.meta.env.VITE_PCC_URL ?? "";
 
 /* ---------- Approval types ---------- */
 interface Approval {
@@ -56,9 +54,9 @@ export function OperatorDashboardPage() {
     if (!window.confirm("EMERGENCY STOP: This will immediately halt all active jobs on kernel-nanoclaw. Continue?")) return;
     setEstopLoading(true);
     try {
-      await fetch(`${API}/api/operator/emergency-stop`, {
+      await authorizedFetch("/api/operator/emergency-stop", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
       });
       setEmergencyStopped(true);
@@ -74,9 +72,9 @@ export function OperatorDashboardPage() {
     if (!window.confirm("Resume operations on kernel-nanoclaw?")) return;
     setEstopLoading(true);
     try {
-      await fetch(`${API}/api/operator/emergency-resume`, {
+      await authorizedFetch("/api/operator/emergency-resume", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
       });
       setEmergencyStopped(false);
@@ -96,9 +94,7 @@ export function OperatorDashboardPage() {
     setApprovalsLoading(true);
     setApprovalsError(null);
     try {
-      const res = await fetch(`${API}/api/operator/approvals?status=pending`, {
-        headers: { ...getAuthHeaders() },
-      });
+      const res = await authorizedFetch("/api/operator/approvals?status=pending");
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       const data = await res.json();
       setApprovals(data.approvals ?? []);
@@ -118,9 +114,8 @@ export function OperatorDashboardPage() {
 
   async function handleApprovalAction(id: string, action: "approve" | "reject") {
     try {
-      await fetch(`${API}/api/operator/approvals/${id}/${action}`, {
+      await authorizedFetch(`/api/operator/approvals/${id}/${action}`, {
         method: "POST",
-        headers: { ...getAuthHeaders() },
       });
       setApprovals((prev) => prev.filter((a) => a.id !== id));
     } catch {

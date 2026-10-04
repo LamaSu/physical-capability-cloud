@@ -119,11 +119,15 @@ function isValidCron(expr: string): boolean {
 
 const HHMM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 const IsoInstant = z.string().datetime({ offset: true });
+// The runtime's IANA database is the authority (isKnownTimezone). The pattern
+// only keeps out what Intl accepts that is not an IANA name: a UTC offset such
+// as "+05:00". Every IANA name starts with a letter, and legacy names carry
+// digits in the first part (GMT0, EST5EDT, PST8PDT).
 const Timezone = z
   .string()
   .min(1)
   .max(64)
-  .regex(/^[A-Za-z_]+(?:\/[A-Za-z0-9_+-]+)*$/, "Must be an IANA timezone, e.g. America/Los_Angeles")
+  .regex(/^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+)*$/, "Must be an IANA timezone, e.g. America/Los_Angeles")
   .refine(isKnownTimezone, { message: "Unknown timezone: not in the runtime's IANA database" });
 
 const AvailabilityWindowSchema = z
