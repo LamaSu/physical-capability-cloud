@@ -12,7 +12,8 @@
  * What runs at load is exempt, since nothing a caller does can precede it. That covers top-level
  * `const` initializers, a function called right where it is written there (`(() => ...)()`), and a
  * top-level class's `extends` clause. Any other function body runs later and is walked like the
- * rest. Type positions are erased and are not walked.
+ * rest, and so does an instance field's initializer, which runs at `new` even in a class evaluated
+ * at load (astra pack 303). Type positions are erased and are not walked.
  *
  * The forms that pass (each listed in `checkNode` below):
  *   - literals (string, number, bigint, true, false, null, a template with no substitution);
@@ -38,9 +39,19 @@
  *         the same literal key). A call or an assignment in between could remove the property;
  *       - any key of a binding declared `const x = ObjectCreate(null)`, with the trusted
  *         ObjectCreate (CheckOptions.primordials), which has no prototype;
- *   - a call whose callee is an identifier (a function value), `this.#private`, or `super`, under
- *     any parentheses, `!`, `as`, `satisfies` or `<T>`;
- *   - `new` of an identifier;
+ *   - a call whose callee is an identifier, `this.#private`, or `super`, under any parentheses, `!`,
+ *     `as`, `satisfies` or `<T>`, and `new` of an identifier, when the TARGET is fixed, seen code
+ *     (astra pack 303):
+ *       - a function, method or class declared in the repository (the closure enters and checks it);
+ *       - a function written in place, or a const bound to one;
+ *       - a const whose value is computed at load (top-level, or in a function called where it is
+ *         written there), unless it was taken from third-party code;
+ *       - a parameter whose function is not an entry point, never escapes as a value, and is passed
+ *         seen code by every call in the scope; or the resolve and reject of an executor passed to the
+ *         Promise captured at load.
+ *     Any other target (a callback or field supplied at run time, a const read from data, a `let`, an
+ *     unresolved name, third-party code) fails closed unless its call site is a named collaborator
+ *     (CheckOptions.collaborators), with its reason;
  *   - unary `!`, `-`, `~`, `typeof`, `void`, and `++`/`--` on a writable target. `-` and `~` need a
  *     primitive operand;
  *   - binary arithmetic, bitwise, logical, `===` and `!==`. `+`, `<`, `<=`, `>`, `>=` and
@@ -74,6 +85,39 @@ export interface CheckOptions {
   primordials: RegExp;
   /** Calls that pin a promise before it is awaited: `await` takes only a call of one of these. */
   awaitWrappers: ReadonlySet<string>;
+  /** The repository root: keys and the closure's names give a file by its path relative to it, so no two files share a key. */
+  root: string;
+  /**
+   * The CLOSED list of collaborators, each with its reason (astra pack 303):
+   *   - `path:Name` or `path:Class.member`: a declaration the closure reaches but does not enter;
+   *   - `path:Enclosing:callee()` (with `#n` when that declaration makes several such calls): a call
+   *     whose target the check cannot see, a function value supplied at run time or third-party code.
+   * Every entry needs a reason, and must match exactly one declaration or call site: an entry that
+   * is unexplained, matches nothing or matches several is reported like any violation.
+   */
+  collaborators?: ReadonlyMap<string, string>;
+}
+
+/** A file's path relative to `root`, with forward slashes; a file outside `root` keeps its whole path. */
+function relativeName(fileName: string, root: string): string {
+  const normalized = fileName.split("\\").join("/");
+  const base = root.split("\\").join("/").replace(/\/+$/, "");
+  return normalized.startsWith(`${base}/`) ? normalized.slice(base.length + 1) : normalized;
+}
+
+/** Which declarations and call sites each collaborator entry matched. */
+type Matches = Map<string, Set<unknown>>;
+
+/** What is wrong with the collaborator entries: no reason, no match (stale), or several matches. */
+function collaboratorProblems(options: CheckOptions, matches: Matches): string[] {
+  const problems: string[] = [];
+  for (const [key, reason] of options.collaborators ?? new Map<string, string>()) {
+    if (typeof reason !== "string" || reason.trim() === "") problems.push(`collaborator ${key}: no reason is given`);
+    const count = matches.get(key)?.size ?? 0;
+    if (count === 0) problems.push(`collaborator ${key}: matches no declaration or call site (a stale entry)`);
+    else if (count > 1) problems.push(`collaborator ${key}: matches ${count} declarations or call sites; name each`);
+  }
+  return problems;
 }
 
 const TYPED_ARRAYS = new Set([
@@ -95,9 +139,11 @@ const PROPERTY_KEY = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.Type
 
 /** "file:line what: text" for each node of `fileName` (or of its named top-level functions) that is not an allowed form. */
 export function builtinReads(program: ts.Program, fileName: string, options: CheckOptions, functions?: ReadonlySet<string>): string[] {
-  const walker = makeWalker(program, options);
-  walker.walkFile(program.getSourceFile(fileName)!, functions);
-  return walker.found;
+  const source = program.getSourceFile(fileName)!;
+  const matches: Matches = new Map();
+  const walker = makeWalker(program, options, [source], new Set([source]), matches);
+  walker.walkFile(source, functions);
+  return [...walker.found, ...collaboratorProblems(options, matches)];
 }
 
 /**
@@ -112,11 +158,11 @@ export function trustedClosure(
   program: ts.Program,
   seedFiles: readonly string[],
   inRepo: (fileName: string) => boolean,
-  collaborators: ReadonlyMap<string, string> = new Map(),
-): { roots: ts.Node[]; collaboratorsUsed: string[] } {
+  options: CheckOptions,
+  matches: Matches = new Map(),
+): ts.Node[] {
   const checker = program.getTypeChecker();
   const roots: ts.Node[] = [];
-  const used = new Set<string>();
   const queued = new Set<ts.Node>();
   const enqueue = (node: ts.Node): void => {
     for (let at: ts.Node | undefined = node; at !== undefined; at = at.parent) if (queued.has(at)) return;
@@ -131,9 +177,11 @@ export function trustedClosure(
       const source = declaration.getSourceFile();
       if (source.isDeclarationFile || !inRepo(source.fileName)) continue;
       // A collaborator the trusted code hands its results to, named with its reason, is not entered.
-      const key = closureKey(declaration);
-      if (collaborators.has(key)) {
-        used.add(key);
+      const key = closureKey(declaration, options.root);
+      if (options.collaborators?.has(key) === true) {
+        let matched = matches.get(key);
+        if (matched === undefined) matches.set(key, (matched = new Set()));
+        matched.add(symbol);
         continue;
       }
       if (ts.isShorthandPropertyAssignment(declaration)) {
@@ -162,17 +210,17 @@ export function trustedClosure(
     };
     walk(roots[i]!);
   }
-  return { roots, collaboratorsUsed: [...used].sort() };
+  return roots;
 }
 
-/** "file:Name" for a declaration, "file:Class.member" for a class member: how roots and collaborators are named. */
-export function closureKey(node: ts.Node): string {
+/** "path:Name" for a declaration, "path:Class.member" for a class member: how roots and collaborators are named. */
+export function closureKey(node: ts.Node, root: string): string {
   const file = node.getSourceFile();
-  const base = file.fileName.split(/[\\/]/).pop();
-  if (ts.isSourceFile(node)) return `${base}:(the whole file)`;
-  const name = ts.getNameOfDeclaration(node as ts.Declaration)?.getText(file) ?? ts.SyntaxKind[node.kind];
+  const path = relativeName(file.fileName, root);
+  if (ts.isSourceFile(node)) return `${path}:(the whole file)`;
+  const name = ts.isConstructorDeclaration(node) ? "constructor" : (ts.getNameOfDeclaration(node as ts.Declaration)?.getText(file) ?? ts.SyntaxKind[node.kind]);
   const owner = node.parent !== undefined && (ts.isClassDeclaration(node.parent) || ts.isClassExpression(node.parent)) ? node.parent.name?.text : undefined;
-  return `${base}:${owner !== undefined ? `${owner}.` : ""}${name}`;
+  return `${path}:${owner !== undefined ? `${owner}.` : ""}${name}`;
 }
 
 /** "file:line what: text" for each node of the trusted closure of `seedFiles` that is not an allowed form, and what it reached. */
@@ -181,22 +229,32 @@ export function closureReads(
   seedFiles: readonly string[],
   options: CheckOptions,
   inRepo: (fileName: string) => boolean,
-  collaborators: ReadonlyMap<string, string> = new Map(),
 ): { reached: string[]; found: string[]; collaboratorsUsed: string[] } {
-  const { roots, collaboratorsUsed } = trustedClosure(program, seedFiles, inRepo, collaborators);
-  const walker = makeWalker(program, options);
+  const matches: Matches = new Map();
+  const roots = trustedClosure(program, seedFiles, inRepo, options, matches);
+  const seeds = new Set(seedFiles.map((file) => program.getSourceFile(file)!));
+  const walker = makeWalker(program, options, roots, seeds, matches);
   for (const root of roots) walker.walkRoot(root);
-  return { reached: roots.map(closureKey), found: [...new Set(walker.found)], collaboratorsUsed };
+  return {
+    reached: roots.map((root) => closureKey(root, options.root)),
+    found: [...new Set([...walker.found, ...collaboratorProblems(options, matches)])],
+    collaboratorsUsed: [...matches.keys()].sort(),
+  };
 }
 
-/** The check's machinery over `program`: walkFile checks a file (or named functions of it), walkRoot one reached declaration. */
-function makeWalker(program: ts.Program, options: CheckOptions) {
+/**
+ * The check's machinery over `program`: walkFile checks a file (or named functions of it), walkRoot
+ * one reached declaration. `scope` is the code a call through a parameter is resolved against (the
+ * closure's roots, or the one file), and `seeds` the files whose exports are the entry points, which
+ * callers outside the check call with values it cannot see.
+ */
+function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly ts.Node[], seeds: ReadonlySet<ts.SourceFile>, matches: Matches) {
   const checker = program.getTypeChecker();
   const found: string[] = [];
   const report = (node: ts.Node, what: string) => {
     const file = node.getSourceFile();
     const { line } = file.getLineAndCharacterOfPosition(node.getStart(file));
-    found.push(`${file.fileName.split(/[\\/]/).pop()}:${line + 1} ${what}: ${node.getText(file).split("\n")[0]!.slice(0, 80)}`);
+    found.push(`${relativeName(file.fileName, options.root)}:${line + 1} ${what}: ${node.getText(file).split("\n")[0]!.slice(0, 80)}`);
   };
   const fromLib = (symbol: ts.Symbol | undefined): boolean =>
     symbol?.declarations?.some((d) => {
@@ -388,6 +446,257 @@ function makeWalker(program: ts.Program, options: CheckOptions) {
     return false;
   };
 
+  // -- call targets (astra pack 303): a call passes only when the code it runs is fixed and seen --
+  const isIntrinsic = (declaration: ts.Node): boolean => {
+    const file = declaration.getSourceFile();
+    return program.isSourceFileDefaultLibrary(file) || /[\\/]node_modules[\\/]@types[\\/]node[\\/]/.test(file.fileName);
+  };
+  /** Code outside the repository's own source that is neither an intrinsic nor a node: built-in. */
+  const isThirdParty = (declaration: ts.Node): boolean => {
+    const file = declaration.getSourceFile();
+    return !isIntrinsic(declaration) && (file.isDeclarationFile || /[\\/]node_modules[\\/]/.test(file.fileName));
+  };
+  const symbolOf = (node: ts.Node): ts.Symbol | undefined => {
+    let symbol = checker.getSymbolAtLocation(node);
+    if (symbol !== undefined && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+    return symbol;
+  };
+  const isConst = (declaration: ts.Node): declaration is ts.VariableDeclaration =>
+    ts.isVariableDeclaration(declaration) && ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0;
+  /**
+   * Whether `node` runs once, when its module loads: it is in a top-level const initializer (or a
+   * top-level class's extends clause), with no function between other than one called right where
+   * it is written. A top-level const's own declaration runs at load too.
+   */
+  const runsAtLoad = (node: ts.Node): boolean => {
+    if (isConst(node) && ts.isVariableStatement(node.parent.parent) && ts.isSourceFile(node.parent.parent.parent)) return true;
+    const loadTime = loadTimeOf(node.getSourceFile());
+    for (let at: ts.Node | undefined = node; at !== undefined; at = at.parent) {
+      if (loadTime.has(at)) return true;
+      if ((ts.isFunctionLike(at) && !isImmediatelyInvoked(at)) || ts.isClassStaticBlockDeclaration(at)) return false;
+    }
+    return false;
+  };
+  /** A const whose initializer runs at load: its value is fixed before any caller acts. */
+  const isLoadTimeConst = (declaration: ts.Node): declaration is ts.VariableDeclaration =>
+    isConst(declaration) && declaration.initializer !== undefined && runsAtLoad(declaration);
+  /** Whether `reference` only names its declaration or exports it, rather than using the value. */
+  const isNamingOnly = (reference: ts.Node): boolean => {
+    const parent = reference.parent;
+    if (
+      (ts.isFunctionDeclaration(parent) || ts.isMethodDeclaration(parent) || ts.isVariableDeclaration(parent) || ts.isClassDeclaration(parent) ||
+        ts.isPropertyDeclaration(parent) || ts.isParameter(parent) || ts.isGetAccessorDeclaration(parent) || ts.isSetAccessorDeclaration(parent)) &&
+      parent.name === reference
+    ) {
+      return true;
+    }
+    return ts.isExportSpecifier(parent) || ts.isExportAssignment(parent);
+  };
+  // Every reference in `scope` (identifiers and #names in value positions), by the symbol it resolves to.
+  let referenceIndex: Map<ts.Symbol, ts.Node[]> | undefined;
+  const referencesOf = (symbol: ts.Symbol): ts.Node[] => {
+    if (referenceIndex === undefined) {
+      const index = new Map<ts.Symbol, ts.Node[]>();
+      const walk = (node: ts.Node): void => {
+        if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) return;
+        if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isImportDeclaration(node)) return;
+        if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
+          const s = symbolOf(node);
+          if (s !== undefined) {
+            const list = index.get(s);
+            if (list === undefined) index.set(s, [node]);
+            else list.push(node);
+          }
+        }
+        ts.forEachChild(node, walk);
+      };
+      for (const root of scope) walk(root);
+      referenceIndex = index;
+    }
+    return referenceIndex.get(symbol) ?? [];
+  };
+  /** The call or `new` whose callee is `reference` (under erased wrappers), or undefined when the reference is used otherwise. */
+  const callOf = (reference: ts.Node): ts.CallExpression | ts.NewExpression | undefined => {
+    let at: ts.Node = reference;
+    if (ts.isPropertyAccessExpression(reference.parent) && reference.parent.name === reference) at = reference.parent;
+    while (ts.isParenthesizedExpression(at.parent) || ts.isNonNullExpression(at.parent) || ts.isAsExpression(at.parent) || ts.isSatisfiesExpression(at.parent) || ts.isTypeAssertionExpression(at.parent)) {
+      at = at.parent;
+    }
+    const parent = at.parent;
+    return (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === at ? parent : undefined;
+  };
+  /** The binding that names a function: its declaration's name, or the const it is the initializer of. */
+  const functionSymbol = (fn: ts.SignatureDeclaration): ts.Symbol | undefined => {
+    if ((ts.isFunctionDeclaration(fn) || ts.isMethodDeclaration(fn)) && fn.name !== undefined) return checker.getSymbolAtLocation(fn.name);
+    if (ts.isArrowFunction(fn) || ts.isFunctionExpression(fn)) {
+      let at: ts.Node = fn;
+      while (ts.isParenthesizedExpression(at.parent) || ts.isAsExpression(at.parent) || ts.isSatisfiesExpression(at.parent)) at = at.parent;
+      const parent = at.parent;
+      if (ts.isVariableDeclaration(parent) && parent.initializer === at && ts.isIdentifier(parent.name) && ts.isVariableDeclarationList(parent.parent) && (parent.parent.flags & ts.NodeFlags.Const) !== 0) {
+        return checker.getSymbolAtLocation(parent.name);
+      }
+    }
+    return undefined;
+  };
+  /** Whether calling `expression`'s value runs fixed, seen code: a function written in place, or a binding that resolves to one. */
+  const valueFixed = (expression: ts.Expression, seen: Set<ts.Node>): boolean => {
+    const e = unwrap(expression);
+    if (ts.isArrowFunction(e) || ts.isFunctionExpression(e) || ts.isClassExpression(e) || e.kind === ts.SyntaxKind.NullKeyword) return true;
+    return ts.isIdentifier(e) && (e.text === "undefined" || identifierFixed(e, seen));
+  };
+  const identifierFixed = (identifier: ts.Node, seen: Set<ts.Node>): boolean => {
+    const declarations = symbolOf(identifier)?.declarations ?? [];
+    return declarations.length > 0 && declarations.every((d) => declarationFixed(d, seen));
+  };
+  const declarationFixed = (declaration: ts.Declaration, seen: Set<ts.Node>): boolean => {
+    if (seen.has(declaration)) return true;
+    seen.add(declaration);
+    // A global or a node: binding: the identifier check judges its use after load.
+    if (isIntrinsic(declaration)) return true;
+    if (isThirdParty(declaration)) return false;
+    if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isClassDeclaration(declaration) || ts.isConstructorDeclaration(declaration)) return true;
+    if (ts.isParameter(declaration)) return parameterFixed(declaration, seen);
+    if (isLoadTimeConst(declaration)) return loadTimeFixed(declaration.initializer!, seen);
+    if (isConst(declaration) && declaration.initializer !== undefined) return valueFixed(declaration.initializer, seen);
+    // A let or var, a binding element, a declared value, an import that resolves to nothing: supplied at run time.
+    return false;
+  };
+  /**
+   * A value computed at load is fixed when the module loads: nothing a caller does afterwards
+   * changes it. It is seen code unless it was taken from third-party code, directly or through
+   * another load-time const; that is named as a collaborator instead.
+   */
+  const loadTimeFixed = (initializer: ts.Expression, seen: Set<ts.Node>): boolean => {
+    let fixed = true;
+    const walk = (node: ts.Node): void => {
+      if (!fixed || (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node))) return;
+      if (ts.isIdentifier(node) && !isNamingOnly(node) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) {
+        for (const d of symbolOf(node)?.declarations ?? []) {
+          if (isThirdParty(d)) fixed = false;
+          else if (isLoadTimeConst(d) && !seen.has(d)) {
+            seen.add(d);
+            if (!loadTimeFixed(d.initializer!, seen)) fixed = false;
+          }
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(initializer);
+    return fixed;
+  };
+  /** Whether `fn` is an entry point: exported from a seed file, or a public method or constructor of a class a seed file exports. */
+  const isEntryPoint = (fn: ts.SignatureDeclaration): boolean => {
+    if (!seeds.has(fn.getSourceFile())) return false;
+    const moduleSymbol = checker.getSymbolAtLocation(fn.getSourceFile());
+    const exported = new Set<ts.Symbol>();
+    for (const e of moduleSymbol !== undefined ? checker.getExportsOfModule(moduleSymbol) : []) exported.add(e.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(e) : e);
+    const own = functionSymbol(fn);
+    if (own !== undefined && exported.has(own)) return true;
+    const owner = fn.parent;
+    if ((ts.isMethodDeclaration(fn) || ts.isConstructorDeclaration(fn) || ts.isGetAccessorDeclaration(fn) || ts.isSetAccessorDeclaration(fn)) && ts.isClassLike(owner)) {
+      const classSymbol = owner.name !== undefined ? checker.getSymbolAtLocation(owner.name) : undefined;
+      const isPrivate = fn.name !== undefined && ts.isPrivateIdentifier(fn.name) || (ts.getCombinedModifierFlags(fn) & (ts.ModifierFlags.Private | ts.ModifierFlags.Protected)) !== 0;
+      return classSymbol !== undefined && exported.has(classSymbol) && !isPrivate;
+    }
+    return false;
+  };
+  /**
+   * A parameter is fixed when every call of its function in `scope` passes fixed code there (or
+   * nothing, or its default is fixed), and the function never escapes as a value, which would let
+   * callers the check cannot see supply it. An entry point's parameters, and an unnamed function's,
+   * are supplied by whoever calls it: never fixed.
+   */
+  const parameterFixed = (parameter: ts.ParameterDeclaration, seen: Set<ts.Node>): boolean => {
+    const fn = parameter.parent;
+    if (!ts.isFunctionLike(fn) || parameter.dotDotDotToken !== undefined || !ts.isIdentifier(parameter.name)) return false;
+    if (parameter.initializer !== undefined && !valueFixed(parameter.initializer, seen)) return false;
+    // A promise executor's resolve and reject, when the promise is made by the Promise captured at load, are the engine's own.
+    if (isPromiseExecutor(fn)) return fn.parameters.indexOf(parameter) < 2;
+    if (isEntryPoint(fn)) return false;
+    const symbol = functionSymbol(fn);
+    if (symbol === undefined) return false;
+    const index = fn.parameters.indexOf(parameter);
+    for (const reference of referencesOf(symbol)) {
+      if (isNamingOnly(reference)) continue;
+      const call = callOf(reference);
+      if (call === undefined) return false;
+      const argument = call.arguments?.[index];
+      // An argument passed where the call runs at load is a value fixed at load.
+      if (argument !== undefined && !(runsAtLoad(call) ? loadTimeFixed(argument, seen) : valueFixed(argument, seen))) return false;
+    }
+    return true;
+  };
+  /** Whether `expression` is the intrinsic Promise: the global itself, or a load-time const taken from it. */
+  const isIntrinsicPromise = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+    const e = unwrap(expression);
+    if (!ts.isIdentifier(e)) return false;
+    const symbol = symbolOf(e);
+    for (const d of symbol?.declarations ?? []) {
+      if (seen.has(d)) continue;
+      seen.add(d);
+      if (isIntrinsic(d) && symbol!.getName() === "Promise") return true;
+      if (isLoadTimeConst(d) && isIntrinsicPromise(d.initializer!, seen)) return true;
+    }
+    return false;
+  };
+  /** Whether `fn` is written as the executor of `new P(fn)`, where P is the intrinsic Promise. */
+  const isPromiseExecutor = (fn: ts.SignatureDeclaration): boolean => {
+    if (!(ts.isArrowFunction(fn) || ts.isFunctionExpression(fn))) return false;
+    let at: ts.Node = fn;
+    while (ts.isParenthesizedExpression(at.parent)) at = at.parent;
+    const parent = at.parent;
+    return ts.isNewExpression(parent) && parent.arguments?.[0] === at && isIntrinsicPromise(parent.expression);
+  };
+  /** Whether a call's callee (an identifier, `this.#member` or `super`) runs fixed, seen code. */
+  const callTargetFixed = (callee: ts.Expression): boolean => {
+    if (callee.kind === ts.SyntaxKind.SuperKeyword) return true;
+    if (isPrivateMember(callee)) {
+      // A private method is fixed code; a private field holds whatever was assigned to it at run time.
+      const declarations = symbolOf((callee as ts.PropertyAccessExpression).name)?.declarations ?? [];
+      return declarations.length > 0 && declarations.every((d) => ts.isMethodDeclaration(d));
+    }
+    return identifierFixed(callee, new Set());
+  };
+  /** The nearest enclosing declaration with a name: what a call-site key is relative to. */
+  const enclosingNamed = (node: ts.Node): ts.Node | undefined => {
+    for (let at = node.parent; at !== undefined; at = at.parent) {
+      if (ts.isConstructorDeclaration(at)) return at;
+      if (
+        (ts.isFunctionDeclaration(at) || ts.isMethodDeclaration(at) || ts.isGetAccessorDeclaration(at) || ts.isSetAccessorDeclaration(at) ||
+          ts.isPropertyDeclaration(at) || ts.isClassDeclaration(at)) &&
+        at.name !== undefined
+      ) {
+        return at;
+      }
+      if (ts.isVariableDeclaration(at) && ts.isIdentifier(at.name)) return at;
+    }
+    return undefined;
+  };
+  /** `path:Enclosing:callee()`, numbered `#n` in source order when the enclosing declaration makes several calls of that callee. */
+  const callSiteKey = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): string => {
+    const enclosing = enclosingNamed(call);
+    const text = callee.getText();
+    const base = `${enclosing !== undefined ? closureKey(enclosing, options.root) : `${relativeName(call.getSourceFile().fileName, options.root)}:(top level)`}:${text}()`;
+    const same: ts.Node[] = [];
+    const walk = (n: ts.Node): void => {
+      if ((ts.isCallExpression(n) || ts.isNewExpression(n)) && unwrap(n.expression).getText() === text && enclosingNamed(n) === enclosing) same.push(n);
+      ts.forEachChild(n, walk);
+    };
+    walk(enclosing ?? call.getSourceFile());
+    return same.length > 1 ? `${base}#${same.indexOf(call) + 1}` : base;
+  };
+  /** A call whose target is not fixed and seen: allowed only at a call site named as a collaborator. */
+  const unseenTarget = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): void => {
+    const key = callSiteKey(call, callee);
+    if (options.collaborators?.has(key) === true) {
+      let matched = matches.get(key);
+      if (matched === undefined) matches.set(key, (matched = new Set()));
+      matched.add(call);
+      return;
+    }
+    report(call, `a call whose target the check cannot see (supplied at run time, or third-party code); name the call site ${key} as a collaborator, with its reason`);
+  };
+
   const checkIdentifier = (node: ts.Identifier): void => {
     const parent = node.parent;
     // Names that are not references: declarations, property names, labels.
@@ -523,12 +832,15 @@ function makeWalker(program: ts.Program, options: CheckOptions) {
         const callee = unwrap(n.expression);
         if (!(ts.isIdentifier(callee) || isPrivateMember(callee) || callee.kind === ts.SyntaxKind.SuperKeyword)) {
           report(n, "a call whose callee is looked up at call time");
+        } else if (!callTargetFixed(callee)) {
+          unseenTarget(n, callee);
         }
         return true;
       }
       case ts.SyntaxKind.NewExpression: {
         const n = node as ts.NewExpression;
         if (!ts.isIdentifier(n.expression)) report(n, "new of a constructor looked up at call time");
+        else if (!callTargetFixed(n.expression)) unseenTarget(n, n.expression);
         return true;
       }
       case ts.SyntaxKind.PrefixUnaryExpression: {
@@ -678,7 +990,10 @@ function makeWalker(program: ts.Program, options: CheckOptions) {
     const now = ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node) ? atLoad && isImmediatelyInvoked(node) : atLoad || loadTime.has(node);
     if (!now && !checkNode(node)) return;
     if (now && (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isImportDeclaration(node))) return;
-    ts.forEachChild(node, (child) => visit(child, now, loadTime));
+    // An instance field's initializer runs at `new`, after load, even in a class evaluated at load (astra pack 303);
+    // its computed name, and a static field's initializer, run when the class is evaluated.
+    const deferred = ts.isPropertyDeclaration(node) && (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Static) === 0 ? node.initializer : undefined;
+    ts.forEachChild(node, (child) => visit(child, child === deferred ? false : now, loadTime));
   };
   const walkFile = (source: ts.SourceFile, functions?: ReadonlySet<string>): void => {
     const loadTime = loadTimeOf(source);
@@ -731,5 +1046,11 @@ export function programOfFiles(dir: string, files: ReadonlyMap<string, string>, 
   host.fileExists = (name) => files.has(name) || fileExists(name);
   const readFile = host.readFile.bind(host);
   host.readFile = (name) => files.get(name) ?? readFile(name);
+  // An in-memory file's directory exists, so a module in it resolves.
+  const directoryExists = host.directoryExists?.bind(host) ?? ts.sys.directoryExists;
+  host.directoryExists = (name) => {
+    const prefix = `${name.split("\\").join("/").replace(/\/+$/, "")}/`;
+    return [...files.keys()].some((file) => file.split("\\").join("/").startsWith(prefix)) || directoryExists(name);
+  };
   return ts.createProgram([...files.keys()], options, host);
 }
