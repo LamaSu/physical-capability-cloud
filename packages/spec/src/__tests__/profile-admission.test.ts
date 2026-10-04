@@ -22,10 +22,12 @@ import {
   computeRegistryDigest,
   NON_NUMERIC_UNIT,
   PROFILE_OBSERVATION_FIELD,
+  REGISTRY_SNAPSHOT_DOMAIN,
   type AdmissionBundle,
   type ProfileAdmissionInput,
   type ProfileAdmissionResult,
   type ProfileObservation,
+  type SignerGrant,
 } from "../evidence/profile-admission.js";
 import {
   computeMeasurementProfileDigest,
@@ -33,8 +35,8 @@ import {
   type MeasurementProfileV1,
 } from "../evidence/measurement-profile.js";
 import { evidenceLevelOfBundles, evidenceLevelsOfEvents } from "../evidence/evidence-level.js";
-import { signingPreimage } from "../evidence/signing-preimage.js";
-import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
+import { sessionKeyDelegationPreimage, signingPreimage } from "../evidence/signing-preimage.js";
+import { canonicalize, hashBundle, hashEvent, sha256 } from "../util/canonical.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../evidence/subject-binding.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
@@ -152,10 +154,13 @@ async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promis
   return out;
 }
 
-/** The pinned registry snapshot (astra packs 271, 275): each registered key and the operator that owns it. */
+/**
+ * The pinned registry snapshot (astra packs 271, 275, 281): each registered key, the operator that owns it, and
+ * its grants. A is the executor of KERNEL (the kernel's own key); B is an independent witness for KERNEL.
+ */
 const REGISTRY = [
-  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]! },
-  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]! },
+  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]!, grants: [{ role: "executor" as const, kernelId: KERNEL }] },
+  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]!, grants: [{ role: "witness" as const, kernelId: KERNEL }] },
 ];
 const REGISTRY_PIN = await computeRegistryDigest(REGISTRY);
 /** The pin for `rows`, or a well-formed stand-in when admission is to refuse the rows themselves. */
@@ -166,6 +171,34 @@ async function pinOf(rows: unknown): Promise<string> {
     return "sha256:" + "0".repeat(64);
   }
 }
+
+/**
+ * A session key `root` delegates (LO-EV-1), as kernel-sdk makes one: its row key, its signer id, and the
+ * authorization as kernel-sdk sends it (`publicKey` and `parentSignature` as bare hex). Its key pair joins KEYS, so
+ * toBundle can sign with it. By default it is valid from a minute before the pilot to an hour after, for JOB.
+ */
+function delegate(
+  root: ReturnType<typeof generateKeyPairSync>,
+  over: { pair?: ReturnType<typeof generateKeyPairSync>; contractIds?: string[]; allowedActions?: string[]; issuedAt?: number; expiresAt?: number } = {},
+) {
+  const pair = over.pair ?? generateKeyPairSync("ed25519");
+  const raw = rawKey(pair);
+  const body = {
+    sessionId: "session-0001",
+    parentAgentId: "eip155:84532:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:7",
+    publicKey: Buffer.from(raw.slice(2), "hex"),
+    issuedAt: over.issuedAt ?? Math.floor(T0 / 1000) - 60,
+    expiresAt: over.expiresAt ?? Math.floor(T0 / 1000) + 3600,
+    scope: { allowedActions: over.allowedActions ?? ["evidence_submit"], contractIds: over.contractIds ?? [JOB], maxSignatures: 1000 },
+  };
+  const parentSignature = sign(null, sessionKeyDelegationPreimage(body as never), root.privateKey).toString("hex");
+  const signer = raw.slice(0, 42);
+  KEYS[signer] = pair;
+  return { pair, raw, signer, authorization: { ...body, publicKey: raw.slice(2), parentSignature } };
+}
+/** The registry row of a delegated session key: its key, its root's key, and the root's delegation as received. */
+const sessionRow = (session: ReturnType<typeof delegate>, root: string = KEY_A) => ({ publicKey: session.raw, delegatedBy: root, authorization: session.authorization });
+const EXECUTOR_GRANTS: SignerGrant[] = [{ role: "executor", kernelId: KERNEL }];
 
 /** printer execution_started t0, execution_completed t10, camera inspects (passed) at t20. */
 const PILOT: Draft[] = [
@@ -360,7 +393,7 @@ describe("profile admission — trust domains (#345's one rule, steward #6478)",
 
   it("a registry key that names no operator (null) authenticates, but no inspection can then be independent", async () => {
     const p = inspectedPageProfile();
-    const unknown = [{ publicKey: KEY_A, trustDomain: null }, { publicKey: KEY_B, trustDomain: null }];
+    const unknown = REGISTRY.map((row) => ({ ...row, trustDomain: null }));
     const r = await admit(p, await toBundles(PILOT, p), { registryKeys: unknown });
     expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
     expect(codes(r)).toEqual(["level-not-reached"]);
@@ -372,44 +405,61 @@ describe("profile admission — trust domains (#345's one rule, steward #6478)",
     const p = inspectedPageProfile();
     const bundles = await toBundles(PILOT, p);
     // After the pin, B's key is reassigned to the executor A: the rows are no longer the pinned registry.
-    const rotated = [REGISTRY[0]!, { publicKey: KEY_B, trustDomain: OPERATOR_A }];
+    const rotated = [REGISTRY[0]!, { ...REGISTRY[1]!, trustDomain: OPERATOR_A }];
     expect(codes(await admit(p, bundles, { registryKeys: rotated, pinnedRegistryDigest: REGISTRY_PIN }))).toEqual(["registry-mismatch"]);
+    // A grant changed after the pin is not the pinned registry either (astra pack 281).
+    const regranted = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: JOB }] }];
+    expect(codes(await admit(p, bundles, { registryKeys: regranted, pinnedRegistryDigest: REGISTRY_PIN }))).toEqual(["registry-mismatch"]);
     // Pinned with the rotation, it is that registry, and the camera is the executor's own.
     expect(await admit(p, bundles, { registryKeys: rotated })).toMatchObject({ decision: "reject", reached: "device_reported" });
     expect(codes(await admit(p, bundles, { pinnedRegistryDigest: "0x" + "a".repeat(64) }))).toEqual(["registry-pin-invalid"]);
     expect((await admit(p, bundles, { registryKeys: [...REGISTRY].reverse(), pinnedRegistryDigest: REGISTRY_PIN })).decision).toBe("admit");
   });
 
-  it("the registry is data, one row per key: a key twice (even with one domain), another spelling of a key, colliding signer ids, or a malformed row is refused", async () => {
+  it("the registry is data, one row per key: a key twice (even with one domain), another spelling of a key, colliding signer ids, or a malformed row or grant is refused", async () => {
     const p = inspectedPageProfile();
     const bundles = await toBundles(PILOT, p);
-    const accessorRow = { publicKey: KEY_A };
+    const G = EXECUTOR_GRANTS;
+    const accessorRow = { publicKey: KEY_A, grants: G };
     Object.defineProperty(accessorRow, "trustDomain", { get: () => OPERATOR_A, enumerable: true });
     // Two keys that share their first 20 bytes, so one signer id: a declared signer would not name one key.
     const collideA = `0x${"ab".repeat(20)}${"00".repeat(12)}`;
     const collideB = `0x${"ab".repeat(20)}${"11".repeat(12)}`;
-    const registries: unknown[] = [
-      undefined,
-      {},
-      [{ publicKey: "not-a-key", trustDomain: OPERATOR_A }],
-      [{ publicKey: KEY_A }],
-      [{ publicKey: KEY_A, trustDomain: "not-a-principal" }],
-      [{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A }, REGISTRY[1]],
-      [...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_B }],
-      [...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_A }],
-      [...REGISTRY, { publicKey: collideA, trustDomain: null }, { publicKey: collideB, trustDomain: null }],
-      [accessorRow, REGISTRY[1]],
+    // Each case and the reason it must be refused for, so none passes on another case's defect.
+    const registries: Array<[unknown, RegExp]> = [
+      [undefined, /must be a list/],
+      [{}, /must be a list/],
+      [[{ publicKey: "not-a-key", trustDomain: OPERATOR_A, grants: G }], /0x<64 lowercase hex>/],
+      [[{ publicKey: KEY_A, grants: G }], /trustDomain: an operator principal id or null/],
+      [[{ publicKey: KEY_A, trustDomain: "not-a-principal", grants: G }], /trustDomain: an operator principal id or null/],
+      [[{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A, grants: G }, REGISTRY[1]], /0x<64 lowercase hex>/],
+      [[...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_B, grants: G }], /twice/],
+      [[...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_A, grants: G }], /twice/],
+      [[...REGISTRY, { publicKey: collideA, trustDomain: null, grants: G }, { publicKey: collideB, trustDomain: null, grants: G }], /signer id/],
+      [[accessorRow, REGISTRY[1]], /no code supplied with the data may run/],
+      // Grants (astra pack 281): a non-empty list of { role, kernelId, jobId? }, none twice, and nothing else on the row.
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [] }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [{ role: "owner", kernelId: KERNEL }] }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [{ role: "executor", kernelId: "" }] }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [{ role: "executor", kernelId: KERNEL, jobId: "" }] }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [{ role: "executor", kernelId: KERNEL, jobId: null }] }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [{ role: "executor", kernelId: KERNEL, unit: "u" }] }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: [...G, ...G] }, REGISTRY[1]], /none twice/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: G, note: "x" }, REGISTRY[1]], /grants: a non-empty list/],
+      [[{ publicKey: KEY_A, trustDomain: OPERATOR_A, grants: G, delegatedBy: KEY_B }, REGISTRY[1]], /delegatedBy: a registered key/],
     ];
-    for (const registry of registries) {
+    for (const [registry, why] of registries) {
       const r = await admit(p, bundles, { registryKeys: registry as ProfileAdmissionInput["registryKeys"], pinnedRegistryDigest: REGISTRY_PIN });
       expect(codes(r), JSON.stringify(registry)).toEqual(["input-unreadable"]);
+      expect(r.reasons[0]!.detail, JSON.stringify(registry)).toMatch(why);
     }
   });
 
   it("registryKeys is walked for code with the other data: an accessor row is refused as code, and its getter never runs", async () => {
     const p = inspectedPageProfile();
     let runs = 0;
-    const row = { publicKey: KEY_A };
+    const row = { publicKey: KEY_A, grants: EXECUTOR_GRANTS };
     Object.defineProperty(row, "trustDomain", { get: () => (runs++, OPERATOR_A), enumerable: true });
     const r = await admit(p, await toBundles(PILOT, p), { registryKeys: [row as { publicKey: string; trustDomain: string }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN });
     expect(codes(r)).toEqual(["input-unreadable"]);
@@ -417,11 +467,26 @@ describe("profile admission — trust domains (#345's one rule, steward #6478)",
     expect(runs).toBe(0);
   });
 
-  it("computeRegistryDigest commits to the rows, not their order, and refuses what admission refuses", async () => {
+  it("computeRegistryDigest commits to the rows and their grants, not their order, and refuses what admission refuses", async () => {
     expect(await computeRegistryDigest([...REGISTRY].reverse())).toBe(REGISTRY_PIN);
-    expect(await computeRegistryDigest([REGISTRY[0]!, { publicKey: KEY_B, trustDomain: null }])).not.toBe(REGISTRY_PIN);
+    expect(await computeRegistryDigest([REGISTRY[0]!, { ...REGISTRY[1]!, trustDomain: null }])).not.toBe(REGISTRY_PIN);
     await expect(computeRegistryDigest([...REGISTRY, REGISTRY[0]!])).rejects.toThrow("twice");
-    await expect(computeRegistryDigest([{ publicKey: "0x00", trustDomain: null }])).rejects.toThrow("must be");
+    await expect(computeRegistryDigest([{ publicKey: "0x00", trustDomain: null, grants: EXECUTOR_GRANTS }])).rejects.toThrow("must be");
+    // Byte-identical to its definition: rows sorted by key, each registered row's grants sorted, under the v2 domain.
+    const two: SignerGrant[] = [{ role: "witness", kernelId: "kernel-z" }, { role: "executor", kernelId: KERNEL, jobId: JOB }];
+    const rows = [{ ...REGISTRY[1]!, grants: two }, REGISTRY[0]!];
+    const sortedGrants = [two[1]!, two[0]!];
+    const keys = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: sortedGrants }].sort((a, b) => (a.publicKey < b.publicKey ? -1 : 1));
+    expect(REGISTRY_SNAPSHOT_DOMAIN).toBe("PCC:evidence-registry-snapshot:v2");
+    expect(await computeRegistryDigest(rows)).toBe(await sha256(canonicalize({ domain: REGISTRY_SNAPSHOT_DOMAIN, keys })));
+    expect(await computeRegistryDigest([{ ...REGISTRY[1]!, grants: [...two].reverse() }, REGISTRY[0]!])).toBe(await computeRegistryDigest(rows));
+    // A delegation is committed as received.
+    const session = delegate(key);
+    const withSession = [...REGISTRY, sessionRow(session)];
+    const sessionKeys = [...keys.map((k) => (k.publicKey === KEY_B ? REGISTRY[1]! : k)), { publicKey: session.raw, delegatedBy: KEY_A, authorization: session.authorization }].sort((a, b) =>
+      a.publicKey < b.publicKey ? -1 : 1,
+    );
+    expect(await computeRegistryDigest(withSession)).toBe(await sha256(canonicalize({ domain: REGISTRY_SNAPSHOT_DOMAIN, keys: sessionKeys })));
   });
 
   it("executorTrustDomains must be a list of operator principal ids, from the deal: absent or malformed rejects", async () => {
@@ -447,6 +512,136 @@ describe("profile admission — trust domains (#345's one rule, steward #6478)",
     const r = await admit(p, await toBundles([...PILOT.slice(0, 2), { ...PILOT[2]!, payload: { passed: false } }], p));
     expect(r.decision).toBe("reject");
     expect(codes(r)).toContain("contradictory-evidence");
+  });
+});
+
+describe("profile admission — a signature authorizes only what its key's grant names (astra pack 281, DECISIONS 00:26)", () => {
+  it("astra 281's reproduction: B, registered as a witness, signs the printer's execution events for KERNEL and declares B. Refused, never admitted", async () => {
+    const p = deviceReportedProfile();
+    const r = await admit(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_B)]);
+    expect(r).toMatchObject({ decision: "reject", admits: false, reached: null, qualifyingSamples: 0 });
+    expect(codes(r)).toEqual(["unauthorized-signer"]);
+    expect(r.reasons[0]!.detail).toMatch(/is a witness for this subject, which signs inspections only, not execution_started/);
+  });
+
+  it("a registered key with no grant for the subject's kernel authorizes nothing: B signs, declares B and is registered, and is refused", async () => {
+    const p = deviceReportedProfile();
+    // B is the executor of another kernel: a valid signature by a registered key, for the wrong subject.
+    const elsewhere = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }];
+    const r = await admit(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_B)], { registryKeys: elsewhere });
+    expect(codes(r)).toEqual(["unauthorized-signer"]);
+    expect(r.reasons[0]!.detail).toMatch(/holds no grant for kernel kernel-admission-1, job job-admission-1: registry membership alone authorizes nothing/);
+    // A witness for another kernel cannot inspect this one either.
+    const q = inspectedPageProfile();
+    const witnessElsewhere = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: "kernel-other" }] }];
+    expect(codes(await admit(q, await toBundles(PILOT, q), { registryKeys: witnessElsewhere }))).toEqual(["unauthorized-signer"]);
+  });
+
+  it("an explicitly authorized independent inspector is admitted: a witness for the kernel, or for this one job; a witness for another job is not", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    expect(await admit(p, bundles)).toMatchObject({ decision: "admit", reached: "inspected_output", qualifyingSamples: 1 });
+    const forTheJob = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: JOB }] }];
+    expect(await admit(p, bundles, { registryKeys: forTheJob })).toMatchObject({ decision: "admit", reached: "inspected_output" });
+    const forAnotherJob = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: "job-other" }] }];
+    expect(codes(await admit(p, bundles, { registryKeys: forAnotherJob }))).toEqual(["unauthorized-signer"]);
+  });
+
+  it("the executor's grant must name the subject's kernel, and its job when it names one; one grant that names the subject is enough", async () => {
+    const p = deviceReportedProfile();
+    const printer = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A)];
+    const withA = (grants: SignerGrant[]) => [{ ...REGISTRY[0]!, grants }, REGISTRY[1]!];
+    expect((await admit(p, printer, { registryKeys: withA([{ role: "executor", kernelId: KERNEL, jobId: JOB }]) })).decision).toBe("admit");
+    expect(codes(await admit(p, printer, { registryKeys: withA([{ role: "executor", kernelId: "kernel-other" }]) }))).toEqual(["unauthorized-signer"]);
+    expect(codes(await admit(p, printer, { registryKeys: withA([{ role: "executor", kernelId: KERNEL, jobId: "job-other" }]) }))).toEqual(["unauthorized-signer"]);
+    // The kernel's own key granted only as a witness may not sign the kernel's execution.
+    expect(codes(await admit(p, printer, { registryKeys: withA([{ role: "witness", kernelId: KERNEL }]) }))).toEqual(["unauthorized-signer"]);
+    const several: SignerGrant[] = [{ role: "witness", kernelId: "kernel-other" }, { role: "executor", kernelId: KERNEL }];
+    expect((await admit(p, printer, { registryKeys: withA(several) })).decision).toBe("admit");
+  });
+
+  it("a witness signs inspections only: its bundle holding the kernel's completion beside the inspection is refused", async () => {
+    const p = inspectedPageProfile();
+    const witnessed = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(1), p, SIGNER_B)];
+    const r = await admit(p, witnessed);
+    expect(codes(r)).toEqual(["unauthorized-signer"]);
+    expect(r.reasons[0]!.detail).toMatch(/signs inspections only, not execution_completed/);
+  });
+
+  it("a session key counts through a delegation rooted in a registered row and committed in the same pin; it holds its root's grant and domain", async () => {
+    const p = inspectedPageProfile();
+    const session = delegate(key);
+    const registry = [...REGISTRY, sessionRow(session)];
+    const bundles = [await toBundle(PILOT.slice(0, 2), p, session.signer), await toBundle(PILOT.slice(2), p, SIGNER_B)];
+    expect(await admit(p, bundles, { registryKeys: registry })).toMatchObject({ decision: "admit", reached: "inspected_output" });
+    // Its domain is its root's (A, the executor's): signing the camera's inspection makes it the executor's own.
+    const own = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(2), p, session.signer)];
+    expect(await admit(p, own, { registryKeys: registry })).toMatchObject({ decision: "reject", reached: "device_reported" });
+    // Only the pinned rows' delegations count: left out of them, the session key names no registry key.
+    expect(codes(await admit(p, bundles))).toEqual(["unauthenticated-bundle"]);
+  });
+
+  it("a delegation outside its root's subjects is refused: another job in its scope, a root granted for another kernel, events outside its window", async () => {
+    const p = inspectedPageProfile();
+    const camera = await toBundle(PILOT.slice(2), p, SIGNER_B);
+    const run = async (session: ReturnType<typeof delegate>, registry: unknown[]) =>
+      admit(p, [await toBundle(PILOT.slice(0, 2), p, session.signer), camera], { registryKeys: registry as ProfileAdmissionInput["registryKeys"] });
+    const otherJob = delegate(key, { contractIds: ["job-other"] });
+    const r1 = await run(otherJob, [...REGISTRY, sessionRow(otherJob)]);
+    expect(codes(r1)).toEqual(["unauthorized-signer"]);
+    expect(r1.reasons[0]!.detail).toMatch(/is delegated for job\(s\) job-other, not job job-admission-1/);
+    const rootElsewhere = delegate(key);
+    const elsewhere = [{ ...REGISTRY[0]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }, REGISTRY[1]!, sessionRow(rootElsewhere)];
+    expect(codes(await run(rootElsewhere, elsewhere))).toEqual(["unauthorized-signer"]);
+    // The pilot's events run from T0 to T0+20s: a delegation that expired at T0+5s, or was issued then, does not cover them.
+    const expired = delegate(key, { expiresAt: Math.floor(T0 / 1000) + 5 });
+    const r2 = await run(expired, [...REGISTRY, sessionRow(expired)]);
+    expect(codes(r2)).toEqual(["unauthorized-signer"]);
+    expect(r2.reasons[0]!.detail).toMatch(/outside its delegation's window/);
+    const late = delegate(key, { issuedAt: Math.floor(T0 / 1000) + 5 });
+    expect(codes(await run(late, [...REGISTRY, sessionRow(late)]))).toEqual(["unauthorized-signer"]);
+    // The window's ends are inclusive, in whole seconds: issued at T0 and expiring at T0+10 covers the printer's events.
+    const exact = delegate(key, { issuedAt: Math.floor(T0 / 1000), expiresAt: Math.floor(T0 / 1000) + 10 });
+    expect((await run(exact, [...REGISTRY, sessionRow(exact)])).decision).toBe("admit");
+  });
+
+  it("a delegation the registry cannot vouch for refuses the registry: another signer than its root, a root that is not a registered row, another key, no evidence_submit, no job, a reversed window, a malformed authorization", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    const s = delegate(key);
+    const other = delegate(key);
+    const { sessionId: _sessionId, ...noSessionId } = s.authorization;
+    const cases: Array<[string, unknown[], RegExp]> = [
+      ["signed by B, naming A as its root", [...REGISTRY, sessionRow(delegate(keyB))], /is not signed by its root key/],
+      ["a root that is not in the snapshot", [...REGISTRY, sessionRow(s, `0x${"cd".repeat(32)}`)], /is not a registered row of this snapshot/],
+      ["a session key as the root", [...REGISTRY, sessionRow(s), sessionRow(delegate(key), s.raw)], /is not a registered row of this snapshot/],
+      ["the authorization of another key", [...REGISTRY, { ...sessionRow(s), authorization: other.authorization }], /delegates another key than its row's/],
+      ["no evidence_submit", [...REGISTRY, sessionRow(delegate(key, { allowedActions: ["heartbeat"] }))], /does not allow evidence_submit/],
+      ["no job: an empty scope", [...REGISTRY, sessionRow(delegate(key, { contractIds: [] }))], /names no job/],
+      ["expiring before it is issued", [...REGISTRY, sessionRow(delegate(key, { issuedAt: 200, expiresAt: 100 }))], /expires before it is issued/],
+      ["no sessionId", [...REGISTRY, { ...sessionRow(s), authorization: noSessionId }], /not a well-formed session key authorization/],
+      ["an empty derivation path", [...REGISTRY, { ...sessionRow(s), authorization: { ...s.authorization, derivationPath: "" } }], /not a well-formed session key authorization/],
+      ["a field the wire form does not have", [...REGISTRY, { ...sessionRow(s), authorization: { ...s.authorization, extra: 1 } }], /the LO-EV-1 wire form/],
+      ["a scope field the wire form does not have", [...REGISTRY, { ...sessionRow(s), authorization: { ...s.authorization, scope: { ...s.authorization.scope, extra: 1 } } }], /the LO-EV-1 wire form/],
+      ["a row with a domain beside its root", [...REGISTRY, { ...sessionRow(s), trustDomain: OPERATOR_B }], /delegatedBy: a registered key/],
+    ];
+    for (const [label, registry, why] of cases) {
+      const r = await admit(p, bundles, { registryKeys: registry as ProfileAdmissionInput["registryKeys"], pinnedRegistryDigest: REGISTRY_PIN });
+      expect(codes(r), label).toEqual(["input-unreadable"]);
+      expect(r.reasons[0]!.detail, label).toMatch(why);
+      await expect(computeRegistryDigest(registry as ProfileAdmissionInput["registryKeys"]), label).rejects.toThrow();
+    }
+  });
+
+  it("the pin commits each delegation: the same session key re-delegated with a wider scope after the pin is not the pinned registry", async () => {
+    const p = inspectedPageProfile();
+    const session = delegate(key);
+    const pinned = [...REGISTRY, sessionRow(session)];
+    const pin = await computeRegistryDigest(pinned);
+    const widened = delegate(key, { pair: session.pair, contractIds: [JOB, "job-other"] });
+    const bundles = [await toBundle(PILOT.slice(0, 2), p, session.signer), await toBundle(PILOT.slice(2), p, SIGNER_B)];
+    expect(codes(await admit(p, bundles, { registryKeys: [...REGISTRY, sessionRow(widened)], pinnedRegistryDigest: pin }))).toEqual(["registry-mismatch"]);
+    expect((await admit(p, bundles, { registryKeys: pinned, pinnedRegistryDigest: pin })).decision).toBe("admit");
   });
 });
 
@@ -1322,7 +1517,9 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
     negatives: { failureBearingBundle: AdmissionBundle };
   };
   // The fixture's key is registered under no operator: its registry row names none.
-  const fixtureRegistry = [{ publicKey: `0x${FIXTURE.kernelPublicKeyHex}`, trustDomain: null }];
+  const fixtureRegistry = [
+    { publicKey: `0x${FIXTURE.kernelPublicKeyHex}`, trustDomain: null, grants: [{ role: "executor" as const, kernelId: "kernel-hp-3301-golden" }] },
+  ];
   const lose3Subject = { jobId: "job-lose3-consumer-run-001", kernelId: "kernel-hp-3301-golden" };
 
   async function run(bundle: AdmissionBundle) {
