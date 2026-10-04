@@ -1,11 +1,136 @@
 import crypto from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 
-const { operatorPolicies, pendingApprovals } = schema;
+const { operatorPolicies, pendingApprovals, shopKernels } = schema;
+
+/**
+ * Board N31 (bus #6272; the steward's ruling #6278). These routes used to change any kernel's
+ * stop, policy and approvals for any authenticated caller. Who may act on a kernel now:
+ *
+ *   - "decide": approve, reject, emergency-resume, PUT or PATCH of the policy (PATCH
+ *     {emergencyStop:false} is a resume by another name), and an approval submitted with
+ *     autoApprove (a pre-made approval decision). It needs the gateway admin secret, or a wallet
+ *     the caller PROVED that is the kernel's operator. WP-A (#326) sets req.provenWallet for a
+ *     SIWE session or a key minted from one; nothing sets it before that merges, so until then
+ *     only the admin decides. A claimed identity never decides: anyone can provision a key that
+ *     names any wallet or email.
+ *   - "stop or submit": emergency-stop, and an approval submitted as PENDING. Also the kernel's
+ *     own principal: the identity its operatorAddress records, which POST /api/kernels takes from
+ *     the registering caller. An operator must never lose their own e-stop, and a pending
+ *     approval still needs a decision. The residual, a key provisioned under the operator's
+ *     identity stopping the kernel or queueing requests, is queue item 136.
+ *
+ * The reads (GET policy, GET approvals) are unchanged here.
+ */
+type KernelAction = "decide" | "stop_or_submit";
+
+interface KernelAuthority {
+  /** The request carried a valid X-Admin-Key. */
+  admin: boolean;
+  /** The wallet the caller proved control of (WP-A); null when none. */
+  provenWallet: string | null;
+  /** The caller's claimed identity: its API key's operator id, or its session's address. */
+  claimed: string | null;
+}
+
+/**
+ * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
+ * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
+ * grants nothing in any environment. (Same rule as routes/kernels.ts; WP-A #326 adds the shared
+ * helper, auth/admin-key.ts.)
+ */
+function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
+  if (typeof expected !== "string" || expected.trim().length === 0) return false;
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const a = crypto.createHash("sha256").update(provided, "utf8").digest();
+  const b = crypto.createHash("sha256").update(expected, "utf8").digest();
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function authorityOf(req: FastifyRequest): KernelAuthority {
+  const r = req as unknown as { provenWallet?: unknown; operatorId?: unknown; userId?: unknown };
+  const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
+  return {
+    admin: hasAdminSecret(req.headers["x-admin-key"]),
+    provenWallet: text(r.provenWallet),
+    claimed: text(r.operatorId) ?? text(r.userId),
+  };
+}
+
+const isAnonymous = (a: KernelAuthority) => !a.admin && a.provenWallet === null && a.claimed === null;
+
+const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
+/** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
+const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
+
+function ownerOf(operatorAddress: unknown): string | null {
+  if (typeof operatorAddress !== "string") return null;
+  const owner = operatorAddress.trim().toLowerCase();
+  return UNOWNED.has(owner) ? null : owner;
+}
+
+/** The admin secret, or a proven wallet equal to the kernel's operator (both compared as addresses). */
+function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean {
+  if (a.admin) return true;
+  const owner = ownerOf(operatorAddress);
+  if (owner === null || !WALLET_RE.test(owner) || a.provenWallet === null || !WALLET_RE.test(a.provenWallet)) return false;
+  return a.provenWallet.toLowerCase() === owner;
+}
+
+/** Anyone who may decide, or the caller whose claimed identity is the kernel's recorded operator. */
+function mayStopOrSubmit(a: KernelAuthority, operatorAddress: unknown): boolean {
+  if (mayDecide(a, operatorAddress)) return true;
+  const owner = ownerOf(operatorAddress);
+  return owner !== null && a.claimed !== null && a.claimed.toLowerCase() === owner;
+}
+
+const AUTHENTICATION_REQUIRED = {
+  error: "authentication_required",
+  message: "This operator action needs an API key or a signed-in wallet.",
+};
+
+const REFUSALS: Record<KernelAction, Record<string, string>> = {
+  decide: {
+    error: "forbidden",
+    reason: "operator_proof_required",
+    message:
+      "This needs the gateway admin secret, or proof that you control the kernel's operator wallet (wallet sign-in proof, WP-A). An API key's claimed identity is not proof.",
+  },
+  stop_or_submit: {
+    error: "forbidden",
+    reason: "not_kernel_operator",
+    message: "Only this kernel's operator or the gateway admin may do this.",
+  },
+};
+
+interface Refusal {
+  status: 403 | 404 | 503;
+  body: Record<string, string>;
+}
+
+/**
+ * Null when this caller may take `action` on the kernel; otherwise the refusal to send. The admin
+ * may act on any id, registered or not, as before. For anyone else an unregistered kernel is 404
+ * (kernel ids are public through GET /api/kernels), and a failed kernel read is 503, never a pass.
+ */
+function refuseKernelAction(req: FastifyRequest, a: KernelAuthority, kernelId: string, action: KernelAction): Refusal | null {
+  if (a.admin) return null;
+  let kernel: { operatorAddress: string } | undefined;
+  try {
+    const { db } = getStore();
+    kernel = db.select({ operatorAddress: shopKernels.operatorAddress }).from(shopKernels).where(eq(shopKernels.id, kernelId)).get();
+  } catch (err) {
+    req.log.warn({ kernelId, err }, "kernel read for an operator action failed");
+    return { status: 503, body: { error: "read_failed", message: "The kernel could not be read to check who operates it. Try again shortly." } };
+  }
+  if (!kernel) return { status: 404, body: { error: "kernel_not_found", message: "No kernel with this id is registered." } };
+  const allowed = action === "decide" ? mayDecide(a, kernel.operatorAddress) : mayStopOrSubmit(a, kernel.operatorAddress);
+  return allowed ? null : { status: 403, body: REFUSALS[action] };
+}
 
 /**
  * An operator read the gateway has no real source for yet. It answers 501 with a
@@ -108,10 +233,15 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.put<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
       const policy = req.body as OperatorPolicy;
       if (!policy || policy.version !== 1) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
+      // N31: replacing the policy can clear the stop and every guardrail, so it is a decision.
+      const refusal = refuseKernelAction(req, authority, req.params.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       try {
         const { db } = getStore();
@@ -141,6 +271,11 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.patch<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      // N31: PATCH {emergencyStop:false} is a resume by another name, so a patch is a decision.
+      const refusal = refuseKernelAction(req, authority, req.params.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
       const patch = req.body as Partial<OperatorPolicy>;
 
       try {
@@ -179,8 +314,13 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-stop — Activate emergency stop */
   app.post("/api/operator/emergency-stop", async (req, reply) => {
-    const { kernelId, reason } = req.body as { kernelId: string; reason?: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const { kernelId, reason } = (req.body ?? {}) as { kernelId?: unknown; reason?: string };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    // N31: the kernel's own operator may always stop it, even by a claimed identity (fail-safe).
+    const refusal = refuseKernelAction(req, authority, kernelId, "stop_or_submit");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     try {
       const { db } = getStore();
@@ -221,8 +361,13 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-resume — Deactivate emergency stop */
   app.post("/api/operator/emergency-resume", async (req, reply) => {
-    const { kernelId } = req.body as { kernelId: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const { kernelId } = (req.body ?? {}) as { kernelId?: unknown };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    // N31: undoing a stop is a decision; a claimed identity may stop but never resume.
+    const refusal = refuseKernelAction(req, authority, kernelId, "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     try {
       const { db } = getStore();
@@ -253,13 +398,21 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/approvals — Submit a job for approval */
   app.post("/api/operator/approvals", async (req, reply) => {
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
     const { kernelId, agentId, capabilityType, parameters, autoApprove } = (req.body ?? {}) as {
       kernelId?: string; agentId?: string; capabilityType?: string;
-      parameters?: Record<string, unknown>; autoApprove?: boolean;
+      parameters?: Record<string, unknown>; autoApprove?: unknown;
     };
     if (typeof kernelId !== "string" || !kernelId || typeof agentId !== "string" || !agentId) {
       return reply.status(400).send({ error: "kernelId and agentId required" });
     }
+    // N31: autoApprove stores an APPROVED record the executor may run, so only a real boolean
+    // counts; a truthy string used to approve.
+    if (autoApprove !== undefined && typeof autoApprove !== "boolean") {
+      return reply.status(400).send({ error: "invalid_body", message: "autoApprove must be a boolean." });
+    }
+    const preApproved = autoApprove === true;
     // The body above is only cast, not validated: a wrong-shaped value would otherwise be
     // persisted unchanged even though the public type requires a string/plain-object.
     // An explicit null is not a capability type either (cross-family review r1 of #513, M3): only an
@@ -270,6 +423,10 @@ export async function operatorRoutes(app: FastifyInstance) {
     if (parameters !== undefined && (parameters === null || typeof parameters !== "object" || Array.isArray(parameters))) {
       return reply.status(400).send({ error: "invalid_body", message: "parameters must be a plain object." });
     }
+    // N31: a pre-approved submission is an approval decision; a pending one is a request the
+    // kernel's own principal may queue.
+    const refusal = refuseKernelAction(req, authority, kernelId, preApproved ? "decide" : "stop_or_submit");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     try {
       const { db } = getStore();
       const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -289,9 +446,9 @@ export async function operatorRoutes(app: FastifyInstance) {
           ...(capabilityType !== undefined && capabilityType !== null ? { capabilityType } : {}),
           parameters: parameters ?? {},
         },
-        status: autoApprove ? "approved" : "pending",
+        status: preApproved ? "approved" : "pending",
         createdAt: now,
-        decidedAt: autoApprove ? now : null,
+        decidedAt: preApproved ? now : null,
         expiresAt: expires,
       }).run();
 
@@ -353,8 +510,17 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/operator/approvals/:id/approve",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
       try {
         const { db } = getStore();
+        // N31: the approval's kernel decides who may approve it.
+        const target = db.select({ kernelId: pendingApprovals.kernelId }).from(pendingApprovals)
+          .where(eq(pendingApprovals.id, req.params.id))
+          .get();
+        if (!target) return reply.status(404).send({ error: "Approval not found" });
+        const refusal = refuseKernelAction(req, authority, target.kernelId, "decide");
+        if (refusal) return reply.code(refusal.status).send(refusal.body);
         const now = new Date().toISOString();
 
         // The update only matches a "pending" row, so its changed-row count is what says
@@ -387,10 +553,19 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/operator/approvals/:id/reject",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
       const { reason } = (req.body ?? {}) as { reason?: string };
 
       try {
         const { db } = getStore();
+        // N31: same rule as approve; rejecting is a decision too.
+        const target = db.select({ kernelId: pendingApprovals.kernelId }).from(pendingApprovals)
+          .where(eq(pendingApprovals.id, req.params.id))
+          .get();
+        if (!target) return reply.status(404).send({ error: "Approval not found" });
+        const refusal = refuseKernelAction(req, authority, target.kernelId, "decide");
+        if (refusal) return reply.code(refusal.status).send(refusal.body);
         const now = new Date().toISOString();
 
         // Same rule as approve: only a changed row means THIS request rejected it.
