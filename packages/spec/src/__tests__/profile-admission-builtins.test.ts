@@ -1,7 +1,9 @@
 /**
- * profile-admission.ts, and the functions it calls on its trusted path, pass the DEFAULT-DENY check in
- * builtin-reads-check.ts (steward DECISIONS 01:30 and #6792, astra packs 289, 291): every node that
- * runs after load is one of the forms the check names, under that form's condition, or it fails.
+ * profile-admission.ts, and every in-repo function it can reach, pass the DEFAULT-DENY check in
+ * builtin-reads-check.ts (steward DECISIONS 01:30, #6792 and 04:06; astra packs 289, 291, 293 and
+ * 297): every node that runs after load is one of the forms the check names, under that form's
+ * condition, or it fails. The trusted path is COMPUTED from the program (DECISIONS 04:06): no hand
+ * list of modules, so a new callee joins without anyone naming it.
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,9 +11,13 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 import { charAt, hasOwn, listAt } from "../util/primordials.js";
-import { builtinReads, compilerOptions, programOf, type CheckOptions } from "./builtin-reads-check.js";
+import { builtinReads, closureReads, compilerOptions, programOf, programOfFiles, type CheckOptions } from "./builtin-reads-check.js";
 
 const SPEC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const REPO = join(SPEC_DIR, "..", "..");
+/** The repository's own source: what the closure enters (not node_modules, the default library or a declaration file). */
+const inRepo = (fileName: string): boolean =>
+  fileName.startsWith(join(REPO, "packages")) && !/[\\/]node_modules[\\/]/.test(fileName) && !fileName.endsWith(".d.ts");
 const ADMISSION = join(SPEC_DIR, "src", "evidence", "profile-admission.ts");
 const OPTIONS: CheckOptions = {
   primordials: /[\\/]src[\\/]util[\\/](primordials|plain-data)\.ts$/,
@@ -146,30 +152,74 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
     expect(Object.prototype.hasOwnProperty.call(Array.prototype, "0") || Object.prototype.hasOwnProperty.call(String.prototype, "5")).toBe(false);
   });
 
-  it("so do the modules admission calls on its trusted path: the levels, binding, plain-data copies, governance, canonicalize and isFabricated", () => {
-    const evidence = (rel: string) => join(SPEC_DIR, "src", "evidence", rel);
-    const util = (rel: string) => join(SPEC_DIR, "src", "util", rel);
-    const targets: Array<[string, ReadonlySet<string> | undefined]> = [
-      [evidence("evidence-level.ts"), undefined],
-      [evidence("subject-binding.ts"), undefined],
-      [evidence("measurement-profile.ts"), undefined],
-      [util("plain-data.ts"), undefined],
-      // Admission calls only these functions of their files (sha256 and hashBundle use crypto.subtle; it does not).
-      [util("canonical.ts"), new Set(["canonicalize"])],
-      [evidence("is-fabricated.ts"), new Set(["isFabricated"])],
-    ];
-    const program = ts.createProgram(targets.map(([file]) => file), compilerOptions(SPEC_DIR));
-    const found: string[] = [];
-    for (const [file, functions] of targets) found.push(...builtinReads(program, file, OPTIONS, functions));
-    expect(found).toEqual([]);
-    // The scoping is real: the rest of canonical.ts does read built-ins.
-    expect(builtinReads(program, util("canonical.ts"), OPTIONS).length).toBeGreaterThan(0);
+  it("the closure follows calls and stored functions across files, not an import alone, and stops at a named collaborator (a self-test)", () => {
+    const dir = join(SPEC_DIR, "src", "__tests__");
+    const seed = join(dir, "closure-seed.ts");
+    const lib = join(dir, "closure-lib.ts");
+    const files = new Map([
+      [
+        seed,
+        [
+          "import { used, notCalled, viaValue, Store } from \"./closure-lib.js\";",
+          "const table = [viaValue];",
+          "export function entry() { return used(); }",
+          "export function entry2() { return table; }",
+          "export function entry3(s: Store) { return s.save; }",
+          "export type Unused = typeof notCalled;",
+        ].join("\n"),
+      ],
+      [
+        lib,
+        [
+          "export function used() { return helper(); }",
+          "function helper() { return JSON; }",
+          "export function notCalled() { return Math; }",
+          "export function viaValue() { return Reflect; }",
+          "export class Store { save() { return Atomics; } }",
+        ].join("\n"),
+      ],
+    ]);
+    const collaborators = new Map([["closure-lib.ts:Store.save", "the collaborator this self-test names"]]);
+    const { reached, found, collaboratorsUsed } = closureReads(
+      programOfFiles(SPEC_DIR, files),
+      [seed],
+      { primordials: /^$/, awaitWrappers: new Set() },
+      (fileName) => fileName.startsWith(dir),
+      collaborators,
+    );
+    expect(reached).toEqual(expect.arrayContaining(["closure-seed.ts:(the whole file)", "closure-lib.ts:used", "closure-lib.ts:helper", "closure-lib.ts:viaValue"]));
+    expect(reached).not.toContain("closure-lib.ts:notCalled");
+    expect(reached).not.toContain("closure-lib.ts:Store.save");
+    const lines = new Set(found.map((line) => line.split(" ")[0]));
+    expect(lines.has("closure-lib.ts:2"), "helper, reached through used()").toBe(true);
+    expect(lines.has("closure-lib.ts:4"), "viaValue, stored in a table at load and handed out later").toBe(true);
+    expect(lines.has("closure-lib.ts:3"), "notCalled: imported, and named only in a type").toBe(false);
+    expect(lines.has("closure-lib.ts:5"), "Store.save: the named collaborator").toBe(false);
+    expect(collaboratorsUsed).toEqual(["closure-lib.ts:Store.save"]);
   }, 60_000);
 
-  it("profile-admission.ts has none", () => {
+  it("profile-admission.ts, and every in-repo function it can reach, computed from the program, have none (DECISIONS 04:06)", () => {
     const program = ts.createProgram([ADMISSION], compilerOptions(SPEC_DIR));
     // Every import resolves and every type is known, so no receiver is silently `any` (which the check refuses anyway).
     expect(program.getSemanticDiagnostics(program.getSourceFile(ADMISSION)).map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "))).toEqual([]);
-    expect(builtinReads(program, ADMISSION, OPTIONS)).toEqual([]);
-  }, 60_000);
+    const { reached, found, collaboratorsUsed } = closureReads(program, [ADMISSION], OPTIONS, inRepo);
+    // Not vacuous: the closure enters the levels, the binding, the plain-data copy, the profile check, canonical JSON and the promise helpers.
+    for (const name of [
+      "evidence-level.ts:evidenceLevelsOfEvents",
+      "subject-binding.ts:verifyEvidenceSubjectBinding",
+      "plain-data.ts:plainDataCopy",
+      "measurement-profile.ts:validateMeasurementProfile",
+      "canonical.ts:canonicalize",
+      "is-fabricated.ts:isFabricated",
+      "primordials.ts:ownPromise",
+      "primordials.ts:awaitedHere",
+      "primordials.ts:sortedStrings",
+      "primordials.ts:listAt",
+    ]) {
+      expect(reached, name).toContain(name);
+    }
+    // Admission hands its results to no collaborator: everything it reaches is checked.
+    expect(collaboratorsUsed).toEqual([]);
+    expect(found).toEqual([]);
+  }, 120_000);
 });

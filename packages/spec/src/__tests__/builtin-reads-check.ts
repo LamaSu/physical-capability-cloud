@@ -93,14 +93,110 @@ const PRIMITIVE = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFla
 /** What a key may be: ToPropertyKey of anything else looks up its toString or valueOf. */
 const PROPERTY_KEY = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.ESSymbolLike;
 
-/** "file:line what: text" for each node on the trusted path that is not an allowed form. */
+/** "file:line what: text" for each node of `fileName` (or of its named top-level functions) that is not an allowed form. */
 export function builtinReads(program: ts.Program, fileName: string, options: CheckOptions, functions?: ReadonlySet<string>): string[] {
+  const walker = makeWalker(program, options);
+  walker.walkFile(program.getSourceFile(fileName)!, functions);
+  return walker.found;
+}
+
+/**
+ * The trusted path's code (steward DECISIONS 04:06): the seed files' top-level code, and every
+ * in-repo declaration it reaches, transitively, through ANY reference: a call, or a function passed,
+ * stored or captured as a value, through imports and re-exports. It is computed from the program's
+ * symbols, so a new callee joins without anyone listing it. Code `inRepo` rejects (node_modules, the
+ * default library, declaration files) is not entered. A reference to it is judged by the check
+ * itself: a load-time capture, a node: binding or a global.
+ */
+export function trustedClosure(
+  program: ts.Program,
+  seedFiles: readonly string[],
+  inRepo: (fileName: string) => boolean,
+  collaborators: ReadonlyMap<string, string> = new Map(),
+): { roots: ts.Node[]; collaboratorsUsed: string[] } {
   const checker = program.getTypeChecker();
-  const source = program.getSourceFile(fileName)!;
+  const roots: ts.Node[] = [];
+  const used = new Set<string>();
+  const queued = new Set<ts.Node>();
+  const enqueue = (node: ts.Node): void => {
+    for (let at: ts.Node | undefined = node; at !== undefined; at = at.parent) if (queued.has(at)) return;
+    queued.add(node);
+    roots.push(node);
+  };
+  const follow = (start: ts.Symbol | undefined): void => {
+    let symbol = start;
+    if (symbol === undefined) return;
+    if (symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+    for (const declaration of symbol.declarations ?? []) {
+      const source = declaration.getSourceFile();
+      if (source.isDeclarationFile || !inRepo(source.fileName)) continue;
+      // A collaborator the trusted code hands its results to, named with its reason, is not entered.
+      const key = closureKey(declaration);
+      if (collaborators.has(key)) {
+        used.add(key);
+        continue;
+      }
+      if (ts.isShorthandPropertyAssignment(declaration)) {
+        follow(checker.getShorthandAssignmentValueSymbol(declaration));
+      } else if (
+        ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration) || ts.isConstructorDeclaration(declaration) ||
+        ts.isGetAccessorDeclaration(declaration) || ts.isSetAccessorDeclaration(declaration) || ts.isClassDeclaration(declaration) ||
+        ts.isClassExpression(declaration) || ts.isFunctionExpression(declaration) || ts.isArrowFunction(declaration) || ts.isEnumDeclaration(declaration)
+      ) {
+        enqueue(declaration);
+      } else if ((ts.isVariableDeclaration(declaration) || ts.isPropertyAssignment(declaration) || ts.isPropertyDeclaration(declaration)) && declaration.initializer !== undefined) {
+        enqueue(declaration);
+      }
+    }
+  };
+  for (const file of seedFiles) enqueue(program.getSourceFile(file)!);
+  for (let i = 0; i < roots.length; i++) {
+    const walk = (node: ts.Node): void => {
+      if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) return; // erased
+      if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return;
+      if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
+        follow(checker.getSymbolAtLocation(node));
+        if (ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node) follow(checker.getShorthandAssignmentValueSymbol(node.parent));
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(roots[i]!);
+  }
+  return { roots, collaboratorsUsed: [...used].sort() };
+}
+
+/** "file:Name" for a declaration, "file:Class.member" for a class member: how roots and collaborators are named. */
+export function closureKey(node: ts.Node): string {
+  const file = node.getSourceFile();
+  const base = file.fileName.split(/[\\/]/).pop();
+  if (ts.isSourceFile(node)) return `${base}:(the whole file)`;
+  const name = ts.getNameOfDeclaration(node as ts.Declaration)?.getText(file) ?? ts.SyntaxKind[node.kind];
+  const owner = node.parent !== undefined && (ts.isClassDeclaration(node.parent) || ts.isClassExpression(node.parent)) ? node.parent.name?.text : undefined;
+  return `${base}:${owner !== undefined ? `${owner}.` : ""}${name}`;
+}
+
+/** "file:line what: text" for each node of the trusted closure of `seedFiles` that is not an allowed form, and what it reached. */
+export function closureReads(
+  program: ts.Program,
+  seedFiles: readonly string[],
+  options: CheckOptions,
+  inRepo: (fileName: string) => boolean,
+  collaborators: ReadonlyMap<string, string> = new Map(),
+): { reached: string[]; found: string[]; collaboratorsUsed: string[] } {
+  const { roots, collaboratorsUsed } = trustedClosure(program, seedFiles, inRepo, collaborators);
+  const walker = makeWalker(program, options);
+  for (const root of roots) walker.walkRoot(root);
+  return { reached: roots.map(closureKey), found: [...new Set(walker.found)], collaboratorsUsed };
+}
+
+/** The check's machinery over `program`: walkFile checks a file (or named functions of it), walkRoot one reached declaration. */
+function makeWalker(program: ts.Program, options: CheckOptions) {
+  const checker = program.getTypeChecker();
   const found: string[] = [];
   const report = (node: ts.Node, what: string) => {
-    const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
-    found.push(`${fileName.split(/[\\/]/).pop()}:${line + 1} ${what}: ${node.getText(source).split("\n")[0]!.slice(0, 80)}`);
+    const file = node.getSourceFile();
+    const { line } = file.getLineAndCharacterOfPosition(node.getStart(file));
+    found.push(`${file.fileName.split(/[\\/]/).pop()}:${line + 1} ${what}: ${node.getText(file).split("\n")[0]!.slice(0, 80)}`);
   };
   const fromLib = (symbol: ts.Symbol | undefined): boolean =>
     symbol?.declarations?.some((d) => {
@@ -414,12 +510,12 @@ export function builtinReads(program: ts.Program, fileName: string, options: Che
       case ts.SyntaxKind.ElementAccessExpression: {
         const n = node as ts.ElementAccessExpression;
         if (!isPropertyKey(n.argumentExpression)) {
-          report(n, `[${n.argumentExpression.getText(source)}] a key that is not a string, number or symbol (its toString is looked up)`);
+          report(n, `[${n.argumentExpression.getText()}] a key that is not a string, number or symbol (its toString is looked up)`);
           return true;
         }
         if (isTypedElement(n) || isNullPrototypeRecord(n.expression) || provenOwn(n, unwrap(n.expression), n.argumentExpression)) return true;
         const kinds = kindsOf(typeOf(n.expression));
-        report(n, `[${n.argumentExpression.getText(source)}] not proven own${kinds.length > 0 ? ` on a ${kinds.join("|")}` : ""}`);
+        report(n, `[${n.argumentExpression.getText()}] not proven own${kinds.length > 0 ? ` on a ${kinds.join("|")}` : ""}`);
         return true;
       }
       case ts.SyntaxKind.CallExpression: {
@@ -542,7 +638,7 @@ export function builtinReads(program: ts.Program, fileName: string, options: Che
         const kinds = kindsOf(typeOf(n));
         for (const element of n.elements) {
           const key = element.propertyName ?? element.name;
-          const name = ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : key.getText(source);
+          const name = ts.isIdentifier(key) || ts.isStringLiteral(key) ? key.text : key.getText();
           for (const kind of kinds) {
             if (!(name === "length" && (kind === "array" || kind === "string"))) report(element, `destructuring .${name} from a ${kind}`);
           }
@@ -558,32 +654,57 @@ export function builtinReads(program: ts.Program, fileName: string, options: Che
     return true;
   };
 
-  // What the module evaluates once, at load: top-level const initializers, and top-level classes' extends clauses.
-  const loadTime = new Set<ts.Node>();
-  for (const statement of source.statements) {
-    if (ts.isVariableStatement(statement)) for (const d of statement.declarationList.declarations) if (d.initializer) loadTime.add(d.initializer);
-    if (ts.isClassDeclaration(statement)) for (const clause of statement.heritageClauses ?? []) loadTime.add(clause);
-  }
+  // What a module evaluates once, at load: its top-level const initializers, and its top-level classes' extends clauses.
+  const loadTimes = new Map<ts.SourceFile, Set<ts.Node>>();
+  const loadTimeOf = (source: ts.SourceFile): Set<ts.Node> => {
+    let loadTime = loadTimes.get(source);
+    if (loadTime === undefined) {
+      loadTime = new Set<ts.Node>();
+      for (const statement of source.statements) {
+        if (ts.isVariableStatement(statement)) for (const d of statement.declarationList.declarations) if (d.initializer) loadTime.add(d.initializer);
+        if (ts.isClassDeclaration(statement)) for (const clause of statement.heritageClauses ?? []) loadTime.add(clause);
+      }
+      loadTimes.set(source, loadTime);
+    }
+    return loadTime;
+  };
   const isImmediatelyInvoked = (node: ts.Node): boolean => {
     if (!(ts.isArrowFunction(node) || ts.isFunctionExpression(node))) return false;
     let at: ts.Node = node;
     while (ts.isParenthesizedExpression(at.parent)) at = at.parent;
     return ts.isCallExpression(at.parent) && at.parent.expression === at;
   };
-  const visit = (node: ts.Node, atLoad: boolean): void => {
+  const visit = (node: ts.Node, atLoad: boolean, loadTime: Set<ts.Node>): void => {
     const now = ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node) ? atLoad && isImmediatelyInvoked(node) : atLoad || loadTime.has(node);
     if (!now && !checkNode(node)) return;
     if (now && (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isImportDeclaration(node))) return;
-    ts.forEachChild(node, (child) => visit(child, now));
+    ts.forEachChild(node, (child) => visit(child, now, loadTime));
   };
-  const scope = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
-    if (functions === undefined || (ts.isFunctionDeclaration(node) && node.name !== undefined && functions.has(node.name.text))) visit(node, false);
-    else ts.forEachChild(node, scope);
+  const walkFile = (source: ts.SourceFile, functions?: ReadonlySet<string>): void => {
+    const loadTime = loadTimeOf(source);
+    const scope = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) || ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return;
+      if (functions === undefined || (ts.isFunctionDeclaration(node) && node.name !== undefined && functions.has(node.name.text))) visit(node, false, loadTime);
+      else ts.forEachChild(node, scope);
+    };
+    if (functions === undefined) for (const statement of source.statements) scope(statement);
+    else scope(source);
   };
-  if (functions === undefined) for (const statement of source.statements) scope(statement);
-  else scope(source);
-  return found;
+  /** One declaration the closure reached, checked in place: inside a top-level initializer, with no function between, it runs at load. */
+  const walkRoot = (root: ts.Node): void => {
+    if (ts.isSourceFile(root)) return walkFile(root);
+    const loadTime = loadTimeOf(root.getSourceFile());
+    let atLoad = false;
+    for (let at = root.parent; at !== undefined; at = at.parent) {
+      if (ts.isFunctionLike(at) || ts.isClassStaticBlockDeclaration(at)) break;
+      if (loadTime.has(at)) {
+        atLoad = true;
+        break;
+      }
+    }
+    visit(root, atLoad, loadTime);
+  };
+  return { found, walkFile, walkRoot };
 }
 
 export function compilerOptions(dir: string): ts.CompilerOptions {
@@ -594,14 +715,21 @@ export function compilerOptions(dir: string): ts.CompilerOptions {
 
 /** A program over one in-memory file, with the package's compiler options and the default library. */
 export function programOf(dir: string, fileName: string, text: string): ts.Program {
-  const options = compilerOptions(dir);
+  return programOfFiles(dir, new Map([[fileName, text]]));
+}
+
+/** A program over in-memory files (absolute name to text), with the package's compiler options, any overrides, and the default library. */
+export function programOfFiles(dir: string, files: ReadonlyMap<string, string>, overrides: ts.CompilerOptions = {}): ts.Program {
+  const options = { ...compilerOptions(dir), ...overrides };
   const host = ts.createCompilerHost(options);
   const getSourceFile = host.getSourceFile.bind(host);
-  host.getSourceFile = (name, languageVersion, ...rest) =>
-    name === fileName ? ts.createSourceFile(name, text, languageVersion, true) : getSourceFile(name, languageVersion, ...rest);
+  host.getSourceFile = (name, languageVersion, ...rest) => {
+    const text = files.get(name);
+    return text !== undefined ? ts.createSourceFile(name, text, languageVersion, true) : getSourceFile(name, languageVersion, ...rest);
+  };
   const fileExists = host.fileExists.bind(host);
-  host.fileExists = (name) => name === fileName || fileExists(name);
+  host.fileExists = (name) => files.has(name) || fileExists(name);
   const readFile = host.readFile.bind(host);
-  host.readFile = (name) => (name === fileName ? text : readFile(name));
-  return ts.createProgram([fileName], options, host);
+  host.readFile = (name) => files.get(name) ?? readFile(name);
+  return ts.createProgram([...files.keys()], options, host);
 }
