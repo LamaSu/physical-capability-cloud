@@ -21,6 +21,10 @@ export * from "./onboarding/index.js";
 // ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
 // (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
 export * from "./payouts.js";
+// Device intake (R2) — field registry, records, milestone validation, JSON Schema
+export * from "./onboarding/intake/index.js";
+// Research prompt library (R5) — ready-to-fire research prompts + coaching
+export * from "./onboarding/research/index.js";
 
 // Economic agreements v1 (docs/ECONOMIC_AGREEMENTS.md). Namespaced because its schema names
 // (Unit, AmountSchema, ...) are generic; also importable directly as `@pcc/spec/economics`.
