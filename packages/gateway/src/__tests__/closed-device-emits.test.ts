@@ -12,7 +12,10 @@ import { setupRoutes } from "../routes/setup.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import * as kernelServiceModule from "../services/kernel-service.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
-import { closeStoredDeviceEmits, closedStoredEmits, withClosedEmits } from "../services/closed-device-emits.js";
+import { closeStoredDeviceEmits, closedStoredEmits, isClosedRepositoryMethod, withClosedEmits } from "../services/closed-device-emits.js";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { KernelConfig } from "@pcc/kernel";
 
 // ---------------------------------------------------------------------------
@@ -146,20 +149,36 @@ describe("closedStoredEmits and withClosedEmits", () => {
     expect(withClosedEmits(undefined)).toBeUndefined();
   });
 
-  it("closeStoredDeviceEmits closes sync and async results of every device method", async () => {
-    const repo = {
-      findDeviceById: () => ({ id: "d", emits: LEGACY }),
-      findDevicesByKernel: () => [{ id: "d", emits: LEGACY }, { id: "e", emits: CLOSED }],
-      findDevicesByAdapter: async () => [{ id: "d", emits: LEGACY }],
-      insertDevice: () => ({ id: "d", emits: LEGACY }),
-      updateDevice: async () => ({ id: "d", emits: LEGACY }),
-    };
+  it("closeStoredDeviceEmits closes the sync and async results of EVERY method, by construction", async () => {
+    // astra's r3 reproduction: updateHealth and findHealthyDevices were missing from a hand-written list.
+    class Repo {
+      findDeviceById() { return { id: "d", emits: LEGACY }; }
+      findDevicesByKernel() { return [{ id: "d", emits: LEGACY }, { id: "e", emits: CLOSED }]; }
+      async findDevicesByAdapter() { return [{ id: "d", emits: LEGACY }]; }
+      insertDevice() { return { id: "d", emits: LEGACY }; }
+      async updateDevice() { return { id: "d", emits: LEGACY }; }
+      updateHealth() { return { id: "d", emits: LEGACY }; }
+      findHealthyDevices() { return [{ id: "d", emits: LEGACY }]; }
+      findById() { return { id: "k", name: "kernel" }; }
+    }
+    const repo = new Repo();
+    const own = { aDeviceMethodAddedLater: () => ({ id: "d", emits: LEGACY }) };
+    Object.assign(repo, own);
     closeStoredDeviceEmits(repo);
     expect(repo.findDeviceById()).toEqual({ id: "d", emits: null });
     expect(repo.findDevicesByKernel()).toEqual([{ id: "d", emits: null }, { id: "e", emits: CLOSED }]);
     expect(await repo.findDevicesByAdapter()).toEqual([{ id: "d", emits: null }]);
     expect(repo.insertDevice()).toEqual({ id: "d", emits: null });
     expect(await repo.updateDevice()).toEqual({ id: "d", emits: null });
+    expect(repo.updateHealth()).toEqual({ id: "d", emits: null });
+    expect(repo.findHealthyDevices()).toEqual([{ id: "d", emits: null }]);
+    expect((repo as unknown as typeof own).aDeviceMethodAddedLater()).toEqual({ id: "d", emits: null });
+    // A row without emits (a kernel row) passes unchanged.
+    expect(repo.findById()).toEqual({ id: "k", name: "kernel" });
+    // Closing twice is a no-op.
+    const before = repo.updateHealth;
+    closeStoredDeviceEmits(repo);
+    expect(repo.updateHealth).toBe(before);
   });
 });
 
@@ -203,6 +222,25 @@ describe("the store serves no stored open declaration (astra's reproduction)", (
     expect((getRepos().kernels.findDevicesByAdapter("mock") as Array<{ id: string; emits?: unknown }>).find((d) => d.id === "dev-legacy-read")?.emits).toBeNull();
   });
 
+  it("every method of the store's kernels repository class is closed (derived from the class, never a list)", () => {
+    const repo = getRepos().kernels as unknown as Record<string, unknown>;
+    const proto = Object.getPrototypeOf(repo) as object;
+    const methods = Object.getOwnPropertyNames(proto).filter(
+      (name) => name !== "constructor" && typeof Object.getOwnPropertyDescriptor(proto, name)?.value === "function",
+    );
+    expect(methods).toEqual(expect.arrayContaining(["updateHealth", "findHealthyDevices", "findDevicesByKernel", "updateDevice"]));
+    for (const name of methods) expect(isClosedRepositoryMethod(repo[name]), name).toBe(true);
+  });
+
+  it("updateHealth and findHealthyDevices withhold a stored open list (astra's r3 reproduction)", () => {
+    seed("dev-legacy-health", LEGACY);
+    const updated = getRepos().kernels.updateHealth("dev-legacy-health", "healthy", Date.now()) as { emits?: unknown };
+    expect(updated.emits).toBeNull();
+    const healthy = getRepos().kernels.findHealthyDevices("kernel-nyc") as Array<{ id: string; emits?: unknown }>;
+    expect(healthy.find((d) => d.id === "dev-legacy-health")?.emits).toBeNull();
+    expect(JSON.stringify(healthy)).not.toContain("sk_live_x");
+  });
+
   it("a re-registration that sends closed emits replaces the stored open list", async () => {
     const deviceId = "dev-legacy-replaced";
     seed(deviceId, LEGACY);
@@ -213,5 +251,27 @@ describe("the store serves no stored open declaration (astra's reproduction)", (
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().device.emits).toEqual(CLOSED);
+  });
+});
+
+describe("no full device row is read past the repository", () => {
+  it("the gateway selects from the device table only with a column projection (its stored emits stay closed)", () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir)) {
+        const path = join(dir, entry);
+        if (statSync(path).isDirectory()) {
+          if (entry !== "__tests__" && entry !== "node_modules") walk(path);
+          continue;
+        }
+        if (!entry.endsWith(".ts") || entry.endsWith(".test.ts")) continue;
+        const text = readFileSync(path, "utf8");
+        // A full-row select (no projection) from the device table: select() then .from(kernelDevices).
+        if (/select\(\s*\)\s*\.from\(\s*(?:schema\.)?kernelDevices\s*\)/.test(text)) offenders.push(path.slice(root.length));
+      }
+    };
+    walk(root);
+    expect(offenders).toEqual([]);
   });
 });

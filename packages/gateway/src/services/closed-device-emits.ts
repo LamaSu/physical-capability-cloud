@@ -5,10 +5,13 @@
  * a free-text bind or via. Setup validated only what a caller sent, so a re-registration without `emits`
  * preserved such a row and returned it, and GET /api/devices/:kernelId served it.
  *
- * `closeStoredDeviceEmits` wraps the kernels repository's device readers and writers once, when the store
- * is initialised, so EVERY device row the gateway reads or writes back passes through `withClosedEmits`.
- * Its `emits` are re-parsed with spec's EmitterDeclsSchema (a descriptor-only copy, then each declaration
- * closed). A stored list that doesn't parse is withheld WHOLE (null), never served, preserved or used. A
+ * `closeStoredDeviceEmits` wraps EVERY method of the kernels repository once, when the store is initialised,
+ * so every device row the gateway reads or writes back passes through ONE mapper, `closeDeviceRows`. That is
+ * by construction, not by a list of names (N128 r3): a device-returning method added later is closed too, and
+ * a test checks every method of the repository class.
+ *
+ * Each row's `emits` is re-parsed with spec's EmitterDeclsSchema (a descriptor-only copy, then each
+ * declaration closed). A stored list that doesn't parse is withheld WHOLE (null), never served, preserved or used. A
  * partly valid list is not trimmed: that would change what the device declared.
  *
  * The stored value itself is not migrated here. Setup's preserve path (`existing.emits`) now reads null for
@@ -30,41 +33,48 @@ export function withClosedEmits<T>(row: T): T {
   return { ...row, emits: closedStoredEmits((row as { emits?: unknown }).emits) };
 }
 
-/** `result` closed by `close`, awaiting it first when a repository answers with a promise. */
-function closeResult(result: unknown, close: (value: unknown) => unknown): unknown {
-  return result instanceof Promise ? result.then(close) : close(result);
-}
-
-const closeRows = (rows: unknown): unknown => (Array.isArray(rows) ? rows.map(withClosedEmits) : rows);
-
-/** The kernels repository methods that return device rows. */
-const DEVICE_ROW_METHODS = ["findDeviceById", "insertDevice", "updateDevice"] as const;
-const DEVICE_LIST_METHODS = ["findDevicesByKernel", "findDevicesByAdapter"] as const;
+/** Marks a repository method this module wrapped, so a test can show that none was missed. */
+const CLOSED = Symbol("pcc.closedDeviceEmits");
 
 /**
- * Route every device row `kernels` returns through withClosedEmits. Call once, on the store's own
- * repository instance, before anything else holds it. A method the instance lacks is left alone.
+ * The ONE device-row mapper: a repository result with every device row in it closed. That covers a row, a
+ * list of rows, or a promise of either. A value without its own `emits` passes unchanged, so the mapper is
+ * safe on every method's result (kernel rows carry no `emits`).
+ */
+export function closeDeviceRows(result: unknown): unknown {
+  if (result instanceof Promise) return result.then(closeDeviceRows);
+  if (Array.isArray(result)) return result.map(withClosedEmits);
+  return withClosedEmits(result);
+}
+
+/** Every method a repository instance answers with, own or inherited, except its constructor (data properties only). */
+export function repositoryMethodNames(repo: object): string[] {
+  const names = new Set<string>();
+  for (let o: object | null = repo; o !== null && o !== Object.prototype; o = Object.getPrototypeOf(o) as object | null) {
+    for (const name of Object.getOwnPropertyNames(o)) {
+      if (name === "constructor") continue;
+      const descriptor = Object.getOwnPropertyDescriptor(o, name);
+      if (descriptor !== undefined && typeof descriptor.value === "function") names.add(name);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Route EVERY method of `kernels` through closeDeviceRows. Call once, on the store's own repository instance,
+ * before anything else holds it. Calling again is a no-op.
  */
 export function closeStoredDeviceEmits(kernels: object): void {
-  const repo = kernels as Record<string, unknown>;
-  for (const name of DEVICE_ROW_METHODS) {
-    const original = repo[name];
-    if (typeof original !== "function") continue;
-    const bound = (original as (...args: unknown[]) => unknown).bind(kernels);
-    Object.defineProperty(kernels, name, {
-      value: (...args: unknown[]) => closeResult(bound(...args), withClosedEmits),
-      configurable: true,
-      writable: true,
-    });
+  for (const name of repositoryMethodNames(kernels)) {
+    const original = (kernels as Record<string, unknown>)[name] as (...args: unknown[]) => unknown;
+    if (isClosedRepositoryMethod(original)) continue;
+    const closed = (...args: unknown[]): unknown => closeDeviceRows(original.apply(kernels, args));
+    Object.defineProperty(closed, CLOSED, { value: true });
+    Object.defineProperty(kernels, name, { value: closed, configurable: true, writable: true });
   }
-  for (const name of DEVICE_LIST_METHODS) {
-    const original = repo[name];
-    if (typeof original !== "function") continue;
-    const bound = (original as (...args: unknown[]) => unknown).bind(kernels);
-    Object.defineProperty(kernels, name, {
-      value: (...args: unknown[]) => closeResult(bound(...args), closeRows),
-      configurable: true,
-      writable: true,
-    });
-  }
+}
+
+/** Whether `method` is one that closeStoredDeviceEmits wrapped. */
+export function isClosedRepositoryMethod(method: unknown): boolean {
+  return typeof method === "function" && (method as { [CLOSED]?: unknown })[CLOSED] === true;
 }
