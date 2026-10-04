@@ -36,7 +36,7 @@ import {
   initCarrierShipmentStore,
   nextStatus,
 } from "../services/carrier-shipment-store.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { computeCid, type ICidBlobStorage } from "../services/cid-blob-storage.js";
 
@@ -493,7 +493,9 @@ describe("POST /api/carrier/shipments — guarded purchase lifecycle", () => {
         if (codes[1] === 409) expect(["job_not_active", "job_in_flight"]).toContain(b.json().error ?? a.json().error);
         expect(getCarrierShipmentStore().size()).toBe(1);
       } finally {
-        await getJobFacade().updateStatus(JOB, "queued"); // restore for other tests
+        // Restore for other tests through the repository: a fixture reset, not a generic write. A cancelled
+        // job is terminal for the generic writers (N85, astra round 3 of #475).
+        getRepos().jobs.updateStatus(JOB, "queued");
       }
     } finally {
       await app.close();

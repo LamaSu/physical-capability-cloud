@@ -2,7 +2,7 @@ import React from "react";
 import { GlassPanel, GlowBadge, Skeleton } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import {
   AreaChart,
   Area,
@@ -121,10 +121,11 @@ const LEVEL_COLORS: Record<string, string> = {
 // Fetch helpers
 // ---------------------------------------------------------------------------
 
-const headers = () => ({ ...getAuthHeaders() });
+/** Only the gateway's analytics routes: the type keeps any other URL (an external package URL, say) out. */
+type AnalyticsPath = `/api/analytics/${string}`;
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: headers() });
+async function fetchJson<T>(path: AnalyticsPath): Promise<T> {
+  const res = await authorizedFetch(path);
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json();
 }

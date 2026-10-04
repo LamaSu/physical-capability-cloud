@@ -234,7 +234,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/health` | Gateway healthcheck. |
+| GET | `/health` | Gateway healthcheck (same payload as `/api/health`). Also reports the served build: `commit` (the full git SHA a build argument named, recorded in the image at build time, or `null`), `commitSource` (`build_argument` or `unknown`), `buildArg`, `sourceDigest` (digest of the source the image was built from; CI checks it against the commit before pushing, and `scripts/verify-build-source.sh` checks any served gateway), `sourceDigestSpec`, and `deployMetadata.railwayGitCommitSha` (host metadata, never reported as `commit`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
 | GET | `/agent-package.json` | 218-tool agent package for any LLM (PUBLIC). |
@@ -451,7 +451,9 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   envelope?: WorkEnvelope;           // Build volume
   assuranceTiers: (0|1|2|3)[];       // Which tiers this supports
   pricing: PricingModel;             // {currency, baseCost, minimum, ...}
-  location: {lat, lng};
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell
+  locationCell: string | null;       // the site's geohash-5 cell
   tags?: string[];
   // Enrichment (populated by facades):
   reputation?: number;               // 0-1000, from ERC-8004
@@ -495,8 +497,10 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   id: string;
   name: string;
   operatorAddress: string;
-  location: {lat, lng};
-  physicalAddress: string;
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell; none = no location ({0,0} included)
+  locationCell: string | null;       // the site's geohash-5 cell
+  physicalAddress: string | null;    // only when the operator opted in
   maxAssuranceTier: 0|1|2|3;
   status: "online"|"offline"|"maintenance"|"suspended";
   lastHeartbeat: string;
