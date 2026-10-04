@@ -535,6 +535,8 @@ describe("JobRunner — camera call sites (tier >= 2)", () => {
       getProgress: async () => 100,
       execute: async () => ({ success: true, message: "ok" }),
       onEvidence: () => {},
+      // It emits nothing: nothing is ever outstanding (#502's quiesceEvidence).
+      quiesceEvidence: async () => {},
       dispose: async () => {},
     };
   }
@@ -569,6 +571,8 @@ describe("JobRunner — camera call sites (tier >= 2)", () => {
       onEvidence(cb) {
         listeners.push(cb);
       },
+      // It emits inside its calls: nothing is outstanding once they return (#502's quiesceEvidence).
+      async quiesceEvidence() {},
       async dispose() {
         listeners.length = 0;
       },
