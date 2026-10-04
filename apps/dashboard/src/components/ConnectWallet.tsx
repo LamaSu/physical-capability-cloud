@@ -43,6 +43,9 @@ export function ConnectWallet() {
   const { disconnect } = useDisconnect();
   const { signMessageAsync } = useSignMessage();
   const [showModal, setShowModal] = React.useState(false);
+  // Why a sign-out didn't finish (astra 19j). Kept here: disconnecting the wallet can switch this
+  // component to its not-connected view, so each view shows it.
+  const [signOutProblem, setSignOutProblem] = React.useState<string | null>(null);
 
   const {
     sessionToken,
@@ -159,9 +162,19 @@ export function ConnectWallet() {
       credentials: "include",
     }).catch(() => {});
     disconnect();
-    authLogout();
-    setShowModal(false);
+    if (authLogout()) {
+      setSignOutProblem(null);
+      setShowModal(false);
+    } else {
+      setSignOutProblem(useAuthStore.getState().error ?? "Signing out didn't finish.");
+    }
   };
+
+  const signOutAlert = signOutProblem ? (
+    <p role="alert" className="text-[10px] leading-snug text-red-400/70">
+      {signOutProblem}
+    </p>
+  ) : null;
 
   // Connected + authenticated
   if (isConnected && address && sessionToken) {
@@ -189,6 +202,7 @@ export function ConnectWallet() {
               >
                 Disconnect
               </button>
+              {signOutAlert}
             </GlassPanel>
           </div>
         )}
@@ -219,6 +233,7 @@ export function ConnectWallet() {
       >
         Connect Wallet
       </button>
+      {signOutAlert}
       {showModal && (
         <div className="absolute right-0 top-full mt-2 z-50">
           <GlassPanel padding="md" className="min-w-[240px] space-y-2">

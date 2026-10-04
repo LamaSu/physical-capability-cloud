@@ -253,13 +253,22 @@ function AgentShell() {
 
 function LogoutButton() {
   const logout = useAuthStore((s) => s.logout);
+  // Why a sign-out didn't finish, shown where the person asked for it (astra 19j).
+  const [problem, setProblem] = React.useState<string | null>(null);
   return (
-    <button
-      onClick={logout}
-      className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
-    >
-      Disconnect
-    </button>
+    <>
+      <button
+        onClick={() => setProblem(logout() ? null : (useAuthStore.getState().error ?? "Signing out didn't finish."))}
+        className="w-full px-3 py-2 text-[10px] text-white/25 hover:text-red-400/70 hover:bg-white/[0.03] rounded-lg transition-all text-left tracking-wide uppercase"
+      >
+        Disconnect
+      </button>
+      {problem && (
+        <p role="alert" className="px-3 pb-2 text-[10px] leading-snug text-red-400/70">
+          {problem}
+        </p>
+      )}
+    </>
   );
 }
 

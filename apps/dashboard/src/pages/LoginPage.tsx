@@ -6,7 +6,8 @@ import { ParticleBackground } from "@pcc/ui";
 export function LoginPage() {
   const login = useAuthStore((s) => s.login);
   const [key, setKey] = React.useState("");
-  const [error, setError] = React.useState<string | null>(null);
+  // A sign-out this browser couldn't confirm lands here, so its reason shows on arrival (astra 19j).
+  const [error, setError] = React.useState<string | null>(() => useAuthStore.getState().error);
   const [loading, setLoading] = React.useState(false);
 
   async function handleSubmit(e: React.FormEvent) {

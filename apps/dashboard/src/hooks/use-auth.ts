@@ -134,7 +134,8 @@ export function useAuth() {
     }
   }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 
-  const logout = useCallback(async () => {
+  /** True once signed out; false with the store's `error` saying why it didn't finish (astra 19j). */
+  const logout = useCallback(async (): Promise<boolean> => {
     try {
       await fetch("/api/auth/logout", {
         method: "POST",
@@ -143,7 +144,7 @@ export function useAuth() {
     } catch {
       // Ignore network errors on logout
     }
-    authLogout();
+    return authLogout();
   }, [authLogout]);
 
   return {

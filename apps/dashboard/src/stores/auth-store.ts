@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { fetchWithKey } from "../lib/gateway-base.js";
-import { hasStoredApiKey, onStoredKeyChange, setStoredApiKey } from "../lib/authorized-fetch.js";
+import { hasStoredApiKey, onStoredKeyChange, setStoredApiKey, type KeyWrite } from "../lib/authorized-fetch.js";
 import { beginAccountChange } from "../lib/account-generation.js";
 
 /**
@@ -16,7 +16,12 @@ interface AuthState {
   /** Bumped on every change of the stored key, whoever makes it (onStoredKeyChange). Never the key. */
   keyEpoch: number;
   login: (key: string) => Promise<boolean>;
-  /** False, changing nothing, when the browser won't remove the saved key (astra 19i); `error` says so. */
+  /**
+   * True once no key is held. False, with `error` saying why, when the browser
+   * won't remove the saved key (nothing changed, astra 19i), when it couldn't
+   * confirm the removal (this tab holds no key all the same, astra 19j), or
+   * when a listener signed in again while the change was told.
+   */
   logout: () => boolean;
 
   // -- Wallet/SIWE auth (secondary, for on-chain features) --
@@ -38,6 +43,8 @@ interface AuthState {
 /** Why a sign-in or sign-out the browser refused to save didn't happen (astra 19i). */
 const KEY_NOT_SAVED = "This browser wouldn't save your API key, so you're not signed in. Check that this site may store data, then try again.";
 const KEY_NOT_REMOVED = "This browser wouldn't remove your saved API key, so you're still signed in. Clear this site's data to sign out.";
+const KEY_UNCONFIRMED_SAVE = "This browser couldn't confirm it saved your API key, so this tab isn't signed in as anyone. Sign in again; if this repeats, check that this site may store data.";
+const KEY_UNCONFIRMED_REMOVAL = "This browser couldn't confirm it removed your saved API key. This tab is signed out; clear this site's data to make sure every tab is.";
 
 export const useAuthStore = create<AuthState>((set) => ({
   // -- API Key auth --
@@ -58,9 +65,15 @@ export const useAuthStore = create<AuthState>((set) => ({
       // which fails closed.
       if (!beginAccountChange()) return false;
       // The browser's slot is the account every tab and the next load act as:
-      // if it won't save the key, nothing changes here either (astra 19i).
-      if (!adoptApiKey(key)) {
+      // if it won't save the key, nothing changes here either (astra 19i); if
+      // it can't confirm the save, this tab holds no key (astra 19j).
+      const saved = adoptApiKey(key);
+      if (saved === "unchanged") {
         set({ error: KEY_NOT_SAVED });
+        return false;
+      }
+      if (saved === "unconfirmed") {
+        set({ error: KEY_UNCONFIRMED_SAVE });
         return false;
       }
       return true;
@@ -77,25 +90,30 @@ export const useAuthStore = create<AuthState>((set) => ({
     // The teardown it starts reads the generation only after its first await,
     // under the wallet-session lock (lib/wallet-session.ts), so it sees the move.
     const hadKey = hasStoredApiKey();
-    let removed: boolean;
+    let removal: KeyWrite | undefined;
     try {
-      removed = setStoredApiKey(null);
-    } catch (error) {
-      // A listener failed after the key was removed (every listener hears the
-      // change, then the first error is rethrown). The change stands, so every
-      // other tab must still see it pending before the error goes on.
-      if (hadKey && !hasStoredApiKey()) beginAccountChange();
-      throw error;
+      removal = setStoredApiKey(null);
+    } finally {
+      // Unless the browser refused the removal outright, the account may have
+      // changed: the key went, its removal couldn't be confirmed, a listener
+      // signed in again during the change, or a listener failed after it
+      // (removal unset, the error goes on). Every other tab must see it
+      // pending (astra 19i, 19j).
+      if (hadKey && removal !== "unchanged") beginAccountChange();
     }
-    if (!removed) {
+    if (removal === "unchanged") {
       // The browser won't remove the saved key (astra 19i): nothing changed.
       // This tab stays signed in, as every other tab and the next load would
       // be, and no tab is told of a change.
       set({ error: KEY_NOT_REMOVED });
       return false;
     }
-    if (hadKey) beginAccountChange();
-    return true;
+    if (removal === "unconfirmed") {
+      set({ error: KEY_UNCONFIRMED_REMOVAL });
+      return false;
+    }
+    // A listener may have signed in again while the change was told: that is not signed out.
+    return !hasStoredApiKey();
   },
 
   // -- Wallet/SIWE auth --
@@ -132,10 +150,10 @@ onStoredKeyChange(() => {
 /**
  * Hold `key` as the signed-in key, or sign out with null. login() calls it
  * after the gateway accepts the key; tests call it directly. It is
- * write-only: writing a key cannot leak one. False, changing nothing, when the
- * browser won't save the change (astra 19i).
+ * write-only: writing a key cannot leak one. Says how the browser's slot took
+ * the change (KeyWrite, astra 19i and 19j).
  */
-export function adoptApiKey(key: string | null): boolean {
+export function adoptApiKey(key: string | null): KeyWrite {
   return setStoredApiKey(key);
 }
 

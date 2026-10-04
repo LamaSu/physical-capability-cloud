@@ -104,12 +104,12 @@ describe("19i HIGH: a key change the browser refused is not made", () => {
     expect(await aFreshLoadSends()).toBe(KEY_A);
   });
 
-  it("the same when the write is silently dropped: what counts is what the slot holds afterwards", async () => {
+  it("a silently dropped write fails too; it can't be told from a stale read (astra 19j), so this tab holds no key", async () => {
     const { store, sends } = await page();
     refuseKeySlot("setItem", "ignore");
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
-    expect(sends()).toBe(KEY_A);
-    expect(await aFreshLoadSends()).toBe(KEY_A);
+    expect(sends(), "neither A nor B stays live here").toBeNull();
+    expect(await aFreshLoadSends(), "the slot kept A").toBe(KEY_A);
   });
 
   it("logout() fails closed when the browser won't remove A: this tab stays signed in as A, and the generation doesn't move", async () => {

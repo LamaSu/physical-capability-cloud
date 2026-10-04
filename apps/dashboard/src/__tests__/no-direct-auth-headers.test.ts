@@ -635,7 +635,7 @@ describe("only lib/authorized-fetch.ts holds the API key, and only fetchWithKey 
       removeItem: (k: string) => void slots.delete(k),
     });
     // Built at run time: a key-shaped literal in source trips the secret scanners (pack and push gates).
-    expect(store.adoptApiKey(["pcc", "test", "ratchet0123456789abcdef"].join("_"))).toBe(true);
+    expect(store.adoptApiKey(["pcc", "test", "ratchet0123456789abcdef"].join("_"))).toBe("committed");
     try {
       const state = store.useAuthStore.getState();
       expect(state.isAuthenticated).toBe(true);

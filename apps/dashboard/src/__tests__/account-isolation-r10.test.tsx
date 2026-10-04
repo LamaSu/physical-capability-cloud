@@ -181,6 +181,33 @@ describe("19j MEDIUM: the shell says why a sign-out didn't happen", () => {
   });
 });
 
+describe("19j: a sign-out that couldn't be confirmed lands on the login page, which says why", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("Disconnect with the removal unconfirmed: this tab is signed out, and the login page carries the reason", async () => {
+    const { App } = await import("../App.js");
+    window.history.replaceState(null, "", "/dashboard");
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    for (let i = 0; i < 10; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
+    const disconnect = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Disconnect");
+    expect(disconnect).toBeDefined();
+    commitThenUnreadable("removeItem");
+    await act(async () => disconnect!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    for (let i = 0; i < 20; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
+    restoreStorage();
+    expect(container.textContent, "the login page").toContain("Enter your API key");
+    expect(container.textContent).toMatch(/couldn't confirm it removed your saved API key/);
+  });
+});
+
 describe("19j MEDIUM: a listener that signs in again during logout is a change of account", () => {
   it("logout() doesn't report success when a key is held at the end", async () => {
     const { store, owner, sends } = await page();
