@@ -69,6 +69,7 @@
  * consumerInterface, positive, states, negative) is written once, after every assertion
  * above has already run (the env var changes nothing about what runs).
  */
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -78,7 +79,7 @@ import cookie from "@fastify/cookie";
 import Fastify, { type FastifyInstance } from "fastify";
 import { JSDOM } from "jsdom";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { closeStore, initStore } from "../db.js";
+import { closeStore, getRepos, initStore } from "../db.js";
 import { httpMcpRoutes } from "../mcp/http-mcp-server.js";
 import { MCP_APP_RENDER_IR_URI } from "../mcp/mcp-app-view.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
@@ -151,6 +152,61 @@ const PCC_API_ORIGIN = "https://capability.network"; // MCP_APP_API_BASE_URL (mc
 const APP_DOMAIN = "https://pcc-apps.example"; // this run's PCC_MCP_APP_DOMAIN — a DIFFERENT origin, on purpose (cross-origin proof)
 const KIT_PROTOCOL = "2026-01-26"; // CAP.protocol, dashboard-ir-browser-entry.ts
 
+// M6 fix (astra #565 r1): the FROZEN literal, never the mutable production import —
+// every functional comparison below targets this literal. MCP_APP_RENDER_IR_URI is
+// compared to it exactly once (a dedicated pin in P1), so a rename of the production
+// constant's VALUE fails that pin directly instead of the whole suite silently
+// "following" the rename.
+const FROZEN_RENDER_IR_URI = "ui://pcc/dashboard/render-ir";
+// M1 fix: the exact MCP Apps resource-content contract a conforming host relies on
+// (mcp-app-view.ts MCP_APP_MIME_TYPE / MCP_APP_CSP_META), pinned as literals here —
+// never read back from the same response being checked.
+const FROZEN_RENDER_IR_MIME_TYPE = "text/html;profile=mcp-app";
+const FROZEN_CONNECT_DOMAINS = ["https://capability.network"];
+// M7 fix: pinned canonical-JSON SHA256 digest of render_pcc_dashboard_ir's advertised
+// inputSchema (readDashboardManifestJsonSchema() via buildRenderIrDashboardTool,
+// mcp-app-view.ts:1972-1981), computed below with canonicalJson+sha256Hex over the
+// CURRENT schema at the time this proof was written. A DELIBERATE schema change (a new
+// property, an altered constraint, a new window variant) requires updating this literal
+// — that update IS the frozen-interface guarantee working as intended; an accidental or
+// unreviewed drift fails this assertion instead of passing silently.
+const FROZEN_RENDER_IR_INPUT_SCHEMA_SHA256 = "8f13ec9caf3c8972abd81beb158b5876836d59e36f4a067bc87d18fddde914c1";
+
+/** Stable JSON serialization with recursively SORTED object keys, so the digest below
+ *  depends only on the schema's values/structure, never on its property insertion order. */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(",")}}`;
+}
+function sha256Hex(s: string): string {
+  return createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+// M5 fix: the closed set of provenance markers the renderer ever paints on a bound HOST
+// element (dashboard-ir-renderer.ts CLS.fresh/stale/unavail/timeUnknown — "pcc-fresh" is
+// included defensively: production code never paints it on the HOST today, only on the
+// metadata LINE, but a regression that did would be exactly this hole). Exactly one of
+// these (or, for a genuinely fresh non-stale read, NONE of them) may be on the host.
+const PROVENANCE_MARKERS = ["pcc-fresh", "pcc-stale", "pcc-unavail", "pcc-time-unknown"] as const;
+type ProvenanceMarker = (typeof PROVENANCE_MARKERS)[number];
+/** The real CSS classes among PROVENANCE_MARKERS present on `el` — a token match (split on
+ *  whitespace), never a substring match, so "pcc-stale" can't accidentally match some
+ *  unrelated future class name. */
+function provenanceMarkersOn(el: any): ProvenanceMarker[] {
+  const classes = String(el.className).split(" ").filter(Boolean);
+  return PROVENANCE_MARKERS.filter((m) => classes.includes(m));
+}
+/** M5 fix: assert the host carries EXACTLY the one expected provenance marker — never a
+ *  simultaneous "pcc-fresh" alongside stale/unavailable/time-unknown — and never shows the
+ *  empty marker while in one of these four non-empty-eligible states. */
+function assertExclusiveProvenance(el: any, expected: ProvenanceMarker, label: string): void {
+  expect(provenanceMarkersOn(el), `${label}: provenance markers on the host`).toEqual([expected]);
+  expect(el.querySelector(".pcc-empty"), `${label}: must not show the empty marker`).toBeNull();
+}
+
 interface Reply {
   status: number;
   json?: unknown;
@@ -198,8 +254,13 @@ interface Host {
  * a fetch bridge that accepts ONLY the kit's own fixed origin, maps path+query onto
  * `app.inject`, and takes a one-shot per-path override so a test can force a reply for
  * exactly the next poll of that path.
+ *
+ * `hostOrigin` (M1 fix) is the document origin a real host would frame this view under —
+ * the CALLER derives it from the resource's own returned `_meta.ui.domain` (P3), never
+ * from this test's hardcoded APP_DOMAIN constant, so the host simulation depends on what
+ * production actually returned.
  */
-function buildHost(app: FastifyInstance, html: string, startAt: number): Host {
+function buildHost(app: FastifyInstance, html: string, startAt: number, hostOrigin: string): Host {
   let now = startAt;
   const timers: Array<{ id: number; at: number; fn: () => void }> = [];
   let tid = 0;
@@ -207,7 +268,7 @@ function buildHost(app: FastifyInstance, html: string, startAt: number): Host {
   const overrides: Record<string, Reply> = {};
 
   const dom = new JSDOM(html, {
-    url: APP_DOMAIN + "/",
+    url: hostOrigin + "/",
     runScripts: "dangerously",
     beforeParse(w: any) {
       w.setTimeout = (fn: () => void, ms?: number) => {
@@ -342,6 +403,14 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     PCC_MCP_APP_DOMAIN: process.env.PCC_MCP_APP_DOMAIN,
     PCC_API_BASE_URL: process.env.PCC_API_BASE_URL,
     PCC_DEPLOYMENT_ENV: process.env.PCC_DEPLOYMENT_ENV,
+    // M8 fix (astra #565 r1): db.ts:31-48 prefers DATABASE_URL, then a Railway volume
+    // mount, then PCC_DB_PATH — vitest.setup.ts sets PCC_DB_PATH only when it is ABSENT,
+    // so an ambient DATABASE_URL/RAILWAY_VOLUME_MOUNT_PATH would otherwise be inherited
+    // and this proof would run against a real/persistent store instead of the seeded
+    // in-memory one. Save + force all three below; restored by the same loop as the rest.
+    DATABASE_URL: process.env.DATABASE_URL,
+    RAILWAY_VOLUME_MOUNT_PATH: process.env.RAILWAY_VOLUME_MOUNT_PATH,
+    PCC_DB_PATH: process.env.PCC_DB_PATH,
   };
   let app: FastifyInstance;
   let host: Host | null = null;
@@ -355,7 +424,13 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
   let listBody: any;
   let manifest: Record<string, unknown>;
   let viewHtml: string;
+  let hostDomain: string; // M1 fix: read from the resource's own _meta.ui.domain in P3
   let toolResultStructured: unknown;
+  // M2 fix: expectations anchored to the seeded REPOSITORY (getRepos(), src/db.ts),
+  // independent of the route responses being rendered — set in P2, used from P6 on.
+  let expectedCapName: string;
+  let expectedCapType: string;
+  let expectedCapabilityCount: number;
 
   beforeAll(async () => {
     process.env.NODE_ENV = "production";
@@ -365,6 +440,10 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     // gate, not an incidental base-gate failure.
     process.env.PCC_DEPLOYMENT_ENV = "staging";
     process.env.PCC_API_BASE_URL = "https://pcc-gateway-staging.up.railway.app";
+    // M8 fix: force the in-memory, ephemeral store regardless of the ambient environment.
+    delete process.env.DATABASE_URL;
+    delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
+    process.env.PCC_DB_PATH = ":memory:";
 
     initStore({ seed: true });
     app = Fastify({ logger: false });
@@ -387,13 +466,29 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
   });
 
   it("P1: tools/list on /mcp advertises render_pcc_dashboard_ir, linked to ui://pcc/dashboard/render-ir", async () => {
+    // M6 fix: pin the constant itself, once, against the frozen literal — independent of
+    // every other comparison below (which all target the literal directly, never the
+    // import, so a rename of the production constant's VALUE cannot make the rest of this
+    // test silently "follow" it).
+    expect(MCP_APP_RENDER_IR_URI).toBe(FROZEN_RENDER_IR_URI);
+
     const session = await initSession(app, "/mcp");
     const tools = await listTools(app, "/mcp", session);
     const tool = tools.find((t) => t.name === "render_pcc_dashboard_ir");
     expect(tool).toBeDefined();
+    // M7 fix: pin the literal tool name.
+    expect(tool.name).toBe("render_pcc_dashboard_ir");
     const link = tool._meta?.ui?.resourceUri ?? tool._meta?.["ui/resourceUri"];
-    expect(link).toBe(MCP_APP_RENDER_IR_URI);
-    proofRecord.positive.p1 = link === MCP_APP_RENDER_IR_URI;
+    expect(link).toBe(FROZEN_RENDER_IR_URI);
+    // M7 fix: pin the exact advertised inputSchema as a canonical-JSON SHA256 digest, so
+    // compatible-looking drift (an added optional property, a loosened constraint, a new
+    // window variant) fails here instead of passing because P2 only samples one manifest
+    // shape. See FROZEN_RENDER_IR_INPUT_SCHEMA_SHA256's comment for what to do when this
+    // assertion fails on a DELIBERATE schema change.
+    const schemaDigest = sha256Hex(canonicalJson(tool.inputSchema));
+    expect(schemaDigest).toBe(FROZEN_RENDER_IR_INPUT_SCHEMA_SHA256);
+
+    proofRecord.positive.p1 = link === FROZEN_RENDER_IR_URI;
   });
 
   it("P2: a manifest built from REAL seeded ids renders via render_pcc_dashboard_ir (structuredContent.manifest equals what was sent)", async () => {
@@ -430,6 +525,26 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     expect(Object.prototype.hasOwnProperty.call(kernelDetail, "asOf")).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(listBody, "asOf")).toBe(false);
 
+    // M2 fix: anchor the EXPECTED values to the seeded REPOSITORY directly (getRepos(),
+    // src/db.ts), independent of the route responses this test is about to render — a
+    // route/populator bug that returns an internally-consistent but WRONG value (an
+    // arbitrary capabilityCount, a swapped-but-valid capability) cannot pass silently,
+    // because the comparison basis never comes from the same response being checked.
+    const repoCapabilities = getRepos().capabilities.findAll();
+    const repoCapRow = repoCapabilities.find((c) => c.id === capRow.id);
+    expect(repoCapRow, "capRow must exist in the seeded repository, independent of the route").toBeDefined();
+    expect(capRow.name).toBe(repoCapRow!.name);
+    expect(capRow.type).toBe(repoCapRow!.type);
+    // M4 fix: prove the chosen row genuinely HAS an own, valid `type` TODAY — so S3's later
+    // removal of it is a real present -> absent transition, not a field that was already
+    // missing (which would make P6 and S3 both pass vacuously).
+    expect(typeof repoCapRow!.type, "capRow.type must be an own, valid string before S3 removes it").toBe("string");
+    expect(repoCapRow!.type.length).toBeGreaterThan(0);
+    expectedCapName = repoCapRow!.name;
+    expectedCapType = repoCapRow!.type;
+    expectedCapabilityCount = repoCapabilities.filter((c) => c.kernelId === kernelRow.id).length;
+    expect(expectedCapabilityCount, "the seeded kernel must own at least one capability").toBeGreaterThan(0);
+
     manifest = {
       csd: "pcc://artifacts/dashboard/v1",
       title: "Row-37 proof dashboard",
@@ -453,6 +568,10 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
       ],
     };
 
+    // M7 fix: pin the literal CSD this interface is frozen to — a deliberate change here
+    // requires updating this test, which IS the frozen-interface guarantee.
+    expect(manifest.csd).toBe("pcc://artifacts/dashboard/v1");
+
     const session = await initSession(app, "/mcp");
     const call = await rpc(app, "/mcp", session, {
       id: 10,
@@ -460,6 +579,8 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
       params: { name: "render_pcc_dashboard_ir", arguments: manifest },
     });
     expect(call.body.result.isError).not.toBe(true);
+    // M7 fix: pin the literal structured-content field name, not just its value.
+    expect(Object.prototype.hasOwnProperty.call(call.body.result.structuredContent, "manifest")).toBe(true);
     expect(call.body.result.structuredContent.manifest).toEqual(manifest);
     toolResultStructured = call.body.result.structuredContent;
 
@@ -472,18 +593,32 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     const read = await rpc(app, "/mcp", session, {
       id: 11,
       method: "resources/read",
-      params: { uri: MCP_APP_RENDER_IR_URI },
+      params: { uri: FROZEN_RENDER_IR_URI },
     });
     expect(read.body.error).toBeUndefined();
-    const html = read.body.result.contents[0].text as string;
+    const content = read.body.result.contents[0];
+    // M1 fix: a conforming MCP Apps host reads the FULL resource-content contract, not
+    // just the HTML text (mcp-app-view.ts:1549-1550, mcpAppUiResourceMeta()) — the literal
+    // URI, the literal MCP App MIME type, the CONFIGURED per-view domain (D14 storage
+    // isolation), and the fixed CSP connect-src the kit's fetches are declared against.
+    expect(content.uri).toBe(FROZEN_RENDER_IR_URI);
+    expect(content.mimeType).toBe(FROZEN_RENDER_IR_MIME_TYPE);
+    expect(content._meta?.ui?.domain).toBe(APP_DOMAIN);
+    expect(content._meta?.ui?.csp?.connectDomains).toEqual(FROZEN_CONNECT_DOMAINS);
+
+    const html = content.text as string;
     expect(html).toContain('id="pcc-ir-root"');
     expect(html).toContain("__PCC_IR_ORIGIN__");
     viewHtml = html;
+    // M1 fix: the host (P4) is built from THIS returned domain, never the test's own
+    // hardcoded constant — even though they're equal here, the host simulation now
+    // depends on what production actually returned, not on an assumption.
+    hostDomain = content._meta.ui.domain;
     proofRecord.positive.p3 = typeof html === "string" && html.length > 0;
   });
 
   it("P4-P6, the HOST: renders the real seeded data — honestly time-unknown, never a false 'fresh'", async () => {
-    host = buildHost(app, viewHtml, Date.parse("2026-10-03T00:00:00.000Z"));
+    host = buildHost(app, viewHtml, Date.parse("2026-10-03T00:00:00.000Z"), hostDomain);
 
     // P4: jsdom (runScripts:"dangerously") executes the outer boot <script> synchronously
     // during construction, which injects+runs the kit <script>, which calls boot() — by the
@@ -505,17 +640,24 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     expect(list, "list element").not.toBeNull();
 
     // P6, the honest rule: every read succeeded (never unavailable), and none is shown as
-    // fresh without a source time (no data-as-of, the time-unknown class, the honest line).
+    // fresh without a source time. M5 fix: assert the provenance markers are MUTUALLY
+    // EXCLUSIVE (never a stray "pcc-fresh" alongside "pcc-time-unknown") and that nothing
+    // shows the empty marker while honestly time-unknown.
     for (const [name, el] of [["metric", stat], ["capability", card], ["list", list]] as const) {
-      expect(el.className, name).not.toContain("pcc-unavail");
       expect(el.getAttribute("data-as-of"), name).toBeNull();
-      expect(el.className, name).toContain("pcc-time-unknown");
+      assertExclusiveProvenance(el, "pcc-time-unknown", name);
       expect(host.lineOf(el)!.textContent, name).toContain("source time not reported");
     }
-    expect(stat.querySelector(".pcc-value").textContent).toBe(String(kernelDetail.kernel.capabilityCount ?? 0));
-    expect(card.textContent).toContain(capRow.name);
+    // M2 fix: compared against the REPOSITORY-anchored expectations from P2, never against
+    // the same route response being rendered.
+    expect(stat.querySelector(".pcc-value").textContent).toBe(String(expectedCapabilityCount));
+    expect(card.textContent).toContain(expectedCapName);
     expect(list.querySelectorAll(".pcc-row").length).toBeGreaterThan(0);
-    expect(list.textContent).toContain(capRow.name);
+    expect(list.textContent).toContain(expectedCapName);
+    // M4 fix: the real, present `type` field renders — no absent marker — so S3's later
+    // removal of it is a genuine present -> absent transition, not a pre-existing gap.
+    expect(list.querySelectorAll(".pcc-absent").length, "P6 must show the real type field, not absent").toBe(0);
+    expect(list.textContent).toContain(expectedCapType);
 
     proofRecord.states.p6 = {
       metric: snapshotElement(stat, host),
@@ -545,11 +687,13 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     const card = h.q(".pcc-schema-card");
     const list = h.q(".pcc-list");
 
-    expect(stat.className).toContain("pcc-stale");
+    // M5 fix: exactly one provenance marker, never a stray "pcc-fresh" alongside "stale",
+    // and no empty marker while stale.
+    assertExclusiveProvenance(stat, "pcc-stale", "metric");
     expect(h.lineOf(stat)!.textContent).toContain("stale");
     expect(stat.getAttribute("data-as-of")).not.toBeNull(); // now genuinely timed (just old)
 
-    expect(list.className).toContain("pcc-stale");
+    assertExclusiveProvenance(list, "pcc-stale", "list");
     expect(h.lineOf(list)!.textContent).toContain("stale");
     expect(list.querySelectorAll(".pcc-row").length).toBeGreaterThan(0); // stale != cleared
 
@@ -557,8 +701,7 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     // BINDER_LIM.sessionMs (30 min, dashboard-ir-binder.ts) — it cannot be observed going
     // stale inside one binding session, by construction. It must still never be falsely
     // "fresh": asserted here to stay exactly P6's honest time-unknown.
-    expect(card.className).toContain("pcc-time-unknown");
-    expect(card.className).not.toContain("pcc-stale");
+    assertExclusiveProvenance(card, "pcc-time-unknown", "capability");
     expect(h.lineOf(card)!.textContent).toContain("source time not reported");
 
     proofRecord.states.s1 = {
@@ -575,7 +718,8 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
 
     const list = h.q(".pcc-list");
     expect(list.querySelectorAll(".pcc-row").length).toBe(0);
-    expect(list.className).toContain("pcc-unavail");
+    // M5 fix: exactly "pcc-unavail", never alongside a stray "pcc-fresh"; no empty marker.
+    assertExclusiveProvenance(list, "pcc-unavail", "list");
     expect(h.lineOf(list)!.textContent).toBe("unavailable · HTTP 500");
 
     proofRecord.states.s2 = { list: snapshotElement(list, h) };
@@ -583,6 +727,11 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
 
   it("S3 ABSENT: a timed row missing its one profiled meta field shows 'not reported', never an empty cell", async () => {
     const h = host!;
+    // M4 fix: P2 already proved (via the seeded repository, independent of this route)
+    // that this row's `type` is a real, present, non-empty field — so dropping it here is
+    // a genuine present -> absent transition, not a field P6 never actually exercised.
+    expect(Object.prototype.hasOwnProperty.call(capRow, "type")).toBe(true);
+    expect(capRow.type).toBe(expectedCapType);
     const { type: _droppedType, ...rowWithoutType } = capRow;
     h.overrides["/api/capabilities"] = {
       status: 200,
@@ -608,8 +757,9 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     await h.advance(65_000);
 
     const list = h.q(".pcc-list");
-    expect(list.querySelector(".pcc-empty")).toBeNull();
-    expect(list.className).toContain("pcc-unavail");
+    // M5 fix: exactly "pcc-unavail" (the helper also asserts no .pcc-empty), never a
+    // simultaneous stray "pcc-fresh" that would make this look like a fresh "none".
+    assertExclusiveProvenance(list, "pcc-unavail", "list");
     expect(h.lineOf(list)!.textContent).toBe("unavailable · unexpected response shape");
 
     proofRecord.states.s4 = { list: snapshotElement(list, h) };
@@ -621,7 +771,10 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
     await h.advance(65_000);
 
     const list = h.q(".pcc-list");
-    expect(list.className).not.toContain("pcc-unavail");
+    // S5 is a genuinely fresh (timed, valid) read: NONE of the four provenance markers —
+    // the brief's M5 fix calls out S5 specifically as the one state where .pcc-empty MUST
+    // be present; a fresh non-stale read carries no marker class on the host at all.
+    expect(provenanceMarkersOn(list), "list").toEqual([]);
     const empty = list.querySelector(".pcc-empty");
     expect(empty).not.toBeNull();
     expect(empty.textContent).toBe("none");
@@ -668,8 +821,14 @@ describe("row-37 proof: NEGATIVE (prod, closed gate)", () => {
     const names = tools.map((t) => t.name);
     expect(names).not.toContain("render_pcc_dashboard_ir");
     expect(names).not.toContain("render_pcc_dashboard");
+    // M3 fix: prove SELECTIVE removal, not a total surface failure (a closed-gate
+    // tools/list that returned [] would otherwise pass this check vacuously) — a stable,
+    // always-present read tool (also asserted present on the full surface by
+    // mcp-apps-readonly-surface.test.ts's "REGRESSION" case) must still be listed.
+    expect(names).toContain("list_kernels");
     proofRecord.negative.n1 = {
       toolAbsent: !names.includes("render_pcc_dashboard_ir") && !names.includes("render_pcc_dashboard"),
+      nonViewToolPresent: names.includes("list_kernels"),
     };
   });
 
@@ -694,7 +853,7 @@ describe("row-37 proof: NEGATIVE (prod, closed gate)", () => {
     const read = await rpc(app, "/mcp", session, {
       id: 21,
       method: "resources/read",
-      params: { uri: MCP_APP_RENDER_IR_URI },
+      params: { uri: FROZEN_RENDER_IR_URI },
     });
     expect(read.body.result).toBeUndefined();
     const message = read.body.error.message as string;
