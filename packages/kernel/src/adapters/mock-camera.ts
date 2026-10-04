@@ -7,11 +7,14 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { CameraAdapter } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export class MockCameraAdapter implements CameraAdapter {
   readonly id: string;
   readonly source: EvidenceSource;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  /** Captures and inspections in flight: the only things that emit. */
+  private readonly work = new OutstandingWork();
 
   /** Simulated inspection pass rate (0-1) */
   private passRate: number;
@@ -31,7 +34,11 @@ export class MockCameraAdapter implements CameraAdapter {
     };
   }
 
-  async captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+    return this.work.track(this.capture());
+  }
+
+  private async capture(): Promise<{ imageHash: string; storageRef: string }> {
     // Simulate capturing an image
     const fakeHash = `sha256:${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}`;
     const storageRef = `file:///mock-images/${Date.now()}.jpg`;
@@ -51,7 +58,16 @@ export class MockCameraAdapter implements CameraAdapter {
     return { imageHash: fakeHash, storageRef };
   }
 
-  async runInspection(referenceHash?: string): Promise<{
+  runInspection(referenceHash?: string): Promise<{
+    passed: boolean;
+    confidence: number;
+    findings: string[];
+    imageHash: string;
+  }> {
+    return this.work.track(this.inspect(referenceHash));
+  }
+
+  private async inspect(referenceHash?: string): Promise<{
     passed: boolean;
     confidence: number;
     findings: string[];
@@ -97,6 +113,11 @@ export class MockCameraAdapter implements CameraAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /** Resolves once no capture or inspection is in flight (each emits before it returns); at once when none is. */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {
