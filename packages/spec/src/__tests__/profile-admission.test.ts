@@ -145,15 +145,21 @@ async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promis
   return out;
 }
 
-/** The registered-key leg: verifies under the signer's key and names its operator, the bundle's trust domain. */
+/** The registered-key leg: verifies under the declared signer's key and names that signer. */
 const verifySignature = (b: AdmissionBundle) => {
   const signer = (b.kernelSignature as { signer?: string }).signer ?? "";
   const k = KEYS[signer];
   const ok =
     k !== undefined &&
     verify(null, signingPreimage(b.bundleHash), k.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
-  return ok ? { trustDomain: DOMAINS[signer]! } : (false as const);
+  return ok ? signer : (false as const);
 };
+
+/** The pinned registry snapshot (astra pack 271): each signer's one trust domain, the operator that owns its key. */
+const SIGNER_DOMAINS = [
+  { signer: SIGNER_A, trustDomain: DOMAINS[SIGNER_A]! },
+  { signer: SIGNER_B, trustDomain: DOMAINS[SIGNER_B]! },
+];
 
 /** printer execution_started t0, execution_completed t10, camera inspects (passed) at t20. */
 const PILOT: Draft[] = [
@@ -229,8 +235,8 @@ async function admit(
     pinnedBundleSetDigest,
     verifyBundleSignature: verifySignature,
     executorTrustDomains: [OPERATOR_A],
+    signerTrustDomains: SIGNER_DOMAINS,
     verifyPrimitiveInstance: () => true,
-    executorTrustDomains: [OPERATOR_A],
     ...over,
   });
 }
@@ -287,25 +293,82 @@ describe("profile admission — trust domains (#345's one rule, steward #6478)",
     expect((await admit(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), both[1]!])).decision).toBe("admit");
   });
 
-  it("the signature leg must name the signer's trust domain: a bare true, a malformed principal or an accessor fails it", async () => {
+  it("the signature leg must name the verified signer the bundle declares: true, a domain record, a malformed id or another signer fails it", async () => {
     const p = inspectedPageProfile();
     const bundles = await toBundles(PILOT, p);
-    const accessor = {};
-    Object.defineProperty(accessor, "trustDomain", { get: () => OPERATOR_B, enumerable: true });
-    const answers: unknown[] = [true, { trustDomain: "not-a-principal" }, { trustDomain: OPERATOR_B.toUpperCase() }, { trustDomain: 7 }, {}, accessor, [OPERATOR_B]];
+    const answers: unknown[] = [true, 7, {}, [SIGNER_A], { trustDomain: OPERATOR_A }, "0x" + "1".repeat(39), SIGNER_A.toUpperCase(), `0x${"A".repeat(40)}`];
     for (const answer of answers) {
       const r = await admit(p, bundles, { verifyBundleSignature: (() => answer) as unknown as ProfileAdmissionInput["verifyBundleSignature"] });
       expect(codes(r), JSON.stringify(answer)).toEqual(["unauthenticated-bundle"]);
     }
+    // A leg naming another registered signer than the one the bundle declares would take that key's domain.
+    const swapped = (b: AdmissionBundle) => {
+      const verified = verifySignature(b);
+      return verified === SIGNER_A ? SIGNER_B : verified;
+    };
+    expect(codes(await admit(p, bundles, { verifyBundleSignature: swapped }))).toEqual(["unauthenticated-bundle"]);
   });
 
-  it("a leg that names no trust domain (null) authenticates, but no inspection can then be independent", async () => {
+  it("one key signs both bundles: the snapshot gives it ONE domain, the executor's, so the camera is not independent (astra pack 271)", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, await toBundles(PILOT, p), { verifyBundleSignature: () => ({ trustDomain: null }) });
+    // astra's reproduction, under the new contract: the printer's and the camera's bundles both signed by A's key.
+    const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_A)];
+    const r = await admit(p, sameKey);
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
+    expect(codes(r)).toEqual(["level-not-reached"]);
+    // The leg can no longer vary a signer's domain call by call: it names signers, and naming another one than the
+    // bundle declares is refused.
+    let calls = 0;
+    const flipping = (b: AdmissionBundle) => {
+      const verified = verifySignature(b);
+      if (verified === false) return verified;
+      calls++;
+      return calls === 1 ? verified : SIGNER_B;
+    };
+    const flipped = await admit(p, sameKey, { verifyBundleSignature: flipping });
+    expect(flipped.decision).toBe("reject");
+    expect(codes(flipped)).toEqual(["unauthenticated-bundle"]);
+  });
+
+  it("a signer the snapshot maps to no operator (null) authenticates, but no inspection can then be independent", async () => {
+    const p = inspectedPageProfile();
+    const unknown = [{ signer: SIGNER_A, trustDomain: null }, { signer: SIGNER_B, trustDomain: null }];
+    const r = await admit(p, await toBundles(PILOT, p), { signerTrustDomains: unknown });
     expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
     expect(codes(r)).toEqual(["level-not-reached"]);
     // A device_reported profile does not need independence.
-    expect((await admit(deviceReportedProfile(), await toBundles(PILOT, deviceReportedProfile()), { verifyBundleSignature: () => ({ trustDomain: null }) })).decision).toBe("admit");
+    expect((await admit(deviceReportedProfile(), await toBundles(PILOT, deviceReportedProfile()), { signerTrustDomains: unknown })).decision).toBe("admit");
+  });
+
+  it("a verified signer missing from the snapshot is not authenticated: its domain is unknown to the pin", async () => {
+    const p = inspectedPageProfile();
+    const r = await admit(p, await toBundles(PILOT, p), { signerTrustDomains: [{ signer: SIGNER_A, trustDomain: OPERATOR_A }] });
+    expect(codes(r)).toEqual(["unauthenticated-bundle"]);
+    expect(r.reasons[0]!.detail).toContain("not in the pinned registry snapshot");
+  });
+
+  it("the snapshot is data, one row per signer: absent, malformed, or a signer listed twice (even with one domain) is refused", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    const accessorRow = {};
+    Object.defineProperty(accessorRow, "trustDomain", { get: () => OPERATOR_A, enumerable: true });
+    Object.defineProperty(accessorRow, "signer", { value: SIGNER_A, enumerable: true });
+    const snapshots: unknown[] = [
+      undefined,
+      {},
+      [{ signer: "not-a-signer", trustDomain: OPERATOR_A }],
+      [{ signer: SIGNER_A }],
+      [{ signer: SIGNER_A, trustDomain: "not-a-principal" }],
+      [{ signer: SIGNER_A, trustDomain: OPERATOR_A.toUpperCase() }],
+      [{ signer: SIGNER_A.toUpperCase(), trustDomain: OPERATOR_A }],
+      [...SIGNER_DOMAINS, { signer: SIGNER_A, trustDomain: OPERATOR_B }],
+      [...SIGNER_DOMAINS, { signer: SIGNER_A, trustDomain: OPERATOR_A }],
+      [accessorRow, SIGNER_DOMAINS[1]],
+    ];
+    for (const snapshot of snapshots) {
+      const r = await admit(p, bundles, { signerTrustDomains: snapshot as unknown as ProfileAdmissionInput["signerTrustDomains"] });
+      expect(codes(r), JSON.stringify(snapshot)).toEqual(["input-unreadable"]);
+    }
   });
 
   it("executorTrustDomains must be a list of operator principal ids, from the deal: absent or malformed rejects", async () => {
@@ -1030,6 +1093,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1052,6 +1116,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1082,6 +1147,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1104,6 +1170,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1133,6 +1200,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1213,8 +1281,10 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
   });
   const verifyFixture = (b: AdmissionBundle) =>
     verify(null, signingPreimage(b.bundleHash), fixtureKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"))
-      ? { trustDomain: null }
+      ? (b.kernelSignature as { signer: string }).signer
       : (false as const);
+  // The fixture's key is registered under no operator: its snapshot row names none.
+  const fixtureSigners = [{ signer: (FIXTURE.bundle.kernelSignature as { signer: string }).signer, trustDomain: null }];
   const lose3Subject = { jobId: "job-lose3-consumer-run-001", kernelId: "kernel-hp-3301-golden" };
 
   async function run(bundle: AdmissionBundle) {
@@ -1228,6 +1298,7 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
       pinnedBundleSetDigest: await computeBundleSetDigest(lose3Subject, [bundle.bundleHash]),
       verifyBundleSignature: verifyFixture,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: fixtureSigners,
       verifyPrimitiveInstance: () => true,
     });
   }
@@ -1284,6 +1355,7 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     });
     expect(r.decision).toBe("reject");
@@ -1302,6 +1374,7 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
       bundles,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     } as Record<string, unknown>;
     Object.defineProperty(input, "pinnedBundleSetDigest", {
@@ -1349,6 +1422,7 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
         verifyBundleSignature: verifySignature,
         executorTrustDomains: [OPERATOR_A],
+        signerTrustDomains: SIGNER_DOMAINS,
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).not.toBe("admit");
@@ -1376,6 +1450,7 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         pinnedBundleSetDigest: "sha256:" + "0".repeat(64),
         verifyBundleSignature: verifySignature,
         executorTrustDomains: [OPERATOR_A],
+        signerTrustDomains: SIGNER_DOMAINS,
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).toBe("reject");
@@ -1415,6 +1490,7 @@ describe("profile admission — astra r5 (pack 127): a data getter cannot change
         pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
         verifyBundleSignature: verifySignature,
         executorTrustDomains: [OPERATOR_A],
+        signerTrustDomains: SIGNER_DOMAINS,
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).not.toBe("admit");
@@ -1446,6 +1522,7 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
       subject,
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
     } as Record<string, unknown>;
@@ -1466,7 +1543,7 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
     // A process-level change that admission's own membership checks must not consult.
     Array.prototype.includes = function () { return true; } as typeof Array.prototype.includes;
     try {
-      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, verifyBundleSignature: verifySignature, executorTrustDomains: [OPERATOR_A], verifyPrimitiveInstance: () => true });
+      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, verifyBundleSignature: verifySignature, executorTrustDomains: [OPERATOR_A], signerTrustDomains: SIGNER_DOMAINS, verifyPrimitiveInstance: () => true });
       expect(r.decision).not.toBe("admit");
     } finally {
       Array.prototype.includes = original;
@@ -1494,6 +1571,7 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     });
     expect(ran).toBe(false);
@@ -1517,6 +1595,7 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     });
     expect(ran).toBe(false);
@@ -1545,6 +1624,7 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const input = new Proxy(target, { get: (t, k, r) => (trapped++, Reflect.get(t, k, r)), getOwnPropertyDescriptor: (t, k) => (trapped++, Reflect.getOwnPropertyDescriptor(t, k)) });
@@ -1566,6 +1646,7 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
       executorTrustDomains: [OPERATOR_A],
+      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     expect(codes(await profileAdmitsBundle(input))).not.toContain("input-unreadable");
