@@ -271,7 +271,7 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
     expect(releaseSpan?.op).toBe("blockchain");
   });
 
-  it("spans include job.id in attributes", async () => {
+  it("spans include job.id in attributes, declared: a caller's or bundle's id leaves keyed (N107b, #538 r3)", async () => {
     const service = getSettlementService();
     const bundle = makeBundle();
     await service.processEvidence(bundle, "job-004");
@@ -281,8 +281,12 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
     );
 
     const pipelineSpan = spanOptions.find((s) => s.name === "settlement.pipeline");
-    expect(pipelineSpan?.attributes?.["job.id"]).toBe("job-004");
-    expect(pipelineSpan?.attributes?.["bundle.id"]).toBe("bun-tracing-001");
+    expect(pipelineSpan?.attributes?.["job.id"]).toBe(keyedHash("job-004"));
+    expect(pipelineSpan?.attributes?.["bundle.id"]).toBe(keyedHash("bun-tracing-001"));
+    const submitSpan = spanOptions.find((s) => s.name === "settlement.onchain_submit");
+    expect(submitSpan?.attributes).toEqual({ "job.id": keyedHash("job-004"), "contract.address": keyedHash("none"), "write.enabled": false });
+    expect(JSON.stringify(spanOptions)).not.toContain("job-004");
+    expect(JSON.stringify(spanOptions)).not.toContain("bun-tracing-001");
   });
 
   it("total span count is 5 (1 parent + 4 children)", async () => {
@@ -354,7 +358,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
     expect(spanNames).toContain("job.lifecycle");
   });
 
-  it("'job.lifecycle' span includes job.id, job.type, and job.assurance_tier attributes", async () => {
+  it("'job.lifecycle' span includes job.id, job.type, and job.assurance_tier attributes, declared (keyed; N107b, #538 r3)", async () => {
     initKernelService(mockKernelConfig);
     const { getKernelService } = await import("../services/kernel-service.js");
     const svc = getKernelService();
@@ -374,9 +378,11 @@ describe("KernelService.submitJob — Sentry spans", () => {
 
     const options = lifecycleCall![0] as { name: string; op: string; attributes?: Record<string, unknown> };
     expect(options.op).toBe("job.lifecycle");
-    expect(options.attributes?.["job.id"]).toBe("job-tracing-ks-002");
-    expect(options.attributes?.["job.type"]).toBe("step-ks-attrs");
-    expect(options.attributes?.["job.assurance_tier"]).toBe(1);
+    expect(options.attributes).toEqual({
+      "job.id": keyedHash("job-tracing-ks-002"),
+      "job.type": keyedHash("step-ks-attrs"),
+      "job.assurance_tier": keyedHash(1),
+    });
   });
 
   it("the local 'job.lifecycle' trace declares its names and keys the job's values (N107b round 5)", async () => {

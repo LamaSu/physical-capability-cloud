@@ -26,6 +26,7 @@ import { traceCollector, TraceCollector } from "../trace-collector.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "./audit-service.js";
 import { declare, lit } from "../observability/closed-schema.js";
+import { startDeclaredSpan } from "../observability/closed-otel.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -135,15 +136,16 @@ export class SettlementService {
 
     // Wrap the entire pipeline in a parent Sentry span for waterfall visibility
     try {
-      await Sentry.startSpan(
+      // Each Sentry span's name, op and attributes are declared, as the local spans' are (N107b,
+      // #538 round 3): an exporter keeps them, and a bundle's or caller's values leave keyed.
+      await startDeclaredSpan(
+        Sentry.startSpan,
+        lit("settlement.pipeline"),
+        lit("settlement"),
         {
-          name: "settlement.pipeline",
-          op: "settlement",
-          attributes: {
-            "job.id": jobId,
-            "bundle.id": bundle.id,
-            "bundle.assurance_tier": bundle.assuranceTier,
-          },
+          "job.id": declare.id(jobId),
+          "bundle.id": declare.id(bundle.id),
+          "bundle.assurance_tier": declare.id(bundle.assuranceTier),
         },
         async () => {
           // ── Step 1: Store evidence bundle to IPFS/Storacha ──────────────
@@ -156,8 +158,11 @@ export class SettlementService {
             service: lit("storage"),
             attributes: { "bundle.id": declare.id(bundle.id) },
           });
-          await Sentry.startSpan(
-            { name: "settlement.ipfs_archive", op: "storage", attributes: { "bundle.id": bundle.id } },
+          await startDeclaredSpan(
+            Sentry.startSpan,
+            lit("settlement.ipfs_archive"),
+            lit("storage"),
+            { "bundle.id": declare.id(bundle.id) },
             async () => {
               try {
                 const { createEvidenceStorage } = await import("@pcc/kernel/evidence-storage-factory");
@@ -190,8 +195,11 @@ export class SettlementService {
             service: lit("db"),
             attributes: { "job.id": declare.id(jobId), "event.count": declare.id(bundle.events.length) },
           });
-          await Sentry.startSpan(
-            { name: "settlement.db_persist", op: "db", attributes: { "job.id": jobId, "event.count": bundle.events.length } },
+          await startDeclaredSpan(
+            Sentry.startSpan,
+            lit("settlement.db_persist"),
+            lit("db"),
+            { "job.id": declare.id(jobId), "event.count": declare.id(bundle.events.length) },
             async () => {
               try {
                 const repos = getRepos();
@@ -245,15 +253,14 @@ export class SettlementService {
               "write.enabled": declare.flag(isWriteEnabled()),
             },
           });
-          await Sentry.startSpan(
+          await startDeclaredSpan(
+            Sentry.startSpan,
+            lit("settlement.onchain_submit"),
+            lit("blockchain"),
             {
-              name: "settlement.onchain_submit",
-              op: "blockchain",
-              attributes: {
-                "job.id": jobId,
-                "contract.address": contractAddress ?? "none",
-                "write.enabled": isWriteEnabled(),
-              },
+              "job.id": declare.id(jobId),
+              "contract.address": declare.id(contractAddress ?? "none"),
+              "write.enabled": declare.flag(isWriteEnabled()),
             },
             async () => {
               if (isWriteEnabled() && contractAddress && !fabricatedBlocksSettlement) {
@@ -357,15 +364,14 @@ export class SettlementService {
               "contract.address": declare.id(contractAddress ?? "none"),
             },
           });
-          await Sentry.startSpan(
+          await startDeclaredSpan(
+            Sentry.startSpan,
+            lit("settlement.onchain_release"),
+            lit("blockchain"),
             {
-              name: "settlement.onchain_release",
-              op: "blockchain",
-              attributes: {
-                "job.id": jobId,
-                "auto_release": autoRelease,
-                "contract.address": contractAddress ?? "none",
-              },
+              "job.id": declare.id(jobId),
+              "auto_release": declare.flag(autoRelease === true),
+              "contract.address": declare.id(contractAddress ?? "none"),
             },
             async () => {
               if (autoRelease && isWriteEnabled() && contractAddress && attestation && !fabricatedBlocksSettlement) {

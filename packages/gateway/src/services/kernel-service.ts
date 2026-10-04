@@ -17,6 +17,7 @@ import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
+import { startDeclaredSpan } from "../observability/closed-otel.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { declare, lit } from "../observability/closed-schema.js";
 
@@ -297,17 +298,14 @@ export class KernelService {
     // Fire-and-forget execution — wrapped in a Sentry lifecycle span so the
     // async chain is visible as a waterfall in the Sentry trace view.
     try {
-      Sentry.startSpanManual(
-        {
-          name: "job.lifecycle",
-          op: "job.lifecycle",
-          attributes: {
-            "job.id": jobId,
-            "job.type": stepId,
-            "job.assurance_tier": assuranceTier,
-          },
-        },
-        (lifecycleSpan) => {
+      // Its name, op and attributes are declared (N107b, #538 round 3): an exporter keeps them, and
+      // the job's id, step and tier (a caller's values) leave keyed, as in the local trace above.
+      startDeclaredSpan(
+        Sentry.startSpanManual,
+        lit("job.lifecycle"),
+        lit("job.lifecycle"),
+        { "job.id": declare.id(jobId), "job.type": declare.id(stepId), "job.assurance_tier": declare.id(assuranceTier) },
+        (lifecycleSpan: Sentry.Span) => {
           // Telemetry: job execution starting
           pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
           runner

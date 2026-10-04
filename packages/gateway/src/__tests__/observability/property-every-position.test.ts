@@ -962,3 +962,124 @@ describe("N107b round 4, positive controls: declared values and the server's own
     await app.close();
   });
 });
+
+// ── #538 r3 (source pack): the OTLP exporter ───────────────────────────────
+
+/** What an OTLP exporter serializes from a span (the fields @opentelemetry/otlp-transformer reads). */
+function otlpFields(span: {
+  name: string;
+  kind: number;
+  spanContext(): { traceId: string; spanId: string; traceState?: { serialize(): string } };
+  parentSpanContext?: { spanId: string };
+  attributes: unknown;
+  events: Array<{ name: string; attributes?: unknown }>;
+  status: unknown;
+  links: Array<{ context: { traceId: string; spanId: string }; attributes?: unknown }>;
+  resource: { attributes: unknown };
+  instrumentationScope: unknown;
+}) {
+  return {
+    name: span.name,
+    kind: span.kind,
+    traceId: span.spanContext().traceId,
+    spanId: span.spanContext().spanId,
+    traceState: span.spanContext().traceState?.serialize(),
+    parentSpanId: span.parentSpanContext?.spanId,
+    attributes: span.attributes,
+    events: span.events.map((event) => ({ name: event.name, attributes: event.attributes })),
+    status: span.status,
+    links: span.links.map((link) => ({ traceId: link.context.traceId, spanId: link.context.spanId, attributes: link.attributes })),
+    resource: span.resource.attributes,
+    scope: span.instrumentationScope,
+  };
+}
+
+describe("#538 r3: the OTLP exporter (otel.ts) carries no marker from any span field", () => {
+  it("every field a producer can set on an OpenTelemetry span, through the exporter otel.ts puts in front of OTLP", async () => {
+    const otel = (await import("../../otel.js")) as { otelSpanExporter?: (inner: unknown) => unknown };
+    const { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } = await import("@opentelemetry/sdk-trace-node");
+    const memory = new InMemorySpanExporter();
+    const exporter = (typeof otel.otelSpanExporter === "function" ? otel.otelSpanExporter(memory) : memory) as InstanceType<typeof InMemorySpanExporter>;
+    const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+    const tracer = provider.getTracer("n107b-prop-otlp");
+    const results: Result[] = [];
+    // The positions the OpenTelemetry SDK itself refuses: its recordException builds a diagnostic
+    // with a template literal for a value it cannot record, which throws for a symbol and for an
+    // object with no prototype. The producer's call throws before the span ends: nothing is
+    // exported. Any other throw, and any attempt that exports no span, is a violation.
+    const REFUSALS: ReadonlyMap<string, RegExp> = new Map([
+      ["recordException = symbol", /Cannot convert a Symbol value to a string/],
+      ["recordException = nullPrototype", /Cannot convert object to primitive value/],
+    ]);
+    const refused: string[] = [];
+    const exported = (label: string, run: () => void) => {
+      const before = memory.getFinishedSpans().length;
+      try {
+        run();
+      } catch (error) {
+        const expected = REFUSALS.get(label);
+        if (expected?.test(String(error)) && memory.getFinishedSpans().length === before) refused.push(label);
+        else results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
+        return;
+      }
+      const spans = memory.getFinishedSpans().slice(before);
+      results.push({ label, text: spans.length > 0 ? render(spans.map((span) => otlpFields(span as never))) : undefined });
+    };
+    const value = (make: Make) => make() as never;
+    for (const [kind, make] of Object.entries(ALL_KINDS)) {
+      exported(`span name = ${kind}`, () => tracer.startSpan(value(make)).end());
+      exported(`updateName = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.updateName(value(make));
+        span.end();
+      });
+      exported(`setAttribute value = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.setAttribute("a", value(make));
+        span.end();
+      });
+      exported(`setAttributes = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.setAttributes({ a: value(make), [MARK]: "v", n: NUM, list: [MARK, MARK] });
+        span.end();
+      });
+      exported(`startSpan attributes = ${kind}`, () => tracer.startSpan("n", { attributes: { a: value(make), [MARK]: NUM } }).end());
+      exported(`addEvent name = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.addEvent(value(make));
+        span.end();
+      });
+      exported(`addEvent attributes = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.addEvent("e", { a: value(make), [MARK]: "v", n: NUM });
+        span.end();
+      });
+      exported(`recordException = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.recordException(value(make));
+        span.end();
+      });
+      exported(`setStatus message = ${kind}`, () => {
+        const span = tracer.startSpan("n");
+        span.setStatus({ code: 2, message: value(make) });
+        span.end();
+      });
+      exported(`link attributes = ${kind}`, () => {
+        const other = tracer.startSpan("o");
+        other.end();
+        tracer.startSpan("n", { links: [{ context: other.spanContext(), attributes: { a: value(make), [MARK]: "v" } }] }).end();
+      });
+    }
+    for (const name of SPECIAL_NAMES) {
+      exported(`attribute key {${name}}`, () => {
+        const span = tracer.startSpan("n");
+        span.setAttribute(name, "v");
+        span.setAttribute(`${name}.${MARK}`, 1);
+        span.end();
+      });
+    }
+    expect(violations("the OTLP exporter", results), "positions that reached the OTLP exporter").toBe("");
+    expect(refused, "the SDK's refusals, each as documented").toEqual([...REFUSALS.keys()]);
+    await provider.shutdown();
+  });
+});
