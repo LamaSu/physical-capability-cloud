@@ -100,8 +100,9 @@ describe("N31 device relay on master: #400's relayAccessGuard refuses a stranger
   // The relay's guard is master's #400 relayAccessGuard (routes/device-relay.ts), tested in full by
   // device-relay.test.ts. This cross-check pins the N31 hole (bus #6505) closed on this branch: a
   // stranger's key gets nothing from another operator's kernel, and the kernel's own key keeps the
-  // executor side. The steward's #6508 decision layer (proven or admin for actuation) waits on the
-  // re-ruling of #6578, since #400's grant model was unknown when #6508 was written.
+  // executor side. dc6d3833 (N126) runs that guard on auth/kernel-authority.ts, which puts the
+  // steward's #6508 decision tier (the admin or the proven operator wallet) on the relay: opening
+  // and revoking a scope, a chat instruction and a write tool call; every other route is "operate".
   it("anonymous is 401 on a write and a read", async () => {
     expect((await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: ANON, payload: SCOPE_BODY })).statusCode).toBe(401);
     expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: ANON })).statusCode).toBe(401);

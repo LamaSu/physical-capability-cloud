@@ -50,7 +50,16 @@ function seedKernel(id: string, operatorAddress: string) {
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 const PENDING = "/api/relay/kernel-a/tool-call/pending";
 
+// N126 (dc6d3833): opening or revoking a scope is a decision, which needs the admin or the
+// kernel's PROVEN operator wallet. The operator's real key is a claimed identity until WP-A, so
+// those calls keep the operator's key and add the admin key.
+const ADMIN = "n31b-apigate-admin";
+let prevAdminKey: string | undefined;
+const asOperatorAdmin = () => ({ ...bearer(operatorKey), "x-admin-key": ADMIN });
+
 beforeAll(async () => {
+  prevAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   process.env.DATABASE_URL = ":memory:";
   closeStore();
   initStore({ seed: false });
@@ -88,6 +97,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   closeStore();
+  if (prevAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = prevAdminKey;
 });
 
 beforeEach(() => {
@@ -258,10 +269,13 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
   }
 
   async function grant(holder: string): Promise<string> {
-    const res = await app.inject({
-      method: "POST", url: "/api/relay/kernel-a/scope", headers: bearer(operatorKey),
-      payload: { createdBy: holder, allowedTools: ["run_create"] },
-    });
+    const payload = { createdBy: holder, allowedTools: ["run_create"] };
+    // N126: the operator's real key alone is refused the mint (a decision) and mints nothing.
+    const claimed = await app.inject({ method: "POST", url: "/api/relay/kernel-a/scope", headers: bearer(operatorKey), payload });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(executionScopes).where(eq(executionScopes.createdBy, holder)).all()).toHaveLength(0);
+    const res = await app.inject({ method: "POST", url: "/api/relay/kernel-a/scope", headers: asOperatorAdmin(), payload });
     expect(res.statusCode).toBe(201);
     return res.json().id;
   }
@@ -294,7 +308,8 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
     const stream = openStream(viewer);
     try {
       await until(() => stream.text().includes("event: connected"));
-      const res = await app.inject({ method: "POST", url: `/api/relay/kernel-a/scope/${scope}/revoke`, headers: bearer(operatorKey) });
+      // N126: a revoke is a decision (the operator's key with the admin key).
+      const res = await app.inject({ method: "POST", url: `/api/relay/kernel-a/scope/${scope}/revoke`, headers: asOperatorAdmin() });
       expect(res.statusCode).toBe(200);
       expect(await frameReaches(stream)).toBe(false);
       await until(() => stream.ended());

@@ -6,7 +6,7 @@
  * ALL external calls (IPFS, blockchain) are mocked. No real network traffic.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
@@ -92,7 +92,8 @@ async function buildApp(): Promise<FastifyInstance> {
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
   // The legacy OT-2 relay is retired (N4b-gw); tool calls go through
-  // /api/relay/:kernelId as the scope's holder.
+  // /api/relay/:kernelId: a holder's safe call as the scope's holder, a scoped
+  // write as the admin naming the holder's scope (N126, adminFor below).
   await app.register(deviceRelayRoutes);
   await app.register(jobRoutes);
   await app.ready();
@@ -101,6 +102,43 @@ async function buildApp(): Promise<FastifyInstance> {
 
 /** Headers for a principal, e.g. the buyer agent holding the job's scope. */
 const asKey = (id: string) => ({ "x-test-key": id });
+
+// N126 (dc6d3833): a scope holder's write tool call is a decision, which needs the admin or the
+// kernel's PROVEN operator wallet; the holder's key is a claimed identity. Where a holder's
+// scoped write ran, the admin now names the holder's scope. adminFor(holder) keeps the holder's
+// key (the caller identity and its safety-governor rate-limit bucket) and adds the admin key.
+const ADMIN = "n31b-paid-job-flow-admin";
+const adminFor = (id: string) => ({ ...asKey(id), "x-admin-key": ADMIN });
+let prevAdminKey: string | undefined;
+beforeAll(() => {
+  prevAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
+});
+afterAll(() => {
+  if (prevAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = prevAdminKey;
+});
+
+/**
+ * N126: the holder's own scoped write is refused, 403 operator_proof_required, and queues and
+ * spends nothing: no relay row under its scope, and the scope's command count unchanged.
+ */
+async function expectHolderWriteRefused(
+  app: FastifyInstance,
+  holder: string,
+  payload: { scopeId: string; toolName: string; args?: Record<string, unknown> },
+) {
+  const { db } = getStore();
+  const rows = () => db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.scopeId, payload.scopeId)).all();
+  const spent = () => db.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, payload.scopeId)).get()!.commandCount;
+  const rowsBefore = rows().length;
+  const spentBefore = spent();
+  const res = await app.inject({ method: "POST", url: "/api/relay/kernel-nyc/tool-call", headers: asKey(holder), payload });
+  expect(res.statusCode).toBe(403);
+  expect(res.json().reason).toBe("operator_proof_required");
+  expect(rows()).toHaveLength(rowsBefore);
+  expect(spent()).toBe(spentBefore);
+}
 
 /** The recorded operator of a seeded kernel. */
 function operatorOf(kernelId: string): string {
@@ -325,16 +363,15 @@ describe("Paid Job Flow", () => {
       });
       const { jobId, scopeId } = createRes.json();
 
-      // Simulate some tool calls under the scope
+      // Simulate some tool calls under the scope. N126: the holder's own write is refused; the
+      // admin names the holder's scope.
+      const write = { scopeId, toolName: "ot2_aspirate", args: { volume: 100, well: "A1" } };
+      await expectHolderWriteRefused(app, "user-agent-003", write);
       const call = await app.inject({
         method: "POST",
         url: "/api/relay/kernel-nyc/tool-call",
-        headers: asKey("user-agent-003"),
-        payload: {
-          scopeId,
-          toolName: "ot2_aspirate",
-          args: { volume: 100, well: "A1" },
-        },
+        headers: adminFor("user-agent-003"),
+        payload: write,
       });
       expect(call.statusCode).toBe(201);
 
@@ -536,16 +573,15 @@ describe("Paid Job Flow", () => {
       });
       const { scopeId } = createRes.json();
 
-      // Tool call should succeed — escrow is mock-funded
+      // Tool call should succeed — escrow is mock-funded. N126: the holder's own write is
+      // refused; the admin names the holder's scope.
+      const write = { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } };
+      await expectHolderWriteRefused(app, "user-agent-008", write);
       const toolRes = await app.inject({
         method: "POST",
         url: "/api/relay/kernel-nyc/tool-call",
-        headers: asKey("user-agent-008"),
-        payload: {
-          scopeId,
-          toolName: "ot2_aspirate",
-          args: { volume: 50 },
-        },
+        headers: adminFor("user-agent-008"),
+        payload: write,
       });
 
       expect(toolRes.statusCode).toBe(201);
@@ -595,10 +631,12 @@ describe("Paid Job Flow", () => {
       const { scopeId, escrowId } = createRes.json();
       getRepos().escrows.updateStatus(escrowId, "created");
 
+      // N126: the holder can't make a scoped write, so the admin names its scope; the escrow gate
+      // (escrowRefusal) still refuses it.
       const toolRes = await app.inject({
         method: "POST",
         url: "/api/relay/kernel-nyc/tool-call",
-        headers: asKey("user-agent-010"),
+        headers: adminFor("user-agent-010"),
         payload: { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } },
       });
 
@@ -627,10 +665,12 @@ describe("Paid Job Flow", () => {
         throw new Error("escrow store unavailable");
       });
 
+      // N126: the holder can't make a scoped write, so the admin names its scope; a failed escrow
+      // lookup still refuses it.
       const toolRes = await app.inject({
         method: "POST",
         url: "/api/relay/kernel-nyc/tool-call",
-        headers: asKey("user-agent-011"),
+        headers: adminFor("user-agent-011"),
         payload: { scopeId, toolName: "ot2_aspirate", args: { volume: 50 } },
       });
       spy.mockRestore();
@@ -706,27 +746,24 @@ describe("Paid Job Flow", () => {
       expect(escrowStatus).toBe("funded");
 
       // ── Step 2: Execute tool calls under scope ─────────────────────
+      // N126: the holder's own writes are refused; the admin names the holder's scope.
+      const aspirate = { scopeId, toolName: "ot2_aspirate", args: { volume: 50, well: "A1" } };
+      await expectHolderWriteRefused(app, "user-agent-e2e", aspirate);
       const call1 = await app.inject({
         method: "POST",
         url: "/api/relay/kernel-nyc/tool-call",
-        headers: asKey("user-agent-e2e"),
-        payload: {
-          scopeId,
-          toolName: "ot2_aspirate",
-          args: { volume: 50, well: "A1" },
-        },
+        headers: adminFor("user-agent-e2e"),
+        payload: aspirate,
       });
       expect(call1.statusCode).toBe(201);
 
+      const dispense = { scopeId, toolName: "ot2_dispense", args: { volume: 50, well: "B1" } };
+      await expectHolderWriteRefused(app, "user-agent-e2e", dispense);
       const call2 = await app.inject({
         method: "POST",
         url: "/api/relay/kernel-nyc/tool-call",
-        headers: asKey("user-agent-e2e"),
-        payload: {
-          scopeId,
-          toolName: "ot2_dispense",
-          args: { volume: 50, well: "B1" },
-        },
+        headers: adminFor("user-agent-e2e"),
+        payload: dispense,
       });
       expect(call2.statusCode).toBe(201);
 
