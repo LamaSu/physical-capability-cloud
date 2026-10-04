@@ -15,7 +15,12 @@
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
  *   - SIGNATURE: every bundle's `bundleHash` verifies under the node's
  *     registered key (`verifyBundleSignature`: gateway
- *     `verifyDeviceSignedEvidence`, the oracle's registered-key check);
+ *     `verifyDeviceSignedEvidence`, the oracle's registered-key check), and the
+ *     leg names the verified signer's operator principal in the pinned
+ *     registry: the bundle's TRUST DOMAIN, or null when the registry names
+ *     none. Levels judge independence between trust domains (evidence-level.ts,
+ *     #345's one rule), so a leg that cannot name the signer's operator caps
+ *     that bundle's inspections below inspected_output;
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
  *     opens to its events, and they commit the job and the kernel that
  *     accepted it;
@@ -86,10 +91,17 @@
  *
  * A QUALIFYING OBSERVATION is an event that:
  *   - is at the profile's `acceptanceLevel` (evidence-level.ts, the one
- *     classification), from the profiled `device.deviceId`;
- *   - if it is an inspection, carries its own positive verdict,
- *     `payload.passed === true`. A negative verdict is a failure (below), and
- *     an inspection with no verdict proves nothing about the output;
+ *     classification), from the profiled `device.deviceId`. Levels are judged
+ *     over the authenticated bundles, each with its signer's trust domain, and
+ *     the deal's `executorTrustDomains`: an inspection is inspected_output only
+ *     from a trust domain independent of every executor. An event present in
+ *     several bundles counts at the LOWEST level any of them gives it, so a copy
+ *     in a fabricated or executor's bundle never lifts it (steward #6478);
+ *   - if it is an inspection, carries its own positive verdict: evidence's
+ *     pinned verdict field (`inspectionVerdict` is pass: cv_inspection_result
+ *     `passed: true`, instrument_result `pass: true`, batch_sample_result
+ *     `status: "PASS"`). A negative or unreadable verdict is a failure (below),
+ *     and an inspection with no verdict proves nothing about the output;
  *   - comes from the profiled kind of device and adapter, and from pinned
  *     versions, each read from its own field: `source.deviceType` equals
  *     `device.kind`, `source.adapterType` equals `device.adapterType`,
@@ -164,15 +176,19 @@
 
 import { isFabricated } from "./is-fabricated.js";
 import {
-  evidenceLevelOf,
-  evidenceLevelOfBundle,
-  executingDeviceIds,
+  evidenceLevelRank,
+  evidenceLevelsOfEvents,
   meetsEvidenceLevel,
   deriveContradictions,
   inspectionFailed,
+  inspectionVerdict,
   INSPECTION_EVENT_TYPES,
+  type AuthenticatedBundle,
+  type ContradictionKind,
+  type EventLevel,
   type EvidenceLevel,
 } from "./evidence-level.js";
+import { parseOperatorPrincipalId } from "./principal-id.js";
 import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
 // The trap-free proxy check, loaded at runtime (no static node:util import, so browser bundles of @pcc/spec build).
 import { isProxy } from "../util/plain-data.js";
@@ -264,6 +280,9 @@ export interface ProfileAdmissionResult {
   reasons: ProfileAdmissionReason[];
 }
 
+/** The signature leg's answer: verified, naming the signer's trust domain, or not verified. */
+export type BundleSignatureAnswer = { readonly trustDomain: string | null } | false;
+
 /** The part of an EvidenceBundle admission reads. */
 export interface AdmissionBundle {
   bundleHash: string;
@@ -281,8 +300,21 @@ export interface ProfileAdmissionInput {
   bundles: readonly AdmissionBundle[];
   /** The pinned set's digest (`computeBundleSetDigest`), from where it was pinned (see the caller contract). A malformed pin rejects. */
   pinnedBundleSetDigest: string;
-  /** The registered-key signature leg. */
-  verifyBundleSignature: (bundle: AdmissionBundle) => boolean | Promise<boolean>;
+  /**
+   * The operator principals the job was ASSIGNED to (eip155:<chainId>:0x<40
+   * lowercase hex>), from the accepted deal, as `subject` comes from the job
+   * record: never from the evidence. Empty when the deal names none, and then no
+   * inspection can show independence (at most device_reported).
+   */
+  executorTrustDomains: readonly string[];
+  /**
+   * The registered-key signature leg. It answers `{ trustDomain }` when the
+   * bundle verifies: the verified signer's operator principal in the pinned
+   * registry, or null when the registry names none. Anything else fails the
+   * leg: false, a throw, a bare `true` (it names no signer), or a trustDomain
+   * that is not an operator principal id.
+   */
+  verifyBundleSignature: (bundle: AdmissionBundle) => BundleSignatureAnswer | Promise<BundleSignatureAnswer>;
   /**
    * The primitive leg: is `observation` an authentic instance of `primitiveId`
    * for this job, and is its `profileObservation` record TRUE of it? It must
@@ -508,6 +540,33 @@ async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean
 }
 
 /**
+ * The signature leg's answer, read once from its own data: the verified signer's
+ * trust domain (undefined when the registry names none), or null when the leg
+ * failed. A throw, false, a bare true, a non-object, an accessor or a trustDomain
+ * that is neither null nor an operator principal id all fail.
+ */
+async function signatureLeg(leg: () => BundleSignatureAnswer | Promise<BundleSignatureAnswer>): Promise<{ trustDomain: string | undefined } | null> {
+  try {
+    const answer: unknown = await leg();
+    if (typeof answer !== "object" || answer === null || Array.isArray(answer)) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(answer, "trustDomain");
+    if (descriptor === undefined || !Object.prototype.hasOwnProperty.call(descriptor, "value")) return null;
+    const domain: unknown = descriptor.value;
+    if (domain === null) return { trustDomain: undefined };
+    if (typeof domain !== "string" || parseOperatorPrincipalId(domain) === null) return null;
+    return { trustDomain: domain };
+  } catch {
+    return null;
+  }
+}
+
+/** The lower of two levels; null (no level) is the lowest. */
+function lowerLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null || b === null) return null;
+  return evidenceLevelRank(a) <= evidenceLevelRank(b) ? a : b;
+}
+
+/**
  * Admit, reject or hold the evidence for one job against its committed
  * measurement profile. Never throws.
  *
@@ -529,7 +588,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   if (typeof input !== "object" || input === null || isProxy === null || isProxy(input)) {
     return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
   }
-  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile"] as const;
+  const fields = ["pinnedBundleSetDigest", "verifyBundleSignature", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile", "executorTrustDomains"] as const;
   const read = Object.create(null) as Record<(typeof fields)[number], unknown>;
   for (const key of fields) {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
@@ -538,7 +597,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     }
     read[key] = descriptor?.value;
   }
-  for (const key of ["profile", "subject", "bundles"] as const) {
+  for (const key of ["profile", "subject", "bundles", "executorTrustDomains"] as const) {
     const code = codeInData(read[key], `input.${key}`, new Set());
     if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
   }
@@ -550,6 +609,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     verifyPrimitiveInstance: ProfileAdmissionInput["verifyPrimitiveInstance"];
     subjectCopy: ReturnType<typeof plainDataCopy>;
     bundlesCopy: ReturnType<typeof plainDataCopy>;
+    executorsCopy: ReturnType<typeof plainDataCopy>;
     committedDigest: string;
     presentedProfile: MeasurementProfileV1;
   };
@@ -560,13 +620,14 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       verifyPrimitiveInstance: read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"],
       subjectCopy: plainDataCopy(read.subject),
       bundlesCopy: plainDataCopy(read.bundles),
+      executorsCopy: plainDataCopy(read.executorTrustDomains),
       committedDigest: read.committedDigest as string,
       presentedProfile: read.profile as MeasurementProfileV1,
     };
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
-  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy } = entry;
+  const { pinnedBundleSetDigest, verifyBundleSignature, verifyPrimitiveInstance, subjectCopy, bundlesCopy, executorsCopy } = entry;
 
   const governance = profileGoverns(entry.committedDigest, entry.presentedProfile);
   if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
@@ -579,6 +640,16 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     return reject("unbound-bundle", "the subject (the job record's job and kernel) is not plain JSON data");
   }
   const subject = deepFreeze(subjectCopy.value) as unknown as EvidenceSubject;
+
+  // The deal's executors: a list of operator principal ids, possibly empty, never absent.
+  const executors: unknown = executorsCopy.ok ? executorsCopy.value : undefined;
+  if (!Array.isArray(executors) || !executors.every((d) => typeof d === "string" && parseOperatorPrincipalId(d) !== null)) {
+    return reject(
+      "input-unreadable",
+      "executorTrustDomains (the deal's assigned operators) must be a list of operator principal ids, eip155:<chainId>:0x<40 lowercase hex>",
+    );
+  }
+  const executorTrustDomains = deepFreeze([...executors]) as readonly string[];
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
@@ -633,9 +704,12 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
 
   const events: EvidenceEvent[] = [];
   const seen = new Set<string>();
+  // Each bundle as evidence-level reads it: its bound events and its signer's trust domain.
+  const authenticated: AuthenticatedBundle[] = [];
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    if (!(await legPasses(() => verifyBundleSignature(bundle)))) {
+    const signer = await signatureLeg(() => verifyBundleSignature(bundle));
+    if (signer === null) {
       return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
     }
     const binding = await verifyEvidenceSubjectBinding({
@@ -647,6 +721,9 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
       return rejectNow("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
     }
+    authenticated.push(
+      signer.trustDomain === undefined ? { events: binding.events } : { events: binding.events, trustDomain: signer.trustDomain },
+    );
     // Evaluate only what was hashed: the verified canonical snapshots.
     for (const e of binding.events) {
       if (seen.has(e.hash)) continue;
@@ -666,7 +743,14 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   // Contradiction is evidence's one public rule, the same one the oracle signs
   // rejects on (evidence-level.ts deriveContradictions); a failure with no
   // completion is a device failure, judged here under onDeviceFailure.
-  const contradictions = deriveContradictions(events);
+  let contradictions: ContradictionKind[];
+  let eventLevels: readonly EventLevel[];
+  try {
+    contradictions = deriveContradictions(authenticated);
+    eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains });
+  } catch (err) {
+    return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${err instanceof Error ? err.message : String(err)}`);
+  }
   const executionFailed = events.some((e) => e.type === "execution_failed");
   const failedInspections = events.filter(inspectionFailed).length;
   const failure = [
@@ -686,8 +770,18 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   const required = profile.interpretation.acceptanceLevel;
-  const reached = evidenceLevelOfBundle(events);
-  const executing = executingDeviceIds(events);
+  // The level of each distinct event: the LOWEST any of its copies gets (steward #6478).
+  const levelByHash = new Map<string, EvidenceLevel | null>();
+  for (const { bundleIndex, eventIndex, level } of eventLevels) {
+    const hash = authenticated[bundleIndex]!.events[eventIndex]!.hash;
+    levelByHash.set(hash, levelByHash.has(hash) ? lowerLevel(levelByHash.get(hash)!, level) : level);
+  }
+  const levelOf = (e: EvidenceEvent): EvidenceLevel | null => levelByHash.get(e.hash) ?? null;
+  let reached: EvidenceLevel | null = null;
+  for (const e of events) {
+    const level = levelOf(e);
+    if (level !== null && (reached === null || evidenceLevelRank(level) > evidenceLevelRank(reached))) reached = level;
+  }
   const { device } = profile;
   const window = captureWindow(profile, events);
 
@@ -702,7 +796,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   const legEvents = deepFreeze(structuredClone(events));
   for (let k = 0; k < events.length; k++) {
     const e = events[k]!;
-    if (!meetsEvidenceLevel(evidenceLevelOf(e, executing), required)) continue;
+    if (!meetsEvidenceLevel(levelOf(e), required)) continue;
     if (e.source.deviceId !== device.deviceId) {
       otherDevices++;
       continue;
@@ -712,7 +806,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       exclude("failed inspection(s)");
       continue;
     }
-    if (INSPECTION.has(e.type) && (e.payload as Record<string, unknown> | undefined)?.passed !== true) {
+    if (INSPECTION.has(e.type) && inspectionVerdict(e) !== "pass") {
       exclude("without a positive verdict");
       continue;
     }

@@ -108,7 +108,18 @@ async function toEvent(d: Draft): Promise<EvidenceEvent> {
 }
 
 /** Attaches `payload.profileObservation` to every draft unless it says `observation: null`. */
-async function toBundle(drafts: Draft[], profile: MeasurementProfileV1): Promise<AdmissionBundle> {
+// Two operators with registered keys: A runs the job (the deal assigns it), B is an independent
+// inspector. evidence-level.ts judges independence between their trust domains (#345), so an
+// inspection is inspected_output only from B's bundle.
+const OPERATOR_A = `eip155:84532:0x${"aa".repeat(20)}`;
+const OPERATOR_B = `eip155:84532:0x${"bb".repeat(20)}`;
+const SIGNER_A = "0x1111111111111111111111111111111111111111";
+const SIGNER_B = "0x2222222222222222222222222222222222222222";
+const keyB = generateKeyPairSync("ed25519");
+const KEYS: Record<string, ReturnType<typeof generateKeyPairSync>> = { [SIGNER_A]: key, [SIGNER_B]: keyB };
+const DOMAINS: Record<string, string> = { [SIGNER_A]: OPERATOR_A, [SIGNER_B]: OPERATOR_B };
+
+async function toBundle(drafts: Draft[], profile: MeasurementProfileV1, signer: string = SIGNER_A): Promise<AdmissionBundle> {
   const events = await Promise.all(
     drafts.map((d) => {
       if (d.observation === null) return toEvent(d);
@@ -120,12 +131,29 @@ async function toBundle(drafts: Draft[], profile: MeasurementProfileV1): Promise
     }),
   );
   const bundleHash = await hashBundle(events);
-  const value = sign(null, signingPreimage(bundleHash), key.privateKey).toString("hex");
-  return { bundleHash, events, kernelSignature: { signer: "0x1111111111111111111111111111111111111111", algorithm: "ed25519", value } };
+  const value = sign(null, signingPreimage(bundleHash), KEYS[signer]!.privateKey).toString("hex");
+  return { bundleHash, events, kernelSignature: { signer, algorithm: "ed25519", value } };
 }
 
-const verifySignature = (b: AdmissionBundle) =>
-  verify(null, signingPreimage(b.bundleHash), key.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+/** The pilot world: the printer's events in operator A's bundle, the camera's and scale's in independent operator B's. */
+async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promise<AdmissionBundle[]> {
+  const executor = drafts.filter((d) => d.device === PRINTER);
+  const inspector = drafts.filter((d) => d.device !== PRINTER);
+  const out: AdmissionBundle[] = [];
+  if (executor.length > 0) out.push(await toBundle(executor, profile, SIGNER_A));
+  if (inspector.length > 0) out.push(await toBundle(inspector, profile, SIGNER_B));
+  return out;
+}
+
+/** The registered-key leg: verifies under the signer's key and names its operator, the bundle's trust domain. */
+const verifySignature = (b: AdmissionBundle) => {
+  const signer = (b.kernelSignature as { signer?: string }).signer ?? "";
+  const k = KEYS[signer];
+  const ok =
+    k !== undefined &&
+    verify(null, signingPreimage(b.bundleHash), k.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+  return ok ? { trustDomain: DOMAINS[signer]! } : (false as const);
+};
 
 /** printer execution_started t0, execution_completed t10, camera inspects (passed) at t20. */
 const PILOT: Draft[] = [
@@ -138,7 +166,7 @@ const PILOT: Draft[] = [
 const MASS_PILOT: Draft[] = [
   { type: "execution_started", t: 0, device: PRINTER },
   { type: "execution_completed", t: 10, device: PRINTER },
-  { type: "instrument_result", t: 20, device: SCALE, payload: { passed: true } },
+  { type: "instrument_result", t: 20, device: SCALE, payload: { pass: true } },
 ];
 
 function inspectedPageProfile(): MeasurementProfileV1 {
@@ -200,7 +228,9 @@ async function admit(
     bundles,
     pinnedBundleSetDigest,
     verifyBundleSignature: verifySignature,
+    executorTrustDomains: [OPERATOR_A],
     verifyPrimitiveInstance: () => true,
+    executorTrustDomains: [OPERATOR_A],
     ...over,
   });
 }
@@ -210,26 +240,97 @@ const codes = (r: { reasons: { code: string }[] }) => r.reasons.map((x) => x.cod
 describe("profile admission — admits evidence that satisfies the committed profile", () => {
   it("admits the pilot: printer completes, a separate camera inspects after completion", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)]);
+    const r = await admit(p, await toBundles(PILOT, p));
     expect(r).toMatchObject({ decision: "admit", admits: true, reached: "inspected_output", qualifyingSamples: 1, reasons: [] });
   });
 
   it("admits a device_reported profile on the printer's own completion", async () => {
     const p = deviceReportedProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)]);
+    const r = await admit(p, await toBundles(PILOT, p));
     expect(r.decision).toBe("admit");
   });
 
   it("admits the mass profile: the scale's positive-control reading (decimal-string value)", async () => {
     const p = massProfile();
-    const r = await admit(p, [await toBundle(MASS_PILOT, p)]);
+    const r = await admit(p, await toBundles(MASS_PILOT, p));
     expect(r).toMatchObject({ decision: "admit", qualifyingSamples: 1 });
   });
 
-  it("judges an inspection against the executing devices across several bundles of the same job", async () => {
+  it("judges independence by trust domain across several bundles of the same job (#345's rule)", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT.slice(0, 2), p), await toBundle(PILOT.slice(2), p)]);
+    const r = await admit(p, [await toBundle(PILOT.slice(0, 2), p), await toBundle(PILOT.slice(2), p, SIGNER_B)]);
     expect(r.decision).toBe("admit");
+  });
+
+  it("an inspection in the assigned executor's own trust domain is not independent: device_reported, never inspected_output", async () => {
+    const p = inspectedPageProfile();
+    // One bundle, signed by operator A, whom the deal assigned: its camera is the executor's own.
+    const r = await admit(p, [await toBundle(PILOT, p)]);
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
+    expect(codes(r)).toEqual(["level-not-reached"]);
+    // So is an independent operator's camera when the deal names no executor: independence cannot be shown.
+    const unassigned = await admit(p, await toBundles(PILOT, p), { executorTrustDomains: [] });
+    expect(unassigned).toMatchObject({ decision: "reject", reached: "device_reported" });
+  });
+});
+
+describe("profile admission — trust domains (#345's one rule, steward #6478)", () => {
+  it("an event present in two bundles counts at the LOWER level: the inspector's copy cannot lift the executor's", async () => {
+    const p = inspectedPageProfile();
+    // The camera's inspection in operator B's bundle (independent) AND in operator A's own (the executor's).
+    const both = [await toBundle(PILOT, p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_B)];
+    expect(both[0]!.events[2]!.hash).toBe(both[1]!.events[0]!.hash);
+    const r = await admit(p, both);
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported", qualifyingSamples: 0 });
+    expect(codes(r)).toEqual(["level-not-reached"]);
+    // Without the executor's copy, the same inspection is independent and admits.
+    expect((await admit(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), both[1]!])).decision).toBe("admit");
+  });
+
+  it("the signature leg must name the signer's trust domain: a bare true, a malformed principal or an accessor fails it", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    const accessor = {};
+    Object.defineProperty(accessor, "trustDomain", { get: () => OPERATOR_B, enumerable: true });
+    const answers: unknown[] = [true, { trustDomain: "not-a-principal" }, { trustDomain: OPERATOR_B.toUpperCase() }, { trustDomain: 7 }, {}, accessor, [OPERATOR_B]];
+    for (const answer of answers) {
+      const r = await admit(p, bundles, { verifyBundleSignature: (() => answer) as unknown as ProfileAdmissionInput["verifyBundleSignature"] });
+      expect(codes(r), JSON.stringify(answer)).toEqual(["unauthenticated-bundle"]);
+    }
+  });
+
+  it("a leg that names no trust domain (null) authenticates, but no inspection can then be independent", async () => {
+    const p = inspectedPageProfile();
+    const r = await admit(p, await toBundles(PILOT, p), { verifyBundleSignature: () => ({ trustDomain: null }) });
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
+    expect(codes(r)).toEqual(["level-not-reached"]);
+    // A device_reported profile does not need independence.
+    expect((await admit(deviceReportedProfile(), await toBundles(PILOT, deviceReportedProfile()), { verifyBundleSignature: () => ({ trustDomain: null }) })).decision).toBe("admit");
+  });
+
+  it("executorTrustDomains must be a list of operator principal ids, from the deal: absent or malformed rejects", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    for (const executors of [undefined, OPERATOR_A, [OPERATOR_A, "not-a-principal"], [7], [OPERATOR_A.toUpperCase()]]) {
+      const r = await admit(p, bundles, { executorTrustDomains: executors as unknown as string[] });
+      expect(codes(r), JSON.stringify(executors)).toEqual(["input-unreadable"]);
+    }
+    const accessor: string[] = [];
+    Object.defineProperty(accessor, 0, { get: () => OPERATOR_A, enumerable: true });
+    expect(codes(await admit(p, bundles, { executorTrustDomains: accessor }))).toEqual(["input-unreadable"]);
+  });
+
+  it("the inspector's operator assigned as an executor is not independent of itself", async () => {
+    const p = inspectedPageProfile();
+    const r = await admit(p, await toBundles(PILOT, p), { executorTrustDomains: [OPERATOR_A, OPERATOR_B] });
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
+  });
+
+  it("a completion in the executor's bundle and a failed inspection in the inspector's contradict across trust domains", async () => {
+    const p = inspectedPageProfile();
+    const r = await admit(p, await toBundles([...PILOT.slice(0, 2), { ...PILOT[2]!, payload: { passed: false } }], p));
+    expect(r.decision).toBe("reject");
+    expect(codes(r)).toContain("contradictory-evidence");
   });
 });
 
@@ -238,14 +339,14 @@ describe("profile admission — the committed profile governs (section 3: mutati
     const accepted = inspectedPageProfile();
     const loosened = inspectedPageProfile();
     loosened.interpretation.acceptanceLevel = "device_reported";
-    const r = await admit(loosened, [await toBundle(PILOT, accepted)], { committedDigest: computeMeasurementProfileDigest(accepted) });
+    const r = await admit(loosened, await toBundles(PILOT, accepted), { committedDigest: computeMeasurementProfileDigest(accepted) });
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["digest-mismatch"]);
   });
 
   it("a committed digest in the sha256: evidence-event family is rejected", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], { committedDigest: `sha256:${computeMeasurementProfileDigest(p).slice(2)}` });
+    const r = await admit(p, await toBundles(PILOT, p), { committedDigest: `sha256:${computeMeasurementProfileDigest(p).slice(2)}` });
     expect(codes(r)).toEqual(["digest-wrong-family"]);
   });
 });
@@ -253,13 +354,13 @@ describe("profile admission — the committed profile governs (section 3: mutati
 describe("profile admission — only authenticated, bound evidence counts (section 3: job A/B, node A/B)", () => {
   it("a bundle whose signature leg fails is rejected", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], { verifyBundleSignature: () => false });
+    const r = await admit(p, await toBundles(PILOT, p), { verifyBundleSignature: () => false });
     expect(codes(r)).toEqual(["unauthenticated-bundle"]);
   });
 
   it("a signature verifier that throws counts as a failed signature", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], {
+    const r = await admit(p, await toBundles(PILOT, p), {
       verifyBundleSignature: () => {
         throw new Error("registry unavailable");
       },
@@ -269,14 +370,14 @@ describe("profile admission — only authenticated, bound evidence counts (secti
 
   it("evidence from job A cannot satisfy job B", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)]);
+    const r = await admit(p, await toBundles(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p));
     expect(codes(r)).toEqual(["unbound-bundle"]);
     expect(r.reasons[0]!.detail).toContain("job-mismatch");
   });
 
   it("evidence from node A cannot be substituted for node B", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p)]);
+    const r = await admit(p, await toBundles(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p));
     expect(codes(r)).toEqual(["unbound-bundle"]);
     expect(r.reasons[0]!.detail).toContain("kernel-mismatch");
   });
@@ -295,14 +396,14 @@ describe("profile admission — simulated evidence cannot satisfy a non-simulate
   it("a simulated source rejects the whole evidence set", async () => {
     const p = inspectedPageProfile();
     const drafts = PILOT.map((d) => (d.device === CAMERA ? { ...d, simulated: true } : d));
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(codes(r)).toEqual(["simulated-evidence"]);
   });
 
   it("a payload.mock event rejects too, even when a genuine inspection is present", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PILOT, { type: "execution_progress", t: 5, device: PRINTER, payload: { mock: true } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(codes(r)).toEqual(["simulated-evidence"]);
   });
 });
@@ -311,14 +412,14 @@ describe("profile admission — levels come from the evidence contract", () => {
   it("a device's report on its own output is not inspected_output", async () => {
     const p = inspectedPageProfile();
     const drafts = PILOT.map((d) => (d.device === CAMERA ? { ...d, device: PRINTER } : d));
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reached).toBe("device_reported");
     expect(codes(r)).toEqual(["level-not-reached"]);
   });
 
   it("printer_job_verified alone proves no level, not even device_reported (the R5 print-leg case)", async () => {
     const p = deviceReportedProfile();
-    const r = await admit(p, [await toBundle([{ type: "printer_job_verified", t: 10, device: PRINTER }], p)]);
+    const r = await admit(p, await toBundles([{ type: "printer_job_verified", t: 10, device: PRINTER }], p));
     expect(r.reached).toBeNull();
     expect(codes(r)).toEqual(["level-not-reached"]);
   });
@@ -326,7 +427,7 @@ describe("profile admission — levels come from the evidence contract", () => {
   it("level-not-reached follows onMissingData: hold", async () => {
     const p = inspectedPageProfile();
     p.onMissingData = "hold";
-    const r = await admit(p, [await toBundle(PILOT.slice(0, 2), p)]);
+    const r = await admit(p, await toBundles(PILOT.slice(0, 2), p));
     expect(r.decision).toBe("hold");
     expect(codes(r)).toEqual(["level-not-reached"]);
   });
@@ -336,7 +437,7 @@ describe("profile admission — missing measurements follow the committed policy
   it("an inspection from a camera the profile does not name does not count", async () => {
     const p = inspectedPageProfile();
     const drafts = PILOT.map((d) => (d.device === CAMERA ? { ...d, device: "dev-other-camera" } : d));
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(codes(r)).toEqual(["missing-measurements"]);
     expect(r.reasons[0]!.detail).toContain("1 from other devices");
   });
@@ -344,7 +445,7 @@ describe("profile admission — missing measurements follow the committed policy
   it("an observation from an unpermitted version does not count", async () => {
     const p = inspectedPageProfile();
     const drafts = PILOT.map((d) => (d.device === CAMERA ? { ...d, source: { adapterVersion: "PhotoCameraAdapter-9.9.9" } } : d));
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("1 unpermitted version");
   });
 
@@ -353,21 +454,21 @@ describe("profile admission — missing measurements follow the committed policy
     const drafts = PILOT.map((d) =>
       d.device === CAMERA ? { ...d, source: { adapterVersion: undefined, firmwareVersion: undefined } } : d,
     );
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(codes(r)).toEqual(["missing-measurements"]);
   });
 
   it("an inspection before the printer completed is outside the capture window", async () => {
     const p = inspectedPageProfile();
     const drafts = PILOT.map((d) => (d.device === CAMERA ? { ...d, t: 5 } : d));
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("1 outside the capture window");
   });
 
   it("fewer observations than minSamples is missing data", async () => {
     const p = inspectedPageProfile();
     p.measurement.sampling.minSamples = 2;
-    const r = await admit(p, [await toBundle(PILOT, p)]);
+    const r = await admit(p, await toBundles(PILOT, p));
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 1 });
     expect(codes(r)).toEqual(["missing-measurements"]);
   });
@@ -376,7 +477,7 @@ describe("profile admission — missing measurements follow the committed policy
     const p = inspectedPageProfile();
     p.measurement.sampling.minSamples = 2;
     p.onMissingData = "hold";
-    expect((await admit(p, [await toBundle(PILOT, p)])).decision).toBe("hold");
+    expect((await admit(p, await toBundles(PILOT, p))).decision).toBe("hold");
   });
 
   it("no bundles at all is missing data", async () => {
@@ -388,7 +489,7 @@ describe("profile admission — missing measurements follow the committed policy
 describe("profile admission — failure and contradiction follow the committed policy (section 3)", () => {
   it("completion and execution_failed together is a contradiction", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p)]);
+    const r = await admit(p, await toBundles([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p));
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["contradictory-evidence"]);
   });
@@ -396,13 +497,13 @@ describe("profile admission — failure and contradiction follow the committed p
   it("a contradiction follows onContradiction: hold", async () => {
     const p = inspectedPageProfile();
     p.onContradiction = "hold";
-    const r = await admit(p, [await toBundle([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p)]);
+    const r = await admit(p, await toBundles([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p));
     expect(r.decision).toBe("hold");
   });
 
   it("a reported device failure follows onDeviceFailure", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle([PILOT[0]!, { type: "execution_failed", t: 10, device: PRINTER }], p)]);
+    const r = await admit(p, await toBundles([PILOT[0]!, { type: "execution_failed", t: 10, device: PRINTER }], p));
     expect(r.decision).toBe("reject");
     expect(codes(r)).toContain("device-failure");
   });
@@ -441,7 +542,7 @@ describe("profile admission — terms this version cannot evaluate fail closed, 
     it(`${name} → unverifiable-term`, async () => {
       const p = inspectedPageProfile();
       mutate(p);
-      const r = await admit(p, [await toBundle(PILOT, p)]);
+      const r = await admit(p, await toBundles(PILOT, p));
       expect(r.decision).toBe("reject");
       expect(codes(r)).toEqual(["unverifiable-term"]);
       expect(r.reasons[0]!.detail).toContain(term);
@@ -456,8 +557,8 @@ describe("profile admission — review #363 fixes (evidence #2777, probes P1-P3 
   it("P1: the same signed bundle presented twice counts once", async () => {
     const p = inspectedPageProfile();
     p.measurement.sampling.minSamples = 2;
-    const b = await toBundle(PILOT, p);
-    const r = await admit(p, [b, b]);
+    const b = await toBundles(PILOT, p);
+    const r = await admit(p, [...b, ...b]);
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 1 });
     expect(codes(r)).toEqual(["missing-measurements"]);
     expect(r.reasons[0]!.detail).toContain("1 from the profiled device");
@@ -466,13 +567,13 @@ describe("profile admission — review #363 fixes (evidence #2777, probes P1-P3 
   it("P1b: one event listed twice inside one signed bundle counts once", async () => {
     const p = inspectedPageProfile();
     p.measurement.sampling.minSamples = 2;
-    const r = await admit(p, [await toBundle([...PILOT, PILOT[2]!], p)]);
+    const r = await admit(p, await toBundles([...PILOT, PILOT[2]!], p));
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 1 });
   });
 
   it("P2: an inspection reporting passed:false is a failure, never a sample", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle([...PRINTED, INSPECT({ passed: false, antiSpoofScore: 0.1 })], p)]);
+    const r = await admit(p, await toBundles([...PRINTED, INSPECT({ passed: false, antiSpoofScore: 0.1 })], p));
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 0 });
     expect(codes(r)).toEqual(["contradictory-evidence", "missing-measurements"]);
     expect(r.reasons[1]!.detail).toContain("1 failed inspection(s)");
@@ -480,13 +581,13 @@ describe("profile admission — review #363 fixes (evidence #2777, probes P1-P3 
 
   it("a failed inspection with no completion is a device failure", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle([PILOT[0]!, INSPECT({ passed: false })], p)]);
+    const r = await admit(p, await toBundles([PILOT[0]!, INSPECT({ passed: false })], p));
     expect(codes(r)).toContain("device-failure");
   });
 
   it("any non-true passed value is a negative verdict", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle([...PRINTED, INSPECT({ passed: "yes" })], p)]);
+    const r = await admit(p, await toBundles([...PRINTED, INSPECT({ passed: "yes" })], p));
     expect(r.decision).toBe("reject");
     expect(codes(r)).toContain("contradictory-evidence");
   });
@@ -528,7 +629,7 @@ describe("profile admission — evaluates only what was hashed (coord-watch rule
 
   it("contradictions come from evidence's deriveContradictions, named by kind", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p)]);
+    const r = await admit(p, await toBundles([...PILOT, { type: "execution_failed", t: 11, device: PRINTER }], p));
     expect(r.reasons[0]).toMatchObject({ code: "contradictory-evidence" });
     expect(r.reasons[0]!.detail).toContain("completion-and-failure");
   });
@@ -540,24 +641,25 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
   it("an observation naming a different object is excluded", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { object: { kind: "documentHash", value: "sha256:" + "c".repeat(64) } } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 0 });
     expect(codes(r)).toEqual(["missing-measurements"]);
     expect(r.reasons[0]!.detail).toContain("not matching outcome.objectIdentity");
   });
 
-  it("an inspection with no passed field (the record is still present) is excluded, never a sample", async () => {
+  it("an inspection with no verdict field (the record is still present) proves no level (#345), so it is never a sample", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { type: "cv_inspection_result", t: 20, device: CAMERA, payload: { score: 0.97 } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 0 });
-    expect(r.reasons[0]!.detail).toContain("without a positive verdict");
+    expect(codes(r)).toEqual(["level-not-reached"]);
+    expect(r.reasons[0]!.detail).toContain("the evidence reaches device_reported");
   });
 
   it("a bare signed inspection with no profileObservation record does not count", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { type: "cv_inspection_result", t: 20, device: CAMERA, payload: { passed: true }, observation: null }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 0 });
     expect(r.reasons[0]!.detail).toContain("without a profileObservation record");
   });
@@ -565,21 +667,21 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
   it("an observation naming another (active) primitive is excluded", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { primitiveId: "artifact.hash" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("not matching interpretation.evidenceTypeIds");
   });
 
   it("an observation naming a different method is excluded", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { method: "manual-count" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("not matching measurement.method");
   });
 
   it("an observation naming a different quantity is excluded", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { quantity: "page-count" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("not matching measurement.quantity");
   });
 
@@ -588,20 +690,20 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
     const other = inspectedPageProfile();
     other.measurement.sampling.minSamples = 2;
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { profileDigest: computeMeasurementProfileDigest(other) } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("not matching the committed profile digest");
   });
 
   it("the mass profile admits a decimal-string value (positive control)", async () => {
     const p = massProfile();
-    const r = await admit(p, [await toBundle(MASS_PILOT, p)]);
+    const r = await admit(p, await toBundles(MASS_PILOT, p));
     expect(r).toMatchObject({ decision: "admit", qualifyingSamples: 1 });
   });
 
   it("an observation with the wrong unit is excluded", async () => {
     const p = massProfile();
     const drafts = MASS_PILOT.map((d) => (d.device === SCALE ? { ...d, observation: { unit: "g" } } : d));
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("not matching measurement.unit");
   });
 
@@ -617,7 +719,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
       const drafts = MASS_PILOT.map((d) =>
         d.device === SCALE ? { ...d, observation: { value } as Partial<ProfileObservation> } : d,
       );
-      const r = await admit(p, [await toBundle(drafts, p)]);
+      const r = await admit(p, await toBundles(drafts, p));
       expect(r.reasons[0]!.detail).toContain("without a decimal-string value");
     });
   }
@@ -625,19 +727,19 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
   it("a non-numeric (unit none) observation carrying a value is excluded", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { value: "3" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("with a value on a non-numeric (unit none) observation");
   });
 
   it("the primitive leg returning false excludes the observation", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], { verifyPrimitiveInstance: () => false });
+    const r = await admit(p, await toBundles(PILOT, p), { verifyPrimitiveInstance: () => false });
     expect(r.reasons[0]!.detail).toContain("not verified as capture.photo_nonced");
   });
 
   it("a primitive leg that throws excludes the observation the same way", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], {
+    const r = await admit(p, await toBundles(PILOT, p), {
       verifyPrimitiveInstance: () => {
         throw new Error("verifier unavailable");
       },
@@ -647,10 +749,10 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
 
   it("the primitive leg receives the primitive id, a frozen snapshot, and the frozen bound event set", async () => {
     const p = inspectedPageProfile();
-    const b = await toBundle(PILOT, p);
-    const cameraEvent = b.events[2] as EvidenceEvent;
+    const b = await toBundles(PILOT, p);
+    const cameraEvent = b[1]!.events[0] as EvidenceEvent;
     const calls: { id: string; observation: EvidenceEvent; events: readonly EvidenceEvent[] }[] = [];
-    const r = await admit(p, [b], {
+    const r = await admit(p, b, {
       verifyPrimitiveInstance: (id, observation, events) => {
         calls.push({ id, observation, events });
         return true;
@@ -669,7 +771,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F1: terms
 
   it("a leg that mutates its observation throws, and a throwing leg is a failure", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], {
+    const r = await admit(p, await toBundles(PILOT, p), {
       verifyPrimitiveInstance: (_id, observation) => {
         (observation.payload as Record<string, unknown>).passed = false;
         return true;
@@ -685,10 +787,10 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
 
   it("omitting a stored failure bundle from the presented set cannot produce admit", async () => {
     const p = inspectedPageProfile();
-    const b1 = await toBundle(PILOT, p);
+    const b1 = await toBundles(PILOT, p);
     const b2 = await toBundle(FAILURE, p);
-    const pin = await computeBundleSetDigest(subject, [b1.bundleHash, b2.bundleHash]);
-    const r = await admit(p, [b1], { pinnedBundleSetDigest: pin });
+    const pin = await computeBundleSetDigest(subject, [...b1.map((b) => b.bundleHash), b2.bundleHash]);
+    const r = await admit(p, b1, { pinnedBundleSetDigest: pin });
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["bundle-set-mismatch"]);
     expect(r.reasons[0]!.detail).toContain("a bundle is missing or was not pinned");
@@ -697,10 +799,10 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
   it("an omitted bundle follows onMissingData: hold", async () => {
     const p = inspectedPageProfile();
     p.onMissingData = "hold";
-    const b1 = await toBundle(PILOT, p);
+    const b1 = await toBundles(PILOT, p);
     const b2 = await toBundle(FAILURE, p);
-    const pin = await computeBundleSetDigest(subject, [b1.bundleHash, b2.bundleHash]);
-    const r = await admit(p, [b1], { pinnedBundleSetDigest: pin });
+    const pin = await computeBundleSetDigest(subject, [...b1.map((b) => b.bundleHash), b2.bundleHash]);
+    const r = await admit(p, b1, { pinnedBundleSetDigest: pin });
     expect(r.decision).toBe("hold");
   });
 
@@ -730,7 +832,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
 
   it("a malformed pin is rejected, never recomputed", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, [await toBundle(PILOT, p)], { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
+    const r = await admit(p, await toBundles(PILOT, p), { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["bundle-set-pin-invalid"]);
 
@@ -738,7 +840,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
     // reject even under onMissingData: "hold".
     const held = inspectedPageProfile();
     held.onMissingData = "hold";
-    const r2 = await admit(held, [await toBundle(PILOT, held)], { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
+    const r2 = await admit(held, await toBundles(PILOT, held), { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
     expect(r2.decision).toBe("reject");
     expect(codes(r2)).toEqual(["bundle-set-pin-invalid"]);
   });
@@ -747,12 +849,12 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
     const p = inspectedPageProfile();
     p.onMissingData = "hold";
     p.onContradiction = "reject";
-    const b1 = await toBundle(PILOT, p);
+    const b1 = await toBundles(PILOT, p);
     const b2 = await toBundle(FAILURE, p);
     const b3 = await toBundle([{ type: "camera_snapshot", t: 25, device: CAMERA, observation: null }], p);
-    const pin = await computeBundleSetDigest(subject, [b1.bundleHash, b2.bundleHash]);
+    const pin = await computeBundleSetDigest(subject, [...b1.map((b) => b.bundleHash), b2.bundleHash]);
     let signatureCalls = 0;
-    const r = await admit(p, [b1, b2, b3], {
+    const r = await admit(p, [...b1, b2, b3], {
       pinnedBundleSetDigest: pin,
       verifyBundleSignature: (b) => {
         signatureCalls++;
@@ -766,7 +868,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
     expect(codes(r)).toEqual(["bundle-set-mismatch", "contradictory-evidence"]);
     // Every presented bundle's leg ran, including the extra one: a mismatch
     // no longer short-circuits authentication and binding.
-    expect(signatureCalls).toBe(3);
+    expect(signatureCalls).toBe(4);
   });
 });
 
@@ -824,9 +926,9 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F3: sampl
       { type: "cv_inspection_result", t: 20, device: CAMERA, payload: { passed: true }, observation: { sampleId: S } },
       { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true }, observation: { sampleId: S } },
     ];
-    const b = await toBundle(drafts, p);
-    expect((b.events[2] as EvidenceEvent).hash).not.toBe((b.events[3] as EvidenceEvent).hash);
-    const r = await admit(p, [b]);
+    const b = await toBundles(drafts, p);
+    expect((b[1]!.events[0] as EvidenceEvent).hash).not.toBe((b[1]!.events[1] as EvidenceEvent).hash);
+    const r = await admit(p, b);
     expect(r).toMatchObject({ decision: "reject", qualifyingSamples: 1 });
     expect(codes(r)).toEqual(["missing-measurements"]);
     expect(r.reasons[0]!.detail).toContain("1 repeating a counted sample");
@@ -840,14 +942,14 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F3: sampl
       { type: "cv_inspection_result", t: 20, device: CAMERA, payload: { passed: true } },
       { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true } },
     ];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r).toMatchObject({ decision: "admit", qualifyingSamples: 2 });
   });
 
   it("a sampleId that is not a sha256: digest is excluded", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PRINTED, { ...PILOT[2]!, observation: { sampleId: "frame-7" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("without a sha256: sampleId");
   });
 });
@@ -862,7 +964,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F4: split
   it("each pin is checked against its own field (disjoint pins, both present, admits)", async () => {
     const p = splitPinProfile();
     const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source: { adapterVersion: "cam-A", firmwareVersion: "fw-1" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.decision).toBe("admit");
   });
 
@@ -873,7 +975,7 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F4: split
       { adapterVersion: "cam-A", firmwareVersion: "cam-A" },
     ]) {
       const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source }];
-      const r = await admit(p, [await toBundle(drafts, p)]);
+      const r = await admit(p, await toBundles(drafts, p));
       expect(r.reasons[0]!.detail).toContain("unpermitted version");
     }
   });
@@ -881,28 +983,28 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F4: split
   it("the old one-field convention (firmwareVersion alone) does not count", async () => {
     const p = splitPinProfile();
     const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source: { adapterVersion: undefined, firmwareVersion: "cam-A" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("unpermitted version");
   });
 
   it("device kind is compared with source.deviceType", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source: { deviceType: "thermal_camera" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("from another device kind or adapter");
   });
 
   it("adapter type is compared with source.adapterType", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source: { adapterType: "mock-photo" } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("from another device kind or adapter");
   });
 
   it("a missing adapterType does not count", async () => {
     const p = inspectedPageProfile();
     const drafts = [...PILOT.slice(0, 2), { ...PILOT[2]!, source: { adapterType: undefined } }];
-    const r = await admit(p, [await toBundle(drafts, p)]);
+    const r = await admit(p, await toBundles(drafts, p));
     expect(r.reasons[0]!.detail).toContain("from another device kind or adapter");
   });
 });
@@ -927,6 +1029,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       bundles,
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -938,9 +1041,9 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
 
   it("39-A: mutating an already-presented bundle's events right after the call started changes nothing", async () => {
     const p = inspectedPageProfile();
-    const bundle = await toBundle(PILOT, p);
-    const bundles = [bundle];
-    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, [bundle.bundleHash]);
+    const [printerBundle, bundle] = await toBundles(PILOT, p);
+    const bundles = [printerBundle!, bundle!];
+    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash));
     const input: ProfileAdmissionInput = {
       profile: p,
       committedDigest: computeMeasurementProfileDigest(p),
@@ -948,11 +1051,12 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       bundles,
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
-    const events = bundle.events as unknown as EvidenceEvent[];
-    (events[2] as unknown as { payload: Record<string, unknown> }).payload.passed = false;
+    const events = bundle!.events as unknown as EvidenceEvent[];
+    (events[0] as unknown as { payload: Record<string, unknown> }).payload.passed = false;
     events.push({
       id: "junk-event",
       type: "camera_snapshot",
@@ -968,15 +1072,16 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
   it("39-B: the profile's minSamples changed during suspension does not weaken the committed threshold", async () => {
     const p = inspectedPageProfile();
     p.measurement.sampling.minSamples = 2;
-    const bundle = await toBundle(PILOT, p); // one qualifying observation
-    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, [bundle.bundleHash]);
+    const pilot = await toBundles(PILOT, p); // one qualifying observation
+    const pinnedBundleSetDigest = await computeBundleSetDigest(subject, pilot.map((b) => b.bundleHash));
     const input: ProfileAdmissionInput = {
       profile: p,
       committedDigest: computeMeasurementProfileDigest(p),
       subject,
-      bundles: [bundle],
+      bundles: pilot,
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -998,6 +1103,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       bundles: [bundle],
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1017,21 +1123,22 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
   it("the subject changed during suspension does not change which job is evaluated", async () => {
     const p = inspectedPageProfile();
     const mutableSubject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
-    const bundle = await toBundle(PILOT, p);
-    const pinnedBundleSetDigest = await computeBundleSetDigest(mutableSubject, [bundle.bundleHash]);
+    const pilot = await toBundles(PILOT, p);
+    const pinnedBundleSetDigest = await computeBundleSetDigest(mutableSubject, pilot.map((b) => b.bundleHash));
     const input: ProfileAdmissionInput = {
       profile: p,
       committedDigest: computeMeasurementProfileDigest(p),
       subject: mutableSubject,
-      bundles: [bundle],
+      bundles: pilot,
       pinnedBundleSetDigest,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
     mutableSubject.jobId = "job-other";
     const r = await pending;
-    const baseline = await admit(p, [bundle]);
+    const baseline = await admit(p, pilot);
     expect(r).toEqual(baseline);
     expect(r.decision).toBe("admit");
   });
@@ -1062,7 +1169,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       const observation = payload[PROFILE_OBSERVATION_FIELD] as { sampleId: string };
       return observation.sampleId === payload.captureHash;
     };
-    const r = await admit(p, [await toBundle(drafts, p)], { verifyPrimitiveInstance: capturesMatch });
+    const r = await admit(p, await toBundles(drafts, p), { verifyPrimitiveInstance: capturesMatch });
     expect(r.decision).toBe("admit");
   });
 
@@ -1085,7 +1192,7 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       const observation = payload[PROFILE_OBSERVATION_FIELD] as { sampleId: string };
       return observation.sampleId === payload.captureHash;
     };
-    const r = await admit(p, [await toBundle(drafts, p)], { verifyPrimitiveInstance: capturesMatch });
+    const r = await admit(p, await toBundles(drafts, p), { verifyPrimitiveInstance: capturesMatch });
     expect(r.decision).toBe("reject");
     expect(r.reasons[0]!.detail).toContain("not verified as capture.photo_nonced");
   });
@@ -1105,7 +1212,9 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
     type: "spki",
   });
   const verifyFixture = (b: AdmissionBundle) =>
-    verify(null, signingPreimage(b.bundleHash), fixtureKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+    verify(null, signingPreimage(b.bundleHash), fixtureKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"))
+      ? { trustDomain: null }
+      : (false as const);
   const lose3Subject = { jobId: "job-lose3-consumer-run-001", kernelId: "kernel-hp-3301-golden" };
 
   async function run(bundle: AdmissionBundle) {
@@ -1118,6 +1227,7 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
       bundles: [bundle],
       pinnedBundleSetDigest: await computeBundleSetDigest(lose3Subject, [bundle.bundleHash]),
       verifyBundleSignature: verifyFixture,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     });
   }
@@ -1161,7 +1271,7 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
     expect(digestOfStripped(presented)).toBe(committedDigest); // the bytes a stripping copy would hash are identical
     // One qualifying sample, its observation naming the committed digest (the commitment asked for two).
     const drafts = PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), profileDigest: committedDigest } }));
-    const bundles = [await toBundle(drafts, inspectedPageProfile())];
+    const bundles = await toBundles(drafts, inspectedPageProfile());
     const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
     // Called directly: the admit() helper computes a default digest from the presented profile,
     // which now refuses a __proto__ member outright (computeMeasurementProfileDigest throws).
@@ -1173,6 +1283,7 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
       bundles,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     });
     expect(r.decision).toBe("reject");
@@ -1182,7 +1293,7 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
 
   it("a throwing getter on a top-level input field resolves to reject; the call never throws", async () => {
     const p = inspectedPageProfile();
-    const bundles = [await toBundle(PILOT, p)];
+    const bundles = await toBundles(PILOT, p);
     const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
     const input = {
       profile: p,
@@ -1190,6 +1301,7 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
       subject,
       bundles,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     } as Record<string, unknown>;
     Object.defineProperty(input, "pinnedBundleSetDigest", {
@@ -1227,7 +1339,7 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         },
       });
       const drafts = PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), profileDigest: committedDigest } }));
-      const bundles = [await toBundle(drafts, inspectedPageProfile())];
+      const bundles = await toBundles(drafts, inspectedPageProfile());
       const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
       const r = await profileAdmitsBundle({
         profile: presented as unknown as MeasurementProfileV1,
@@ -1236,6 +1348,7 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         bundles,
         pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
         verifyBundleSignature: verifySignature,
+        executorTrustDomains: [OPERATOR_A],
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).not.toBe("admit");
@@ -1262,6 +1375,7 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         bundles: [],
         pinnedBundleSetDigest: "sha256:" + "0".repeat(64),
         verifyBundleSignature: verifySignature,
+        executorTrustDomains: [OPERATOR_A],
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).toBe("reject");
@@ -1291,7 +1405,7 @@ describe("profile admission — astra r5 (pack 127): a data getter cannot change
     try {
       // the camera's observation names a primitive the profile never committed
       const drafts = PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), primitiveId: "artifact.hash" } }));
-      const bundles = [await toBundle(drafts, committed)];
+      const bundles = await toBundles(drafts, committed);
       const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
       const r = await profileAdmitsBundle({
         profile: presented as unknown as MeasurementProfileV1,
@@ -1300,6 +1414,7 @@ describe("profile admission — astra r5 (pack 127): a data getter cannot change
         bundles,
         pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
         verifyBundleSignature: verifySignature,
+        executorTrustDomains: [OPERATOR_A],
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).not.toBe("admit");
@@ -1314,7 +1429,7 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
     const p = inspectedPageProfile();
     let trapped = 0;
     const proxied = new Proxy({ ...p }, { get: (t, k) => { trapped++; return Reflect.get(t, k); }, ownKeys: (t) => { trapped++; return Reflect.ownKeys(t); } });
-    const r = await admit(p, [await toBundle(PILOT, p)], { profile: proxied as unknown as MeasurementProfileV1 });
+    const r = await admit(p, await toBundles(PILOT, p), { profile: proxied as unknown as MeasurementProfileV1 });
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["input-unreadable"]);
     expect(trapped).toBe(0);
@@ -1322,7 +1437,7 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
 
   it("an accessor on the input object itself is refused, and its getter never runs", async () => {
     const p = inspectedPageProfile();
-    const bundles = [await toBundle(PILOT, p)];
+    const bundles = await toBundles(PILOT, p);
     const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
     let ran = false;
     const input = {
@@ -1330,6 +1445,7 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
       committedDigest: computeMeasurementProfileDigest(p),
       subject,
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
     } as Record<string, unknown>;
@@ -1344,13 +1460,13 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
     const p = inspectedPageProfile();
     const committedDigest = computeMeasurementProfileDigest(p);
     const original = Array.prototype.includes;
-    const bundles = [await toBundle(PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), primitiveId: "artifact.hash" } })), p)];
+    const bundles = await toBundles(PILOT.map((d) => (d.observation === null ? d : { ...d, observation: { ...(d.observation ?? {}), primitiveId: "artifact.hash" } })), p);
     const subject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
     const pin = await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash));
     // A process-level change that admission's own membership checks must not consult.
     Array.prototype.includes = function () { return true; } as typeof Array.prototype.includes;
     try {
-      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, verifyBundleSignature: verifySignature, verifyPrimitiveInstance: () => true });
+      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, verifyBundleSignature: verifySignature, executorTrustDomains: [OPERATOR_A], verifyPrimitiveInstance: () => true });
       expect(r.decision).not.toBe("admit");
     } finally {
       Array.prototype.includes = original;
@@ -1377,6 +1493,7 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
       bundles,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     });
     expect(ran).toBe(false);
@@ -1399,6 +1516,7 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
       bundles: [crafted],
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     });
     expect(ran).toBe(false);
@@ -1426,6 +1544,7 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       bundles: [bundle],
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     const input = new Proxy(target, { get: (t, k, r) => (trapped++, Reflect.get(t, k, r)), getOwnPropertyDescriptor: (t, k) => (trapped++, Reflect.getOwnPropertyDescriptor(t, k)) });
@@ -1446,6 +1565,7 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       bundles: [bundle],
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
       verifyBundleSignature: verifySignature,
+      executorTrustDomains: [OPERATOR_A],
       verifyPrimitiveInstance: () => true,
     };
     expect(codes(await profileAdmitsBundle(input))).not.toContain("input-unreadable");
