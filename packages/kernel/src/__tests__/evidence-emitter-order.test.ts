@@ -1316,8 +1316,8 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
     const savedSet = globalThis.Set;
     const savedHasOwn = Object.prototype.hasOwnProperty;
     const savedTypes = [...KERNEL_PULL_CAPTURE_TYPES];
-    const tierOne = DEFAULT_TIER_REQUIREMENTS[1]!;
-    const savedTierOne = { requiredEventTypes: tierOne.requiredEventTypes, minimumEvents: tierOne.minimumEvents };
+    const tierTwo = DEFAULT_TIER_REQUIREMENTS[2]!;
+    const savedTierTwo = { requiredEventTypes: tierTwo.requiredEventTypes, minimumEvents: tierTwo.minimumEvents };
     let calls = 0;
     let hostile: unknown;
     try {
@@ -1335,10 +1335,11 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
         }
       } as unknown as SetConstructor;
       Object.prototype.hasOwnProperty = () => (calls++, false);
-      // spec's arrays are mutable: a power summary now reads as a camera type, and tier 1 asks for nothing.
+      // spec's arrays are mutable: a power summary now reads as a camera type, and tier 2, which
+      // these events do not meet, asks for nothing.
       (KERNEL_PULL_CAPTURE_TYPES as unknown as string[])[2] = "power_profile_summary";
-      tierOne.requiredEventTypes = [];
-      tierOne.minimumEvents = 0;
+      tierTwo.requiredEventTypes = [];
+      tierTwo.minimumEvents = 0;
       hostile = ask();
     } finally {
       for (let i = 0; i < methods.length; i++) array[methods[i]!] = savedMethods[i];
@@ -1346,8 +1347,8 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
       globalThis.Set = savedSet;
       Object.prototype.hasOwnProperty = savedHasOwn;
       (KERNEL_PULL_CAPTURE_TYPES as unknown as string[]).length = savedTypes.length;
-      tierOne.requiredEventTypes = savedTierOne.requiredEventTypes;
-      tierOne.minimumEvents = savedTierOne.minimumEvents;
+      tierTwo.requiredEventTypes = savedTierTwo.requiredEventTypes;
+      tierTwo.minimumEvents = savedTierTwo.minimumEvents;
     }
     expect(calls, "calls of what was replaced").toBe(0);
     expect(hostile).toEqual(clean);
