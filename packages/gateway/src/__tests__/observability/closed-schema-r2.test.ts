@@ -133,7 +133,8 @@ describe("CRITICAL 1: a caller's trace and span ids, and its sampling context, n
 describe("MEDIUM 2: every field the call did not declare is closed on the line, a child logger's bindings included", () => {
   it("nested bindings, bindings that shadow the logger's own fields, and undeclared fields write no marker", async () => {
     const { lines, stream } = capture();
-    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId });
+    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId, requestIdHeader: false });
+    sinks.closedLoggerHooks(app);
     const m = mark("child");
     app.get("/n107b-r2/child", async (req) => {
       req.log.child({ context: { note: (req.query as { marker?: string }).marker } }).info(schema.lit("child line"));
@@ -327,7 +328,8 @@ describe("MEDIUM 3 (audit) and MEDIUM 4: the closed audit log, and the rows writ
     expect(schema.telemetryKeyWarning("production", false)).toBeUndefined();
     // It reaches the log as written: the message is declared.
     const { lines, stream } = capture();
-    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream } });
+    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId, requestIdHeader: false });
+    sinks.closedLoggerHooks(app);
     app.log[loud.level](loud.message);
     expect(lines.join("")).toContain("NODE_ENV=production and PCC_TELEMETRY_KEY is unset");
     await app.close();

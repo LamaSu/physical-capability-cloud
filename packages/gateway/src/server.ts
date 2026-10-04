@@ -5,8 +5,8 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 initPostHog();
-import { closeConsole, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
-import { closedError, declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning, trackRouteTemplates } from "./observability/closed-schema.js";
+import { closeConsole, closedLoggerHooks, gatewayLoggerOptions, issueRequestId } from "./observability/closed-sinks.js";
+import { closedError, declare, declaredRoute, lit, METHODS, openRequestScope, telemetryKeyWarning } from "./observability/closed-schema.js";
 // Request-path console output leaves under the closed observability schema (N107b).
 closeConsole();
 import { randomBytes } from "node:crypto";
@@ -196,9 +196,10 @@ export async function createGateway(port = 3200) {
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
 
-  // The closed schema's vocabulary of routes (every template the app declares), and the request
-  // scope that closes request-path console output. Both before any route or plugin.
-  trackRouteTemplates(app);
+  // The closed logger's hooks (the route templates the app declares, and the registry of the
+  // server's own requests and replies that its serializers read), and the request scope that closes
+  // request-path console output. All before any route or plugin.
+  closedLoggerHooks(app);
   app.addHook("onRequest", openRequestScope);
   // Without a valid PCC_TELEMETRY_KEY every hash uses a per-process key: one warning, loud in
   // production (round 2, MEDIUM 4). The gateway still starts; refusing to is the operator's call (#5708).

@@ -40,15 +40,16 @@ const capture = () => {
 describe("MEDIUM (M2, r2): a child logger's reserved req and res bindings are closed too", () => {
   it("the review's reproduction: a forged req route and res status write neither value", async () => {
     const { lines, stream } = capture();
-    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId });
+    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId, requestIdHeader: false });
+    sinks.closedLoggerHooks(app);
     await app.ready();
     const m = mark("route");
     app.log.child({ req: { method: "GET", routeOptions: { url: m } }, res: { statusCode: NUMBER } }).info(schema.lit("probe"));
     app.log.info({ req: { method: m, url: m }, res: { statusCode: NUMBER, statusMessage: m } }, schema.lit("probe two"));
     // A forged response with a status in range: only the response's own-object check stops it.
     app.log.child({ res: { statusCode: 451 } }).info(schema.lit("probe three"));
-    // A request-like object carrying a real stream passes the own-object check: only the route
-    // vocabulary stops its route.
+    // A request-like object carrying a real stream is not the server's own (round 4 of #538: the
+    // server registers its own requests; a stream's type proves nothing), so it is closed whole.
     const m2 = mark("streamed-route");
     app.log.info({ req: { raw: new Readable({ read() {} }), method: "GET", routeOptions: { url: m2 } } }, schema.lit("probe four"));
     const text = lines.join("");
@@ -62,8 +63,8 @@ describe("MEDIUM (M2, r2): a child logger's reserved req and res bindings are cl
 
   it("a real request still logs its method, registered route and status (positive control)", async () => {
     const { lines, stream } = capture();
-    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId });
-    schema.trackRouteTemplates(app);
+    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId, requestIdHeader: false });
+    sinks.closedLoggerHooks(app);
     app.get("/n107b-r3/items/:id", async () => ({ ok: true }));
     await app.ready();
     const res = await app.inject({ method: "GET", url: `/n107b-r3/items/${mark("id")}` });
@@ -99,12 +100,14 @@ describe("MEDIUM (M3, r2): no value leaves raw because of its spelling or its ke
 
   it("M3b, the review's reproduction: an error's code and statusCode are not trusted by their spelling", () => {
     const err = Object.assign(new Error("boom"), { code: "CALLERSECRET", statusCode: 418 });
-    const closed = JSON.stringify(schema.closeValue({ err }));
-    expect(closed).not.toContain("CALLERSECRET");
-    expect(closed).not.toContain("418");
-    const direct = JSON.stringify(schema.closedError(err));
-    expect(direct).not.toContain("CALLERSECRET");
-    expect(direct).not.toContain("418");
+    // Checked field by field: a keyed hash's hex can hold the digits 418 by chance (round 4 of #538).
+    const [nested] = Object.values(schema.closeValue({ err }) as Record<string, Record<string, unknown>>);
+    for (const closed of [nested!, schema.closedError(err)]) {
+      expect(JSON.stringify(closed)).not.toContain("CALLERSECRET");
+      expect(closed.code).toBe(schema.keyedHash("CALLERSECRET"));
+      expect(closed.statusClass).toBe("4xx");
+      expect(closed).not.toHaveProperty("statusCode");
+    }
   });
 
   it("M3c, the review's reproduction: Sentry measurements do not pass through raw", () => {

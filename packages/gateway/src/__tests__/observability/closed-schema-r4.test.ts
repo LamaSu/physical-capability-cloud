@@ -62,6 +62,93 @@ const closedEvent = (event: object, hint?: object) =>
   (sinks.closedSentryEvent as (event: object, server?: object, hint?: object) => Record<string, any>)(event, server, hint);
 const closedSpan = (span: object) => (sinks.closedSentrySpan as (span: object, server?: object) => Record<string, any>)(span, server);
 
+describe("A: the log line", () => {
+  it("A1: a line's level is a member of pino's level vocabulary, else keyed (a custom level, a declared field named level)", async () => {
+    const { stream, records } = capture();
+    const app = closedApp(stream);
+    await app.ready();
+    const custom = app.log.child({}, { customLevels: { forged: 999 } } as never) as unknown as Record<string, (msg: unknown) => void>;
+    custom.forged!(schema.lit("custom level line"));
+    app.log.info({ level: schema.declare.metric(999) }, schema.lit("declared level line"));
+    app.log.warn(schema.lit("ordinary line"));
+    const byMsg = (msg: string) => records().find((r) => r.msg === msg)!;
+    expect(byMsg("custom level line").level).toBe(schema.keyedHash(999));
+    expect(byMsg("declared level line").level).toBe(schema.keyedHash(999));
+    expect(byMsg("ordinary line").level).toBe(40);
+    await app.close();
+  });
+
+  it("A2: a request id stays readable only while it is in the window of ids this process issued", async () => {
+    const { stream, records } = capture();
+    const app = closedApp(stream);
+    await app.ready();
+    const window = (sinks as unknown as { REQUEST_ID_WINDOW?: number }).REQUEST_ID_WINDOW ?? 200_000;
+    const first = sinks.issueRequestId();
+    for (let i = 0; i < window; i++) sinks.issueRequestId();
+    const recent = sinks.issueRequestId();
+    app.log.child({ reqId: first }).info(schema.lit("an id issued more than the window ago"));
+    app.log.child({ reqId: recent }).info(schema.lit("an id issued now"));
+    const byMsg = (msg: string) => records().find((r) => r.msg === msg)!;
+    expect(byMsg("an id issued more than the window ago").reqId).toBe(schema.keyedHash(first));
+    expect(byMsg("an id issued now").reqId).toBe(recent);
+    await app.close();
+  }, 60_000);
+
+  it("A3: req, res and err a child logger was made with are closed like any binding; this call's own serializers write those keys", async () => {
+    const { stream, records } = capture();
+    const app = closedApp(stream);
+    app.get("/n107b-r4/own", async (req, reply) => {
+      req.log.info({ req, res: reply, err: new Error("own") }, schema.lit("own objects line"));
+      return { ok: true };
+    });
+    await app.ready();
+    app.log.child({ req: { method: "GET" }, res: { statusCode: 200 }, err: new Error("bound") }).info(schema.lit("bound line"));
+    await app.inject({ method: "GET", url: "/n107b-r4/own" });
+    const bound = records().find((r) => r.msg === "bound line")!;
+    for (const key of ["req", "res", "err"]) expect(bound, `a ${key} bound earlier`).not.toHaveProperty(key);
+    const own = records().find((r) => r.msg === "own objects line")!;
+    expect(own.req).toMatchObject({ method: "GET", route: "/n107b-r4/own" });
+    expect(own.res).toEqual({ statusCode: 200 });
+    expect(own.err).toMatchObject({ type: "Error" });
+    await app.close();
+  });
+
+  it("A4: a request or reply is the server's own only when the server registered it (a forged stream or ServerResponse is closed)", async () => {
+    const { stream, records } = capture();
+    const app = closedApp(stream);
+    app.get("/n107b-r4/registered", async () => ({ ok: true }));
+    await app.ready();
+    app.log.info({ res: Object.assign(forgedResponse(), { statusCode: 451 }) }, schema.lit("forged reply"));
+    app.log.info({ req: { raw: new Readable({ read() {} }), method: "GET", routeOptions: { url: "/n107b-r4/registered" } } }, schema.lit("forged request"));
+    // The serializers ran (so the keys are theirs), and closed each forged object like any value.
+    const reply = records().find((r) => r.msg === "forged reply")!;
+    // The status as a number standing alone (a keyed hash's hex can hold the digits 451).
+    expect(JSON.stringify(reply)).not.toMatch(/(?<![0-9A-Za-z])451(?![0-9A-Za-z])/);
+    expect(reply.res).not.toHaveProperty("statusCode");
+    const request = records().find((r) => r.msg === "forged request")!;
+    expect(JSON.stringify(request)).not.toContain("/n107b-r4/registered");
+    expect(request.req).not.toHaveProperty("route");
+    await app.close();
+  });
+
+  it("A4: a reply's response time is the reply's own measurement, never a number its record carries", async () => {
+    const { stream, records } = capture();
+    const app = closedApp(stream);
+    app.get("/n107b-r4/time", async (req, reply) => {
+      req.log.info({ res: reply, responseTime: 31337 }, schema.lit("a record with a chosen time"));
+      return { ok: true };
+    });
+    await app.ready();
+    await app.inject({ method: "GET", url: "/n107b-r4/time" });
+    const record = records().find((r) => r.msg === "a record with a chosen time")!;
+    expect(typeof record.responseTime).toBe("number");
+    expect(record.responseTime).not.toBe(31337);
+    const completed = records().find((r) => r.msg === "request completed")!;
+    expect(typeof completed.responseTime).toBe("number");
+    await app.close();
+  });
+});
+
 describe("B: errors", () => {
   it("B5: an error's class is readable only from the built-in vocabulary; any other class is keyed, a non-Error is NonError", async () => {
     class PaymentGatewayError extends Error {}

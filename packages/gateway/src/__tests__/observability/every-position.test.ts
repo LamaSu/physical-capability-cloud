@@ -280,6 +280,15 @@ describe("N107b: a marker in every request position reaches no sink and no conso
     }
     const failures = traced.filter((e) => e.type === "event" && e.item.exception?.values?.[0]?.value === keyedHash("n107b forced failure"));
     expect(new Set(failures.map((e) => e.item.contexts.trace.trace_id)).size, "the two forced 500s, sent with the same sentry-trace, are two traces").toBeGreaterThanOrEqual(2);
+
+    // Round 4 of #538, positive control: server.ts installs the closed logger's hooks, so the server's
+    // own request and reply are read as such (registered, never recognized by type): the forced 500's
+    // records carry its method, registered route, status and measured time.
+    const records = captured.logs.join("").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, any>);
+    const completed = records.filter((r) => r.msg === "request completed" && r.res?.statusCode === 500);
+    expect(completed.length, "the forced 500s' completed records carry the reply's own status").toBeGreaterThan(0);
+    expect(typeof completed[0]!.responseTime).toBe("number");
+    expect(records.some((r) => r.msg === "incoming request" && r.req?.method === "POST" && r.req?.route === "/n107b-ep/throws")).toBe(true);
   });
 
   // N107b codemod regression (orchestrator review, round 3): declare.metric emits its number

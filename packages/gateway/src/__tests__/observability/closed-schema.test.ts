@@ -155,8 +155,10 @@ describe("the logger", () => {
         done();
       },
     });
-    // The gateway's own logger options, through Fastify (which owns pino), with a captured stream.
-    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream } });
+    // The gateway's own logger options, through Fastify (which owns pino), with a captured stream,
+    // its request ids and its hooks (round 4 of #538).
+    const app = Fastify({ logger: { ...sinks.gatewayLoggerOptions(), stream }, genReqId: sinks.issueRequestId, requestIdHeader: false });
+    sinks.closedLoggerHooks(app);
     await app.ready();
     const logger = app.log;
     const m = mark("log");

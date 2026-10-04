@@ -1,18 +1,19 @@
 /**
  * The closed schema at each sink chokepoint (N107b; see closed-schema.ts for the rules):
- *   - gatewayLoggerOptions(): pino options for the gateway's Fastify logger. Every log line's
- *     object, message, bindings, request and error leave under the closed rules, and the last pass
- *     over the serialized line closes whatever reached it any other way (a child logger's bindings);
+ *   - gatewayLoggerOptions(): pino options for the gateway's Fastify logger, with issueRequestId as
+ *     Fastify's genReqId and closedLoggerHooks(app) installed on the app. Every log line's object,
+ *     message, request, reply and error leave under the closed rules, and the last pass over the
+ *     serialized line keeps a field only when this call's own chokepoints produced exactly that value
+ *     (round 4 of #538): anything else that reached the line (a child logger's bindings, a route's
+ *     own serializers) is closed there, key and value;
  *   - closeConsole(): request-path console output (inside a request's scope) leaves closed too;
  *   - closedSentryEvent / closedSentryTransaction / closedSentrySpan / closedBreadcrumb: Sentry's
  *     outbound events are rebuilt from closed fields only, trace and span ids remapped under the
  *     telemetry key and the envelope's sampling context rebuilt (sentry.ts wires them, and keeps
  *     a request's trace headers from being continued at all).
  */
-import type { FastifyLogFn } from "fastify";
+import type { FastifyInstance, FastifyLogFn } from "fastify";
 import { hostname } from "node:os";
-import { ServerResponse } from "node:http";
-import { Readable } from "node:stream";
 import {
   closedError,
   closedMessage,
@@ -25,9 +26,10 @@ import {
   keyedHash,
   keyedHexId,
   METHODS,
+  readSafely,
   requestScope,
-  routeTemplateOf,
   routeTemplates,
+  trackRouteTemplates,
   type Declared,
 } from "./closed-schema.js";
 
@@ -49,57 +51,138 @@ declare module "fastify" {
   }
 }
 
-// ── Request ids ────────────────────────────────────────────────────────────
+// ── The server's own requests, replies and request ids ─────────────────────
+
+/** How many of the most recently issued request ids a log line keeps readable (round 4 of #538, A2). */
+export const REQUEST_ID_WINDOW = 200_000;
 
 let issued = 0;
+/** The request ids this process issued, the most recent REQUEST_ID_WINDOW of them: a registry, never a shape. */
+const ISSUED_IDS = new Set<string>();
+const ISSUED_RING: Array<string | undefined> = new Array<string | undefined>(REQUEST_ID_WINDOW);
+
+/** The server's own requests: each raw request Fastify asked an id for (issueRequestId) or ran its hooks on. */
+const OWN_REQUESTS = new WeakSet<object>();
+/** The server's own replies: each raw response closedLoggerHooks saw, with its Fastify reply (for its measured time). */
+const OWN_REPLIES = new WeakMap<object, object>();
 
 /**
- * The gateway's request ids (Fastify's genReqId): req-<n> in base 36, as Fastify's default makes
- * them. The line pass keeps a request id only when this process issued it.
+ * The gateway's request ids (Fastify's genReqId, which passes the raw request): req-<n> in base 36,
+ * as Fastify's default makes them. Each id is recorded in a bounded registry, and the raw request in
+ * the registry of the server's own requests: a log line keeps a request id, and a serializer reads a
+ * request as the server's, only on membership (round 4 of #538, A2 and A4).
  */
-export function issueRequestId(): string {
-  issued = (issued + 1) & 0x7fffffff;
-  return `req-${issued.toString(36)}`;
+export function issueRequestId(raw?: unknown): string {
+  issued += 1;
+  const id = `req-${issued.toString(36)}`;
+  const slot = issued % REQUEST_ID_WINDOW;
+  const evicted = ISSUED_RING[slot];
+  if (evicted !== undefined) ISSUED_IDS.delete(evicted);
+  ISSUED_RING[slot] = id;
+  ISSUED_IDS.add(id);
+  if (typeof raw === "object" && raw !== null) OWN_REQUESTS.add(raw);
+  return id;
 }
 
 function isIssuedRequestId(value: unknown): boolean {
-  if (typeof value !== "string" || !value.startsWith("req-")) return false;
-  const n = Number.parseInt(value.slice(4), 36);
-  return Number.isSafeInteger(n) && n >= 1 && n <= issued && value === `req-${n.toString(36)}`;
+  return typeof value === "string" && ISSUED_IDS.has(value);
+}
+
+/**
+ * The closed logger's hooks on an app that logs with gatewayLoggerOptions: the vocabulary of route
+ * templates (trackRouteTemplates), and an onRequest hook that registers the server's own request and
+ * reply. Install it first, at the root, before any route or plugin; server.ts does, and so must any
+ * app (a test's included) that logs with these options.
+ */
+export function closedLoggerHooks(app: FastifyInstance): void {
+  trackRouteTemplates(app);
+  app.addHook("onRequest", (request, reply, done) => {
+    const rawRequest = readSafely(request, "raw");
+    if (typeof rawRequest === "object" && rawRequest !== null) OWN_REQUESTS.add(rawRequest);
+    const rawReply = readSafely(reply, "raw");
+    if (typeof rawReply === "object" && rawReply !== null) OWN_REPLIES.set(rawReply, reply);
+    done();
+  });
+}
+
+/** The server's own raw request behind a logged request (the request itself, or its raw), by registry membership. */
+function ownRequest(req: unknown): object | undefined {
+  if (typeof req !== "object" || req === null) return undefined;
+  if (OWN_REQUESTS.has(req)) return req;
+  const raw = readSafely(req, "raw");
+  return typeof raw === "object" && raw !== null && OWN_REQUESTS.has(raw) ? raw : undefined;
+}
+
+/** The server's own raw response and Fastify reply behind a logged reply, by registry membership. */
+function ownReply(res: unknown): { raw: object; reply: object } | undefined {
+  if (typeof res !== "object" || res === null) return undefined;
+  const direct = OWN_REPLIES.get(res);
+  if (direct) return { raw: res, reply: direct };
+  const raw = readSafely(res, "raw");
+  const reply = typeof raw === "object" && raw !== null ? OWN_REPLIES.get(raw) : undefined;
+  return reply && raw ? { raw: raw as object, reply } : undefined;
 }
 
 // ── Logger ─────────────────────────────────────────────────────────────────
 
 const HOSTNAME = hostname();
 
-/** Fastify's own messages, kept only on Fastify's own records (frameworkRecord). */
+/** pino's own level numbers: a line's level is one of them, else keyed (round 4 of #538, A1). */
+const PINO_LEVELS: ReadonlySet<number> = new Set([10, 20, 30, 40, 50, 60]);
+
+/** Fastify's own messages, kept only on records of the server's own request or reply (frameworkRecord). */
 const FRAMEWORK_MESSAGES: ReadonlySet<string> = new Set(["incoming request", "request completed"]);
 
 /**
  * What the current log call's own chokepoints produced. One pino write is synchronous: logMethod
- * closes the message, formatters.log the object, and the line pass reads both before the next call.
+ * closes the message, formatters.log the object's fields, the req, res and err serializers their
+ * values, and the line pass reads all of it before the next call. Each field is kept as its JSON, so
+ * the line keeps a field only when its value is exactly what was produced for this call.
  */
-let writing: { msg: string | undefined; keys: ReadonlySet<string> } | undefined;
+interface Writing {
+  msg: string | undefined;
+  fields: Map<string, string>;
+}
+let writing: Writing | undefined;
 
-/**
- * Fastify's own records ("incoming request", "request completed", its error records): an object
- * whose req is the request's own stream or whose res is the server's own response, which nothing
- * parsed from a request can be. Its response time is a measurement the server made.
- */
-function frameworkRecord(obj: Record<string, unknown>): Record<string, unknown> | undefined {
-  const req = obj.req as { raw?: unknown } | undefined;
-  const res = obj.res as { raw?: unknown } | undefined;
-  const own = (req && typeof req === "object" && req.raw instanceof Readable) || (res && typeof res === "object" && res.raw instanceof ServerResponse);
-  if (!own) return undefined;
-  return typeof obj.responseTime === "number" ? { ...obj, responseTime: declare.metric(obj.responseTime) } : obj;
+/** Records a field this call's chokepoints produced, as JSON (a value JSON cannot hold is not recorded, so the line closes it). */
+function produced<T>(key: string, value: T): T {
+  if (writing) {
+    try {
+      const json = JSON.stringify(value);
+      if (json !== undefined) writing.fields.set(key, json);
+    } catch {
+      // not recorded: the line pass closes the field
+    }
+  }
+  return value;
 }
 
 /**
- * The last pass over every serialized log line. A child logger's bindings are serialized when the
- * child is made (pino resets the bindings formatter for a child), so they reach the line without
- * passing any other chokepoint: every field the call's own chokepoints did not produce is closed
- * here, recursively, nested objects and arrays included. The logger's own fields are written by the
- * server (time, pid, hostname), and a request id must be one this process issued.
+ * Fastify's own records ("incoming request", "request completed", its error records): an object
+ * carrying the server's own request or reply (by registry, never by its type). A record's response
+ * time is the reply's own measurement (Fastify's elapsedTime, read from the registered reply),
+ * never a number the record carries (round 4 of #538, A4: no trust by a declared neighbour).
+ */
+function frameworkRecord(obj: Record<string, unknown>): Record<string, unknown> | undefined {
+  const reply = ownReply(readSafely(obj, "res"));
+  if (!reply && !ownRequest(readSafely(obj, "req"))) return undefined;
+  if (!reply || !Object.hasOwn(obj, "responseTime")) return obj;
+  const elapsed = readSafely(reply.reply, "elapsedTime");
+  try {
+    return { ...obj, responseTime: typeof elapsed === "number" ? declare.metric(elapsed) : undefined };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The last pass over every serialized log line. A field leaves as written only when this call's own
+ * chokepoints produced exactly that value under that key (formatters.log for the object's fields, the
+ * serializers for req, res and err, logMethod for the message); req, res and err are not trusted by
+ * their names, so a child logger's earlier bindings and a route's own serializers are closed here
+ * like anything else, key and value. The logger's own fields are the server's: the time, pid and
+ * hostname it writes, a level from pino's level numbers, a request id this process issued.
  */
 function closedLine(line: string): string {
   const own = writing;
@@ -115,7 +198,7 @@ function closedLine(line: string): string {
   for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
     switch (key) {
       case "level":
-        out.level = typeof value === "number" ? value : keyedHash(value);
+        out.level = typeof value === "number" && PINO_LEVELS.has(value) ? value : keyedHash(value);
         break;
       case "time":
         out.time = Date.now();
@@ -127,19 +210,15 @@ function closedLine(line: string): string {
         out.hostname = HOSTNAME;
         break;
       case "msg":
-        out.msg = own && (value === own.msg || own.keys.has("msg")) ? value : keyedHash(value);
+        out.msg = own !== undefined && typeof value === "string" && (value === own.msg || own.fields.get("msg") === JSON.stringify(value))
+          ? value
+          : keyedHash(value);
         break;
       case "reqId":
         out.reqId = isIssuedRequestId(value) ? value : keyedHash(value);
         break;
-      case "req":
-      case "res":
-      case "err":
-        // Their serializers built them, for an object's fields and a binding's alike.
-        out[key] = value;
-        break;
       default:
-        if (own?.keys.has(key)) {
+        if (own !== undefined && own.fields.get(key) === JSON.stringify(value)) {
           out[key] = value;
         } else {
           const closed = closeValue(value);
@@ -150,54 +229,67 @@ function closedLine(line: string): string {
   return JSON.stringify(out) + "\n";
 }
 
-interface LoggedRequest {
-  method?: string;
-  ip?: string;
-  routeOptions?: { url?: string };
-}
-
 /**
  * A request as a log line carries it, built here: method, route template and the client's keyed
- * hash. Only the server's own request (one over a real stream, as Fastify logs it) is read this way,
- * and its route only when the app declared it; anything else is closed like any value, so a forged
- * req binding writes nothing raw (round 2 of #538, M2).
+ * hash. Only the server's own request (registered when Fastify issued its id, or by its hooks) is
+ * read this way: its method from its own raw request, its route only when the app declared it.
+ * Anything else is closed like any value (round 4 of #538, A4).
  */
-export function closedRequest(req: LoggedRequest | undefined): Record<string, unknown> {
-  if (!req || typeof req !== "object") return {};
-  const own = (req as { raw?: unknown }).raw instanceof Readable || req instanceof Readable;
-  if (!own) return (closeValue(req) as Record<string, unknown> | undefined) ?? {};
-  const route = routeTemplateOf(req);
+export function closedRequest(req: unknown): Record<string, unknown> {
+  const raw = ownRequest(req);
+  if (!raw) return (closeValue(req) as Record<string, unknown> | undefined) ?? {};
+  const requestMethod = readSafely(raw, "method");
+  const url = readSafely(readSafely(req, "routeOptions"), "url");
+  const route = typeof url === "string" && url !== "" ? url : "unmatched";
+  const ip = readSafely(req, "ip");
   return {
-    method: typeof req.method === "string" && METHODS.has(req.method) ? req.method : "OTHER",
+    method: typeof requestMethod === "string" && METHODS.has(requestMethod) ? requestMethod : "OTHER",
     route: routeTemplates().has(route) ? route : keyedHash(route),
-    ...(typeof req.ip === "string" ? { client: keyedHash(req.ip) } : {}),
+    ...(typeof ip === "string" ? { client: keyedHash(ip) } : {}),
   };
 }
 
 /**
- * A response as a log line carries it: the status the server's own response carries (one over a
- * real ServerResponse, as Fastify logs it). Anything else is closed like any value (M2).
+ * A response as a log line carries it: the status the server's own response carries (registered by
+ * closedLoggerHooks), read from that response. Anything else is closed like any value (round 4, A4).
  */
 export function closedResponse(res: unknown): Record<string, unknown> {
-  if (!res || typeof res !== "object") return {};
-  const own = (res as { raw?: unknown }).raw instanceof ServerResponse || res instanceof ServerResponse;
+  const own = ownReply(res);
   if (!own) return (closeValue(res) as Record<string, unknown> | undefined) ?? {};
-  const status = (res as { statusCode?: unknown }).statusCode;
-  return { statusCode: typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined };
+  const status = readSafely(own.raw, "statusCode");
+  return typeof status === "number" && Number.isInteger(status) ? { statusCode: status } : {};
 }
 
-/** A log object under the closed rules; the req, res and err keys go to their serializers. */
+/** An error as a log line carries it: closedError, its frames as one string. */
+function serializedError(err: unknown): { [key: string]: unknown; type: string; message: string; stack: string } {
+  const closed = closedError(err);
+  return {
+    ...closed,
+    type: String(closed.type),
+    message: typeof closed.message === "string" ? closed.message : "",
+    stack: Array.isArray(closed.stack) ? closed.stack.join("\n") : "",
+  };
+}
+
+/** A log object under the closed rules; the req, res and err keys go to their serializers. Each field it produces is recorded. */
 export function closeLogObject(obj: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(obj)) {
+  let entries: Array<[string, unknown]>;
+  try {
+    entries = Object.entries(obj);
+  } catch {
+    return out;
+  }
+  for (const [key, value] of entries) {
     if (key === "req" || key === "res" || key === "err") {
       out[key] = value;
       continue;
     }
     const closed = closeField(value, 1);
-    if (closed.value !== undefined) out[closed.declared ? key : keyedHash(key)] = closed.value;
+    if (closed.value === undefined) continue;
+    const name = closed.declared ? key : keyedHash(key);
+    out[name] = produced(name, closed.value);
   }
-  if (writing) writing.keys = new Set(Object.keys(out).filter((key) => key !== "req" && key !== "res" && key !== "err"));
   return out;
 }
 
@@ -210,23 +302,15 @@ export function gatewayLoggerOptions() {
   return {
     level: "info",
     serializers: {
-      req: (req: LoggedRequest) => closedRequest(req),
-      res: (res: unknown) => closedResponse(res),
-      err: (err: unknown) => {
-        const closed = closedError(err);
-        return {
-          ...closed,
-          type: String(closed.type),
-          message: typeof closed.message === "string" ? closed.message : "",
-          stack: Array.isArray(closed.stack) ? closed.stack.join("\n") : "",
-        };
-      },
+      req: (req: unknown) => produced("req", closedRequest(req)),
+      res: (res: unknown) => produced("res", closedResponse(res)),
+      err: (err: unknown) => produced("err", serializedError(err)),
     },
     formatters: {
       bindings: (bindings: Record<string, unknown>) => {
         const out: Record<string, unknown> = {};
-        if (typeof bindings.pid === "number") out.pid = bindings.pid;
-        if (typeof bindings.hostname === "string") out.hostname = bindings.hostname;
+        if (Object.hasOwn(bindings, "pid")) out.pid = process.pid;
+        if (Object.hasOwn(bindings, "hostname")) out.hostname = HOSTNAME;
         if (bindings.reqId !== undefined) out.reqId = isIssuedRequestId(bindings.reqId) ? bindings.reqId : keyedHash(bindings.reqId);
         return out;
       },
@@ -236,11 +320,12 @@ export function gatewayLoggerOptions() {
       streamWrite: (line: string) => closedLine(line),
       logMethod(this: unknown, args: unknown[], method: (...a: unknown[]) => void) {
         const [first, ...rest] = args;
+        writing = { msg: undefined, fields: new Map() };
         let call: unknown[];
         if (args.length === 0) {
           call = [];
         } else if (first instanceof Error) {
-          call = [{ err: first }, rest.length > 0 ? closedMessage(rest[0], ...rest.slice(1)) : closedText(first.message ?? "")];
+          call = [{ err: first }, rest.length > 0 ? closedMessage(rest[0], ...rest.slice(1)) : closedText(readSafely(first, "message") ?? "")];
         } else if (first !== null && typeof first === "object" && !isDeclared(first)) {
           const framework = frameworkRecord(first as Record<string, unknown>);
           const message = rest.length === 0 ? undefined
@@ -250,8 +335,7 @@ export function gatewayLoggerOptions() {
         } else {
           call = [closedMessage(first, ...rest)];
         }
-        const msg = call.length === 1 && typeof call[0] === "string" ? call[0] : typeof call[1] === "string" ? call[1] : undefined;
-        writing = { msg, keys: new Set() };
+        writing.msg = call.length === 1 && typeof call[0] === "string" ? call[0] : typeof call[1] === "string" ? call[1] : undefined;
         return method.apply(this, call);
       },
     },
@@ -264,8 +348,8 @@ let consoleClosed = false;
 
 /**
  * Request-path console output under the closed rules: inside a request's scope (requestScope), a
- * console line is one JSON object of closed arguments; outside it (boot, timers), output is as
- * written, a declared argument as its text.
+ * console line is one JSON object of closed arguments (closeValue, the same rules as every sink);
+ * outside it (boot, timers), output is as written, a declared argument as its text.
  */
 export function closeConsole(): void {
   if (consoleClosed) return;

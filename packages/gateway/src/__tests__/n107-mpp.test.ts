@@ -54,7 +54,11 @@ beforeAll(async () => {
   delete process.env.PCC_X402_LEGACY;
   delete process.env.MPP_ENABLED;
   // The gateway's closed logger options (N107b); before them, pino's defaults (the reproduction).
-  const sinksModule = (await import("../observability/closed-sinks.js").catch(() => null)) as { gatewayLoggerOptions(): Record<string, unknown> } | null;
+  const sinksModule = (await import("../observability/closed-sinks.js").catch(() => null)) as {
+    gatewayLoggerOptions(): Record<string, unknown>;
+    issueRequestId?: (raw?: unknown) => string;
+    closedLoggerHooks?: (app: FastifyInstance) => void;
+  } | null;
   const gatewayLoggerOptions = () => (sinksModule ? sinksModule.gatewayLoggerOptions() : { level: "info" });
   const stream = new Writable({
     write(chunk, _encoding, done) {
@@ -62,7 +66,8 @@ beforeAll(async () => {
       done();
     },
   });
-  app = Fastify({ logger: { ...gatewayLoggerOptions(), stream } });
+  app = Fastify({ logger: { ...gatewayLoggerOptions(), stream }, ...(sinksModule?.issueRequestId ? { genReqId: sinksModule.issueRequestId, requestIdHeader: false } : {}) });
+  sinksModule?.closedLoggerHooks?.(app);
   const { paymentGate } = await import("../middleware/x402-gate.js");
   await app.register(paymentGate);
   await app.ready();
