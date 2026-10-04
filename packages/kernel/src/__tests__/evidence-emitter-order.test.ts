@@ -1356,6 +1356,39 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
     expect(clean[3]!.missing).toEqual(["Missing one of: a | b"]);
   });
 
+  it("an Object.prototype simulated or mock written after load changes nothing checkTierRequirements counts, and no getter runs; an accessor flag fails closed", () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    const event = (type: string, payload: Record<string, unknown> = {}) => ({ id: `ev_${type}`, hash: `sha256:${"a".repeat(64)}`, type, timestamp: "2026-10-04T00:00:00.000Z", source: { ...source }, payload }) as unknown as EvidenceEvent;
+    const events = [event("gcode_hash_verified"), event("execution_completed"), event("power_profile_summary")];
+    const clean = emitter.checkTierRequirements(events, 1);
+    let mocked: unknown;
+    let getterRuns = 0;
+    let withGetter: unknown;
+    try {
+      Object.defineProperty(Object.prototype, "mock", { value: true, writable: true, configurable: true, enumerable: false });
+      mocked = emitter.checkTierRequirements(events, 1);
+    } finally {
+      delete (Object.prototype as { mock?: unknown }).mock;
+    }
+    try {
+      Object.defineProperty(Object.prototype, "simulated", { configurable: true, enumerable: false, get: () => (getterRuns++, true) });
+      withGetter = emitter.checkTierRequirements(events, 1);
+    } finally {
+      delete (Object.prototype as { simulated?: unknown }).simulated;
+    }
+    expect(clean.met).toBe(true);
+    expect(mocked).toEqual(clean);
+    expect(withGetter).toEqual(clean);
+    expect(getterRuns, "getters run on Object.prototype.simulated").toBe(0);
+    // An event's own mock flag behind a getter is not data: the event is taken as fabricated, and the getter never runs.
+    let ownGetterRuns = 0;
+    const accessorMock = event("execution_completed", {});
+    Object.defineProperty(accessorMock.payload, "mock", { enumerable: true, get: () => (ownGetterRuns++, false) });
+    const answer = emitter.checkTierRequirements([events[0]!, accessorMock, events[2]!], 1);
+    expect(answer.met).toBe(false);
+    expect(ownGetterRuns).toBe(0);
+  });
+
   it("a hole in a custom requirements list is skipped, as Array.prototype.find skipped it (astra pack 299 MEDIUM)", () => {
     const emitter = new EvidenceEmitter(KERNEL);
     const events = [{ id: "ev_g", hash: `sha256:${"a".repeat(64)}`, type: "gcode_hash_verified", timestamp: "2026-10-04T00:00:00.000Z", source, payload: {} }] as unknown as EvidenceEvent[];

@@ -128,6 +128,40 @@ function ownDataValue(target: unknown, key: string): unknown {
   return descriptor !== undefined && isDataDescriptor(descriptor) ? descriptor.value : undefined;
 }
 
+/** What ownField answers for a Proxy or an accessor: no value to read (a module-private identity). */
+const UNREADABLE: object = ObjectCreate(null) as object;
+
+/** `target`'s own data value at `key`; UNREADABLE when `target` is a Proxy or `key` an accessor; undefined when absent or `target` is no object. */
+function ownField(target: unknown, key: string): unknown {
+  if (target === null || typeof target !== "object") return undefined;
+  if (IsProxy(target)) return UNREADABLE;
+  const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
+  if (descriptor === undefined) return undefined;
+  return isDataDescriptor(descriptor) ? descriptor.value : UNREADABLE;
+}
+
+/**
+ * Whether spec's isFabricated takes `event` as fabricated, from the event's OWN `source.simulated`
+ * and `payload.mock`, presented on null-prototype records: a `simulated` or `mock` a prototype serves
+ * is not the event's, and no getter runs. An accessor or a Proxy on the way fails closed: the event
+ * is taken as fabricated, so it never counts toward a tier.
+ */
+function fabricated(event: EvidenceEvent): boolean {
+  const source = ownField(event, "source");
+  const payload = ownField(event, "payload");
+  const simulated = ownField(source, "simulated");
+  const mock = ownField(payload, "mock");
+  if (source === UNREADABLE || payload === UNREADABLE || simulated === UNREADABLE || mock === UNREADABLE) return true;
+  const sourceView = ObjectCreate(null) as Record<string, unknown>;
+  sourceView.simulated = simulated;
+  const payloadView = ObjectCreate(null) as Record<string, unknown>;
+  payloadView.mock = mock;
+  const view = ObjectCreate(null) as Record<string, unknown>;
+  view.source = typeof source === "object" && source !== null ? sourceView : undefined;
+  view.payload = typeof payload === "object" && payload !== null ? payloadView : undefined;
+  return IsFabricated(view as unknown as EvidenceEvent);
+}
+
 /** The device that emitted `event`, named for a `missing` entry without running a getter or a trap. */
 function deviceLabel(event: unknown): string {
   const deviceId = ownDataValue(ownDataValue(event, "source"), "deviceId");
@@ -791,7 +825,7 @@ export class EvidenceEmitter {
     const countedTypes: string[] = [];
     for (let i = 0; i < assessed.length; i++) {
       const entry = listAt(assessed, i)!;
-      if (entry.cameraIssue === null && !IsFabricated(entry.event)) append(countedTypes, entry.type);
+      if (entry.cameraIssue === null && !fabricated(entry.event)) append(countedTypes, entry.type);
     }
 
     const missing: string[] = [];
