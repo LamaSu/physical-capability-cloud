@@ -352,7 +352,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
     expect(spanNames).toContain("job.lifecycle");
   });
 
-  it("'job.lifecycle' span includes job.id, job.type, and job.assurance_tier attributes", async () => {
+  it("'job.lifecycle' span includes job.id and job.assurance_tier attributes; job.type is no longer populated from stepId (N71 round 7, CRITICAL #2: stepId is caller-influenced free text with no fixed vocabulary logSafeId's identifier-shape check can close against — dropped from this sink rather than echoed, same as settlement.facade.ts's body.reason/evidenceBundleHash)", async () => {
     initKernelService(mockKernelConfig);
     const { getKernelService } = await import("../services/kernel-service.js");
     const svc = getKernelService();
@@ -373,7 +373,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
     const options = lifecycleCall![0] as { name: string; op: string; attributes?: Record<string, unknown> };
     expect(options.op).toBe("job.lifecycle");
     expect(options.attributes?.["job.id"]).toBe("job-tracing-ks-002");
-    expect(options.attributes?.["job.type"]).toBe("step-ks-attrs");
+    expect(options.attributes?.["job.type"]).toBeUndefined();
     expect(options.attributes?.["job.assurance_tier"]).toBe(1);
   });
 });
