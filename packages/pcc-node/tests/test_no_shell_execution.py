@@ -124,10 +124,10 @@ ALLOWED_DUNDERS = {"__name__", "__qualname__", "__doc__", "__init__", "__datacla
 # list exactly that). A new import is a reviewed change to it.
 ALLOWED_IMPORTS = {
     "ast", "base64", "click", "concurrent.futures", "cryptography.hazmat.primitives.ciphers.aead", "csv",
-    "dataclasses", "datetime", "errno", "glob", "hashlib", "hmac", "html", "http.server", "httpx", "ipaddress",
-    "json", "logging", "logging.handlers", "nacl.encoding", "nacl.signing", "os", "pathlib", "platform", "re",
-    "secrets", "shutil", "signal", "socket", "ssl", "stat", "subprocess", "sys", "threading", "time", "typing",
-    "urllib.error", "urllib.parse", "urllib.request", "zeroconf",
+    "dataclasses", "datetime", "errno", "glob", "hashlib", "hmac", "html", "http.client", "http.server", "httpx",
+    "ipaddress", "json", "logging", "logging.handlers", "math", "nacl.encoding", "nacl.exceptions", "nacl.signing",
+    "os", "pathlib", "platform", "re", "secrets", "select", "shutil", "signal", "socket", "ssl", "stat",
+    "subprocess", "sys", "threading", "time", "typing", "urllib.error", "urllib.parse", "urllib.request", "zeroconf",
 }
 # Names that start processes, refused anywhere (as an attribute of any object, or imported from any module).
 REFUSED_ANYWHERE = {"ProcessPoolExecutor", "CGIHTTPRequestHandler"}
@@ -253,6 +253,16 @@ def _tracked(tree):
     return modules, names, prefixed, refusals
 
 
+def _call_target(func, modules, names):
+    """(module, attr) a call resolves to through the source's own imports (_tracked), if it is one the guard
+    tracks. violations() and executables_started() both resolve calls with this, and nothing else."""
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in modules:
+        return modules[func.value.id], func.attr
+    if isinstance(func, ast.Name) and func.id in names:
+        return names[func.id]
+    return None
+
+
 def violations(source, filename="<src>"):
     """Every rule the source breaks, as "line: reason" strings."""
     tree = ast.parse(source, filename)
@@ -289,14 +299,6 @@ def violations(source, filename="<src>"):
         and len(n.args) >= 2 and isinstance(n.args[0], ast.Name) and n.args[0].id in modules
         and isinstance(n.args[1], ast.Constant) and isinstance(n.args[1].value, str)
     }
-
-    def target(func):
-        """(module, attr) a call resolves to, if it is one we track."""
-        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in modules:
-            return modules[func.value.id], func.attr
-        if isinstance(func, ast.Name) and func.id in names:
-            return names[func.id]
-        return None
 
     for node in ast.walk(tree):
         # A module object used as a value (assigned, passed, vars(os)) hides its calls.
@@ -391,7 +393,7 @@ def violations(source, filename="<src>"):
         if isinstance(func, ast.Name) and func.id in REBINDERS:
             bad(node, f"{func.id}() can rebind names out of the guard's sight")
             continue
-        resolved = target(func)
+        resolved = _call_target(func, modules, names)
         if resolved is None or (resolved[0], resolved[1]) not in ALLOWED_STARTS:
             continue
         module, attr = resolved
@@ -530,16 +532,19 @@ def reexport_violations(sources):
 
 
 def executables_started(source):
-    """The fixed executables a source starts, as written."""
+    """The fixed executables a source starts, as written.
+
+    A call counts only when it resolves to an allowed starter through the source's imports, by the
+    same resolver violations() uses (_tracked, then _call_target): a local function or a method that
+    only shares a starter's name is not a start (runtime.py's call("GET", path) is an HTTP request).
+    """
+    tree = ast.parse(source)
+    modules, names, _prefixed, _refusals = _tracked(tree)
     started = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _call_target(node.func, modules, names) not in ALLOWED_STARTS:
             continue
-        func = node.func
-        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-        if name not in {a for _, a in ALLOWED_STARTS}:
-            continue
-        argv = node.args[0] if node.args else None
+        argv = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg == "args"), None)
         first = argv.elts[0] if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts else argv
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             started.add(first.value)
@@ -811,3 +816,24 @@ def test_a_module_reexported_across_files_is_caught():
 @pytest.mark.parametrize("label", sorted(SAFE))
 def test_the_guard_allows(label):
     assert violations(SAFE[label]) == [], label
+
+
+# The allowlist check's own proof (#563): a start counts when it resolves to an allowed starter
+# through any import form, and a call that only shares a starter's name does not count.
+STARTS = {
+    "subprocess.run": ("import subprocess\nsubprocess.run(['arp', '-a'])", {"arp"}),
+    "an aliased module": ("import subprocess as sp\nsp.Popen(('dd', 'if=x'))", {"dd"}),
+    "an imported starter": ("from subprocess import check_output\ncheck_output(['sysctl', '-n', 'x'])", {"sysctl"}),
+    "an aliased starter": ("from subprocess import call as c\nc(['journalctl'])", {"journalctl"}),
+    "args= keyword": ("import subprocess\nsubprocess.run(args=['v4l2-ctl', '--all'])", {"v4l2-ctl"}),
+    "create_subprocess_exec": ("import asyncio\nasyncio.create_subprocess_exec('ffmpeg', '-i', dev)", {"ffmpeg"}),
+    "a local function named call": ("def call(method, path):\n    return method\ncall('GET', '/status')", set()),
+    "a method named run": ("client.run(['GET', '/x'])", set()),
+    "a starter name from another module": ("from helpers import run\nrun(['GET'])", set()),
+}
+
+
+@pytest.mark.parametrize("label", sorted(STARTS))
+def test_the_allowlist_check_counts_only_real_starts(label):
+    source, expected = STARTS[label]
+    assert executables_started(source) == expected, label
