@@ -499,6 +499,8 @@ describe("profile admission — evaluates only what was hashed (coord-watch rule
     const b = await toBundle([...PILOT.slice(0, 2), { ...PILOT[2]!, payload: { passed: false } }], p);
     const payload = (b.events[2] as { payload: Record<string, unknown> }).payload;
     // Measure how many times binding reads `passed`, so the lie starts exactly after binding.
+    // LO-EV-9's binding (#341) runs no caller code either: it refuses the accessor without
+    // running its getter, so binding reads it 0 times and the lie starts at the first read.
     let reads = 0;
     Object.defineProperty(payload, "passed", { get: () => (reads++, false), enumerable: true, configurable: true });
     const probe = await verifyEvidenceSubjectBinding({
@@ -506,7 +508,8 @@ describe("profile admission — evaluates only what was hashed (coord-watch rule
       events: b.events,
       subject: { jobId: JOB, kernelId: KERNEL },
     });
-    expect(probe.ok).toBe(true);
+    expect(probe, "binding refuses data that carries code, at the event that carries it").toMatchObject({ ok: false, reason: "malformed-event", eventIndex: 2 });
+    expect(reads, "reads of the getter during binding").toBe(0);
     const readsDuringBinding = reads;
     // Now: truthful (false, as hashed) for binding's reads, then true on every later read.
     reads = 0;
@@ -1748,9 +1751,13 @@ describe("profile admission — astra pack 187: .then, .catch and .finally deliv
       delete (Object.prototype as Record<string, unknown>).then;
     }
     expect(r?.decision).toBe("admit");
-    // verifyEvidenceSubjectBinding is an async function: resolving its own promise with the answer looks `then`
-    // up once. Admission's await of that promise must add none (an await that resolves through `then` would).
-    expect([...lookups.values()]).toEqual([1]);
+    // LO-EV-9's binding (#341) answers with a frozen null-prototype object, so no inherited `then` is ever
+    // looked up on its answer: not when its own promise resolves, and not by any await of it, admission's
+    // included. A polluted Object.prototype.then cannot reach admission through binding's answer.
+    expect([...lookups.values()]).toEqual([]);
+    const answer = await verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject: SUBJECT });
+    expect(Object.getPrototypeOf(answer), "binding's answer has no prototype to inherit `then` from").toBeNull();
+    expect(Object.isFrozen(answer)).toBe(true);
   });
 
   it("awaitedHere (util/primordials.ts): awaiting it looks nothing up on the value; awaiting an ownPromise looks `then` up once", async () => {

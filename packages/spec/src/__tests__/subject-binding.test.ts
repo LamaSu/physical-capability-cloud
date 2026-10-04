@@ -3,6 +3,7 @@ import {
   EVIDENCE_SUBJECT_BINDING_CONTRACT,
   verifyEvidenceSubjectBinding,
   type EvidenceSubject,
+  type EvidenceSubjectBindingInput,
 } from "../evidence/subject-binding.js";
 import { computeLogEntryHash } from "../evidence/verifiers/log-chain.js";
 import { hashBundle, hashEvent } from "../util/canonical.js";
@@ -519,8 +520,48 @@ describe("LO-EV-9 settlement-unit and challenge binding (oracle's milestone repl
     ).toEqual({ ok: false, reason: "unit-not-committed", eventIndex: 1 });
   });
 
-  it("a subject that names no unit is unchanged: unit fields in the evidence are ignored", async () => {
+  it("E11 F1: a subject that names no unit refuses evidence scoped to one (the subject /complete and /resume-settlement build)", async () => {
+    // Before E11 this returned ok: evidence signed for U3/N3 could anchor whatever
+    // milestone a unit-less consumer settles (the legacy routes drive milestone 0).
     const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject() })).toEqual({
+      ok: false,
+      reason: "unit-not-in-subject",
+      eventIndex: 0,
+    });
+  });
+
+  it("E11 F1: a subject that names the unit but no challenge refuses evidence that carries a challenge", async () => {
+    const b = await milestoneBundle(U3, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject(U3) })).toEqual({
+      ok: false,
+      reason: "challenge-not-in-subject",
+      eventIndex: 0,
+    });
+  });
+
+  it("E11 F1: a challenge with no unit is refused by a subject that names neither", async () => {
+    const b = await milestoneBundle(undefined, NONCE_3);
+    expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject() })).toEqual({
+      ok: false,
+      reason: "challenge-not-in-subject",
+      eventIndex: 0,
+    });
+  });
+
+  it("E11 F1: one unit-scoped event is enough to refuse a unit-less subject", async () => {
+    const source = { deviceId: NODE_A, deviceType: "digital_agent" as const, kernelId: NODE_A };
+    const events = await seal([
+      { type: "execution_started", timestamp: "2026-09-24T10:00:00.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A } },
+      { type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source, payload: { jobId: JOB_A, kernelId: NODE_A, settlementUnitId: U3 } },
+    ]);
+    expect(
+      await verifyEvidenceSubjectBinding({ bundleHash: await hashBundle(events), events, subject: unitSubject() }),
+    ).toEqual({ ok: false, reason: "unit-not-in-subject", eventIndex: 1 });
+  });
+
+  it("E11 F1: unit-less evidence still binds a unit-less subject (the legacy routes keep settling it)", async () => {
+    const b = await milestoneBundle(undefined, undefined);
     expect(await verifyEvidenceSubjectBinding({ ...b, subject: unitSubject() })).toMatchObject({ ok: true });
   });
 
@@ -535,5 +576,198 @@ describe("LO-EV-9 settlement-unit and challenge binding (oracle's milestone repl
     expect(
       await verifyEvidenceSubjectBinding({ ...b, subject: { ...unitSubject(U3), challengeNonce: "nonce-3" } }),
     ).toEqual({ ok: false, reason: "malformed-subject" });
+  });
+});
+
+describe("E11 F2/F3: one read of every input, no caller code, never throws", () => {
+  it("F2: an event.hash getter cannot answer the checks with job B's hashes and the bundle with job A's", async () => {
+    // astra's reproduction: genuine A and B bundles of equal length; every B event's
+    // hash becomes a getter answering B, B, then A's. Before E11 this returned ok.
+    const A = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const B = await kernelSdkShapedBundle(JOB_B, NODE_A);
+    let reads = 0;
+    const forged = B.events.map((e, i) => {
+      let n = 0;
+      const { hash: _hash, ...rest } = e;
+      return Object.defineProperty({ ...rest }, "hash", {
+        enumerable: true,
+        get: () => {
+          reads++;
+          return ++n <= 2 ? e.hash : A.events[i]!.hash;
+        },
+      });
+    });
+    expect(
+      await verifyEvidenceSubjectBinding({ bundleHash: A.bundleHash, events: forged, subject: subject(JOB_B, NODE_A) }),
+    ).toEqual({ ok: false, reason: "malformed-event", eventIndex: 0 });
+    expect(reads).toBe(0);
+  });
+
+  it("F2: the equivalent Proxy is refused before any of its traps runs", async () => {
+    const A = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const B = await kernelSdkShapedBundle(JOB_B, NODE_A);
+    let traps = 0;
+    const forged = B.events.map((e, i) => {
+      let n = 0;
+      return new Proxy(e, {
+        get(target, key, receiver) {
+          traps++;
+          if (key === "hash") return ++n <= 2 ? e.hash : A.events[i]!.hash;
+          return Reflect.get(target, key, receiver);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          traps++;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+        ownKeys(target) {
+          traps++;
+          return Reflect.ownKeys(target);
+        },
+        getPrototypeOf(target) {
+          traps++;
+          return Reflect.getPrototypeOf(target);
+        },
+      });
+    });
+    expect(
+      await verifyEvidenceSubjectBinding({ bundleHash: A.bundleHash, events: forged, subject: subject(JOB_B, NODE_A) }),
+    ).toEqual({ ok: false, reason: "malformed-event", eventIndex: 0 });
+    expect(traps).toBe(0);
+  });
+
+  it("F2: a Proxy or accessor anywhere inside source or payload is refused without running", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    let ran = 0;
+    const counting = <T extends object>(o: T): T =>
+      new Proxy(o, {
+        get(target, key, receiver) {
+          ran++;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    const e1 = b.events[1]!;
+    const variants: unknown[] = [
+      { ...e1, payload: counting(e1.payload) },
+      { ...e1, source: counting(e1.source) },
+      { ...e1, payload: { ...e1.payload, nested: counting({ x: 1 }) } },
+      {
+        ...e1,
+        payload: Object.defineProperty({ ...e1.payload }, "jobId", {
+          enumerable: true,
+          get: () => {
+            ran++;
+            return JOB_A;
+          },
+        }),
+      },
+    ];
+    for (const variant of variants) {
+      expect(
+        await verifyEvidenceSubjectBinding({
+          bundleHash: b.bundleHash,
+          events: [b.events[0], variant, b.events[2]],
+          subject: subject(JOB_A, NODE_A),
+        }),
+      ).toEqual({ ok: false, reason: "malformed-event", eventIndex: 1 });
+    }
+    expect(ran).toBe(0);
+  });
+
+  it("F3: a Proxy whose get('type') throws resolves to malformed-event (astra's reproduction)", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const hostile = new Proxy({}, {
+      get(_target, key) {
+        if (key === "type") throw new Error("boom");
+        return undefined;
+      },
+    });
+    await expect(
+      verifyEvidenceSubjectBinding({
+        bundleHash: b.bundleHash,
+        events: [hostile, ...b.events.slice(1)],
+        subject: subject(JOB_A, NODE_A),
+      }),
+    ).resolves.toEqual({ ok: false, reason: "malformed-event", eventIndex: 0 });
+  });
+
+  it("F3: a throwing getter wherever a field is read resolves to the refusal for that part, and never runs", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    let ran = 0;
+    const thrower = () => {
+      ran++;
+      throw new Error("boom");
+    };
+    const withGetter = <T extends object>(o: T, key: PropertyKey): T =>
+      Object.defineProperty({ ...o }, key, { enumerable: true, configurable: true, get: thrower });
+    const base = { ...b, subject: subject(JOB_A, NODE_A) };
+    const indexedAccessor = Object.defineProperty([...b.events], 1, { enumerable: true, configurable: true, get: thrower });
+    const cases: Array<[unknown, Record<string, unknown>]> = [
+      [withGetter(base, "subject"), { ok: false, reason: "malformed-subject" }],
+      [{ ...base, subject: withGetter(subject(JOB_A, NODE_A), "jobId") }, { ok: false, reason: "malformed-subject" }],
+      [{ ...base, subject: withGetter(subject(JOB_A, NODE_A), "settlementUnitId") }, { ok: false, reason: "malformed-subject" }],
+      [withGetter(base, "bundleHash"), { ok: false, reason: "malformed-bundle-hash" }],
+      [withGetter(base, "events"), { ok: false, reason: "malformed-event" }],
+      [{ ...base, events: indexedAccessor }, { ok: false, reason: "malformed-event", eventIndex: 1 }],
+      [{ ...base, events: [b.events[0], withGetter(b.events[1]!, "type"), b.events[2]] }, { ok: false, reason: "malformed-event", eventIndex: 1 }],
+      [{ ...base, events: [b.events[0], withGetter(b.events[1]!, "hash"), b.events[2]] }, { ok: false, reason: "malformed-event", eventIndex: 1 }],
+      [{ ...base, events: [b.events[0], withGetter(b.events[1]!, "id"), b.events[2]] }, { ok: false, reason: "malformed-event", eventIndex: 1 }],
+      [
+        { ...base, events: [b.events[0], { ...b.events[1]!, payload: withGetter(b.events[1]!.payload, "outputHash") }, b.events[2]] },
+        { ok: false, reason: "malformed-event", eventIndex: 1 },
+      ],
+    ];
+    for (const [input, expected] of cases) {
+      await expect(verifyEvidenceSubjectBinding(input as EvidenceSubjectBindingInput)).resolves.toEqual(expected);
+    }
+    expect(ran).toBe(0);
+  });
+
+  it("F3: never throws, whatever the input", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const { proxy: revoked, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const good = subject(JOB_A, NODE_A);
+    const holed = [...b.events];
+    delete holed[1];
+    let deep: Record<string, unknown> = {};
+    for (let i = 0; i < 200_000; i++) deep = { d: deep };
+    const cases: Array<[unknown, Record<string, unknown>]> = [
+      [null, { ok: false, reason: "malformed-subject" }],
+      [42, { ok: false, reason: "malformed-subject" }],
+      [revoked, { ok: false, reason: "malformed-subject" }],
+      [new Proxy({ ...b, subject: good }, {}), { ok: false, reason: "malformed-subject" }],
+      [{ ...b, subject: new Proxy(good, {}) }, { ok: false, reason: "malformed-subject" }],
+      [{ ...b, subject: revoked }, { ok: false, reason: "malformed-subject" }],
+      [{ ...b, subject: good, events: new Proxy([...b.events], {}) }, { ok: false, reason: "malformed-event" }],
+      [{ ...b, subject: good, events: revoked }, { ok: false, reason: "malformed-event" }],
+      [{ ...b, subject: good, events: [revoked] }, { ok: false, reason: "malformed-event", eventIndex: 0 }],
+      [{ ...b, subject: good, events: holed }, { ok: false, reason: "malformed-event", eventIndex: 1 }],
+      [
+        { ...b, subject: good, events: [b.events[0], { ...b.events[1]!, payload: { ...b.events[1]!.payload, deep } }, b.events[2]] },
+        { ok: false, reason: "malformed-event", eventIndex: 1 },
+      ],
+    ];
+    for (const [input, expected] of cases) {
+      await expect(verifyEvidenceSubjectBinding(input as EvidenceSubjectBindingInput)).resolves.toEqual(expected);
+    }
+  });
+
+  it("the verified events are frozen copies, and the result is a null-prototype object", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const r = await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_A, NODE_A) });
+    if (!r.ok) throw new Error(`expected ok, got ${r.reason}`);
+    expect(Object.getPrototypeOf(r)).toBeNull();
+    expect(Object.isFrozen(r.events)).toBe(true);
+    for (let i = 0; i < r.events.length; i++) {
+      const e = r.events[i]! as unknown as Record<string, unknown>;
+      expect(e).not.toBe(b.events[i]);
+      expect(Object.isFrozen(e)).toBe(true);
+      expect(Object.isFrozen(e.payload)).toBe(true);
+      expect(Object.getPrototypeOf(e.payload)).toBeNull();
+    }
+    expect(JSON.parse(JSON.stringify(r.events))).toEqual(JSON.parse(JSON.stringify(b.events)));
+    const refused = await verifyEvidenceSubjectBinding({ ...b, subject: subject(JOB_B, NODE_A) });
+    expect(Object.getPrototypeOf(refused)).toBeNull();
+    expect(Object.isFrozen(refused)).toBe(true);
   });
 });
