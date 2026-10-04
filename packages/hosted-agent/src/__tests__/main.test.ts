@@ -141,7 +141,10 @@ describe("the attempt sink only claims delivery when the receiver echoes the rep
     consent: { transcript: false },
   } as never;
 
-  it("Q6: through master's REAL feedbackRoutes, the report is NOT accepted (rewritten to kind:\"feedback\"; no sessionId echo)", async () => {
+  // Master's /api/feedback became the attempt.v1 receiver when painpoints' #458 merged (10/03): it now
+  // answers with the report's sessionId, so the sink rightly claims delivery. Before #458 this test pinned
+  // the opposite (master's generic route rewrote the report and echoed nothing).
+  it("Q6: through master's REAL feedbackRoutes (#458's attempt.v1 receiver), the receiver echoes the sessionId and the report IS accepted", async () => {
     // First choice per spec: the workspace import (`@pcc/gateway`) does not re-export
     // feedbackRoutes from its package entry point (checked directly: only createGateway,
     // db, sse, session, chain-client, escrow-client and agent-bridge symbols are exported).
@@ -159,9 +162,13 @@ describe("the attempt sink only claims delivery when the receiver echoes the rep
     await app.listen({ host: "127.0.0.1", port: 0 });
     try {
       const port = (app.server.address() as { port: number }).port;
+      // The receiver's own answer is what the sink trusts: prove the echo directly first.
+      const direct = await fetch(`http://127.0.0.1:${port}/api/feedback`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(REPORT) });
+      expect(direct.ok).toBe(true);
+      expect(((await direct.json()) as { sessionId?: unknown }).sessionId).toBe(REPORT.sessionId);
       const lines: string[] = [];
       await attemptSink(`http://127.0.0.1:${port}`, (l) => lines.push(l))(REPORT);
-      expect(lines.some((l) => l.includes("attempt-report-not-accepted"))).toBe(true);
+      expect(lines.some((l) => l.includes("attempt-report-not-accepted"))).toBe(false);
     } finally {
       await app.close();
     }

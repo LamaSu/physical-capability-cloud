@@ -133,7 +133,10 @@ describe("historical never entries (prior rounds), kept as the explicit belt-and
     "kernel_heartbeat", "operator_heartbeat", "operator_poll_jobs", "operator_push_evidence",
     "provision_api_key", "list_api_keys", "pcc_generate_ui", "delete_operator_channel", "fund_escrow",
   ])("%s is never offered", (name) => {
-    expect(level(name)).toBe("never");
+    // The policy refuses the name itself, whatever the package version: a name the current package no
+    // longer carries (2.19.3 dropped pcc_generate_ui) is checked through a synthetic spec instead.
+    const t = pkg.tools.find((x) => x.name === name);
+    expect(classify(t ? spec(t) : { name, method: "POST", path: `/api/${name}` })).toBe("never");
   });
 });
 
