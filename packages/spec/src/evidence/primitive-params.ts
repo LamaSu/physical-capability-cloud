@@ -21,6 +21,8 @@
  * a polluted prototype can't add a field and a getter can't answer differently on a second read.
  */
 
+import { KNOWN_UNITS } from "../csd/composition.js";
+
 /** One param's closed shape. */
 export type ParamKind =
   | { readonly kind: "enum"; readonly values: readonly string[] }
@@ -124,6 +126,8 @@ export const PRIMITIVE_PARAMS: Readonly<Record<string, Readonly<Record<string, P
     disclosure: optional(enumOf("full", "redacted-commit")),
     minCadenceMs: optional({ kind: "integer", min: 1, max: 86_400_000 }),
     alarmPolicy: optional(enumOf("none-critical", "declared")),
+    // A supporting log (not the success signal), as the print-and-mail CSD marks printer_job_verified (8d7fc56e).
+    role: optional(enumOf("supporting")),
   },
   "telemetry.envelope_conformance": {
     envelope: optional({
@@ -137,6 +141,8 @@ export const PRIMITIVE_PARAMS: Readonly<Record<string, Readonly<Record<string, P
             kind: "object",
             fields: {
               metric: required(id),
+              // A unit from the composition unit table, as the safety-envelope compiler writes it.
+              unit: optional({ kind: "enum", values: KNOWN_UNITS }),
               min: optional({ kind: "number", min: -1e12, max: 1e12 }),
               max: optional({ kind: "number", min: -1e12, max: 1e12 }),
               ratioBands: optional({ kind: "array", maxItems: 16, items: { kind: "number", min: -1e12, max: 1e12 } }),

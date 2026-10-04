@@ -8,6 +8,7 @@
  */
 
 import { z } from "zod";
+import { isParamIdentifier, validatePrimitiveParams } from "../evidence/primitive-params.js";
 import { CompositionBlockSchema } from "./composition.js";
 
 // ── Pricing Impact ─────────────────────────────────────────────────
@@ -144,13 +145,30 @@ export type CsdInvariant = z.infer<typeof CsdInvariantSchema>;
 export const CsdEvidencePrimitiveRefSchema = z.object({
   /** Short-form primitive id, e.g. "capture.photo_nonced". */
   id: z.string().min(1),
-  /** Per-primitive params (minClass, integrityGrade, channel, …). */
+  /**
+   * Per-primitive params (minClass, integrityGrade, channel, …). Closed per primitive: see
+   * `refineClosedPrimitiveRef` and evidence/primitive-params.ts (N128).
+   */
   params: z.record(z.unknown()).optional(),
-  /** Bundle/WorkSchema field that carries this primitive's instance. */
-  bind: z.string().optional(),
+  /** Bundle/WorkSchema field that carries this primitive's instance: an identifier, never free text (N128). */
+  bind: z.string().refine(isParamIdentifier, { message: "bind must be an identifier" }).optional(),
 });
 
 export type CsdEvidencePrimitiveRef = z.infer<typeof CsdEvidencePrimitiveRefSchema>;
+
+/**
+ * The closed-params check for a primitive ref (N128): its id is a registry primitive, and its params are
+ * exactly that primitive's closed shape (evidence/primitive-params.ts). The plain object above stays
+ * extendable, so apply this with superRefine wherever a ref is parsed.
+ */
+export function refineClosedPrimitiveRef(ref: { id: string; params?: unknown }, ctx: z.RefinementCtx): void {
+  const result = validatePrimitiveParams(ref.id, ref.params);
+  if (result.ok) return;
+  for (const issue of result.issues) ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue, path: ["params"] });
+}
+
+/** A primitive ref as a document carries it: no unknown key, and closed params (N128). */
+export const ClosedCsdEvidencePrimitiveRefSchema = CsdEvidencePrimitiveRefSchema.strict().superRefine(refineClosedPrimitiveRef);
 
 export const CsdEvidenceTierSchema = z.object({
   description: z.string(),
@@ -160,7 +178,7 @@ export const CsdEvidenceTierSchema = z.object({
    * per the eligibility rule). Present ⇒ the tier references bounded primitives
    * by id, which is what makes it tier-N eligible.
    */
-  primitives: z.array(CsdEvidencePrimitiveRefSchema).optional(),
+  primitives: z.array(ClosedCsdEvidencePrimitiveRefSchema).optional(),
 });
 
 export type CsdEvidenceTier = z.infer<typeof CsdEvidenceTierSchema>;

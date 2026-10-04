@@ -34,9 +34,9 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
   "capture.photo_nonced": { media: "photo", minClass: "CC2", nonceType: "qr" },
   "telemetry.gps_trail": { integrityGrade: "checked", maxGapSeconds: 30, plausibility: { maxSpeedKph: 120 } },
   "confirm.target_system": { channel: "webhook", matcher: "order-status-shipped" },
-  "machine.execution_log": { logKind: "job_log", disclosure: "full", minCadenceMs: 1000, alarmPolicy: "declared" },
+  "machine.execution_log": { logKind: "job_log", disclosure: "full", minCadenceMs: 1000, alarmPolicy: "declared", role: "supporting" },
   "telemetry.envelope_conformance": {
-    envelope: [{ metric: "spindle_temp_c", min: 10, max: 90, ratioBands: [0.5, 1.5] }],
+    envelope: [{ metric: "spindle_temp_c", unit: "degC", min: 10, max: 90, ratioBands: [0.5, 1.5] }],
     source: "stream",
     severityFloor: "critical",
     materialParam: "pla",
@@ -117,7 +117,8 @@ describe("validatePrimitiveParams: closed shapes only", () => {
     expect(validatePrimitiveParams("approval.payer", { claimIds: new Array(65).fill("c") }).ok).toBe(false);
     expect(validatePrimitiveParams("telemetry.envelope_conformance", { envelope: "builtin-defaults" })).toEqual({ ok: true });
     expect(validatePrimitiveParams("telemetry.envelope_conformance", { envelope: "custom" }).ok).toBe(false);
-    expect(validatePrimitiveParams("telemetry.envelope_conformance", { envelope: [{ metric: "m", unit: "c" }] }).ok).toBe(false);
+    expect(validatePrimitiveParams("telemetry.envelope_conformance", { envelope: [{ metric: "m", unit: "furlongs" }] }).ok).toBe(false);
+    expect(validatePrimitiveParams("telemetry.envelope_conformance", { envelope: [{ metric: "m", unit: "degC", note: "x" }] }).ok).toBe(false);
   });
 });
 

@@ -30,9 +30,11 @@
 import { z } from "zod";
 import {
   CsdEvidencePrimitiveRefSchema,
+  refineClosedPrimitiveRef,
   type CsdEvidencePrimitiveRef,
   type CsdEvidenceTier,
 } from "../csd/schema.js";
+import { isParamIdentifier } from "./primitive-params.js";
 import { computeCsdEligibility } from "./eligibility.js";
 import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "./primitives.js";
 
@@ -43,15 +45,18 @@ import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "./primitives.js"
  * (`{ id, params?, bind? }`) plus supply-side provenance/demonstration.
  */
 export const EmitterDeclSchema = CsdEvidencePrimitiveRefSchema.extend({
-  /** Provenance: adapter command / EvidenceEventType / peripheral deviceId. */
-  via: z.string().optional(),
+  /** Provenance: adapter command / EvidenceEventType / peripheral deviceId, as an identifier (N128). */
+  via: z.string().refine(isParamIdentifier, { message: "via must be an identifier" }).optional(),
   /**
    * Demonstration flag — set ONLY by test-job / prove after a real run produced
    * this primitive, NEVER by the author. Declaration ≠ demonstration ≠
    * settlement; this is the middle checkpoint. (Consumers land in a follow-up.)
    */
   demonstrated: z.boolean().optional(),
-});
+})
+  // A public declaration: no unknown key, and closed params (N128).
+  .strict()
+  .superRefine(refineClosedPrimitiveRef);
 export type EmitterDecl = z.infer<typeof EmitterDeclSchema>;
 
 /** What a manifest attaches to. Subject-flexible: adapter | device | process. */
@@ -70,9 +75,9 @@ export const EvidenceEmitterManifestSchema = z.object({
   /** Which vocabulary version the claims were authored against. */
   vocabVersion: z.number().int().nonnegative(),
   emits: z.array(EmitterDeclSchema),
-  /** Optional draft primitive proposals → the growth loop (consumer deferred). */
-  proposals: z.array(z.unknown()).optional(),
-});
+  // `proposals` (draft primitive proposals for the growth loop) left the PUBLIC manifest (N128): it was an
+  // open array, and its consumer is deferred. Proposals belong in a non-public channel when that lands.
+}).strict();
 export type EvidenceEmitterManifest = z.infer<typeof EvidenceEmitterManifestSchema>;
 
 // ── Bridge: emitter manifest → CSD evidence tier map ────────────────
