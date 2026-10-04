@@ -240,7 +240,12 @@ export class PipelineTelemetryService {
     return [...this.events.keys()];
   }
 
-  getStats(): TelemetryStats {
+  /**
+   * Aggregate statistics. With `include`, only the jobs it accepts count, events per minute
+   * included (board N122: a caller's stats never count another party's jobs). Without it, every
+   * job counts: the admin's view.
+   */
+  getStats(include?: (jobId: string) => boolean): TelemetryStats {
     let totalJobs = 0;
     let activeJobs = 0;
     let totalDuration = 0;
@@ -254,8 +259,8 @@ export class PipelineTelemetryService {
       byPhase[phase] = { total: 0, failed: 0 };
     }
 
-    for (const evts of this.events.values()) {
-      if (evts.length === 0) continue;
+    for (const [jobId, evts] of this.events) {
+      if (evts.length === 0 || (include && !include(jobId))) continue;
       totalJobs++;
       totalEvents += evts.length;
 
@@ -279,8 +284,8 @@ export class PipelineTelemetryService {
       }
     }
 
-    // Events/minute: average over last 5 filled buckets
-    const bucketValues = [...this.minuteBuckets.values()];
+    // Events/minute: average over the filled minute buckets (the last 10 minutes)
+    const bucketValues = [...(include ? this._minuteBucketsOf(include) : this.minuteBuckets).values()];
     const eventsPerMinute =
       bucketValues.length > 0
         ? bucketValues.reduce((a, b) => a + b, 0) / bucketValues.length
@@ -298,6 +303,24 @@ export class PipelineTelemetryService {
   }
 
   // ── Private ────────────────────────────────────────────────────────────
+
+  /**
+   * The minute buckets for the accepted jobs' stored events, over the same window the global
+   * buckets keep: within 10 minutes of the newest bucket.
+   */
+  private _minuteBucketsOf(include: (jobId: string) => boolean): Map<number, number> {
+    const newest = Math.max(...this.minuteBuckets.keys());
+    const buckets = new Map<number, number>();
+    if (!Number.isFinite(newest)) return buckets;
+    for (const [jobId, evts] of this.events) {
+      if (!include(jobId)) continue;
+      for (const evt of evts) {
+        const bucket = Math.floor(Date.parse(evt.timestamp) / 60_000);
+        if (Number.isFinite(bucket) && newest - bucket <= 10) buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+      }
+    }
+    return buckets;
+  }
 
   private _addEvent(jobId: string, event: TelemetryEvent): void {
     let buf = this.events.get(jobId);
