@@ -217,10 +217,7 @@ function fieldIssue(key: string, v: unknown, context: CheckContext): string | nu
  * otherwise the first reason it is not one. Never runs a getter on the event's
  * fields, its source or its payload, and never throws for a plain-data input.
  */
-export function kernelPullCaptureIssue(
-  event: { type: string; timestamp?: unknown; source?: unknown; payload?: unknown },
-  jobId: string,
-): string | null {
+export function kernelPullCaptureIssue(event: unknown, jobId: string): string | null {
   if (event === null || typeof event !== "object") return `the event ${show(event)} is not an object`;
   const proxy = proxyIssue(event, "the event");
   if (proxy !== null) return proxy;

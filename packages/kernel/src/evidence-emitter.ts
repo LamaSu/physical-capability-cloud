@@ -132,7 +132,7 @@ function ownDataValue(target: unknown, key: string): unknown {
 const UNREADABLE: object = ObjectCreate(null) as object;
 
 /** `target`'s own data value at `key`; UNREADABLE when `target` is a Proxy or `key` an accessor; undefined when absent or `target` is no object. */
-function ownField(target: unknown, key: string): unknown {
+function ownField(target: unknown, key: PropertyKey): unknown {
   if (target === null || typeof target !== "object") return undefined;
   if (IsProxy(target)) return UNREADABLE;
   const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
@@ -141,12 +141,45 @@ function ownField(target: unknown, key: string): unknown {
 }
 
 /**
+ * `value`'s own elements, in index order with holes left out, read through their descriptors: no
+ * getter runs, and no element a prototype serves is read. Null when `value` is not an array, is a
+ * Proxy, or has an accessor among its length and elements (astra pack 309).
+ */
+function ownElements(value: unknown): unknown[] | null {
+  if (!ArrayIsArray(value) || IsProxy(value)) return null;
+  const length = ownField(value, "length");
+  if (typeof length !== "number") return null;
+  const out: unknown[] = [];
+  for (let i = 0; i < length; i++) {
+    const descriptor = ObjectGetOwnPropertyDescriptor(value, i);
+    if (descriptor === undefined) continue;
+    if (!isDataDescriptor(descriptor)) return null;
+    append(out, descriptor.value);
+  }
+  return out;
+}
+
+/** A requirement's required-type groups as own data: lists of strings, or null when any part is not (fail closed). */
+function ownGroups(value: unknown): string[][] | null {
+  const groups = ownElements(value);
+  if (groups === null) return null;
+  const out: string[][] = [];
+  for (let g = 0; g < groups.length; g++) {
+    const group = ownElements(listAt(groups, g));
+    if (group === null) return null;
+    for (let k = 0; k < group.length; k++) if (typeof listAt(group, k) !== "string") return null;
+    append(out, group as string[]);
+  }
+  return out;
+}
+
+/**
  * Whether spec's isFabricated takes `event` as fabricated, from the event's OWN `source.simulated`
  * and `payload.mock`, presented on null-prototype records: a `simulated` or `mock` a prototype serves
  * is not the event's, and no getter runs. An accessor or a Proxy on the way fails closed: the event
  * is taken as fabricated, so it never counts toward a tier.
  */
-function fabricated(event: EvidenceEvent): boolean {
+function fabricated(event: unknown): boolean {
   const source = ownField(event, "source");
   const payload = ownField(event, "payload");
   const simulated = ownField(source, "simulated");
@@ -208,8 +241,8 @@ class EvidenceInputError extends ErrorCtor {
   }
 }
 
-/** Whether `value` is one of the input check's refusals. */
-function isEvidenceInputError(value: unknown): value is EvidenceInputError {
+/** Whether `value` is one of the input check's refusals: a boolean, not a type predicate, so the caught value stays unknown. */
+function isEvidenceInputError(value: unknown): boolean {
   return typeof value === "object" && value !== null && WeakSetPrototypeHas(InputErrors, value);
 }
 
@@ -508,7 +541,8 @@ export class EvidenceEmitter {
   /** console.warn as it was when the emitter was built, bound to console: the test-only signer's warning. */
   readonly #warn: (...data: unknown[]) => void;
   /** Optional IPFS storage service — when set, bundles are archived after finalization */
-  #storage: EvidenceStorageService | null = null;
+  /** The storage service as setStorageService was handed it: kept only to hand back (getStorageService), never read here. */
+  #storage: unknown = null;
   /** The storage service's isReady and archiveBundle, bound to it when it was attached. */
   #storageIsReady: (() => boolean) | null = null;
   #storageArchive: ((bundle: EvidenceBundle) => Promise<ArchiveResult>) | null = null;
@@ -554,7 +588,7 @@ export class EvidenceEmitter {
 
   /** Get the attached storage service (if any) */
   getStorageService(): EvidenceStorageService | null {
-    return this.#storage;
+    return this.#storage as EvidenceStorageService | null;
   }
 
   /** Get the IPFS archive result from the most recent finalizeBundle call */
@@ -570,9 +604,10 @@ export class EvidenceEmitter {
   registerStep(jobId: string, stepId: string, assuranceTier: AssuranceTier, unit?: StepUnitContext): void {
     // Each of the unit's two fields is read once, checked and kept: the record never holds the caller's object.
     let unitCopy: StepUnitContext | undefined;
-    if (unit) {
-      const settlementUnitId: unknown = unit.settlementUnitId;
-      const challengeNonce: unknown = unit.challengeNonce;
+    if (unit !== undefined && unit !== null) {
+      // Own data only: an accessor (whose getter never runs), a Proxy or an inherited field fails the check below.
+      const settlementUnitId = ownField(unit as unknown, "settlementUnitId");
+      const challengeNonce = ownField(unit as unknown, "challengeNonce");
       if (!(isUnitField(settlementUnitId) && isUnitField(challengeNonce))) {
         throw new ErrorCtor("registerStep: settlementUnitId and challengeNonce must be 0x + 64 lowercase hex");
       }
@@ -793,52 +828,63 @@ export class EvidenceEmitter {
     requirements: TierEvidenceRequirements[] = DefaultTierRequirements,
     options: { jobId?: string } = {},
   ): { met: boolean; missing: string[] } {
-    let tierReq: TierEvidenceRequirements | undefined;
-    for (let r = 0; r < requirements.length; r++) {
-      // A hole is skipped, as Array.prototype.find skipped it (astra pack 299 MEDIUM).
-      if (!hasOwn(requirements, r)) continue;
-      const candidate = listAt(requirements, r)!;
-      if (candidate.tier === tier) {
-        tierReq = candidate;
-        break;
-      }
+    // Every field of the caller's requirements, events and options is read as their OWN data, through
+    // descriptors: no getter runs, and nothing written on a prototype after load is read (astra pack
+    // 309). A Proxy, an accessor or a field of the wrong shape fails closed: the tier is not met.
+    const requirementList = ownElements(requirements as unknown);
+    if (requirementList === null) return { met: false, missing: ["the tier requirements are not plain data"] };
+    let tierReq: { groups: string[][]; minimumEvents: number } | undefined;
+    for (let r = 0; r < requirementList.length; r++) {
+      const candidate = listAt(requirementList, r);
+      const candidateTier = ownField(candidate, "tier");
+      if (candidateTier === UNREADABLE) return { met: false, missing: ["a tier requirement is not plain data"] };
+      if (candidateTier !== tier) continue;
+      const groups = ownGroups(ownField(candidate, "requiredEventTypes"));
+      const minimumEvents = ownField(candidate, "minimumEvents");
+      if (groups === null || typeof minimumEvents !== "number") return { met: false, missing: [`the requirements for tier ${tier} are not plain data`] };
+      tierReq = { groups, minimumEvents };
+      break;
     }
-    if (!tierReq) {
+    if (tierReq === undefined) {
       return { met: false, missing: [`No requirements defined for tier ${tier}`] };
     }
 
-    // Each event's type is read once, and the same value is used to classify it
-    // and to count it. A camera event gets the reason it does not count (null
-    // when it does). These arrays are built by defining their elements and read
-    // by index: no [[Set]] and no Array.prototype method, so no setter or method
-    // put on Array.prototype runs (astra packs 158, 277). A hole in `events` is
-    // skipped, as map skipped it.
-    const jobId = options?.jobId ?? "";
-    const assessed: Array<{ event: EvidenceEvent; type: string; cameraIssue: string | null }> = [];
-    for (let i = 0; i < events.length; i++) {
-      if (!hasOwn(events, i)) continue;
-      const event = listAt(events, i)!;
-      const type = event.type;
-      const cameraIssue = includesValue(CameraTypes, type) ? KernelPullCaptureIssue(event, jobId) : null;
+    // Each event's type is read once, as its own string, and the same value is used to classify it
+    // and to count it. A camera event gets the reason it does not count (null when it does); an event
+    // whose type is not its own string never counts and is named. These arrays are built by defining
+    // their elements and read by index: no [[Set]] and no Array.prototype method, so no setter or
+    // method put on Array.prototype runs (astra packs 158, 277). A hole in `events` is skipped, as map
+    // skipped it.
+    const jobIdField = ownField(options as unknown, "jobId");
+    const jobId = typeof jobIdField === "string" ? jobIdField : "";
+    const eventList = ownElements(events as unknown);
+    if (eventList === null) return { met: false, missing: ["the events are not plain data"] };
+    const assessed: Array<{ event: unknown; type: string | null; cameraIssue: string | null }> = [];
+    for (let i = 0; i < eventList.length; i++) {
+      const event = listAt(eventList, i);
+      const typeField = ownField(event, "type");
+      const type = typeof typeField === "string" ? typeField : null;
+      const cameraIssue = type !== null && includesValue(CameraTypes, type) ? KernelPullCaptureIssue(event, jobId) : null;
       append(assessed, { event, type, cameraIssue });
     }
     const countedTypes: string[] = [];
     for (let i = 0; i < assessed.length; i++) {
       const entry = listAt(assessed, i)!;
-      if (entry.cameraIssue === null && !fabricated(entry.event)) append(countedTypes, entry.type);
+      if (entry.type !== null && entry.cameraIssue === null && !fabricated(entry.event)) append(countedTypes, entry.type);
     }
 
     const missing: string[] = [];
     // At least one event type from each group must be present.
-    const groups = tierReq.requiredEventTypes;
+    const groups = tierReq.groups;
     for (let g = 0; g < groups.length; g++) {
-      if (!hasOwn(groups, g)) continue;
       const group = listAt(groups, g)!;
       if (!someIncluded(group, countedTypes)) append(missing, `Missing one of: ${joinGroup(group, " | ")}`);
     }
     for (let i = 0; i < assessed.length; i++) {
       const entry = listAt(assessed, i)!;
-      if (entry.cameraIssue !== null) {
+      if (entry.type === null) {
+        append(missing, "an event whose type is not its own string (an accessor, a Proxy, an inherited or a missing field) does not count");
+      } else if (entry.cameraIssue !== null) {
         append(missing, `${entry.type} from ${deviceLabel(entry.event)}: not an LO-SE-1 capture for this job (${entry.cameraIssue})`);
       }
     }
