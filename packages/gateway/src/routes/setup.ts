@@ -21,6 +21,7 @@ import { isExecutingAdapter } from "../facades/job.facade.js";
 import type { KernelConfig, DeviceConfig, AdapterType, DeviceRole } from "@pcc/kernel";
 import { z } from "zod";
 import { EmitterDeclSchema, type EmitterDecl } from "@pcc/spec";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 // ---------------------------------------------------------------------------
 // Valid adapter types and device roles
@@ -601,6 +602,11 @@ export async function setupRoutes(app: FastifyInstance) {
         }
         validatedEmits = parsed.data;
       }
+
+      // N31c: a device is registered on a kernel: the kernel's own principal, its proven wallet or
+      // the admin. Any key could register devices on any operator's kernel.
+      const refusal = refuseKernelRequest(req, String(kernelId), "operate");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       try {
         const repos = getRepos();

@@ -5,6 +5,7 @@ import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/inde
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 // ── POST /api/capabilities — accepted top-level body fields ─────────────────
 //
@@ -723,10 +724,15 @@ export async function capabilityRoutes(app: FastifyInstance) {
    * Returns 500 on DB failure with { error, message }.
    */
   app.post<{ Body: CreateCapabilityInput }>("/api/capabilities", async (req, reply) => {
-    const { kernelId, type } = req.body;
-    if (!kernelId || !type) {
+    const { kernelId, type } = req.body ?? ({} as CreateCapabilityInput);
+    if (!kernelId || !type || typeof kernelId !== "string") {
       return reply.code(400).send({ error: "kernelId and type required" });
     }
+    // N31c (#579 stacked; the steward's #6540 ruling): a capability is published on a kernel, so
+    // only the kernel's own principal, its proven operator wallet or the admin may create one. N43
+    // closed only the anonymous path; any key could publish on any operator's kernel.
+    const refusal = refuseKernelRequest(req, kernelId, "operate");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const bodyKeys = Object.keys(req.body ?? {});
     const result = await facade.create(req.body);
     if (!result.success) {
