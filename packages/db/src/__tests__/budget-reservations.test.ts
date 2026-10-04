@@ -21,6 +21,7 @@ import { acceptedDealPreimage, canonicalize, compileAcceptedPlan, type AcceptedP
 import { createStore } from "../index.js";
 import {
   BUDGET_RESERVATIONS_DDL,
+  BUDGET_RESERVATIONS_SCHEMA_VERSION,
   BudgetReservationStore,
   MAX_DEAL_PREIMAGE_BYTES,
   MAX_RESERVATION_LIFETIME_SEC,
@@ -569,6 +570,44 @@ describe("H3: migration 0004 is the runtime DDL, and a table of another shape is
     held.prepare("INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, expires_at, state, created_at) VALUES ('x', 'p', 'w', 'USDC', '1', 'p', 'r', 2, 'issued', 1)").run();
     expect(() => ensureBudgetReservationsSchema(held)).toThrow(/holds rows but its recorded schema version is missing/);
     expect(held.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 1 }); // nothing dropped
+  });
+
+  // Pack 92 (MEDIUM): the reviewer's reproduction. Run directly against an existing older table, the DDL used
+  // to stamp it with the current version, and the guarded path then trusted the false record.
+  const versionOf = (db: Database.Database): unknown =>
+    (db.prepare("SELECT version FROM pcc_schema_versions WHERE object = 'budget_reservations'").get() as { version: unknown } | undefined)?.version;
+  it.each([
+    ["BUDGET_RESERVATIONS_DDL", () => BUDGET_RESERVATIONS_DDL],
+    ["migration 0004", () => readFileSync(SQL_FILE, "utf8")],
+  ])("pack 92 MEDIUM: %s run directly on an existing, populated older table certifies nothing, and the boot still refuses it", (_label, ddl) => {
+    const held = new Database(":memory:");
+    held.exec(OLD_0004);
+    held.prepare("INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, expires_at, state, created_at) VALUES ('x', 'p', 'w', 'USDC', '1', 'p', 'r', 2, 'issued', 1)").run();
+    held.exec(ddl());
+    expect(versionOf(held)).toBeUndefined();
+    const cols = (held.prepare("PRAGMA table_info(budget_reservations)").all() as Array<{ name: string }>).map((c) => c.name);
+    expect(cols).not.toContain("consumed_deal_json");
+    expect(() => ensureBudgetReservationsSchema(held)).toThrow(/holds rows but its recorded schema version is missing/);
+    expect(held.prepare("SELECT count(*) AS n FROM budget_reservations").get()).toEqual({ n: 1 });
+  });
+
+  it("pack 92 MEDIUM: a v1 table (the same column names, id nullable) recorded as v1 is never re-stamped v2 by the DDL", () => {
+    const v1 = new Database(":memory:");
+    v1.exec(BUDGET_RESERVATIONS_DDL.replace("id TEXT NOT NULL PRIMARY KEY", "id TEXT PRIMARY KEY"));
+    v1.exec("UPDATE pcc_schema_versions SET version = 1 WHERE object = 'budget_reservations'");
+    v1.prepare("INSERT INTO budget_reservations (id, principal, payer_address, currency, max_amount_base_units, purpose, request_id, expires_at, state, created_at) VALUES ('x', 'p', 'w', 'USDC', '1', 'p', 'r', 2, 'issued', 1)").run();
+    v1.exec(BUDGET_RESERVATIONS_DDL);
+    expect(versionOf(v1)).toBe(1);
+    expect(() => ensureBudgetReservationsSchema(v1)).toThrow(/holds rows but its recorded schema version is 1/);
+  });
+
+  it("pack 92 MEDIUM: the run that creates the table records its version, and a later run keeps that record", () => {
+    const db = new Database(":memory:");
+    db.exec(BUDGET_RESERVATIONS_DDL);
+    expect(versionOf(db)).toBe(BUDGET_RESERVATIONS_SCHEMA_VERSION);
+    db.exec(BUDGET_RESERVATIONS_DDL);
+    expect(versionOf(db)).toBe(BUDGET_RESERVATIONS_SCHEMA_VERSION);
+    expect(db.prepare("SELECT count(*) AS n FROM pcc_schema_versions").get()).toEqual({ n: 1 });
   });
 
   it("createStore(:memory:) creates the table and its guards, and running the migration again changes nothing", () => {

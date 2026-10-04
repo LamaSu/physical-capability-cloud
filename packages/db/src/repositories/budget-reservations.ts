@@ -181,7 +181,8 @@ const TABLE = `budget_reservations (
     )`;
 
 /**
- * The schema's version, recorded in `pcc_schema_versions` by the DDL itself. `ensureBudgetReservationsSchema`
+ * The schema's version, recorded in `pcc_schema_versions` by the DDL, in the same run that creates the table, and
+ * never over a table that already exists. `ensureBudgetReservationsSchema`
  * trusts this record, never the table's SQL text: two texts can describe one schema (astra, round 2 of R13).
  * Bump it whenever TABLE, or anything the store relies on, changes. v1 was 45d0cde3; v2 adds `id NOT NULL`
  * and the insert guard that refuses a reused id.
@@ -189,12 +190,18 @@ const TABLE = `budget_reservations (
 export const BUDGET_RESERVATIONS_SCHEMA_VERSION = 2;
 
 /**
- * The runtime DDL: the version table, the table, its indexes, its guard triggers and the version record. `ensureBudgetReservationsSchema` runs
+ * The runtime DDL: the version table, the version record, the table, its indexes and its guard triggers. `ensureBudgetReservationsSchema` runs
  * it (so does `migrateDatabase`), and migrations/0004_budget_reservations.sql is this, statement for
  * statement. The triggers hold no data, so they are dropped and recreated on every run.
+ *
+ * The version record is written only by the run that CREATES the table (pack 92, MEDIUM): `CREATE TABLE IF
+ * NOT EXISTS` keeps an existing table as it is, so stamping after it would certify a table of any age. An
+ * existing table is never stamped here; `ensureBudgetReservationsSchema` alone decides about it.
  */
 export const BUDGET_RESERVATIONS_DDL = `
     CREATE TABLE IF NOT EXISTS pcc_schema_versions (object TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL);
+    INSERT OR REPLACE INTO pcc_schema_versions (object, version) SELECT 'budget_reservations', ${BUDGET_RESERVATIONS_SCHEMA_VERSION}
+      WHERE NOT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'budget_reservations');
     CREATE TABLE IF NOT EXISTS ${TABLE};
     CREATE INDEX IF NOT EXISTS budget_reservations_request_idx ON budget_reservations(request_id, state);
     CREATE INDEX IF NOT EXISTS budget_reservations_parent_idx ON budget_reservations(parent_reservation_id, parent_unit);
@@ -223,7 +230,6 @@ export const BUDGET_RESERVATIONS_DDL = `
     BEGIN
       SELECT RAISE(ABORT, 'budget_reservations: a reservation is never deleted');
     END;
-    INSERT OR REPLACE INTO pcc_schema_versions (object, version) VALUES ('budget_reservations', ${BUDGET_RESERVATIONS_SCHEMA_VERSION});
 `;
 
 /**
