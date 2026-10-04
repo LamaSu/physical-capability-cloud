@@ -409,3 +409,14 @@ describe("astra pack 299 HIGH: nothing replaced after load changes kernelPullCap
     expect(hostile.calls, "calls of what was replaced").toBe(0);
   });
 });
+
+describe("astra pack 309 LOW: the image-hash check answers as the former RegExp did, a final line terminator included", () => {
+  it("refuses a hash followed by a line terminator, as /^sha256:[0-9a-f]{64}$/ refused it ($ without the m flag matches only at the end of the input)", () => {
+    const former = /^sha256:[0-9a-f]{64}$/;
+    for (const terminator of ["", "\n", "\r", "\r\n", "\u2028", "\u2029"]) {
+      const imageHash = `${HASH}${terminator}`;
+      const issue = kernelPullCaptureIssue(edited((p) => (p.imageHash = imageHash)), JOB);
+      expect(issue === null, JSON.stringify(imageHash)).toBe(former.test(imageHash));
+    }
+  });
+});
