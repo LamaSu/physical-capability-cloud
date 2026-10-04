@@ -52,10 +52,25 @@ export const StringCtor = String;
 const ObjectPrototypeHasOwnProperty = uncurryThis(Object.prototype.hasOwnProperty);
 const StringPrototypeTrim = uncurryThis(String.prototype.trim);
 const StringPrototypeCharCodeAt = uncurryThis(String.prototype.charCodeAt);
+const StringPrototypeCharAt = uncurryThis(String.prototype.charAt) as (s: string, i: number) => string;
 
 /** An own property check that consults no prototype. */
 export function hasOwn(o: object, key: PropertyKey): boolean {
   return ObjectPrototypeHasOwnProperty(o, key);
+}
+
+/**
+ * The element of `list` at `index` if `list` OWNS it, else undefined (astra pack 291). A hole, or an
+ * index past the end, never continues to Array.prototype, where code running after load could plant
+ * an element or a getter.
+ */
+export function listAt<T>(list: readonly T[], index: number): T | undefined {
+  return hasOwn(list, index) ? list[index] : undefined;
+}
+
+/** The code unit of `s` at `i` as a one-character string, or "" past either end: String.prototype.charAt as it was at load. */
+export function charAt(s: string, i: number): string {
+  return StringPrototypeCharAt(s, i);
 }
 
 /** A data-property descriptor with a null prototype, so no inherited `get` or `set` is read as its own. */
@@ -84,19 +99,19 @@ export function newList<T>(length: number): T[] {
 }
 
 export function includesValue(list: readonly unknown[], x: unknown): boolean {
-  for (let i = 0; i < list.length; i++) if (list[i] === x) return true;
+  for (let i = 0; i < list.length; i++) if (listAt(list, i) === x) return true;
   return false;
 }
 
 export function mapList<T, U>(list: readonly T[], f: (x: T, i: number) => U): U[] {
   const out = newList<U>(list.length);
-  for (let i = 0; i < list.length; i++) defineIndex(out, i, f(list[i]!, i));
+  for (let i = 0; i < list.length; i++) defineIndex(out, i, f(listAt(list, i)!, i));
   return out;
 }
 
 export function joinStrings(list: readonly string[], separator: string): string {
   let out = "";
-  for (let i = 0; i < list.length; i++) out = i === 0 ? list[i]! : out + separator + list[i]!;
+  for (let i = 0; i < list.length; i++) out = i === 0 ? listAt(list, i)! : out + separator + listAt(list, i)!;
   return out;
 }
 
@@ -104,10 +119,10 @@ export function joinStrings(list: readonly string[], separator: string): string 
 export function sortedStrings(list: readonly string[]): string[] {
   const out = mapList(list, (s) => s);
   for (let i = 1; i < out.length; i++) {
-    const s = out[i]!;
+    const s = listAt(out, i)!;
     let j = i - 1;
-    while (j >= 0 && out[j]! > s) {
-      defineIndex(out, j + 1, out[j]!);
+    while (j >= 0 && listAt(out, j)! > s) {
+      defineIndex(out, j + 1, listAt(out, j)!);
       j--;
     }
     defineIndex(out, j + 1, s);
@@ -124,7 +139,11 @@ export function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !ObjectIsFrozen(value)) {
     ObjectFreeze(value);
     const keys = ObjectKeys(value);
-    for (let i = 0; i < keys.length; i++) deepFreeze((value as Record<string, unknown>)[keys[i]!]);
+    for (let i = 0; i < keys.length; i++) {
+      const key = listAt(keys, i)!;
+      const record = value as Record<string, unknown>;
+      deepFreeze(hasOwn(record, key) ? record[key] : undefined);
+    }
   }
   return value;
 }
@@ -132,7 +151,7 @@ export function deepFreeze<T>(value: T): T {
 /** A string set with no prototype, frozen when built: membership never consults one. */
 export function stringSet(values: readonly string[]): Readonly<Record<string, true>> {
   const set = ObjectCreate(null) as Record<string, true>;
-  for (let i = 0; i < values.length; i++) set[values[i]!] = true;
+  for (let i = 0; i < values.length; i++) set[listAt(values, i)!] = true;
   return ObjectFreeze(set);
 }
 
@@ -182,22 +201,6 @@ const PromisePrototypeThen = uncurryThis(Promise.prototype.then) as (
 /** `s.charCodeAt(i)`, through String.prototype.charCodeAt as it was at load. */
 export function charCodeAt(s: string, i: number): number {
   return StringPrototypeCharCodeAt(s, i);
-}
-
-const StringPrototypeCharAt = uncurryThis(String.prototype.charAt) as (s: string, i: number) => string;
-
-/** The code unit of `s` at `i` as a one-character string, or "" past either end: String.prototype.charAt as it was at load. */
-export function charAt(s: string, i: number): string {
-  return StringPrototypeCharAt(s, i);
-}
-
-/**
- * The element of `list` at `index` if `list` OWNS it, else undefined (astra pack 291). A hole, or an
- * index past the end, never continues to Array.prototype, where code running after load could plant
- * an element or a getter.
- */
-export function listAt<T>(list: readonly T[], index: number): T | undefined {
-  return hasOwn(list, index) ? list[index] : undefined;
 }
 
 const TAGGED_SHA256_PREFIX = "sha256:";
