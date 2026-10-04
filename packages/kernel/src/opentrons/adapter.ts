@@ -10,6 +10,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "../adapters/types.js";
+import { OutstandingWork } from "../adapters/outstanding-work.js";
 import type {
   OpentronAdapterConfig,
   OpentronRobotInfo,
@@ -34,6 +35,9 @@ export class OpentronsMachineAdapter implements MachineAdapter {
   private mockProgress = 0;
   private mockInterval: ReturnType<typeof setInterval> | null = null;
   private mockStatus: MachineStatus = "idle";
+  /** What can still emit: the mock run's interval, each real command in flight. */
+  private readonly work = new OutstandingWork();
+  private endMockRun: (() => void) | null = null;
 
   constructor(id: string, config: OpentronAdapterConfig) {
     this.id = id;
@@ -70,7 +74,10 @@ export class OpentronsMachineAdapter implements MachineAdapter {
 
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
     if (this.config.mockMode) return this.mockExecute(command);
+    return this.work.track(this.executeReal(command));
+  }
 
+  private async executeReal(command: MachineCommand): Promise<MachineCommandResult> {
     switch (command.type) {
       case "load_gcode": {
         // For OT, "load_gcode" means upload a protocol
@@ -136,12 +143,27 @@ export class OpentronsMachineAdapter implements MachineAdapter {
     this.evidenceCallbacks.push(callback);
   }
 
+  /**
+   * Resolves once no command is in flight and the mock run, if one is simulated, has emitted
+   * run_completed or was paused or stopped; at once when none is. Real mode emits only inside
+   * the commands (protocol_uploaded, run_action): it does not poll the run, so nothing is
+   * emitted for it once its commands have returned.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
-    if (this.mockInterval) {
-      clearInterval(this.mockInterval);
-      this.mockInterval = null;
-    }
+    this.stopMockRun();
     this.currentRunId = null;
+  }
+
+  /** Stop the simulated run. It emits nothing from here on. */
+  private stopMockRun(): void {
+    if (this.mockInterval) clearInterval(this.mockInterval);
+    this.mockInterval = null;
+    this.endMockRun?.();
+    this.endMockRun = null;
   }
 
   // ── Opentrons-Specific Methods ────────────────────────────────
@@ -433,11 +455,15 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       }
 
       case "start": {
+        // A run already simulated is replaced. (Its interval used to be overwritten and
+        // left running, emitting run_progress forever.)
+        this.stopMockRun();
         this.mockStatus = "busy";
         this.mockProgress = 0;
         this.currentRunId = `mock-run-${Date.now()}`;
 
         // Simulate progress over ~10 seconds
+        this.endMockRun = this.work.begin();
         this.mockInterval = setInterval(() => {
           this.mockProgress += 10;
           this.emitEvidence("run_progress", {
@@ -447,10 +473,10 @@ export class OpentronsMachineAdapter implements MachineAdapter {
           });
 
           if (this.mockProgress >= 100) {
-            if (this.mockInterval) clearInterval(this.mockInterval);
-            this.mockInterval = null;
             this.mockStatus = "idle";
             this.emitEvidence("run_completed", { runId: this.currentRunId, mock: true });
+            // Stopped, so the run's work ends, only after run_completed is emitted.
+            this.stopMockRun();
           }
         }, 1000);
 
@@ -459,14 +485,13 @@ export class OpentronsMachineAdapter implements MachineAdapter {
       }
 
       case "pause":
-        if (this.mockInterval) clearInterval(this.mockInterval);
-        this.mockInterval = null;
+        // Nothing resumes a paused simulation (resume is a no-op here), so it is over.
+        this.stopMockRun();
         this.mockStatus = "idle";
         return { success: true };
 
       case "stop":
-        if (this.mockInterval) clearInterval(this.mockInterval);
-        this.mockInterval = null;
+        this.stopMockRun();
         this.mockStatus = "idle";
         this.mockProgress = 0;
         this.currentRunId = null;
