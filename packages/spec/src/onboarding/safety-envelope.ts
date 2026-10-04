@@ -121,6 +121,7 @@ import {
   newList,
   NumberIsFinite,
   NumberIsInteger,
+  NumberIsSafeInteger,
   ObjectAssign,
   ObjectCreate,
   ObjectGetOwnPropertyDescriptor,
@@ -505,7 +506,8 @@ const MAX_DEPTH = 64;
  * without being called. Refused: a proxy; an accessor; an array whose
  * prototype is not Array.prototype, or with a hole; an object whose prototype
  * is not Object.prototype or null; a function, symbol, bigint or non-finite
- * number; undefined inside an array; a cycle; a key named `__proto__`; and
+ * number; an integer outside the safe range, which canonical JSON (D5) has no
+ * form for; undefined inside an array; a cycle; a key named `__proto__`; and
  * nesting deeper than 64. An undefined member is dropped, and -0 becomes 0,
  * both as `canonicalize` writes them. Copied objects have a null prototype,
  * and copied array elements are installed as own data properties, so
@@ -515,6 +517,9 @@ function plainCopy(value: unknown, path: string, ancestors: object[], depth: num
   if (value === null || typeof value === "boolean" || typeof value === "string") return value;
   if (typeof value === "number") {
     if (!NumberIsFinite(value)) throw new NotPlainData(`${path}: ${text(value)} is not a finite number`);
+    if (NumberIsInteger(value) && !NumberIsSafeInteger(value)) {
+      throw new NotPlainData(`${path}: ${text(value)} is an integer outside the safe range, which canonical JSON (D5) has no form for`);
+    }
     return ObjectIs(value, -0) ? 0 : value;
   }
   if (typeof value !== "object") throw new NotPlainData(`${path}: a ${typeof value} is not JSON data`);
