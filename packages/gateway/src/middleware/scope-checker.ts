@@ -121,7 +121,8 @@ interface ScopeRequirement {
  * rows (or is not ready yet), in which case only the defaults apply.
  */
 let scopeCache: ScopeRequirement[] = [];
-let lastScopeCacheRefresh = 0;
+/** When the governance rows were last loaded SUCCESSFULLY; 0 means never. A failed read never sets it. */
+let lastScopeCacheLoad = 0;
 const SCOPE_CACHE_TTL = 300_000; // 5 minutes
 
 /**
@@ -135,7 +136,7 @@ const SCOPE_CACHE_TTL = 300_000; // 5 minutes
  * dropped every built-in rule (kernels, evidence, negotiate, jobs, build,
  * admin, templates, audit, compliance) the moment that seed ran.
  */
-function refreshScopeCache(): void {
+function refreshScopeCache(): boolean {
   try {
     const rows = getRepos().governance.findAllEndpointScopes();
     scopeCache = rows.map((r) => ({
@@ -143,17 +144,20 @@ function refreshScopeCache(): void {
       pattern: r.routePattern,
       scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
     }));
+    lastScopeCacheLoad = Date.now();
+    return true;
   } catch {
-    // DB not ready — leave scopeCache as-is (typically still empty). The
-    // defaults apply unconditionally regardless, so this never opens anything.
+    // A failed read is never "fresh": the next request retries, and until a read succeeds the hook
+    // refuses scoped keys (it cannot know which table rows apply), instead of treating the routes those
+    // rows cover as unmatched. Neither an empty cache nor an old snapshot is served as current.
+    return false;
   }
-  lastScopeCacheRefresh = Date.now();
 }
 
-function ensureScopeCacheReady(): void {
-  if (Date.now() - lastScopeCacheRefresh > SCOPE_CACHE_TTL) {
-    refreshScopeCache();
-  }
+/** True when the governance rows are loaded and within the TTL (reloading them first if needed). */
+function ensureScopeCacheReady(): boolean {
+  if (lastScopeCacheLoad !== 0 && Date.now() - lastScopeCacheLoad <= SCOPE_CACHE_TTL) return true;
+  return refreshScopeCache();
 }
 
 /**
@@ -165,7 +169,7 @@ function ensureScopeCacheReady(): void {
  */
 export function __resetScopeCacheForTests(): void {
   scopeCache = [];
-  lastScopeCacheRefresh = 0;
+  lastScopeCacheLoad = 0;
 }
 
 // ── Route Matching ───────────────────────────────────────────────
@@ -300,7 +304,7 @@ async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.url.startsWith("/api/")) return;
 
-    ensureScopeCacheReady();
+    const rowsReady = ensureScopeCacheReady();
 
     // Scopes live on API keys; a request without one is not checked here (unchanged).
     if (!req.apiKeyId) return;
@@ -309,6 +313,15 @@ async function scopeCheckerImpl(app: FastifyInstance) {
 
     // Wildcard scope grants access to everything. Unchanged.
     if (callerScopes.includes("*")) return;
+
+    // Fail closed: without the governance rows the checker cannot know which requirements apply to a
+    // scoped key, so it refuses rather than judging against the defaults alone.
+    if (!rowsReady) {
+      return reply.status(503).send({
+        error: "scope_requirements_unavailable",
+        message: "Endpoint scope requirements could not be loaded. Try again shortly.",
+      });
+    }
 
     // DEFAULT_SCOPE_REQUIREMENTS is consulted UNCONDITIONALLY, and a table
     // row is matched separately against scopeCache — so a row can only ADD a
