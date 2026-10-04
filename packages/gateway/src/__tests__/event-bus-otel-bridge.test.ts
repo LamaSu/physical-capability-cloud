@@ -91,6 +91,14 @@ describe("event-bus → OTel bridge", () => {
     expect(startSpan.mock.calls[0]?.[0]).toBe("navi.before");
   });
 
+  it("passes no time to the span: the tracing SDK's clock times it (N107b round 4, C11)", () => {
+    startEventBusOtelBridge();
+    emit({ kind: "build.done", sponsor: "navi", text: "ok", level: "ok", duration_ms: 8675309 });
+    const opts = startSpan.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(opts).not.toHaveProperty("startTime");
+    expect(end).toHaveBeenCalledWith();
+  });
+
   it("truncates long text attributes at 1024 chars", () => {
     startEventBusOtelBridge();
     const longText = "a".repeat(2000);

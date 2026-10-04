@@ -178,9 +178,10 @@ export class PipelineTelemetryService {
     // Add a Sentry breadcrumb for every telemetry event so the trace waterfall
     // in Sentry shows the pipeline phase progression alongside spans.
     // N107b codemod: sentry.ts wires beforeBreadcrumb: closedBreadcrumb, which keeps ONLY
-    // type/category/level/timestamp from every breadcrumb — message and data (jobId, phase,
-    // status, ...) never leave, by construction, whatever this call puts in them (closedBreadcrumb
-    // also re-checks category/level against its own closed vocabularies regardless of this call).
+    // type/category/level from every breadcrumb, with the server's clock as its time — message and
+    // data (jobId, phase, status, ...) never leave, by construction, whatever this call puts in them
+    // (closedBreadcrumb also re-checks category/level against its own closed vocabularies regardless
+    // of this call). No time is passed: none reaches Sentry from a producer (round 4, C11).
     // Sentry's own Breadcrumb type takes category as a plain string, so lit() cannot wrap it here.
     Sentry.addBreadcrumb({
       category: "pcc.pipeline",
@@ -193,7 +194,6 @@ export class PipelineTelemetryService {
         duration_ms: event.duration_ms,
         source: event.source,
       },
-      timestamp: new Date(event.timestamp).getTime() / 1000,
     });
 
     // Attach this pipeline event to whatever OTel span is currently active.
