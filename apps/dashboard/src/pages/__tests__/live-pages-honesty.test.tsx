@@ -35,6 +35,7 @@ import { RevenueDashboardPage } from "../RevenueDashboardPage.js";
 import { SettingsPage } from "../SettingsPage.js";
 import { KNOWN_ESCROW_STATUSES, KNOWN_JOB_STATUSES } from "../../api/wire-vocabulary.js";
 import { EscrowAmount, formatEscrowAmount } from "../../components/EscrowAmount.js";
+import { useAllCapabilities, type AllCapabilities } from "../../api/hooks/use-pcc-data.js";
 
 // ── fetch stub ───────────────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ const EMPTY: Routes = {
   "/api/kernels": { status: 200, body: { kernels: [] } },
   "/api/escrow": { status: 200, body: { escrows: [] } },
   "/api/capabilities/templates": { status: 200, body: { templates: [] } },
-  "/api/capabilities": { status: 200, body: { items: [], total: 0, offset: 0, limit: 500 } },
+  "/api/capabilities": { status: 200, body: { items: [], total: 0, offset: 0, limit: 500, hasMore: false } },
 };
 
 // ── render harness ───────────────────────────────────────────────────────────
@@ -521,7 +522,7 @@ describe("C. Discover says when site names are missing", () => {
       ...EMPTY,
       "/api/capabilities": {
         status: 200,
-        body: { items: [{ id: "c1", name: "Cap One", type: "hplc", kernelId: "k1" }], total: 1, offset: 0, limit: 200 },
+        body: { items: [{ id: "c1", name: "Cap One", type: "hplc", kernelId: "k1" }], total: 1, offset: 0, limit: 200, hasMore: false },
       },
       "/api/kernels": { status: 503, body: { error: "unavailable" } },
     });
@@ -613,7 +614,7 @@ describe("F. the leaderboard reads every page of /api/capabilities", () => {
         const offset = Number(params.get("offset") ?? "0");
         const servedLimit = Math.min(requestedLimit, 200); // the gateway never serves more than 200 rows
         calls.push(`offset=${offset}&limit=${requestedLimit}`);
-        body = { items: allCaps.slice(offset, offset + servedLimit), total, offset, limit: servedLimit };
+        body = { items: allCaps.slice(offset, offset + servedLimit), total, offset, limit: servedLimit, hasMore: offset + servedLimit < total };
       } else if (path === "/api/health") {
         body = { status: "ok" };
       } else if (path === "/api/kernels") {
@@ -652,7 +653,10 @@ describe("F. the leaderboard reads every page of /api/capabilities", () => {
 
     const t = await renderPage(<KernelLeaderboardPage />);
 
-    expect(calls).toEqual(["offset=0&limit=200", "offset=200&limit=200"]);
+    // A two-page read that looks complete re-reads page 1 once to check it
+    // against a snapshot/revision- or cursor-free gateway (astra 18c MEDIUM);
+    // this list is unchanging, so the re-read matches and adds no notice.
+    expect(calls).toEqual(["offset=0&limit=200", "offset=200&limit=200", "offset=0&limit=200"]);
     expect(t).not.toContain("Ranked over the first");
     expect(t).toMatch(/Kernels\s*5/);
     expect(t).not.toMatch(/Kernels\s*5\+/);
@@ -1107,10 +1111,10 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
       // Without the total check this would read 250 rows, find no more, and rank them as "the first 250 of 251".
       stubCapabilityPages((offset) =>
         offset === 0
-          ? { items: caps(0, 200), total: 250, offset, limit: 200 }
+          ? { items: caps(0, 200), total: 250, offset, limit: 200, hasMore: true }
           : offset === 200
-            ? { items: caps(200, 50), total: 251, offset, limit: 200 }
-            : { items: [], total: 251, offset, limit: 200 },
+            ? { items: caps(200, 50), total: 251, offset, limit: 200, hasMore: false }
+            : { items: [], total: 251, offset, limit: 200, hasMore: false },
       );
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
@@ -1118,7 +1122,7 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("a page that answers for another offset fails the read", async () => {
-      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 200) : caps(200, 50), total: 250, offset: 0, limit: 200 }));
+      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 200) : caps(200, 50), total: 250, offset: 0, limit: 200, hasMore: true }));
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
     });
@@ -1130,7 +1134,7 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("more rows than the total fails the read", async () => {
-      stubCapabilityPages(() => ({ items: caps(0, 2), total: 1, offset: 0, limit: 200 }));
+      stubCapabilityPages(() => ({ items: caps(0, 2), total: 1, offset: 0, limit: 200, hasMore: false }));
       const t = await renderPage(<KernelLeaderboardPage />);
       expect(t).toContain("Couldn't load the leaderboard");
     });
@@ -1143,10 +1147,78 @@ describe("R4 fixes: what the stricter reads accept, and how an escrow amount sho
     });
 
     it("Discover counts a capped read as a lower bound and says only part was read", async () => {
-      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 1) : [], total: 3, offset, limit: 200 }));
+      stubCapabilityPages((offset) => ({ items: offset === 0 ? caps(0, 1) : [], total: 3, offset, limit: 200, hasMore: false }));
       const t = await renderPage(<DiscoverPage />);
       expect(t).toContain("Showing the first 1 of the 3 capabilities");
       expect(t).toContain("1+ capability found");
+    });
+
+    it("a read that changed between pages is never presented as complete (astra 18c MEDIUM)", async () => {
+      // astra's example: page 1 (offset 0) reads c0..c199 of 250, then the
+      // list mutates — c0 removed, c250 appended, total unchanged — and page
+      // 2 (offset 200) answers with c201..c250. Total stays 250 and no id
+      // repeats, so the pre-fix checks certified the combined read complete
+      // despite c200 being missing.
+      //
+      // Modelled here as the list shifting by one more element on every
+      // single request (never settling), rather than mutating exactly once:
+      // a one-time mutation is what astra described, but it also makes the
+      // query's own retry (configured on this hook) re-read a since-settled
+      // list and succeed — correctly, since nothing is inconsistent once the
+      // list has stopped moving. An indefinitely moving list keeps every
+      // attempt, including the retry, inconsistent, so the fix's protection
+      // is what's under test here rather than the hook's retry behavior.
+      let calls = 0;
+      stubCapabilityPages((offset) => {
+        const shift = calls;
+        calls++;
+        const n = Math.min(200, 250 - offset);
+        const items = Array.from({ length: n }, (_, i) => ({ id: `c${offset + i + shift}`, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+        return { items, total: 250, offset, limit: 200, hasMore: offset + 200 < 250 };
+      });
+      const t = await renderPage(<KernelLeaderboardPage />);
+      expect(t).toContain("Couldn't load the leaderboard");
+      expect(t).not.toContain("Ranked over the first");
+    });
+
+    it("a read of three pages that shifted inside page 2 before page 3 is never presented as complete (astra 18c, past page 1)", async () => {
+      // 500 capabilities, read in pages of 200. Right after page 2 is served,
+      // c210 (inside page 2) is removed and c500 appended: the total stays 500
+      // and no id repeats. Page 3 then answers with c401..c500, so a read that
+      // re-checks only page 1 combines c210 (from the old page 2) with c500
+      // and loses c400. Whatever is shown as complete must be one snapshot.
+      let list = Array.from({ length: 500 }, (_, i) => `c${i}`);
+      let shifted = false;
+      stubCapabilityPages((offset) => {
+        const items = list.slice(offset, offset + 200).map((id) => ({ id, kernelId: "k1", type: "hplc", queueDepth: 0 }));
+        const page = { items, total: list.length, offset, limit: 200, hasMore: offset + 200 < list.length };
+        if (offset === 200 && !shifted) {
+          shifted = true;
+          list = [...list.filter((id) => id !== "c210"), "c500"];
+        }
+        return page;
+      });
+      function CapabilityProbe() {
+        useAllCapabilities();
+        return null;
+      }
+      const client = newClient();
+      await renderPage(<CapabilityProbe />, client);
+      const data = client.getQueryData<AllCapabilities>(["capabilities", "all"]);
+      if (data?.complete) {
+        const ids = new Set(data.items.map((c) => c.id));
+        expect({ hasC210: ids.has("c210"), hasC400: ids.has("c400") }, "a complete read is one snapshot of the list").toEqual({ hasC210: false, hasC400: true });
+      }
+    });
+
+    it("a page missing offset or limit is unavailable, not silently trusted (astra 18c MEDIUM)", async () => {
+      for (const partial of [{ limit: 200 }, { offset: 0 }]) {
+        act(() => root.unmount());
+        root = createRoot(container);
+        stubCapabilityPages(() => ({ items: caps(0, 1), total: 1, ...partial }));
+        const t = await renderPage(<KernelLeaderboardPage />);
+        expect(t, JSON.stringify(partial)).toContain("Couldn't load the leaderboard");
+      }
     });
   });
 
