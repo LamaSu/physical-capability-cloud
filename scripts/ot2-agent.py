@@ -18,7 +18,9 @@ import sys
 import os
 import hashlib
 import logging
-from urllib.parse import urlencode
+import threading
+from datetime import datetime, timezone
+from urllib.parse import quote, urlencode
 
 # N4a guard. Without this module the agent cannot start (fail closed).
 # UNSAFE_LOCAL_FLAG and local_base are re-exported for the guard tests.
@@ -528,6 +530,322 @@ def run_agent_turn(messages, tools=OT2_TOOLS):
     return messages
 
 
+# ── Each approval runs once ─────────────────────────────────────────────
+# GET /api/operator/approvals?status=approved lists every approval whose status is
+# "approved", and no gateway route moves one out of that status, so the daemon sees the
+# same record on every poll. Unmarked, it would send the job to the agent again every
+# POLL_INTERVAL seconds, and the robot could run the same protocol again and again.
+#
+# claim_job_once() is the mark: one file per approval, created atomically BEFORE the job
+# is dispatched. The gateway's consume (below) is the record that the job may run. Together
+# that is at-most-once, not exactly-once: a crash or power cut after the consume loses that
+# run instead of repeating it, and the operator re-approves. Whatever keeps the mark from
+# being written fails closed: the job is not run. A mark alone is not enough (#499 r4): it
+# can be lost, or moved off the configured path, so no job runs without the consume.
+# See "Each approval runs once" in scripts/README-ot2-executor.md.
+
+STATE_DIR_DEFAULT = "~/.pcc/ot2-agent/handled"  # used when OT2_AGENT_STATE_DIR is unset
+MARKER_TEXT_LIMIT = 512  # characters of an id kept inside a marker; its file name is a hash
+
+_logged_once = set()
+_logged_once_lock = threading.Lock()
+
+
+def _first_time(token):
+    """True the first time this process sees `token`: a message that would otherwise
+    repeat on every poll is logged once."""
+    with _logged_once_lock:
+        if token in _logged_once:
+            return False
+        _logged_once.add(token)
+        return True
+
+
+def handled_dir():
+    """The directory that holds one marker per handled approval: OT2_AGENT_STATE_DIR, else
+    ~/.pcc/ot2-agent/handled. Raises OSError when it cannot be resolved (no home directory)."""
+    raw = os.environ.get("OT2_AGENT_STATE_DIR", "").strip() or STATE_DIR_DEFAULT
+    path = os.path.expanduser(raw)
+    if path.startswith("~"):
+        raise OSError(f"cannot resolve {raw!r} (no home directory); set OT2_AGENT_STATE_DIR to an absolute path")
+    return os.path.abspath(path)
+
+
+def _job_key(record):
+    """The identity an approval runs once under: its `id`, else its `jobId`.
+
+    None when there is no usable one: the record is not a dict, `id` and `jobId` are both
+    missing or empty, or `id` is present but is not a string or an integer (it does not then
+    fall back to `jobId`). Such a record is refused. It is never given a shared placeholder
+    such as "unknown", under which unrelated records would collide."""
+    if not isinstance(record, dict):
+        return None
+    for field in ("id", "jobId"):
+        value = record.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return None
+        return str(value)
+    return None
+
+
+def _recorded(value):
+    """A job id as bounded text for a marker, or None when it is not a plain id."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    return str(value)[:MARKER_TEXT_LIMIT]
+
+
+def _fsync_dir(directory):
+    """Flush a directory's entries to stable storage, so that a file or directory just created
+    in it survives a power cut. Raises OSError when that can't be done. (On Windows a directory
+    can't be opened like this, so it always raises there.) claim_job_once logs it and goes on: a
+    mark is a best effort (see there)."""
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _makedirs_durable(path):
+    """Create `path` and any missing ancestors (mode 0o700), then fsync each new directory's
+    parent so the new entries survive a power cut.
+
+    Every directory is created first, so `path` exists even when a sync then fails. A creation
+    failure raises at once. A sync failure is raised after every sync was attempted, so the
+    caller can still place (and keep) its mark while refusing to rely on it."""
+    missing = []
+    current = path
+    while not os.path.isdir(current):
+        missing.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    created = []
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            if not os.path.isdir(directory):
+                raise
+        created.append(directory)
+    first_error = None
+    for directory in created:
+        try:
+            _fsync_dir(os.path.dirname(directory) or os.curdir)
+        except OSError as err:
+            first_error = first_error or err
+    if first_error is not None:
+        raise first_error
+
+
+def _sync_dir_chain(path):
+    """fsync `path` and every directory above it, up to the filesystem root.
+
+    fsyncing a directory persists the entries of its children, so this makes every component
+    of `path` (and a mark inside it) reach stable storage, including directories an earlier,
+    failed attempt created and never synced. Every directory is attempted; the first failure is
+    raised at the end. It walks the path as written, so a symlink on it leaves the directories
+    the link points into unsynced: a best effort, like the mark itself (see claim_job_once)."""
+    current = os.path.abspath(path)
+    first_error = None
+    while True:
+        try:
+            _fsync_dir(current)
+        except OSError as err:
+            first_error = first_error or err
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    if first_error is not None:
+        raise first_error
+
+
+def claim_job_once(record):
+    """Mark an approved job as handled and return True: it may go on to the gateway's consume.
+
+    Returns False when it must not: it is already marked (by this or an earlier process), it
+    has no usable id (see _job_key), or the mark could not be written (fail closed).
+
+    The mark is one file in handled_dir(), named by the SHA-256 hex of the key, so no id,
+    however hostile, can name a path. O_CREAT | O_EXCL makes the claim atomic: of any number of
+    threads or processes claiming one key, exactly one gets True. No fcntl or msvcrt.
+
+    The mark is a local guard, never the record that a job may run. That record is the gateway's
+    consume (consume_on_gateway), the only thing that can refuse a repeat. A mark can vanish: a
+    power cut can lose it, and any process that can rename or remove the state directory takes
+    it off the configured path, during a claim or between polls, so the next poll finds no mark
+    (#499 r4). That is why OT2_AGENT_SERVER_CONSUME=off runs no job (see poll_once). Still, after
+    the marker is written, every directory from the state directory up to the root is fsynced,
+    on every claim (#499 r2), as a best effort: a failure is logged once per directory as a
+    WARNING, and the claim stands."""
+    key = _job_key(record)
+    if key is None:
+        log.error("Refusing an approval with no usable id or jobId; it cannot be marked handled, "
+                  "so it is NOT run: %.200r", record)
+        return False
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+    payload = json.dumps({
+        "key": key[:MARKER_TEXT_LIMIT],
+        "jobId": _recorded(record.get("jobId")),
+        "claimedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }).encode("ascii")  # json.dumps escapes everything outside ASCII
+
+    durability_error = None
+    try:
+        directory = handled_dir()
+    except OSError as err:
+        log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
+                  "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
+        return False
+    try:
+        _makedirs_durable(directory)
+    except OSError as err:
+        if not os.path.isdir(directory):
+            log.error("Cannot use the handled-job directory (%s), so approval %.80r is NOT run. "
+                      "Fix it (OT2_AGENT_STATE_DIR) and the approval is picked up again.", err, key)
+            return False
+        durability_error = err  # the directory exists, but its entry may not survive a power cut
+    marker = os.path.join(directory, digest)
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        if _first_time(("handled", digest)):
+            log.info("Approval %.80r was already handled (marker %s); not running it again", key, marker)
+        return False
+    except OSError as err:
+        log.error("Cannot mark approval %.80r handled in %s (%s), so it is NOT run. "
+                  "Fix the directory and the approval is picked up again.", key, directory, err)
+        return False
+
+    # The marker now exists, so this approval never runs again, whatever fails from here on:
+    # the cost is a lost run, never a repeated one.
+    try:
+        with os.fdopen(fd, "wb") as marker_file:
+            marker_file.write(payload)
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+    except OSError as err:
+        log.error("Marked approval %.80r handled but could not finish writing %s (%s), so it is NOT "
+                  "run, and it will not run again unless it is re-approved or the marker is deleted.",
+                  key, marker, err)
+        return False
+    # The whole state path, every time: an earlier failed attempt may have created the chain
+    # without syncing it, and a mark is only as durable as every entry above it (#499 r2).
+    try:
+        _sync_dir_chain(directory)
+    except OSError as err:
+        durability_error = durability_error or err
+    if durability_error is not None and _first_time(("not-durable", directory)):
+        log.warning("Handled-job marks in %s cannot be made durable (%s). Jobs still run: the "
+                    "gateway's consume is the record that a job may run, not the mark.",
+                    directory, durability_error)
+    return True
+
+
+def release_job_claim(record):
+    """Remove the mark claim_job_once(record) made, so a later poll may claim the approval again.
+
+    Only for an approval the gateway did NOT consume (consume_on_gateway() said "retry"). From
+    then on the gateway decides whether it may still run: its approved listing never shows a
+    consumed approval again. If the mark cannot be removed, the approval stays blocked on this
+    machine, which is the safe direction."""
+    key = _job_key(record)
+    if key is None:
+        return
+    digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()
+    try:
+        os.remove(os.path.join(handled_dir(), digest))
+    except FileNotFoundError:
+        pass
+    except OSError as err:
+        log.error("Could not release the mark for approval %.80r (%s); it is not tried again until "
+                  "its marker is deleted.", key, err)
+
+
+# ── The gateway consumes each approval once ─────────────────────────────
+# The mark above stops THIS machine (this state directory) running an approval twice. It cannot
+# stop another machine from running the same approval. The gateway's consume route,
+# POST /api/operator/approvals/:id/consume (gateway WP-C, #445), is a compare-and-set on the
+# approval itself, approved -> consumed: it answers 200 to exactly one caller and 409 to every
+# other, and the approved listing never shows a consumed approval again. With the default
+# OT2_AGENT_SERVER_CONSUME=required, a job reaches the agent only when this process holds the mark
+# AND the gateway consumed the approval for it:
+#   - 200 {"consumed": true}: it runs.
+#   - any 409 (approval_not_consumable: another agent has it, or it is no longer approved;
+#     kernel_emergency_stopped: nothing was consumed, and the approval does not start on its own
+#     once the stop is cleared): it does not run, and the mark stays.
+#   - anything else (401, 403, a 404 from a gateway without the route, 5xx, an answer without
+#     "consumed": true, a transport error): it does not run. The gateway did not consume it for
+#     anyone, or consumed it for this call whose answer was lost (then it is never listed again),
+#     so the mark is released and a later poll asks again.
+# OT2_AGENT_SERVER_CONSUME=off runs no job at all (#499 r4). It used to skip the gateway and let the
+# mark alone protect, but no local mark can: any process that can rename or remove the state
+# directory takes the marks off the configured path, and the next poll runs the approval again.
+# Only the gateway's compare-and-set can refuse that repeat. With off, approvals are logged and
+# left alone, and chat and the camera work as usual. Any other value is logged and treated as
+# "required".
+
+SERVER_CONSUME_ENV = "OT2_AGENT_SERVER_CONSUME"
+
+
+def server_consume_mode():
+    """"required" (the default) or "off" (no job runs). Any other value is logged and treated as
+    "required"."""
+    raw = os.environ.get(SERVER_CONSUME_ENV, "")
+    value = raw.strip().lower() or "required"
+    if value in ("required", "off"):
+        return value
+    if _first_time(("consume-mode", raw)):
+        log.error("%s=%r is neither 'required' nor 'off'; treating it as 'required'",
+                  SERVER_CONSUME_ENV, raw)
+    return "required"
+
+
+def consume_on_gateway(record):
+    """Ask the gateway to consume this approval. Returns "consumed", "refused" or "retry".
+
+    "consumed" only for HTTP 200 with {"consumed": true}: the only answer that lets the job run.
+    "refused" for any 409, and for a record without a usable approval `id` (it can never be
+    consumed). "retry" for every other answer, a transport error included."""
+    approval_id = record.get("id") if isinstance(record, dict) else None
+    if isinstance(approval_id, bool) or not isinstance(approval_id, (str, int)) or not str(approval_id).strip():
+        if _first_time(("consume-no-id", _job_key(record))):
+            log.error("Approval %.200r has no approval id the gateway can consume, so it is NOT run",
+                      record)
+        return "refused"
+    approval_id = str(approval_id)
+    try:
+        status, body = pcc("POST", f"/api/operator/approvals/{quote(approval_id, safe='')}/consume", {})
+    except Exception as err:  # a transport failure: the gateway may or may not have seen it
+        if _first_time(("consume-error", approval_id, type(err).__name__)):
+            log.error("Could not ask the gateway to consume approval %.80r (%s); it is NOT run, and "
+                      "a later poll asks again", approval_id, err)
+        return "retry"
+    error = body.get("error") if isinstance(body, dict) else None
+    if status == 200 and isinstance(body, dict) and body.get("consumed") is True:
+        return "consumed"
+    if status == 409:
+        if error == "kernel_emergency_stopped":
+            log.warning("Approval %.80r is NOT run: the kernel's emergency stop is engaged. It does "
+                        "not start on its own when the stop is cleared; approve it again to run it.",
+                        approval_id)
+        elif _first_time(("consume-409", approval_id)):
+            log.info("The gateway did not consume approval %.80r for this agent (%s); not running it",
+                     approval_id, error or "conflict")
+        return "refused"
+    if _first_time(("consume-status", approval_id, status)):
+        log.error("The gateway did not consume approval %.80r (HTTP %s%s); it is NOT run, and a later "
+                  "poll asks again. A gateway without POST /api/operator/approvals/:id/consume answers "
+                  "404: deploy gateway WP-C (#445). Until then no job runs (%s=off runs none either).",
+                  approval_id, status, f", {error}" if error else "", SERVER_CONSUME_ENV)
+    return "retry"
+
+
 def poll_for_jobs():
     """Poll PCC for pending approved jobs."""
     s, r = pcc("GET", f"/api/operator/approvals?status=approved&kernelId={KERNEL_ID}")
@@ -541,7 +859,10 @@ def poll_for_jobs():
 
 
 def handle_job(job):
-    """Handle a single job from PCC."""
+    """Send a single approved job from PCC to the agent.
+
+    Nothing here stops it running twice: the caller must have won claim_job_once(job) and the
+    gateway's consume (see poll_once)."""
     job_id = job.get("jobId", job.get("id", "unknown"))
     summary = job.get("jobSummary", {})
     params = summary.get("parameters", {}) if isinstance(summary, dict) else {}
@@ -653,6 +974,39 @@ def push_camera_frame():
         log.debug(f"Camera capture failed: {e}")
 
 
+def poll_once():
+    """One pass of the daemon loop: run newly approved jobs, then answer pending chat.
+
+    Returns (jobs, chat_msgs) as polled. An approval is sent to the agent only after it is
+    claimed on this machine (claim_job_once) AND consumed on the gateway (consume_on_gateway).
+    A claim the gateway did not consume is released, so a later poll asks again; any 409 keeps
+    it, and the approval does not run here. With OT2_AGENT_SERVER_CONSUME=off nothing is claimed
+    or run (#499 r4): each approval is logged once and left alone."""
+    jobs = poll_for_jobs()
+    run_jobs = server_consume_mode() == "required"
+    for job in jobs:
+        if not run_jobs:
+            if _first_time(("consume-off", _job_key(job))):
+                log.error("Approval %.80r is NOT run: %s=off runs no job. Without the gateway's "
+                          "consume nothing can refuse a repeated run (#499 r4).",
+                          _job_key(job), SERVER_CONSUME_ENV)
+            continue
+        if not claim_job_once(job):
+            continue
+        outcome = consume_on_gateway(job)
+        if outcome == "retry":
+            release_job_claim(job)
+        if outcome != "consumed":
+            continue
+        handle_job(job)
+
+    chat_msgs = poll_chat()
+    for msg in chat_msgs:
+        handle_chat_message(msg)
+
+    return jobs, chat_msgs
+
+
 def daemon_mode():
     """Daemon mode: poll PCC for jobs and chat, push camera frames.
 
@@ -660,6 +1014,11 @@ def daemon_mode():
     """
     pcc_base = require_started("daemon_mode()")
     require_robot("daemon_mode()")
+    if server_consume_mode() == "off":
+        log.error("%s=off: approved jobs are NOT run in this mode. A local mark cannot stop a "
+                  "repeated run (#499 r4); only the gateway's consume can. Chat and the camera still "
+                  "work. Deploy gateway WP-C (#445) and unset %s to run jobs.",
+                  SERVER_CONSUME_ENV, SERVER_CONSUME_ENV)
     log.info(f"Daemon mode. Polling {pcc_base} every {POLL_INTERVAL}s for kernel {KERNEL_ID}")
 
     # Register as online
@@ -670,17 +1029,8 @@ def daemon_mode():
 
     while True:
         try:
-            # Poll for approved jobs
-            jobs = poll_for_jobs()
-            if jobs:
-                for job in jobs:
-                    handle_job(job)
-
-            # Poll for chat messages
-            chat_msgs = poll_chat()
-            if chat_msgs:
-                for msg in chat_msgs:
-                    handle_chat_message(msg)
+            # Poll for approved jobs (each runs at most once) and chat messages
+            jobs, chat_msgs = poll_once()
 
             # Push camera frame periodically
             camera_counter += 1
