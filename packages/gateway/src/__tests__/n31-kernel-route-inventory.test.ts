@@ -12,15 +12,17 @@
  *      one closed classification with an executable witness. A new unguarded kernel route fails
  *      CI; guarding one fails CI until it leaves the list.
  *
- * #575 r2 item 4 (astra, MEDIUM; the steward's #6658): the inventory proved that a guard was
- * CALLED, not that its answer was used, and some route and table forms escaped it. Now:
- *   - A guard call counts only when its result is consumed: returned, or tested by an `if` with a
- *     branch that returns or throws, directly or through the const it initializes. A preHandler
- *     counts only when that branch also sends a reply or throws: a hook that returns without
- *     sending lets the request through. astra's probe, a named hook that ignores the refusal in
- *     front of a write, is pinned as unguarded.
- *   - A route registration the scan cannot read fails CI: app.route({...}), or a mutating route on
- *     any receiver but `app` (every production route uses `app`). A computed path is resolved
+ * #575 r2 item 4 (astra, MEDIUM; the steward's #6658) and #579 r1 item 6 (the steward's #6771):
+ * the inventory is a fail-closed RECOGNIZER of canonical forms, not a list of bad patterns.
+ *   - A guard's answer counts only as `const r = G(...);` immediately followed by
+ *     `if (r) return ...;`, or as `if (G(...)) return ...;`: no else, no inverted, compound or
+ *     compared condition, never inside a nested function. A preHandler's return must also send.
+ *     A same-file helper is a guard only when it ends in `return G(...);` after plain
+ *     declarations and early object-literal refusals. astra's probes (a named hook that ignores
+ *     the refusal, a refusal on the wrong branch, a refusal ANDed away) are pinned as unguarded.
+ *   - A route registration the scan cannot read fails CI: any app.route(...), a route-shaped call
+ *     on any receiver but `app` (every production route uses `app`), or a handler that is not
+ *     inline or a same-file function. A computed path is resolved
  *     through the file's string constants. One that cannot be resolved must be EXACTLY one entry of
  *     COMPUTED_PATHS, which says why it is not a kernel route. If its handler reads
  *     req.params.kernelId, it is a kernel route anyway and must be guarded.
@@ -138,165 +140,81 @@ function within(root: ts.Node, test: (n: ts.Node) => boolean): boolean {
 }
 
 const isSendCall = (n: ts.Node) => ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && n.expression.name.text === "send";
-/** Calls that write: a refused path containing one does not stop before the write. */
+/** Calls that write: a guard helper may not contain one before its answer. */
 const WRITE_CALLS = new Set(["insert", "update", "delete", "run", "exec", "values", "set"]);
-/**
- * Named SECOND authorizations (#579 r1 item 6): a refusal ANDed with the negation of a call to one
- * of these (`refusal && !isProvenHolderOfNamedScope(...)`) is still a refusal unless that named
- * authorization admits the caller. ANDed with anything else, the refusal is no longer certain.
- */
-const ADMISSIONS = new Set(["isProvenHolderOfNamedScope", "isProvenGrant"]);
+const isWriteCall = (n: ts.Node) => ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && WRITE_CALLS.has(n.expression.name.text);
 
-/** What a value is when the request must be refused: truthy (a refusal), falsy (an allowed-check), or unknown. */
-type Refused = "truthy" | "falsy" | "unknown";
-const flipRefused = (s: Refused): Refused => (s === "truthy" ? "falsy" : s === "falsy" ? "truthy" : "unknown");
+/** Exactly a call to one of `guards`: `G(...)`, optionally awaited or parenthesized. */
+function guardCall(e: ts.Expression | undefined, guards: Set<string>): boolean {
+  let x = e;
+  while (x && (ts.isParenthesizedExpression(x) || ts.isAwaitExpression(x))) x = x.expression;
+  return x !== undefined && ts.isCallExpression(x) && ts.isIdentifier(x.expression) && guards.has(x.expression.text);
+}
 
-const unwrapNode = (n: ts.Node): ts.Node => (ts.isExpression(n) ? unwrap(n) : n);
-const callsAdmission = (n: ts.Node): boolean =>
-  ts.isCallExpression(n) && ts.isIdentifier(n.expression) && ADMISSIONS.has(n.expression.text)
-    ? true
-    : (ts.forEachChild(n, (c) => (callsAdmission(c) ? true : undefined)) ?? false);
+/** `return E;`, or a block holding exactly that; for a hook, E sends the reply. */
+function canonicalReturn(s: ts.Statement, mustSend: boolean): boolean {
+  const r = ts.isBlock(s) && s.statements.length === 1 ? s.statements[0]! : s;
+  if (!ts.isReturnStatement(r)) return false;
+  return !mustSend || (r.expression !== undefined && within(r.expression, isSendCall));
+}
 
-/** `x == null`, `x === undefined` and the like: "eq" flips the refusal, "ne" keeps it; null when not a nullish comparison. */
-function nullCompare(b: ts.BinaryExpression, from: ts.Node): "eq" | "ne" | null {
-  const other = unwrapNode(b.left === from ? b.right : b.left);
-  const nullish = other.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(other) && other.text === "undefined");
-  if (!nullish) return null;
-  const k = b.operatorToken.kind;
-  if (k === ts.SyntaxKind.EqualsEqualsToken || k === ts.SyntaxKind.EqualsEqualsEqualsToken) return "eq";
-  if (k === ts.SyntaxKind.ExclamationEqualsToken || k === ts.SyntaxKind.ExclamationEqualsEqualsToken) return "ne";
-  return null;
+/** `if (<cond>) return E;` with no else, where <cond> passes `test` exactly. */
+function canonicalIf(s: ts.Statement | undefined, test: (cond: ts.Expression) => boolean, mustSend: boolean): boolean {
+  return s !== undefined && ts.isIfStatement(s) && s.elseStatement === undefined && test(s.expression) && canonicalReturn(s.thenStatement, mustSend);
 }
 
 /**
- * Follow a value carrying a refusal (`given`: what it is when the request must be refused) up
- * through the expressions that pass it on, to the node that consumes it. `!` flips it; `||` and
- * `??` keep a truthy refusal; `&&` keeps a falsy one, and keeps a truthy one only when its other
- * side is a negated named admission (ADMISSIONS); a nullish equality flips it. Anything else (a
- * field of the refusal, another comparison) makes it unknown.
+ * #579 r1 item 6 and the steward's #6771: the inventory is a fail-closed RECOGNIZER. A guard's
+ * answer counts as consumed only in one of two exact forms, in a statement list of `body` itself
+ * (never in a function nested inside it):
+ *   (a) `const r = G(...);` immediately followed by `if (r) return ...;`
+ *   (b) `if (G(...)) return ...;`
+ * with no else, and no inverted, compound or compared condition. For a hook, the return sends.
+ * Anything else, however correct, does not count: the scanner counts only what it can prove.
  */
-function follow(expr: ts.Node, given: Refused): { into: ts.Node | undefined; from: ts.Node; state: Refused } {
-  let n = expr;
-  let state = given;
-  for (;;) {
-    const p = n.parent;
-    if (!p) return { into: undefined, from: n, state };
-    if (ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isTypeAssertionExpression(p) || ts.isSatisfiesExpression(p) || ts.isNonNullExpression(p) || ts.isAwaitExpression(p)) {
-      n = p;
-      continue;
-    }
-    if (ts.isPrefixUnaryExpression(p) && p.operator === ts.SyntaxKind.ExclamationToken) {
-      state = flipRefused(state);
-      n = p;
-      continue;
-    }
-    if (ts.isBinaryExpression(p)) {
-      const k = p.operatorToken.kind;
-      const other = unwrapNode(p.left === n ? p.right : p.left);
-      if (k === ts.SyntaxKind.BarBarToken) state = state === "truthy" ? "truthy" : "unknown";
-      else if (k === ts.SyntaxKind.QuestionQuestionToken) state = state === "truthy" && p.left === n ? "truthy" : "unknown";
-      else if (k === ts.SyntaxKind.AmpersandAmpersandToken) {
-        const waiver = ts.isPrefixUnaryExpression(other) && other.operator === ts.SyntaxKind.ExclamationToken && callsAdmission(other);
-        state = state === "falsy" ? "falsy" : state === "truthy" && waiver ? "truthy" : "unknown";
-      } else {
-        const nc = nullCompare(p, n);
-        if (!nc) return { into: p, from: n, state: "unknown" };
-        if (nc === "eq") state = flipRefused(state);
-      }
-      n = p;
-      continue;
-    }
-    return { into: p, from: n, state };
-  }
-}
-
-/**
- * The refused path stops: it ends in a return or throw, writes nothing, and, for a hook, every
- * return on it sends a reply (a hook that returns without sending lets the request through).
- */
-function stopsOnRefusal(statements: readonly ts.Statement[], mustSend: boolean): boolean {
-  const last = statements[statements.length - 1];
-  if (!last || !(ts.isReturnStatement(last) || ts.isThrowStatement(last))) return false;
-  let ok = true;
-  const visit = (n: ts.Node): void => {
-    if (!ok || ts.isFunctionLike(n)) return;
-    if (mustSend && ts.isReturnStatement(n) && !(n.expression && within(n.expression, isSendCall))) ok = false;
-    else if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && WRITE_CALLS.has(n.expression.name.text)) ok = false;
-    else ts.forEachChild(n, visit);
-  };
-  for (const s of statements) visit(s);
-  return ok;
-}
-
-const branchStatements = (s: ts.Statement): readonly ts.Statement[] => (ts.isBlock(s) ? s.statements : [s]);
-
-/**
- * Whether a value carrying a refusal decides the request: it is returned (from a helper), or it is
- * tested by an `if` whose REFUSED path stops, directly or through the const it initializes. The
- * refused path is the then-branch when the condition is truthy on refusal, else the else-branch,
- * or, with no else, the statements that follow the `if` in its block.
- */
-function consumed(expr: ts.Node, given: Refused, mustSend: boolean, depth = 0): boolean {
-  const { into, from, state } = follow(expr, given);
-  if (!into || state === "unknown") return false;
-  if (ts.isReturnStatement(into) || (ts.isArrowFunction(into) && into.body === from)) return !mustSend;
-  if (ts.isIfStatement(into) && into.expression === from) {
-    const refused = state === "truthy" ? into.thenStatement : into.elseStatement;
-    if (refused) return stopsOnRefusal(branchStatements(refused), mustSend);
-    const block = into.parent;
-    if (!ts.isBlock(block) && !ts.isSourceFile(block)) return false;
-    const rest = block.statements.slice(block.statements.indexOf(into as ts.Statement) + 1);
-    return stopsOnRefusal(rest, mustSend);
-  }
-  if (ts.isVariableDeclaration(into) && into.initializer === from && ts.isIdentifier(into.name) && depth === 0) {
-    const name = into.name.text;
-    let scope: ts.Node | undefined = into.parent;
-    while (scope && !ts.isFunctionLike(scope) && !ts.isSourceFile(scope)) scope = scope.parent;
-    let used = false;
-    const visit = (n: ts.Node): void => {
-      if (used) return;
-      if (ts.isIdentifier(n) && n.text === name && n !== into.name && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && consumed(n, state, mustSend, depth + 1)) {
-        used = true;
-        return;
-      }
-      ts.forEachChild(n, visit);
-    };
-    if (scope) visit(scope);
-    return used;
-  }
-  return false;
-}
-
-/** Whether `body` calls one of `guards` and consumes its result (each guard with what it returns on refusal). */
-function consumesGuard(body: ts.Node, guards: Map<string, Refused>, mustSend: boolean): boolean {
+function consumesGuard(body: ts.Node, guards: Set<string>, mustSend: boolean): boolean {
   let found = false;
   const visit = (n: ts.Node): void => {
-    if (found) return;
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && guards.has(n.expression.text) && consumed(n, guards.get(n.expression.text)!, mustSend)) found = true;
-    else ts.forEachChild(n, visit);
+    if (found || (n !== body && ts.isFunctionLike(n))) return;
+    if (ts.isBlock(n) || ts.isSourceFile(n) || ts.isCaseClause(n) || ts.isDefaultClause(n)) {
+      const statements = n.statements;
+      statements.forEach((s, i) => {
+        if (found) return;
+        if (canonicalIf(s, (c) => guardCall(c, guards), mustSend)) found = true;
+        else if (ts.isVariableStatement(s) && s.declarationList.declarations.length === 1) {
+          const d = s.declarationList.declarations[0]!;
+          if (ts.isIdentifier(d.name) && guardCall(d.initializer, guards)) {
+            const name = d.name.text;
+            if (canonicalIf(statements[i + 1], (c) => ts.isIdentifier(c) && c.text === name, mustSend)) found = true;
+          }
+        }
+      });
+    }
+    ts.forEachChild(n, visit);
   };
   visit(body);
   return found;
 }
 
 /**
- * What a same-file helper returns on refusal, when it returns a guard's answer (refuseOperate
- * returns the refusal: truthy; isRelayOperator returns `refusal === null`: falsy); null when it does
- * not, or when its returns disagree.
+ * A same-file helper is a guard only in this exact form: plain declarations and early refusals
+ * (`if (...) return { ... };`, an object literal), with no write, then a LAST statement
+ * `return G(...);` (kernels.ts refuseOperate). Any other helper, an allowed-check that returns
+ * `refusal === null` included, is not a guard.
  */
-function helperPolarity(fn: ts.FunctionLikeDeclaration, guards: Map<string, Refused>): Refused | null {
-  const found = new Set<Refused>();
-  const visit = (n: ts.Node): void => {
-    if (n !== fn && ts.isFunctionLike(n)) return;
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && guards.has(n.expression.text)) {
-      const { into, from, state } = follow(n, guards.get(n.expression.text)!);
-      const returned = into !== undefined && (ts.isReturnStatement(into) || (ts.isArrowFunction(into) && into === fn && into.body === from));
-      if (returned && state !== "unknown") found.add(state);
-    }
-    ts.forEachChild(n, visit);
-  };
-  visit(fn);
-  return found.size === 1 ? [...found][0]! : null;
+function isGuardHelper(fn: ts.FunctionLikeDeclaration, guards: Set<string>): boolean {
+  const body = fn.body;
+  if (!body || !ts.isBlock(body) || body.statements.length === 0) return false;
+  const statements = body.statements;
+  const last = statements[statements.length - 1]!;
+  if (!ts.isReturnStatement(last) || !guardCall(last.expression, guards)) return false;
+  return statements.slice(0, -1).every((s) => {
+    if (within(s, isWriteCall)) return false;
+    if (ts.isVariableStatement(s)) return true;
+    if (!ts.isIfStatement(s) || s.elseStatement !== undefined) return false;
+    const r = ts.isBlock(s.thenStatement) && s.thenStatement.statements.length === 1 ? s.thenStatement.statements[0]! : s.thenStatement;
+    return ts.isReturnStatement(r) && r.expression !== undefined && ts.isObjectLiteralExpression(unwrap(r.expression));
+  });
 }
 
 /** The text a route path expression resolves to through the file's string constants, if any. */
@@ -373,14 +291,12 @@ function scanSource(fileName: string, text: string): Scan {
 
   // Same-file helpers that consume a guard are guards (e.g. kernels.ts refuseOperate); helpers that
   // also send its refusal may stand as a preHandler.
-  const guards = new Map<string, Refused>([...GUARD_NAMES].map((name) => [name, "truthy" as Refused]));
+  const guards = new Set(GUARD_NAMES);
   for (let grew = true; grew; ) {
     grew = false;
     for (const [name, fn] of functions) {
-      if (guards.has(name) || !fn.body) continue;
-      const polarity = helperPolarity(fn, guards);
-      if (polarity !== null) {
-        guards.set(name, polarity);
+      if (!guards.has(name) && isGuardHelper(fn, guards)) {
+        guards.add(name);
         grew = true;
       }
     }
@@ -455,6 +371,9 @@ function scanSource(fileName: string, text: string): Scan {
             ts.isArrowFunction(l) || ts.isFunctionExpression(l) || (ts.isIdentifier(l) && functions.has(l.text)) ||
             (first !== undefined && ts.isStringLiteralLike(unwrap(first)) && (unwrap(first) as ts.StringLiteralLike).text.startsWith("/"));
           if (routeShaped) unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(...)`);
+        } else if (!(ts.isArrowFunction(unwrap(last)) || ts.isFunctionExpression(unwrap(last)) || (ts.isIdentifier(unwrap(last)) && functions.has((unwrap(last) as ts.Identifier).text)))) {
+          // #6771: a handler the scan cannot read (imported, or built by a call) is unreadable.
+          unreadable.push(`${fileName}:${lineOf(n)} ${receiver.getText(sf)}.${method}(<handler>)`);
         } else {
           const resolved = resolvePath(first!, consts);
           let fn: ts.Node | undefined = n.parent;
@@ -631,7 +550,13 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       // line 59: the allow-path returns early and the refused path WRITES; a named handler at a computed path.
       '  app.post("/api/probe/:kernelId/negated-to-write", async (req: any) => { if (!refuseKernelAction(req, {} as any, "k", "decide")) return; db.insert(pendingApprovals).values({}); });',
       "  child.put(otherPath, namedHandler);",
+      '  app.post("/api/probe/:kernelId/imported-handler", importedHandler);',
+      // line 62: a write between the guard and its check, a guard only in a nested function, a writing helper.
+      '  app.post("/api/probe/:kernelId/write-before-check", async (req: any, reply: any) => { const r = refuseKernelAction(req, {} as any, "k", "decide"); db.insert(pendingApprovals).values({}); if (r) return reply.code(r.status).send(r.body); });',
+      '  app.post("/api/probe/:kernelId/nested-guard", async (req: any) => { const unused = () => { if (refuseKernelAction(req, {} as any, "k", "decide")) return; }; db.insert(pendingApprovals).values({}); });',
+      '  app.post("/api/probe/:kernelId/writing-helper", async (req: any) => { if (writingHelper(req)) return; });',
       "}",
+      "function writingHelper(req: any) { const written = db.insert(operatorPolicies).values({}).run(); return refuseKernelAction(req, {} as any, 'k', 'decide'); }",
     ].join("\n"),
   );
   const byKey = new Map(probe.routes.map((r) => [r.key, r.guarded]));
@@ -657,15 +582,18 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       'POST probe.ts:opts.prefix + "/x"': false,
       "POST probe.ts:dynamicPath": false,
       "ALL /api/probe/:kernelId/all": false,
-      // #579 r1 item 6: the refused branch must stop, and must not write; an AND keeps the refusal
-      // only when its other side is a named second authorization (ADMISSIONS).
+      // #579 r1 item 6 and #6771: only the canonical forms count; an inverted, waived (compound)
+      // or wrong-branch refusal does not, however correct it may be.
       "POST /api/probe/:kernelId/inverted": false,
       "POST /api/probe/:kernelId/and-false": false,
       "POST /api/probe/:kernelId/write-then-return": false,
-      "POST /api/probe/:kernelId/negated": true,
-      "POST /api/probe/:kernelId/waived": true,
+      "POST /api/probe/:kernelId/negated": false,
+      "POST /api/probe/:kernelId/waived": false,
       "POST /api/probe/:kernelId/waived-by-anything": false,
       "POST /api/probe/:kernelId/negated-to-write": false,
+      "POST /api/probe/:kernelId/write-before-check": false,
+      "POST /api/probe/:kernelId/nested-guard": false,
+      "POST /api/probe/:kernelId/writing-helper": false,
     });
   });
 
@@ -681,6 +609,9 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       [49, "POST /api/probe/:kernelId/inverted", false],
       [51, "POST /api/probe/:kernelId/write-then-return", false],
       [59, "POST /api/probe/:kernelId/negated-to-write", false],
+      [62, "POST /api/probe/:kernelId/write-before-check", false],
+      [63, "POST /api/probe/:kernelId/nested-guard", false],
+      [66, null, null],
     ]);
   });
 
@@ -691,6 +622,7 @@ describe("N31 route inventory: the scanner sees what it must (probe)", () => {
       "probe.ts:56 app.route(routeOpts)",
       "probe.ts:58 child.post(...)",
       "probe.ts:60 child.put(...)",
+      "probe.ts:61 app.post(<handler>)",
     ]);
     const computed = probe.routes.filter((r) => r.computed).map((r) => [r.key, isKernelRoute(r)]);
     expect(computed).toEqual([
