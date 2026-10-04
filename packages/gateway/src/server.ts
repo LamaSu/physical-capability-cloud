@@ -36,6 +36,7 @@ import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { operatorWorkRoutes } from "./routes/operator-work.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { operatorChannelsRoutes } from "./routes/operator-channels.js";
 import { operatorStatusRoutes } from "./routes/operator-status.js";
@@ -137,7 +138,7 @@ import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
-import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
+import { corsDelegator, irCorsReadProjection, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
 import { scopeChecker } from "./middleware/scope-checker.js";
@@ -287,14 +288,13 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin)
-  await app.register(cors, {
-    origin: corsOriginValidator,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
-    maxAge: 86400, // Cache preflight for 24h
-  });
+  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
+  // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
+  // GET access to the closed IR's public read routes for the governed GenUI view (row 37).
+  await app.register(cors, { delegator: corsDelegator });
+  // ...and such a wildcard response is the server-side IR projection, never the raw body
+  // (astra #562 r1 F1). This is a ROOT hook, so it wraps every route registered below.
+  app.addHook("onSend", irCorsReadProjection);
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
@@ -657,6 +657,7 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(operatorWorkRoutes);
   await app.register(operatorsPublicRoutes);
   await app.register(operatorChannelsRoutes);
   await app.register(operatorStatusRoutes);

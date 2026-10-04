@@ -25,3 +25,4 @@ export * from "./simulate.js";
 export * from "./bind.js";
 export * from "./adapters.js";
 export * from "./examples.js";
+export * from "./kits.js";
