@@ -116,6 +116,14 @@ export function readOperatorPolicy(kernelId: string): PolicyRead {
   }
   if (!row) return { kind: "missing" };
   if (!isPolicyObject(row.policy)) return { kind: "unavailable" };
+  // A PRESENT emergencyStop must be a boolean. A truthy non-boolean still stops the
+  // kernel (the safe direction, read by truthiness below), but a malformed FALSY one
+  // (null, 0, "") would read as "not stopped" and hand work out, so the row is
+  // unavailable instead: it fails closed, never open (astra pack 150b).
+  if (Object.prototype.hasOwnProperty.call(row.policy, "emergencyStop")) {
+    const flag = row.policy.emergencyStop;
+    if (typeof flag !== "boolean" && !flag) return { kind: "unavailable" };
+  }
   return { kind: "ok", policy: row.policy, updatedAt: row.updatedAt };
 }
 

@@ -25,6 +25,17 @@ import {
  *  pending approvals, only run there). Shared between PUT and PATCH so the
  *  two can never drift to different codes for the same refusal. */
 const EMERGENCY_STOP_IMMUTABLE_VIA_POLICY_WRITE = "emergency_stop_immutable_via_policy_write";
+const INVALID_EMERGENCY_STOP = "invalid_emergency_stop";
+
+/** A policy write may only name emergencyStop as a real boolean; a non-boolean is never stored (astra pack 150b). */
+function namesNonBooleanEmergencyStop(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    Object.prototype.hasOwnProperty.call(body, "emergencyStop") &&
+    typeof (body as Record<string, unknown>).emergencyStop !== "boolean"
+  );
+}
 
 const { operatorPolicies, pendingApprovals } = schema;
 
@@ -153,6 +164,9 @@ export async function operatorRoutes(app: FastifyInstance) {
       if (!policy || policy.version !== 1) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
+      if (namesNonBooleanEmergencyStop(policy)) {
+        return reply.status(400).send({ error: INVALID_EMERGENCY_STOP, message: "emergencyStop must be a boolean." });
+      }
       if (!(await requireOwnerOf(actor, reply, req.params.kernelId))) return reply;
 
       // refvertical #4850: emergencyStop may change ONLY through
@@ -214,6 +228,9 @@ export async function operatorRoutes(app: FastifyInstance) {
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
       const patch = req.body as Partial<OperatorPolicy>;
+      if (namesNonBooleanEmergencyStop(patch)) {
+        return reply.status(400).send({ error: INVALID_EMERGENCY_STOP, message: "emergencyStop must be a boolean." });
+      }
       if (!(await requireKernelOwner(req, reply, req.params.kernelId))) return reply;
 
       try {
