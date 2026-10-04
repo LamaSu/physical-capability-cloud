@@ -9,6 +9,7 @@
  * hashEvent calls crypto.subtle.digest once per event (sha256 in @pcc/spec), so these tests hold
  * back or fail chosen events' digests through a spy on it.
  */
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { verifyBundleHash, verifyEventHash, type EvidenceBundle, type EvidenceEvent, type EvidenceSource, type Signature } from "@pcc/spec";
 import { EvidenceEmitter } from "../evidence-emitter.js";
@@ -98,8 +99,10 @@ it("two overlapping addEvent calls on one step record in call order", async () =
   });
   const emitter = new EvidenceEmitter("kernel-order");
   emitter.registerStep("job-1", "step-1", 0);
-  const first = emitter.addEvent("job-1", "step-1", { type: "execution_progress", timestamp: "2026-10-03T00:00:00Z", payload: {} } as never);
-  const second = emitter.addEvent("job-1", "step-1", { type: "execution_completed", timestamp: "2026-10-03T00:00:01Z", payload: {} } as never);
+  // Each event carries a source: the emitter refuses an event without one (astra pack 273).
+  const source = { deviceId: "dev-1", deviceType: "machine", kernelId: "kernel-order" };
+  const first = emitter.addEvent("job-1", "step-1", { type: "execution_progress", timestamp: "2026-10-03T00:00:00Z", source, payload: {} } as never);
+  const second = emitter.addEvent("job-1", "step-1", { type: "execution_completed", timestamp: "2026-10-03T00:00:01Z", source, payload: {} } as never);
   await Promise.all([first, second]);
   expect(emitter.getEvents("job-1", "step-1").map((e) => e.type)).toEqual(["execution_progress", "execution_completed"]);
 });
@@ -307,7 +310,7 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
     expect(await verifyEventHash(second.events[0]!)).toBe(true);
   });
 
-  it("refuses an event whose hashed fields are not plain JSON data, before it takes a place (pack 265)", async () => {
+  it("refuses an event whose hashed fields are not plain JSON data, before it takes a place (packs 265, 273)", async () => {
     const emitter = new EvidenceEmitter(KERNEL);
     emitter.registerStep(JOB, "s1", 0);
     class Reading {
@@ -315,6 +318,8 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
     }
     const sparse: unknown[] = [1];
     sparse[2] = 3;
+    const hidden = {};
+    Object.defineProperty(hidden, "x", { value: 1, enumerable: false });
     const refused: Array<[string, Record<string, unknown>, string]> = [
       ["a Date", { at: new Date(0) }, "event.payload.at is not a plain object"],
       ["a Map", { m: new Map([["a", 1]]) }, "event.payload.m is not a plain object"],
@@ -322,7 +327,11 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
       ["a typed array", { bytes: new Uint8Array([1, 2]) }, "event.payload.bytes is not a plain object"],
       ["shared memory", { bytes: new Uint8Array(new SharedArrayBuffer(2)) }, "event.payload.bytes is not a plain object"],
       ["a RegExp", { r: /x/ }, "event.payload.r is not a plain object"],
-      ["an undefined element", { list: [1, undefined] }, "event.payload.list[1] is a undefined"],
+      ["a class instance", { reading: new Reading() }, "event.payload.reading is not a plain object"],
+      ["a boxed primitive", { s: new String("x") }, "event.payload.s is not a plain object"],
+      ["an undefined element", { list: [1, undefined] }, "event.payload.list[1] is undefined"],
+      ["an undefined member (astra pack 273)", { x: undefined }, "event.payload.x is undefined"],
+      ["a nested undefined member", { reading: { celsius: undefined } }, "event.payload.reading.celsius is undefined"],
       ["a hole", { list: sparse }, "event.payload.list[1] is a hole"],
       ["a bigint", { n: 1n }, "event.payload.n is a bigint"],
       ["NaN", { x: NaN }, "event.payload.x is NaN"],
@@ -331,34 +340,49 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
       ["an integer past the safe range (D5)", { n: 2 ** 53 }, "event.payload.n is the integer 9007199254740992, outside the safe range"],
       ["a negative one", { n: -(2 ** 53) }, "event.payload.n is the integer -9007199254740992, outside the safe range"],
       ["a magnitude only an integer has", { n: 6.02e23 }, "event.payload.n is the integer 6.02e+23, outside the safe range"],
-      ["a named member on an array", { list: Object.assign([1, 2], { unit: "mm" }) }, "event.payload.list has a named member besides its elements"],
-      ["a boxed primitive", { s: new String("x") }, "event.payload.s is not a plain object"],
+      ["a named member on an array", { list: Object.assign([1, 2], { unit: "mm" }) }, "event.payload.list has a member besides its elements"],
+      ["a symbol-keyed member", { m: { [Symbol("k")]: 1 } }, "event.payload.m has a symbol-keyed member"],
+      ["a non-enumerable member", { m: hidden }, "event.payload.m.x is not enumerable"],
+      ["a member named __proto__", { m: JSON.parse('{"__proto__": 1}') }, "event.payload.m has a member named __proto__"],
     ];
     for (const [label, payload, problem] of refused) {
       await expect(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, payload)), label).rejects.toThrow(problem);
     }
-    // A cycle (structuredClone keeps it) is refused at the depth cap, never walked forever.
+    // The four hashed fields: type and timestamp are strings, and source is a plain object, never undefined (astra pack 273).
+    const base = raw("execution_progress", 0) as unknown as Record<string, unknown>;
+    const roots: Array<[string, Record<string, unknown>, string]> = [
+      ["type undefined", { ...base, type: undefined }, "event.type is not a string"],
+      ["timestamp undefined", { ...base, timestamp: undefined }, "event.timestamp is not a string"],
+      ["source undefined", { ...base, source: undefined }, "event.source is undefined"],
+      ["source absent", { type: base.type, timestamp: base.timestamp, payload: {} }, "event.source is undefined"],
+      ["source an array", { ...base, source: [] }, "event.source is not an object"],
+      ["payload an array", { ...base, payload: [1] }, "event.payload is not an object"],
+    ];
+    for (const [label, event, problem] of roots) {
+      await expect(emitter.addEvent(JOB, "s1", event as never), label).rejects.toThrow(problem);
+    }
+    // A cycle is refused at the depth cap, never walked forever.
     const cyclic: Record<string, unknown> = { a: 1 };
     cyclic.self = cyclic;
     await expect(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { cyclic }))).rejects.toThrow("nests deeper than 64");
     // In the source too.
-    const fromSource = { ...(raw("execution_progress", 0) as unknown as Record<string, unknown>), source: { deviceId: "dev-1", at: new Date(0) } };
+    const fromSource = { ...base, source: { deviceId: "dev-1", at: new Date(0) } };
     await expect(emitter.addEvent(JOB, "s1", fromSource as never)).rejects.toThrow("event.source.at is not a plain object");
     // None took a place: plain data still stores, and the step holds only it.
     const nested = {
       reading: { celsius: 21, probes: [{ id: "p1" }, null, true, "x"] },
-      skipped: undefined,
       bare: Object.create(null),
       numbers: [2 ** 53 - 1, -(2 ** 53 - 1), 0.5, 1e-300, -0],
     };
     const plain = await emitter.addEvent(JOB, "s1", raw("execution_completed", 1, nested));
     expect(types(emitter)).toEqual(["execution_completed"]);
     expect(await verifyEventHash(plain)).toBe(true);
-    // A class instance's own fields are copied as a plain object, so what is hashed is what is stored.
-    const stored = await emitter.addEvent(JOB, "s1", raw("execution_progress", 2, { reading: new Reading() }));
-    expect(Object.getPrototypeOf((stored.payload as { reading: object }).reading)).toBe(Object.prototype);
-    expect((stored.payload as { reading: unknown }).reading).toEqual({ celsius: 21 });
-    expect(await verifyEventHash(stored)).toBe(true);
+    // What is stored is what JSON carries: -0 is stored as 0, and a JSON round trip changes nothing.
+    expect(Object.is((plain.payload as { numbers: number[] }).numbers[4], 0)).toBe(true);
+    expect(JSON.parse(JSON.stringify(emitter.getEvents(JOB, "s1")[0]))).toEqual(emitter.getEvents(JOB, "s1")[0]);
+    // An absent or null payload is an empty one, as before.
+    const empty = await emitter.addEvent(JOB, "s1", { ...base, payload: null } as never);
+    expect(empty.payload).toEqual({ jobId: JOB });
   });
 
   it("stores only the fields the hash covers: anything else on the event is dropped at the call", async () => {
@@ -450,5 +474,161 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
     await emitter.addEvent("a", "b:c", raw("execution_completed", 1));
     expect(emitter.getEvents("a:b", "c").map((e) => [e.type, (e.payload as { jobId: string }).jobId])).toEqual([["execution_started", "a:b"]]);
     expect(emitter.getEvents("a", "b:c").map((e) => [e.type, (e.payload as { jobId: string }).jobId])).toEqual([["execution_completed", "a"]]);
+  });
+});
+
+describe("EvidenceEmitter's input boundary runs no adapter code and uses intrinsics captured at load (astra pack 273)", () => {
+  it("astra's recipe: a payload getter is refused without running, so it can neither swap structuredClone nor keep a reference into what is stored", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const original = globalThis.structuredClone;
+    let runs = 0;
+    const payload = {};
+    Object.defineProperty(payload, "reading", {
+      enumerable: true,
+      get() {
+        runs++;
+        globalThis.structuredClone = ((v: unknown) => v) as typeof structuredClone;
+        return { celsius: 21 };
+      },
+    });
+    try {
+      await expect(emitter.addEvent(JOB, "s1", raw("sensor_data_summary", 0, payload))).rejects.toThrow("event.payload.reading is an accessor");
+    } finally {
+      globalThis.structuredClone = original;
+    }
+    expect(runs).toBe(0);
+    expect(types(emitter)).toEqual([]);
+  });
+
+  it("a getter on the event itself, or a Proxy anywhere, is refused without running it or any trap", async () => {
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    let runs = 0;
+    const event = { ...(raw("execution_progress", 0) as unknown as Record<string, unknown>) };
+    Object.defineProperty(event, "payload", { enumerable: true, get: () => (runs++, {}) });
+    await expect(emitter.addEvent(JOB, "s1", event as never)).rejects.toThrow("event.payload is an accessor");
+    // A handler that is itself a proxy counts every trap the engine looks up.
+    const handler = new Proxy({}, { get: () => (runs++, undefined) });
+    await expect(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { reading: new Proxy({ celsius: 21 }, handler) }))).rejects.toThrow(
+      "event.payload.reading is a proxy",
+    );
+    await expect(emitter.addEvent(JOB, "s1", new Proxy(raw("execution_progress", 0) as object, handler) as never)).rejects.toThrow("event is not a plain object");
+    expect(runs).toBe(0);
+    expect(types(emitter)).toEqual([]);
+  });
+
+  it("intrinsics replaced after load change nothing: a Date, NaN, an accessor and a hole are still refused, and plain data still stores", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const saved = {
+      getPrototypeOf: Object.getPrototypeOf,
+      getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+      ownKeys: Reflect.ownKeys,
+      isArray: Array.isArray,
+      isFinite: Number.isFinite,
+      isSafeInteger: Number.isSafeInteger,
+      keys: Object.keys,
+      structuredClone: globalThis.structuredClone,
+    };
+    const getter = {};
+    Object.defineProperty(getter, "x", { enumerable: true, get: () => 1 });
+    const sparse: unknown[] = [1];
+    sparse[2] = 3;
+    const calls: Array<Promise<{ event?: EvidenceEvent; error?: string }>> = [];
+    try {
+      // Each replacement answers what would let the bad input through. The copy runs synchronously inside the
+      // call, before addEvent's first await, so every refusal is decided while they are in place.
+      Object.getPrototypeOf = (() => Object.prototype) as typeof Object.getPrototypeOf;
+      Object.getOwnPropertyDescriptor = ((o: object, k: PropertyKey) => ({
+        value: (o as Record<PropertyKey, unknown>)[k],
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      })) as typeof Object.getOwnPropertyDescriptor;
+      Reflect.ownKeys = ((o: object) => saved.keys(o)) as typeof Reflect.ownKeys;
+      Array.isArray = (() => false) as unknown as typeof Array.isArray;
+      Number.isFinite = (() => true) as typeof Number.isFinite;
+      Number.isSafeInteger = (() => true) as typeof Number.isSafeInteger;
+      globalThis.structuredClone = ((v: unknown) => v) as typeof structuredClone;
+      calls.push(settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { at: new Date(0) }))));
+      calls.push(settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { x: NaN }))));
+      calls.push(settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { m: getter }))));
+      calls.push(settled(emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { list: sparse }))));
+      calls.push(settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 1, { reading: { celsius: 21 } }))));
+    } finally {
+      Object.getPrototypeOf = saved.getPrototypeOf;
+      Object.getOwnPropertyDescriptor = saved.getOwnPropertyDescriptor;
+      Reflect.ownKeys = saved.ownKeys;
+      Array.isArray = saved.isArray;
+      Number.isFinite = saved.isFinite;
+      Number.isSafeInteger = saved.isSafeInteger;
+      globalThis.structuredClone = saved.structuredClone;
+    }
+    const outcomes = await Promise.all(calls);
+    expect(outcomes.map((o) => o.error ?? "stored")).toEqual([
+      expect.stringContaining("event.payload.at is not a plain object"),
+      expect.stringContaining("event.payload.x is NaN"),
+      expect.stringContaining("event.payload.m.x is an accessor"),
+      expect.stringContaining("event.payload.list[1] is a hole"),
+      "stored",
+    ]);
+    expect(types(emitter)).toEqual(["execution_completed"]);
+    expect(await verifyEventHash(outcomes[4]!.event!)).toBe(true);
+  });
+
+  it("setters and a `get` planted on Object.prototype after load: the copy and the job binding define properties, so no setter runs and nothing is lost", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    let runs = 0;
+    const planted = ["jobId", "reading", "celsius"];
+    let call: Promise<{ event?: EvidenceEvent; error?: string }>;
+    try {
+      // A setter would swallow an assigned member; a `get` on Object.prototype would make every ordinary
+      // descriptor read as an accessor's. Both are planted only for the synchronous part of the call.
+      for (const key of planted) Object.defineProperty(Object.prototype, key, { configurable: true, set: () => void runs++ });
+      Object.defineProperty(Object.prototype, "get", { configurable: true, writable: true, value: () => (runs++, undefined) });
+      Object.defineProperty(Object.prototype, "settlementUnitId", { configurable: true, get: () => (runs++, `0x${"ab".repeat(32)}`) });
+      call = settled(emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { reading: { celsius: 21 } })));
+    } finally {
+      for (const key of [...planted, "get", "settlementUnitId"]) delete (Object.prototype as Record<string, unknown>)[key];
+    }
+    const outcome = await call!;
+    expect(outcome.error).toBeUndefined();
+    expect(runs).toBe(0);
+    const stored = emitter.getEvents(JOB, "s1")[0]!;
+    expect(stored.payload).toEqual({ reading: { celsius: 21 }, jobId: JOB });
+    expect(await verifyEventHash(stored)).toBe(true);
+  });
+
+  it("structuredClone replaced after load: getEvents still hands out detached copies, through the clone captured at load", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+    const original = globalThis.structuredClone;
+    let listed: EvidenceEvent[] = [];
+    try {
+      globalThis.structuredClone = ((v: unknown) => v) as typeof structuredClone;
+      listed = emitter.getEvents(JOB, "s1");
+    } finally {
+      globalThis.structuredClone = original;
+    }
+    (listed[0]!.payload as { pages: number }).pages = 99;
+    expect((emitter.getEvents(JOB, "s1")[0]!.payload as { pages: number }).pages).toBe(3);
+  });
+
+  it("the emitter calls no clone or reflection intrinsic it did not capture at load (a scan of its source)", () => {
+    const source = readFileSync(new URL("../evidence-emitter.ts", import.meta.url), "utf8");
+    // Comments out, then every call of an intrinsic the boundary or a copy could reach through a global.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const pattern =
+      /\b(structuredClone|Object\.(getPrototypeOf|getOwnPropertyDescriptor|defineProperty|create|keys|entries|values|assign)|Reflect\.ownKeys|Array\.isArray|Number\.is(Finite|Integer|SafeInteger)|types\.isProxy)\s*\(/g;
+    expect(code.match(pattern) ?? []).toEqual([]);
+    // And the capture itself is there.
+    expect(code).toContain("const StructuredClone = globalThis.structuredClone;");
   });
 });

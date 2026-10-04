@@ -26,11 +26,35 @@ import * as Sentry from "@sentry/node";
 /** The camera event types; each counts toward a tier only as a closed LO-SE-1 capture for the job. */
 const CAMERA_TYPES: readonly string[] = KERNEL_PULL_CAPTURE_TYPES;
 
+// -- captured when this module loads (astra pack 273) --
+// The input boundary, the plain-JSON check and every copy the emitter makes or hands out call only
+// these, never a method or global looked up at the time of the call: an adapter running after load
+// cannot replace what they do, as @pcc/spec's canonicalize resists the same with util/primordials.ts.
+const StructuredClone = globalThis.structuredClone;
+const ObjectGetPrototypeOf = Object.getPrototypeOf;
+const ObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const ObjectDefineProperty = Object.defineProperty;
+const ObjectCreate = Object.create;
+const ReflectOwnKeys = Reflect.ownKeys;
+const ArrayIsArray = Array.isArray;
+const NumberIsFinite = Number.isFinite;
+const NumberIsInteger = Number.isInteger;
+const NumberIsSafeInteger = Number.isSafeInteger;
+const ObjectPrototype = Object.prototype;
+const ArrayPrototype = Array.prototype;
+/** node:util's proxy check: it runs no trap. */
+const IsProxy = types.isProxy;
+
+/** Whether `descriptor` describes a data property: it OWNS `value` (one written on Object.prototype is not its own). */
+function isDataDescriptor(descriptor: PropertyDescriptor): boolean {
+  return ObjectGetOwnPropertyDescriptor(descriptor, "value") !== undefined;
+}
+
 /** An own data property's value, read without running a getter or a Proxy trap; otherwise undefined. */
 function ownDataValue(target: unknown, key: string): unknown {
-  if (target === null || typeof target !== "object" || types.isProxy(target)) return undefined;
-  const descriptor = Object.getOwnPropertyDescriptor(target, key);
-  return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+  if (target === null || typeof target !== "object" || IsProxy(target)) return undefined;
+  const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
+  return descriptor !== undefined && isDataDescriptor(descriptor) ? descriptor.value : undefined;
 }
 
 /** The device that emitted `event`, named for a `missing` entry without running a getter or a trap. */
@@ -71,52 +95,122 @@ const UNIT_FIELD = /^0x[0-9a-f]{64}$/;
 /** Deeper than this, a value is refused rather than walked (a cycle, or a structure no device emits). */
 const MAX_EVIDENCE_DEPTH = 64;
 
+/** Why an event's input is not plain JSON data. Module-private, so nothing outside can raise one. */
+class EvidenceInputError extends Error {}
+
+/** A writable, enumerable, configurable data descriptor with no prototype, so no `get` or `set` written on Object.prototype is read as its own. */
+function dataDescriptor(value: unknown): PropertyDescriptor {
+  const descriptor = ObjectCreate(null) as PropertyDescriptor;
+  descriptor.value = value;
+  descriptor.writable = true;
+  descriptor.enumerable = true;
+  descriptor.configurable = true;
+  return descriptor;
+}
+
+/** An own property of `target`, read from its descriptor: absent, or its value. An accessor is refused and never runs. */
+function ownProperty(target: object, key: PropertyKey, at: string): { present: boolean; value: unknown } {
+  const descriptor = ObjectGetOwnPropertyDescriptor(target, key);
+  if (descriptor === undefined) return { present: false, value: undefined };
+  if (!isDataDescriptor(descriptor)) throw new EvidenceInputError(`${at} is an accessor`);
+  return { present: true, value: descriptor.value };
+}
+
 /**
- * Where `value` is not plain JSON data, or null when it is all plain. The event hash is
- * canonical JSON, which has no faithful form for anything else (astra pack 265): it hashes a
- * Date, a Map, a Set, a RegExp or an Error as {}, a typed array as an object of its indices, a
- * SharedArrayBuffer's bytes as they are at that moment (they can change after), an undefined
- * array element as null, an array hole, NaN and Infinity as text no JSON parser reads (JSON
- * carries them as null), and an array without its named members. #359's canonicalize refuses
- * all of these; the oracle and VCR also refuse D5's integers outside the safe range.
+ * The emitter's own copy of `value`, which must be plain JSON data (astra packs 265, 273): canonical
+ * JSON has no faithful form for anything else. It hashes a Date, a Map, a Set, a RegExp or an Error as
+ * {}, a typed array as an object of its indices, a SharedArrayBuffer's bytes as they are at that moment,
+ * an undefined array element as null, an array hole, NaN and Infinity as text no JSON parser reads, an
+ * array without its named members, and an object without an undefined member, which JSON drops too.
+ * #359's canonicalize refuses all of these; the oracle and VCR also refuse D5's integers outside the
+ * safe range.
  *
- * It walks the emitter's own copy (structuredClone). The copy makes every array an ordinary
- * Array and gives every plain object Object.prototype, a class instance's or a null-prototype
- * one's included; it keeps a Date, a Map, a typed array or a boxed primitive what it is. Plain
- * data is null, a boolean, a string, a finite number that is not an integer outside the safe
- * range (D5), an array whose every index holds plain data and which has no other member, and an
- * object whose prototype is Object.prototype and whose own enumerable string-keyed members are
- * plain data. A member that is undefined is skipped, as canonical JSON skips it.
+ * It reads only through own property descriptors and node:util's trap-free proxy check, so NO adapter
+ * code runs while it copies: no getter, setter or Proxy trap. An accessor, a proxy, a symbol-keyed,
+ * non-enumerable or `__proto__` member, and `undefined` anywhere are refused. Plain data is null, a
+ * boolean, a string, a finite number that is not an integer outside the safe range (D5; -0 is copied as
+ * 0, as JSON carries it), an ordinary array whose every index holds plain data and which has no other
+ * member, and an object whose prototype is Object.prototype or null and whose members are plain data.
+ * The copy is made of ordinary arrays and objects, built by defining properties, so no setter runs.
  */
-function jsonProblem(value: unknown, path: string, depth: number): string | null {
-  if (value === null || typeof value === "boolean" || typeof value === "string") return null;
+function copyPlain(value: unknown, at: string, depth: number): unknown {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return value;
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) return `${path} is ${value}`;
-    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
-      return `${path} is the integer ${value}, outside the safe range (D5: send it as a decimal string)`;
+    if (!NumberIsFinite(value)) throw new EvidenceInputError(`${at} is ${value}`);
+    if (NumberIsInteger(value) && !NumberIsSafeInteger(value)) {
+      throw new EvidenceInputError(`${at} is the integer ${value}, outside the safe range (D5: send it as a decimal string)`);
     }
-    return null;
+    return value === 0 ? 0 : value;
   }
-  if (typeof value !== "object") return `${path} is a ${typeof value}`;
-  if (depth >= MAX_EVIDENCE_DEPTH) return `${path} nests deeper than ${MAX_EVIDENCE_DEPTH}`;
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      if (!Object.prototype.hasOwnProperty.call(value, i)) return `${path}[${i}] is a hole`;
-      const problem = jsonProblem(value[i], `${path}[${i}]`, depth + 1);
-      if (problem !== null) return problem;
+  if (value === undefined) throw new EvidenceInputError(`${at} is undefined (JSON has no undefined: omit the member)`);
+  if (typeof value !== "object") throw new EvidenceInputError(`${at} is a ${typeof value}`);
+  if (IsProxy(value)) throw new EvidenceInputError(`${at} is a proxy`);
+  if (depth >= MAX_EVIDENCE_DEPTH) throw new EvidenceInputError(`${at} nests deeper than ${MAX_EVIDENCE_DEPTH}`);
+  const prototype: unknown = ObjectGetPrototypeOf(value);
+  if (ArrayIsArray(value)) {
+    if (prototype !== ArrayPrototype) throw new EvidenceInputError(`${at} is not a plain array`);
+    const length = ownProperty(value, "length", `${at}.length`).value as number;
+    const out: unknown[] = [];
+    for (let i = 0; i < length; i++) {
+      const element = ownProperty(value, i, `${at}[${i}]`);
+      if (!element.present) throw new EvidenceInputError(`${at}[${i}] is a hole`);
+      ObjectDefineProperty(out, i, dataDescriptor(copyPlain(element.value, `${at}[${i}]`, depth + 1)));
     }
-    if (Object.keys(value).length !== value.length) return `${path} has a named member besides its elements`;
-    return null;
+    // Its own keys are its indices and "length", and nothing else.
+    if (ReflectOwnKeys(value).length !== length + 1) throw new EvidenceInputError(`${at} has a member besides its elements`);
+    return out;
   }
-  if (Object.getPrototypeOf(value) !== Object.prototype) return `${path} is not a plain object`;
-  const keys = Object.keys(value);
-  for (let i = 0; i < keys.length; i++) {
-    const member = (value as Record<string, unknown>)[keys[i]!];
-    if (member === undefined) continue;
-    const problem = jsonProblem(member, `${path}.${keys[i]}`, depth + 1);
-    if (problem !== null) return problem;
+  if (prototype !== ObjectPrototype && prototype !== null) throw new EvidenceInputError(`${at} is not a plain object`);
+  const out: Record<string, unknown> = {};
+  const keys = ReflectOwnKeys(value);
+  for (let k = 0; k < keys.length; k++) {
+    const key = keys[k]!;
+    if (typeof key === "symbol") throw new EvidenceInputError(`${at} has a symbol-keyed member`);
+    if (key === "__proto__") throw new EvidenceInputError(`${at} has a member named __proto__`);
+    const descriptor = ObjectGetOwnPropertyDescriptor(value, key)!;
+    if (!isDataDescriptor(descriptor)) throw new EvidenceInputError(`${at}.${key} is an accessor`);
+    if (descriptor.enumerable !== true) throw new EvidenceInputError(`${at}.${key} is not enumerable`);
+    ObjectDefineProperty(out, key, dataDescriptor(copyPlain(descriptor.value, `${at}.${key}`, depth + 1)));
   }
-  return null;
+  return out;
+}
+
+/** The emitter's copy of exactly the four fields an event's hash covers. */
+interface EventInput {
+  type: string;
+  timestamp: string;
+  source: Record<string, unknown>;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * The four fields the hash covers, copied through own descriptors (copyPlain); the event's other
+ * fields are never read. type and timestamp must be strings and source a plain object; an absent or
+ * null payload is an empty one, as before.
+ */
+function copyEventInput(rawEvent: unknown): EventInput {
+  if (rawEvent === null || typeof rawEvent !== "object" || IsProxy(rawEvent)) throw new EvidenceInputError("event is not a plain object");
+  const type = ownProperty(rawEvent, "type", "event.type").value;
+  const timestamp = ownProperty(rawEvent, "timestamp", "event.timestamp").value;
+  const source = ownProperty(rawEvent, "source", "event.source").value;
+  const payload = ownProperty(rawEvent, "payload", "event.payload").value;
+  if (typeof type !== "string") throw new EvidenceInputError("event.type is not a string");
+  if (typeof timestamp !== "string") throw new EvidenceInputError("event.timestamp is not a string");
+  const sourceCopy = copyPlain(source, "event.source", 1);
+  if (sourceCopy === null || typeof sourceCopy !== "object" || ArrayIsArray(sourceCopy)) {
+    throw new EvidenceInputError("event.source is not an object");
+  }
+  const payloadCopy = payload === undefined || payload === null ? {} : copyPlain(payload, "event.payload", 1);
+  if (payloadCopy === null || typeof payloadCopy !== "object" || ArrayIsArray(payloadCopy)) {
+    throw new EvidenceInputError("event.payload is not an object");
+  }
+  return { type, timestamp, source: sourceCopy as Record<string, unknown>, payload: payloadCopy as Record<string, unknown> };
+}
+
+/** A payload member's own value (undefined when absent), read from the emitter's own copy. */
+function ownMember(payload: Record<string, unknown>, field: string): unknown {
+  const descriptor = ObjectGetOwnPropertyDescriptor(payload, field);
+  return descriptor === undefined ? undefined : descriptor.value;
 }
 
 export class EvidenceEmitter {
@@ -234,45 +328,52 @@ export class EvidenceEmitter {
       throw new Error(`No step registered for ${jobId}:${stepId}`);
     }
 
+    // The emitter's own copy of exactly the fields the hash covers, taken FIRST and read through own
+    // descriptors only (copyEventInput), so no adapter code runs inside addEvent at all: no getter,
+    // setter or Proxy trap, before or after the event takes its place (astra pack 273). The event is
+    // hashed and stored from the copy, so nothing the adapter changes afterwards reaches what is
+    // stored (steward #6450), and nothing the hash does not cover is stored. Input that is not plain
+    // JSON data fails the call here, before it takes a place.
+    let input: EventInput;
+    try {
+      input = copyEventInput(rawEvent);
+    } catch (err) {
+      if (err instanceof EvidenceInputError) {
+        throw new Error(`${err.message}: evidence must be plain JSON data, which its hash commits to faithfully`);
+      }
+      throw err;
+    }
+    const payload = input.payload;
+
     // Every event names its job, and its unit when the step has one, inside the
     // hashed payload: LO-EV-9 and the oracle bind each event, not the bundle.
     // An adapter may pre-fill a field, but never with another job or unit, and
     // never with a unit the step was not given: the unit fields are reserved
-    // for the binding.
-    const payload: Record<string, unknown> = { ...((rawEvent.payload ?? {}) as Record<string, unknown>) };
-    const commit: Record<string, string> = {
-      jobId,
-      ...(stepEv.unit ? { settlementUnitId: stepEv.unit.settlementUnitId, challengeNonce: stepEv.unit.challengeNonce } : {}),
-    };
-    if (!stepEv.unit) {
-      for (const field of ["settlementUnitId", "challengeNonce"]) {
-        if (payload[field] !== undefined) {
-          throw new Error(`event payload.${field} is reserved for the step's unit, and this step has none`);
-        }
+    // for the binding. Read and written on the copy, own members only.
+    const unit = stepEv.unit;
+    if (!unit) {
+      if (ownMember(payload, "settlementUnitId") !== undefined) {
+        throw new Error("event payload.settlementUnitId is reserved for the step's unit, and this step has none");
+      }
+      if (ownMember(payload, "challengeNonce") !== undefined) {
+        throw new Error("event payload.challengeNonce is reserved for the step's unit, and this step has none");
       }
     }
-    for (const [field, value] of Object.entries(commit)) {
-      if (payload[field] !== undefined && payload[field] !== value) {
-        throw new Error(`event payload.${field} ${String(payload[field])} does not match the step's ${value}`);
+    const commit: Array<[string, string]> = unit
+      ? [["jobId", jobId], ["settlementUnitId", unit.settlementUnitId], ["challengeNonce", unit.challengeNonce]]
+      : [["jobId", jobId]];
+    for (let c = 0; c < commit.length; c++) {
+      const field = commit[c]![0];
+      const value = commit[c]![1];
+      const existing = ownMember(payload, field);
+      if (existing !== undefined && existing !== value) {
+        const shown = typeof existing === "string" ? existing : `a ${typeof existing}`;
+        throw new Error(`event payload.${field} ${shown} does not match the step's ${value}`);
       }
-      payload[field] = value;
+      ObjectDefineProperty(payload, field, dataDescriptor(value));
     }
-    // The emitter's own deep copy of exactly the fields the hash covers, taken at the call: the
-    // event is hashed and stored from it, so nothing the emitting adapter changes afterwards
-    // reaches what is stored (steward #6450), and nothing the hash does not cover is stored. A
-    // value that cannot be copied fails the call here, before it takes a place.
-    const bound = structuredClone({
-      type: rawEvent.type,
-      timestamp: rawEvent.timestamp,
-      source: rawEvent.source,
-      payload,
-    }) as Omit<EvidenceEvent, "id" | "hash">;
-    // It must be plain JSON data, or canonical JSON would commit to something else than what is
-    // stored (astra pack 265). Checked on the copy, before the event takes a place.
-    const problem = jsonProblem(bound, "event", 0);
-    if (problem !== null) {
-      throw new Error(`${problem}: evidence must be plain JSON data, which its hash commits to faithfully`);
-    }
+    // The copy is plain data with the four hashed fields; the source's shape is the adapter's, as before.
+    const bound = input as unknown as Omit<EvidenceEvent, "id" | "hash">;
 
     // Hashed now, from the event as called, and stored in call order (N123): an event waits for
     // the step's earlier events to be stored, or to fail, never for their hashes alone, so a slow
@@ -293,7 +394,7 @@ export class EvidenceEmitter {
         const event: EvidenceEvent = { ...bound, id, hash };
         stepEv.events.push(event);
         // The caller gets a copy: a stored event is never shared, so nothing changes it.
-        return structuredClone(event);
+        return StructuredClone(event);
       } catch (err) {
         stepEv.lost ??= { type: bound.type, error: err instanceof Error ? err.message : String(err) };
         throw err;
@@ -330,7 +431,7 @@ export class EvidenceEmitter {
     }
     // A deep copy, so the bundle shares no object with the stored record, and a change made to
     // either while the bundle is hashed and signed never reaches the other (astra pack 261).
-    const events = structuredClone(stepEv.events);
+    const events = StructuredClone(stepEv.events);
     if (events.length === 0) {
       throw new Error(`No evidence events for ${jobId}:${stepId}`);
     }
@@ -446,7 +547,7 @@ export class EvidenceEmitter {
   /** A copy of the events stored for a job step, in call order. */
   getEvents(jobId: string, stepId: string): EvidenceEvent[] {
     // A copy, as from addEvent: changing it (or pushing into it) changes nothing stored.
-    return structuredClone(this.step(jobId, stepId)?.events ?? []);
+    return StructuredClone(this.step(jobId, stepId)?.events ?? []);
   }
 
   /** Subscribe to finalized bundles */
