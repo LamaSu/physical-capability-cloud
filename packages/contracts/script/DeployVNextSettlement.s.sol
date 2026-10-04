@@ -328,7 +328,8 @@ contract DeployVNextSettlement is Script {
         console2.log("implementation codehash: requires execution - run `--sig run()` WITHOUT --broadcast");
     }
 
-    /// @notice Re-derive the whole tuple from the FACTORY ADDRESS ALONE and re-run every assertion.
+    /// @notice Re-derive the whole tuple from the FACTORY ADDRESS ALONE — plus, for a provisional
+    ///         deployment, its `VNEXT_LABEL` — and re-run every assertion.
     /// @dev    This is what makes the published artifact tamper-EVIDENT rather than merely trusted. The
     ///         artifact is not an authority — it is a claim, and every field of it is re-derivable here
     ///         from one address plus this git commit's build:
@@ -351,13 +352,25 @@ contract DeployVNextSettlement is Script {
     ///         A reviewer runs this against the recorded factory and gets a revert if any recorded field
     ///         was altered. No trusted store, no signature infrastructure required.
     ///
-    ///         ACCEPTANCE BINDS THE ADDRESS (H7 — what invalidates it). An acceptance binds the factory
-    ///         ADDRESS; any change of code or inputs is a different address, which this function then
-    ///         refuses. There is no upgrade path for an accepted factory to drift onto without becoming a
-    ///         different address: `implementation` is an immutable set once in the factory's constructor,
-    ///         and neither the factory nor the escrow has an owner, an admin, a mutable delegatecall
-    ///         target, or a `selfdestruct`. A change of code or inputs is therefore the only way the bound
-    ///         code can ever differ — exactly the case this re-derivation catches.
+    ///         WHAT THIS PROVES, PRECISELY (astra pack-410 Q1/Q5). The bound attester ADDRESSES — not the
+    ///         attesters' code, nor the truth of their getters. The attester-shape probes elsewhere in
+    ///         this file ({_isFixed2of3}/{_isSingleSigner}/{_routeOf}) are SELECTOR-based, not proofs of
+    ///         correct behavior. Passing `verify()` is therefore not clearance to arm arbitrary supplied
+    ///         cohorts; it certifies the factory/implementation pairing alone.
+    ///
+    ///         ACCEPTANCE BINDS A SPECIFIC ADDRESS — this is NOT "no change ever passes" (H7, corrected
+    ///         per astra pack-410 LOW). `verify(factory)` proves only that `factory` IS this build's
+    ///         CREATE2 output for ITS OWN read-back inputs — not that it is the one address any
+    ///         particular consumer accepted. A DIFFERENT, independently and correctly deployed factory
+    ///         from this SAME build also passes `verify()`, on ITS OWN address: changing the code or the
+    ///         inputs does not make verification of that other address fail, it simply produces a
+    ///         different, equally genuine address. An acceptance is bound to the SPECIFIC factory address
+    ///         a consumer accepted, so the CONSUMER — not this function — must compare `verify`'s returned
+    ///         `factory` against that accepted address. What `verify` does rule out, for the one address
+    ///         actually passed in, is that address's code or inputs having drifted since acceptance: there
+    ///         is no upgrade path to drift onto — `implementation` is an immutable set once in the
+    ///         factory's constructor, and neither the factory nor the escrow has an owner, an admin, a
+    ///         mutable delegatecall target, or a `selfdestruct`.
     ///
     ///         WHAT THIS DOES NOT PROVE: the git commit the build came from. "This build" is only as
     ///         trustworthy as whoever compiled and ran it; the published artifact's solc version and
@@ -411,10 +424,21 @@ contract DeployVNextSettlement is Script {
         // is empty for canonical and comes from the environment for provisional, since it is not
         // recoverable from chain state alone.
         bool provisional = VNextDeploySpec.isProvisionalCohort(t.primaryCohortId);
+        // N38 follow-up M1 (astra pack-410 Q2, MEDIUM): the mode above is inferred from the PRIMARY
+        // cohort's band ALONE, and {_assertCohortSeparation} below checks the two cohorts hold DISTINCT
+        // ids but never that they share a BAND. Without this, a primary in the canonical band paired
+        // with an escalation cohort in the provisional band (or the reverse) passes every check that
+        // follows — including the address re-derivation, since its mode never looks at the escalation
+        // side at all. `_assertPreflight` (`:614`) already refuses this for script-made deployments, so
+        // this closes the gap for STANDALONE `verify(address)` only.
+        require(
+            VNextDeploySpec.isProvisionalCohort(t.escalationCohortId) == provisional,
+            "verify: primary and escalation cohorts are in different bands (one canonical, one provisional)"
+        );
         string memory mode = provisional ? VNextDeploySpec.MODE_PROVISIONAL : VNextDeploySpec.MODE_CANONICAL;
         string memory label = "";
         if (provisional) {
-            label = vm.envString("VNEXT_LABEL");
+            label = _verifyLabel();
             require(
                 bytes(label).length > 0,
                 "verify: VNEXT_LABEL is required to re-derive a provisional factory's salt"
@@ -1086,6 +1110,17 @@ contract DeployVNextSettlement is Script {
     ///      production reader below is still pinned by one dedicated test that owns the variable.
     function _unknownChainAllowed() internal view virtual returns (bool) {
         return vm.envOr("VNEXT_ALLOW_UNKNOWN_CHAIN", uint256(0)) == 1;
+    }
+
+    /// @dev The ONE reader of `VNEXT_LABEL` inside {_verify}'s re-derivation (N38 follow-up M2, astra
+    ///      pack-410 Q4). `virtual` for the same reason as {_signerOverlapAllowed}/{_unknownChainAllowed}:
+    ///      it reads HOST process state rather than chain state, and `forge` runs the tests within a
+    ///      suite in PARALLEL against one shared environment, so a suite driving this with `vm.setEnv`
+    ///      would race with every other test that touches the variable. Overriding it in a test harness
+    ///      moves the label into EVM state, which forge does isolate per test. Behavior-preserving: the
+    ///      production reader is unchanged (`vm.envString("VNEXT_LABEL")`, same revert on a missing var).
+    function _verifyLabel() internal view virtual returns (string memory) {
+        return vm.envString("VNEXT_LABEL");
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════

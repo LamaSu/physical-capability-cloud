@@ -35,3 +35,4 @@ export * from "./money/money-status.js";
 // Product read models (browser-safe): typed DTOs product surfaces project without
 // inferring meaning. JobExecutionDTO first (PX-6).
 export * from "./readmodels/job-execution.js";
+export * from "./readmodels/operator-work.js";
