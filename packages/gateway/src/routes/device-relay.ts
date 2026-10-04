@@ -286,14 +286,39 @@ function ownsScope(
   return scope.createdBy === principal || isRelayOperator(req, kernelId);
 }
 
+// DECISIONS 00:53 (the steward's #6711): the relay's human- and agent-facing side needs a PROVEN
+// principal or the admin, through either #400 branch. A kernel's operatorAddress is public (the
+// kernel listing shows it), so a key that merely claims it may not watch the camera, read the
+// chat, call a tool or read a result. The device's own side (its polling, starts, results, frame
+// uploads and chat replies) stays claimed-or-admin (the steward's 20:16).
+
+/** The admin, or a proven wallet that is the kernel's operator: what "decide" admits. */
+function isProvenOperator(req: FastifyRequest, kernelId: string): boolean {
+  return refuseKernelAction(req, authorityOf(req), kernelId, "decide") === null;
+}
+
+/** A proven wallet holding an active scope on the kernel. */
+function isProvenScopeHolder(req: FastifyRequest, kernelId: string): boolean {
+  const wallet = authorityOf(req).provenWallet;
+  return wallet !== null && holdsActiveScope(kernelId, wallet);
+}
+
+/** The scope's owner, proven: the admin, the proven operator, or the proven wallet that created it. */
+function provenOwnsScope(req: FastifyRequest, scope: typeof executionScopes.$inferSelect, kernelId: string): boolean {
+  const wallet = authorityOf(req).provenWallet;
+  return (wallet !== null && scope.createdBy === wallet) || isProvenOperator(req, kernelId);
+}
+
 /**
  * Load the scope a scope/:scopeId route addresses. Replies 404 unless the
- * scope is on :kernelId, and 403 unless the caller is the kernel operator or
- * the scope's creator.
+ * scope is on :kernelId, and 403 unless the caller owns it: for a revoke at the
+ * stop tier (#6677: the scope's creator, the kernel's claimed operator or the
+ * admin), for a read with proof (DECISIONS 00:53).
  */
 function ownedScopeOrReply(
   req: FastifyRequest<{ Params: { kernelId: string; scopeId: string } }>,
   reply: FastifyReply,
+  tier: "stop" | "proof",
 ): typeof executionScopes.$inferSelect | null {
   const { kernelId, scopeId } = req.params;
   const { db } = getStore();
@@ -302,10 +327,14 @@ function ownedScopeOrReply(
     reply.status(404).send({ error: "Scope not found", id: scopeId });
     return null;
   }
-  if (!ownsScope(req, scope, kernelId, relayPrincipal(req) ?? "")) {
+  const owns = tier === "stop" ? ownsScope(req, scope, kernelId, relayPrincipal(req) ?? "") : provenOwnsScope(req, scope, kernelId);
+  if (!owns) {
     reply.status(403).send({
       error: "scope_not_yours",
-      message: "Only the kernel operator or the scope's creator may use this scope.",
+      message:
+        tier === "stop"
+          ? "Only the kernel operator or the scope's creator may use this scope."
+          : "Only the kernel's operator or the scope's creator, by a proven wallet, or the admin may read this scope.",
     });
     return null;
   }
@@ -386,21 +415,43 @@ async function relayAccessGuard(req: FastifyRequest, reply: FastifyReply) {
     }
     return;
   }
-  if (access === "object_owner") return; // the handler checks the addressed object
+  // The handler checks the addressed object: a revoke at the stop tier, a read with proof.
+  if (access === "object_owner") return;
 
-  const refusal = refuseKernelAction(req, authority, kernelId, "operate");
-  if (!refusal) return;
+  if (access === "kernel_operator") {
+    // The device's own side (the steward's 20:16; DECISIONS 00:53): the kernel's executor polls,
+    // starts, reports, uploads frames and replies with its own key, or the admin does.
+    const refusal = refuseKernelAction(req, authority, kernelId, "operate");
+    if (!refusal) return;
+    if (refusal.status !== 403) return reply.status(refusal.status).send(refusal.body);
+    return reply.status(403).send({
+      error: "relay_access_denied",
+      required: "kernel_operator",
+      message: "Only this kernel's operator may use this relay route.",
+    });
+  }
+
+  // operator_or_grant reads and safe calls face people and agents (DECISIONS 00:53): the admin,
+  // the proven operator wallet, or a proven wallet holding an active scope on this kernel (for a
+  // tool call, the scope the call names).
+  const proof = refuseKernelAction(req, authority, kernelId, "decide");
+  if (!proof) return;
+  if (proof.status !== 403) return reply.status(proof.status).send(proof.body);
+  const provenGrant =
+    routeKey === "POST /api/relay/:kernelId/tool-call"
+      ? isProvenHolderOfNamedScope(req, authority, kernelId)
+      : authority.provenWallet !== null && holdsActiveScope(kernelId, authority.provenWallet);
+  if (provenGrant) return;
+  // The kernel's claimed operator, or a claimed scope holder, lacks only the proof. Anyone else is
+  // #400's stranger.
   const principal = relayPrincipal(req);
-  if (access === "operator_or_grant" && refusal.status === 403 && principal && holdsActiveScope(kernelId, principal)) return;
-  if (refusal.status !== 403) return reply.status(refusal.status).send(refusal.body);
-
+  const claimsAccess =
+    refuseKernelAction(req, authority, kernelId, "operate") === null || (principal !== null && holdsActiveScope(kernelId, principal));
+  if (claimsAccess) return reply.status(403).send(proof.body);
   return reply.status(403).send({
     error: "relay_access_denied",
-    required: access === "kernel_operator" ? "kernel_operator" : "kernel_operator_or_active_scope",
-    message:
-      access === "kernel_operator"
-        ? "Only this kernel's operator may use this relay route."
-        : "Requires this kernel's operator or an active execution scope on this kernel.",
+    required: "kernel_operator_or_active_scope",
+    message: "Requires this kernel's operator or an active execution scope on this kernel.",
   });
 }
 
@@ -1368,10 +1419,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Tool call not found", id });
     }
 
-    // Object owner: the kernel operator, or the creator of the call's scope. The
-    // scope must be on this kernel too: the retired /api/ot2 writer could link a
-    // call to another kernel's scope, and that link grants nothing.
-    const principal = relayPrincipal(req)!;
+    // Object owner, proven (DECISIONS 00:53): the admin, the proven operator, or the
+    // proven creator of the call's scope. The scope must be on this kernel too: the
+    // retired /api/ot2 writer could link a call to another kernel's scope, and that
+    // link grants nothing.
     const scope = call.scopeId
       ? db
           .select()
@@ -1379,9 +1430,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
           .where(and(eq(executionScopes.id, call.scopeId), eq(executionScopes.kernelId, kernelId)))
           .get()
       : undefined;
-    const allowed = scope
-      ? ownsScope(req, scope, kernelId, principal)
-      : isRelayOperator(req, kernelId);
+    const allowed = scope ? provenOwnsScope(req, scope, kernelId) : isProvenOperator(req, kernelId);
     if (!allowed) {
       return reply.status(403).send({
         error: "tool_result_not_yours",
@@ -1525,7 +1574,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { scopeId } = req.params;
 
     const { db } = getStore();
-    const scope = ownedScopeOrReply(req, reply);
+    const scope = ownedScopeOrReply(req, reply, "proof");
     if (!scope) return reply;
 
     // Check if expired and auto-update status
@@ -1551,7 +1600,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { kernelId, scopeId } = req.params;
 
     const { db } = getStore();
-    const scope = ownedScopeOrReply(req, reply);
+    const scope = ownedScopeOrReply(req, reply, "stop");
     if (!scope) return reply;
 
     if (scope.status === "revoked") {
@@ -1606,7 +1655,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     const { db } = getStore();
 
-    const scope = ownedScopeOrReply(req, reply);
+    const scope = ownedScopeOrReply(req, reply, "proof");
     if (!scope) return reply;
 
     // This kernel's calls only, whatever other rows name the scope.
@@ -1814,8 +1863,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     reply.raw.write(`event: connected\ndata: ${JSON.stringify({ type: "connected", kernelId })}\n\n`);
 
-    // The guard admitted this caller as the operator or an active scope
-    // holder; the stream keeps checking that it still is.
+    // The guard admitted this caller as the admin, the proven operator or a proven
+    // active scope holder (DECISIONS 00:53); the stream keeps checking that it still is.
     const principal = relayPrincipal(req)!;
     const subscriber: CameraSubscriber = {
       reply,
@@ -1823,7 +1872,7 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
         try {
           return (
             credentialStands(req, principal) &&
-            (isRelayOperator(req, kernelId) || holdsActiveScope(kernelId, principal))
+            (isProvenOperator(req, kernelId) || isProvenScopeHolder(req, kernelId))
           );
         } catch {
           return false;

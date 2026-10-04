@@ -222,6 +222,89 @@ describe("DECISIONS 00:42 (#6690): a PROVEN scope holder may make its scoped wri
   });
 });
 
+describe("DECISIONS 00:53 (#6711): the relay's human- and agent-facing side needs proof; the device's own side does not", () => {
+  // The kernel listing publishes a kernel's operatorAddress, so a key that merely CLAIMS it (here,
+  // an API key provisioned for that address, which apiGate resolves to it) proves nothing.
+  const HOLDER = "0xC0FFEE0000000000000000000000000000000531";
+  let holderRawKey = "";
+  const holderKey = () => (holderRawKey ||= provisionApiKey({ operatorId: HOLDER, name: "n31-relay-holder", scopes: ["*"] }).rawKey);
+  const asClaimedHolder = () => bearer(holderKey());
+  const asProvenHolder = () => ({ ...bearer(holderKey()), "x-test-proven-wallet": HOLDER });
+  const frame = { frame: Buffer.from("n31-frame").toString("base64") };
+  const human = (scopeId?: string) =>
+    [
+      ["GET", `/api/relay/${KERNEL}/camera/latest`, undefined],
+      ["GET", `/api/relay/${KERNEL}/chat/messages`, undefined],
+      ["GET", `/api/relay/${KERNEL}/manifest`, undefined],
+      ["POST", `/api/relay/${KERNEL}/tool-call`, { ...(scopeId ? { scopeId } : {}), toolName: "health", args: {} }],
+    ] as const;
+  const mintFor = async (holder: string) => {
+    const res = await app.inject({
+      method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: asProvenOperator(),
+      payload: { createdBy: holder, allowedTools: ["printer_print_text"], maxCommands: 5, expiresInMinutes: 5 },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  };
+
+  it("the device's own side keeps its claimed key: a frame upload, both polls and a result", async () => {
+    expect((await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/camera/frame`, headers: asOperator(), payload: frame })).statusCode).toBe(201);
+    expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: asOperator() })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/chat/pending`, headers: asOperator() })).statusCode).toBe(200);
+    queueCall("call-n31-device-side");
+    const result = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-result`, headers: asOperator(), payload: { callId: "call-n31-device-side", result: { ok: true } } });
+    expect(result.statusCode).toBeLessThan(300);
+  });
+
+  it("a key claiming the operator's address is refused the camera, the chat, the manifest and a read-only tool call", async () => {
+    const before = getStore().db.select().from(schema.toolCallRelay).all().length;
+    for (const [method, url, payload] of human()) {
+      const res = await app.inject({ method, url, headers: asOperator(), ...(payload ? { payload } : {}) });
+      expect(res.statusCode, `${method} ${url}`).toBe(403);
+      expect(res.json().reason, `${method} ${url}`).toBe("operator_proof_required");
+    }
+    expect(getStore().db.select().from(schema.toolCallRelay).all().length).toBe(before);
+  });
+
+  it("the proven operator and the admin are admitted to each", async () => {
+    for (const headers of [asProvenOperator(), asAdmin()]) {
+      for (const [method, url, payload] of human()) {
+        const res = await app.inject({ method, url, headers, ...(payload ? { payload } : {}) });
+        expect(res.statusCode, `${method} ${url}`).toBeLessThan(300);
+      }
+    }
+  });
+
+  it("a proven scope holder is admitted under its scope; the same address merely claimed is not", async () => {
+    const scopeId = await mintFor(HOLDER);
+    for (const [method, url, payload] of human(scopeId)) {
+      const claimed = await app.inject({ method, url, headers: asClaimedHolder(), ...(payload ? { payload } : {}) });
+      expect(claimed.statusCode, `claimed ${method} ${url}`).toBe(403);
+      expect(claimed.json().reason, `claimed ${method} ${url}`).toBe("operator_proof_required");
+      const proven = await app.inject({ method, url, headers: asProvenHolder(), ...(payload ? { payload } : {}) });
+      expect(proven.statusCode, `proven ${method} ${url}`).toBeLessThan(300);
+    }
+    // Its scope and the scope's audit: read by the proven creator, not by the claimed one.
+    for (const url of [`/api/relay/${KERNEL}/scope/${scopeId}`, `/api/relay/${KERNEL}/scope/${scopeId}/audit`]) {
+      expect((await app.inject({ method: "GET", url, headers: asClaimedHolder() })).statusCode, url).toBe(403);
+      expect((await app.inject({ method: "GET", url, headers: asProvenHolder() })).statusCode, url).toBe(200);
+    }
+  });
+
+  it("a tool call's result is read with proof: the claimed operator is refused, the proven operator reads it", async () => {
+    queueCall("call-n31-result-read");
+    const url = `/api/relay/${KERNEL}/tool-result/call-n31-result-read`;
+    expect((await app.inject({ method: "GET", url, headers: asOperator() })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url, headers: asProvenOperator() })).statusCode).toBe(200);
+  });
+
+  it("a stranger with no claim on the kernel still gets #400's refusal", async () => {
+    const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/camera/latest`, headers: asStranger() });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("relay_access_denied");
+  });
+});
+
 describe("N31 kernel heartbeat and capability announce: only the kernel's operator or the admin", () => {
   it("anonymous is 401", async () => {
     expect((await app.inject({ method: "POST", url: `/api/kernels/${KERNEL}/heartbeat`, headers: ANON, payload: {} })).statusCode).toBe(401);
