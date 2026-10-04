@@ -356,6 +356,9 @@ const ALLOWLIST: Allowlist = {
     "KERNEL_TTL_LOWER_BOUND_HOURS": "Module-level `const X = <number literal>` (this file, top) — fixed at load time, never reassigned, never caller/dependency input.",
     "KERNEL_TTL_UPPER_BOUND_HOURS": "Module-level `const X = <number literal>` (this file, top) — fixed at load time, never reassigned, never caller/dependency input.",
     "KERNEL_TTL_DEFAULT_HOURS": "Module-level `const X = <number literal>` (this file, top) — fixed at load time, never reassigned, never caller/dependency input.",
+    "sinceLastHeartbeatSec": "heartbeat()'s local: null or Math.floor((now - the STORED prior heartbeat) / 1000) — a server-computed integer, never caller text.",
+    "wasExpiredForMinutes": "heartbeat()'s local: null or Math.floor(of a difference of server-stored timestamps) — a server-computed integer, never caller text.",
+    "line": "emitKernelLifecycleEvent's own JSON of its argument plus a server timestamp; that argument is checked as a sink at every call site in these files (STREAM_EMITTERS).",
   },
   "services/kernel-service.ts": {
     "this.config.kernelId": "KernelService's own KernelConfig.kernelId, fixed at construction from the operator's own config/env — never per-request caller input.",

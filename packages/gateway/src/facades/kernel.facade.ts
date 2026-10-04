@@ -582,13 +582,13 @@ export class KernelFacade extends BaseFacade {
       try {
         emitKernelLifecycleEvent({
           event: "kernel.heartbeat.received",
-          kernelId,
+          kernelId: logSafeId(kernelId),
           sinceLastHeartbeatSec,
         });
         if (resurrected) {
           emitKernelLifecycleEvent({
             event: "kernel.resurrected",
-            kernelId,
+            kernelId: logSafeId(kernelId),
             wasExpiredForMinutes: wasExpiredForMinutes ?? 0,
           });
         }
