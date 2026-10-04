@@ -4,6 +4,22 @@
  * A device adapter wraps a physical machine (CNC, printer, sensor, camera)
  * and exposes a standard interface for the kernel to control it and
  * collect evidence.
+ *
+ * The evidence handshake, quiesceEvidence() (#502 round 3b). The kernel records an event
+ * under whichever job's window is open when it arrives, so a job's window closes, and its
+ * devices pass to the next job, only on the adapter's word that it is done. Every adapter
+ * must implement it, and the JobRunner refuses one that does not. The contract:
+ *   - it resolves once the adapter has emitted every evidence event of the work it was
+ *     given, and the adapter emits nothing for that work afterwards;
+ *   - it must NOT resolve while given work can still emit: a running poll or execution loop
+ *     that may still report a completion or failure, a sampling timer, an async callback or
+ *     command in flight;
+ *   - called again with no new work, it resolves at once.
+ * The runner calls it at the end of every run, success or failure, bounded by its
+ * evidenceQuiesceTimeoutMs; a device whose hook has not resolved stays unavailable to the
+ * next job until it does (fail closed). An adapter that cannot know when it is done waits
+ * for the strongest signal it has. OutstandingWork (outstanding-work.ts) counts what is
+ * outstanding for an adapter that tracks its own work.
  */
 
 import type { EvidenceEvent, EvidenceEventType, EvidenceSource, WorkflowChallenge } from "@pcc/spec";
@@ -42,6 +58,13 @@ export interface MachineAdapter {
   /** Subscribe to evidence events from this machine */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
 
+  /**
+   * Resolves once this adapter has emitted every evidence event of the work it was given,
+   * and never while that work can still emit; it emits nothing for that work afterwards.
+   * Required: see the contract at the top of this file.
+   */
+  quiesceEvidence(): Promise<void>;
+
   /** Disconnect / cleanup */
   dispose(): Promise<void>;
 }
@@ -63,6 +86,9 @@ export interface SensorAdapter {
 
   /** Subscribe to evidence events */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
+
+  /** Required: see MachineAdapter.quiesceEvidence and the contract at the top of this file. */
+  quiesceEvidence(): Promise<void>;
 
   dispose(): Promise<void>;
 }
@@ -96,6 +122,9 @@ export interface CameraAdapter {
 
   /** Subscribe to evidence events */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
+
+  /** Required: see MachineAdapter.quiesceEvidence and the contract at the top of this file. */
+  quiesceEvidence(): Promise<void>;
 
   dispose(): Promise<void>;
 }
