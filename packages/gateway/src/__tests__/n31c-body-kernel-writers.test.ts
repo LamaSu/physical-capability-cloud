@@ -241,12 +241,12 @@ describe("N31c POST /api/operator/diagnostics: a bundle that names a kernel need
 });
 
 describe("N31c body/query inventory finds: acting as the operator or spending a paid resource is a DECISION (DECISIONS 01:25)", () => {
-  const claimedRefused = async (url: string, body: unknown) => {
+  const post = (url: string, headers: Record<string, string>, payload: object) => app.inject({ method: "POST", url, headers, payload });
+  const claimedRefused = async (url: string, body: object) => {
     const res = await post(url, asOperator(), body);
     expect(res.statusCode, `${url} with the operator's claimed key`).toBe(403);
     expect(res.json().reason).toBe("operator_proof_required");
   };
-  const post = (url: string, headers: Record<string, string>, payload: unknown) => app.inject({ method: "POST", url, headers, payload });
   const batchesOnKernel = async () =>
     ((await app.inject({ method: "GET", url: `/api/batches/shared/open?kernelId=${KERNEL}`, headers: asOperator() })).json().batches ?? []).length;
   const profileOf = async () => JSON.stringify((await app.inject({ method: "GET", url: `/api/compliance/profiles/${KERNEL}`, headers: asOperator() })).json());
