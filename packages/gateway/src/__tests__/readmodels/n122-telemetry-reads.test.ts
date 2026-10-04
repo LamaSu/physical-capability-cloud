@@ -55,7 +55,11 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   app.addHook("onRequest", async (req) => {
     const principal = req.headers["x-test-principal"];
-    if (typeof principal === "string") (req as any).operatorId = principal;
+    // As apiGate does for an API key: the key's record id and its (claimed) operator id.
+    if (typeof principal === "string") {
+      (req as any).operatorId = principal;
+      (req as any).apiKeyId = `key-${principal}`;
+    }
     const proven = req.headers["x-test-proven-wallet"];
     if (typeof proven === "string") (req as any).provenWallet = proven;
   });
@@ -138,5 +142,52 @@ describe("N122 GET /api/telemetry/audit is the admin's", () => {
     expect(res.statusCode).toBe(200);
     expect(Array.isArray(res.json().entries)).toBe(true);
     expect(res.json().entries.length).toBeGreaterThan(0);
+  });
+});
+
+describe("N122 POST /api/telemetry/emit: only the admin or a PROVEN party of the job (#6488)", () => {
+  const emit = (headers: Record<string, string>, jobId = "job-001") =>
+    app.inject({ method: "POST", url: "/api/telemetry/emit", headers, payload: { jobId, phase: "discovery", status: "started" } });
+  const events = async () => (await import("../../telemetry.js")).pipelineTelemetry.getTimeline("job-001").length;
+
+  it("anonymous is 401 and nothing is written", async () => {
+    const before = await events();
+    expect((await emit(ANON)).statusCode).toBe(401);
+    expect(await events()).toBe(before);
+  });
+
+  it("a claimed (unproven) key is 403, even the kernel operator's own claim", async () => {
+    const before = await events();
+    expect((await emit(UNPROVEN)).statusCode).toBe(403);
+    expect(await events()).toBe(before);
+  });
+
+  it("a proven stranger is refused as if the job did not exist, and nothing is written", async () => {
+    const before = await events();
+    const res = await emit(STRANGER_H);
+    expect(res.statusCode).toBe(404);
+    expect(await events()).toBe(before);
+  });
+
+  it("the job's kernel operator (proven) and the admin emit", async () => {
+    const before = await events();
+    expect((await emit(NYC)).statusCode).toBe(200);
+    expect((await emit(ADMIN_H)).statusCode).toBe(200);
+    expect(await events()).toBe(before + 2);
+  });
+});
+
+describe("N122 a pipeline timeline read cannot change the stored timeline (#538 r3 class)", () => {
+  it("mutating a returned timeline, event or metadata leaves the next read unchanged", async () => {
+    const { pipelineTelemetry } = await import("../../telemetry.js");
+    pipelineTelemetry.emit("job-n122-immutable", "discovery", "started", { metadata: { note: "original" } });
+    const first = pipelineTelemetry.getTimeline("job-n122-immutable") as unknown as Array<Record<string, any>>;
+    try { first.push({ forged: true }); } catch { /* frozen is fine too */ }
+    try { first[0]!.status = "failed"; } catch { /* frozen is fine too */ }
+    try { first[0]!.metadata.note = "forged"; } catch { /* frozen is fine too */ }
+    const again = pipelineTelemetry.getTimeline("job-n122-immutable");
+    expect(again.length).toBe(1);
+    expect(again[0]!.status).toBe("started");
+    expect(again[0]!.metadata).toEqual({ note: "original" });
   });
 });

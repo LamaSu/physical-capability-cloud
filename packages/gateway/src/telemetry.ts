@@ -206,8 +206,12 @@ export class PipelineTelemetryService {
     return event;
   }
 
+  /**
+   * The job's events, as a deep copy: a caller that changes what it read never changes the stored
+   * timeline other readers see (N122; the class of #538 r3's stored-entries MEDIUM).
+   */
   getTimeline(jobId: string): TelemetryEvent[] {
-    return this.events.get(jobId) ?? [];
+    return structuredClone(this.events.get(jobId) ?? []);
   }
 
   getActiveJobs(): ActiveJobSummary[] {

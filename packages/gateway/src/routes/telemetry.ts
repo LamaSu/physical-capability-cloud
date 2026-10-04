@@ -317,18 +317,17 @@ export async function telemetryRoutes(app: FastifyInstance) {
       source?: string;
     };
   }>("/api/telemetry/emit", async (req, reply) => {
-    // Restrict to operators with API keys (HIGH-04 fix — prevents arbitrary telemetry injection)
-    const apiKeyId = (req as any).apiKeyId;
-    const operatorId = (req as any).operatorId;
-    if (!apiKeyId || !operatorId) {
-      return reply.code(403).send({ error: "forbidden", message: "Telemetry emit requires operator API key authentication" });
-    }
+    const { jobId, phase, status, duration_ms, metadata, level, source } = req.body ?? ({} as typeof req.body);
 
-    const { jobId, phase, status, duration_ms, metadata, level, source } = req.body;
-
-    if (!jobId || !phase || !status) {
+    if (!jobId || !phase || !status || typeof jobId !== "string") {
       return reply.code(400).send({ error: "jobId, phase, status are required" });
     }
+
+    // N122 (#6488): an emitted event becomes part of the pipeline the job's parties read, so only
+    // the admin or a PROVEN party of the job (its kernel's operator or its buyer: the job read
+    // gate) may emit for it. Any API key could, for any job id (HIGH-04 only required a key).
+    const gate = gateJobRead(req, jobId);
+    if (!gate.ok) return refuseJobRead(reply, gate, { error: "Job not found" });
 
     // Sanitize metadata to prevent prompt injection in telemetry (AI-02 fix)
     const sanitizedMetadata = metadata ? sanitizeTelemetryMetadata(metadata) : undefined;
