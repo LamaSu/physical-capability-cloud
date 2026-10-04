@@ -223,6 +223,9 @@ const PATCHES: Patch[] = [
   ["RegExp.prototype.test", RegExp.prototype, "test", () => () => true],
   ["Number.isFinite", Number, "isFinite", () => () => true],
   ["Number.isInteger", Number, "isInteger", () => () => true],
+  // Captured for D5's refusal (#566); both directions, because either one is a lie (astra pack 244).
+  ["Number.isSafeInteger (always true)", Number, "isSafeInteger", () => () => true],
+  ["Number.isSafeInteger (always false)", Number, "isSafeInteger", () => () => false],
   ["Date.parse", Date, "parse", () => () => Number.NaN],
   ["Math.max", Math, "max", () => () => 1e9],
   ["Math.min", Math, "min", () => () => -1e9],
@@ -285,6 +288,26 @@ describe("astra 164 CRITICAL: an intrinsic replaced after load cannot change wha
       if (runtime !== CLEAN.runtime) expect((produced.runtime as { threw?: string }).threw).toBe("EnvelopeRefused");
     });
   }
+
+  it.each([
+    ["always true", () => true],
+    ["always false", () => false],
+  ])("with Number.isSafeInteger replaced after load (%s), an unsafe integer is still refused and the safe boundary still passes (astra pack 244)", (_what, fake) => {
+    withPatch(Number, "isSafeInteger", fake, () => {
+      for (const v of [1e21, 2 ** 53, -(2 ** 53)]) {
+        expect(() => canonicalJson(v), String(v)).toThrow(/canonical JSON has no form for the number/);
+      }
+      expect(canonicalJson(2 ** 53 - 1)).toBe("9007199254740991");
+      expect(canonicalJson(-(2 ** 53 - 1))).toBe("-9007199254740991");
+      // The plain copy too, through a draft: an unsafe limit is refused, and the boundary is still JSON data.
+      const unsafe = input();
+      unsafe.intake.limits[0] = { ...unsafe.intake.limits[0]!, max: 2 ** 53 };
+      expect(() => draftSafetyEnvelope(unsafe)).toThrow(/is an integer outside the safe range/);
+      const boundary = input();
+      boundary.intake.limits[0] = { ...boundary.intake.limits[0]!, max: 2 ** 53 - 1 };
+      expect(() => draftSafetyEnvelope(boundary)).not.toThrow();
+    });
+  });
 
   it("data written onto Object.prototype and Array.prototype (min, max, value, get, set, indices) changes nothing either", () => {
     // Data-only prototype pollution, the kind a JSON merge bug can cause: no function is replaced, values appear
