@@ -2024,6 +2024,18 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     expect(rowOf("tc-legacy")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
   });
 
+  it("F3 (#6771): a dispatched SAFE call counts too, so a legacy row behind it can't exceed maxCommands", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/scope", headers: opAdmin,
+      payload: { createdBy: "agent-q", allowedTools: ["health"], maxCommands: 1 },
+    });
+    const scope = res.json().id as string;
+    seedCall("tc-counted-safe", "health", scope, "claimed"); // one safe call already dispatched
+    seedCall("tc-legacy-safe", "health", scope, "pending");  // an uncounted legacy row
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-legacy-safe")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
+  });
+
   it("F1: an open circuit breaker blocks dispatch of an admitted call", async () => {
     const scope = await mintScope("agent-q", ["run_create"]);
     seedCall("tc-breaker", "run_create", scope);
