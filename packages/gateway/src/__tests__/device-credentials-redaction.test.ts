@@ -1113,6 +1113,9 @@ describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that car
     // query on a manifest URL, key name irrelevant — see findEmitterManifestFormIssue.
     ["a URL QUERY with a non-credential-named key (astra pack 83d CRITICAL #1's own example)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/?session=${SENTINEL}` } }]],
     ["a URL FRAGMENT with a non-credential-named key (round 5 — not 'token=', which round 4 already caught by key name)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/#session=${SENTINEL}` } }]],
+    // N71 round 5 follow-up (lane review): the declaration's own `id` is a caller string that is
+    // stored and returned too, so the URL-form rule covers every string in a declaration.
+    ["a URL QUERY in the declaration's own id", [{ id: `https://h.invalid/?session=${SENTINEL}` }]],
   ];
 
   it.each(CREDENTIAL_MANIFESTS)("[neg] %s: 400 invalid_emitter_manifest, nothing written, nothing echoed", async (_what, emits) => {
