@@ -47,6 +47,11 @@ interface StepEvidence {
   assuranceTier: AssuranceTier;
   /** The escrow unit (milestone) and its challenge nonce, when the job names one. */
   unit?: StepUnitContext;
+  /**
+   * Settles once every addEvent called so far on the step has stored its event or failed. Each
+   * call stores only after it, so the step's events are in call order (N123).
+   */
+  stored: Promise<void>;
 }
 
 /** `0x` + 64 lowercase hex each (LO-EV-9 unit binding). */
@@ -131,10 +136,15 @@ export class EvidenceEmitter {
       events: [],
       assuranceTier,
       ...(unit ? { unit } : {}),
+      stored: Promise.resolve(),
     });
   }
 
-  /** Add an evidence event for a job step */
+  /**
+   * Add an evidence event for a job step. The step's events are stored in the order this is
+   * called, whatever order their hashes finish in (N123). The promise settles once this event
+   * is stored, or rejects with the reason it was not.
+   */
   async addEvent(
     jobId: string,
     stepId: string,
@@ -171,17 +181,27 @@ export class EvidenceEmitter {
     }
     const bound = { ...rawEvent, payload } as Omit<EvidenceEvent, "id" | "hash">;
 
+    // Hashed now, from the event as called, and stored in call order (N123): an event waits for
+    // the step's earlier events to be stored, or to fail, never for their hashes alone, so a slow
+    // hash cannot put it after later events. The hashes still run concurrently. An event refused
+    // above never takes a place.
     const id = ids.evidence();
-    const hash = await hashEvent(bound);
-
-    const event: EvidenceEvent = {
-      ...bound,
-      id,
-      hash,
-    };
-
-    stepEv.events.push(event);
-    return event;
+    const hashed = hashEvent(bound);
+    void hashed.catch(() => undefined); // a failed hash is this call's to report, in its turn; never unhandled meanwhile
+    const stored = stepEv.stored.then(async () => {
+      const event: EvidenceEvent = {
+        ...bound,
+        id,
+        hash: await hashed,
+      };
+      stepEv.events.push(event);
+      return event;
+    });
+    stepEv.stored = stored.then(
+      () => undefined,
+      () => undefined,
+    );
+    return stored;
   }
 
   /** Finalize and sign an evidence bundle for a job step */
