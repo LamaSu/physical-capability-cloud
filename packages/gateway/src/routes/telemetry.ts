@@ -16,7 +16,10 @@ import { streamHub } from "../sse/stream-hub.js";
 import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
-import { keyedHash } from "../observability/closed-schema.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** The pipeline statuses the server defines: a status stays readable in the log only as one of them. */
+const TELEMETRY_STATUSES: readonly TelemetryStatus[] = ["started", "completed", "failed", "skipped"];
 
 // Active SSE clients for the live log stream
 const logStreamClients = new Set<FastifyReply>();
@@ -269,19 +272,19 @@ export async function telemetryRoutes(app: FastifyInstance) {
       source,
     });
 
-    // N107b codemod: this route takes phase/status/jobId/source straight from the request
-    // body with no schema validation (their PipelinePhase/TelemetryStatus TS types are not
-    // runtime-checked here), and structured-logger (this file's `logger`) is a bespoke
-    // in-memory sink with no closed-schema chokepoint of its own — world-readable via
-    // GET /api/telemetry/logs — so every dynamic value is hashed inline (keyedHash) before
-    // it ever reaches an entry; LogEntry.source is also typed `string`, not `unknown`, so a
-    // Declared wrapper would not type-check here even if the sink understood it.
-    logger.info(`Telemetry event emitted: ${keyedHash(phase)} → ${keyedHash(status)}`, {
-      source: keyedHash(source ?? "api"),
-      jobId: keyedHash(jobId),
-      // duration_ms is the caller's own report, not a server measurement: hashed like the rest
-      // (round 2 of #538, codemod pack, MEDIUM Q2).
-      metadata: { phase: keyedHash(phase), status: keyedHash(status), duration_ms: duration_ms === undefined ? undefined : keyedHash(duration_ms) },
+    // The structured log is a sink (GET /api/telemetry/logs returns it to any caller) and closes
+    // what it stores (structured-logger.ts, N107b round 4, F). This route takes phase, status,
+    // jobId and source straight from the body (their TS types are not checked at run time), so it
+    // declares each: the phase and status readable only as members of the server's vocabularies,
+    // the job id, the source and the caller's own duration_ms (not a server measurement, round 2 of
+    // #538, Q2) keyed. The event returned below is the caller's own telemetry: a product response,
+    // not the log.
+    logger.info(lit("telemetry event emitted"), {
+      phase: declare.code(phase, PIPELINE_PHASES),
+      status: declare.code(status, TELEMETRY_STATUSES),
+      jobId: declare.id(jobId),
+      source: declare.id(source ?? "api"),
+      ...(duration_ms !== undefined ? { duration_ms: declare.id(duration_ms) } : {}),
     });
 
     return { event };

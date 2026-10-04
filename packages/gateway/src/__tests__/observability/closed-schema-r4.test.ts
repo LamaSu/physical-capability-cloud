@@ -245,6 +245,25 @@ describe("C: Sentry", () => {
   });
 });
 
+describe("F: the structured log", () => {
+  it("telemetry emit: a phase and a status in the server's vocabulary stay readable, the job id and source are keyed, the entry's own fields are the logger's", async () => {
+    const { telemetryRoutes } = await import("../../routes/telemetry.js");
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      Object.assign(req, { apiKeyId: "key-r4", operatorId: "operator-r4" });
+    });
+    await app.register(telemetryRoutes);
+    await app.ready();
+    const res = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload: { jobId: "job-r4", phase: "job_submit", status: "completed", source: "caller-source" } });
+    expect(res.statusCode).toBe(200);
+    const logs = await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=1" });
+    const [entry] = (logs.json() as { entries: Array<Record<string, unknown>> }).entries;
+    expect(entry).toMatchObject({ phase: "job_submit", status: "completed", jobId: schema.keyedHash("job-r4"), source: schema.keyedHash("caller-source"), level: "info" });
+    expect(entry!.message).toBe("telemetry event emitted");
+    await app.close();
+  });
+});
+
 describe("keyedHash", () => {
   it("never throws: a bigint, a cycle and a throwing toJSON each leave as a hash", () => {
     const cycle: Record<string, unknown> = {};
