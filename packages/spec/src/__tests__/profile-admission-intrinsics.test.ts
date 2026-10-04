@@ -12,7 +12,10 @@
  * a promise resolution), runs them again and undoes it. Every result must be
  * identical to the clean one, or a refusal: a reject (or a hold where the
  * clean result admitted), a throw, or more unverifiable terms. A changed
- * acceptance, digest, term list or level fails the scenario.
+ * acceptance, digest, term list or level fails the scenario. Returned promises
+ * are consumed as callers consume them: awaited, and through the promise
+ * `.then`, `.catch` and `.finally` return, used and awaited (astra pack 187:
+ * native `then` builds that promise with the mutable Promise[Symbol.species]).
  *
  * Why children: vitest runs its own runner in the test's realm. With
  * Array.prototype[Symbol.iterator] replaced across an event-loop turn, vitest
@@ -34,6 +37,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import * as admissionModule from "../evidence/profile-admission.js";
 import type { ProfileAdmissionInput } from "../evidence/profile-admission.js";
 import * as levelModule from "../evidence/evidence-level.js";
+import { parseOperatorPrincipalId } from "../evidence/principal-id.js";
 import * as primordials from "../util/primordials.js";
 
 // -- the child realms --
@@ -120,9 +124,12 @@ describe("the patch harness: nothing changed after load changes a decision, a di
       "Object.getOwnPropertyDescriptor", "Object.getPrototypeOf", "Reflect.ownKeys", "JSON.stringify", "String", "Number.isFinite",
       "Date.parse", "Set.prototype.has", "Set.prototype.add", "Map.prototype.get", "RegExp.prototype.test", "RegExp.prototype.exec",
       "String.prototype.trim", "String.prototype.charCodeAt", "Promise.prototype.then", "Hash.prototype.update", "Hash.prototype.digest",
+      // astra pack 187: what native then, catch and finally read on the way to the promise a caller receives.
+      "Promise[Symbol.species]", "Promise.prototype.catch", "Promise.prototype.finally",
     ]) {
       expect(has(`patch: ${name}`), name).toBe(true);
     }
+    expect(has("recipe: Promise[Symbol.species] builds a forged thenable (astra pack 187)")).toBe(true);
     expect(SCENARIOS.length).toBeGreaterThan(80);
   });
 
@@ -138,8 +145,21 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     expect(value("digest: golden with a unit")).toBe("sha256:965f2f0c50750b5171f2f8dc845c44eb0753bba4f2a5903d6f1d8c7c1b037dc8");
     expect(value("digest: empty")).toBe("threw");
     expect(value("terms: every term at once")).toHaveLength(11);
-    expect(value("levels: printer completes, camera inspects")).toBe("inspected_output");
+    // The levels' own rows live in #577's harness; here the level is read through admission's result.
+    expect((value("admit: the pilot, inspected_output") as { reached: string }).reached).toBe("inspected_output");
     expect(rows.filter((r) => r[0] === "admission").length).toBeGreaterThanOrEqual(60);
+    // Every delivery (4 admissions, 3 digests) through every caller's shape (5), each the same as the promise
+    // awaited directly wherever a direct row exists: the shapes deliver, so a changed one is a forgery.
+    const delivered = rows.filter((r) => r[1].includes(" | delivered as p"));
+    expect(delivered.length).toBe(35);
+    let compared = 0;
+    for (const [kind, label, value] of delivered) {
+      const direct = rows.find((r) => r[0] === kind && r[1] === label.split(" | delivered as p")[0]);
+      if (direct === undefined) continue;
+      compared++;
+      expect(value, label).toEqual(direct[2]);
+    }
+    expect(compared).toBe(30);
     for (const id of SCENARIOS) {
       if (!id.startsWith("patch: ") && !id.startsWith("data: ")) continue;
       expect(OUTCOMES.get(id)?.clean, id).toEqual(rows);
@@ -286,6 +306,55 @@ describe("isTaggedSha256 (util/primordials.ts): exactly signing-preimage.ts's TA
 
   it("is false for non-strings", () => {
     for (const v of [undefined, null, 1, [`sha256:${hex}`], { toString: () => `sha256:${hex}` }]) expect(isTaggedSha256(v)).toBe(false);
+  });
+});
+
+describe("isOperatorPrincipalId: exactly what principal-id.ts parseOperatorPrincipalId accepts, by code unit, with no RegExp", () => {
+  const isOperatorPrincipalId = (admissionModule as Record<string, unknown>).isOperatorPrincipalId as (v: unknown) => boolean;
+  const accepts = (s: unknown) => parseOperatorPrincipalId(s) !== null;
+  const a40 = "0123456789abcdef0123456789abcdef01234567";
+
+  it("agrees on edge cases: the chain id's leading zero and safe-integer bound, hex case, length, prefix, whitespace, non-ASCII digits", () => {
+    expect(typeof isOperatorPrincipalId).toBe("function");
+    const cases = [
+      `eip155:84532:0x${a40}`, `eip155:1:0x${a40}`, `eip155:0:0x${a40}`, `eip155:01:0x${a40}`, `eip155::0x${a40}`,
+      `eip155:9007199254740991:0x${a40}`, `eip155:9007199254740992:0x${a40}`, `eip155:9999999999999999:0x${a40}`,
+      `eip155:999999999999999:0x${a40}`, `eip155:10000000000000000:0x${a40}`, `eip155:84532:0x${a40.toUpperCase()}`,
+      `eip155:84532:0X${a40}`, `EIP155:84532:0x${a40}`, `eip155:84532:0x${a40.slice(1)}`, `eip155:84532:0x${a40}0`,
+      `eip155:84532:0x${a40}\n`, ` eip155:84532:0x${a40}`, `eip155:8${ch(0x0663)}:0x${a40}`, `eip155:84532:0x${a40.slice(1)}${ch(0xd800)}`,
+      `eip155:84532:${a40}`, `eip155-84532:0x${a40}`, "", "eip155:", "eip155:1", "eip155:1:0x",
+    ];
+    for (const s of cases) expect(isOperatorPrincipalId(s), JSON.stringify(s)).toBe(accepts(s));
+  });
+
+  it("agrees on 20,000 near-miss strings, with edits at every position and chain ids at the safe-integer bound", () => {
+    const rand = lcg(519);
+    const alphabet = ["0", "1", "9", "a", "f", "g", "A", "F", ":", "x", "X", "e", "\n", ch(0xd800), ch(0x0663)];
+    const chains = ["84532", "1", "9007199254740991", "9007199254740992", "8999999999999999", "90071992547409910"];
+    let accepted = 0;
+    for (let n = 0; n < 20_000; n++) {
+      const chars = `eip155:${chains[Math.floor(rand() * chains.length)]}:0x${a40}`.split("");
+      const edits = Math.floor(rand() * 3);
+      for (let e = 0; e < edits; e++) {
+        const at = Math.floor(rand() * (chars.length + 1));
+        const kind = rand();
+        if (kind < 0.5) chars[at] = alphabet[Math.floor(rand() * alphabet.length)]!;
+        else if (kind < 0.75) chars.splice(at, 1);
+        else chars.splice(at, 0, alphabet[Math.floor(rand() * alphabet.length)]!);
+      }
+      const s = chars.join("");
+      const expected = accepts(s);
+      if (isOperatorPrincipalId(s) !== expected) expect.fail(`isOperatorPrincipalId(${JSON.stringify(s)}) !== ${expected}`);
+      if (expected) accepted++;
+    }
+    // The corpus reaches both answers.
+    expect(accepted).toBeGreaterThan(2000);
+    expect(20_000 - accepted).toBeGreaterThan(2000);
+  });
+
+  it("is false for non-strings", () => {
+    const id = `eip155:84532:0x${a40}`;
+    for (const v of [undefined, null, 84532, [id], { toString: () => id }, new String(id)]) expect(isOperatorPrincipalId(v)).toBe(false);
   });
 });
 
