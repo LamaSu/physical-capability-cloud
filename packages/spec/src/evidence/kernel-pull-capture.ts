@@ -29,7 +29,7 @@
  *     found at module load without a static import, because @pcc/spec is also
  *     bundled for the browser. Where it is missing (a browser, Node before
  *     20.16 / 22.3) every capture is refused: fail closed.
- *   - Each value passes its check in CAPTURE_CHECKS or INSPECTION_CHECKS below.
+ *   - Each value passes its check in fieldIssue below.
  *
  * What code that replaces a method or global AFTER this module loads can and
  * cannot do (astra pack 299 HIGH, PR #578). The kernel's tier gate captures
@@ -87,7 +87,6 @@ import {
   ObjectGetPrototypeOf,
   ObjectPrototype,
   StringCtor,
-  deepFreeze,
   hasOwn,
   trim,
   uncurryThis,
@@ -140,14 +139,6 @@ interface CheckContext {
   payload: Fields;
 }
 
-type Check = (value: unknown, context: CheckContext) => string | null;
-
-/** A payload key and its check. */
-interface KeyCheck {
-  readonly key: string;
-  readonly check: Check;
-}
-
 /** The event's own fields the check reads, in the order an accessor among them is reported. */
 const EVENT_KEYS: readonly string[] = ObjectFreeze(["type", "timestamp", "source", "payload"]);
 
@@ -156,61 +147,70 @@ const IMAGE_HASH_PREFIX = "sha256:";
 
 const DEVICE_KEYS: readonly string[] = ObjectFreeze(["path", "identity"]);
 
-/** The capture keys, each with its check, in the order a reason is reported. */
-const CAPTURE_CHECKS: readonly KeyCheck[] = deepFreeze([
-  { key: "jobId", check: (v, { jobId }) => (v === jobId ? null : `payload.jobId ${show(v)} is not this job's ${show(jobId)}`) },
-  {
-    key: "acquiredAt",
-    check: (v, { timestamp }) =>
-      !isCanonicalIso(v)
+/** The capture keys, in the order a reason is reported: the key set a camera_snapshot's payload must have exactly. */
+const CAPTURE_KEYS: readonly string[] = ObjectFreeze([
+  "jobId", "acquiredAt", "imageHash", "storageRef", "frameStored", "rawSizeBytes", "captureMode", "captureClass", "device",
+  "declaredChallengeId", "declaredChallengeAnchor", "antiSpoofScore",
+]);
+/** The inspection keys a cv_inspection_result carries on top of the capture keys, in the order a reason is reported. */
+const INSPECTION_KEYS: readonly string[] = ObjectFreeze(["passed", "confidence", "findings", "referenceHash", "model"]);
+/** A cv_inspection_result's keys: the capture's, then the inspection's. */
+const ALL_KEYS: readonly string[] = ObjectFreeze([...CAPTURE_KEYS, ...INSPECTION_KEYS]);
+
+/**
+ * The reason the payload's value for `key` fails its check, or null. One switch over the keys, with
+ * each check written in place, so every call it makes is to a function named here: a check read
+ * back from a table of functions would be a call target the default-deny check cannot see (astra
+ * pack 303). An unknown key fails closed.
+ */
+function fieldIssue(key: string, v: unknown, context: CheckContext): string | null {
+  switch (key) {
+    case "jobId":
+      return v === context.jobId ? null : `payload.jobId ${show(v)} is not this job's ${show(context.jobId)}`;
+    case "acquiredAt":
+      return !isCanonicalIso(v)
         ? `payload.acquiredAt ${show(v)} is not a canonical ISO-8601 instant`
-        : v !== timestamp
-          ? `payload.acquiredAt ${show(v)} is not the event's timestamp ${show(timestamp)}`
-          : null,
-  },
-  { key: "imageHash", check: (v) => (isImageHash(v) ? null : `payload.imageHash ${show(v)} is not sha256:<64 lowercase hex>`) },
-  { key: "storageRef", check: (v) => (nonBlank(v) ? null : `payload.storageRef ${show(v)} is not a non-blank string`) },
-  { key: "frameStored", check: (v) => (typeof v === "boolean" ? null : `payload.frameStored ${show(v)} is not a boolean`) },
-  {
-    key: "rawSizeBytes",
-    check: (v) => (NumberIsSafeInteger(v) && (v as number) > 0 ? null : `payload.rawSizeBytes ${show(v)} is not a positive safe integer`),
-  },
-  { key: "captureMode", check: (v) => (v === "kernel-pull" ? null : `payload.captureMode ${show(v)} is not "kernel-pull"`) },
-  { key: "captureClass", check: (v) => (v === "CC0" ? null : `payload.captureClass ${show(v)} is not "CC0"`) },
-  { key: "device", check: deviceIssue },
-  {
-    key: "declaredChallengeId",
-    check: (v) => (v === null || nonBlank(v) ? null : `payload.declaredChallengeId ${show(v)} is not a non-blank string or null`),
-  },
-  {
-    key: "declaredChallengeAnchor",
-    check: (v, { payload }) =>
-      !(v === null || nonBlank(v))
+        : v !== context.timestamp
+          ? `payload.acquiredAt ${show(v)} is not the event's timestamp ${show(context.timestamp)}`
+          : null;
+    case "imageHash":
+      return isImageHash(v) ? null : `payload.imageHash ${show(v)} is not sha256:<64 lowercase hex>`;
+    case "storageRef":
+      return nonBlank(v) ? null : `payload.storageRef ${show(v)} is not a non-blank string`;
+    case "frameStored":
+      return typeof v === "boolean" ? null : `payload.frameStored ${show(v)} is not a boolean`;
+    case "rawSizeBytes":
+      return NumberIsSafeInteger(v) && (v as number) > 0 ? null : `payload.rawSizeBytes ${show(v)} is not a positive safe integer`;
+    case "captureMode":
+      return v === "kernel-pull" ? null : `payload.captureMode ${show(v)} is not "kernel-pull"`;
+    case "captureClass":
+      return v === "CC0" ? null : `payload.captureClass ${show(v)} is not "CC0"`;
+    case "device":
+      return deviceIssue(v);
+    case "declaredChallengeId":
+      return v === null || nonBlank(v) ? null : `payload.declaredChallengeId ${show(v)} is not a non-blank string or null`;
+    case "declaredChallengeAnchor":
+      return !(v === null || nonBlank(v))
         ? `payload.declaredChallengeAnchor ${show(v)} is not a non-blank string or null`
-        : (v === null) !== (fieldValue(payload, "declaredChallengeId") === null)
+        : (v === null) !== (fieldValue(context.payload, "declaredChallengeId") === null)
           ? "payload.declaredChallengeAnchor is not null exactly when declaredChallengeId is null"
-          : null,
-  },
-  { key: "antiSpoofScore", check: (v) => (inRange(v, 0, 1) ? null : `payload.antiSpoofScore ${show(v)} is not a finite number in [0, 1]`) },
-]);
-
-/** The inspection keys a cv_inspection_result carries on top of the capture keys. */
-const INSPECTION_CHECKS: readonly KeyCheck[] = deepFreeze([
-  { key: "passed", check: (v) => (typeof v === "boolean" ? null : `payload.passed ${show(v)} is not a boolean`) },
-  { key: "confidence", check: (v) => (inRange(v, 0, 100) ? null : `payload.confidence ${show(v)} is not a finite number in [0, 100]`) },
-  { key: "findings", check: findingsIssue },
-  {
-    key: "referenceHash",
-    check: (v) => (v === null || typeof v === "string" ? null : `payload.referenceHash ${show(v)} is not a string or null`),
-  },
-  { key: "model", check: (v) => (v === "anti-spoof-heuristic" ? null : `payload.model ${show(v)} is not "anti-spoof-heuristic"`) },
-]);
-
-/** A cv_inspection_result's checks: the capture's, then the inspection's. */
-const ALL_CHECKS: readonly KeyCheck[] = ObjectFreeze([...CAPTURE_CHECKS, ...INSPECTION_CHECKS]);
-/** The key set each type's payload must have exactly. */
-const CAPTURE_KEYS: readonly string[] = ObjectFreeze(CAPTURE_CHECKS.map((c) => c.key));
-const ALL_KEYS: readonly string[] = ObjectFreeze(ALL_CHECKS.map((c) => c.key));
+          : null;
+    case "antiSpoofScore":
+      return inRange(v, 0, 1) ? null : `payload.antiSpoofScore ${show(v)} is not a finite number in [0, 1]`;
+    case "passed":
+      return typeof v === "boolean" ? null : `payload.passed ${show(v)} is not a boolean`;
+    case "confidence":
+      return inRange(v, 0, 100) ? null : `payload.confidence ${show(v)} is not a finite number in [0, 100]`;
+    case "findings":
+      return findingsIssue(v);
+    case "referenceHash":
+      return v === null || typeof v === "string" ? null : `payload.referenceHash ${show(v)} is not a string or null`;
+    case "model":
+      return v === "anti-spoof-heuristic" ? null : `payload.model ${show(v)} is not "anti-spoof-heuristic"`;
+    default:
+      return `payload.${key} has no check`;
+  }
+}
 
 /**
  * Null when `event` is a complete LO-SE-1 kernel-pull capture for `jobId`;
@@ -252,12 +252,11 @@ export function kernelPullCaptureIssue(
   const keys = keySetIssue(payload, snapshot ? CAPTURE_KEYS : ALL_KEYS, "payload");
   if (keys !== null) return keys;
 
-  const checks = snapshot ? CAPTURE_CHECKS : ALL_CHECKS;
+  const checked = snapshot ? CAPTURE_KEYS : ALL_KEYS;
   const context: CheckContext = { jobId, timestamp: top.timestamp, payload };
-  for (let i = 0; i < checks.length; i++) {
-    const entry = listAt(checks, i)!;
-    const check = entry.check;
-    const issue = check(fieldValue(payload, entry.key), context);
+  for (let i = 0; i < checked.length; i++) {
+    const key = listAt(checked, i)!;
+    const issue = fieldIssue(key, fieldValue(payload, key), context);
     if (issue !== null) return issue;
   }
   return null;
