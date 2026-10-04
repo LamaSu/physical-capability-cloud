@@ -12,6 +12,7 @@ import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
 import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
+import { operatorRoutes } from "../routes/operator.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { actAsJobParty } from "./helpers/job-read-party.js";
@@ -96,6 +97,8 @@ async function buildApp(): Promise<FastifyInstance> {
   // makes is as the PROVEN holder (DECISIONS 00:42 and 00:53; buyer below).
   await app.register(deviceRelayRoutes);
   await app.register(jobRoutes);
+  // N133: the kernel operator's decision on a paid job's scope (POST /api/operator/scopes/:scopeId/accept).
+  await app.register(operatorRoutes);
   await app.ready();
   return app;
 }
@@ -139,6 +142,19 @@ async function expectClaimedOnlyWriteRefused(
   expect(spent()).toBe(spentBefore);
 }
 
+/**
+ * N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, and the
+ * write scope its job mints waits for the kernel operator's acceptance unless the kernel's policy
+ * accepts the buyer. kernel-nyc's policy is the default (manual), so its proven operator (a request
+ * with no x-test-key reads as that operator) accepts the scope here; it goes live on the buyer's own
+ * escrow (the mock one, MOCK_SETTLEMENT=true above).
+ */
+async function acceptScope(app: FastifyInstance, scopeId: string) {
+  const res = await app.inject({ method: "POST", url: `/api/operator/scopes/${scopeId}/accept` });
+  expect(res.statusCode).toBe(200);
+  expect(res.json()).toMatchObject({ accepted: true, scopeId, status: "active" });
+}
+
 /** The recorded operator of a seeded kernel. */
 function operatorOf(kernelId: string): string {
   const row = getStore().db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, kernelId)).get();
@@ -168,15 +184,18 @@ describe("Paid Job Flow", () => {
 
   describe("POST /api/jobs/submit-from-discovery", () => {
     it("creates a fast-track job with all pieces wired", async () => {
+      // N133: the buyer is the caller's proven wallet, naming itself.
+      const wallet = buyer("001");
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
           parameters: { volume: 100, tipType: "p300" },
           paymentMethod: "testnet-mock",
-          userAgentId: "user-agent-001",
+          userAgentId: wallet,
         },
       });
 
@@ -211,13 +230,15 @@ describe("Paid Job Flow", () => {
     });
 
     it("creates a job in 'queued' status (mock settlement, control-plane gateway)", async () => {
+      const wallet = buyer("001");
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-001",
+          userAgentId: wallet,
         },
       });
 
@@ -237,13 +258,15 @@ describe("Paid Job Flow", () => {
     });
 
     it("creates an escrow in 'funded' status (mock settlement)", async () => {
+      const wallet = buyer("001");
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-001",
+          userAgentId: wallet,
         },
       });
 
@@ -257,11 +280,14 @@ describe("Paid Job Flow", () => {
       expect(escrow!.status).toBe("funded");
     });
 
-    it("creates an active execution scope tied to the job", async () => {
+    // N133 (inverted): under kernel-nyc's default (manual) policy the scope is minted awaiting the
+    // kernel operator's acceptance, not active; the operator's acceptance makes it active.
+    it("creates an execution scope tied to the job that awaits the kernel operator's acceptance, then is active once accepted", async () => {
       const wallet = buyer("001");
       const res = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -271,21 +297,29 @@ describe("Paid Job Flow", () => {
 
       expect(res.statusCode).toBe(201);
       const body = res.json();
+      expect(body.scopeStatus).toBe("awaiting_acceptance");
 
       // Verify scope in DB (read by its proven holder through the device relay)
-      const scopeRes = await app.inject({
-        method: "GET",
-        url: `/api/relay/kernel-nyc/scope/${body.scopeId}`,
-        headers: asKey(wallet),
-      });
+      const readScope = () =>
+        app.inject({
+          method: "GET",
+          url: `/api/relay/kernel-nyc/scope/${body.scopeId}`,
+          headers: asKey(wallet),
+        });
+      const scopeRes = await readScope();
 
       expect(scopeRes.statusCode).toBe(200);
       const scope = scopeRes.json();
-      expect(scope.status).toBe("active");
+      expect(scope.status).toBe("awaiting_acceptance");
       expect(scope.jobId).toBe(body.jobId);
       expect(scope.kernelId).toBe("kernel-nyc");
       expect(Array.isArray(scope.allowedTools)).toBe(true);
       expect(scope.allowedTools.length).toBeGreaterThan(0);
+
+      await acceptScope(app, body.scopeId);
+      const acceptedRes = await readScope();
+      expect(acceptedRes.statusCode).toBe(200);
+      expect(acceptedRes.json().status).toBe("active");
     });
   });
 
@@ -295,12 +329,16 @@ describe("Paid Job Flow", () => {
 
   describe("Negotiation COMMITTED -> Job + Escrow + Scope", () => {
     it("creates job, escrow, and scope when session is committed", async () => {
+      // N133: the session's buyer is the caller's proven wallet, and only it (or the admin)
+      // commits the session, so the buyer drives every step.
+      const wallet = buyer("002");
       // Step 1: Create session
       const createRes = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asKey(wallet),
         payload: {
-          userAgentId: "user-agent-002",
+          userAgentId: wallet,
           // negotiation now gates on the kernel actually offering the capability
           // type (checkKernelOffersCapability → 404 otherwise). kernel-nyc offers
           // fdm/laser-cut, not liquid-handler; kernel-nanoclaw is the seeded
@@ -317,6 +355,7 @@ describe("Paid Job Flow", () => {
       const quoteRes = await app.inject({
         method: "POST",
         url: `/api/negotiate/session/${sessionId}/quote`,
+        headers: asKey(wallet),
       });
       expect(quoteRes.statusCode).toBe(200);
 
@@ -324,6 +363,7 @@ describe("Paid Job Flow", () => {
       const reviewRes = await app.inject({
         method: "POST",
         url: `/api/negotiate/session/${sessionId}/review`,
+        headers: asKey(wallet),
       });
       expect(reviewRes.statusCode).toBe(200);
 
@@ -331,6 +371,7 @@ describe("Paid Job Flow", () => {
       const commitRes = await app.inject({
         method: "POST",
         url: `/api/negotiate/session/${sessionId}/commit`,
+        headers: asKey(wallet),
       });
       expect(commitRes.statusCode).toBe(200);
       const commitBody = commitRes.json();
@@ -356,6 +397,7 @@ describe("Paid Job Flow", () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -363,6 +405,7 @@ describe("Paid Job Flow", () => {
         },
       });
       const { jobId, scopeId } = createRes.json();
+      await acceptScope(app, scopeId);
 
       // Simulate some tool calls under the scope: the buyer's proven wallet writes, and the same
       // address only claimed is refused (DECISIONS 00:42).
@@ -411,13 +454,15 @@ describe("Paid Job Flow", () => {
 
     it("returns 409 for already completed job", async () => {
       // Create and complete a job
+      const wallet = buyer("004");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-004",
+          userAgentId: wallet,
         },
       });
       const { jobId } = createRes.json();
@@ -446,6 +491,7 @@ describe("Paid Job Flow", () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -453,6 +499,7 @@ describe("Paid Job Flow", () => {
         },
       });
       const { jobId, scopeId } = createRes.json();
+      await acceptScope(app, scopeId);
 
       // Complete the job
       await app.inject({
@@ -483,13 +530,15 @@ describe("Paid Job Flow", () => {
 
   describe("GET /api/jobs/:jobId/settlement", () => {
     it("returns settlement status for a pending job", async () => {
+      const wallet = buyer("006");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-006",
+          userAgentId: wallet,
         },
       });
       const { jobId } = createRes.json();
@@ -513,13 +562,15 @@ describe("Paid Job Flow", () => {
 
     it("NEGATIVE: a mock-settled job reads simulated, never settled or paid (readmodels F1)", async () => {
       // Create and complete
+      const wallet = buyer("007");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
-          userAgentId: "user-agent-007",
+          userAgentId: wallet,
         },
       });
       const { jobId } = createRes.json();
@@ -568,6 +619,7 @@ describe("Paid Job Flow", () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -575,6 +627,7 @@ describe("Paid Job Flow", () => {
         },
       });
       const { scopeId } = createRes.json();
+      await acceptScope(app, scopeId);
 
       // Tool call should succeed — escrow is mock-funded — from the buyer's proven wallet; the
       // same address only claimed is refused (DECISIONS 00:42).
@@ -595,6 +648,7 @@ describe("Paid Job Flow", () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -602,6 +656,8 @@ describe("Paid Job Flow", () => {
         },
       });
       const { scopeId } = createRes.json();
+      // Accepted while the escrow is still funded (N133), so the scope is live.
+      await acceptScope(app, scopeId);
 
       // A safe tool (the relay manifest's "health") works whatever the escrow
       // status, so make the escrow unfunded first.
@@ -627,6 +683,7 @@ describe("Paid Job Flow", () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -634,6 +691,9 @@ describe("Paid Job Flow", () => {
         },
       });
       const { scopeId, escrowId } = createRes.json();
+      // Accepted while the escrow is still funded (N133), so the scope is live and the relay's
+      // escrow gate is what this write meets.
+      await acceptScope(app, scopeId);
       getRepos().escrows.updateStatus(escrowId, "created");
 
       // The buyer's proven wallet passes the relay guard (DECISIONS 00:42), so the escrow gate
@@ -660,6 +720,7 @@ describe("Paid Job Flow", () => {
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -667,6 +728,8 @@ describe("Paid Job Flow", () => {
         },
       });
       const { scopeId } = createRes.json();
+      // Accepted before the escrow store fails (N133: the acceptance reads the escrow too).
+      await acceptScope(app, scopeId);
       const spy = vi.spyOn(getRepos().escrows, "findByCwm").mockImplementation(() => {
         throw new Error("escrow store unavailable");
       });
@@ -692,10 +755,12 @@ describe("Paid Job Flow", () => {
 
   describe("Relay scope minting and jobs", () => {
     it("refuses an operator binding a scope to a job on another kernel", async () => {
+      const wallet = buyer("012");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
-        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-012" },
+        headers: asKey(wallet),
+        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: wallet },
       });
       const { jobId } = createRes.json();
 
@@ -710,10 +775,12 @@ describe("Paid Job Flow", () => {
     });
 
     it("lets the job's own kernel operator bind a scope to it", async () => {
+      const wallet = buyer("013");
       const createRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
-        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: "user-agent-013" },
+        headers: asKey(wallet),
+        payload: { kernelId: "kernel-nyc", capabilityType: "liquid-handler", userAgentId: wallet },
       });
       const { jobId } = createRes.json();
 
@@ -739,6 +806,7 @@ describe("Paid Job Flow", () => {
       const submitRes = await app.inject({
         method: "POST",
         url: "/api/jobs/submit-from-discovery",
+        headers: asKey(wallet),
         payload: {
           kernelId: "kernel-nyc",
           capabilityType: "liquid-handler",
@@ -749,8 +817,12 @@ describe("Paid Job Flow", () => {
       });
 
       expect(submitRes.statusCode).toBe(201);
-      const { jobId, scopeId, escrowId, escrowStatus } = submitRes.json();
+      const { jobId, scopeId, escrowId, escrowStatus, scopeStatus } = submitRes.json();
       expect(escrowStatus).toBe("funded");
+
+      // ── Step 1b: The kernel's operator accepts the buyer's scope (N133) ──
+      expect(scopeStatus).toBe("awaiting_acceptance");
+      await acceptScope(app, scopeId);
 
       // ── Step 2: Execute tool calls under scope ─────────────────────
       // The buyer's proven wallet writes; the same address only claimed is refused
