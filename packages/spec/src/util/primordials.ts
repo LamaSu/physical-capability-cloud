@@ -18,6 +18,11 @@
  *
  * Browser-safe: no `node:` import, because the dashboard bundles canonical.ts.
  * Internal to @pcc/spec; not exported from the package index.
+ *
+ * #363 round 9 adds what profile admission and the evidence levels need: the
+ * tagged-digest check, own-data reads, Set methods for the evidence levels'
+ * exported Set API, the structured clone, and promises whose delivery reads
+ * nothing on Promise.prototype (`ownPromise`, `fulfillsWithTrue`).
  */
 
 const FunctionPrototype = Function.prototype;
@@ -146,4 +151,105 @@ export function isHex256Digest(value: unknown): value is `0x${string}` {
     if (!((unit >= 0x30 && unit <= 0x39) || (unit >= 0x61 && unit <= 0x66))) return false;
   }
   return true;
+}
+
+// -- #363 round 9: profile admission and the evidence levels (steward #5186) --
+
+export const ReflectOwnKeys = Reflect.ownKeys;
+export const DateParse = Date.parse;
+export const ErrorCtor = Error;
+export const PromiseCtor = Promise;
+export const SetCtor = Set;
+export const SetPrototypeAdd = uncurryThis(Set.prototype.add) as (set: Set<unknown>, value: unknown) => Set<unknown>;
+export const SetPrototypeHas = uncurryThis(Set.prototype.has) as (set: ReadonlySet<unknown>, value: unknown) => boolean;
+export const SetPrototypeSize = uncurryThis(ObjectGetOwnPropertyDescriptor(Set.prototype, "size")!.get!) as (set: ReadonlySet<unknown>) => number;
+/** The runtime's structured clone (HTML, and Node since 17), captured at load. */
+export const StructuredClone = (globalThis as { structuredClone?: <T>(value: T) => T }).structuredClone;
+const PromisePrototypeThenOriginal = Promise.prototype.then;
+const PromisePrototypeThen = uncurryThis(Promise.prototype.then) as (
+  promise: Promise<unknown>,
+  onFulfilled: (value: unknown) => unknown,
+  onRejected: (reason: unknown) => unknown,
+) => Promise<unknown>;
+
+/** `s.charCodeAt(i)`, through String.prototype.charCodeAt as it was at load. */
+export function charCodeAt(s: string, i: number): number {
+  return StringPrototypeCharCodeAt(s, i);
+}
+
+const TAGGED_SHA256_PREFIX = "sha256:";
+
+/**
+ * `sha256:` followed by exactly 64 lowercase hex digits: the evidence family's
+ * tagged digest (signing-preimage.ts TAGGED_DIGEST_PATTERN), checked code unit
+ * by code unit, with no RegExp (astra pack 167).
+ */
+export function isTaggedSha256(value: unknown): value is `sha256:${string}` {
+  if (typeof value !== "string" || value.length !== 71) return false;
+  for (let i = 0; i < 7; i++) {
+    if (StringPrototypeCharCodeAt(value, i) !== StringPrototypeCharCodeAt(TAGGED_SHA256_PREFIX, i)) return false;
+  }
+  for (let i = 7; i < 71; i++) {
+    const unit = StringPrototypeCharCodeAt(value, i);
+    if (!((unit >= 0x30 && unit <= 0x39) || (unit >= 0x61 && unit <= 0x66))) return false;
+  }
+  return true;
+}
+
+/**
+ * An own data property's value: undefined when `o` is not an object, or the
+ * property is absent, inherited, or an accessor (which never runs). Nothing
+ * written on a prototype after load can supply it.
+ */
+export function ownDataValue(o: unknown, key: PropertyKey): unknown {
+  if (o === null || (typeof o !== "object" && typeof o !== "function")) return undefined;
+  const descriptor = ObjectGetOwnPropertyDescriptor(o, key);
+  return descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor.value : undefined;
+}
+
+/** A data descriptor that is not writable, enumerable or configurable, with a null prototype. */
+function fixedDescriptor(value: unknown): PropertyDescriptor {
+  const descriptor = ObjectCreate(null) as PropertyDescriptor;
+  descriptor.value = value;
+  descriptor.writable = false;
+  descriptor.enumerable = false;
+  descriptor.configurable = false;
+  return descriptor;
+}
+
+/**
+ * `promise`, given its own `constructor` (the Promise captured at load) and its
+ * own `then` (Promise.prototype.then as it was at load). `await` reads a
+ * promise's `constructor` before it takes the engine's internal path, and a
+ * `.then` call looks `then` up. Both live on Promise.prototype, where code
+ * running after load can replace them: with `constructor` replaced, `await`
+ * resolves through whatever `then` it finds, and that `then` can hand over any
+ * value. Own properties are read first. Neither is enumerable.
+ */
+export function ownPromise<T>(promise: Promise<T>): Promise<T> {
+  ObjectDefineProperty(promise, "constructor", fixedDescriptor(PromiseCtor));
+  ObjectDefineProperty(promise, "then", fixedDescriptor(PromisePrototypeThenOriginal));
+  return promise;
+}
+
+/**
+ * Whether a trusted callback answered exactly true, or with a promise that
+ * fulfills with exactly true. A promise is followed through
+ * Promise.prototype.then as it was at load, into a promise made here with
+ * `ownPromise`, so nothing replaced after load sees or changes the answer,
+ * and awaiting the result reads nothing on Promise.prototype. Anything else
+ * answers false: a value that is not exactly true, a rejection, and an object
+ * that is not a native promise (a thenable is never followed).
+ */
+export function fulfillsWithTrue(answer: unknown): boolean | Promise<boolean> {
+  if (typeof answer !== "object" || answer === null) return answer === true;
+  return ownPromise(
+    new PromiseCtor<boolean>((resolve) => {
+      try {
+        PromisePrototypeThen(answer as Promise<unknown>, (value) => resolve(value === true), () => resolve(false));
+      } catch {
+        resolve(false);
+      }
+    }),
+  );
 }
