@@ -261,7 +261,10 @@ export class EvidenceEmitter {
         `an event of step ${stepId} of job ${jobId} could not be stored (${stepEv.lost.type}: ${stepEv.lost.error}), so its evidence is incomplete`,
       );
     }
-    const events = [...stepEv.events];
+    // A deep copy: callers still hold the stored events (addEvent returns them, getEvents hands
+    // them out), so a change made through such a reference while the bundle is hashed and
+    // signed must never reach the bundle (astra pack 261).
+    const events = structuredClone(stepEv.events);
     if (events.length === 0) {
       throw new Error(`No evidence events for ${jobId}:${stepId}`);
     }

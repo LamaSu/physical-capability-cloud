@@ -236,6 +236,28 @@ describe("EvidenceEmitter's step lifecycle around the chain (pack 259)", () => {
     expect(types(emitter), "the later event is stored in the step, after the bundle").toEqual(["execution_started", "execution_completed"]);
   });
 
+  it("finalizeBundle signs a detached snapshot: an event changed through the caller's reference while it signs never reaches the bundle", async () => {
+    const signer = gatedSigner();
+    const emitter = new EvidenceEmitter(KERNEL, signer.signFn);
+    emitter.registerStep(JOB, "s1", 0);
+    const returned = await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+    const original = returned.hash;
+
+    const finalizing = emitter.finalizeBundle(JOB, "s1");
+    await signer.inside;
+    // The caller still holds the event addEvent returned (getEvents() hands out the same one).
+    (returned as { hash: string }).hash = `sha256:${"0".repeat(64)}`;
+    (returned.payload as { pages: number }).pages = 99;
+    signer.release();
+    const bundle = await finalizing;
+
+    expect(bundle.events[0]).not.toBe(returned);
+    expect(bundle.events[0]?.hash).toBe(original);
+    expect((bundle.events[0]?.payload as { pages: number }).pages).toBe(3);
+    expect(await verifyBundleHash(bundle), "the bundle hash covers its events").toBe(true);
+    expect(await verifyEventHash(bundle.events[0]!), "the event hash covers its content").toBe(true);
+  });
+
   it("finalizeBundle waits for an add accepted before it", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const digests = controlDigests();
