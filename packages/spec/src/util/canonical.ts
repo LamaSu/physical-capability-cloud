@@ -14,32 +14,58 @@
 
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
+import { ArrayIsArray, hasOwn, JSONStringify, ObjectKeys, sortedStrings, StringCtor } from "./primordials.js";
 
 /**
  * Canonicalize any value to a deterministic JSON string.
  * Keys sorted lexicographically at all depths.
+ *
+ * It calls only intrinsics captured when `./primordials.ts` loads (astra pack
+ * 170). A method or global replaced afterwards cannot change what it writes,
+ * so it cannot make two different values serialize, and hash, alike. For JSON
+ * data its output is byte-identical to the implementation it replaces
+ * (`value.map(canonicalize).join(",")` and `Object.keys(value).sort()`
+ * filtered and mapped), including the edge cases:
+ *   - a hole in an array is written as nothing;
+ *   - `undefined` in an array is written as null;
+ *   - an object member whose value is undefined is omitted;
+ *   - a number is written as String() writes it.
+ * For a value that is not data, two things differ. An index or member is read
+ * once, so a getter runs once, not twice. An array index is read only when it
+ * is the array's own, never one a prototype serves.
  */
 export function canonicalize(value: unknown): string {
   if (value === null || value === undefined) {
     return "null";
   }
   if (typeof value === "string") {
-    return JSON.stringify(value);
+    return JSONStringify(value);
   }
   if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
+    return `${value}`;
   }
-  if (Array.isArray(value)) {
-    return "[" + value.map(canonicalize).join(",") + "]";
+  if (ArrayIsArray(value)) {
+    let out = "[";
+    for (let i = 0; i < value.length; i++) {
+      if (i > 0) out += ",";
+      // `map` skips a hole, and `join` writes the hole as nothing.
+      if (hasOwn(value, i)) out += canonicalize(value[i]);
+    }
+    return `${out}]`;
   }
   if (typeof value === "object") {
-    const keys = Object.keys(value as Record<string, unknown>).sort();
-    const pairs = keys
-      .filter((k) => (value as Record<string, unknown>)[k] !== undefined)
-      .map((k) => JSON.stringify(k) + ":" + canonicalize((value as Record<string, unknown>)[k]));
-    return "{" + pairs.join(",") + "}";
+    const keys = sortedStrings(ObjectKeys(value as Record<string, unknown>));
+    let out = "{";
+    let first = true;
+    for (let i = 0; i < keys.length; i++) {
+      const member = (value as Record<string, unknown>)[keys[i]!];
+      if (member === undefined) continue;
+      out += `${first ? "" : ","}${JSONStringify(keys[i]!)}:${canonicalize(member)}`;
+      first = false;
+    }
+    return `${out}}`;
   }
-  return String(value);
+  return StringCtor(value);
 }
 
 /**
