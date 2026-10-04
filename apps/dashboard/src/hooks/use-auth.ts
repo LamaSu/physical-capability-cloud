@@ -10,6 +10,7 @@ import { useState, useCallback, useEffect } from "react";
 import { useAccount, useSignMessage } from "wagmi";
 import { useAuthStore } from "../stores/auth-store.js";
 import { beginSignIn, signInCurrent, verifySignIn } from "../lib/wallet-session.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -68,7 +69,8 @@ export function useAuth() {
   // Check existing session on mount
   useEffect(() => {
     setIsChecking(true);
-    fetch("/api/auth/me", { credentials: "include" })
+    // With the API key: the gateway honors a session cookie only beside the key it was verified under (N103).
+    authorizedFetch("/api/auth/me", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.address) {
@@ -113,6 +115,7 @@ export function useAuth() {
       const signature = await signMessageAsync({ message });
 
       // 4. Verify with gateway
+      // With the API key, so the gateway binds the session to this account (N103).
       const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn);
 
       if (!verifyRes.ok) {

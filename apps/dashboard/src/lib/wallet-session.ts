@@ -1,6 +1,7 @@
 import { disconnect } from "wagmi/actions";
 import { wagmiConfig, wagmiQueryClient } from "../providers/WalletProvider.js";
 import { accountGeneration, confirmWalletSessionEnded } from "./account-generation.js";
+import { authorizedFetch } from "./authorized-fetch.js";
 
 /**
  * End the wallet half of the signed-in identity (astra 19d, 19e, 19f).
@@ -111,7 +112,9 @@ export async function verifySignIn(
     signIn.signal.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => send.abort(new DOMException("The gateway didn't answer the sign-in", "TimeoutError")), VERIFY_MS);
     try {
-      return await fetch("/api/auth/verify", {
+      // With the API key, so the gateway binds the session it mints to this
+      // account's key and honors its cookie only beside that key (N103).
+      return await authorizedFetch("/api/auth/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
