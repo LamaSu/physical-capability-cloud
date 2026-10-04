@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { GlassPanel, DataCell, GlowBadge, PulseIndicator, EmptyState, LoadingShell } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useKernels } from "../api/hooks/use-pcc-data.js";
+import { siteLocationLabel } from "./kernel-location.js";
 
 export function KernelsPage() {
   const navigate = useNavigate();
@@ -56,11 +57,7 @@ export function KernelsPage() {
                   <GlowBadge color="gray">+{kernel.capabilities.length - 4}</GlowBadge>
                 )}
               </div>
-              <div className="text-xs text-white/25">
-                {kernel.physicalAddress ||
-                  kernel.location?.label ||
-                  (kernel.location ? `${kernel.location.lat.toFixed(4)}, ${kernel.location.lng.toFixed(4)}` : "Location not set")}
-              </div>
+              <div className="text-xs text-white/25">{siteLocationLabel(kernel)}</div>
             </GlassPanel>
           ))}
         </div>

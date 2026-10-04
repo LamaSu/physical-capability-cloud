@@ -355,6 +355,19 @@ describe("draftSafetyEnvelope: operator answers", () => {
     }
   });
 
+  it("refuses an input carrying an integer outside the safe range: canonical JSON (D5) has no form for it, so no envelope is built from it", () => {
+    // The oracle's canonicalize (D5, #359) refuses such a number, so an envelope holding one would have a digest it cannot recompute.
+    for (const [min, max] of [[20, 1e21], [-(2 ** 53), 40]]) {
+      const input = emptyInput("lab-plate-reader");
+      input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min, max }];
+      expect(() => draftSafetyEnvelope(input)).toThrow(/is an integer outside the safe range, which canonical JSON \(D5\) has no form for: input must be plain JSON data/);
+    }
+    // The boundary itself is a safe integer: still JSON data, so the draft is built.
+    const input = emptyInput("lab-plate-reader");
+    input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: -(2 ** 53 - 1), max: 2 ** 53 - 1 }];
+    expect(() => draftSafetyEnvelope(input)).not.toThrow();
+  });
+
   it("drops an operator answer whose bound is missing or not a number, and asks", () => {
     const input = emptyInput("lab-plate-reader");
     input.intake.limits = [{ field: "f", quantity: "incubation_temperature", unit: "degC", min: "20" as unknown as number, max: 40 }];
