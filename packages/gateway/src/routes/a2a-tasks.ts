@@ -63,6 +63,8 @@ import { createJobFromSession } from "./paid-job-flow.js";
 import { assertSessionLive } from "./session-liveness.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { authorityOf } from "../auth/kernel-authority.js";
+import { bindBuyer, type BuyerBinding } from "../auth/buyer-identity.js";
 import { canAnonA2aDiscover } from "../middleware/security-hardening.js";
 import {
   attachChannel,
@@ -495,13 +497,7 @@ export async function commitPccSession(
     .where(eq(negotiationSessions.id, sessionId))
     .run();
 
-  let paidJob: {
-    jobId: string;
-    scopeId: string;
-    escrowId: string;
-    escrowAddress: string;
-    escrowStatus: string;
-  } | null = null;
+  let paidJob: Awaited<ReturnType<typeof createJobFromSession>> | null = null;
   try {
     const committedRow = db
       .select()
@@ -524,6 +520,8 @@ export async function commitPccSession(
           jobId: paidJob?.jobId ?? jobId,
           cwmId,
           scopeId: paidJob?.scopeId ?? null,
+          // N133: the scope is live only once the kernel's operator accepted it and the buyer funded it.
+          scopeStatus: paidJob?.scopeStatus ?? null,
           escrowId: paidJob?.escrowId ?? null,
           escrowAddress: paidJob?.escrowAddress ?? null,
           escrowStatus: paidJob?.escrowStatus ?? null,
@@ -897,11 +895,30 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
   }];
 }
 
+/**
+ * N133 rule 1 (the steward's DECISIONS 01:01): a paid session's buyer is the caller's proven
+ * identity (its SIWE session's wallet) or the admin acts for it; pcc-submit's commit mints the
+ * buyer's write scope. A params object naming no buyer passes through: createPccQuote refuses it
+ * as missing before it creates anything.
+ */
+function bindA2ABuyer(
+  skillParams: Record<string, unknown>,
+  principal: CapturePrincipal,
+  admin: boolean,
+): { ok: true; params: Record<string, unknown> } | Extract<BuyerBinding, { ok: false }> {
+  const named = skillParams.userAgentId;
+  if (typeof named !== "string" || named.length === 0) return { ok: true, params: skillParams };
+  const binding = bindBuyer({ admin, provenWallet: principal.proven }, named);
+  return binding.ok ? { ok: true, params: { ...skillParams, userAgentId: binding.buyer } } : binding;
+}
+
 async function dispatchTasksSend(
   rpcId: string | number | null,
   params: Record<string, unknown>,
   /** Who the route authenticated (key holder or SIWE session); server-side only. */
   principal: CapturePrincipal = { proven: null, key: null },
+  /** The request carried the gateway admin secret (N133: the admin may act for any buyer). */
+  admin = false,
 ): Promise<JsonRpcSuccess | JsonRpcError> {
   pruneExpired();
   const requestedSkill = (params.skill ?? params.skillId) as string | undefined;
@@ -946,7 +963,9 @@ async function dispatchTasksSend(
       }
 
       case "pcc-quote": {
-        const result = await createPccQuote(skillParams as PccQuoteParams);
+        const bound = bindA2ABuyer(skillParams, principal, admin);
+        if (!bound.ok) return rpcError(rpcId, -32001, bound.body.message, { skill, reason: bound.body.reason });
+        const result = await createPccQuote(bound.params as unknown as PccQuoteParams);
         void emitAtomicSessionIntent(skillParams as PccQuoteParams, userAgentId, principal);
         const task: A2ATask = {
           ...baseTask,
@@ -960,7 +979,9 @@ async function dispatchTasksSend(
       }
 
       case "pcc-submit": {
-        const quote = await createPccQuote(skillParams as PccSubmitParams);
+        const bound = bindA2ABuyer(skillParams, principal, admin);
+        if (!bound.ok) return rpcError(rpcId, -32001, bound.body.message, { skill, reason: bound.body.reason });
+        const quote = await createPccQuote(bound.params as unknown as PccSubmitParams);
         const commit = await commitPccSession(quote.sessionId);
         void emitAtomicSessionIntent(skillParams as PccSubmitParams, userAgentId, principal);
         const task: A2ATask = {
@@ -1248,11 +1269,14 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     // Who made the request, for demand capture (R44 D2): the API key resolved
     // here (a self-asserted key holder) or the SIWE session (a proven wallet).
     // The same primitives apiGate uses. Never params.
-    let principal: CapturePrincipal = { proven: null, key: null };
+    // N133: the caller is resolved even when PCC_A2A_AUTH_DISABLED (a test switch) waives the
+    // requirement, because pcc-quote/pcc-submit bind the buyer to it; "disabled" only stops an
+    // anonymous call being turned away here, and an anonymous paid call then has no proof.
+    const apiKey = resolveApiKey(req);
+    const session = !apiKey ? resolveSession(req) : null;
+    const principal: CapturePrincipal = principalFromA2AAuth(apiKey, session);
+    const admin = authorityOf(req).admin;
     if (process.env.PCC_A2A_AUTH_DISABLED !== "true") {
-      const apiKey = resolveApiKey(req);
-      const session = !apiKey ? resolveSession(req) : null;
-      principal = principalFromA2AAuth(apiKey, session);
       if (!apiKey && !session) {
         if (!isPublicDiscoverCall(method, params)) {
           return reply.status(200).send(
@@ -1278,7 +1302,7 @@ export async function a2aTasksRoutes(app: FastifyInstance) {
     let result: JsonRpcSuccess | JsonRpcError;
     switch (method) {
       case "tasks/send":
-        result = await dispatchTasksSend(rpcId, params, principal);
+        result = await dispatchTasksSend(rpcId, params, principal, admin);
         break;
       case "tasks/get":
         result = await dispatchTasksGet(rpcId, params);

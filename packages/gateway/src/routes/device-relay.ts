@@ -499,9 +499,9 @@ function escrowRefusal(scope: typeof executionScopes.$inferSelect): string | nul
  * Synchronous (better-sqlite3), so a caller can read the state and act on it
  * with no await in between.
  */
-type EmergencyStopState = "stopped" | "clear" | "unavailable";
+export type EmergencyStopState = "stopped" | "clear" | "unavailable";
 
-function emergencyStopState(kernelId: string): EmergencyStopState {
+export function emergencyStopState(kernelId: string): EmergencyStopState {
   try {
     const { db } = getStore();
     const row = db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
@@ -514,8 +514,8 @@ function emergencyStopState(kernelId: string): EmergencyStopState {
   }
 }
 
-/** The refusal for a kernel whose emergency stop is not "clear". */
-function stopRefusal(reply: FastifyReply, state: Exclude<EmergencyStopState, "clear">): FastifyReply {
+/** The refusal for a kernel whose emergency stop is not "clear". N133: an operator's scope acceptance uses it too. */
+export function stopRefusal(reply: FastifyReply, state: Exclude<EmergencyStopState, "clear">): FastifyReply {
   return state === "stopped"
     ? reply.status(409).send({ error: "kernel_emergency_stopped" })
     : reply.status(503).send({ error: "policy_unavailable" });

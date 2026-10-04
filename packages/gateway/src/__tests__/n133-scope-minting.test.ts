@@ -172,18 +172,17 @@ describe("N133: nobody can mint a live write scope for itself on another operato
     process.env.MOCK_SETTLEMENT = "true"; // explicit, as tests must now set it
     const sub = await submit(asKey(STRANGER), STRANGER);
     expect(sub.statusCode).toBe(201);
-    const { scopeId, jobId } = sub.json() as { scopeId: string; jobId: string };
+    const { scopeId } = sub.json() as { scopeId: string };
 
     // kernel-nyc's policy is the default (manual): nothing is accepted for the operator.
     expect(scopeRow(scopeId)!.status).not.toBe("active");
     expect((await writeAs(asKey(STRANGER), scopeId)).statusCode).toBe(403);
     expect(queued()).toHaveLength(0);
 
-    // The operator's decision: the pending approval for this job, accepted by kernel-nyc's
-    // proven operator wallet (a request with no x-test-key reads as that operator).
-    const approval = db().select().from(schema.pendingApprovals).where(eq(schema.pendingApprovals.jobId, jobId)).get();
-    expect(approval?.status).toBe("pending");
-    const accepted = await app.inject({ method: "POST", url: `/api/operator/approvals/${approval!.id}/approve` });
+    // The operator's decision, on the scope itself: kernel-nyc's proven operator wallet accepts
+    // it (a request with no x-test-key reads as that operator). Not a pending approval: an
+    // approved approval is a job the OT-2 executor runs (scripts/ot2-agent.py).
+    const accepted = await app.inject({ method: "POST", url: `/api/operator/scopes/${scopeId}/accept` });
     expect(accepted.statusCode).toBe(200);
 
     expect(scopeRow(scopeId)!.status).toBe("active");
