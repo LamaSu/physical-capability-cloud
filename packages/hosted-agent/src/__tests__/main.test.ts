@@ -150,7 +150,7 @@ describe("the attempt sink only claims delivery when the receiver echoes the rep
     // the same aliasing packages/gateway/vitest.config.ts uses, so feedback.ts's own
     // `@pcc/store` import resolves without a prior build) — if this ever stops resolving,
     // this test fails loudly with a module-not-found error, which IS "stop and report".
-    process.env.PCC_DB_PATH = "/mnt/sparkbulk/tmp/hosted-agent-q6-feedback/pcc.sqlite";
+    process.env.PCC_DB_PATH = ":memory:"; // portable: no host path (a CI runner has no /mnt/sparkbulk)
     const { feedbackRoutes } = await import("../../../gateway/src/routes/feedback.js");
     const { attemptSink } = await import("../main.js");
     const Fastify = (await import("fastify")).default;
@@ -485,10 +485,13 @@ describe("round 7: every startup failure line is total and closed", () => {
   });
 
   it("a spend database that cannot open, and a port already in use, log a closed category and operational code", async () => {
+    // Paths under the OS temp directory, which exists on every machine and CI runner.
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
     // better-sqlite3 refuses a missing directory itself, with a plain TypeError and no code.
     let dirErr: unknown = null;
     try {
-      new Database("/mnt/sparkbulk/tmp/no-such-dir-243/spend.db");
+      new Database(join(tmpdir(), `no-such-dir-243-${process.pid}`, "spend.db"));
     } catch (e) {
       dirErr = e;
     }
@@ -496,7 +499,7 @@ describe("round 7: every startup failure line is total and closed", () => {
     // SQLite's own refusal carries its code.
     let dbErr: unknown = null;
     try {
-      new Database("/mnt/sparkbulk/tmp/no-such-file-243.db", { fileMustExist: true });
+      new Database(join(tmpdir(), `no-such-file-243-${process.pid}.db`), { fileMustExist: true });
     } catch (e) {
       dbErr = e;
     }
