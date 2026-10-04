@@ -5,9 +5,7 @@ import { GlassPanel, GlowBadge } from "@pcc/ui";
 import type { BatchManifest, SampleSlot } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useBatchTrackerStore } from "../stores/batch-tracker-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
-
-const GATEWAY = "/api";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 const STATUS_COLORS: Record<SampleSlot["status"], string> = {
   pending: "bg-white/10",
@@ -40,7 +38,7 @@ export function BatchTrackingPage() {
   // Fetch batches
   const { data: batchData } = useQuery({
     queryKey: ["batches"],
-    queryFn: () => fetch(`${GATEWAY}/batches`, { headers: { ...getAuthHeaders() } }).then((r) => r.json()),
+    queryFn: () => authorizedFetch("/api/batches").then((r) => r.json()),
   });
 
   React.useEffect(() => {
