@@ -180,7 +180,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
   });
 
   it("reproduction (r1 of #513, M3): an explicit capabilityType null is refused as 400, and nothing is stored", async () => {
-    const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
+    const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}`, headers: ADMIN_HEADERS })).json().approvals.length;
     const res = await app.inject({
       method: "POST",
       headers: ADMIN_HEADERS,
@@ -188,12 +188,12 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
       payload: { kernelId: KERNEL, agentId: "agent-m3-captype-null", capabilityType: null },
     });
     expect(res.statusCode).toBe(400);
-    const after = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
+    const after = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}`, headers: ADMIN_HEADERS })).json().approvals.length;
     expect(after).toBe(before);
   });
 
   it("reproduction: a rejected capabilityType must not be stored", async () => {
-    const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
+    const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}`, headers: ADMIN_HEADERS })).json().approvals.length;
     const create = await app.inject({
       method: "POST",
       headers: ADMIN_HEADERS,
@@ -203,7 +203,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
     if (create.statusCode === 200) {
       expect(storedRow(create.json().approval.id)).not.toHaveProperty("jobSummary.capabilityType.unexpected");
     }
-    const after = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
+    const after = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}`, headers: ADMIN_HEADERS })).json().approvals.length;
     expect(after).toBe(before);
   });
 

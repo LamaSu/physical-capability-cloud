@@ -89,7 +89,7 @@ describe("operator read routes: no fabricated data", () => {
   });
 
   it("operator policy: no saved row reads as the defaults, labeled default", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/operator/policy/kernel-with-no-policy" });
+    const res = await app.inject({ method: "GET", url: "/api/operator/policy/kernel-with-no-policy", headers: ADMIN_HEADERS });
     expect(res.statusCode).toBe(200);
     expect(res.json().source).toBe("default");
   });
@@ -97,7 +97,7 @@ describe("operator read routes: no fabricated data", () => {
   it("NEGATIVE: operator policy: a failed read is 503, never the defaults", async () => {
     closeStore(); // every store read now throws
     try {
-      const res = await app.inject({ method: "GET", url: "/api/operator/policy/kernel-nyc" });
+      const res = await app.inject({ method: "GET", url: "/api/operator/policy/kernel-nyc", headers: ADMIN_HEADERS });
       expect(res.statusCode).toBe(503);
       expect(res.json().error).toBe("read_failed");
       expect(res.json()).not.toHaveProperty("policy");
@@ -151,12 +151,12 @@ describe("operator approvals: no silent substitution", () => {
   describe("M1 GET /api/operator/approvals", () => {
     it("lists what is recorded, and a real empty result is still an empty list", async () => {
       const a = await submit();
-      const all = await app.inject({ method: "GET", url: "/api/operator/approvals" });
+      const all = await app.inject({ method: "GET", url: "/api/operator/approvals", headers: ADMIN_HEADERS });
       expect(all.statusCode).toBe(200);
       expect(all.json().approvals.map((r: { id: string }) => r.id)).toContain(a.id);
 
       // Nothing recorded for this kernel: absence is a truthful 200 with an empty list.
-      const none = await app.inject({ method: "GET", url: "/api/operator/approvals?kernelId=kernel-with-no-approvals" });
+      const none = await app.inject({ method: "GET", url: "/api/operator/approvals?kernelId=kernel-with-no-approvals", headers: ADMIN_HEADERS });
       expect(none.statusCode).toBe(200);
       expect(none.json()).toEqual({ approvals: [] });
     });
@@ -165,7 +165,7 @@ describe("operator approvals: no silent substitution", () => {
       await submit(); // a recorded approval the outage must not hide
       closeStore(); // every store read now throws, as in the operator policy test
       try {
-        const res = await app.inject({ method: "GET", url: "/api/operator/approvals" });
+        const res = await app.inject({ method: "GET", url: "/api/operator/approvals", headers: ADMIN_HEADERS });
         expect(res.statusCode).toBe(503);
         expect(res.json().error).toBe("read_failed");
         expect(res.json()).not.toHaveProperty("approvals");
@@ -192,7 +192,7 @@ describe("operator approvals: no silent substitution", () => {
       const spy = vi.spyOn(db, "select").mockImplementation((() => chain) as never);
       try {
         for (const q of ["", "?kernelId=kernel-nyc", "?status=pending", "?kernelId=kernel-nyc&status=pending"]) {
-          const res = await app.inject({ method: "GET", url: `/api/operator/approvals${q}` });
+          const res = await app.inject({ method: "GET", url: `/api/operator/approvals${q}`, headers: ADMIN_HEADERS });
           expect(res.statusCode, `GET approvals${q}`).toBe(503);
           expect(res.json().error, `GET approvals${q}`).toBe("read_failed");
           expect(res.json(), `GET approvals${q}`).not.toHaveProperty("approvals");
@@ -225,7 +225,7 @@ describe("operator approvals: no silent substitution", () => {
       expect(JSON.stringify(stored)).not.toContain("liquid-handler");
 
       // Listed.
-      const listed = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` }))
+      const listed = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}`, headers: ADMIN_HEADERS }))
         .json()
         .approvals.find((r: { id: string }) => r.id === approval.id);
       expect(listed.jobSummary).not.toHaveProperty("capabilityType");
