@@ -91,4 +91,19 @@ describe("E11e HIGH 1: the worker never chooses the proof pipeline", () => {
     expect(JSON.stringify(json)).toMatch(/task_pipeline/);
     await app.close();
   });
+
+  it("a submission on the task's own pipeline reaches the verifier, judged at the task's tier", async () => {
+    const app = await appWith({ milestoneOwner: () => OWNER });
+    expect((await create(app, "m-3", OWNER, benchmark(2, "sensor_evidence"))).statusCode).toBe(201);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/milestones/m-3/tmp-validate",
+      payload: { proofType: "sensor_evidence", proof: { evidenceBundle: { events: [], bundleHash: `sha256:${"ab".repeat(32)}`, assuranceTier: 0 } }, worker: "0x0000000000000000000000000000000000000002" },
+    });
+    const findings: Array<{ check: string; passed: boolean }> = res.json().result.findings;
+    expect(findings.some((f) => f.check === "task_pipeline")).toBe(false);
+    // The task's tier 2 chooses the evidence (its camera requirement), not the bundle's claimed tier 0.
+    expect(findings.some((f) => f.check === "tier_requirement_cv_inspection_result_or_camera_snapshot")).toBe(true);
+    await app.close();
+  });
 });
