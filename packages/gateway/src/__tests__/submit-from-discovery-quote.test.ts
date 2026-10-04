@@ -14,8 +14,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
@@ -85,8 +83,6 @@ async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
   await app.register(jobRoutes);
   await app.ready();
   return app;

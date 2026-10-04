@@ -338,6 +338,25 @@ describe("the legacy settlement routes on a real store", () => {
     getStore = db.getStore;
     closeStore = db.closeStore;
     db.initStore({ seed: true });
+    // N98 (#498): a discovery quote is the kernel's REGISTERED capability price, so the kernel the F1 test
+    // submits to carries one USDC-priced liquid-handler capability. No test here asserts that amount.
+    const kernelId = "kernel-nyc";
+    if (!db.getRepos().capabilities.findByKernel(kernelId).some((c: { type: string }) => c.type === "liquid-handler")) {
+      db.getRepos().capabilities.insert({
+        id: `cap-liquid-handler-${kernelId}`,
+        kernelId,
+        type: "liquid-handler",
+        name: "liquid-handler test capability",
+        description: "test",
+        materials: [],
+        tolerances: {},
+        envelope: { x: 1, y: 1, z: 1, unit: "mm" as const },
+        assuranceTiers: [0, 1, 2, 3],
+        pricing: { currency: "USDC", baseCost: "10.00", minimum: "0.01" } as never,
+        availability: {},
+        location: { lat: 40.7, lng: -74 },
+      } as never);
+    }
     const { paidJobFlowRoutes } = await import("../../routes/paid-job-flow.js");
     const { negotiationRoutes } = await import("../../routes/negotiation.js");
     const { settlementRoutes } = await import("../../routes/settlement.js");
