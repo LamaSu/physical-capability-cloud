@@ -636,4 +636,121 @@ export async function operatorRoutes(app: FastifyInstance) {
       }
     },
   );
+
+  /**
+   * Authority for POST /api/operator/approvals/:id/consume: the admin secret,
+   * or the approval's kernel owner -- same order as GET
+   * /api/operator/policy/:kernelId (adk #3972): a PRESENTED admin secret must
+   * check out on its own (never downgraded to the owner check below), or else
+   * a PRESENT actor is required (401) who must own the approval's kernel.
+   * Either way an unknown approval id is 404 before any ownership question is
+   * even asked. Returns the approval row ({id, kernelId, status}) when
+   * authorized; otherwise the refusal (401 / 404 / 403 / 500) has already been
+   * sent and this returns null.
+   */
+  async function requireConsumeAuthority(
+    req: FastifyRequest<{ Params: { id: string } }>,
+    reply: FastifyReply,
+  ): Promise<{ id: string; kernelId: string; status: string } | null> {
+    let actor: string | null = null;
+    if (presentsAdminSecret(req)) {
+      if (!requireAdminSecret(req, reply)) return null;
+    } else {
+      actor = requireActor(req, reply);
+      if (!actor) return null;
+    }
+
+    let approval: { id: string; kernelId: string; status: string } | undefined;
+    try {
+      approval = getStore().db.select().from(pendingApprovals)
+        .where(eq(pendingApprovals.id, req.params.id))
+        .get();
+    } catch {
+      void reply.status(500).send({ error: "Failed to consume" });
+      return null;
+    }
+    if (!approval) {
+      void reply.status(404).send({ error: "approval_not_found" });
+      return null;
+    }
+
+    if (actor !== null) {
+      const verdict = await checkKernelOwner(actor, approval.kernelId);
+      if (!verdict.ok) {
+        void reply.status(verdict.status).send({
+          error: verdict.error,
+          message: verdict.message,
+          kernelId: approval.kernelId,
+        });
+        return null;
+      }
+    }
+    return approval;
+  }
+
+  /**
+   * POST /api/operator/approvals/:id/consume -- at-most-once CLAIM of an
+   * APPROVED job (#4742, operator item 126).
+   *
+   * scripts/ot2-agent.py (and any other node) polls
+   * GET /api/operator/approvals?status=approved and runs whatever it gets back
+   * on the physical robot. A LOCAL "already ran this" marker cannot stop TWO
+   * machines that both polled the same approved row before either one marked
+   * it: nothing server-side had yet told the second machine the job was taken.
+   * This route is that server-side claim -- the listing above already excludes
+   * anything not 'approved', so a consumed row falls out of the poll on its own.
+   *
+   * AUTHORITY: requireConsumeAuthority above (admin secret, or the kernel's
+   * owner; unknown approval -> 404 either way).
+   *
+   * E-STOP: checkKernelAcceptsJobs (kernel-emergency-stop.ts) runs AFTER
+   * authority and BEFORE the claim. A stopped kernel refuses 409
+   * kernel_emergency_stopped; a policy that cannot be trusted (missing vs.
+   * invalid vs. a read that throws -- see that file) fails closed, 503
+   * policy_unavailable, same as every other path that hands out work. Neither
+   * answer touches the row.
+   *
+   * CLAIM: one UPDATE ... WHERE id = ? AND status = 'approved' -- the same
+   * compare-and-set shape as sqlUpdateCas in carrier-shipment-store.ts. SQLite
+   * (better-sqlite3) runs it to completion before anything else in this
+   * process can run another statement, so of two concurrent consumes of the
+   * same row, the WHERE clause can be true for at most one of them -- whichever
+   * reaches the engine second finds the row already 'consumed' and changes=0.
+   * changes=0 means "not consumable right now": 409 approval_not_consumable
+   * with the row's CURRENT status (an approval that was never approved, or was
+   * already consumed by someone else).
+   */
+  app.post<{ Params: { id: string } }>(
+    "/api/operator/approvals/:id/consume",
+    async (req, reply) => {
+      const approval = await requireConsumeAuthority(req, reply);
+      if (!approval) return reply;
+
+      const accepts = checkKernelAcceptsJobs(approval.kernelId);
+      if (!accepts.ok) return replyKernelNotAccepting(reply, accepts);
+
+      try {
+        const { db } = getStore();
+        const result = db.update(pendingApprovals)
+          .set({ status: "consumed" })
+          .where(and(eq(pendingApprovals.id, req.params.id), eq(pendingApprovals.status, "approved")))
+          .run();
+        const changed = (result as unknown as { changes: number }).changes ?? 0;
+
+        if (changed === 0) {
+          const row = db.select().from(pendingApprovals)
+            .where(eq(pendingApprovals.id, req.params.id))
+            .get();
+          return reply.status(409).send({
+            error: "approval_not_consumable",
+            status: row?.status ?? approval.status,
+          });
+        }
+
+        return { consumed: true, approvalId: req.params.id };
+      } catch {
+        return reply.status(500).send({ error: "Failed to consume" });
+      }
+    },
+  );
 }
