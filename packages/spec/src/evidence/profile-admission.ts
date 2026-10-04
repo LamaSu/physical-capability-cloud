@@ -13,14 +13,17 @@
  *     (`pinnedBundleSetDigest`, see `computeBundleSetDigest`). A caller that
  *     passes a subset (for example the first bundle that verifies) gets
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
- *   - SIGNATURE: every bundle's `bundleHash` verifies under the node's
- *     registered key (`verifyBundleSignature`: gateway
- *     `verifyDeviceSignedEvidence`, the oracle's registered-key check), and the
- *     leg names the verified signer's operator principal in the pinned
- *     registry: the bundle's TRUST DOMAIN, or null when the registry names
- *     none. Levels judge independence between trust domains (evidence-level.ts,
- *     #345's one rule), so a leg that cannot name the signer's operator caps
- *     that bundle's inspections below inspected_output;
+ *   - SIGNATURE: every bundle's `bundleHash` verifies under the key registered
+ *     for its declared signer (`kernelSignature.signer`), and the leg
+ *     (`verifyBundleSignature`: gateway `verifyDeviceSignedEvidence`, the
+ *     oracle's registered-key check) names the signer that verified, which
+ *     must be the declared one. The bundle's TRUST DOMAIN is that signer's
+ *     operator principal in ONE pinned registry snapshot (`signerTrustDomains`),
+ *     looked up here, never answered bundle by bundle, so one signer has one
+ *     domain (astra pack 271). Levels judge independence between trust domains
+ *     (evidence-level.ts, #345's one rule), so a signer whose operator the
+ *     registry does not name caps that bundle's inspections below
+ *     inspected_output;
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
  *     opens to its events, and they commit the job and the kernel that
  *     accepted it;
@@ -69,8 +72,9 @@
  *         validation must end in an explicit terminal state (reject or
  *         quarantine), never be silently left out of the pin;
  *       - persist the exact manifest and context with the decision: bundle
- *         roots, profile commitment, subject, unit and challenge, and the
- *         verifier and program identity, so recovery re-evaluates the same set;
+ *         roots, profile commitment, subject, unit and challenge, the executor
+ *         domains and the signer snapshot, and the verifier and program
+ *         identity, so recovery re-evaluates the same set;
  *       - under v1, present exactly the committed bundle at /settle, and hold
  *         producers to the one-bundle rule (evidence states it in LO-EV-9 and
  *         EvidenceBlockV2); a multi-bundle set would need the seal seam;
@@ -211,17 +215,14 @@
  *     awaited through `awaitedHere`, so that `await` reads only its own
  *     `constructor` and looks nothing up on the answer. The primitive leg's
  *     promise is followed through the `then` captured at load
- *     (`fulfillsWithTrue`). So is the signature leg's (`followedPromise`), and
- *     its answer is read inside the handler, from its own data, into a frozen
- *     null-prototype record: a `then` written on Object.prototype never runs on
- *     it. The result is a null-prototype object, so a `then` written on
+ *     (`fulfillsWithTrue`). So is the signature leg's (`followedPromise`), whose
+ *     answer is a signer id, a string: no resolution looks `then` up on it. The
+ *     result is a null-prototype object, so a `then` written on
  *     Object.prototype cannot take over its resolution.
  * The boundary, named honestly: the verification callbacks are the caller's
  * trusted code (the primitive leg's answer must be true, false or a native
- * promise; the signature leg's must be a plain `{ trustDomain }` record, or a
- * native promise of a record with no prototype, `signedBy`, since resolving an
- * ordinary object looks `then` up on Object.prototype; any other thenable is
- * refused). A realm whose intrinsics were replaced BEFORE
+ * promise; the signature leg's a signer id or false, or a native promise of
+ * one; any other thenable is refused). A realm whose intrinsics were replaced BEFORE
  * @pcc/spec loaded is out of scope: no in-process check can tell. Anything
  * replaced after load can make admission refuse, or, for a promise that never
  * settles, never answer; it cannot change an acceptance or a value.
@@ -383,6 +384,21 @@ export function isOperatorPrincipalId(value: unknown): value is string {
 }
 
 /**
+ * A signer id as kernel bundles declare it (`kernelSignature.signer`): 0x and
+ * exactly 40 lowercase hex digits, checked code unit by code unit with no
+ * RegExp (pack 167). Exported; a test holds it equal to `^0x[0-9a-f]{40}$`.
+ */
+export function isSignerId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length !== 42) return false;
+  if (charCodeAt(value, 0) !== 0x30 || charCodeAt(value, 1) !== 0x78) return false; // "0x"
+  for (let i = 2; i < 42; i++) {
+    const unit = charCodeAt(value, i);
+    if (!(isDigit(unit) || (unit >= 0x61 && unit <= 0x66))) return false;
+  }
+  return true;
+}
+
+/**
  * What a qualifying observation states about itself, in its hashed payload
  * (`payload.profileObservation`). The device and adapter are read from the
  * event's `source`, not from here.
@@ -446,21 +462,17 @@ export interface ProfileAdmissionResult {
   reasons: ProfileAdmissionReason[];
 }
 
-/** The signature leg's answer: verified, naming the signer's trust domain, or not verified. */
-export type BundleSignatureAnswer = { readonly trustDomain: string | null } | false;
+/** The signature leg's answer: the id of the signer whose registered key verified the bundle (its declared `kernelSignature.signer`), or false. */
+export type BundleSignatureAnswer = string | false;
 
 /**
- * The signature leg's answer for a verified bundle: a frozen record with no
- * prototype naming the signer's trust domain (null when the registry names
- * none). An asynchronous leg must resolve with one. Resolving an ordinary
- * object looks `then` up on Object.prototype, where code running after load
- * could substitute the answer, so admission refuses a promised answer that has
- * a prototype. A synchronous leg may also answer a plain `{ trustDomain }`.
+ * One row of the pinned registry snapshot: a registered signer's id, as kernel
+ * bundles declare it (`kernelSignature.signer`, 0x + 40 lowercase hex), and the
+ * operator principal that owns its key, or null when the registry names none.
  */
-export function signedBy(trustDomain: string | null): { readonly trustDomain: string | null } {
-  const answer = ObjectCreate(null) as { trustDomain: string | null };
-  answer.trustDomain = trustDomain;
-  return ObjectFreeze(answer);
+export interface SignerTrustDomain {
+  readonly signer: string;
+  readonly trustDomain: string | null;
 }
 
 /** The part of an EvidenceBundle admission reads. */
@@ -488,13 +500,20 @@ export interface ProfileAdmissionInput {
    */
   executorTrustDomains: readonly string[];
   /**
-   * The registered-key signature leg. It answers `{ trustDomain }` when the
-   * bundle verifies: the verified signer's operator principal in the pinned
-   * registry, or null when the registry names none. The answer is a plain record,
-   * or a native promise of a record with no prototype (`signedBy`). Anything else
-   * fails the leg: false, a throw, a bare `true` (it names no signer), a thenable
-   * that is not a native promise, a promised record with a prototype, a proxy or
-   * an accessor, or a trustDomain that is not an operator principal id.
+   * ONE pinned registry snapshot, as data: every signer the signature leg
+   * verifies against, with the operator principal that owns its key (or null).
+   * From the registry at the same pin as the leg's keys, never from the evidence.
+   * Each bundle's trust domain is looked up here, so a signer has exactly one;
+   * a signer listed twice is refused (astra pack 271).
+   */
+  signerTrustDomains: readonly SignerTrustDomain[];
+  /**
+   * The registered-key signature leg. When the bundle's `bundleHash` verifies
+   * under the key registered for its declared signer, it answers that signer's
+   * id (the bundle's `kernelSignature.signer`); otherwise false. The answer, or
+   * the value a native promise of it fulfills with, is a string. Anything else
+   * fails the leg: false, a throw, `true` (it names no signer), a thenable that
+   * is not a native promise, or a signer other than the one the bundle declares.
    */
   verifyBundleSignature: (bundle: AdmissionBundle) => BundleSignatureAnswer | Promise<BundleSignatureAnswer>;
   /**
@@ -551,11 +570,12 @@ const INPUT_FIELDS = deepFreeze([
   "committedDigest",
   "profile",
   "executorTrustDomains",
+  "signerTrustDomains",
 ] as const);
 type InputField = (typeof INPUT_FIELDS)[number];
 
 /** The input fields that are data, walked for code before anything is copied. */
-const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles", "executorTrustDomains"] as const);
+const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles", "executorTrustDomains", "signerTrustDomains"] as const);
 
 const VERSION_PIN_FIELDS = deepFreeze(["permittedAdapterVersions", "permittedFirmwareVersions"] as const);
 
@@ -908,50 +928,21 @@ function legAnswer(leg: () => unknown): boolean | Promise<boolean> {
   }
 }
 
-/** The verified signer the signature leg names: its trust domain, undefined when the registry names none. */
-interface Signer {
-  readonly trustDomain: string | undefined;
+/** The signature leg's answer: the verified signer's id, or null (false, true, a thenable, or anything that is not a signer id). */
+function signerIdOf(answer: unknown): string | null {
+  return isSignerId(answer) ? answer : null;
 }
 
 /**
- * The signature leg's answer, read once from its own data (steward #6478): the
- * signer, as a frozen null-prototype record, or null when the leg failed. A
- * non-object, an array, a proxy, a record with its own `then` (a thenable is
- * never followed), an absent or accessor trustDomain, and a trustDomain that is
- * neither null nor an operator principal id all fail; so do false and a bare
- * true, which name no signer.
+ * The signature leg's answer, ready to await. A native promise is followed
+ * through the `then` captured at load (`followedPromise`); the answer is a
+ * string, so no resolution looks `then` up on it. A leg that throws fails.
  */
-function signerOf(answer: unknown): Signer | null {
-  if (typeof answer !== "object" || answer === null || ArrayIsArray(answer)) return null;
-  if (isProxy === null || isProxy(answer) || hasOwn(answer, "then")) return null;
-  const descriptor = ObjectGetOwnPropertyDescriptor(answer, "trustDomain");
-  // The descriptor's OWN value: one written on Object.prototype must not pass an accessor off as data.
-  if (descriptor === undefined || !hasOwn(descriptor, "value")) return null;
-  const domain: unknown = descriptor.value;
-  const signer = ObjectCreate(null) as { trustDomain: string | undefined };
-  if (domain === null) signer.trustDomain = undefined;
-  else if (isOperatorPrincipalId(domain)) signer.trustDomain = domain;
-  else return null;
-  return ObjectFreeze(signer);
-}
-
-/**
- * A promised answer is read only when it has no prototype (`signedBy`). The
- * leg's promise resolved it, and resolving an ordinary object looks `then` up
- * on Object.prototype, where code running after load can substitute any
- * answer before admission sees it.
- */
-function promisedSignerOf(value: unknown): Signer | null {
-  if (typeof value !== "object" || value === null || ObjectGetPrototypeOf(value) !== null) return null;
-  return signerOf(value);
-}
-
-/** The signature leg's answer, ready to await: a native promise is followed (`followedPromise`). A leg that throws fails. */
-function signerAnswer(leg: () => unknown): Signer | null | Promise<Signer | null> {
+function signerAnswer(leg: () => unknown): string | null | Promise<string | null> {
   try {
     const answer = leg();
-    const followed = followedPromise(answer, promisedSignerOf, null);
-    return followed === null ? signerOf(answer) : followed;
+    const followed = followedPromise(answer, signerIdOf, null);
+    return followed === null ? signerIdOf(answer) : followed;
   } catch {
     return null;
   }
@@ -1029,10 +1020,12 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   let subjectCopy: ReturnType<typeof plainDataCopy>;
   let bundlesCopy: ReturnType<typeof plainDataCopy>;
   let executorsCopy: ReturnType<typeof plainDataCopy>;
+  let signersCopy: ReturnType<typeof plainDataCopy>;
   try {
     subjectCopy = plainDataCopy(read.subject);
     bundlesCopy = plainDataCopy(read.bundles);
     executorsCopy = plainDataCopy(read.executorTrustDomains);
+    signersCopy = plainDataCopy(read.signerTrustDomains);
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
@@ -1058,6 +1051,30 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     );
   }
   const executorTrustDomains = deepFreeze(executors);
+
+  // The pinned registry snapshot: each signer's one trust domain, in a null-prototype record (astra pack 271).
+  // A signer listed twice is refused, whatever the domains, so no lookup depends on which row it reads.
+  const snapshot: unknown = signersCopy.ok ? signersCopy.value : undefined;
+  if (!ArrayIsArray(snapshot)) {
+    return reject("input-unreadable", "signerTrustDomains (the pinned registry snapshot) must be a list of { signer, trustDomain } rows");
+  }
+  const domainOf = ObjectCreate(null) as Record<string, string | null>;
+  for (let k = 0; k < snapshot.length; k++) {
+    const row: unknown = snapshot[k];
+    const signer: unknown = isRecord(row) ? row.signer : undefined;
+    const domain: unknown = isRecord(row) ? row.trustDomain : undefined;
+    if (!isSignerId(signer) || !(domain === null || isOperatorPrincipalId(domain))) {
+      return reject(
+        "input-unreadable",
+        `signerTrustDomains[${k}] must be { signer: 0x<40 lowercase hex>, trustDomain: an operator principal id or null }`,
+      );
+    }
+    if (hasOwn(domainOf, signer)) {
+      return reject("input-unreadable", `signerTrustDomains lists signer ${signer} twice: a signer has one trust domain`);
+    }
+    domainOf[signer] = domain;
+  }
+  ObjectFreeze(domainOf);
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", joinStrings(terms, "; "));
@@ -1125,13 +1142,23 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const authenticated = newList<AuthenticatedBundle>(0);
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    let signer: Signer | null;
+    let verifiedSigner: string | null;
     try {
-      signer = await signerAnswer(() => verifyBundleSignature(bundle));
+      verifiedSigner = await signerAnswer(() => verifyBundleSignature(bundle));
     } catch {
-      signer = null;
+      verifiedSigner = null;
     }
-    if (signer === null) return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+    if (verifiedSigner === null) return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+    // The leg must name the signer the bundle declares, and the snapshot must hold it: the trust domain is
+    // the domain of the key that verified, from the one snapshot (astra pack 271). Read from admission's copy.
+    const declared: unknown = isRecord(bundle.kernelSignature) ? bundle.kernelSignature.signer : undefined;
+    if (verifiedSigner !== declared) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: the leg verified signer ${verifiedSigner}, not the bundle's declared signer`);
+    }
+    if (!hasOwn(domainOf, verifiedSigner)) {
+      return rejectNow("unauthenticated-bundle", `bundle ${i}: signer ${verifiedSigner} is not in the pinned registry snapshot (signerTrustDomains)`);
+    }
+    const trustDomain = domainOf[verifiedSigner] ?? null;
 
     let answer: unknown;
     try {
@@ -1159,7 +1186,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     const verified = opened as readonly EvidenceEvent[];
     const entry = ObjectCreate(null) as { events: readonly EvidenceEvent[]; trustDomain?: string };
     entry.events = verified;
-    if (signer.trustDomain !== undefined) entry.trustDomain = signer.trustDomain;
+    if (trustDomain !== null) entry.trustDomain = trustDomain;
     append(authenticated, entry as AuthenticatedBundle);
     for (let k = 0; k < verified.length; k++) {
       const e = verified[k]!;
