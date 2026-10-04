@@ -212,6 +212,30 @@ class TestRunDaemonLoop:
         MockClient.assert_not_called()   # no gateway client / no "online" heartbeat
         write_state.assert_not_called()  # no running state written
 
+    def test_a_refused_registration_leaves_no_pid_or_state_file(self):
+        # verdict 133b MED (Q1 NOT CLOSED): the fail-closed return at the 401 bypasses the daemon-file
+        # cleanup, so the PID written at startup plus a PRE-EXISTING state file from an earlier run let
+        # `status` still print "PCC: connected" after a refused registration. The fail path must leave
+        # disk as a clean shutdown does -- no PID file, no state file.
+        from pcc_node import daemon as daemon_module
+        from pcc_node.register import RegistrationError
+        # A stale state file from an earlier, successful run is already on disk.
+        with open(daemon_module.STATE_FILE, "w") as f:
+            json.dump({"kernel_id": "k-old", "pcc_base": "http://pcc-test", "pid": os.getpid()}, f)
+        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
+             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
+             mock.patch.object(daemon_module, "register_kernel",
+                               side_effect=RegistrationError(401, {"error": "unauthorized"})), \
+             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
+             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
+             mock.patch("pcc_node.ui_server.start_ui_server"):
+            daemon_module.run_daemon(self._config())
+        # The daemon never started, so it must leave no live-looking footprint: a subsequent `status`
+        # keys off read_pid()/read_state(), so both must be gone.
+        assert daemon_module.read_pid() is None, "PID file left behind after a refused registration"
+        assert daemon_module.read_state() is None, "state file left behind after a refused registration"
+        MockClient.assert_not_called()
+
     def test_the_daemon_keeps_the_kernel_online_without_taking_jobs(self):
         client, _, _ = self._run_once(self._config())
         client.send_heartbeat.assert_any_call("online", accepting_jobs=False)
