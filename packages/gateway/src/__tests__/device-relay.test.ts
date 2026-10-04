@@ -151,16 +151,31 @@ async function mintScope(holder: string, allowedTools: string[] = ["run_create"]
 }
 
 /**
- * The operator posts a safe tool call and its executor claims it. The call faces people and agents
- * (DECISIONS 00:53), so it is opAdmin's; the claim is the device's own (op).
+ * The steward's #6771: every tool call names a scope whose allowedTools lists the tool, the kernel
+ * operator's own included, and nothing bypasses that list, the command budget or escrow. A
+ * manifest's safeTools is a hint for clients, never an authorization. So where #400's suite made a
+ * scope-free operator call ("health", "home") as setup, the call now names this: the operator's own
+ * scope on kernel-test-1 listing `tools`, granted through the real route (mintScope, as opAdmin),
+ * with the route's default budget of 100 commands.
+ */
+function operatorScope(tools: string[] = ["health"]): Promise<string> {
+  return mintScope(OPERATOR, tools);
+}
+
+/**
+ * The operator posts a tool call under its own scope (#6771) and its executor claims it. The call
+ * faces people and agents (DECISIONS 00:53), so it is opAdmin's; the claim is the device's own (op).
  */
 async function createAndClaim(toolName = "health"): Promise<string> {
+  const scopeId = await operatorScope([toolName]);
   const createRes = await app.inject({
     method: "POST",
     url: "/api/relay/kernel-test-1/tool-call",
     headers: opAdmin,
-    payload: { toolName },
+    payload: { scopeId, toolName },
   });
+  // A refused call would leave callId undefined, and the tests built on it would pass vacuously.
+  expect(createRes.statusCode).toBe(201);
   const callId = createRes.json().id;
   await app.inject({
     method: "GET",
@@ -172,13 +187,15 @@ async function createAndClaim(toolName = "health"): Promise<string> {
 
 /** Claim a call and take its execution lease, as a lease-capable executor does
  * before it runs anything (F3): only a started call's report is a device outcome.
- * The call is opAdmin's (DECISIONS 00:53); the claim and the start are the device's (op). */
+ * The call is opAdmin's (DECISIONS 00:53), under the operator's own scope (#6771);
+ * the claim and the start are the device's (op). */
 async function createClaimAndStart(toolName = "health"): Promise<string> {
+  const scopeId = await operatorScope([toolName]);
   const createRes = await app.inject({
     method: "POST",
     url: "/api/relay/kernel-test-1/tool-call",
     headers: opAdmin,
-    payload: { toolName },
+    payload: { scopeId, toolName },
   });
   const callId = createRes.json().id as string;
   const pending = await app.inject({
@@ -250,9 +267,9 @@ describe("GET /api/relay/:kernelId/manifest", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("POST /api/relay/:kernelId/tool-call", () => {
-  it("accepts a safe tool without scope from the kernel operator", async () => {
+  it("refuses the kernel operator's scope-free safe tool: 403 scope_required, nothing queued (#6771)", async () => {
     // DECISIONS 00:53: every tool call needs proof, a safe one too. The kernel's claimed key alone
-    // is refused and queues nothing; with the admin key the call is accepted.
+    // is refused and queues nothing.
     const claimed = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
@@ -262,14 +279,27 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
     expect(claimed.statusCode).toBe(403);
     expect(claimed.json().reason).toBe("operator_proof_required");
     expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    // #6771: with proof (the admin key) the operator still names a scope that lists the tool; the
+    // manifest calling "health" safe authorizes nothing. Without one: refused, nothing queued.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
       payload: { toolName: "health" },
     });
-    expect(res.statusCode).toBe(201);
-    const body = res.json();
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("scope_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    // Naming its own scope that lists the tool, the operator's call is accepted.
+    const scopeId = await operatorScope(["health"]);
+    const scoped = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
+    });
+    expect(scoped.statusCode).toBe(201);
+    const body = scoped.json();
     expect(body.toolName).toBe("health");
     expect(body.status).toBe("pending");
     expect(body.kernelId).toBe("kernel-test-1");
@@ -404,12 +434,13 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
 describe("GET /api/relay/:kernelId/tool-call/pending", () => {
   it("returns pending calls and marks them as claimed", async () => {
     // Insert a pending tool call (DECISIONS 00:53: a tool call needs proof, so opAdmin; the poll is
-    // the device's own side, on its claimed key)
+    // the device's own side, on its claimed key). #6771: it names the operator's own scope.
+    const scopeId = await operatorScope(["health"]);
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
-      payload: { toolName: "health" },
+      payload: { scopeId, toolName: "health" },
     });
 
     const res = await app.inject({
@@ -434,11 +465,12 @@ describe("GET /api/relay/:kernelId/tool-call/pending", () => {
 
 describe("POST /api/relay/:kernelId/tool-result", () => {
   it("completes a tool call with result", async () => {
+    const scopeId = await operatorScope(["health"]); // #6771: every call names a scope
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
-      payload: { toolName: "health" },
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -453,11 +485,12 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
   });
 
   it("marks a tool call as failed with error", async () => {
+    const scopeId = await operatorScope(["health"]); // #6771: every call names a scope
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
-      payload: { toolName: "health" },
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -646,11 +679,13 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
 describe("GET /api/relay/:kernelId/tool-result/:id", () => {
   it("returns a completed tool call with parsed result", async () => {
     // DECISIONS 00:53: the call needs proof (opAdmin); the result post is the device's own (op).
+    // #6771: the call names the operator's own scope.
+    const scopeId = await operatorScope(["health"]);
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
-      payload: { toolName: "health" },
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -1152,12 +1187,13 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
 describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout (at-most-once)", () => {
   it("closes a claim that was never reported as failed/claim_timeout, and never redelivers it", async () => {
     // Create a tool call (DECISIONS 00:53: the call and the result read need proof, opAdmin; the
-    // polls are the device's own, op)
+    // polls are the device's own, op). #6771: it names the operator's own scope.
+    const scopeId = await operatorScope(["health"]);
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
-      payload: { toolName: "health" },
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -1367,12 +1403,14 @@ describe("N4b-gw: the device side is the kernel operator's alone", () => {
   });
 
   it("refuses a cross-kernel claim: operator-2 cannot claim kernel-test-1's calls", async () => {
-    // The call needs proof (DECISIONS 00:53: opAdmin); the claims below are the device side's.
+    // The call needs proof (DECISIONS 00:53: opAdmin) and names the operator's own scope (#6771);
+    // the claims below are the device side's.
+    const scopeId = await operatorScope(["health"]);
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: opAdmin,
-      payload: { toolName: "health" },
+      payload: { scopeId, toolName: "health" },
     });
     const res = await app.inject({
       method: "GET",
@@ -1529,11 +1567,11 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
     expect(revoke.statusCode).toBe(404);
   });
 
-  it("makes a grant holder name its scope, even for a safe tool", async () => {
+  it("makes a grant holder name a scope that lists even a safe tool: unlisted, 403 tool_not_allowed and nothing queued (#6771)", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
     // DECISIONS 00:53: the guard admits a proven holder's tool call only under the scope the call
     // names, so a scope-less safe call is refused there (operator_proof_required), before the
-    // handler's scope_required, which no holder reaches any more. Naming its scope, it is admitted.
+    // handler's scope_required, which no holder reaches any more.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
@@ -1543,13 +1581,30 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
     expect(res.statusCode).toBe(403);
     expect(res.json().reason).toBe("operator_proof_required");
     expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    // #6771: naming its scope is not enough. The scope must list the tool, a safe one too (the
+    // manifest calling "health" safe authorizes nothing): refused, recorded as rejected and never
+    // queued, its budget untouched, and nothing for the executor's poll.
     const named = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: asProven("agent-1"),
       payload: { scopeId, toolName: "health" },
     });
-    expect(named.statusCode).toBe(201);
+    expect(named.statusCode).toBe(403);
+    expect(named.json().reason).toBe("tool_not_allowed");
+    expect(getStore().db.select().from(toolCallRelay).all().map((c) => [c.status, c.error])).toEqual([["rejected", "tool_not_allowed"]]);
+    expect(getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.commandCount).toBe(0);
+    const poll = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/tool-call/pending", headers: op });
+    expect(poll.json().count).toBe(0);
+    // Under a scope that lists it, the holder's safe call is admitted.
+    const listed = await mintScope("agent-1", ["health"]);
+    const admitted = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asProven("agent-1"),
+      payload: { scopeId: listed, toolName: "health" },
+    });
+    expect(admitted.statusCode).toBe(201);
   });
 
   it("grants nothing once the scope has expired or been revoked", async () => {
@@ -1767,21 +1822,22 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
     expect(row("tc-noscope")).toMatchObject({ status: "rejected", error: "scope_required" });
   });
 
-  it("still hands out the operator's scope-free safe call and a live scope's allowed write", async () => {
+  it("refuses the operator's scope-free safe call at dispatch (scope_required, never handed out), and still hands out a live scope's allowed write (#6771)", async () => {
     queue("tc-safe", "health", null, new Date(Date.now() - 10).toISOString());
     const scope = await mintScope("agent-q", ["run_create"]);
     const write = await admit("agent-q", scope);
     const body = await poll();
-    expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-safe", write]);
-    expect(row("tc-safe").status).toBe("claimed");
+    expect(body.calls.map((c: { id: string }) => c.id)).toEqual([write]);
+    expect(row("tc-safe")).toMatchObject({ status: "rejected", error: "scope_required", claimedAt: null });
     expect(row(write).status).toBe("claimed");
   });
 
   it("refused calls at the head of the queue do not hold back a valid one", async () => {
     const foreign = await mintScope("holder-2", ["run_create"], "kernel-test-2");
+    const own = await operatorScope(["health"]); // #6771: the valid call names the operator's own scope
     const t0 = Date.now() - 1_000;
     for (let i = 0; i < 6; i++) queue(`tc-bad-${i}`, "run_create", foreign, new Date(t0 + i).toISOString());
-    queue("tc-good", "health", null, new Date(t0 + 10).toISOString());
+    queue("tc-good", "health", own, new Date(t0 + 10).toISOString());
     const body = await poll();
     expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-good"]);
     for (let i = 0; i < 6; i++) expect(row(`tc-bad-${i}`).status).toBe("rejected");
@@ -1945,11 +2001,14 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     expect(rowOf("tc-safe-scoped")).toMatchObject({ status: "rejected", error: "scope_expired" });
   });
 
-  it("F2 control: the operator's scope-free safe call still dispatches", async () => {
+  it("F2 (#6771): the operator's scope-free safe call does not dispatch (rejected scope_required, never handed out); under its live scope that lists the tool, it does", async () => {
     seedCall("tc-safe-free", "home", null);
+    const scope = await operatorScope(["home"]);
+    seedCall("tc-safe-listed", "home", scope); // the control: the same call under the operator's live scope
     const body = await poll();
-    expect(body.calls.map((c: { id: string }) => c.id)).toContain("tc-safe-free");
-    expect(rowOf("tc-safe-free").status).toBe("claimed");
+    expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-safe-listed"]);
+    expect(rowOf("tc-safe-free")).toMatchObject({ status: "rejected", error: "scope_required", claimedAt: null });
+    expect(rowOf("tc-safe-listed").status).toBe("claimed");
   });
 
   it("F3: a legacy row cannot exceed maxCommands (budget re-derived from rows)", async () => {
@@ -1963,6 +2022,18 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     seedCall("tc-legacy", "run_create", scope, "pending");  // an uncounted legacy row
     expect((await poll()).count).toBe(0);
     expect(rowOf("tc-legacy")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
+  });
+
+  it("F3 (#6771): a dispatched SAFE call counts too, so a legacy row behind it can't exceed maxCommands", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/scope", headers: opAdmin,
+      payload: { createdBy: "agent-q", allowedTools: ["health"], maxCommands: 1 },
+    });
+    const scope = res.json().id as string;
+    seedCall("tc-counted-safe", "health", scope, "claimed"); // one safe call already dispatched
+    seedCall("tc-legacy-safe", "health", scope, "pending");  // an uncounted legacy row
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-legacy-safe")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
   });
 
   it("F1: an open circuit breaker blocks dispatch of an admitted call", async () => {
@@ -2039,7 +2110,9 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   const HOLDER = "agent-r6";
 
   // DECISIONS 00:53: a tool call needs proof, a safe one too, so the operator submits as opAdmin;
-  // the pending poll is the device's own side, on its claimed key (op).
+  // the pending poll is the device's own side, on its claimed key (op). #6771: and every call names
+  // a scope that lists its tool, the operator's own included (operatorScope). No scope is minted
+  // while the stop is engaged or the policy unreadable, so each is minted before the stop.
   const submit = (payload: Record<string, unknown>, headers: Record<string, string> = opAdmin) =>
     app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers, payload });
   const poll = () =>
@@ -2119,8 +2192,9 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   // ── submit ────────────────────────────────────────────────────────────────
   describe("submit: POST /tool-call", () => {
     it("while stopped answers 409 kernel_emergency_stopped and queues nothing", async () => {
+      const scopeId = await operatorScope();
       engageStop();
-      const res = await submit({ toolName: "health" });
+      const res = await submit({ scopeId, toolName: "health" });
       expect(res.statusCode).toBe(409);
       expect(res.json()).toEqual({ error: "kernel_emergency_stopped" });
       expect(relayRows()).toHaveLength(0);
@@ -2162,9 +2236,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a stop that lands while the safety governor is consulted still refuses the call (the read and the insert are one synchronous section)", async () => {
+      const scopeId = await operatorScope();
       const spy = governorThatRuns(() => engageStop());
       try {
-        const res = await submit({ toolName: "health" });
+        const res = await submit({ scopeId, toolName: "health" });
         expect(res.statusCode).toBe(409);
         expect(res.json().error).toBe("kernel_emergency_stopped");
         expect(relayRows()).toHaveLength(0);
@@ -2241,9 +2316,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a policy that turns unreadable while the safety governor is consulted refuses the call 503", async () => {
+      const scopeId = await operatorScope();
       const spy = governorThatRuns(() => setPolicyText("{not json"));
       try {
-        const res = await submit({ toolName: "health" });
+        const res = await submit({ scopeId, toolName: "health" });
         expect(res.statusCode).toBe(503);
         expect(res.json()).toEqual({ error: "policy_unavailable" });
         expect(relayRows()).toHaveLength(0);
@@ -2253,7 +2329,8 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("control: with no policy row for the kernel, submit queues the call and pending dispatches it", async () => {
-      const queued = await submit({ toolName: "health" });
+      const scopeId = await operatorScope();
+      const queued = await submit({ scopeId, toolName: "health" });
       expect(queued.statusCode).toBe(201);
       expect(rowOf(queued.json().id).status).toBe("pending");
 
@@ -2269,20 +2346,23 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       ["null", null],
       ['""', ""],
     ])("control: emergencyStop %s is not a stop", async (_label, value) => {
+      const scopeId = await operatorScope();
       setPolicy({ version: 1, emergencyStop: value });
-      expect((await submit({ toolName: "health" })).statusCode).toBe(201);
+      expect((await submit({ scopeId, toolName: "health" })).statusCode).toBe(201);
     });
 
     it("control: a policy without an emergencyStop key is not a stop", async () => {
+      const scopeId = await operatorScope();
       setPolicy({ version: 1 });
-      expect((await submit({ toolName: "health" })).statusCode).toBe(201);
+      expect((await submit({ scopeId, toolName: "health" })).statusCode).toBe(201);
     });
   });
 
   // ── pending ───────────────────────────────────────────────────────────────
   describe("pending: GET /tool-call/pending", () => {
     it("while stopped withholds: 200 with calls [] and emergencyStop true, and the calls queued before the stop end rejected", async () => {
-      const safe = (await submit({ toolName: "health" })).json().id as string;
+      const opScopeId = await operatorScope();
+      const safe = (await submit({ scopeId: opScopeId, toolName: "health" })).json().id as string;
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       const scoped = (await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER))).json().id as string;
       engageStop();
@@ -2309,7 +2389,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a stop that lands while the poll awaits the safety governor rejects the row being checked instead of claiming it", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const spy = governorThatRuns(() => engageStop());
       try {
         const res = await poll();
@@ -2322,9 +2402,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a stop that lands mid-poll rejects that row and every row behind it; a row claimed before the stop is returned", async () => {
-      seedCall("tc-1");
-      seedCall("tc-2");
-      seedCall("tc-3");
+      const scopeId = await operatorScope(["home"]);
+      seedCall("tc-1", { scopeId });
+      seedCall("tc-2", { scopeId });
+      seedCall("tc-3", { scopeId });
       const spy = governorThatRuns((n) => {
         if (n === 2) engageStop();
       });
@@ -2341,9 +2422,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a policy that turns unreadable mid-poll leaves that row and every later row queued, even if it reads again; a row claimed before it is returned", async () => {
-      seedCall("tc-1");
-      seedCall("tc-2");
-      seedCall("tc-3");
+      const scopeId = await operatorScope(["home"]);
+      seedCall("tc-1", { scopeId });
+      seedCall("tc-2", { scopeId });
+      seedCall("tc-3", { scopeId });
       const spy = governorThatRuns((n) => {
         if (n === 2) setPolicyText("{not json");
         // Were the poll to go on past tc-2, the policy reads clear again here.
@@ -2401,14 +2483,14 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     }
 
     it("control: with nothing changed while the governor is held, the call is claimed and returned", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const res = await pollWhileGovernorIsHeld(() => {});
       expect(idsOf(res)).toEqual(["tc-a"]);
       expect(rowOf("tc-a").status).toBe("claimed");
     });
 
     it("an emergency stop that lands while the governor is held is seen before the claim", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const res = await pollWhileGovernorIsHeld(engageStop);
       expect(res.statusCode).toBe(200);
       expect(res.json().calls).toEqual([]);
@@ -2445,7 +2527,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a circuit breaker that opens while the governor is held does not dispatch its call", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const gateway = getSafetyGateway();
       gateway.resetCircuit(KERNEL);
       const res = await pollWhileGovernorIsHeld(() => {
@@ -2468,7 +2550,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("control: a breaker whose cooldown elapsed lets its test command through (half-open is not open)", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const gateway = getSafetyGateway();
       gateway.resetCircuit(KERNEL);
       for (let failure = 0; failure < 3; failure++) gateway.recordDeviceFailure(KERNEL);
@@ -2499,8 +2581,9 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("serves the queue behind a timed-out claim without handing the timed-out call out again", async () => {
-      seedCall("tc-stale", { status: "claimed", claimedAt: ago(130_000) });
-      seedCall("tc-next");
+      const scopeId = await operatorScope(["home"]);
+      seedCall("tc-stale", { status: "claimed", claimedAt: ago(130_000), scopeId });
+      seedCall("tc-next", { scopeId });
       const res = await poll();
       expect(idsOf(res)).toEqual(["tc-next"]);
       expect(rowOf("tc-stale")).toMatchObject({ status: "failed", error: "claim_timeout" });
@@ -2669,7 +2752,12 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     beforeEach(() => setPolicy({ version: 1, emergencyStop: value }));
 
     it("submit answers 409", async () => {
-      const res = await submit({ toolName: "health" });
+      // #6771: the call names the operator's scope, and none is minted while stopped, so it dates
+      // from before the stop: lift this group's stop for the mint, then engage it again.
+      getStore().db.run(sql`DELETE FROM operator_policies`);
+      const scopeId = await operatorScope();
+      setPolicy({ version: 1, emergencyStop: value });
+      const res = await submit({ scopeId, toolName: "health" });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("kernel_emergency_stopped");
       expect(relayRows()).toHaveLength(0);
@@ -2704,7 +2792,12 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     beforeEach(() => setPolicyText(text));
 
     it("submit answers 503 policy_unavailable and queues nothing", async () => {
-      const res = await submit({ toolName: "health" });
+      // #6771: the call names the operator's scope, and none is minted while the policy is
+      // unreadable, so it dates from before: lift this group's row for the mint, then write it again.
+      getStore().db.run(sql`DELETE FROM operator_policies`);
+      const scopeId = await operatorScope();
+      setPolicyText(text);
+      const res = await submit({ scopeId, toolName: "health" });
       expect(res.statusCode).toBe(503);
       expect(res.json()).toEqual({ error: "policy_unavailable" });
       expect(relayRows()).toHaveLength(0);
@@ -2737,7 +2830,8 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   // ── the stop route, and a resume ──────────────────────────────────────────
   describe("the stop route and a resume", () => {
     it("rejects the calls still queued, so a resume cannot restart them even though the node never polled during the stop", async () => {
-      const queuedSafe = (await submit({ toolName: "health" })).json().id as string;
+      const opScopeId = await operatorScope();
+      const queuedSafe = (await submit({ scopeId: opScopeId, toolName: "health" })).json().id as string;
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       const queuedScoped = (await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER))).json().id as string;
       seedCall("tc-inflight", { status: "claimed", claimedAt: new Date().toISOString() });
@@ -2802,9 +2896,13 @@ describe("N4b-gw r7 F3: the execution lease", () => {
     app.inject({ method: "POST", url: `/api/relay/${kernel}/tool-call/${callId}/start`, headers, payload: { claimToken } });
   const sha256 = (t: string) => createHash("sha256").update(t, "utf8").digest("hex");
 
-  /** The operator's call needs proof (DECISIONS 00:53: opAdmin); the polls and starts below are the device's (op). */
+  /**
+   * The operator's call needs proof (DECISIONS 00:53: opAdmin) and names its own scope that lists the
+   * tool (#6771); the polls and starts below are the device's (op).
+   */
   async function submit(toolName = "health"): Promise<string> {
-    const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: opAdmin, payload: { toolName } });
+    const scopeId = await operatorScope([toolName]);
+    const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: opAdmin, payload: { scopeId, toolName } });
     expect(res.statusCode).toBe(201);
     return res.json().id as string;
   }
@@ -2896,8 +2994,8 @@ describe("N4b-gw r7 F3: the execution lease", () => {
   });
 
   it("a scope that expired after the claim refuses the start", async () => {
-    const scope = await mintScope("agent-f3", ["run_create"]);
-    // The holder's safe call under its scope needs proof (DECISIONS 00:53): its proven wallet.
+    // home is a physical safe_control, so the scope must allow it (#579 r1); it needs proof too (DECISIONS 00:53).
+    const scope = await mintScope("agent-f3", ["run_create", "home"]);
     const res0 = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: asProven("agent-f3"), payload: { toolName: "home", scopeId: scope } });
     expect(res0.statusCode).toBe(201);
     const id = res0.json().id as string;

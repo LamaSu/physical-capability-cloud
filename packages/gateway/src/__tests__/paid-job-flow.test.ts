@@ -590,7 +590,7 @@ describe("Paid Job Flow", () => {
       expect(toolRes.statusCode).toBe(201);
     });
 
-    it("allows safe tools regardless of escrow status", async () => {
+    it("holds even a read tool the scope lists to escrow: nothing bypasses it (#6771)", async () => {
       const wallet = buyer("009");
       const createRes = await app.inject({
         method: "POST",
@@ -603,8 +603,13 @@ describe("Paid Job Flow", () => {
       });
       const { scopeId } = createRes.json();
 
-      // A safe tool (the relay manifest's "health") works whatever the escrow
-      // status, so make the escrow unfunded first.
+      // #6771: no tool bypasses a scope's tool list, budget or escrow, a "safe" read included. List
+      // the read tool on the scope, make the escrow unfunded, and the escrow gate refuses it.
+      const scopeRow = getStore().db.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, scopeId)).get()!;
+      getStore().db.update(schema.executionScopes)
+        .set({ allowedTools: [...(scopeRow.allowedTools as string[]), "health"] })
+        .where(eq(schema.executionScopes.id, scopeId))
+        .run();
       const escrowId = createRes.json().escrowId;
       getRepos().escrows.updateStatus(escrowId, "created");
       const toolRes = await app.inject({
@@ -618,7 +623,8 @@ describe("Paid Job Flow", () => {
         },
       });
 
-      expect(toolRes.statusCode).toBe(201);
+      expect(toolRes.statusCode).toBe(402);
+      expect(toolRes.json()).toMatchObject({ reason: "escrow_not_funded", escrowStatus: "created" });
     });
 
     // Carried over from the retired legacy OT-2 tool-call route (N4b-gw item 1).
