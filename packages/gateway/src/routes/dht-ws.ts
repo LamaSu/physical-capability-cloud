@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DHTNode, dhtTelemetry } from "@pcc/dht";
 import { pipelineTelemetry } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 let gatewayDHTNode: DHTNode | null = null;
 
@@ -89,6 +90,11 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
     if (!announcement || !announcement.kernelId || !announcement.capabilities) {
       return reply.status(400).send({ error: "kernelId and capabilities required" });
     }
+    // N31c (the body/query inventory; the steward's #6540): an announcement publishes the kernel's capabilities and endpoints to
+    // the registry and its peers, so it needs that kernel's
+    // operator at the "operate" tier: its own key, a proven operator wallet, or the admin.
+    const refusal = refuseKernelRequest(req, String(announcement.kernelId), "operate");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     // Store in the registry directly
     const registry = dhtNode.getRegistry();
     registry.store({

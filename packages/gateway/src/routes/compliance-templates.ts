@@ -16,6 +16,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { getRepos } from "../db.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 // ComplianceTemplateInsert / ComplianceProfileInsert are inferred from the
 // Drizzle schema. We use inline object literals that satisfy the insert shape
@@ -207,6 +208,12 @@ export async function complianceTemplateRoutes(app: FastifyInstance) {
       if (!body.kernelId) {
         return badRequest(reply, "kernelId is required");
       }
+
+      // N31c (the body/query inventory; the steward's #6540): the profile is the kernel's compliance claim (its templates, industry,
+      // jurisdictions and overrides), so it needs that kernel's
+      // operator at the "operate" tier: its own key, a proven operator wallet, or the admin.
+      const refusal = refuseKernelRequest(req, String(body.kernelId), "operate");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       const repos = getRepos();
       const now = new Date().toISOString();

@@ -8,6 +8,7 @@ import type { FastifyInstance } from "fastify";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 const LIT_API_URL =
   process.env.LIT_API_URL ?? "https://api.dev.litprotocol.com/core/v1";
@@ -29,6 +30,12 @@ export async function litProvisionRoutes(app: FastifyInstance) {
         message: "Both kernelId and operatorDid are required",
       });
     }
+
+    // N31c (the body/query inventory; the steward's #6540): provisioning spends the gateway's Lit account key on a usage key
+    // named for the kernel, so it needs that kernel's
+    // operator at the "operate" tier: its own key, a proven operator wallet, or the admin.
+    const refusal = refuseKernelRequest(req, String(body.kernelId), "operate");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     if (!LIT_ACCOUNT_KEY) {
       console.log("[LIT] provision failed — no LIT_API_KEY configured");

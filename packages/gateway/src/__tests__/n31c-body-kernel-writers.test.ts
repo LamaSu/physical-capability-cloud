@@ -58,11 +58,19 @@ beforeAll(async () => {
   const { setupRoutes } = await import("../routes/setup.js");
   const { operatorRelayRoutes } = await import("../routes/operator-relay.js");
   const { diagnosticLogRoutes } = await import("../routes/diagnostic-logs.js");
+  const { batchRoutes } = await import("../routes/batches.js");
+  const { complianceTemplateRoutes } = await import("../routes/compliance-templates.js");
+  const { litProvisionRoutes } = await import("../routes/lit-provision.js");
+  const { supportMessageRoutes } = await import("../routes/support-messages.js");
   await app.register(apiGate);
   await app.register(capabilityRoutes);
   await app.register(setupRoutes);
   await app.register(operatorRelayRoutes);
   await app.register(diagnosticLogRoutes);
+  await app.register(batchRoutes);
+  await app.register(complianceTemplateRoutes);
+  await app.register(litProvisionRoutes);
+  await app.register(supportMessageRoutes);
   await app.ready();
   expect(getStore().db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, KERNEL)).get()?.operatorAddress.toLowerCase()).toBe(OPERATOR);
 }, 60_000);
@@ -229,5 +237,49 @@ describe("N31c POST /api/operator/diagnostics: a bundle that names a kernel need
     const res = await upload(asStranger());
     expect(res.statusCode).toBe(200);
     expect(res.json().uploadId).toMatch(/^diag-/);
+  });
+});
+
+describe("N31c body/query inventory finds: kernel-owned writes that named any kernel now need its operator (operate)", () => {
+  const post = (url: string, headers: Record<string, string>, payload: unknown) => app.inject({ method: "POST", url, headers, payload });
+  const batchesOnKernel = async () =>
+    ((await app.inject({ method: "GET", url: `/api/batches/shared/open?kernelId=${KERNEL}`, headers: asOperator() })).json().batches ?? []).length;
+  const profileOf = async () => JSON.stringify((await app.inject({ method: "GET", url: `/api/compliance/profiles/${KERNEL}`, headers: asOperator() })).json());
+
+  it("POST /api/batches/shared: a stranger cannot offer slots on another operator's kernel", async () => {
+    const batch = { kernelId: KERNEL, capabilityType: "3d-printing", totalSlots: 4, pricePerSlot: "1.00", protocolType: "n31c" };
+    const before = await batchesOnKernel();
+    expect((await post("/api/batches/shared", asStranger(), batch)).statusCode).toBe(403);
+    expect(await batchesOnKernel()).toBe(before);
+    for (const headers of [asOperator(), asAdmin()]) expect((await post("/api/batches/shared", headers, batch)).statusCode).toBeLessThan(300);
+    expect(await batchesOnKernel()).toBe(before + 2);
+  });
+
+  it("POST /api/compliance/profiles: a stranger cannot write another kernel's compliance claim", async () => {
+    const claim = { kernelId: KERNEL, industry: "n31c-forged", jurisdictions: ["nowhere"] };
+    const before = await profileOf();
+    expect((await post("/api/compliance/profiles", asStranger(), claim)).statusCode).toBe(403);
+    expect(await profileOf()).toBe(before);
+    const own = await post("/api/compliance/profiles", asOperator(), { kernelId: KERNEL, industry: "n31c-own" });
+    expect(own.statusCode).toBeLessThan(300);
+    expect(own.json().profile.industry).toBe("n31c-own");
+  });
+
+  it("POST /api/lit/provision: a stranger cannot spend the Lit account key on another kernel; the operator passes the guard", async () => {
+    const body = { kernelId: KERNEL, operatorDid: "did:pcc:n31c" };
+    expect((await post("/api/lit/provision", asStranger(), body)).statusCode).toBe(403);
+    // No LIT_API_KEY in tests: past the guard the route answers its own 503, and calls nothing.
+    const own = await post("/api/lit/provision", asOperator(), body);
+    expect(own.statusCode).toBe(503);
+    expect(own.json().error).toBe("lit_not_configured");
+  });
+
+  it("POST /api/operator/support: a stranger cannot post into another kernel's support thread as its operator", async () => {
+    const opened = await post("/api/operator/support", asOperator(), { kernelId: KERNEL, message: "n31c: the operator opens a thread" });
+    expect(opened.statusCode).toBe(200);
+    const forged = await post("/api/operator/support", asStranger(), { kernelId: KERNEL, message: "n31c: forged as the operator", retrievalCode: "forged" });
+    expect(forged.statusCode).toBe(403);
+    expect(forged.json()).not.toHaveProperty("messageId");
+    expect((await post("/api/operator/support", asAdmin(), { kernelId: KERNEL, message: "n31c: the admin" })).statusCode).toBe(200);
   });
 });

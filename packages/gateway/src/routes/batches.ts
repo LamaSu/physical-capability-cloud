@@ -16,6 +16,7 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 // ── In-memory shared batch storage ────────────────────────────────
 const sharedBatches = new Map<string, SharedBatch>();
@@ -82,6 +83,11 @@ export async function batchRoutes(app: FastifyInstance) {
     if (!body.kernelId || !body.capabilityType || !body.totalSlots || !body.pricePerSlot) {
       return reply.status(400).send({ error: "kernelId, capabilityType, totalSlots, and pricePerSlot required" });
     }
+
+    // N31c (the body/query inventory; the steward's #6540): a shared batch offers slots on the kernel it names, at a price, so it needs that kernel's
+    // operator at the "operate" tier: its own key, a proven operator wallet, or the admin.
+    const refusal = refuseKernelRequest(req, String(body.kernelId), "operate");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const batch: SharedBatch = {
       id: `sbatch-${crypto.randomUUID().slice(0, 12)}`,
