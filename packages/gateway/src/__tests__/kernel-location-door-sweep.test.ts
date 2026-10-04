@@ -83,10 +83,9 @@
  * excluded=86 — all 20 remaining NOT_REACHED entries now carry an executable `witness` (BY
  * CONSTRUCTION test, below), proven against the merged code, not just a reviewable reason.
  */
-import { mkdtempSync, rmSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createCipheriv, createHash, pbkdf2Sync, randomBytes as cryptoRandomBytes } from "node:crypto";
 import nodeHttpMod from "node:http";
 import nodeHttpsMod from "node:https";
@@ -944,7 +943,9 @@ const SPECIAL_POST_URLS = new Set(SPECIAL_POST_CALLS.map(([url]) => url));
 // with a stateless-mock twist round 2-5 missed — astra's r5 reproduction (and this round's own
 // wider re-check of every sibling route sharing the same seed) moved them here too; see this
 // block's own extended comment just above the Object.assign that adds them, and the NOT_REACHED
-// table for the exact 20 entries that remain, each now carrying an executable `witness`.
+// table for the entries that remain, each now carrying an executable `witness` (19 since N68b r3
+// moved the archive route to a dynamic fixture: FINAL COUNTS registered=318 called=232
+// reached=213 notReached=19 excluded=86).
 // ─────────────────────────────────────────────────────────────────────────────────────────
 interface FixtureCtx {
   app: FastifyInstance;
@@ -2347,6 +2348,28 @@ Object.assign(FIXTURE_POST_BODIES, {
   }) as DynamicFixture,
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────────────
+// N68b r3 (astra r2 item 2, OPEN): /api/evidence/:bundleId/archive IS reachable, so it is a
+// dynamic fixture, not a NOT_REACHED entry. The r2 structural witness proved only that no
+// GATEWAY route calls insertEncryptedBundle. But the rows findEncryptedByBundleId reads also
+// come from the seed: seedAll() (db/src/seed/index.ts:37) calls seedEncryption()
+// (db/src/seed/encryption.ts:17), whose insert at encryption.ts:55 writes
+// encryptedEvidenceBundles rows for bun_001 and bun_002, and this sweep seeds (beforeAll sets
+// PCC_SEED_DATA, above). Reproduced before this change: the old witness pointed at bun_001 got
+// 200 {"archived":true,...}.
+// The handler (evidence-encrypted.ts:128-163) has no ownership check, so the keyed stranger's
+// pass reaches it on a seeded bundle with no setup: it archives bun_001 to the in-memory
+// storacha mock (200, archived). The anonymous pass is refused by the API gate (401). The
+// response is scanned for leaks like every reached route's. If N139 changes the seed, this
+// fixture must change with it.
+// ─────────────────────────────────────────────────────────────────────────────────────────
+Object.assign(FIXTURE_POST_BODIES, {
+  "/api/evidence/:bundleId/archive": (async (ctx: FixtureCtx) => {
+    const r = await fixtureCall(ctx, "POST", "/api/evidence/bun_001/archive", {});
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+});
+
 /** A handful of FIXTURE_POST_BODIES routes also need a non-default header to reach 2xx — the
  *  MCP Streamable-HTTP surfaces (mcp/http-mcp-server.ts, mcp/docs-mcp-server.ts) 406 a plain
  *  JSON-only Accept header with "Not Acceptable: Client must accept both application/json and
@@ -2597,32 +2620,10 @@ interface PolicyExclusionWitness {
   closedList: readonly string[];
 }
 
-/** N68b r2 (astra r1 item 1a): a witness that proves "no reachable route ever creates the row
- *  this lookup needs" NOT by calling the route under test (a missing-id call can only ever
- *  prove that ONE id is absent, never that no OTHER id-minting path exists — astra's exact
- *  complaint about the old archive witness), but by grepping every PRODUCTION .ts file under
- *  `scanDir` (resolved against this test file's own directory; any directory literally named
- *  __tests__ is always excluded) for a call site matching `callPattern` — the repository
- *  method that is the ONLY writer of the table the route's own lookup reads. Zero matches is
- *  the proof; a match means the "no creation route" claim just went FALSE and this entry must
- *  become a dynamic fixture instead. `httpCheck`, when present, is additionally run as an
- *  ordinary CalledWitness — kept because "this specific id is absent" is still a true, separate
- *  fact worth asserting; it is NOT what proves "no creation route exists at all". */
-interface StructuralNoCreationWitness {
-  repoMethod: string;
-  scanDir: string;
-  callPattern: RegExp;
-  httpCheck?: CalledWitness;
-}
-
-type NotReachedWitness = CalledWitness | PolicyExclusionWitness | StructuralNoCreationWitness;
+type NotReachedWitness = CalledWitness | PolicyExclusionWitness;
 
 function isPolicyExclusionWitness(w: NotReachedWitness): w is PolicyExclusionWitness {
   return "hazard" in w;
-}
-
-function isStructuralNoCreationWitness(w: NotReachedWitness): w is StructuralNoCreationWitness {
-  return "repoMethod" in w;
 }
 
 /** The two closed, hand-reviewed lists a PolicyExclusionWitness may cite. */
@@ -2688,19 +2689,6 @@ const NOT_REACHED: Record<string, NotReachedEntry> = {
     witness: {
       method: "POST", url: "/api/dht/announce", body: { kernelId: "n68b-witness-kernel", capabilities: ["3d-printing"] },
       expect: { status: [401], code: "Authentication required for DHT announcements" },
-    },
-  },
-  "/api/evidence/:bundleId/archive": {
-    category: "no_creation_route", cite: "evidence-encrypted.ts:130-131",
-    reason: "N68b r2 (astra r1 item 1a, OPEN MEDIUM): the old witness called a synthetic, nonexistent bundleId and saw not_found — true, but that only proves THIS id is absent, never that no reachable route mints ANY row satisfying findEncryptedByBundleId (evidence-encrypted.ts:17, read again at :130). That row is written by exactly one repository method, insertEncryptedBundle (IEncryptionRepository.ts:26, implemented at db/src/repositories/encryption.ts:26) — the ONLY writer of the encryptedEvidenceBundles table (db/src/schema). Fixed by a STRUCTURAL witness (below, a new witness kind): greps every production .ts file under packages/gateway/src, excluding __tests__, for a call to insertEncryptedBundle and asserts zero hits — re-run mechanically on every test run, not a one-time grep result. Confirmed fresh at N68b r2: zk-proofs.ts calls insertCommitment/insertTree/insertProof, and evidence-encrypted.ts's own /grant route calls insertGrant — neither is insertEncryptedBundle; no call site exists anywhere in gateway/src. The original HTTP call is kept as `httpCheck` — still true and still worth asserting, just not what proves \"no creation route exists\" by itself. Verified empirically at a6268d21 (N68b) for the single-id absence; the structural no-call-site proof added at N68b r2.",
-    witness: {
-      repoMethod: "insertEncryptedBundle",
-      scanDir: "..",
-      callPattern: /\binsertEncryptedBundle\s*\(/,
-      httpCheck: {
-        method: "POST", url: "/api/evidence/n68b-witness-nonexistent-bundle/archive", body: {},
-        expect: { status: [404], code: "not_found" },
-      },
     },
   },
   "/api/fiat-ramp/stripe/credits/deposit": {
@@ -3224,30 +3212,9 @@ describe("N68: no read of the real gateway shows an operator's exact location or
   // gate was ever reached), and nothing bound a witness's `url` to the NOT_REACHED key it
   // lives under — astra's cheapest repro pointed the aggregate witness at the archive
   // witness's own URL and the suite still passed. witnessBindingError (pinned just below)
-  // closes the second gap; the three entries above now use `prepare` (anchor, aggregate) or a
-  // new StructuralNoCreationWitness kind (archive) to close the first.
+  // closes the second gap; anchor and aggregate now use `prepare` to close the first. The
+  // archive entry is gone: it is reachable (N68b r3), so it is a dynamic fixture.
   // ───────────────────────────────────────────────────────────────────────────────────────
-  const THIS_DIR = fileURLToPath(new URL(".", import.meta.url));
-
-  /** Recursively lists every production .ts file under `relDir` (resolved against this test
-   *  file's own directory), skipping any directory literally named __tests__ at any depth —
-   *  used by StructuralNoCreationWitness to grep only shipped route/service code, never test
-   *  fixtures (which legitimately DO call insert* helpers directly). */
-  function listProductionTsFiles(relDir: string): string[] {
-    const root = join(THIS_DIR, relDir);
-    const out: string[] = [];
-    const walk = (dir: string) => {
-      for (const ent of readdirSync(dir, { withFileTypes: true })) {
-        if (ent.name === "__tests__") continue;
-        const full = join(dir, ent.name);
-        if (ent.isDirectory()) walk(full);
-        else if (ent.name.endsWith(".ts")) out.push(full);
-      }
-    };
-    walk(root);
-    return out;
-  }
-
   /** Replaces every literal occurrence of each `subs` token with its resolved value, inside a
    *  URL string or (recursively) inside a JSON-shaped request body — the SAME ":token" syntax
    *  works in either position. A string that EQUALS a token is replaced wholesale (so a
@@ -3293,8 +3260,7 @@ describe("N68: no read of the real gateway shows an operator's exact location or
   }
 
   /** Runs one CalledWitness through the real app exactly as the BY CONSTRUCTION test did
-   *  inline before N68b r2 — extracted so a StructuralNoCreationWitness's optional
-   *  `httpCheck` can reuse the identical call/assert path instead of a second copy. */
+   *  inline before N68b r2. */
   async function runCalledWitness(key: string, w: CalledWitness): Promise<void> {
     const bearer = { authorization: `Bearer ${strangerKey}` };
     let callUrl = w.url;
@@ -3354,8 +3320,8 @@ describe("N68: no read of the real gateway shows an operator's exact location or
       )).not.toBeNull();
     });
     it("rejects a completely different route — astra's own cheapest reproduction", () => {
-      // The exact regression this guards: pointing the aggregate witness at the archive
-      // witness's own URL (and expected 404/not_found) used to still pass.
+      // The exact regression this guards: pointing the aggregate witness at the (since removed)
+      // archive witness's URL, with its expected 404/not_found, used to still pass.
       expect(witnessBindingError(
         "/api/jobs/:jobId/attestations/aggregate", "POST", "/api/evidence/n68b-witness-nonexistent-bundle/archive",
       )).not.toBeNull();
@@ -3378,18 +3344,6 @@ describe("N68: no read of the real gateway shows an operator's exact location or
           w.hazard === "real_subprocess" ? REAL_SUBPROCESS_NOT_REACHED_ROUTES : EXTERNAL_SERVICE_NOT_REACHED_ROUTES;
         expect(w.closedList, `${url}: closedList must be that hazard's own canonical list, not a copy`).toBe(canonical);
         continue; // Never called — see PolicyExclusionWitness's own docstring ("Don't call it").
-      }
-
-      if (isStructuralNoCreationWitness(w)) {
-        const files = listProductionTsFiles(w.scanDir);
-        const hits = files.filter((f) => w.callPattern.test(readFileSync(f, "utf8")));
-        expect(
-          hits,
-          `${url}: structural witness found a call to ${w.repoMethod} in production source — ` +
-            `the "no creation route" claim is now FALSE; this entry must become a dynamic fixture`,
-        ).toEqual([]);
-        if (w.httpCheck) await runCalledWitness(url, w.httpCheck);
-        continue;
       }
 
       await runCalledWitness(url, w);
