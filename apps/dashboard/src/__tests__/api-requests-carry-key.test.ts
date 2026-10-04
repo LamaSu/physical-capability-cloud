@@ -198,15 +198,19 @@ function sitesIn(files: Array<{ rel: string; src: string }>): Map<string, number
   return sites;
 }
 
-/** The shipped code: src/ (tests excluded) and the static pages in public/. */
-function requestSites(): Map<string, number> {
+/** The shipped code this scans: src/ (tests excluded) and the static pages in public/. */
+function shippedSources(): Array<{ rel: string; src: string }> {
   const files = [
     ...shippedFiles(join(APP, "src")),
     ...readdirSync(join(APP, "public"))
       .filter((n) => n.endsWith(".html"))
       .map((n) => join(APP, "public", n)),
   ];
-  return sitesIn(files.map((file) => ({ rel: relative(APP, file), src: readFileSync(file, "utf8") })));
+  return files.map((file) => ({ rel: relative(APP, file), src: readFileSync(file, "utf8") }));
+}
+
+function requestSites(): Map<string, number> {
+  return sitesIn(shippedSources());
 }
 
 /** Requests that reach a gated route without a key. This only shrinks: a new one goes through authorizedFetch. */
@@ -216,6 +220,14 @@ const MAX_RESIDUALS = 12;
 
 describe("every request sent without the API key is accounted for (N103)", () => {
   const sites = requestSites();
+
+  it("scans everything the app ships that can run: every script and page under public/, and index.html (astra n103c-586-r1 F2)", () => {
+    const scanned = new Set(shippedSources().map((f) => f.rel));
+    const runnable = (readdirSync(join(APP, "public"), { recursive: true }) as string[])
+      .filter((n) => /\.(m?js|cjs|html?)$/.test(n))
+      .map((n) => join("public", n));
+    expect([...runnable, "index.html"].filter((f) => !scanned.has(f))).toEqual([]);
+  });
 
   it("finds the requests (the scan works)", () => {
     expect(sites.size).toBeGreaterThan(20);
