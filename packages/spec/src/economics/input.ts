@@ -77,3 +77,41 @@ export function snapshotJson(value: unknown): SnapshotResult {
     return { ok: false, reason: e instanceof NotPlainData ? e.message : "the input could not be read as JSON data" };
   }
 }
+
+/**
+ * Where `value` holds a number the canonical form cannot write, or null: one that is not finite, or of
+ * magnitude 2^53 or more (every such double is an integer outside the safe range). Under the evidence
+ * profile's D5, `canonicalize` refuses these, so a body holding one has no hash. A caller that checks
+ * first refuses it as its own input error, the same with or without D5, instead of throwing.
+ *
+ * Numbers only: accessors are not read, and a cycle, a Proxy trap or a structure past the input bounds
+ * is left to the caller's guarded hash.
+ */
+export function numberWithoutCanonicalForm(value: unknown): string | null {
+  let nodes = 0;
+  const onPath = new Set<object>();
+  const walk = (v: unknown, depth: number, where: string): string | null => {
+    if (typeof v === "number") return Number.isFinite(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER ? null : `${where} is ${v}`;
+    if (v === null || typeof v !== "object") return null;
+    nodes += 1;
+    if (nodes > MAX_INPUT_NODES || depth >= MAX_INPUT_DEPTH || onPath.has(v)) return null;
+    onPath.add(v);
+    try {
+      const isArray = Array.isArray(v);
+      for (const key of Object.keys(v)) {
+        const d = Object.getOwnPropertyDescriptor(v, key);
+        if (d === undefined || !("value" in d)) continue;
+        const found = walk(d.value, depth + 1, isArray ? `${where}[${key}]` : `${where}.${key}`);
+        if (found !== null) return found;
+      }
+      return null;
+    } finally {
+      onPath.delete(v);
+    }
+  };
+  try {
+    return walk(value, 0, "$");
+  } catch {
+    return null;
+  }
+}

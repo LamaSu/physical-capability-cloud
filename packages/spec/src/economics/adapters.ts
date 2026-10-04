@@ -15,6 +15,7 @@ import { computeManifestHash } from "../types/composition-manifest.js";
 import type { TrainingManifest } from "../types/training-manifest.js";
 import { computeTrainingManifestHash, TrainingManifestSchema } from "../types/training-manifest.js";
 import { cmpStr } from "./hash.js";
+import { numberWithoutCanonicalForm } from "./input.js";
 import {
   ID_PATTERN,
   IdSchema,
@@ -68,6 +69,22 @@ function lookupParty(table: Readonly<Record<string, string>>, key: string): stri
   return typeof v === "string" && ID_PATTERN.test(v) ? v : undefined;
 }
 
+/**
+ * A manifest's hash, or why it has none. The canonical form cannot write a number that is not finite or
+ * of magnitude 2^53 or more, and under the evidence profile's D5 `canonicalize` throws on one. Such a
+ * manifest is refused before hashing, the same with or without D5; anything else the hash refuses is
+ * caught, so an adapter never throws.
+ */
+function manifestHash(manifest: unknown, hash: () => string): { ok: true; hash: string } | { ok: false; reason: string } {
+  const loose = numberWithoutCanonicalForm(manifest);
+  if (loose !== null) return { ok: false, reason: `the manifest has no canonical JSON form: ${loose} (send such a value as a decimal string)` };
+  try {
+    return { ok: true, hash: hash() };
+  } catch (e) {
+    return { ok: false, reason: `the manifest has no canonical JSON form: ${e instanceof Error ? e.message : "it could not be hashed"}` };
+  }
+}
+
 /** CompositionRole → contributor role. `pilot` is the documented alias of `dataset-contributor`. */
 function compositionRole(role: string): Clause["role"] {
   return (role === "pilot" ? "dataset-contributor" : role) as Clause["role"];
@@ -98,7 +115,9 @@ export function clausesFromCompositionManifest(
 ): AdapterResult<{ clauses: Clause[]; splits: Split[] }> {
   const refusals: AdapterRefusal[] = [];
   const m = input.manifest;
-  if (computeManifestHash(m).toLowerCase() !== m.manifestHash.toLowerCase()) {
+  const hashed = manifestHash(m, () => computeManifestHash(m));
+  if (!hashed.ok) return { ok: false, refusals: [{ code: "MANIFEST_INVALID", message: hashed.reason, path: ["manifest"] }] };
+  if (hashed.hash.toLowerCase() !== m.manifestHash.toLowerCase()) {
     return {
       ok: false,
       refusals: [{ code: "MANIFEST_HASH_MISMATCH", message: "the manifest body does not hash to its manifestHash", path: ["manifest"] }],
@@ -225,7 +244,12 @@ export function splitsFromTrainingManifest(
       refusals.push({ code: "MANIFEST_INVALID", message: valid.error.issues.map((i) => i.message).join("; "), path: at });
       return null;
     }
-    if (computeTrainingManifestHash(m).toLowerCase() !== m.manifestHash.toLowerCase()) {
+    const hashed = manifestHash(m, () => computeTrainingManifestHash(m));
+    if (!hashed.ok) {
+      refusals.push({ code: "MANIFEST_INVALID", message: hashed.reason, path: at });
+      return null;
+    }
+    if (hashed.hash.toLowerCase() !== m.manifestHash.toLowerCase()) {
       refusals.push({ code: "MANIFEST_HASH_MISMATCH", message: "training manifest does not hash to its manifestHash", path: at });
       return null;
     }
