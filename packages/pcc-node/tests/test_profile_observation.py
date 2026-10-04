@@ -162,7 +162,7 @@ def test_device_types_match_the_typescript_vocabulary():
     assert tuple(re.findall(r'"([^"]+)"', block)) == EVIDENCE_DEVICE_TYPES
 
 
-@pytest.mark.parametrize("bad", ["sha256:" + PROFILE_DIGEST[2:], PROFILE_DIGEST.upper().replace("0X", "0x"), PROFILE_DIGEST[:-1], None, 7])
+@pytest.mark.parametrize("bad", ["sha256:" + PROFILE_DIGEST[2:], PROFILE_DIGEST.upper().replace("0X", "0x"), PROFILE_DIGEST[:-1], None, 7, PROFILE_DIGEST + "\n"])
 def test_a_committed_digest_outside_the_0x_family_is_refused(bad):
     with pytest.raises(ProfileObservationError, match="0x \\+ 64 lowercase hex"):
         committed_profile(PILOT, bad)
@@ -205,7 +205,7 @@ def test_a_numeric_unit_carries_its_value_as_a_decimal_string():
     assert observe(p, value="-0.5")["value"] == "-0.5"
 
 
-@pytest.mark.parametrize("bad", [None, 12.5, "1e-7", "01.5", "+3", "12.", ".5", " 12.5"])
+@pytest.mark.parametrize("bad", [None, 12.5, "1e-7", "01.5", "+3", "12.", ".5", " 12.5", "12.5\n"])
 def test_a_numeric_value_that_is_not_a_plain_decimal_string_is_refused(bad):
     with pytest.raises(ProfileObservationError, match="decimal string"):
         observe(mass_profile(), value=bad)
@@ -217,7 +217,7 @@ def test_a_non_numeric_observation_carries_no_value():
         observe(value="3")
 
 
-@pytest.mark.parametrize("bad", ["frame-7", "sha256:" + "A" * 64, "sha256:" + "a" * 63, None])
+@pytest.mark.parametrize("bad", ["frame-7", "sha256:" + "A" * 64, "sha256:" + "a" * 63, None, "sha256:" + "a" * 64 + "\n"])
 def test_a_sample_id_that_is_not_a_sha256_digest_is_refused(bad):
     with pytest.raises(ProfileObservationError, match="sampleId"):
         observe(sample=bad)

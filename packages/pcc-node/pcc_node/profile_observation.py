@@ -44,6 +44,8 @@ MEASUREMENT_PROFILE_DOMAIN = "PCC:measurement-profile:v1"
 PROFILE_OBSERVATION_FIELD = "profileObservation"
 NON_NUMERIC_UNIT = "none"
 
+# Each pattern is applied with fullmatch: Python's $ also matches before a final newline,
+# so .match() would pass "12.5\n", which TS admission refuses (astra pack 251).
 _PROFILE_DIGEST = re.compile(r"^0x[0-9a-f]{64}$")
 _TAGGED_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 # A plain decimal: no exponent, no leading zeros, no "+". JS and Python print
@@ -125,7 +127,7 @@ def committed_profile(profile, committed_digest):
     family is ``0x`` + 64 lowercase hex, never the ``sha256:`` event family)
     or for a profile that digests to anything else.
     """
-    if not isinstance(committed_digest, str) or not _PROFILE_DIGEST.match(committed_digest):
+    if not isinstance(committed_digest, str) or not _PROFILE_DIGEST.fullmatch(committed_digest):
         raise ProfileObservationError(
             f"committed profile digest {committed_digest!r} is not 0x + 64 lowercase hex"
         )
@@ -169,14 +171,14 @@ def build_profile_observation(profile, committed_digest, *, primitive_id, sample
         raise ProfileObservationError(
             f"primitive {primitive_id!r} is not in the profile's evidenceTypeIds {evidence_type_ids!r}"
         )
-    if not isinstance(sample, str) or not _TAGGED_DIGEST.match(sample):
+    if not isinstance(sample, str) or not _TAGGED_DIGEST.fullmatch(sample):
         raise ProfileObservationError(f"sampleId {sample!r} is not a sha256: tagged digest")
     measurement = profile["measurement"]
     unit = measurement["unit"]
     if unit == NON_NUMERIC_UNIT:
         if value is not None:
             raise ProfileObservationError('the profile\'s unit is "none", so the observation carries no value')
-    elif not isinstance(value, str) or not DECIMAL_VALUE.match(value):
+    elif not isinstance(value, str) or not DECIMAL_VALUE.fullmatch(value):
         raise ProfileObservationError(
             f"unit {unit!r} needs the value as a plain decimal string such as \"12.5\"; got {value!r}"
         )
