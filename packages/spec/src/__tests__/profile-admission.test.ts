@@ -19,6 +19,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   profileAdmitsBundle,
   computeBundleSetDigest,
+  computeRegistryDigest,
   NON_NUMERIC_UNIT,
   PROFILE_OBSERVATION_FIELD,
   type AdmissionBundle,
@@ -114,9 +115,14 @@ async function toEvent(d: Draft): Promise<EvidenceEvent> {
 // inspection is inspected_output only from B's bundle.
 const OPERATOR_A = `eip155:84532:0x${"aa".repeat(20)}`;
 const OPERATOR_B = `eip155:84532:0x${"bb".repeat(20)}`;
-const SIGNER_A = "0x1111111111111111111111111111111111111111";
-const SIGNER_B = "0x2222222222222222222222222222222222222222";
 const keyB = generateKeyPairSync("ed25519");
+/** A key's raw 32 bytes as 0x + lowercase hex: the last 32 bytes of its SPKI DER. */
+const rawKey = (k: ReturnType<typeof generateKeyPairSync>) => `0x${(k.publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(12).toString("hex")}`;
+const KEY_A = rawKey(key);
+const KEY_B = rawKey(keyB);
+/** Each key's signer id, as kernels declare it: 0x and the key's first 40 hex digits. */
+const SIGNER_A = KEY_A.slice(0, 42);
+const SIGNER_B = KEY_B.slice(0, 42);
 const KEYS: Record<string, ReturnType<typeof generateKeyPairSync>> = { [SIGNER_A]: key, [SIGNER_B]: keyB };
 const DOMAINS: Record<string, string> = { [SIGNER_A]: OPERATOR_A, [SIGNER_B]: OPERATOR_B };
 
@@ -146,21 +152,20 @@ async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promis
   return out;
 }
 
-/** The registered-key leg: verifies under the declared signer's key and names that signer. */
-const verifySignature = (b: AdmissionBundle) => {
-  const signer = (b.kernelSignature as { signer?: string }).signer ?? "";
-  const k = KEYS[signer];
-  const ok =
-    k !== undefined &&
-    verify(null, signingPreimage(b.bundleHash), k.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
-  return ok ? signer : (false as const);
-};
-
-/** The pinned registry snapshot (astra pack 271): each signer's one trust domain, the operator that owns its key. */
-const SIGNER_DOMAINS = [
-  { signer: SIGNER_A, trustDomain: DOMAINS[SIGNER_A]! },
-  { signer: SIGNER_B, trustDomain: DOMAINS[SIGNER_B]! },
+/** The pinned registry snapshot (astra packs 271, 275): each registered key and the operator that owns it. */
+const REGISTRY = [
+  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]! },
+  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]! },
 ];
+const REGISTRY_PIN = await computeRegistryDigest(REGISTRY);
+/** The pin for `rows`, or a well-formed stand-in when admission is to refuse the rows themselves. */
+async function pinOf(rows: unknown): Promise<string> {
+  try {
+    return await computeRegistryDigest(rows as ProfileAdmissionInput["registryKeys"]);
+  } catch {
+    return "sha256:" + "0".repeat(64);
+  }
+}
 
 /** printer execution_started t0, execution_completed t10, camera inspects (passed) at t20. */
 const PILOT: Draft[] = [
@@ -234,9 +239,9 @@ async function admit(
     subject,
     bundles,
     pinnedBundleSetDigest,
-    verifyBundleSignature: verifySignature,
+    registryKeys: REGISTRY,
+    pinnedRegistryDigest: over.registryKeys !== undefined ? await pinOf(over.registryKeys) : REGISTRY_PIN,
     executorTrustDomains: [OPERATOR_A],
-    signerTrustDomains: SIGNER_DOMAINS,
     verifyPrimitiveInstance: () => true,
     ...over,
   });
@@ -311,82 +316,112 @@ describe("profile admission — trust domains (#345's one rule, steward #6478)",
     expect(r.qualifyingSamples).toBe(1);
   });
 
-  it("the signature leg must name the verified signer the bundle declares: true, a domain record, a malformed id or another signer fails it", async () => {
+  it("each signature is verified HERE, under the key its declared signer names in the pinned registry (astra packs 271, 275)", async () => {
     const p = inspectedPageProfile();
-    const bundles = await toBundles(PILOT, p);
-    const answers: unknown[] = [true, 7, {}, [SIGNER_A], { trustDomain: OPERATOR_A }, "0x" + "1".repeat(39), SIGNER_A.toUpperCase(), `0x${"A".repeat(40)}`];
-    for (const answer of answers) {
-      const r = await admit(p, bundles, { verifyBundleSignature: (() => answer) as unknown as ProfileAdmissionInput["verifyBundleSignature"] });
-      expect(codes(r), JSON.stringify(answer)).toEqual(["unauthenticated-bundle"]);
+    const [printer, camera] = await toBundles(PILOT, p);
+    const resign = (b: AdmissionBundle, change: Record<string, unknown>): AdmissionBundle => ({
+      ...b,
+      kernelSignature: { ...(b.kernelSignature as Record<string, unknown>), ...change },
+    });
+    // A bundle signed by B's key that declares A's signer id: it does not verify under A's key.
+    const byB = await toBundle(PILOT.slice(0, 2), p, SIGNER_B);
+    const cases: Array<[string, AdmissionBundle]> = [
+      ["signed by another registered key than the one it declares", resign(byB, { signer: SIGNER_A })],
+      ["declaring a signer id no registry key has", resign(printer!, { signer: `0x${"9".repeat(40)}` })],
+      ["another algorithm", resign(printer!, { algorithm: "secp256k1" })],
+      ["a signature that does not parse", resign(printer!, { value: "not-hex" })],
+      ["a signature over another digest", resign(printer!, { value: (camera!.kernelSignature as { value: string }).value })],
+    ];
+    for (const [label, bad] of cases) {
+      const r = await admit(p, [bad, camera!]);
+      expect(codes(r), label).toEqual(["unauthenticated-bundle"]);
     }
-    // A leg naming another registered signer than the one the bundle declares would take that key's domain.
-    const swapped = (b: AdmissionBundle) => {
-      const verified = verifySignature(b);
-      return verified === SIGNER_A ? SIGNER_B : verified;
-    };
-    expect(codes(await admit(p, bundles, { verifyBundleSignature: swapped }))).toEqual(["unauthenticated-bundle"]);
+    // The honest pair admits.
+    expect((await admit(p, [printer!, camera!])).decision).toBe("admit");
   });
 
-  it("one key signs both bundles: the snapshot gives it ONE domain, the executor's, so the camera is not independent (astra pack 271)", async () => {
+  it("astra pack 275: one key under two signer ids. The camera's bundle, signed by A's key but declaring B's id, does not verify under B's key", async () => {
     const p = inspectedPageProfile();
-    // astra's reproduction, under the new contract: the printer's and the camera's bundles both signed by A's key.
+    const printer = await toBundle(PILOT.slice(0, 2), p, SIGNER_A);
+    const cameraByA = await toBundle(PILOT.slice(2), p, SIGNER_A);
+    const alias = { ...cameraByA, kernelSignature: { ...(cameraByA.kernelSignature as Record<string, unknown>), signer: SIGNER_B } };
+    const r = await admit(p, [printer, alias]);
+    expect(codes(r)).toEqual(["unauthenticated-bundle"]);
+    expect(r.reached).not.toBe("inspected_output");
+  });
+
+  it("one key signing both bundles (one signer id) has ONE domain, the executor's: the camera is not independent (astra pack 271)", async () => {
+    const p = inspectedPageProfile();
     const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_A)];
     const r = await admit(p, sameKey);
     expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
     expect(codes(r)).toEqual(["level-not-reached"]);
-    // The leg can no longer vary a signer's domain call by call: it names signers, and naming another one than the
-    // bundle declares is refused.
-    let calls = 0;
-    const flipping = (b: AdmissionBundle) => {
-      const verified = verifySignature(b);
-      if (verified === false) return verified;
-      calls++;
-      return calls === 1 ? verified : SIGNER_B;
-    };
-    const flipped = await admit(p, sameKey, { verifyBundleSignature: flipping });
-    expect(flipped.decision).toBe("reject");
-    expect(codes(flipped)).toEqual(["unauthenticated-bundle"]);
   });
 
-  it("a signer the snapshot maps to no operator (null) authenticates, but no inspection can then be independent", async () => {
+  it("a registry key that names no operator (null) authenticates, but no inspection can then be independent", async () => {
     const p = inspectedPageProfile();
-    const unknown = [{ signer: SIGNER_A, trustDomain: null }, { signer: SIGNER_B, trustDomain: null }];
-    const r = await admit(p, await toBundles(PILOT, p), { signerTrustDomains: unknown });
+    const unknown = [{ publicKey: KEY_A, trustDomain: null }, { publicKey: KEY_B, trustDomain: null }];
+    const r = await admit(p, await toBundles(PILOT, p), { registryKeys: unknown });
     expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
     expect(codes(r)).toEqual(["level-not-reached"]);
     // A device_reported profile does not need independence.
-    expect((await admit(deviceReportedProfile(), await toBundles(PILOT, deviceReportedProfile()), { signerTrustDomains: unknown })).decision).toBe("admit");
+    expect((await admit(deviceReportedProfile(), await toBundles(PILOT, deviceReportedProfile()), { registryKeys: unknown })).decision).toBe("admit");
   });
 
-  it("a verified signer missing from the snapshot is not authenticated: its domain is unknown to the pin", async () => {
-    const p = inspectedPageProfile();
-    const r = await admit(p, await toBundles(PILOT, p), { signerTrustDomains: [{ signer: SIGNER_A, trustDomain: OPERATOR_A }] });
-    expect(codes(r)).toEqual(["unauthenticated-bundle"]);
-    expect(r.reasons[0]!.detail).toContain("not in the pinned registry snapshot");
-  });
-
-  it("the snapshot is data, one row per signer: absent, malformed, or a signer listed twice (even with one domain) is refused", async () => {
+  it("the registry is the PINNED one: rows that do not digest to the pin (a key reassigned after it) are refused; a malformed pin rejects; row order is not committed", async () => {
     const p = inspectedPageProfile();
     const bundles = await toBundles(PILOT, p);
-    const accessorRow = {};
+    // After the pin, B's key is reassigned to the executor A: the rows are no longer the pinned registry.
+    const rotated = [REGISTRY[0]!, { publicKey: KEY_B, trustDomain: OPERATOR_A }];
+    expect(codes(await admit(p, bundles, { registryKeys: rotated, pinnedRegistryDigest: REGISTRY_PIN }))).toEqual(["registry-mismatch"]);
+    // Pinned with the rotation, it is that registry, and the camera is the executor's own.
+    expect(await admit(p, bundles, { registryKeys: rotated })).toMatchObject({ decision: "reject", reached: "device_reported" });
+    expect(codes(await admit(p, bundles, { pinnedRegistryDigest: "0x" + "a".repeat(64) }))).toEqual(["registry-pin-invalid"]);
+    expect((await admit(p, bundles, { registryKeys: [...REGISTRY].reverse(), pinnedRegistryDigest: REGISTRY_PIN })).decision).toBe("admit");
+  });
+
+  it("the registry is data, one row per key: a key twice (even with one domain), another spelling of a key, colliding signer ids, or a malformed row is refused", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    const accessorRow = { publicKey: KEY_A };
     Object.defineProperty(accessorRow, "trustDomain", { get: () => OPERATOR_A, enumerable: true });
-    Object.defineProperty(accessorRow, "signer", { value: SIGNER_A, enumerable: true });
-    const snapshots: unknown[] = [
+    // Two keys that share their first 20 bytes, so one signer id: a declared signer would not name one key.
+    const collideA = `0x${"ab".repeat(20)}${"00".repeat(12)}`;
+    const collideB = `0x${"ab".repeat(20)}${"11".repeat(12)}`;
+    const registries: unknown[] = [
       undefined,
       {},
-      [{ signer: "not-a-signer", trustDomain: OPERATOR_A }],
-      [{ signer: SIGNER_A }],
-      [{ signer: SIGNER_A, trustDomain: "not-a-principal" }],
-      [{ signer: SIGNER_A, trustDomain: OPERATOR_A.toUpperCase() }],
-      [{ signer: SIGNER_A.toUpperCase(), trustDomain: OPERATOR_A }],
-      [...SIGNER_DOMAINS, { signer: SIGNER_A, trustDomain: OPERATOR_B }],
-      [...SIGNER_DOMAINS, { signer: SIGNER_A, trustDomain: OPERATOR_A }],
-      [accessorRow, SIGNER_DOMAINS[1]],
+      [{ publicKey: "not-a-key", trustDomain: OPERATOR_A }],
+      [{ publicKey: KEY_A }],
+      [{ publicKey: KEY_A, trustDomain: "not-a-principal" }],
+      [{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A }, REGISTRY[1]],
+      [...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_B }],
+      [...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_A }],
+      [...REGISTRY, { publicKey: collideA, trustDomain: null }, { publicKey: collideB, trustDomain: null }],
+      [accessorRow, REGISTRY[1]],
     ];
-    for (const snapshot of snapshots) {
-      const r = await admit(p, bundles, { signerTrustDomains: snapshot as unknown as ProfileAdmissionInput["signerTrustDomains"] });
-      expect(codes(r), JSON.stringify(snapshot)).toEqual(["input-unreadable"]);
+    for (const registry of registries) {
+      const r = await admit(p, bundles, { registryKeys: registry as ProfileAdmissionInput["registryKeys"], pinnedRegistryDigest: REGISTRY_PIN });
+      expect(codes(r), JSON.stringify(registry)).toEqual(["input-unreadable"]);
     }
+  });
+
+  it("registryKeys is walked for code with the other data: an accessor row is refused as code, and its getter never runs", async () => {
+    const p = inspectedPageProfile();
+    let runs = 0;
+    const row = { publicKey: KEY_A };
+    Object.defineProperty(row, "trustDomain", { get: () => (runs++, OPERATOR_A), enumerable: true });
+    const r = await admit(p, await toBundles(PILOT, p), { registryKeys: [row as { publicKey: string; trustDomain: string }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(r.reasons[0]!.detail).toMatch(/no code supplied with the data may run/);
+    expect(runs).toBe(0);
+  });
+
+  it("computeRegistryDigest commits to the rows, not their order, and refuses what admission refuses", async () => {
+    expect(await computeRegistryDigest([...REGISTRY].reverse())).toBe(REGISTRY_PIN);
+    expect(await computeRegistryDigest([REGISTRY[0]!, { publicKey: KEY_B, trustDomain: null }])).not.toBe(REGISTRY_PIN);
+    await expect(computeRegistryDigest([...REGISTRY, REGISTRY[0]!])).rejects.toThrow("twice");
+    await expect(computeRegistryDigest([{ publicKey: "0x00", trustDomain: null }])).rejects.toThrow("must be");
   });
 
   it("executorTrustDomains must be a list of operator principal ids, from the deal: absent or malformed rejects", async () => {
@@ -433,20 +468,22 @@ describe("profile admission — the committed profile governs (section 3: mutati
 });
 
 describe("profile admission — only authenticated, bound evidence counts (section 3: job A/B, node A/B)", () => {
-  it("a bundle whose signature leg fails is rejected", async () => {
+  it("a bundle whose signature does not verify under its signer's registered key is rejected", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, await toBundles(PILOT, p), { verifyBundleSignature: () => false });
+    const [printer, camera] = await toBundles(PILOT, p);
+    const value = (printer!.kernelSignature as { value: string }).value;
+    const flipped = `${value.slice(0, -1)}${value.endsWith("0") ? "1" : "0"}`;
+    const r = await admit(p, [{ ...printer!, kernelSignature: { ...(printer!.kernelSignature as Record<string, unknown>), value: flipped } }, camera!]);
     expect(codes(r)).toEqual(["unauthenticated-bundle"]);
   });
 
-  it("a signature verifier that throws counts as a failed signature", async () => {
+  it("a signature that cannot be read counts as a failed signature", async () => {
     const p = inspectedPageProfile();
-    const r = await admit(p, await toBundles(PILOT, p), {
-      verifyBundleSignature: () => {
-        throw new Error("registry unavailable");
-      },
-    });
-    expect(codes(r)).toEqual(["unauthenticated-bundle"]);
+    const [printer, camera] = await toBundles(PILOT, p);
+    for (const kernelSignature of [undefined, null, "a string", { ...(printer!.kernelSignature as Record<string, unknown>), value: 7 }]) {
+      const r = await admit(p, [{ ...printer!, kernelSignature }, camera!]);
+      expect(codes(r), JSON.stringify(kernelSignature)).toEqual(["unauthenticated-bundle"]);
+    }
   });
 
   it("evidence from job A cannot satisfy job B", async () => {
@@ -934,22 +971,14 @@ describe("profile admission — review #363 round 2 (ChatGPT pack 04), F2: the p
     const b2 = await toBundle(FAILURE, p);
     const b3 = await toBundle([{ type: "camera_snapshot", t: 25, device: CAMERA, observation: null }], p);
     const pin = await computeBundleSetDigest(subject, [...b1.map((b) => b.bundleHash), b2.bundleHash]);
-    let signatureCalls = 0;
-    const r = await admit(p, [...b1, b2, b3], {
-      pinnedBundleSetDigest: pin,
-      verifyBundleSignature: (b) => {
-        signatureCalls++;
-        return verifySignature(b);
-      },
-    });
+    const r = await admit(p, [...b1, b2, b3], { pinnedBundleSetDigest: pin });
     // Never admit on a mismatch, but a hard reject in what WAS presented
     // still decides: the mismatch (hold) cannot hide the contradiction
-    // (reject), so reject outranks hold. Mismatch is found first.
+    // (reject), so reject outranks hold. Mismatch is found first. Every
+    // presented bundle was authenticated and bound, the extra one included:
+    // the contradiction is found in what was presented.
     expect(r.decision).toBe("reject");
     expect(codes(r)).toEqual(["bundle-set-mismatch", "contradictory-evidence"]);
-    // Every presented bundle's leg ran, including the extra one: a mismatch
-    // no longer short-circuits authentication and binding.
-    expect(signatureCalls).toBe(4);
   });
 });
 
@@ -1109,9 +1138,9 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       subject,
       bundles,
       pinnedBundleSetDigest,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1132,9 +1161,9 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       subject,
       bundles,
       pinnedBundleSetDigest,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1163,9 +1192,9 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       subject,
       bundles: pilot,
       pinnedBundleSetDigest,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1186,9 +1215,9 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       subject,
       bundles: [bundle],
       pinnedBundleSetDigest,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1216,9 +1245,9 @@ describe("profile admission — round 3 (astra pack 39): one snapshot, precedenc
       subject: mutableSubject,
       bundles: pilot,
       pinnedBundleSetDigest,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const pending = profileAdmitsBundle(input);
@@ -1292,17 +1321,8 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
     bundle: AdmissionBundle;
     negatives: { failureBearingBundle: AdmissionBundle };
   };
-  const fixtureKey = createPublicKey({
-    key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(FIXTURE.kernelPublicKeyHex, "hex")]),
-    format: "der",
-    type: "spki",
-  });
-  const verifyFixture = (b: AdmissionBundle) =>
-    verify(null, signingPreimage(b.bundleHash), fixtureKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"))
-      ? (b.kernelSignature as { signer: string }).signer
-      : (false as const);
-  // The fixture's key is registered under no operator: its snapshot row names none.
-  const fixtureSigners = [{ signer: (FIXTURE.bundle.kernelSignature as { signer: string }).signer, trustDomain: null }];
+  // The fixture's key is registered under no operator: its registry row names none.
+  const fixtureRegistry = [{ publicKey: `0x${FIXTURE.kernelPublicKeyHex}`, trustDomain: null }];
   const lose3Subject = { jobId: "job-lose3-consumer-run-001", kernelId: "kernel-hp-3301-golden" };
 
   async function run(bundle: AdmissionBundle) {
@@ -1314,9 +1334,9 @@ describe("profile admission — the LO-SE-3 failure-bearing negative is refused 
       subject: lose3Subject,
       bundles: [bundle],
       pinnedBundleSetDigest: await computeBundleSetDigest(lose3Subject, [bundle.bundleHash]),
-      verifyBundleSignature: verifyFixture,
+      registryKeys: fixtureRegistry,
+      pinnedRegistryDigest: await computeRegistryDigest(fixtureRegistry),
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: fixtureSigners,
       verifyPrimitiveInstance: () => true,
     });
   }
@@ -1371,9 +1391,9 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
       subject,
       bundles,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     });
     expect(r.decision).toBe("reject");
@@ -1390,9 +1410,9 @@ describe("profile admission — astra r3 (pack 74): the committed profile is the
       committedDigest: computeMeasurementProfileDigest(p),
       subject,
       bundles,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     } as Record<string, unknown>;
     Object.defineProperty(input, "pinnedBundleSetDigest", {
@@ -1438,9 +1458,9 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         subject,
         bundles,
         pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
-        verifyBundleSignature: verifySignature,
+        registryKeys: REGISTRY,
+        pinnedRegistryDigest: REGISTRY_PIN,
         executorTrustDomains: [OPERATOR_A],
-        signerTrustDomains: SIGNER_DOMAINS,
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).not.toBe("admit");
@@ -1466,9 +1486,9 @@ describe("profile admission — astra r4 (pack 125): inherited values never reac
         subject,
         bundles: [],
         pinnedBundleSetDigest: "sha256:" + "0".repeat(64),
-        verifyBundleSignature: verifySignature,
+        registryKeys: REGISTRY,
+        pinnedRegistryDigest: REGISTRY_PIN,
         executorTrustDomains: [OPERATOR_A],
-        signerTrustDomains: SIGNER_DOMAINS,
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).toBe("reject");
@@ -1506,9 +1526,9 @@ describe("profile admission — astra r5 (pack 127): a data getter cannot change
         subject,
         bundles,
         pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
-        verifyBundleSignature: verifySignature,
+        registryKeys: REGISTRY,
+        pinnedRegistryDigest: REGISTRY_PIN,
         executorTrustDomains: [OPERATOR_A],
-        signerTrustDomains: SIGNER_DOMAINS,
         verifyPrimitiveInstance: () => true,
       });
       expect(r.decision).not.toBe("admit");
@@ -1538,9 +1558,9 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
       profile: p,
       committedDigest: computeMeasurementProfileDigest(p),
       subject,
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)),
     } as Record<string, unknown>;
@@ -1561,7 +1581,7 @@ describe("profile admission — astra r5 (pack 127): no data-supplied code, and 
     // A process-level change that admission's own membership checks must not consult.
     Array.prototype.includes = function () { return true; } as typeof Array.prototype.includes;
     try {
-      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, verifyBundleSignature: verifySignature, executorTrustDomains: [OPERATOR_A], signerTrustDomains: SIGNER_DOMAINS, verifyPrimitiveInstance: () => true });
+      const r = await profileAdmitsBundle({ profile: p, committedDigest, subject, bundles, pinnedBundleSetDigest: pin, registryKeys: REGISTRY, pinnedRegistryDigest: REGISTRY_PIN, executorTrustDomains: [OPERATOR_A], verifyPrimitiveInstance: () => true });
       expect(r.decision).not.toBe("admit");
     } finally {
       Array.prototype.includes = original;
@@ -1587,9 +1607,9 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
       subject,
       bundles,
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     });
     expect(ran).toBe(false);
@@ -1611,9 +1631,9 @@ describe("profile admission — astra r6 (pack 154): sparse arrays with a custom
       subject,
       bundles: [crafted],
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     });
     expect(ran).toBe(false);
@@ -1640,9 +1660,9 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       subject,
       bundles: [bundle],
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     const input = new Proxy(target, { get: (t, k, r) => (trapped++, Reflect.get(t, k, r)), getOwnPropertyDescriptor: (t, k) => (trapped++, Reflect.getOwnPropertyDescriptor(t, k)) });
@@ -1662,9 +1682,9 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       subject,
       bundles: [bundle],
       pinnedBundleSetDigest: await computeBundleSetDigest(subject, [bundle.bundleHash]),
-      verifyBundleSignature: verifySignature,
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
       executorTrustDomains: [OPERATOR_A],
-      signerTrustDomains: SIGNER_DOMAINS,
       verifyPrimitiveInstance: () => true,
     };
     expect(codes(await profileAdmitsBundle(input))).not.toContain("input-unreadable");
