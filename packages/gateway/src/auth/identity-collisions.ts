@@ -30,43 +30,60 @@ interface Reader {
  * reported; see schemaHas().
  */
 const SOURCES: ReadonlyArray<{ source: string; table: string; column: string; sql: string }> = [
-  { source: "api_keys.operator_id", table: "api_keys", column: "operator_id", sql: "SELECT DISTINCT operator_id AS v FROM api_keys" },
-  { source: "shop_kernels.operator_address", table: "shop_kernels", column: "operator_address", sql: "SELECT DISTINCT operator_address AS v FROM shop_kernels" },
-  { source: "machine_registrations.tenant_id", table: "machine_registrations", column: "tenant_id", sql: "SELECT DISTINCT tenant_id AS v FROM machine_registrations" },
+  { source: "api_keys.operator_id", table: "api_keys", column: "operator_id", sql: "SELECT DISTINCT operator_id AS v FROM main.api_keys" },
+  { source: "shop_kernels.operator_address", table: "shop_kernels", column: "operator_address", sql: "SELECT DISTINCT operator_address AS v FROM main.shop_kernels" },
+  { source: "machine_registrations.tenant_id", table: "machine_registrations", column: "tenant_id", sql: "SELECT DISTINCT tenant_id AS v FROM main.machine_registrations" },
   {
     source: "machine_registrations.operator.walletAddress",
     table: "machine_registrations",
     column: "operator",
-    sql: "SELECT DISTINCT CASE WHEN json_valid(operator) THEN json_extract(operator, '$.walletAddress') END AS v FROM machine_registrations",
+    sql: "SELECT DISTINCT CASE WHEN json_valid(operator) THEN json_extract(operator, '$.walletAddress') END AS v FROM main.machine_registrations",
   },
   {
     source: "machine_registrations.operator.email",
     table: "machine_registrations",
     column: "operator",
-    sql: "SELECT DISTINCT CASE WHEN json_valid(operator) THEN json_extract(operator, '$.email') END AS v FROM machine_registrations",
+    sql: "SELECT DISTINCT CASE WHEN json_valid(operator) THEN json_extract(operator, '$.email') END AS v FROM main.machine_registrations",
   },
-  { source: "job_offers.poster_did", table: "job_offers", column: "poster_did", sql: "SELECT DISTINCT poster_did AS v FROM job_offers" },
-  { source: "ui_artifacts.owner", table: "ui_artifacts", column: "owner", sql: "SELECT DISTINCT owner AS v FROM ui_artifacts" },
+  { source: "job_offers.poster_did", table: "job_offers", column: "poster_did", sql: "SELECT DISTINCT poster_did AS v FROM main.job_offers" },
+  { source: "ui_artifacts.owner", table: "ui_artifacts", column: "owner", sql: "SELECT DISTINCT owner AS v FROM main.ui_artifacts" },
 ];
 
 /**
  * Does this database's schema hold `table`.`column`? Answered by reading SQLite's
- * OWN catalog (sqlite_master, then pragma_table_info), never by interpreting an
+ * OWN catalog (sqlite_master, then pragma_table_xinfo), never by interpreting an
  * error: no error's code, class, message or fields can prove an absence, because
  * any code that throws can forge them (AZ-9 rounds 2-4, astra packs 95b-95d). The
  * catalog read itself throwing, or answering with anything but rows, propagates,
  * and the caller reports the source as `failed`.
+ *
+ * Both catalog reads here, and every data query in SOURCES below, name the MAIN
+ * schema explicitly (AZ-9 round 5, astra pack 95e): the audit judges main-schema
+ * state only, and the catalog's answer and the data read's target must always be
+ * the SAME object. A bare, unqualified table or pragma-function name follows
+ * SQLite's ordinary name resolution, which prefers a TEMP table of the same name
+ * over the main one and can also resolve a table that exists only in an attached
+ * schema. sqlite_master itself is always main's own catalog (never shadowed), but
+ * pragma_table_info/xinfo without a schema argument IS — so an empty temp.<table>
+ * of the same name can make the catalog and the data read silently agree on the
+ * wrong object. Qualifying every read to `main` closes that.
  */
 function schemaHas(db: Reader, table: string, column: string): boolean {
   // Names match the way SQLite itself resolves them (ASCII case-insensitive), and a
   // view counts as present: an exact comparison, or tables only, would report a
   // present source as ABSENT, which an allowlist then excuses (fail open).
   const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? COLLATE NOCASE")
+    .prepare("SELECT name FROM main.sqlite_master WHERE type IN ('table', 'view') AND name = ? COLLATE NOCASE")
     .all(table);
   if (!Array.isArray(tables)) throw new Error("catalog read returned no rows array");
   if (!tables.some((r) => sameName((r as { name?: unknown } | null)?.name, table))) return false;
-  const columns = db.prepare("SELECT name FROM pragma_table_info(?) WHERE name = ? COLLATE NOCASE").all(table, column);
+  // table_info silently omits generated columns (VIRTUAL or STORED, however added —
+  // including by ALTER TABLE) and hidden virtual-table columns, even though a plain
+  // SELECT can read them (AZ-9 round 5, astra pack 95e, HIGH finding 1). table_xinfo
+  // lists every column, tagged `hidden` (0 ordinary, 1 hidden, 2 VIRTUAL generated, 3
+  // STORED generated); presence here does not depend on that tag — any name match
+  // counts, exactly as for an ordinary column.
+  const columns = db.prepare("SELECT name FROM pragma_table_xinfo(?, 'main') WHERE name = ? COLLATE NOCASE").all(table, column);
   if (!Array.isArray(columns)) throw new Error("catalog read returned no rows array");
   return columns.some((r) => sameName((r as { name?: unknown } | null)?.name, column));
 }
