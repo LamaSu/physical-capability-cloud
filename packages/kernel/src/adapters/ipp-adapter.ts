@@ -16,6 +16,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface IppAdapterConfig {
   /** IPP printer URI (e.g., "ipp://192.168.1.50/ipp/print") */
@@ -102,6 +103,15 @@ export class IppAdapter implements MachineAdapter {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activeRealJobId: number | null = null;
 
+  /**
+   * What can still emit: a mock print job (from its start until it completes or is
+   * cancelled; a paused one can be resumed), the real-mode poll loop, each poll and each
+   * real command in flight.
+   */
+  private readonly work = new OutstandingWork();
+  private endMockJob: (() => void) | null = null;
+  private endPolling: (() => void) | null = null;
+
   constructor(id: string, config: IppAdapterConfig) {
     this.id = id;
     this.config = config;
@@ -178,19 +188,27 @@ export class IppAdapter implements MachineAdapter {
     if (this.config.mockMode || !this.ippAvailable) {
       return this.executeMock(command);
     }
-    return this.executeReal(command);
+    return this.work.track(this.executeReal(command));
   }
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once every print job has reported how it ended and nothing more can emit: a
+   * mock job has emitted execution_completed or was cancelled; the real-mode poll loop has
+   * reported execution_completed or execution_failed and stopped (or "stop" stopped it); and
+   * no poll or command is in flight. At once when none is. A paused mock job keeps it
+   * pending until it is resumed and completes, or is cancelled.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     this.stopPolling();
-    this.clearMockTimer();
-    this.mockStatus = "idle";
-    this.mockProgress = 0;
-    this.mockJobState = null;
+    this.cancelMockJob();
     this.listeners = [];
   }
 
@@ -236,11 +254,20 @@ export class IppAdapter implements MachineAdapter {
 
         const jobName = (command.payload?.jobName as string | undefined) ?? "document.pdf";
         const totalPages = (command.payload?.totalPages as number | undefined) ?? 3;
+        // Refused before the job is accepted: with no page to print (0 or fewer) its work would
+        // begin and never end, and with no last page (NaN, Infinity, or past 2^53, where
+        // currentPage++ stops counting) it would print forever. Either holds quiesceEvidence().
+        if (!Number.isSafeInteger(totalPages) || totalPages < 1) {
+          return { success: false, message: `totalPages must be a positive integer (got ${String(totalPages)})` };
+        }
         const jobId = this.currentJobId++;
 
         this.mockStatus = "busy";
         this.mockProgress = 0;
 
+        // A paused job this one replaces can no longer emit: its timer is cleared below.
+        this.endMockJob?.();
+        this.endMockJob = this.work.begin();
         this.mockJobState = {
           jobId,
           jobName,
@@ -370,6 +397,9 @@ export class IppAdapter implements MachineAdapter {
         });
 
         this.mockJobState = null;
+        // Ended only after the completion is emitted.
+        this.endMockJob?.();
+        this.endMockJob = null;
       } else {
         this.mockJobTimer = setTimeout(printNextPage, pageIntervalMs);
       }
@@ -384,6 +414,8 @@ export class IppAdapter implements MachineAdapter {
     this.mockStatus = "idle";
     this.mockProgress = 0;
     this.mockJobState = null;
+    this.endMockJob?.();
+    this.endMockJob = null;
   }
 
   private clearMockTimer(): void {
@@ -655,48 +687,57 @@ export class IppAdapter implements MachineAdapter {
     this.stopPolling();
     const interval = this.config.pollIntervalMs ?? 2000;
 
-    this.pollTimer = setInterval(async () => {
-      if (this.activeRealJobId === null) {
-        this.stopPolling();
-        return;
-      }
-
-      try {
-        const attrs = await this.realGetJobAttributes(this.activeRealJobId);
-
-        if (attrs.jobState === "completed") {
-          this.emit({
-            type: "execution_completed",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { ippJobId: this.activeRealJobId },
-          });
-          this.activeRealJobId = null;
-          this.stopPolling();
-        } else if (attrs.jobState === "aborted" || attrs.jobState === "canceled") {
-          this.emit({
-            type: "execution_failed",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { ippJobId: this.activeRealJobId, state: attrs.jobState },
-          });
-          this.activeRealJobId = null;
-          this.stopPolling();
-        } else if (attrs.completedSheets !== undefined) {
-          this.emit({
-            type: "execution_progress",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: {
-              jobId: this.activeRealJobId,
-              completedSheets: attrs.completedSheets,
-            },
-          });
-        }
-      } catch {
-        // Silently ignore transient poll failures
-      }
+    this.endPolling = this.work.begin();
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.poll());
     }, interval);
+  }
+
+  private async poll(): Promise<void> {
+    // The job this poll is about: a "stop" or a new start may replace it while it waits.
+    const jobId = this.activeRealJobId;
+    if (jobId === null) {
+      this.stopPolling();
+      return;
+    }
+
+    try {
+      const attrs = await this.realGetJobAttributes(jobId);
+      if (this.activeRealJobId !== jobId) return; // stopped or replaced meanwhile: nothing to report for it
+
+      if (attrs.jobState === "completed") {
+        this.emit({
+          type: "execution_completed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { ippJobId: jobId },
+        });
+        this.activeRealJobId = null;
+        this.stopPolling();
+      } else if (attrs.jobState === "aborted" || attrs.jobState === "canceled") {
+        this.emit({
+          type: "execution_failed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { ippJobId: jobId, state: attrs.jobState },
+        });
+        this.activeRealJobId = null;
+        this.stopPolling();
+      } else if (attrs.completedSheets !== undefined) {
+        this.emit({
+          type: "execution_progress",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          // The printer's job number, as on every IPP event: payload.jobId is the PCC job's (LO-EV-9).
+          payload: {
+            ippJobId: jobId,
+            completedSheets: attrs.completedSheets,
+          },
+        });
+      }
+    } catch {
+      // Silently ignore transient poll failures
+    }
   }
 
   private stopPolling(): void {
@@ -704,6 +745,8 @@ export class IppAdapter implements MachineAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   // ---------------------------------------------------------------------------
