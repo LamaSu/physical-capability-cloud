@@ -22,6 +22,8 @@ import * as SentryModule from "@sentry/node";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_TIER_REQUIREMENTS,
+  KERNEL_PULL_CAPTURE_TYPES,
   hashBundle,
   hashEvent,
   ids,
@@ -976,11 +978,12 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
     expect([...hashes].sort()).not.toEqual(hashes);
   });
 
-  it("Map.prototype.get and set replaced after load are never called: no attacker-held record or array is handed an event (steward #6668)", async () => {
+  it("Map.prototype.get, set, delete and size replaced after load are never called: no attacker-held record or array is handed an event (steward #6668)", async () => {
     await runnerSettled();
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const emitter = new EvidenceEmitter(KERNEL);
-    const real = { get: Map.prototype.get, set: Map.prototype.set };
+    const real = { get: Map.prototype.get, set: Map.prototype.set, delete: Map.prototype.delete, size: Object.getOwnPropertyDescriptor(Map.prototype, "size")! };
+    const ours = (key: unknown): boolean => key === JOB || key === "s1" || key === "s2";
     // astra's push recipe, a level up: a get that hands the store a step record whose events array the attacker keeps.
     const attacker = attackerHeldRecord();
     const attackerSteps = new Map<unknown, unknown>([["s1", attacker.record]]);
@@ -989,22 +992,41 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
     let outcome: Outcome | undefined;
     try {
       Map.prototype.get = function (this: Map<unknown, unknown>, key: unknown) {
-        if (key === JOB || key === "s1") calls++;
+        if (ours(key)) calls++;
         return key === JOB ? attackerSteps : key === "s1" ? attacker.record : real.get.call(this, key);
       };
       Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
-        if (key === JOB || key === "s1") {
+        if (ours(key)) {
           calls++;
           handed.push(value);
         }
         return real.set.call(this, key, value);
       };
+      Map.prototype.delete = function (this: Map<unknown, unknown>, key: unknown) {
+        if (!ours(key)) return real.delete.call(this, key);
+        calls++;
+        return false;
+      };
+      // A size that says a job's map is empty when it is not: cleaning up one step would drop the job's others.
+      Object.defineProperty(Map.prototype, "size", {
+        configurable: true,
+        get(this: Map<unknown, unknown>) {
+          if (real.get.call(this, "s1") === undefined && real.get.call(this, JOB) === undefined) return real.size.get!.call(this);
+          calls++;
+          return 0;
+        },
+      });
       outcome = await callsOnStep(emitter, "s1");
+      emitter.registerStep(JOB, "s2", 0);
+      emitter.cleanup(JOB, "s2");
     } finally {
       Map.prototype.get = real.get;
       Map.prototype.set = real.set;
+      Map.prototype.delete = real.delete;
+      Object.defineProperty(Map.prototype, "size", real.size);
     }
-    expect(calls, "calls of the replaced get and set").toBe(0);
+    expect(calls, "calls of the replaced get, set, delete and size").toBe(0);
+    expect(types(emitter, "s2"), "the step cleaned up").toEqual([]);
     expect(attacker.events, "events handed to the attacker's array").toEqual([]);
     expect(handed, "records handed to the replaced set").toEqual([]);
     await expectIntact(emitter, "s1", outcome!);
@@ -1187,6 +1209,150 @@ describe("EvidenceEmitter calls only what it captured at load: the closed allowl
     expect(archived.map((bundle) => bundle.id), "bundles archived").toEqual([outcome!.bundle.id]);
     expect(emitter.getStorageService()).toBe(service);
     await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("Error, Error[Symbol.hasInstance], WeakSet, Date, String.prototype.slice, console.warn and Function.prototype.bind replaced after load change nothing the emitter reports, signs with or attaches", async () => {
+    await runnerSettled();
+    const warned: unknown[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => void warned.push(args[0]));
+    // The test-only signer warns through the console.warn the emitter was built with.
+    const emitter = new EvidenceEmitter(KERNEL);
+    emitter.registerStep(JOB, "s1", 0);
+    const archived: EvidenceBundle[] = [];
+    const service = {
+      isReady: (): boolean => true,
+      archiveBundle: async (bundle: EvidenceBundle) => {
+        archived.push(bundle);
+        return { cid: "bafy-bundle", metadataCid: "bafy-meta" };
+      },
+    };
+    const RealError = globalThis.Error;
+    const RealDate = globalThis.Date;
+    const saved = { add: WeakSet.prototype.add, has: WeakSet.prototype.has, toISOString: RealDate.prototype.toISOString, slice: String.prototype.slice, warn: console.warn, bind: Function.prototype.bind };
+    let calls = 0;
+    let refusal: unknown;
+    let outcome: Outcome | undefined;
+    try {
+      globalThis.Error = class extends RealError {
+        constructor(message?: string) {
+          calls++;
+          super(`forged: ${message}`);
+        }
+      } as ErrorConstructor;
+      // instanceof EvidenceInputError would look this up on Error, through the class's prototype chain.
+      Object.defineProperty(RealError, Symbol.hasInstance, { configurable: true, value: () => (calls++, false) });
+      WeakSet.prototype.add = function (this: WeakSet<object>) {
+        calls++;
+        return this;
+      };
+      WeakSet.prototype.has = () => (calls++, false);
+      // It keeps a working now(): spec's id functions look Date.now up when they run (a named residual).
+      globalThis.Date = class {
+        static now = (): number => RealDate.now();
+        constructor() {
+          calls++;
+        }
+      } as unknown as DateConstructor;
+      RealDate.prototype.toISOString = () => (calls++, "forged");
+      String.prototype.slice = () => (calls++, "forged");
+      console.warn = () => void calls++;
+      Function.prototype.bind = function () {
+        calls++;
+        return () => false;
+      } as typeof Function.prototype.bind;
+      emitter.setStorageService(service as never);
+      Function.prototype.bind = saved.bind;
+      try {
+        await emitter.addEvent(JOB, "s1", raw("execution_progress", 0, { at: new RealDate(0) }));
+      } catch (err) {
+        refusal = err;
+      }
+      const added = await emitter.addEvent(JOB, "s1", raw("execution_completed", 0, { pages: 3 }));
+      const listed = emitter.getEvents(JOB, "s1");
+      const bundle = await emitter.finalizeBundle(JOB, "s1");
+      outcome = { added, listed, bundle };
+    } finally {
+      globalThis.Error = RealError;
+      delete (RealError as unknown as Record<symbol, unknown>)[Symbol.hasInstance];
+      WeakSet.prototype.add = saved.add;
+      WeakSet.prototype.has = saved.has;
+      globalThis.Date = RealDate;
+      RealDate.prototype.toISOString = saved.toISOString;
+      String.prototype.slice = saved.slice;
+      console.warn = saved.warn;
+      Function.prototype.bind = saved.bind;
+    }
+    expect(calls, "calls of what was replaced").toBe(0);
+    // The input check's refusal, told apart without instanceof, reported with the Error captured at load.
+    expect(Object.getPrototypeOf(refusal)).toBe(RealError.prototype);
+    expect((refusal as Error).message).toBe("event.payload.at is not a plain object: evidence must be plain JSON data, which its hash commits to faithfully");
+    const bundle = outcome!.bundle;
+    expect(bundle.kernelSignature.value).toBe(`test_sig_${bundle.bundleHash.slice(0, 16)}`);
+    expect(new Date(bundle.createdAt).toISOString()).toBe(bundle.createdAt);
+    expect(warned).toEqual([expect.stringContaining("Using test-only signing key")]);
+    expect(archived.map((b) => b.id), "bundles archived").toEqual([bundle.id]);
+    expect(emitter.getLastIpfsResult()).toEqual({ cid: "bafy-bundle", metadataCid: "bafy-meta" });
+    await expectIntact(emitter, "s1", outcome!);
+  });
+
+  it("checkTierRequirements answers the same with Array.prototype methods, Set, Object.prototype.hasOwnProperty and spec's exported arrays changed after load", async () => {
+    await runnerSettled();
+    const emitter = new EvidenceEmitter(KERNEL);
+    const event = (type: string, payload: Record<string, unknown> = {}) => ({ id: `ev_${type}`, hash: `sha256:${"a".repeat(64)}`, type, timestamp: "2026-10-04T00:00:00.000Z", source, payload }) as unknown as EvidenceEvent;
+    const events = [event("gcode_hash_verified"), event("execution_completed"), event("power_profile_summary"), event("execution_progress", { mock: true })];
+    const custom = [{ tier: 1, requiredEventTypes: [["a", "b"], ["gcode_hash_verified"]], minimumEvents: 1, description: "custom" }] as never;
+    // Non-camera events only: spec's kernelPullCaptureIssue looks its intrinsics up when it runs (a named residual).
+    const ask = () => [
+      emitter.checkTierRequirements(events, 1),
+      emitter.checkTierRequirements(events, 2),
+      emitter.checkTierRequirements(events, 7 as never),
+      emitter.checkTierRequirements(events, 1, custom),
+    ];
+    const clean = ask();
+    const methods = ["map", "filter", "flatMap", "some", "includes", "join", "find", "push", "indexOf"] as const;
+    const array = Array.prototype as unknown as Record<string, unknown>;
+    const savedMethods = methods.map((name) => array[name]);
+    const savedIterator = Array.prototype[Symbol.iterator];
+    const savedSet = globalThis.Set;
+    const savedHasOwn = Object.prototype.hasOwnProperty;
+    const savedTypes = [...KERNEL_PULL_CAPTURE_TYPES];
+    const tierOne = DEFAULT_TIER_REQUIREMENTS[1]!;
+    const savedTierOne = { requiredEventTypes: tierOne.requiredEventTypes, minimumEvents: tierOne.minimumEvents };
+    let calls = 0;
+    let hostile: unknown;
+    try {
+      for (let i = 0; i < methods.length; i++) array[methods[i]!] = () => (calls++, i % 2 === 0 ? [] : true);
+      Array.prototype[Symbol.iterator] = function* () {
+        calls++;
+      } as unknown as typeof Array.prototype[typeof Symbol.iterator];
+      globalThis.Set = class {
+        constructor() {
+          calls++;
+        }
+        has(): boolean {
+          calls++;
+          return true;
+        }
+      } as unknown as SetConstructor;
+      Object.prototype.hasOwnProperty = () => (calls++, false);
+      // spec's arrays are mutable: a power summary now reads as a camera type, and tier 1 asks for nothing.
+      (KERNEL_PULL_CAPTURE_TYPES as unknown as string[])[2] = "power_profile_summary";
+      tierOne.requiredEventTypes = [];
+      tierOne.minimumEvents = 0;
+      hostile = ask();
+    } finally {
+      for (let i = 0; i < methods.length; i++) array[methods[i]!] = savedMethods[i];
+      Array.prototype[Symbol.iterator] = savedIterator;
+      globalThis.Set = savedSet;
+      Object.prototype.hasOwnProperty = savedHasOwn;
+      (KERNEL_PULL_CAPTURE_TYPES as unknown as string[]).length = savedTypes.length;
+      tierOne.requiredEventTypes = savedTierOne.requiredEventTypes;
+      tierOne.minimumEvents = savedTierOne.minimumEvents;
+    }
+    expect(calls, "calls of what was replaced").toBe(0);
+    expect(hostile).toEqual(clean);
+    expect(clean.map((answer) => answer.met)).toEqual([true, false, false, false]);
+    expect(clean[3]!.missing).toEqual(["Missing one of: a | b"]);
   });
 
   it("properties an adapter writes on the emitter change nothing: its state, signer and collaborators are JS private fields (steward #6668)", async () => {
