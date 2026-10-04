@@ -93,6 +93,9 @@ const WeakSetPrototypeHas = uncurryThis(WeakSet.prototype.has) as (set: WeakSet<
 const DateCtor = Date;
 const DatePrototypeToISOString = uncurryThis(Date.prototype.toISOString) as (date: Date) => string;
 const StringPrototypeSlice = uncurryThis(String.prototype.slice) as (s: string, start?: number, end?: number) => string;
+const StringPrototypeCharAt = uncurryThis(String.prototype.charAt) as (s: string, i: number) => string;
+/** The console object as it was at load. Its warn is bound when an emitter is built, like the other collaborators. */
+const ConsoleAtLoad = console;
 /** Makes a bound function: used only where a collaborator is taken in (the constructor, setStorageService). */
 const FunctionPrototypeBind = uncurryThis(FunctionPrototype.bind) as <F extends (...args: never[]) => unknown>(fn: F, thisArg: unknown) => F;
 /** node:util's proxy and promise checks: they run no trap and no getter. */
@@ -186,6 +189,26 @@ function dataDescriptor(value: unknown): PropertyDescriptor {
   return descriptor;
 }
 
+/** Whether `o` has `key` as its OWN property, by the hasOwnProperty captured at load. */
+function hasOwn(o: object, key: PropertyKey): boolean {
+  return ObjectPrototypeHasOwnProperty(o, key);
+}
+
+/** The element of `list` at `index` if `list` owns it, else undefined: a hole never continues to Array.prototype (steward #6792). */
+function listAt<T>(list: readonly T[], index: number): T | undefined {
+  return hasOwn(list, index) ? list[index] : undefined;
+}
+
+/** `s`'s code unit at `i` as a string, "" past the end, by the charAt captured at load: no index reaches String.prototype. */
+function charAt(s: string, i: number): string {
+  return StringPrototypeCharAt(s, i);
+}
+
+/** Sets `record[key]` by defining it, never through [[Set]]: no setter written on a prototype runs (steward #6792). */
+function defineField<T extends object, K extends keyof T>(record: T, key: K, value: T[K]): void {
+  ObjectDefineProperty(record, key, dataDescriptor(value));
+}
+
 /** Puts `value` after `list`'s last element by defining it: no Array.prototype.push, no [[Set]] (astra pack 277). */
 function append<T>(list: T[], value: T): void {
   ObjectDefineProperty(list, list.length, dataDescriptor(value));
@@ -235,7 +258,7 @@ async function storeInTurn(stepEv: StepEvidence, previous: Promise<void>, event:
     // would be handed the stored event and could change it after it was hashed (astra pack 277).
     append(stepEv.events, event);
   } finally {
-    stepEv.pending -= 1;
+    defineField(stepEv, "pending", stepEv.pending - 1);
   }
 }
 
@@ -256,9 +279,9 @@ function stepRecord(steps: Map<string, Map<string, StepEvidence>>, jobId: string
 
 /** `0x` and 64 lowercase hex digits, checked character by character: no RegExp, whose test and exec can be replaced. */
 function isUnitField(value: unknown): value is string {
-  if (typeof value !== "string" || value.length !== 66 || value[0] !== "0" || value[1] !== "x") return false;
+  if (typeof value !== "string" || value.length !== 66 || charAt(value, 0) !== "0" || charAt(value, 1) !== "x") return false;
   for (let i = 2; i < 66; i++) {
-    const c = value[i]!;
+    const c = charAt(value, i);
     if (!((c >= "0" && c <= "9") || (c >= "a" && c <= "f"))) return false;
   }
   return true;
@@ -277,10 +300,10 @@ function hashEventFields(input: EventInput): SHA256 {
 /** `list`, sorted in place by UTF-16 code unit, which is how Array.prototype.sort orders strings without a comparator. */
 function sortByCodeUnit(list: string[]): string[] {
   for (let i = 1; i < list.length; i++) {
-    const s = list[i]!;
+    const s = listAt(list, i)!;
     let j = i - 1;
-    while (j >= 0 && list[j]! > s) {
-      ObjectDefineProperty(list, j + 1, dataDescriptor(list[j]));
+    while (j >= 0 && listAt(list, j)! > s) {
+      ObjectDefineProperty(list, j + 1, dataDescriptor(listAt(list, j)));
       j--;
     }
     ObjectDefineProperty(list, j + 1, dataDescriptor(s));
@@ -291,14 +314,14 @@ function sortByCodeUnit(list: string[]): string[] {
 /** @pcc/spec's hashBundle, byte for byte: the canonical JSON of the events' hashes, sorted. */
 function hashBundleEvents(events: readonly EvidenceEvent[]): SHA256 {
   const hashes: string[] = [];
-  for (let i = 0; i < events.length; i++) append(hashes, events[i]!.hash);
+  for (let i = 0; i < events.length; i++) append(hashes, listAt(events, i)!.hash);
   return sha256Text(Canonicalize(sortByCodeUnit(hashes)));
 }
 
 /** Whether `list` holds `value`, compared as Array.prototype.includes and Set.prototype.has compare (SameValueZero), by index. */
 function includesValue(list: readonly unknown[], value: unknown): boolean {
   for (let i = 0; i < list.length; i++) {
-    const element = list[i];
+    const element = listAt(list, i);
     if (element === value || (element !== element && value !== value)) return true;
   }
   return false;
@@ -307,7 +330,7 @@ function includesValue(list: readonly unknown[], value: unknown): boolean {
 /** Whether any element `group` owns is in `values` (Array.prototype.some skips a hole). */
 function someIncluded(group: readonly unknown[], values: readonly unknown[]): boolean {
   for (let i = 0; i < group.length; i++) {
-    if (ObjectPrototypeHasOwnProperty(group, i) && includesValue(values, group[i])) return true;
+    if (hasOwn(group, i) && includesValue(values, listAt(group, i))) return true;
   }
   return false;
 }
@@ -316,7 +339,7 @@ function someIncluded(group: readonly unknown[], values: readonly unknown[]): bo
 function joinGroup(group: readonly unknown[], separator: string): string {
   let out = "";
   for (let i = 0; i < group.length; i++) {
-    const element = group[i];
+    const element = listAt(group, i);
     if (i > 0) out += separator;
     if (element !== undefined && element !== null) out += `${element as string}`;
   }
@@ -380,7 +403,7 @@ function copyPlain(value: unknown, at: string, depth: number): unknown {
   const out: Record<string, unknown> = {};
   const keys = ReflectOwnKeys(value);
   for (let k = 0; k < keys.length; k++) {
-    const key = keys[k]!;
+    const key = listAt(keys, k)!;
     if (typeof key === "symbol") throw new EvidenceInputError(`${at} has a symbol-keyed member`);
     if (key === "__proto__") throw new EvidenceInputError(`${at} has a member named __proto__`);
     const descriptor = ObjectGetOwnPropertyDescriptor(value, key)!;
@@ -464,7 +487,7 @@ export class EvidenceEmitter {
   ) {
     this.#kernelId = kernelId;
     this.#hasRealSignFn = !!signFn;
-    this.#warn = FunctionPrototypeBind(console.warn, console);
+    this.#warn = FunctionPrototypeBind(ConsoleAtLoad.warn, ConsoleAtLoad);
     // TEST-ONLY default — replace with a real wallet signFn in production
     this.#signFn = signFn ?? (async (data: string) => {
       this.#warn(
@@ -576,7 +599,8 @@ export class EvidenceEmitter {
       input = copyEventInput(rawEvent);
     } catch (err) {
       if (isEvidenceInputError(err)) {
-        throw new ErrorCtor(`${err.message}: evidence must be plain JSON data, which its hash commits to faithfully`);
+        // The refusal's own message, set by its constructor: no property of Error.prototype is read.
+        throw new ErrorCtor(`${ownDataValue(err, "message") as string}: evidence must be plain JSON data, which its hash commits to faithfully`);
       }
       throw err;
     }
@@ -596,12 +620,12 @@ export class EvidenceEmitter {
         throw new ErrorCtor("event payload.challengeNonce is reserved for the step's unit, and this step has none");
       }
     }
-    const commit: Array<[string, string]> = unit
-      ? [["jobId", jobId], ["settlementUnitId", unit.settlementUnitId], ["challengeNonce", unit.challengeNonce]]
-      : [["jobId", jobId]];
+    const commit: Array<{ field: string; value: string }> = unit
+      ? [{ field: "jobId", value: jobId }, { field: "settlementUnitId", value: unit.settlementUnitId }, { field: "challengeNonce", value: unit.challengeNonce }]
+      : [{ field: "jobId", value: jobId }];
     for (let c = 0; c < commit.length; c++) {
-      const field = commit[c]![0];
-      const value = commit[c]![1];
+      const field = listAt(commit, c)!.field;
+      const value = listAt(commit, c)!.value;
       const existing = ownMember(payload, field);
       if (existing !== undefined && existing !== value) {
         const shown = typeof existing === "string" ? existing : `a ${typeof existing}`;
@@ -623,9 +647,9 @@ export class EvidenceEmitter {
       id: IdsEvidence(),
       hash: hashEventFields(input),
     } as unknown as EvidenceEvent;
-    stepEv.pending += 1;
+    defineField(stepEv, "pending", stepEv.pending + 1);
     const turn = pinned(storeInTurn(stepEv, stepEv.stored, event));
-    stepEv.stored = pinned(settledTurn(turn));
+    defineField(stepEv, "stored", pinned(settledTurn(turn)));
     await pinned(turn);
     // The caller gets a copy: a stored event is never shared, so nothing changes it.
     return StructuredClone(event);
@@ -704,7 +728,7 @@ export class EvidenceEmitter {
     // Notify listeners: each callback registered with onBundle, a trusted collaborator.
     const listeners = this.#listeners;
     for (let i = 0; i < listeners.length; i++) {
-      const listener = listeners[i]!;
+      const listener = listAt(listeners, i)!;
       listener(bundle);
     }
 
@@ -737,7 +761,7 @@ export class EvidenceEmitter {
   ): { met: boolean; missing: string[] } {
     let tierReq: TierEvidenceRequirements | undefined;
     for (let r = 0; r < requirements.length; r++) {
-      const candidate = requirements[r]!;
+      const candidate = listAt(requirements, r)!;
       if (candidate.tier === tier) {
         tierReq = candidate;
         break;
@@ -756,15 +780,15 @@ export class EvidenceEmitter {
     const jobId = options?.jobId ?? "";
     const assessed: Array<{ event: EvidenceEvent; type: string; cameraIssue: string | null }> = [];
     for (let i = 0; i < events.length; i++) {
-      if (!ObjectPrototypeHasOwnProperty(events, i)) continue;
-      const event = events[i]!;
+      if (!hasOwn(events, i)) continue;
+      const event = listAt(events, i)!;
       const type = event.type;
       const cameraIssue = includesValue(CameraTypes, type) ? KernelPullCaptureIssue(event, jobId) : null;
       append(assessed, { event, type, cameraIssue });
     }
     const countedTypes: string[] = [];
     for (let i = 0; i < assessed.length; i++) {
-      const entry = assessed[i]!;
+      const entry = listAt(assessed, i)!;
       if (entry.cameraIssue === null && !IsFabricated(entry.event)) append(countedTypes, entry.type);
     }
 
@@ -772,12 +796,12 @@ export class EvidenceEmitter {
     // At least one event type from each group must be present.
     const groups = tierReq.requiredEventTypes;
     for (let g = 0; g < groups.length; g++) {
-      if (!ObjectPrototypeHasOwnProperty(groups, g)) continue;
-      const group = groups[g]!;
+      if (!hasOwn(groups, g)) continue;
+      const group = listAt(groups, g)!;
       if (!someIncluded(group, countedTypes)) append(missing, `Missing one of: ${joinGroup(group, " | ")}`);
     }
     for (let i = 0; i < assessed.length; i++) {
-      const entry = assessed[i]!;
+      const entry = listAt(assessed, i)!;
       if (entry.cameraIssue !== null) {
         append(missing, `${entry.type} from ${deviceLabel(entry.event)}: not an LO-SE-1 capture for this job (${entry.cameraIssue})`);
       }
@@ -805,7 +829,7 @@ export class EvidenceEmitter {
     const steps = MapPrototypeGet(this.#steps, jobId);
     const stepEv = steps === undefined ? undefined : MapPrototypeGet(steps, stepId);
     if (steps === undefined || stepEv === undefined) return;
-    stepEv.detached = true;
+    defineField(stepEv, "detached", true);
     MapPrototypeDelete(steps, stepId);
     if (MapPrototypeGetSize(steps) === 0) MapPrototypeDelete(this.#steps, jobId);
   }
