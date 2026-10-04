@@ -35,7 +35,14 @@
  *     delegation rooted in a registered row and committed in the same pinned
  *     snapshot: it holds its root's grants for the jobs its scope names, for
  *     events timestamped inside its window, and its root's signature over the
- *     LO-EV-1 delegation must verify. Anything else is `unauthorized-signer`;
+ *     LO-EV-1 delegation must verify. Anything else is `unauthorized-signer`.
+ *     A key that signs as the executor is the executor's own, never an
+ *     independent inspector: its operator joins the deal's executors when
+ *     levels are judged, and one whose operator the registry does not name
+ *     leaves no inspection independent. So only a witness reaches
+ *     inspected_output; when the profile requires it and no pinned row grants
+ *     a witness for the subject, the shortfall is `no-witness-authorized`
+ *     (steward #6694);
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
  *     opens to its events, and they commit the job and the kernel that
  *     accepted it;
@@ -176,7 +183,9 @@
  *      `interpretation.onDeviceFailure`;
  *   6. level: the strongest level the evidence reaches must meet
  *      `acceptanceLevel`, and at least `sampling.minSamples` distinct samples
- *      must qualify. Shortfalls follow `onMissingData`.
+ *      must qualify. Shortfalls follow `onMissingData`. A shortfall from
+ *      inspected_output with no witness granted for the subject is
+ *      `no-witness-authorized`, otherwise `level-not-reached`.
  * A hold never outranks a reject.
  *
  * Every profile term:
@@ -317,6 +326,7 @@ export type ProfileAdmissionCode =
   | "device-failure"
   | "contradictory-evidence"
   | "level-not-reached"
+  | "no-witness-authorized"
   | "missing-measurements";
 
 export interface ProfileAdmissionReason {
@@ -405,7 +415,9 @@ export interface ProfileAdmissionInput {
    * The operator principals the job was ASSIGNED to (eip155:<chainId>:0x<40
    * lowercase hex>), from the accepted deal, as `subject` comes from the job
    * record: never from the evidence. Empty when the deal names none, and then no
-   * inspection can show independence (at most device_reported).
+   * inspection can show independence (at most device_reported). Otherwise the
+   * operator of every key that signs as the subject's executor joins them when
+   * levels are judged (see AUTHORIZATION in the header).
    */
   executorTrustDomains: readonly string[];
   /**
@@ -704,6 +716,25 @@ export async function computeRegistryDigest(registryKeys: readonly RegistryKey[]
   return registryDigestOf(registry.rows);
 }
 
+/** Whether `grant` names `subject`: its kernel is the subject's, and its job, if it names one, is the subject's. */
+function grantNames(grant: SignerGrant, subject: EvidenceSubject): boolean {
+  return grant.kernelId === subject.kernelId && (grant.jobId === undefined || grant.jobId === subject.jobId);
+}
+
+/** Whether `row`'s key is the executor for `subject`: one of its grants names it in the executor role. */
+function isExecutorFor(row: RegistryRow, subject: EvidenceSubject): boolean {
+  return row.grants.some((g) => g.role === "executor" && grantNames(g, subject));
+}
+
+/**
+ * Whether any pinned row lets a key witness `subject`: a witness grant that
+ * names it. A session key holds only its root's grants, so it adds no witness
+ * its root, a registered row here, does not already grant.
+ */
+function witnessAuthorized(rows: readonly RegistryRow[], subject: EvidenceSubject): boolean {
+  return rows.some((row) => row.grants.some((g) => g.role === "witness" && grantNames(g, subject)));
+}
+
 /**
  * Why `row`'s key may not sign `events` for `subject`, or null when it may
  * (astra pack 281, DECISIONS 00:26).
@@ -730,9 +761,8 @@ function authorizationDenied(row: RegistryRow, subject: EvidenceSubject, events:
       }
     }
   }
-  const names = (g: SignerGrant): boolean => g.kernelId === subject.kernelId && (g.jobId === undefined || g.jobId === subject.jobId);
-  if (row.grants.some((g) => g.role === "executor" && names(g))) return null;
-  if (!row.grants.some((g) => g.role === "witness" && names(g))) {
+  if (isExecutorFor(row, subject)) return null;
+  if (!row.grants.some((g) => g.role === "witness" && grantNames(g, subject))) {
     return `key ${row.signer} holds no grant for kernel ${subject.kernelId}, job ${subject.jobId}: registry membership alone authorizes nothing`;
   }
   const other = events.find((e) => !INSPECTION.has(e.type));
@@ -1092,6 +1122,9 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   const seen = new Set<string>();
   // Each bundle as evidence-level reads it: its bound events and its signer's trust domain.
   const authenticated: AuthenticatedBundle[] = [];
+  // The operators of the keys that signed as the subject's executor, and whether one of them names none.
+  const executorDomains = new Set<string>();
+  let executorDomainUnknown = false;
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
     // SIGNATURE, run here (astra packs 271, 275): the declared signer names one key of the pinned registry, the
@@ -1125,6 +1158,10 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
     // itself. The key must hold a grant naming this subject, in a role that fits what the bundle holds.
     const denied = authorizationDenied(row, subject, binding.events);
     if (denied !== null) return rejectNow("unauthorized-signer", `bundle ${i}: ${denied}`);
+    if (isExecutorFor(row, subject)) {
+      if (trustDomain === null) executorDomainUnknown = true;
+      else executorDomains.add(trustDomain);
+    }
     authenticated.push(trustDomain === null ? { events: binding.events } : { events: binding.events, trustDomain });
     // Evaluate only what was hashed: the verified canonical snapshots.
     for (const e of binding.events) {
@@ -1148,11 +1185,17 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   let contradictions: ContradictionKind[];
   let eventLevels: readonly EventLevel[];
   let reached: EvidenceLevel | null;
+  // A key that signed as the executor is the executor's own, never an independent inspector (steward #6694): its
+  // operator joins the deal's executors when levels are judged, so only a witness can reach inspected_output. An
+  // executor key whose operator the registry does not name leaves no inspection independent. When the deal names no
+  // executor, none is added: #345 then shows no independence, as before.
+  const levelExecutors =
+    executorTrustDomains.length === 0 || executorDomainUnknown ? [] : [...new Set([...executorTrustDomains, ...executorDomains])];
   try {
     contradictions = deriveContradictions(authenticated);
-    eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains });
+    eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains: levelExecutors });
     // The strongest level the bundles prove: #345's own function, the maximum over every occurrence.
-    reached = evidenceLevelOfBundles(authenticated, { executorTrustDomains });
+    reached = evidenceLevelOfBundles(authenticated, { executorTrustDomains: levelExecutors });
   } catch (err) {
     return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -1253,7 +1296,19 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
   const qualifying = samples.size;
 
-  if (!meetsEvidenceLevel(reached, required)) {
+  if (!meetsEvidenceLevel(reached, required) && required === "inspected_output" && !witnessAuthorized(registry.rows, subject)) {
+    // Only a witness's inspection reaches inspected_output, and the pinned rows grant no witness for this subject.
+    // No registry record assigns witnesses yet (N132), so say so rather than report a generic shortfall.
+    findings.push({
+      decision: policyDecision(profile.onMissingData),
+      reason: {
+        code: "no-witness-authorized",
+        detail:
+          `the profile requires inspected_output, which only an independent witness's inspection reaches, and no pinned row grants a witness ` +
+          `for kernel ${subject.kernelId}, job ${subject.jobId} (no registry record assigns witnesses yet); the evidence reaches ${reached ?? "no level"}`,
+      },
+    });
+  } else if (!meetsEvidenceLevel(reached, required)) {
     findings.push({
       decision: policyDecision(profile.onMissingData),
       reason: {

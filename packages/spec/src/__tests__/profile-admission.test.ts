@@ -633,6 +633,67 @@ describe("profile admission — a signature authorizes only what its key's grant
     }
   });
 
+  it("a key that signs as the executor is never an independent inspector, even when the deal leaves its operator out (steward #6694)", async () => {
+    const p = inspectedPageProfile();
+    const OPERATOR_C = `eip155:84532:0x${"cc".repeat(20)}`;
+    // A, the kernel's executor key, signs only the camera's inspection; the deal names C as the executor. Without
+    // roles, #345's executor set would be {C} and A's inspection would count as independent.
+    const ownInspection = [await toBundle(PILOT.slice(2), p, SIGNER_A)];
+    const r = await admit(p, ownInspection, { executorTrustDomains: [OPERATOR_C] });
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
+    expect(codes(r)).toEqual(["level-not-reached"]);
+    // #345's own function on the deal's executors alone would say inspected_output: the roles are what close it.
+    expect(evidenceLevelOfBundles([{ events: ownInspection[0]!.events as EvidenceEvent[], trustDomain: OPERATOR_A }], { executorTrustDomains: [OPERATOR_C] })).toBe(
+      "inspected_output",
+    );
+    // A second executor key X whose operator the registry does not name, signing only an inspection, leaves no
+    // inspection independent, the witness's included: nobody can tell whether B is X's operator.
+    const keyX = generateKeyPairSync("ed25519");
+    const KEY_X = rawKey(keyX);
+    KEYS[KEY_X.slice(0, 42)] = keyX;
+    const withX = [...REGISTRY, { publicKey: KEY_X, trustDomain: null, grants: EXECUTOR_GRANTS }];
+    const bundles = [
+      await toBundle(PILOT.slice(0, 2), p, SIGNER_A),
+      await toBundle(PILOT.slice(2), p, KEY_X.slice(0, 42)),
+      await toBundle(PILOT.slice(2), p, SIGNER_B),
+    ];
+    expect(await admit(p, bundles, { registryKeys: withX })).toMatchObject({ decision: "reject", reached: "device_reported" });
+    // #345 on the deal's executors alone would lift it through B's copy: the roles are what close it.
+    const asLevels = bundles.map((b, k) => ({ events: b.events as EvidenceEvent[], ...(k === 1 ? {} : { trustDomain: k === 0 ? OPERATOR_A : OPERATOR_B }) }));
+    expect(evidenceLevelOfBundles(asLevels, { executorTrustDomains: [OPERATOR_A] })).toBe("inspected_output");
+    // Without X, the witness's copy is independent and lifts the inspection.
+    expect(await admit(p, [bundles[0]!, bundles[2]!])).toMatchObject({ decision: "admit", reached: "inspected_output" });
+    // A deal that names no executor still shows no independence: nothing is added.
+    expect(await admit(p, await toBundles(PILOT, p), { executorTrustDomains: [] })).toMatchObject({ decision: "reject", reached: "device_reported" });
+  });
+
+  it("inspected_output with no witness granted for the subject is no-witness-authorized, not a generic shortfall (steward #6694, N132)", async () => {
+    const p = inspectedPageProfile();
+    const executorOnly = [await toBundle(PILOT, p, SIGNER_A)];
+    const noWitness = [REGISTRY[0]!];
+    const r = await admit(p, executorOnly, { registryKeys: noWitness });
+    expect(r).toMatchObject({ decision: "reject", reached: "device_reported" });
+    expect(codes(r)).toEqual(["no-witness-authorized"]);
+    expect(r.reasons[0]!.detail).toMatch(/no pinned row grants a witness for kernel kernel-admission-1, job job-admission-1/);
+    // The profile's policy decides it, as for any level shortfall.
+    const holding = { ...p, onMissingData: "hold" as const };
+    expect((await admit(holding, [await toBundle(PILOT, holding, SIGNER_A)], { registryKeys: noWitness })).decision).toBe("hold");
+    // A witness for another job, or a session key whose scope leaves this job out, is not a witness for this subject.
+    const otherJobWitness = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: "job-other" }] }];
+    expect(codes(await admit(p, executorOnly, { registryKeys: otherJobWitness }))).toEqual(["no-witness-authorized"]);
+    const scopedOut = delegate(keyB, { contractIds: ["job-other"] });
+    expect(codes(await admit(p, executorOnly, { registryKeys: [...REGISTRY, sessionRow(scopedOut, KEY_B)] }))).toEqual(["level-not-reached"]);
+    expect(codes(await admit(p, executorOnly, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }, sessionRow(scopedOut, KEY_B)] }))).toEqual(["no-witness-authorized"]);
+    // With a witness granted, the same shortfall is level-not-reached; a device_reported profile needs no witness.
+    expect(codes(await admit(p, executorOnly))).toEqual(["level-not-reached"]);
+    const d = deviceReportedProfile();
+    expect((await admit(d, [await toBundle(PILOT.slice(0, 2), d, SIGNER_A)], { registryKeys: noWitness })).decision).toBe("admit");
+    // Below device_reported, the shortfall is the generic one: no witness could lift it.
+    const started = await admit(d, [await toBundle(PILOT.slice(0, 1), d, SIGNER_A)], { registryKeys: noWitness });
+    expect(started.reached).not.toBe("device_reported");
+    expect(codes(started)).toEqual(["level-not-reached"]);
+  });
+
   it("the pin commits each delegation: the same session key re-delegated with a wider scope after the pin is not the pinned registry", async () => {
     const p = inspectedPageProfile();
     const session = delegate(key);
