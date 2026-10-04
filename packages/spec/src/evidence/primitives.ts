@@ -26,11 +26,17 @@
  * test locks it, so any contract change is caught. This mirrors the RFC-001 hash
  * discipline in verification-program.ts (which likewise excludes non-contract
  * fields such as publishedAt from its programHash).
+ *
+ * Each `paramsSchema` is RENDERED from the closed params table in
+ * primitive-params.ts (N128), the one statement of a primitive's params: the
+ * registry and the validator can't drift, and the hash commits the closed
+ * contract.
  */
 
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
+import { renderParamsSchema } from "./primitive-params.js";
 
 // ── Field enums (spec §5.1 axes) ────────────────────────────────────
 
@@ -87,7 +93,10 @@ export type PrimitiveStatus = "active" | "reserved" | "deprecated";
  */
 export type VerifierStatus = "live" | "stub" | "planned";
 
-/** Minimal JSON-Schema-shaped params descriptor (avoids a json-schema dep). */
+/**
+ * Minimal JSON-Schema-shaped params descriptor (avoids a json-schema dep), rendered
+ * from the closed table in primitive-params.ts. Every object in it is closed.
+ */
 export type PrimitiveParamsSchema = Record<string, unknown>;
 
 /** One tier this primitive can contribute to, with the why. */
@@ -114,7 +123,7 @@ export interface EvidencePrimitiveDef {
   status: PrimitiveStatus;
   /** The claim, stated as a sentence a payer can read. */
   proves: string;
-  /** Per-primitive params contract (minClass, integrityGrade, channel, …). */
+  /** Per-primitive params contract (minClass, integrityGrade, channel, …), rendered by renderParamsSchema. */
   paramsSchema: PrimitiveParamsSchema;
   authRequirement: AuthRequirement;
   /** Which of 0-3 this can contribute to. Envelopes inherit (full range). */
@@ -187,14 +196,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The payer, with a key pre-registered at job creation, approved (or reasoned-rejected) the committed evidence.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        approverRole: { type: "string", enum: ["payer"] },
-        claimIds: { type: "array", items: { type: "string" } },
-      },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("approval.payer"),
     authRequirement: "actor-signed",
     tierSupport: [{ tier: 2 }, { tier: 3 }],
     objectivityBand: "B5",
@@ -209,15 +211,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A pre-registered domain expert attested the evidence satisfies specific rubric claims agreed pre-job.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        approverRole: { type: "string", enum: ["expert"] },
-        claimIds: { type: "array", items: { type: "string" } },
-        rubricRef: { type: "string" },
-      },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("approval.expert"),
     authRequirement: "actor-signed",
     tierSupport: [{ tier: 2 }, { tier: 3 }],
     objectivityBand: "B4",
@@ -232,11 +226,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The execution ran against the real upstream (not a mock/stub/dry-run); mock or dry_run hard-caps the bundle at tier 0.",
-    paramsSchema: {
-      type: "object",
-      properties: { expected: { type: "string", enum: ["real"] } },
-      additionalProperties: false,
-    },
+    paramsSchema: renderParamsSchema("confirm.execution_mode"),
     authRequirement: "inherited",
     tierSupport: [
       { tier: 0, conditions: "mock/dry_run caps here (negative gate)" },
@@ -258,11 +248,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The operator formally declared a value/claim (schema-valid, operator-signed, in-window) — the typed tier-0 floor.",
-    paramsSchema: {
-      type: "object",
-      properties: { schemaRef: { type: "string" } },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("decl.self_attested"),
     authRequirement: "actor-signed",
     tierSupport: [
       { tier: 0, conditions: "grants only tier 0; contributes context at any tier" },
@@ -280,13 +266,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "This exact content existed at commitment time and is what the job's on-chain submitEvidence hash refers to.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        mode: { type: "string", enum: ["plain", "redacted-commit"], default: "plain" },
-      },
-      additionalProperties: false,
-    },
+    paramsSchema: renderParamsSchema("artifact.hash"),
     authRequirement: "none",
     tierSupport: [
       { tier: 1, conditions: "integrity floor; grants none alone above 1" },
@@ -305,14 +285,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The evidence was produced after a chain-anchored challenge (cannot be pre-fabricated) — the generic freshness modifier.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        form: { type: "string", enum: ["execution", "capture"] },
-        maxAgeSeconds: { type: "number" },
-      },
-      additionalProperties: false,
-    },
+    paramsSchema: renderParamsSchema("fresh.challenge_bound"),
     authRequirement: "crypto-proof",
     tierSupport: [
       { tier: 1, conditions: "modifier — upgrades whatever it binds; grants no tier alone" },
@@ -331,14 +304,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A child job settled through the oracle (Mode-B attestation exists and released) — the composed-job settlement input.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        childJobId: { type: "string" },
-        childEscrow: { type: "string" },
-      },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("pay.escrow_receipt"),
     authRequirement: "crypto-proof",
     tierSupport: [
       { tier: 0, conditions: "inherited from child (min over children)" },
@@ -359,14 +325,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The signing subject (kernel, device, approver, witness, model, credential holder) resolves live in the relevant pinned registry snapshot.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        registryId: { type: "string" },
-        snapshotHash: { type: "string" },
-      },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("ident.registered_key"),
     authRequirement: "actor-signed",
     tierSupport: [
       { tier: 1, conditions: "enabler/dependency — grants no tier alone" },
@@ -385,11 +344,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A registered kernel executed a capability and commits to its inputs/outputs (Ed25519-signed toKernelOutput).",
-    paramsSchema: {
-      type: "object",
-      properties: { capability: { type: "string" } },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("receipt.kernel_signed"),
     authRequirement: "actor-signed",
     tierSupport: [
       { tier: 1 },
@@ -412,16 +367,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A point-in-time position fix was inside radius R of an expected location at time T.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        lat: { type: "number" },
-        lng: { type: "number" },
-        radiusM: { type: "number" },
-      },
-      required: ["lat", "lng", "radiusM"],
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("telemetry.geofence_event"),
     authRequirement: "platform",
     tierSupport: [
       { tier: 1, conditions: "platform app fix" },
@@ -439,11 +385,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A human at the destination took a deliberate action bound to this job (OTP/PIN/QR presented by the recipient at handoff).",
-    paramsSchema: {
-      type: "object",
-      properties: { validityWindowSeconds: { type: "number" } },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("confirm.recipient_nonce"),
     authRequirement: "platform",
     tierSupport: [
       { tier: 2, conditions: "a human at the destination acted — real independence" },
@@ -460,7 +402,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "Someone at the destination signed on-glass / acknowledged receipt (platform-attested image blob; no biometric claim is made).",
-    paramsSchema: { type: "object", additionalProperties: true },
+    paramsSchema: renderParamsSchema("confirm.recipient_signature"),
     authRequirement: "platform",
     tierSupport: [
       { tier: 1 },
@@ -478,17 +420,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The capability transforms declared inputs into expected outputs (run a test vector or verify a signed transcript).",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        mode: {
-          type: "string",
-          enum: ["deterministic", "seeded-stochastic", "statistical-tolerance"],
-        },
-      },
-      required: ["mode"],
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("measure.io_test_pair"),
     authRequirement: "actor-signed",
     tierSupport: [
       { tier: 1 },
@@ -506,19 +438,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A live capture of the physical scene was taken for this job, at capture-time freshness, at the declared authenticity class (CC0-2 in v1).",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        media: { type: "string", enum: ["photo", "video"] },
-        minClass: {
-          type: "string",
-          enum: ["CC0", "CC1", "CC2", "CC3", "CC4", "CC5"],
-        },
-        nonceType: { type: "string", enum: ["qr", "color", "gesture"] },
-      },
-      required: ["media", "minClass"],
-      additionalProperties: false,
-    },
+    paramsSchema: renderParamsSchema("capture.photo_nonced"),
     authRequirement: "device-signed",
     tierSupport: [
       { tier: 1, conditions: "CC0-1" },
@@ -537,23 +457,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "An asset followed a route or remained in an area over a window, at a declared integrity grade.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        integrityGrade: {
-          type: "string",
-          enum: ["raw", "checked", "fused", "certified"],
-        },
-        maxGapSeconds: { type: "number" },
-        plausibility: {
-          type: "object",
-          properties: { maxSpeedKph: { type: "number" } },
-          additionalProperties: true,
-        },
-      },
-      required: ["integrityGrade"],
-      additionalProperties: false,
-    },
+    paramsSchema: renderParamsSchema("telemetry.gps_trail"),
     authRequirement: "platform",
     tierSupport: [
       { tier: 1, conditions: "raw" },
@@ -572,15 +476,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The system the work touched confirms the expected post-state via its own channel (tracker shows delivered, PR merged, booking exists, DNS resolves).",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        channel: { type: "string", enum: ["api", "webhook", "zktls"] },
-        matcher: { type: "string" },
-      },
-      required: ["channel"],
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("confirm.target_system"),
     authRequirement: "platform",
     tierSupport: [
       { tier: 1, conditions: "api (trusts the oracle's own fetch)" },
@@ -622,24 +518,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The machine's own execution record for this job — the command/event/alarm sequence the controller reported, captured contemporaneously by the kernel, hash-chained, kernel-signed, with program identity bound to the committed program/method hash.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        logKind: {
-          type: "string",
-          enum: ["job_log", "command_trace", "alarm_log", "program_transcript"],
-        },
-        disclosure: {
-          type: "string",
-          enum: ["full", "redacted-commit"],
-          default: "redacted-commit",
-        },
-        minCadenceMs: { type: "number" },
-        alarmPolicy: { type: "string", enum: ["none-critical", "declared"] },
-      },
-      required: ["logKind"],
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("machine.execution_log"),
     authRequirement: "actor-signed",
     tierSupport: [
       { tier: 1, conditions: "kernel-signed chain = attributable + integrity, no independence" },
@@ -667,34 +546,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The job's physical signals stayed within the pre-agreed operating envelope — power within the capability's band, temperature within the material's band, duration within the expected ratio — i.e. a machine doing this class of work ran for this long on this material.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        envelope: {
-          oneOf: [
-            { type: "string", enum: ["builtin-defaults"] },
-            {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  metric: { type: "string" },
-                  min: { type: "number" },
-                  max: { type: "number" },
-                  ratioBands: { type: "array", items: { type: "number" } },
-                },
-                required: ["metric"],
-              },
-            },
-          ],
-        },
-        source: { type: "string", enum: ["summary", "stream"], default: "summary" },
-        severityFloor: { type: "string", enum: ["high", "critical"], default: "high" },
-        materialParam: { type: "string" },
-        includePipelineAnomalies: { type: "boolean" },
-      },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("telemetry.envelope_conformance"),
     authRequirement: "inherited",
     tierSupport: [
       { tier: 1, conditions: "kernel-signed summaries" },
@@ -722,18 +574,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "The evidence stream is complete for the claimed tier — no missing required signal groups, no dead air on evidence-grade channels, no flatlined sensors. The anti-cherry-picking gate.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        requiredGroups: {
-          type: "array",
-          items: { type: "array", items: { type: "string" } },
-        },
-        maxGapSeconds: { type: "number" },
-        evidenceGradeChannels: { type: "boolean" },
-      },
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("telemetry.coverage_gate"),
     authRequirement: "none",
     tierSupport: [
       { tier: 0, conditions: "missing/gapped coverage caps here (negative gate)" },
@@ -756,16 +597,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     status: "active",
     proves:
       "A batch/process run followed its pre-agreed recipe — phases executed in declared order, per-phase parameters in-range, all manifest samples processed with results attached. The ISA-88 electronic-batch-record shape.",
-    paramsSchema: {
-      type: "object",
-      properties: {
-        recipeRef: { type: "string" },
-        phaseGraph: { type: "object", additionalProperties: true },
-        sampleManifestRef: { type: "string" },
-      },
-      required: ["recipeRef"],
-      additionalProperties: true,
-    },
+    paramsSchema: renderParamsSchema("process.batch_record"),
     authRequirement: "actor-signed",
     tierSupport: [
       { tier: 1 },
@@ -785,8 +617,15 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
 
 /** Vocabulary version. Bumps when the contract (§5.1 fields) changes.
  *  v2 = the additive v1.5-industrial cut (#52-#55 + Family L `record`); no v1
- *  primitive changed, so the bump is purely additive. */
-export const VOCAB_VERSION = 2 as const;
+ *  primitive changed, so the bump is purely additive.
+ *  v3 = closed params (N128): every paramsSchema is rendered from the closed
+ *  table in primitive-params.ts. Every object is closed, values are typed and
+ *  bounded, capture.photo_nonced's media and minClass and
+ *  measure.io_test_pair's mode stay required, and new closed fields are:
+ *  machine.execution_log.role, an envelope entry's unit, and phaseGraph and
+ *  the other process refs as bytes32 references. NOT additive: a v2 params
+ *  object with an unknown key or an open value is refused. */
+export const VOCAB_VERSION = 3 as const;
 
 /**
  * Contract projection of a primitive def — the fields that constitute the

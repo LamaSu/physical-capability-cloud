@@ -4,10 +4,20 @@
  */
 import { describe, expect, it } from "vitest";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
+import { loadBuiltinCsds } from "../csd/registry.js";
+import { ADAPTER_DEFAULT_MANIFESTS, DEVICE_ROLE_DEFAULT_MANIFESTS } from "../evidence/adapter-manifests.js";
+import { EVIDENCE_EVENT_TYPES } from "../types/evidence.js";
 import {
+  EMITTER_CHANNELS,
+  EVIDENCE_BIND_FIELDS,
+  MAX_SNAPSHOT_DEPTH,
   PRIMITIVE_PARAMS,
+  isEmitterVia,
+  isEvidenceBind,
   isParamIdentifier,
   isSha256Digest,
+  ownDataSnapshot,
+  renderParamsSchema,
   validatePrimitiveParams,
   type ParamKind,
 } from "../evidence/primitive-params.js";
@@ -25,7 +35,7 @@ const SAMPLES: Record<string, Record<string, unknown>> = {
   "artifact.hash": { mode: "redacted-commit" },
   "fresh.challenge_bound": { form: "capture", maxAgeSeconds: 300 },
   "pay.escrow_receipt": { childJobId: "job_child.1", childEscrow: ADDRESS },
-  "ident.registered_key": { registryId: "kernel-registry", snapshotHash: DIGEST },
+  "ident.registered_key": { registryId: "kernel-registry", snapshotHash: BYTES32 },
   "receipt.kernel_signed": { capability: "print.inkjet" },
   "telemetry.geofence_event": { lat: 37.77, lng: -122.42, radiusM: 50 },
   "confirm.recipient_nonce": { validityWindowSeconds: 3600 },
@@ -62,11 +72,47 @@ describe("PRIMITIVE_PARAMS covers the registry exactly", () => {
     expect(Object.keys(SAMPLES).sort()).toEqual(Object.keys(PRIMITIVE_PARAMS).sort());
   });
 
-  it("keeps every param the registry declares (closing a primitive drops none of its documented params)", () => {
+  it("is the ONE source: every registry paramsSchema is its rendering, field for field and requiredness for requiredness", () => {
     for (const p of EVIDENCE_PRIMITIVES) {
-      const declared = Object.keys(((p.paramsSchema as { properties?: object }).properties ?? {}) as object);
-      for (const key of declared) expect(Object.keys(PRIMITIVE_PARAMS[p.id] as object), `${p.id}.${key}`).toContain(key);
+      const fields = PRIMITIVE_PARAMS[p.id] as Record<string, { required?: boolean }>;
+      const schema = p.paramsSchema as { properties: Record<string, unknown>; required?: string[]; additionalProperties: unknown };
+      expect(p.paramsSchema, p.id).toEqual(renderParamsSchema(p.id));
+      // Both directions: the registry names exactly the table's fields, and requires exactly its required ones.
+      expect(Object.keys(schema.properties).sort(), p.id).toEqual(Object.keys(fields).sort());
+      const requiredFields = Object.keys(fields).filter((k) => fields[k]!.required === true).sort();
+      expect([...(schema.required ?? [])].sort(), p.id).toEqual(requiredFields);
+      expect(schema.additionalProperties, p.id).toBe(false);
     }
+  });
+
+  it("keeps the registry's required fields (r1 finding 1): a capture states its media and class, a test pair its mode", () => {
+    expect(validatePrimitiveParams("capture.photo_nonced", undefined).ok).toBe(false);
+    expect(validatePrimitiveParams("capture.photo_nonced", { media: "photo" }).ok).toBe(false);
+    expect(validatePrimitiveParams("capture.photo_nonced", { minClass: "CC2" }).ok).toBe(false);
+    expect(validatePrimitiveParams("capture.photo_nonced", { media: "photo", minClass: "CC2" })).toEqual({ ok: true });
+    expect(validatePrimitiveParams("measure.io_test_pair", undefined).ok).toBe(false);
+    expect(validatePrimitiveParams("measure.io_test_pair", {}).ok).toBe(false);
+  });
+
+  it("renders every default as a member of its enum, and no renderer exists for an unknown id", () => {
+    const defaults: string[] = [];
+    for (const [primitiveId, fields] of Object.entries(PRIMITIVE_PARAMS)) {
+      for (const [key, field] of Object.entries(fields)) {
+        if (field.default === undefined) continue;
+        defaults.push(`${primitiveId}.${key}`);
+        expect(field.type.kind, `${primitiveId}.${key}`).toBe("enum");
+        expect((field.type as { values: readonly string[] }).values, `${primitiveId}.${key}`).toContain(field.default);
+        expect(validatePrimitiveParams(primitiveId, { ...SAMPLES[primitiveId], [key]: field.default }), `${primitiveId}.${key}`).toEqual({ ok: true });
+      }
+    }
+    expect(defaults.sort()).toEqual([
+      "artifact.hash.mode",
+      "machine.execution_log.disclosure",
+      "telemetry.envelope_conformance.severityFloor",
+      "telemetry.envelope_conformance.source",
+    ]);
+    expect(() => renderParamsSchema("capture.unregistered")).toThrow();
+    expect(() => renderParamsSchema("__proto__")).toThrow();
   });
 });
 
@@ -165,6 +211,11 @@ describe("formats are checked character by character", () => {
     }
   });
 
+  it("a registry snapshot hash is bytes32, as types/registry.ts computes it (r1 note), never a sha256: digest", () => {
+    expect(validatePrimitiveParams("ident.registered_key", { snapshotHash: BYTES32 })).toEqual({ ok: true });
+    expect(validatePrimitiveParams("ident.registered_key", { snapshotHash: DIGEST }).ok).toBe(false);
+  });
+
   it("digests, bytes32 and addresses are exact and lowercase", () => {
     expect(isSha256Digest(DIGEST)).toBe(true);
     for (const bad of [DIGEST.toUpperCase(), `sha256:${"ab".repeat(31)}`, `sha512:${"ab".repeat(32)}`, `${DIGEST}0`]) {
@@ -176,5 +227,121 @@ describe("formats are checked character by character", () => {
     expect(validatePrimitiveParams("process.batch_record", { recipeRef: `0x${"cd".repeat(31)}` }).ok).toBe(false);
     expect(validatePrimitiveParams("pay.escrow_receipt", { childEscrow: ADDRESS.slice(0, -1) }).ok).toBe(false);
     expect(validatePrimitiveParams("pay.escrow_receipt", { childEscrow: `0X${"ef".repeat(20)}` }).ok).toBe(false);
+  });
+});
+
+describe("bind and via are closed names (r1 finding 3), never merely identifier-shaped", () => {
+  it("bind is an evidence field or an event type; via is an emitter channel or an event type", () => {
+    for (const field of EVIDENCE_BIND_FIELDS) expect(isEvidenceBind(field), field).toBe(true);
+    for (const channel of EMITTER_CHANNELS) expect(isEmitterVia(channel), channel).toBe(true);
+    for (const type of EVIDENCE_EVENT_TYPES) {
+      expect(isEvidenceBind(type), type).toBe(true);
+      expect(isEmitterVia(type), type).toBe(true);
+    }
+  });
+
+  it("the lists cover the built-in data: every CSD bind, every artifact field a CSD declares, every manifest bind and via", () => {
+    const csds = loadBuiltinCsds().list();
+    const tiers = csds.flatMap((csd) => Object.values(csd.evidence ?? {}));
+    for (const tier of tiers) {
+      for (const ref of tier.primitives ?? []) if (ref.bind !== undefined) expect(isEvidenceBind(ref.bind), ref.bind).toBe(true);
+      for (const field of tier.required) if (field.endsWith("Cid")) expect(EVIDENCE_BIND_FIELDS, field).toContain(field);
+    }
+    for (const manifest of Object.values({ ...ADAPTER_DEFAULT_MANIFESTS, ...DEVICE_ROLE_DEFAULT_MANIFESTS })) {
+      for (const decl of manifest.emits) {
+        if (decl.bind !== undefined) expect(isEvidenceBind(decl.bind), decl.bind).toBe(true);
+        if (decl.via !== undefined) expect(isEmitterVia(decl.via), decl.via).toBe(true);
+      }
+    }
+    // Every channel is one a default manifest uses: the list names no channel that nothing emits through.
+    const vias = new Set(Object.values({ ...ADAPTER_DEFAULT_MANIFESTS, ...DEVICE_ROLE_DEFAULT_MANIFESTS }).flatMap((m) => m.emits.map((e) => e.via)));
+    for (const channel of EMITTER_CHANNELS) expect(vias, channel).toContain(channel);
+  });
+
+  it("an identifier-shaped name outside the lists is refused (astra's sk_live_x and secret_token)", () => {
+    for (const bad of ["sk_live_x", "secret_token", "dropoffVideoCid", "toString", "__proto__", "constructor", "", 7, null]) {
+      expect(isEvidenceBind(bad), String(bad)).toBe(false);
+      expect(isEmitterVia(bad), String(bad)).toBe(false);
+    }
+    // The lists don't leak into each other: a channel is not a field, and a field is not a channel.
+    expect(isEvidenceBind("toKernelOutput")).toBe(false);
+    expect(isEmitterVia("outputArtifactCid")).toBe(false);
+  });
+});
+
+describe("ownDataSnapshot: a descriptor-only copy (r1 finding 5)", () => {
+  it("copies JSON data exactly, as a new object", () => {
+    const value = JSON.parse('{"a":1,"b":[true,null,"x",{"c":-2.5}],"d":{}}') as Record<string, unknown>;
+    const copy = ownDataSnapshot(value);
+    expect(copy).toEqual({ ok: true, value });
+    expect(copy.ok && copy.value).not.toBe(value);
+  });
+
+  it("refuses an accessor anywhere, and never calls it", () => {
+    let called = 0;
+    const getter = () => ((called += 1), "api");
+    const flat = Object.defineProperty({}, "channel", { enumerable: true, get: getter });
+    const deep = { envelope: [Object.defineProperty({ metric: "m" }, "min", { enumerable: true, get: getter })] };
+    const index = Object.defineProperty(["a", "b"], 1, { enumerable: true, get: getter });
+    const hidden = Object.defineProperty({}, "channel", { enumerable: false, get: getter });
+    for (const value of [flat, deep, { claimIds: index }, hidden]) expect(ownDataSnapshot(value).ok).toBe(false);
+    expect(called).toBe(0);
+  });
+
+  it("refuses a proxy without running a trap (Node offers a trap-free check)", () => {
+    let trapped = false;
+    const handler: ProxyHandler<object> = {
+      ownKeys: () => ((trapped = true), []),
+      getOwnPropertyDescriptor: () => ((trapped = true), undefined),
+      getPrototypeOf: () => ((trapped = true), Object.prototype),
+    };
+    expect(ownDataSnapshot(new Proxy({ channel: "api" }, handler)).ok).toBe(false);
+    expect(ownDataSnapshot({ envelope: [new Proxy({ metric: "m" }, handler)] }).ok).toBe(false);
+    expect(trapped).toBe(false);
+  });
+
+  it("refuses symbol keys, __proto__ keys, non-plain objects, irregular arrays and non-data values", () => {
+    class Params {
+      channel = "api";
+    }
+    const holey = ["a", , "c"];
+    const extra = Object.assign(["a"], { secret: "x" });
+    const subclassed = new (class extends Array<string> {})();
+    for (const value of [
+      { [Symbol("s")]: "x" },
+      JSON.parse('{"__proto__":{"admin":true}}'),
+      new Params(),
+      new Map([["channel", "api"]]),
+      new Date(0),
+      { list: holey },
+      { list: extra },
+      { list: subclassed },
+      { f: () => 1 },
+      { n: BigInt(1) },
+      { s: Symbol("s") },
+    ]) {
+      expect(ownDataSnapshot(value).ok, String(value)).toBe(false);
+    }
+  });
+
+  it("copies a non-enumerable data key as an ordinary one, so a closed check still sees and refuses it", () => {
+    const params = Object.defineProperty({ channel: "api" }, "apiKey", { value: "sk_live_x", enumerable: false });
+    const copy = ownDataSnapshot(params);
+    expect(copy.ok && Object.keys(copy.value as object).sort()).toEqual(["apiKey", "channel"]);
+    expect(validatePrimitiveParams("confirm.target_system", copy.ok ? copy.value : undefined).ok).toBe(false);
+  });
+
+  it("bounds nesting, so a cycle is refused rather than walked forever", () => {
+    let nested: Record<string, unknown> = {};
+    const root = nested;
+    for (let i = 0; i < MAX_SNAPSHOT_DEPTH; i++) nested = nested.next = {} as Record<string, unknown>;
+    expect(ownDataSnapshot(root).ok).toBe(false);
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic.self = cyclic;
+    expect(ownDataSnapshot(cyclic).ok).toBe(false);
+    let shallow: Record<string, unknown> = {};
+    const shallowRoot = shallow;
+    for (let i = 0; i < MAX_SNAPSHOT_DEPTH - 1; i++) shallow = shallow.next = {} as Record<string, unknown>;
+    expect(ownDataSnapshot(shallowRoot).ok).toBe(true);
   });
 });

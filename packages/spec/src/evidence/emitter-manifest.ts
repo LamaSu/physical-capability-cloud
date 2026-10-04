@@ -34,7 +34,7 @@ import {
   type CsdEvidencePrimitiveRef,
   type CsdEvidenceTier,
 } from "../csd/schema.js";
-import { isParamIdentifier } from "./primitive-params.js";
+import { isEmitterVia } from "./primitive-params.js";
 import { computeCsdEligibility } from "./eligibility.js";
 import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "./primitives.js";
 
@@ -45,8 +45,11 @@ import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "./primitives.js"
  * (`{ id, params?, bind? }`) plus supply-side provenance/demonstration.
  */
 export const EmitterDeclSchema = CsdEvidencePrimitiveRefSchema.extend({
-  /** Provenance: adapter command / EvidenceEventType / peripheral deviceId, as an identifier (N128). */
-  via: z.string().refine(isParamIdentifier, { message: "via must be an identifier" }).optional(),
+  /**
+   * Provenance, as a closed name (N128): an emitter channel (EMITTER_CHANNELS, e.g. an adapter command) or an
+   * EvidenceEventType. Never free text, and never merely identifier-shaped.
+   */
+  via: z.string().refine(isEmitterVia, { message: "via must name an emitter channel (EMITTER_CHANNELS) or an event type" }).optional(),
   /**
    * Demonstration flag — set ONLY by test-job / prove after a real run produced
    * this primitive, NEVER by the author. Declaration ≠ demonstration ≠

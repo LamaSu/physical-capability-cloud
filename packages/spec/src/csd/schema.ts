@@ -8,7 +8,7 @@
  */
 
 import { z } from "zod";
-import { isParamIdentifier, validatePrimitiveParams } from "../evidence/primitive-params.js";
+import { isEvidenceBind, ownDataSnapshot, validatePrimitiveParams } from "../evidence/primitive-params.js";
 import { CompositionBlockSchema } from "./composition.js";
 
 // ── Pricing Impact ─────────────────────────────────────────────────
@@ -135,10 +135,22 @@ export type CsdInvariant = z.infer<typeof CsdInvariantSchema>;
 // ── Evidence Tier Schema ────────────────────────────────────────────
 
 /**
+ * `params` as every primitive-ref schema reads it (N128 r1, finding 5): first a copy made through property
+ * descriptors only (`ownDataSnapshot`), then zod's record parse of the copy. An accessor inside params is
+ * never called; a value the copy refuses stops the parse (fatal), so nothing after it reads the original.
+ */
+const OwnDataParamsSchema = z.preprocess((value, ctx) => {
+  const copy = ownDataSnapshot(value);
+  if (copy.ok) return copy.value;
+  ctx.addIssue({ code: z.ZodIssueCode.custom, message: copy.reason, fatal: true });
+  return z.NEVER;
+}, z.record(z.unknown()));
+
+/**
  * Structured reference to an evidence primitive (evidence-vocabulary v1, §5.2).
  *
  * Additive sibling of the legacy free-text `required[]`. `bind` names the
- * bundle/WorkSchema field carrying the instance (e.g. bind:"dropoffPhotoCid"),
+ * bundle/WorkSchema field carrying the instance (e.g. bind:"capturePhotoCid"),
  * healing the outputPhotoCid-vs-dropoffPhotoCid divergence WITHOUT renaming
  * anyone's fields.
  */
@@ -149,9 +161,15 @@ export const CsdEvidencePrimitiveRefSchema = z.object({
    * Per-primitive params (minClass, integrityGrade, channel, …). Closed per primitive: see
    * `refineClosedPrimitiveRef` and evidence/primitive-params.ts (N128).
    */
-  params: z.record(z.unknown()).optional(),
-  /** Bundle/WorkSchema field that carries this primitive's instance: an identifier, never free text (N128). */
-  bind: z.string().refine(isParamIdentifier, { message: "bind must be an identifier" }).optional(),
+  params: OwnDataParamsSchema.optional(),
+  /**
+   * Bundle/WorkSchema field that carries this primitive's instance: a closed name (N128), an evidence field
+   * (EVIDENCE_BIND_FIELDS) or an event type. Never free text, and never merely identifier-shaped.
+   */
+  bind: z
+    .string()
+    .refine(isEvidenceBind, { message: "bind must name an evidence field (EVIDENCE_BIND_FIELDS) or an event type" })
+    .optional(),
 });
 
 export type CsdEvidencePrimitiveRef = z.infer<typeof CsdEvidencePrimitiveRefSchema>;

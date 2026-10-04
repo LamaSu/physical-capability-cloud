@@ -35,10 +35,12 @@ const LIVE_FIRST_CLASS = [
 // The locked golden manifest hash of the shipped vocabulary (v1 16 + the
 // v1.5-industrial #52-#55 = 20 active defs). Any contract change (adding/removing
 // a primitive, changing tierSupport, auth, params, deps, gates, status) moves
-// this — the golden test then fails on purpose. Recomputed for the additive
-// v1.5-industrial cut (was 0x499f3a5d… for the v1-only 16-primitive contract).
+// this — the golden test then fails on purpose. Recomputed for v3, the closed
+// params of N128 (every paramsSchema rendered from evidence/primitive-params.ts);
+// v2 was 0x9e034dd9… (the additive v1.5-industrial cut), and the v1-only
+// 16-primitive contract was 0x499f3a5d….
 const GOLDEN_VOCAB_MANIFEST_HASH =
-  "0x9e034dd9df85748de1bac4d199bd3928f6c4477b81eb20a83264bcd7fdd441ed";
+  "0xc01cb6688c4cdbabca37625879d5403637904e38a655f1fede087040808e718d";
 
 // ── 1. The registry validates ───────────────────────────────────────
 
@@ -108,8 +110,8 @@ describe("evidence vocabulary — registry validates", () => {
 // ── 2. Manifest hash (golden + deterministic + order-independent) ────
 
 describe("evidence vocabulary — VOCAB_MANIFEST_HASH", () => {
-  it("VOCAB_VERSION is 2 (additive v1.5-industrial bump)", () => {
-    expect(VOCAB_VERSION).toBe(2);
+  it("VOCAB_VERSION is 3 (N128: closed params, not additive)", () => {
+    expect(VOCAB_VERSION).toBe(3);
   });
 
   it("is a 0x-prefixed sha256 hex", () => {
@@ -136,6 +138,17 @@ describe("evidence vocabulary — VOCAB_MANIFEST_HASH", () => {
         : d,
     );
     expect(computeVocabManifestHash(mutated)).not.toBe(VOCAB_MANIFEST_HASH);
+  });
+
+  it("changes when a primitive's params contract changes (N128: the closed contract is committed)", () => {
+    const loosened: EvidencePrimitiveDef[] = EVIDENCE_PRIMITIVES.map((d) =>
+      d.id === "capture.photo_nonced" ? { ...d, paramsSchema: { ...d.paramsSchema, required: ["media"] } } : d,
+    );
+    expect(computeVocabManifestHash(loosened)).not.toBe(VOCAB_MANIFEST_HASH);
+    const opened: EvidencePrimitiveDef[] = EVIDENCE_PRIMITIVES.map((d) =>
+      d.id === "decl.self_attested" ? { ...d, paramsSchema: { ...d.paramsSchema, additionalProperties: true } } : d,
+    );
+    expect(computeVocabManifestHash(opened)).not.toBe(VOCAB_MANIFEST_HASH);
   });
 
   it("does NOT change when only prose (proves) changes", () => {
@@ -346,7 +359,7 @@ describe("additive schema — CSD primitives[] and the primitive rule kind", () 
         tier0: {
           description: "self-attested",
           required: ["jobId"],
-          primitives: [{ id: "decl.self_attested", bind: "declaration" }],
+          primitives: [{ id: "decl.self_attested" }],
         },
       },
     };
@@ -474,13 +487,13 @@ describe("v1.5-industrial — a sensor/machine-log CSD is tier-eligible via the 
       },
       tier1: {
         description: "signed machine log + power envelope + coverage gate",
-        required: ["jobId", "machineLogChainCid", "sensorSummaryCid"],
+        required: ["jobId", "machineLogCid", "sensorLogCid"],
         primitives: [
           { id: "artifact.hash", params: { mode: "redacted-commit" } },
           { id: "ident.registered_key" },
           { id: "receipt.kernel_signed" },
-          { id: "machine.execution_log", params: { logKind: "command_trace" }, bind: "machineLogChainCid" },
-          { id: "telemetry.envelope_conformance", params: { envelope: "builtin-defaults" }, bind: "sensorSummaryCid" },
+          { id: "machine.execution_log", params: { logKind: "command_trace" }, bind: "machineLogCid" },
+          { id: "telemetry.envelope_conformance", params: { envelope: "builtin-defaults" }, bind: "sensorLogCid" },
           { id: "telemetry.coverage_gate" },
         ],
       },
