@@ -108,16 +108,64 @@ function resolvedDeclaration(call: ts.CallExpression, checker: ts.TypeChecker): 
   return declaration && !ts.isJSDocSignature(declaration) ? declaration : undefined;
 }
 
+/** A call signature declared by pino's LogFn or the gateway's DeclaredLogFn. */
+function isLogFnDeclaration(declaration: ts.Declaration | undefined): boolean {
+  if (!declaration || !ts.isCallSignatureDeclaration(declaration) || !ts.isInterfaceDeclaration(declaration.parent) || !LOG_FN_INTERFACES.has(declaration.parent.name.text)) return false;
+  const file = declaration.getSourceFile().fileName;
+  return /[/\\]pino[/\\]/.test(file) || file.endsWith("closed-sinks.ts");
+}
+
+/** The member name a property or element access reads, when the program names it. */
+function memberName(node: ts.Expression): string | undefined {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) return node.argumentExpression.text;
+  return undefined;
+}
+
+/** `<logger>.<level>` or `<logger>["<level>"]`, by the receiver's type. */
+function isLevelAccess(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  const name = memberName(node);
+  return !!name && LOG_METHODS.includes(name) && isLoggerType(checker.getTypeAtLocation((node as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression), checker);
+}
+
 /** A log call: its resolved signature is pino's LogFn or the gateway's DeclaredLogFn, or it is `<logger>.<level>(...)`. */
 function isLogCall(call: ts.CallExpression, checker: ts.TypeChecker): boolean {
-  const declaration = resolvedDeclaration(call, checker);
-  if (declaration && ts.isCallSignatureDeclaration(declaration) && ts.isInterfaceDeclaration(declaration.parent) && LOG_FN_INTERFACES.has(declaration.parent.name.text)) {
-    const file = declaration.getSourceFile().fileName;
-    if (/[/\\]pino[/\\]/.test(file) || file.endsWith("closed-sinks.ts")) return true;
+  return isLogFnDeclaration(resolvedDeclaration(call, checker)) || isLevelAccess(call.expression, checker);
+}
+
+/** A level method as a value: its type has a LogFn call signature, or it is `<logger>.<level>`. */
+function isLevelMethod(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  const inner = unwrap(node);
+  if (checker.getTypeAtLocation(inner).getCallSignatures().some((signature) => isLogFnDeclaration(signature.getDeclaration()))) return true;
+  return isLevelAccess(inner, checker);
+}
+
+/**
+ * N107c r1 (astra MEDIUM 1): a level method called through Function.prototype.call or apply, or
+ * through Reflect.apply, resolves to their signatures, not LogFn's. Returns the arguments pino
+ * receives; "unreadable" when apply's argument list is not an array literal; undefined when the
+ * call is not one of these.
+ */
+function indirectLogArguments(call: ts.CallExpression, checker: ts.TypeChecker): readonly ts.Expression[] | "unreadable" | undefined {
+  const callee = unwrap(call.expression);
+  const how = memberName(callee);
+  if (how !== "call" && how !== "apply") return undefined;
+  const receiver = unwrap((callee as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression);
+  let fn: ts.Expression | undefined;
+  let list: ts.Expression | undefined;
+  if (how === "apply" && ts.isIdentifier(receiver) && receiver.text === "Reflect") {
+    // Reflect.apply(fn, thisArg, args)
+    [fn, , list] = call.arguments;
+  } else {
+    fn = receiver;
+    if (how === "call") return isLevelMethod(fn, checker) ? call.arguments.slice(1) : undefined;
+    list = call.arguments[1];
   }
-  const callee = call.expression;
-  const name = ts.isPropertyAccessExpression(callee) ? callee.name.text : ts.isElementAccessExpression(callee) && ts.isStringLiteralLike(callee.argumentExpression) ? callee.argumentExpression.text : undefined;
-  return !!name && LOG_METHODS.includes(name) && isLoggerType(checker.getTypeAtLocation((callee as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression), checker);
+  if (!fn || !isLevelMethod(fn, checker)) return undefined;
+  if (list === undefined) return [];
+  const args = unwrap(list);
+  if (!ts.isArrayLiteralExpression(args) || args.elements.some(ts.isOmittedExpression)) return "unreadable";
+  return args.elements;
 }
 
 /** A child-logger call: `<logger>.child(...)`, or a call that resolves to pino's or Fastify's child method. */
@@ -160,8 +208,7 @@ function scanProgram(program: ts.Program, include: (fileName: string) => boolean
       const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
       violations.push({ file: sourceFile.fileName, line: line + 1, text: why });
     };
-    const checkLogCall = (call: ts.CallExpression) => {
-      const args = call.arguments;
+    const checkLogArgs = (args: readonly ts.Expression[]) => {
       const spread = args.find(ts.isSpreadElement);
       if (spread) return report(spread, "log(...spread): arguments the scan cannot read");
       // Each argument as it is, not as a cast says it is.
@@ -202,9 +249,14 @@ function scanProgram(program: ts.Program, include: (fileName: string) => boolean
     };
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
-        if (isLogCall(node, checker)) {
+        const indirect = indirectLogArguments(node, checker);
+        if (indirect !== undefined) {
           found.logCalls += 1;
-          checkLogCall(node);
+          if (indirect === "unreadable") report(node, "log.apply(this, <args>): arguments the scan cannot read");
+          else checkLogArgs(indirect);
+        } else if (isLogCall(node, checker)) {
+          found.logCalls += 1;
+          checkLogArgs(node.arguments);
         } else if (isChildCall(node, checker)) {
           found.childCalls += 1;
           checkChildCall(node);
@@ -267,6 +319,15 @@ describe("N107b ratchet: no raw logger message escapes lit()", () => {
       "app.log.info(raw as unknown as ReturnType<typeof lit>);", // line 39: a raw message cast to Declared
       "app.log.info({ msg: raw } as object);", // line 40: a msg field a cast hides
       'app.log.child({ ["__proto__"]: 1 } as object).info(lit("x"));', // line 41: bindings a cast hides
+      // N107c r1 (astra MEDIUM 1): a level method reached through Function.prototype.call/apply.
+      "app.log.info.call(app.log, raw);", // line 42: call
+      "app.log.info.apply(app.log, [raw]);", // line 43: apply
+      'app.log.info.call(app.log, lit("declared"));',
+      'app.log.warn.apply(app.log, [{ a: 1 }, lit("declared")]);',
+      "const logArgs: [string] = [raw];",
+      "app.log.info.apply(app.log, logArgs);", // line 47: apply with arguments the scan cannot read
+      "Reflect.apply(app.log.error, app.log, [raw]);", // line 48: the same through Reflect.apply
+      'app.log["info"].call(app.log, { msg: raw });', // line 49: call on an element access, a raw msg field
     ].join("\n");
     const host = ts.createCompilerHost(options);
     const getSourceFile = host.getSourceFile.bind(host);
@@ -278,7 +339,7 @@ describe("N107b ratchet: no raw logger message escapes lit()", () => {
     host.readFile = (fileName) => (fileName === probe ? source : readFile(fileName));
     const program = ts.createProgram({ rootNames: [probe], options, host });
     const lines = scanProgram(program, (fileName) => fileName === probe).map((v) => v.line);
-    expect(lines).toEqual([5, 7, 8, 9, 10, 15, 16, 17, 19, 21, 23, 24, 26, 29, 30, 31, 34, 35, 36, 39, 40, 41]);
+    expect(lines).toEqual([5, 7, 8, 9, 10, 15, 16, 17, 19, 21, 23, 24, 26, 29, 30, 31, 34, 35, 36, 39, 40, 41, 42, 43, 47, 48, 49]);
   }, 180_000);
 
   it("every Fastify/pino logger call in packages/gateway/src uses lit() for its message", () => {

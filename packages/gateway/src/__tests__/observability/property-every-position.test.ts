@@ -858,7 +858,9 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       endTrace(traceId: unknown, spanId: unknown, status: unknown, endTime?: unknown): void;
     };
     const results: Result[] = [];
-    let pending: string[] = [];
+    /** Attempts whose record lies outside the stream's window, so the stream cannot show it (see readBack). */
+    const outsideStreamWindow: string[] = [];
+    let streamProven = 0;
 
     /** The stream's snapshot (the most recent traces), as its handler writes it before it holds the connection open. */
     const streamSnapshot = async () => {
@@ -874,18 +876,16 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       raw.emit("close");
       return written.join("");
     };
-    const flushStream = async () => {
-      if (pending.length === 0) return;
-      const text = await streamSnapshot();
-      const label = `the stream snapshot of: ${pending.join(" | ")}`;
-      results.push({ label, text });
-      if (!text.includes("event: connected")) results.push({ label: `${label} (the stream did not complete)`, text: undefined });
-      pending = [];
-    };
     // N107c (tests pack): each attempt carries its own declared witness, and a read counts only when
     // every read path shows it, so the record a read returns is this attempt's, never an earlier
     // trace: an attempt that stored nothing reads as no output.
+    // N107c r1 (astra MEDIUM 2): the stream is one of those read paths. It used to be read once per
+    // 20 attempts and pass on its "event: connected" line alone, so a snapshot that dropped every
+    // trace still passed. Each attempt now reads it, and the stream must show the attempt's witness
+    // whenever the record lies in the stream's window (the STREAM_WINDOW most recent traces).
     const ATTEMPT = "n107b.attempt";
+    /** routes/traces.ts sends the 20 most recent traces on connect (a smaller window there fails here, never passes). */
+    const STREAM_WINDOW = 20;
     let attempt = 1_000_000;
     const witnessed = (attributes: unknown, n: number): unknown =>
       isContainer(attributes) && !Array.isArray(attributes) ? { ...attributes, [ATTEMPT]: schema.declare.metric(n) } : attributes;
@@ -924,9 +924,28 @@ describe("N107b round 4, the property: a marker in every position of every sink 
         results.push({ label: `${label} (no ${unproven.join(", ")} read shows this attempt's record)`, text: undefined });
         return;
       }
-      results.push({ label, text: paths.flatMap(([, texts]) => texts).join("\n") });
-      pending.push(label);
-      if (pending.length >= 20) await flushStream();
+      const stream = await streamSnapshot();
+      if (!stream.includes("event: connected")) {
+        results.push({ label: `${label} (the stream did not complete)`, text: undefined });
+        return;
+      }
+      // A record filed under a trace that is no longer among the most recent (a poisoned trace id
+      // the collector closes to an existing trace) is outside the stream's window by design.
+      let inStreamWindow: boolean;
+      try {
+        inStreamWindow = render(collector.getRecentTraces(STREAM_WINDOW)).includes(witness);
+      } catch (error) {
+        results.push({ label: `${label} (a read threw ${String(error)})`, text: undefined });
+        return;
+      }
+      if (inStreamWindow && !stream.includes(witness)) {
+        results.push({ label: `${label} (the stream snapshot does not show this attempt's record)`, text: undefined });
+        return;
+      }
+      if (inStreamWindow) streamProven += 1;
+      else outsideStreamWindow.push(label);
+      // The whole snapshot, whatever its window holds, is checked for markers too.
+      results.push({ label, text: [...paths.flatMap(([, texts]) => texts), stream].join("\n") });
     };
     const base = () => ({
       traceId: TraceCollector.newTraceId(),
@@ -999,12 +1018,16 @@ describe("N107b round 4, the property: a marker in every position of every sink 
         await readBack(label, n, field === "traceId");
       }
     }
-    await flushStream();
     // A read must prove that the attempted span made the record it returns: an attempt that
     // started no span reads as no output, never as an earlier trace.
     const before = results.length;
     await readBack("a dropped startSpan (no span started)", ++attempt);
     expect(results.splice(before).map((r) => r.text), "a dropped attempt's read").toEqual([undefined]);
+    // The stream proved nearly every attempt. Only an attempt that poisons the trace id itself may
+    // land outside its window, and each one that did is named here.
+    console.log(`stream snapshot: ${streamProven} attempts proven, ${outsideStreamWindow.length} outside its window`);
+    expect(outsideStreamWindow.filter((label) => !/traceId = /.test(label)), "attempts outside the stream's window").toEqual([]);
+    expect(streamProven, "attempts the stream snapshot proved").toBeGreaterThan(10 * Math.max(1, outsideStreamWindow.length));
     expect(violations("the trace collector", results), "positions that reached the trace collector").toBe("");
     await app.close();
   });
