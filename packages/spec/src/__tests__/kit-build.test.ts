@@ -8,6 +8,7 @@ import {
   KIT_BUILD_CAPABILITY_TYPE,
   KIT_BUILD_SPEC_SCHEMA,
   KIT_REQUIRED_ROLES,
+  OPPORTUNITY_SCHEMA,
   OpportunityDTOSchema,
   decimalToBaseUnits,
   kitBuildRequestFromOffer,
@@ -162,7 +163,7 @@ describe("kitBuildRequestFromOffer", () => {
   it("a held escrow bound to THIS offer makes the request funded and authoritative, with the escrow's own amount", () => {
     const dto = kitBuildRequestFromOffer(offer(), held(), AS_OF)!;
     expect(dto).toEqual({
-      schema: "pcc.opportunity.v0",
+      schema: OPPORTUNITY_SCHEMA,
       kind: "kit_build_request",
       id: "kit-build:offer-7",
       capabilityType: LIQUID,
