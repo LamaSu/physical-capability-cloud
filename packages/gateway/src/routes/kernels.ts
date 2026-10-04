@@ -5,6 +5,7 @@ import { getKernelFacade } from "../facades/index.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
 import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -74,6 +75,16 @@ function locationOptInAuthority(req: FastifyRequest): LocationOptInAuthority {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: typeof proven === "string" && proven.length > 0 ? proven : null,
   };
+}
+
+/**
+ * N31: the refusal for a write that runs the kernel ("operate" in auth/kernel-authority.ts), or
+ * null when the caller is the kernel's own principal, its proven operator wallet or the admin.
+ */
+function refuseOperate(req: FastifyRequest, kernelId: string): { status: number; body: Record<string, string> } | null {
+  const authority = authorityOf(req);
+  if (isAnonymous(authority)) return { status: 401, body: AUTHENTICATION_REQUIRED };
+  return refuseKernelAction(req, authority, kernelId, "operate");
 }
 
 export async function kernelRoutes(app: FastifyInstance) {
@@ -200,6 +211,10 @@ export async function kernelRoutes(app: FastifyInstance) {
     Params: { kernelId: string };
     Body: HeartbeatInput;
   }>("/api/kernels/:kernelId/heartbeat", async (req, reply) => {
+    // N31 (#575 r2; bus #6505): a heartbeat sets the kernel's status and upserts its
+    // capabilities, so only the kernel's own principal, its proven wallet or the admin may send it.
+    const refusal = refuseOperate(req, req.params.kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const result = await facade.heartbeat(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
   });
@@ -213,6 +228,9 @@ export async function kernelRoutes(app: FastifyInstance) {
     Params: { kernelId: string };
     Body: CapabilityAnnouncementInput;
   }>("/api/kernels/:kernelId/capabilities", async (req, reply) => {
+    // N31 (#575 r2): announcing capabilities writes them onto the kernel; same rule as heartbeat.
+    const refusal = refuseOperate(req, req.params.kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const result = await facade.announceCapabilities(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
   });

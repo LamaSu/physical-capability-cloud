@@ -32,8 +32,9 @@
  *   GET  /api/relay/:kernelId/manifest              -- Get tool manifest for this kernel
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getStore } from "../db.js";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { isToolSafe, getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
@@ -185,6 +186,28 @@ function getStreamClients(kernelId: string): Set<FastifyReply> {
 // ── Route Registration ──────────────────────────────────────────────────────
 
 export async function deviceRelayRoutes(app: FastifyInstance) {
+  // N31 (#575 r2; bus #6505): every relay route acts on ONE kernel's devices, execution scopes,
+  // tool-call queue, results, camera or chat, and none checked who operates that kernel: any key
+  // could open a scope on any kernel and queue commands its executor runs. One hook for the whole
+  // plugin, registered before every route, so a relay route added later is guarded by
+  // construction: the kernel's own principal, its proven operator wallet, or the admin. That is
+  // the floor (the executor side: the pending queue, tool results, camera frames, chat replies).
+  // What authorizes or drives a device is a decision on top (#6508): opening or revoking an
+  // execution scope, a write tool call and a chat instruction need the admin or the kernel's
+  // PROVEN operator wallet (decideRefusal below).
+  const decideRefusal = (req: FastifyRequest, kernelId: string) => refuseKernelAction(req, authorityOf(req), kernelId, "decide");
+
+  app.addHook("preHandler", async (req, reply) => {
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const kernelId = (req.params as { kernelId?: unknown } | undefined)?.kernelId;
+    if (typeof kernelId !== "string" || kernelId.length === 0) {
+      return reply.code(404).send({ error: "kernel_not_found", message: "No kernel with this id is registered." });
+    }
+    const refusal = refuseKernelAction(req, authority, kernelId, "operate");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
+  });
+
   // Ensure the safety gateway singleton is initialized. In production this is
   // a no-op (KernelService constructor calls initSafetyGateway first). In
   // test environments where KernelService is not running, this creates a
@@ -285,6 +308,13 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const { db } = getStore();
     const callerId = (req as any).operatorId ?? "anonymous";
     const deviceType = resolveDeviceType(kernelId);
+
+    // N31b: a write tool drives the device, so queueing one is a decision (#6508); a safe
+    // (read-only) tool needs only the guard's floor.
+    if (!isToolSafe(deviceType, toolName)) {
+      const refusal = decideRefusal(req, kernelId);
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+    }
 
     // Non-safe tools require a scope
     if (!isToolSafe(deviceType, toolName) && !scopeId) {
@@ -677,6 +707,9 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     };
   }>("/api/relay/:kernelId/scope", async (req, reply) => {
     const { kernelId } = req.params;
+    // N31b: an execution scope authorizes device writes, so opening one is a decision.
+    const refusal = decideRefusal(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const {
       jobId,
       createdBy,
@@ -777,7 +810,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
   app.post<{
     Params: { kernelId: string; scopeId: string };
   }>("/api/relay/:kernelId/scope/:scopeId/revoke", async (req, reply) => {
-    const { scopeId } = req.params;
+    const { kernelId, scopeId } = req.params;
+    // N31b: revoking changes what a device may be driven to do, so it is a decision (#6508).
+    const refusal = decideRefusal(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const { db } = getStore();
     const scope = db
@@ -786,7 +822,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
       .where(eq(executionScopes.id, scopeId))
       .get();
 
-    if (!scope) {
+    // N31b: the guard authorized THIS kernel; a scope of another kernel is not found here.
+    if (!scope || scope.kernelId !== kernelId) {
       return reply.status(404).send({ error: "Scope not found", id: scopeId });
     }
 
@@ -1098,6 +1135,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     };
   }>("/api/relay/:kernelId/chat", async (req, reply) => {
     const { kernelId } = req.params;
+    // N31b: a chat message instructs the kernel's device agent, which may drive the device, so
+    // posting one is a decision (#6508's rule: anything that authorizes or drives a device).
+    const refusal = decideRefusal(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const { message } = req.body ?? {};
 
     if (!message) {
@@ -1201,9 +1242,10 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
 
     // Mark original message as completed if provided
     if (messageId) {
+      // N31b: the guard authorized this kernel; a message of another kernel is left alone.
       db.update(ot2ChatMessages)
         .set({ status: "completed" })
-        .where(eq(ot2ChatMessages.id, messageId))
+        .where(and(eq(ot2ChatMessages.id, messageId), eq(ot2ChatMessages.kernelId, kernelId)))
         .run();
     }
 

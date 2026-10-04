@@ -30,32 +30,27 @@ const GUARD_NAMES = new Set(["refuseKernelAction"]);
 const GUARDED_TABLES = new Set(["operatorPolicies", "pendingApprovals"]);
 
 /**
- * Kernel routes with no ownership check yet, found by this inventory (bus #6505). The stacked PR
- * on #575 guards each and removes it from this list. Keys are "METHOD path".
+ * Kernel routes with no ownership check yet. #575 r2 listed the 10 this inventory found (bus
+ * #6505); N31b guarded the 9 shop-kernel routes (the device relay, heartbeat and capability
+ * announce) and fixed the manifest verify's self-auth (now CLASSIFIED), so it is empty. Keys
+ * are "METHOD path".
  */
-const KNOWN_UNGUARDED = new Set([
-  "POST /api/relay/:kernelId/tool-call",
-  "POST /api/relay/:kernelId/tool-result",
-  "POST /api/relay/:kernelId/scope",
-  "POST /api/relay/:kernelId/scope/:scopeId/revoke",
-  "POST /api/relay/:kernelId/camera/frame",
-  "POST /api/relay/:kernelId/chat",
-  "POST /api/relay/:kernelId/chat/respond",
-  "POST /api/kernels/:kernelId/heartbeat",
-  "POST /api/kernels/:kernelId/capabilities",
-  // The digital-kernel manifest's verify (kernel-marketplace.ts isAdminAuthorized) accepts a
-  // builder "self-auth" from an x-agent-id header that any caller can send.
-  "POST /api/kernels/:kernelId/verify",
-]);
+const KNOWN_UNGUARDED = new Set<string>([]);
 
 /**
  * Kernel-path routes that do not act on a shop kernel's operator controls, each with its own
  * check and an executable witness below. A closed set: adding one needs a witness test here.
  */
-const CLASSIFIED: Record<string, { category: "digital_manifest_admin_only"; cite: string }> = {
+const CLASSIFIED: Record<string, { category: "digital_manifest_admin_only" | "digital_manifest_admin_or_registrant"; cite: string }> = {
   "POST /api/kernels/:kernelId/suspend": {
     category: "digital_manifest_admin_only",
     cite: "routes/kernel-marketplace.ts:401",
+  },
+  // N31b: verify's self-verification is the principal that registered the manifest, no longer an
+  // x-agent-id header any caller could send (kernel-marketplace.ts isAdminAuthorized).
+  "POST /api/kernels/:kernelId/verify": {
+    category: "digital_manifest_admin_or_registrant",
+    cite: "routes/kernel-marketplace.ts:182",
   },
 };
 
@@ -272,6 +267,15 @@ describe("N31 route inventory: packages/gateway/src", () => {
     }
     expect(kernelRoutes.filter((r) => r.guarded).map((r) => r.key).sort()).toEqual([
       "PATCH /api/operator/policy/:kernelId",
+      "POST /api/kernels/:kernelId/capabilities",
+      "POST /api/kernels/:kernelId/heartbeat",
+      "POST /api/relay/:kernelId/camera/frame",
+      "POST /api/relay/:kernelId/chat",
+      "POST /api/relay/:kernelId/chat/respond",
+      "POST /api/relay/:kernelId/scope",
+      "POST /api/relay/:kernelId/scope/:scopeId/revoke",
+      "POST /api/relay/:kernelId/tool-call",
+      "POST /api/relay/:kernelId/tool-result",
       "PUT /api/kernels/:kernelId/agent-package/configure",
       "PUT /api/operator/policy/:kernelId",
     ]);
@@ -283,11 +287,29 @@ describe("N31 route inventory: the CLASSIFIED witnesses", () => {
   // not a shop kernel, and its own check requires X-Admin-Key whenever PCC_ADMIN_KEY is set.
   const PREV_ADMIN = process.env.PCC_ADMIN_KEY;
   let app: FastifyInstance;
+  /** A manifest the marketplace's validateManifest accepts. */
+  const manifestFor = (kernelId: string, builder: string) => ({
+    manifestVersion: "1.0.0",
+    kernelId,
+    name: "N31 inventory manifest",
+    description: "n31",
+    builder: { agentId: builder, name: "b" },
+    capabilityType: "n31.test",
+    workflowSteps: [{ id: "s1", name: "step" }],
+    pricing: { currency: "USDC", baseUSD: 1 },
+    maxAssuranceTier: 1,
+    endpointURL: "https://example.invalid/n31",
+    sessionKeyPolicy: { maxTTLSeconds: 60, allowedActions: ["invoke"] },
+  });
 
   beforeAll(async () => {
     process.env.PCC_ADMIN_KEY = "n31-inventory-admin";
     const { kernelMarketplaceRoutes } = await import("../routes/kernel-marketplace.js");
     app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      const principal = req.headers["x-test-principal"];
+      if (typeof principal === "string") (req as unknown as { operatorId: string }).operatorId = principal;
+    });
     await app.register(kernelMarketplaceRoutes);
     await app.ready();
   });
@@ -302,17 +324,27 @@ describe("N31 route inventory: the CLASSIFIED witnesses", () => {
     const reg = await app.inject({
       method: "POST",
       url: "/api/kernels/register",
-      payload: {
-        kernelId: "kernel-n31-inventory-manifest",
-        name: "N31 inventory manifest",
-        builder: { agentId: "builder-n31", name: "b" },
-        endpoint: "https://example.invalid/n31",
-        capabilities: ["n31.test"],
-      },
+      headers: { "x-test-principal": "registrant-n31-suspend" },
+      payload: manifestFor("kernel-n31-inventory-manifest", "builder-n31"),
     });
-    const id = reg.statusCode === 201 ? "kernel-n31-inventory-manifest" : null;
-    const res = await app.inject({ method: "POST", url: `/api/kernels/${id ?? "kernel-n31-inventory-missing"}/suspend`, payload: {} });
-    expect([401, 404]).toContain(res.statusCode);
-    if (id) expect(res.statusCode).toBe(401);
+    expect(reg.statusCode).toBe(201);
+    // Even the registrant: suspension needs the admin key.
+    for (const headers of [{ "x-test-principal": "registrant-n31-suspend" }, { "x-test-principal": "stranger-n31" }]) {
+      const res = await app.inject({ method: "POST", url: "/api/kernels/kernel-n31-inventory-manifest/suspend", headers, payload: {} });
+      expect(res.statusCode).toBe(401);
+    }
+  });
+
+  it("POST /api/kernels/:kernelId/verify refuses a stranger who names the builder in x-agent-id", async () => {
+    const manifest = manifestFor("kernel-n31-inventory-verify", "builder-n31-verify");
+    const reg = await app.inject({ method: "POST", url: "/api/kernels/register", headers: { "x-test-principal": "registrant-n31" }, payload: manifest });
+    expect(reg.statusCode).toBe(201);
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/kernels/kernel-n31-inventory-verify/verify",
+      headers: { "x-test-principal": "stranger-n31", "x-agent-id": "builder-n31-verify" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(401);
   });
 });

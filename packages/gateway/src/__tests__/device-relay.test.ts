@@ -6,6 +6,22 @@ import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { getSafetyGateway } from "@pcc/kernel";
 import { schema, sql, eq } from "@pcc/store";
 
+// N31b (#575 stacked; the steward's ruling #6508): every relay route and the kernel heartbeat now
+// take the kernel-ownership guard. These tests exercise the routes' own logic, so their apps act
+// with the admin key unless a test sets its own identity; the guard itself is tested in
+// n31-relay-and-heartbeat-ownership.test.ts.
+const N31_ADMIN = "n31b-test-admin-secret";
+const PREV_N31_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_N31_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N31_ADMIN;
+});
+const asN31Admin = async (req: { headers: Record<string, unknown> }) => {
+  if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N31_ADMIN;
+};
+
+
 const { shopKernels, kernelDevices, toolCallRelay, executionScopes, ot2CameraFrames, ot2ChatMessages } = schema;
 
 let app: FastifyInstance;
@@ -16,6 +32,7 @@ beforeAll(async () => {
   initStore({ seed: false });
 
   app = Fastify({ logger: false });
+  app.addHook("onRequest", asN31Admin);
 
   // Mock auth: decorate request with operatorId
   app.decorateRequest("operatorId", null);
@@ -398,7 +415,9 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
     });
 
     expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("tool_result_not_yours");
+    // N31b: the kernel-ownership guard refuses a non-owner before the relay's own F2 check
+    // (tool_result_not_yours); nothing is recorded either way.
+    expect(res.json()).toMatchObject({ error: "forbidden", reason: "not_kernel_operator" });
     // No breaker mutation — cannot force-trip or force-reset the kernel.
     expect(failSpy).not.toHaveBeenCalled();
     expect(okSpy).not.toHaveBeenCalled();
@@ -787,7 +806,10 @@ describe("camera auth: operator access", () => {
 });
 
 describe("camera auth: scope-holder access", () => {
-  it("allows user with active scope to view camera", async () => {
+  it("refuses a scope holder who is not the kernel's operator (N31b, fail-closed until WP-A)", async () => {
+    // The steward's ruling #6508: the relay acts only for the kernel's operator or the admin. A
+    // scope names its holder by a claimed identity, which any key can claim until WP-A proves
+    // identities, so delegation to a scope holder is refused for now (operator item 138).
     // Push a frame
     await app.inject({
       method: "POST",
@@ -822,7 +844,8 @@ describe("camera auth: scope-holder access", () => {
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
     });
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ reason: "not_kernel_operator" });
     await viewerApp.close();
   });
 });
