@@ -195,6 +195,8 @@ describe("the patch harness: nothing changed after load changes a decision, a di
     "patch: parseInt",
     "patch: Math.floor",
     "patch: String.prototype.toLowerCase",
+    // A hole or an index past the end served by a prototype would change a key, a digest or a level (astra pack 291).
+    "patch: Array.prototype[0..63] and String.prototype[0..255] written",
   ]);
 
   for (const id of SCENARIOS) {

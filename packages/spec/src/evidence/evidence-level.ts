@@ -148,6 +148,9 @@ import {
   ObjectPrototype,
   ReflectOwnKeys,
   stringSet,
+  charAt,
+  listAt,
+  ObjectDefineProperty,
 } from "../util/primordials.js";
 
 export const EVIDENCE_LEVELS = ObjectFreeze(["submitted", "device_reported", "inspected_output"] as const);
@@ -348,9 +351,9 @@ export const NON_EXECUTOR_EVENT_TYPES = ObjectFreeze([
 /** The members of three lists, in order, as one new list. */
 function unionOf(a: readonly string[], b: readonly string[], c: readonly string[]): string[] {
   const out: string[] = [];
-  for (let i = 0; i < a.length; i += 1) append(out, a[i]!);
-  for (let i = 0; i < b.length; i += 1) append(out, b[i]!);
-  for (let i = 0; i < c.length; i += 1) append(out, c[i]!);
+  for (let i = 0; i < a.length; i += 1) append(out, listAt(a, i)!);
+  for (let i = 0; i < b.length; i += 1) append(out, listAt(b, i)!);
+  for (let i = 0; i < c.length; i += 1) append(out, listAt(c, i)!);
   return out;
 }
 
@@ -363,7 +366,7 @@ const EXECUTION = stringSet(unionOf(EXECUTION_EVENT_TYPES, SUBMITTED_EVENT_TYPES
 
 /** Position in EVIDENCE_LEVELS; higher is stronger. -1 for anything else, as indexOf answered. */
 export function evidenceLevelRank(level: EvidenceLevel): number {
-  for (let i = 0; i < EVIDENCE_LEVELS.length; i += 1) if (EVIDENCE_LEVELS[i] === level) return i;
+  for (let i = 0; i < EVIDENCE_LEVELS.length; i += 1) if (listAt(EVIDENCE_LEVELS, i) === level) return i;
   return -1;
 }
 
@@ -407,7 +410,13 @@ export interface EvidenceLevelContext {
 export class EvidenceLevelInputError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "EvidenceLevelInputError";
+    // Defined, not assigned: an accessor planted on Error.prototype after load is never run (astra pack 291).
+    const descriptor = ObjectCreate(null) as PropertyDescriptor;
+    descriptor.value = "EvidenceLevelInputError";
+    descriptor.writable = true;
+    descriptor.enumerable = true;
+    descriptor.configurable = true;
+    ObjectDefineProperty(this, "name", descriptor);
   }
 }
 
@@ -447,7 +456,7 @@ function asciiFold(text: string, maxLength: number): string | null {
   for (let i = start; i < end; i += 1) {
     const code = charCodeAt(text, i);
     // A string's own index reads its code unit; no String method is looked up.
-    folded += code >= 0x41 && code <= 0x5a ? ASCII_LOWERCASE[code - 0x41]! : text[i]!;
+    folded += code >= 0x41 && code <= 0x5a ? charAt(ASCII_LOWERCASE, code - 0x41)! : charAt(text, i)!;
   }
   return folded;
 }
@@ -540,11 +549,12 @@ const LONGEST_VERDICT_NAME = longestVerdictName();
 function longestVerdictName(): number {
   let longest = 0;
   for (let i = 0; i < VERDICT_LOOKING_KEYS.length; i += 1) {
-    if (VERDICT_LOOKING_KEYS[i]!.length > longest) longest = VERDICT_LOOKING_KEYS[i]!.length;
+    const key = listAt(VERDICT_LOOKING_KEYS, i)!;
+    if (key.length > longest) longest = key.length;
   }
   const types = ReflectOwnKeys(PINNED_VERDICTS);
   for (let i = 0; i < types.length; i += 1) {
-    const field = PINNED_VERDICTS[types[i] as string]!.field;
+    const field = (own(PINNED_VERDICTS, listAt(types, i)!) as PinnedVerdict).field;
     if (field.length > longest) longest = field.length;
   }
   return longest;
@@ -583,7 +593,7 @@ function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
   // Its own string keys, enumerable or not (what Object.getOwnPropertyNames listed).
   const keys = ReflectOwnKeys(payload);
   for (let k = 0; k < keys.length; k += 1) {
-    const key = keys[k];
+    const key = listAt(keys, k);
     if (typeof key !== "string") continue;
     const folded = asciiFold(key, LONGEST_VERDICT_NAME);
     if (folded === null) continue;
@@ -652,18 +662,18 @@ function isOperatorPrincipalId(value: unknown): value is string {
   const length = value.length;
   let i = 0;
   for (; i < OPERATOR_PRINCIPAL_PREFIX.length; i += 1) {
-    if (i >= length || value[i] !== OPERATOR_PRINCIPAL_PREFIX[i]) return false;
+    if (i >= length || charAt(value, i) !== charAt(OPERATOR_PRINCIPAL_PREFIX, i)) return false;
   }
   // The chain id: [1-9][0-9]*, collected as it is read.
-  if (i >= length || !(value[i]! >= "1" && value[i]! <= "9")) return false;
+  if (i >= length || !(charAt(value, i)! >= "1" && charAt(value, i)! <= "9")) return false;
   let chainId = "";
-  while (i < length && value[i]! >= "0" && value[i]! <= "9") {
-    chainId += value[i]!;
+  while (i < length && charAt(value, i)! >= "0" && charAt(value, i)! <= "9") {
+    chainId += charAt(value, i)!;
     i += 1;
   }
-  if (i + 3 + 40 !== length || value[i] !== ":" || value[i + 1] !== "0" || value[i + 2] !== "x") return false;
+  if (i + 3 + 40 !== length || charAt(value, i) !== ":" || charAt(value, i + 1) !== "0" || charAt(value, i + 2) !== "x") return false;
   for (i += 3; i < length; i += 1) {
-    const c = value[i]!;
+    const c = charAt(value, i)!;
     if (!((c >= "0" && c <= "9") || (c >= "a" && c <= "f"))) return false;
   }
   // Number.isSafeInteger(Number(chainId)), without either: equal-length digit strings compare as numbers.
@@ -890,10 +900,10 @@ export function evidenceLevelsOfEvents(
   // The executor domains, as a null-prototype record: the assigned ones, then every
   // bundle's that holds an execution event.
   const executors = ObjectCreate(null) as Record<string, true>;
-  for (let i = 0; i < assigned.length; i += 1) executors[assigned[i]!] = true;
+  for (let i = 0; i < assigned.length; i += 1) executors[listAt(assigned, i)!] = true;
   let executorsUnknown = false;
   for (let b = 0; b < prepared.length; b += 1) {
-    const bundle = prepared[b]!;
+    const bundle = listAt(prepared, b)!;
     if (!bundle.holdsExecutionEvent) continue;
     if (bundle.trustDomain === null) executorsUnknown = true;
     else executors[bundle.trustDomain] = true;
@@ -902,11 +912,11 @@ export function evidenceLevelsOfEvents(
 
   const levels: EventLevel[] = [];
   for (let bundleIndex = 0; bundleIndex < prepared.length; bundleIndex += 1) {
-    const bundle = prepared[bundleIndex]!;
+    const bundle = listAt(prepared, bundleIndex)!;
     const inspectorIndependent =
       independenceProvable && bundle.trustDomain !== null && !hasOwn(executors, bundle.trustDomain);
     for (let eventIndex = 0; eventIndex < bundle.events.length; eventIndex += 1) {
-      const level = bundle.fabricated ? null : eventLevel(bundle.events[eventIndex]!, inspectorIndependent);
+      const level = bundle.fabricated ? null : eventLevel(listAt(bundle.events, eventIndex)!, inspectorIndependent);
       append(levels, ObjectFreeze({ bundleIndex, eventIndex, level }));
     }
   }
@@ -926,7 +936,7 @@ export function evidenceLevelOfBundles(
   let best: EvidenceLevel | null = null;
   const levels = evidenceLevelsOfEvents(bundles, context);
   for (let i = 0; i < levels.length; i += 1) {
-    const level = levels[i]!.level;
+    const level = listAt(levels, i)!.level;
     if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
       best = level;
     }
@@ -972,10 +982,10 @@ export function deriveContradictions(bundles: readonly AuthenticatedBundle[]): C
   let failedInspection = false;
   const prepared = prepareBundles(bundles);
   for (let b = 0; b < prepared.length; b += 1) {
-    const bundle = prepared[b]!;
+    const bundle = listAt(prepared, b)!;
     if (bundle.fabricated) continue;
     for (let e = 0; e < bundle.events.length; e += 1) {
-      const facts = bundle.events[e]!;
+      const facts = listAt(bundle.events, e)!;
       if (facts.type !== null && inSet(DEVICE_REPORTED, facts.type)) completed = true;
       if (facts.type === "execution_failed") failed = true;
       if (facts.verdict === "fail" || facts.verdict === "malformed") failedInspection = true;

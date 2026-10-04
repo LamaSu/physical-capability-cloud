@@ -340,6 +340,8 @@ import {
   StructuredClone,
   Uint8ArrayCtor,
   uncurryThis,
+  charAt,
+  listAt,
 } from "../util/primordials.js";
 
 export const PROFILE_ADMISSION_CONTRACT = "pcc.evidence.profile-admission.v1";
@@ -651,12 +653,12 @@ const INSPECTION = stringSet(INSPECTION_EVENT_TYPES);
 const ACTIVE_PRIMITIVES = ((): Readonly<Record<string, true>> => {
   const status = ObjectCreate(null) as Record<string, unknown>;
   for (let i = 0; i < EVIDENCE_PRIMITIVES.length; i++) {
-    const def = EVIDENCE_PRIMITIVES[i]!;
+    const def = listAt(EVIDENCE_PRIMITIVES, i)!;
     status[def.id] = def.status;
   }
   const ids = ObjectKeys(status);
   const active = newList<string>(0);
-  for (let i = 0; i < ids.length; i++) if (status[ids[i]!] === "active") append(active, ids[i]!);
+  for (let i = 0; i < ids.length; i++) if (status[listAt(ids, i)!] === "active") append(active, listAt(ids, i)!);
   return stringSet(active);
 })();
 
@@ -816,7 +818,7 @@ const HEX_DIGITS = "0123456789abcdef";
 /** Whether every own key of `record` is one of `allowed`, read through Reflect.ownKeys as captured at load. */
 function onlyFields(record: object, allowed: readonly string[]): boolean {
   const keys = ReflectOwnKeys(record);
-  for (let i = 0; i < keys.length; i++) if (!includesValue(allowed, keys[i])) return false;
+  for (let i = 0; i < keys.length; i++) if (!includesValue(allowed, listAt(keys, i))) return false;
   return true;
 }
 
@@ -833,7 +835,7 @@ function isCount(value: unknown): value is number {
 /** A dense list of strings, every index its own, as the LO-EV-1 delegation contract requires of its lists. */
 function isStringList(value: unknown): value is readonly string[] {
   if (!ArrayIsArray(value)) return false;
-  for (let i = 0; i < value.length; i++) if (!hasOwn(value, i) || typeof value[i] !== "string") return false;
+  for (let i = 0; i < value.length; i++) if (!hasOwn(value, i) || typeof listAt(value, i) !== "string") return false;
   return true;
 }
 
@@ -876,7 +878,7 @@ function readGrants(value: unknown): readonly SignerGrant[] | null {
   }
   const sorted = sortedStrings(keys);
   const grants = newList<SignerGrant>(0);
-  for (let i = 0; i < sorted.length; i++) append(grants, byKey[sorted[i]!]!);
+  for (let i = 0; i < sorted.length; i++) append(grants, byKey[listAt(sorted, i)!]!);
   return ObjectFreeze(grants);
 }
 
@@ -889,7 +891,7 @@ function readGrants(value: unknown): readonly SignerGrant[] | null {
  */
 function lowerHex(bytes: Uint8Array, count: number): string {
   let out = "";
-  for (let i = 0; i < count; i++) out = `${out}${HEX_DIGITS[bytes[i]! >> 4]!}${HEX_DIGITS[bytes[i]! & 15]!}`;
+  for (let i = 0; i < count; i++) out = `${out}${charAt(HEX_DIGITS, bytes[i]! >> 4)!}${charAt(HEX_DIGITS, bytes[i]! & 15)!}`;
   return out;
 }
 
@@ -946,7 +948,7 @@ function utf8(text: string): Uint8Array {
 /** A JSON array of strings, each quoted by JSON.stringify as captured at load. */
 function jsonStrings(list: readonly string[]): string {
   let out = "[";
-  for (let i = 0; i < list.length; i++) out = `${out}${i === 0 ? "" : ","}${JSONStringify(list[i]!)}`;
+  for (let i = 0; i < list.length; i++) out = `${out}${i === 0 ? "" : ","}${JSONStringify(listAt(list, i)!)}`;
   return `${out}]`;
 }
 
@@ -1044,7 +1046,7 @@ function readDelegation(
   });
   if (!ed25519Verifies(rootKey, preimage, parentSignature)) return { ok: false, reason: `is not signed by its root key ${rootKey}` };
   const ids = newList<string>(0);
-  for (let i = 0; i < contractIds.length; i++) append(ids, contractIds[i]!);
+  for (let i = 0; i < contractIds.length; i++) append(ids, listAt(contractIds, i)!);
   return { ok: true, contractIds: ObjectFreeze(ids), issuedAt, expiresAt };
 }
 
@@ -1077,7 +1079,7 @@ function readRegistry(value: unknown): { ok: true; rows: readonly RegistryRow[] 
       return { ok: false, reason: `registryKeys[${k}] must be a row whose publicKey is 0x<64 lowercase hex>` };
     }
     let signer = "";
-    for (let i = 0; i < 42; i++) signer = `${signer}${publicKey[i]!}`;
+    for (let i = 0; i < 42; i++) signer = `${signer}${charAt(publicKey, i)!}`;
     const record = ObjectCreate(null) as RegistryRow;
     record.publicKey = publicKey;
     record.signer = signer;
@@ -1119,7 +1121,7 @@ function readRegistry(value: unknown): { ok: true; rows: readonly RegistryRow[] 
   }
   // A session key counts only through a delegation rooted in a registered row of this snapshot.
   for (let k = 0; k < keys.length; k++) {
-    const row = rowOfKey[keys[k]!]!;
+    const row = rowOfKey[listAt(keys, k)!]!;
     const delegation = row.delegation;
     if (delegation === null) continue;
     const root = hasOwn(rowOfKey, delegation.root) ? rowOfKey[delegation.root]! : null;
@@ -1128,16 +1130,25 @@ function readRegistry(value: unknown): { ok: true; rows: readonly RegistryRow[] 
     }
     const checked = readDelegation(delegation.authorization, row.publicKey, root.publicKey);
     if (!checked.ok) return { ok: false, reason: `the delegation of session key ${row.publicKey} ${checked.reason}` };
-    row.trustDomain = root.trustDomain;
-    row.grants = root.grants;
-    delegation.contractIds = checked.contractIds;
-    delegation.issuedAt = checked.issuedAt;
-    delegation.expiresAt = checked.expiresAt;
-    ObjectFreeze(delegation);
+    // A fresh row and delegation, each a null-prototype record built here: a write into a record made
+    // elsewhere could not be shown to run no inherited setter (astra pack 291).
+    const filledDelegation = ObjectCreate(null) as RowDelegation;
+    filledDelegation.root = delegation.root;
+    filledDelegation.authorization = delegation.authorization;
+    filledDelegation.contractIds = checked.contractIds;
+    filledDelegation.issuedAt = checked.issuedAt;
+    filledDelegation.expiresAt = checked.expiresAt;
+    const filled = ObjectCreate(null) as RegistryRow;
+    filled.publicKey = row.publicKey;
+    filled.signer = row.signer;
+    filled.trustDomain = root.trustDomain;
+    filled.grants = root.grants;
+    filled.delegation = ObjectFreeze(filledDelegation);
+    rowOfKey[listAt(keys, k)!] = filled;
   }
   const sorted = sortedStrings(keys);
   const rows = newList<RegistryRow>(0);
-  for (let i = 0; i < sorted.length; i++) append(rows, ObjectFreeze(rowOfKey[sorted[i]!]!));
+  for (let i = 0; i < sorted.length; i++) append(rows, ObjectFreeze(rowOfKey[listAt(sorted, i)!]!));
   return { ok: true, rows: ObjectFreeze(rows) };
 }
 
@@ -1149,7 +1160,7 @@ function readRegistry(value: unknown): { ok: true; rows: readonly RegistryRow[] 
 function registryDigestOf(rows: readonly RegistryRow[]): SHA256 {
   const keys = newList<Record<string, unknown>>(0);
   for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!;
+    const row = listAt(rows, i)!;
     const key = ObjectCreate(null) as Record<string, unknown>;
     key.publicKey = row.publicKey;
     if (row.delegation === null) {
@@ -1202,7 +1213,7 @@ function grantNames(grant: SignerGrant, subject: EvidenceSubject): boolean {
 /** Whether one of `row`'s grants names `subject` in `role`. */
 function holdsGrant(row: RegistryRow, role: SignerRole, subject: EvidenceSubject): boolean {
   for (let i = 0; i < row.grants.length; i++) {
-    const g = row.grants[i]!;
+    const g = listAt(row.grants, i)!;
     if (g.role === role && grantNames(g, subject)) return true;
   }
   return false;
@@ -1219,7 +1230,7 @@ function isExecutorFor(row: RegistryRow, subject: EvidenceSubject): boolean {
  * its root, a registered row here, does not already grant.
  */
 function witnessAuthorized(rows: readonly RegistryRow[], subject: EvidenceSubject): boolean {
-  for (let i = 0; i < rows.length; i++) if (holdsGrant(rows[i]!, "witness", subject)) return true;
+  for (let i = 0; i < rows.length; i++) if (holdsGrant(listAt(rows, i)!, "witness", subject)) return true;
   return false;
 }
 
@@ -1244,7 +1255,7 @@ function authorizationDenied(row: RegistryRow, subject: EvidenceSubject, events:
       return `session key ${row.signer} is delegated for job(s) ${joinStrings(delegation.contractIds, ", ")}, not job ${subject.jobId}`;
     }
     for (let k = 0; k < events.length; k++) {
-      const timestamp = events[k]!.timestamp;
+      const timestamp = listAt(events, k)!.timestamp;
       const ms = DateParse(timestamp);
       // Whole seconds, floored, with no Math method: a millisecond count's remainder taken to [0, 1000).
       const second = (ms - (((ms % 1000) + 1000) % 1000)) / 1000;
@@ -1258,8 +1269,8 @@ function authorizationDenied(row: RegistryRow, subject: EvidenceSubject, events:
     return `key ${row.signer} holds no grant for kernel ${subject.kernelId}, job ${subject.jobId}: registry membership alone authorizes nothing`;
   }
   for (let k = 0; k < events.length; k++) {
-    if (!inSet(INSPECTION, events[k]!.type)) {
-      return `key ${row.signer} is a witness for this subject, which signs inspections only, not ${events[k]!.type}`;
+    if (!inSet(INSPECTION, listAt(events, k)!.type)) {
+      return `key ${row.signer} is a witness for this subject, which signs inspections only, not ${listAt(events, k)!.type}`;
     }
   }
   return null;
@@ -1277,14 +1288,14 @@ function levelExecutorsOf(deal: readonly string[], signedAsExecutor: readonly st
   if (deal.length === 0 || unknownExecutor) return deepFreeze(out);
   const added = ObjectCreate(null) as Record<string, true>;
   for (let i = 0; i < deal.length; i++) {
-    if (hasOwn(added, deal[i]!)) continue;
-    added[deal[i]!] = true;
-    append(out, deal[i]!);
+    if (hasOwn(added, listAt(deal, i)!)) continue;
+    added[listAt(deal, i)!] = true;
+    append(out, listAt(deal, i)!);
   }
   for (let i = 0; i < signedAsExecutor.length; i++) {
-    if (hasOwn(added, signedAsExecutor[i]!)) continue;
-    added[signedAsExecutor[i]!] = true;
-    append(out, signedAsExecutor[i]!);
+    if (hasOwn(added, listAt(signedAsExecutor, i)!)) continue;
+    added[listAt(signedAsExecutor, i)!] = true;
+    append(out, listAt(signedAsExecutor, i)!);
   }
   return deepFreeze(out);
 }
@@ -1343,7 +1354,7 @@ function ed25519Verifies(publicKey: string, message: Uint8Array, signature: Uint
   const raw = hexBytes(publicKey, 32);
   if (raw === null) return false;
   const der = new Uint8ArrayCtor(ED25519_SPKI_PREFIX.length + 32);
-  for (let i = 0; i < ED25519_SPKI_PREFIX.length; i++) der[i] = ED25519_SPKI_PREFIX[i]!;
+  for (let i = 0; i < ED25519_SPKI_PREFIX.length; i++) der[i] = listAt(ED25519_SPKI_PREFIX, i)!;
   for (let i = 0; i < 32; i++) der[ED25519_SPKI_PREFIX.length + i] = raw[i]!;
   const key = ObjectCreate(null) as Record<string, unknown>;
   key.key = der;
@@ -1427,7 +1438,7 @@ export function unverifiableProfileTerms(profile: MeasurementProfileV1): string[
     append(terms, `device.kind ${JSONStringify(kind)} is not an evidence device type, so no evidence source can match it`);
   }
   for (let f = 0; f < VERSION_PIN_FIELDS.length; f++) {
-    const field = VERSION_PIN_FIELDS[f]!;
+    const field = listAt(VERSION_PIN_FIELDS, f)!;
     const pins = ownDataValue(device, field) as readonly unknown[];
     for (let p = 0; p < pins.length; p++) {
       const pin = ownDataValue(pins, p);
@@ -1470,14 +1481,14 @@ function codeInData(value: unknown, path: string, ancestors: object[]): string |
   if (isProxy === null) return `${path}: this runtime has no trap-free proxy check`;
   if (isProxy(value)) return `${path}: a proxy`;
   if (ArrayIsArray(value) && ObjectGetPrototypeOf(value) !== ArrayPrototype) return `${path}: an array with a nonstandard prototype`;
-  for (let i = 0; i < ancestors.length; i++) if (ancestors[i] === value) return null;
+  for (let i = 0; i < ancestors.length; i++) if (listAt(ancestors, i) === value) return null;
   append(ancestors, value);
   try {
     const keys = ReflectOwnKeys(value);
     for (let k = 0; k < keys.length; k++) {
-      const descriptor = ObjectGetOwnPropertyDescriptor(value, keys[k]!);
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, listAt(keys, k)!);
       if (descriptor === undefined) continue;
-      const at = `${path}.${StringCtor(keys[k])}`;
+      const at = `${path}.${StringCtor(listAt(keys, k))}`;
       if (!hasOwn(descriptor, "value")) return `${at}: an accessor (a getter or setter)`;
       const found = codeInData(descriptor.value, at, ancestors);
       if (found !== null) return found;
@@ -1514,7 +1525,7 @@ function bindingDisagreement(events: readonly unknown[], bundleHash: string, sub
   const hashes = newList<string>(events.length);
   let outputCommitted = false;
   for (let i = 0; i < events.length; i++) {
-    const e = events[i];
+    const e = listAt(events, i);
     if (!isRecord(e) || typeof e.type !== "string" || typeof e.timestamp !== "string" || !isRecord(e.source) || !isRecord(e.payload) || !isTaggedSha256(e.hash)) {
       return `event ${i} is not an event`;
     }
@@ -1549,7 +1560,7 @@ function readObservation(
   profile: MeasurementProfileV1,
   committedDigest: string,
 ): { ok: true; observation: ProfileObservation } | { ok: false; why: string } {
-  const record = isRecord(event.payload) ? event.payload[PROFILE_OBSERVATION_FIELD] : undefined;
+  const record = isRecord(event.payload) ? ownDataValue(event.payload, PROFILE_OBSERVATION_FIELD) : undefined;
   if (!isRecord(record)) return { ok: false, why: "without a profileObservation record" };
   if (record.profileDigest !== committedDigest) return { ok: false, why: "not matching the committed profile digest" };
   if (typeof record.primitiveId !== "string" || !includesValue(profile.interpretation.evidenceTypeIds, record.primitiveId)) {
@@ -1583,7 +1594,7 @@ function captureWindow(
   const bound = (type: string, earliest: boolean): number | null => {
     let t: number | null = null;
     for (let k = 0; k < events.length; k++) {
-      const e = events[k]!;
+      const e = listAt(events, k)!;
       if (e.type !== type) continue;
       const ms = time(e);
       if (NumberIsFinite(ms) && (t === null || (earliest ? ms < t : ms > t))) t = ms;
@@ -1620,7 +1631,7 @@ function higherLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): Evidence
 function isOperatorList(value: unknown): value is readonly string[] {
   if (!ArrayIsArray(value)) return false;
   for (let i = 0; i < value.length; i++) {
-    if (!hasOwn(value, i) || !isOperatorPrincipalId(value[i])) return false;
+    if (!hasOwn(value, i) || !isOperatorPrincipalId(listAt(value, i))) return false;
   }
   return true;
 }
@@ -1661,7 +1672,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   }
   const read = ObjectCreate(null) as Record<InputField, unknown>;
   for (let k = 0; k < INPUT_FIELDS.length; k++) {
-    const key = INPUT_FIELDS[k]!;
+    const key = listAt(INPUT_FIELDS, k)!;
     const descriptor = ObjectGetOwnPropertyDescriptor(input, key);
     // The descriptor's OWN value: one written on Object.prototype must not pass an accessor off as data.
     if (descriptor !== undefined && !hasOwn(descriptor, "value")) {
@@ -1670,7 +1681,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     read[key] = descriptor === undefined ? undefined : descriptor.value;
   }
   for (let k = 0; k < DATA_FIELDS.length; k++) {
-    const key = DATA_FIELDS[k]!;
+    const key = listAt(DATA_FIELDS, k)!;
     const code = codeInData(read[key], `input.${key}`, newList<object>(0));
     if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
   }
@@ -1717,7 +1728,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const registry = readRegistry(registryCopy.ok ? registryCopy.value : undefined);
   if (!registry.ok) return reject("input-unreadable", registry.reason);
   const rowOfSigner = ObjectCreate(null) as Record<string, RegistryRow>;
-  for (let r = 0; r < registry.rows.length; r++) rowOfSigner[registry.rows[r]!.signer] = registry.rows[r]!;
+  for (let r = 0; r < registry.rows.length; r++) rowOfSigner[listAt(registry.rows, r)!.signer] = listAt(registry.rows, r)!;
   ObjectFreeze(rowOfSigner);
 
   const terms = unverifiableProfileTerms(profile);
@@ -1755,7 +1766,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // SET leg: the presented bundles are exactly the pinned set.
   const bundles = newList<AdmissionBundle>(0);
   for (let i = 0; i < presented.length; i++) {
-    const b: unknown = presented[i];
+    const b: unknown = listAt(presented, i);
     if (!isRecord(b) || !isTaggedSha256(b.bundleHash) || !ArrayIsArray(b.events)) {
       return reject("unbound-bundle", `bundle ${i}: not a bundle with a sha256: tagged bundleHash and an events array`);
     }
@@ -1775,8 +1786,8 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     const distinct = ObjectCreate(null) as Record<string, true>;
     let presentedCount = 0;
     for (let i = 0; i < hashes.length; i++) {
-      if (!hasOwn(distinct, hashes[i]!)) {
-        distinct[hashes[i]!] = true;
+      if (!hasOwn(distinct, listAt(hashes, i)!)) {
+        distinct[listAt(hashes, i)!] = true;
         presentedCount++;
       }
     }
@@ -1803,7 +1814,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const executorDomainList = newList<string>(0);
   let executorDomainUnknown = false;
   for (let i = 0; i < bundles.length; i++) {
-    const bundle = bundles[i]!;
+    const bundle = listAt(bundles, i)!;
     // SIGNATURE, run here (astra packs 271, 275): the declared signer names one key of the pinned registry, the
     // bundle hash's Ed25519 signature must verify under THAT key, and the bundle's trust domain is that key's row.
     // Everything is read from admission's own null-prototype copy of the bundle.
@@ -1860,7 +1871,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     if (trustDomain !== null) entry.trustDomain = trustDomain;
     append(authenticated, entry as AuthenticatedBundle);
     for (let k = 0; k < verified.length; k++) {
-      const e = verified[k]!;
+      const e = listAt(verified, k)!;
       if (hasOwn(seen, e.hash)) continue;
       seen[e.hash] = true;
       append(events, e);
@@ -1870,7 +1881,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   deepFreeze(authenticated);
 
   let fabricatedCount = 0;
-  for (let k = 0; k < events.length; k++) if (isFabricated(events[k]!)) fabricatedCount++;
+  for (let k = 0; k < events.length; k++) if (isFabricated(listAt(events, k)!)) fabricatedCount++;
   if (fabricatedCount > 0) {
     return rejectNow(
       "simulated-evidence",
@@ -1895,8 +1906,8 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     // The strongest level the bundles prove: #345's own function, the maximum over every occurrence.
     reached = evidenceLevelOfBundles(authenticated, context);
     for (let x = 0; x < eventLevels.length; x++) {
-      const level = eventLevels[x]!;
-      const hash = authenticated[level.bundleIndex]!.events[level.eventIndex]!.hash;
+      const level = listAt(eventLevels, x)!;
+      const hash = listAt(listAt(authenticated, level.bundleIndex)!.events, level.eventIndex)!.hash;
       levelByHash[hash] = hasOwn(levelByHash, hash) ? higherLevel(levelByHash[hash] ?? null, level.level) : level.level;
     }
   } catch (err) {
@@ -1906,8 +1917,8 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   let executionFailed = false;
   let failedInspections = 0;
   for (let k = 0; k < events.length; k++) {
-    if (events[k]!.type === "execution_failed") executionFailed = true;
-    if (inspectionFailed(events[k]!)) failedInspections++;
+    if (listAt(events, k)!.type === "execution_failed") executionFailed = true;
+    if (inspectionFailed(listAt(events, k)!)) failedInspections++;
   }
   let failure = executionFailed ? "execution_failed" : "";
   if (failedInspections > 0) failure = `${failure === "" ? "" : `${failure} and `}${failedInspections} failed inspection(s)`;
@@ -1934,8 +1945,8 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const excludedCount = newList<number>(0);
   const exclude = (why: string) => {
     for (let x = 0; x < excludedWhy.length; x++) {
-      if (excludedWhy[x] === why) {
-        defineIndex(excludedCount, x, excludedCount[x]! + 1);
+      if (listAt(excludedWhy, x) === why) {
+        defineIndex(excludedCount, x, listAt(excludedCount, x)! + 1);
         return;
       }
     }
@@ -1950,7 +1961,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // ordinary objects, as the leg has always received.
   const legEvents = deepFreeze((StructuredClone as <T>(value: T) => T)(events));
   for (let k = 0; k < events.length; k++) {
-    const e = events[k]!;
+    const e = listAt(events, k)!;
     if (!meetsEvidenceLevel(levelOf(e), required)) continue;
     if (e.source.deviceId !== device.deviceId) {
       otherDevices++;
@@ -1993,7 +2004,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     const observation = observed.observation;
     let verified: boolean;
     try {
-      verified = (await legAnswer(() => verifyPrimitiveInstance(observation.primitiveId, legEvents[k]!, legEvents))) === true;
+      verified = (await legAnswer(() => verifyPrimitiveInstance(observation.primitiveId, listAt(legEvents, k)!, legEvents))) === true;
     } catch {
       verified = false;
     }
@@ -2032,7 +2043,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
           : "";
     let exclusions = "";
     for (let x = 0; x < excludedWhy.length; x++) {
-      exclusions = `${exclusions}${x === 0 ? "" : ", "}${excludedCount[x]} ${excludedWhy[x]}`;
+      exclusions = `${exclusions}${x === 0 ? "" : ", "}${listAt(excludedCount, x)} ${listAt(excludedWhy, x)}`;
     }
     if (exclusions === "") exclusions = "none";
     append(findings, {
@@ -2048,7 +2059,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
 
   if (findings.length === 0) return result("admit", newList<ProfileAdmissionReason>(0), reached, qualifying);
   let decision: ProfileAdmissionDecision = "hold";
-  for (let x = 0; x < findings.length; x++) if (findings[x]!.decision === "reject") decision = "reject";
+  for (let x = 0; x < findings.length; x++) if (listAt(findings, x)!.decision === "reject") decision = "reject";
   return result(
     decision,
     mapList(findings, (f) => f.reason),

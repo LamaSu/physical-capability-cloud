@@ -1,180 +1,143 @@
 /**
- * profile-admission.ts reads nothing from a built-in object except through a
- * primordial captured at load (steward DECISIONS 01:30, astra pack 289).
- *
- * A typed array's `length` is an accessor inherited from %TypedArray%.prototype,
- * so `bytes.length` runs whatever code replaced it after load; pack 289 made a
- * keyless delegation verify that way. The regex scan in
- * profile-admission-intrinsics.test.ts finds calls, not reads. This check uses
- * the TypeScript checker, so it knows each receiver's static type, and it is a
- * CLOSED allowlist. On a value whose type is a built-in, only these are allowed:
- *   - a numeric element read or write (`bytes[i]`, `list[i]`, `text[i]`):
- *     integer-indexed and array elements are own, and never consult a prototype;
- *   - `length` of an array or a string, which is own data, never inherited.
- * Anything else is reported: every other property read, and every method call,
- * on a typed array, ArrayBuffer, DataView, Map, Set, WeakMap, WeakSet, WeakRef,
- * Promise, RegExp, Date, Error, Function, array, string, number, boolean or bigint.
- * A call of a function VALUE (a captured primordial, or a local function) is not
- * a property access, so it is allowed.
+ * profile-admission.ts, and the functions it calls on its trusted path, pass the DEFAULT-DENY check in
+ * builtin-reads-check.ts (steward DECISIONS 01:30 and #6792, astra packs 289, 291): every node that
+ * runs after load is one of the forms the check names, under that form's condition, or it fails.
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { charAt, hasOwn, listAt } from "../util/primordials.js";
+import { builtinReads, compilerOptions, programOf, type CheckOptions } from "./builtin-reads-check.js";
+
 const SPEC_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ADMISSION = join(SPEC_DIR, "src", "evidence", "profile-admission.ts");
+const OPTIONS: CheckOptions = {
+  primordials: /[\\/]src[\\/]util[\\/](primordials|plain-data)\.ts$/,
+  // awaitedHere pins a promise's constructor; legAnswer answers a boolean or an ownPromise (util/primordials.ts).
+  awaitWrappers: new Set(["awaitedHere", "legAnswer"]),
+};
 
-/** The built-in object types whose every property read goes through a primordial. */
-const BUILTIN_OBJECTS = new Set([
-  "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
-  "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "Buffer",
-  "ArrayBuffer", "SharedArrayBuffer", "DataView",
-  "Map", "ReadonlyMap", "Set", "ReadonlySet", "WeakMap", "WeakSet", "WeakRef",
-  "Promise", "PromiseLike", "RegExp", "RegExpMatchArray", "Date", "Error", "Function", "CallableFunction", "NewableFunction",
-]);
-/** The built-in object types whose own `length` is data: arrays. */
-const ARRAYS = new Set(["Array", "ReadonlyArray"]);
-
-function compilerOptions(): ts.CompilerOptions {
-  const configPath = ts.findConfigFile(SPEC_DIR, ts.sys.fileExists, "tsconfig.json")!;
-  const parsed = ts.getParsedCommandLineOfConfigFile(configPath, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => {} })!;
-  return { ...parsed.options, noEmit: true };
-}
-
-/**
- * Each part of `type` (a union's members, nullish left out) as the built-in it
- * is, or null for a type that is not one: "object:<name>", "array", "string",
- * "number", "boolean", "bigint", "function".
- */
-function builtinKinds(checker: ts.TypeChecker, type: ts.Type, program: ts.Program): string[] {
-  const parts = type.isUnion() ? type.types : [type];
-  const kinds: string[] = [];
-  for (const part of parts) {
-    if (part.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Never)) continue;
-    // A receiver whose type is unknown to the checker could be any built-in: the allowlist is closed, so it is refused.
-    if (part.flags & ts.TypeFlags.Any) kinds.push("any");
-    else if (part.flags & ts.TypeFlags.StringLike) kinds.push("string");
-    else if (part.flags & ts.TypeFlags.NumberLike) kinds.push("number");
-    else if (part.flags & ts.TypeFlags.BooleanLike) kinds.push("boolean");
-    else if (part.flags & ts.TypeFlags.BigIntLike) kinds.push("bigint");
-    else {
-      const symbol = part.getSymbol() ?? part.aliasSymbol;
-      const fromLib = symbol?.declarations?.some((d) => {
-        const file = d.getSourceFile();
-        return program.isSourceFileDefaultLibrary(file) || /[\\/]node_modules[\\/]@types[\\/]node[\\/]/.test(file.fileName);
-      });
-      const name = symbol?.getName();
-      if (fromLib && name !== undefined && ARRAYS.has(name)) kinds.push("array");
-      else if (fromLib && name !== undefined && BUILTIN_OBJECTS.has(name)) kinds.push(`object:${name}`);
-      else if (part.getCallSignatures().length > 0 && part.getProperties().length === 0) kinds.push("function");
-    }
-  }
-  return kinds;
-}
-
-/**
- * "file:line what: text" for each read or call on a built-in that the allowlist
- * does not name: in the whole file, or only inside the function declarations
- * named in `functions`.
- */
-function builtinReads(program: ts.Program, fileName: string, functions?: ReadonlySet<string>): string[] {
-  const checker = program.getTypeChecker();
-  const source = program.getSourceFile(fileName)!;
-  const found: string[] = [];
-  const report = (node: ts.Node, what: string) => {
-    const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
-    found.push(`${fileName.split(/[\\/]/).pop()}:${line + 1} ${what}: ${node.getText(source).slice(0, 80)}`);
-  };
-  const visit = (node: ts.Node): void => {
-    if (ts.isPropertyAccessExpression(node)) {
-      const kinds = builtinKinds(checker, checker.getTypeAtLocation(node.expression), program);
-      const name = node.name.text;
-      for (const kind of kinds) {
-        const ownLength = name === "length" && (kind === "array" || kind === "string");
-        if (!ownLength) report(node, `.${name} on a ${kind}`);
-      }
-    } else if (ts.isElementAccessExpression(node)) {
-      const kinds = builtinKinds(checker, checker.getTypeAtLocation(node.expression), program);
-      const numeric = (checker.getTypeAtLocation(node.argumentExpression).flags & ts.TypeFlags.NumberLike) !== 0;
-      for (const kind of kinds) {
-        const indexable = kind === "array" || kind === "string" || /^object:(Int|Uint|Float|BigInt|BigUint)\d*(Clamped)?Array$|^object:Buffer$/.test(kind);
-        if (!(numeric && indexable)) report(node, `[${node.argumentExpression.getText(source)}] on a ${kind}`);
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  if (functions === undefined) visit(source);
-  else {
-    const scoped = (node: ts.Node): void => {
-      if (ts.isFunctionDeclaration(node) && node.name !== undefined && functions.has(node.name.text)) visit(node);
-      else ts.forEachChild(node, scoped);
-    };
-    scoped(source);
-  }
-  return found;
-}
-
-/** A program over one in-memory file, with the spec's compiler options and the default library. */
-function programOf(fileName: string, text: string): ts.Program {
-  const options = compilerOptions();
-  const host = ts.createCompilerHost(options);
-  const getSourceFile = host.getSourceFile.bind(host);
-  host.getSourceFile = (name, languageVersion, ...rest) =>
-    name === fileName ? ts.createSourceFile(name, text, languageVersion, true) : getSourceFile(name, languageVersion, ...rest);
-  const fileExists = host.fileExists.bind(host);
-  host.fileExists = (name) => name === fileName || fileExists(name);
-  const readFile = host.readFile.bind(host);
-  host.readFile = (name) => (name === fileName ? text : readFile(name));
-  return ts.createProgram([fileName], options, host);
-}
-
-describe("profile-admission.ts reads nothing from a built-in except through a primordial (DECISIONS 01:30, astra pack 289)", () => {
-  it("the check finds every read and call on a built-in (or on an `any`, which could be one) that the allowlist does not name, and nothing it names", () => {
+describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, steward #6792, astra packs 289, 291)", () => {
+  it("allows exactly the forms it names, and refuses every other form, astra pack 291's included (a self-test)", () => {
     const fileName = join(SPEC_DIR, "src", "__tests__", "builtin-reads-fixture.ts");
-    const text = [
+    const head = [
+      "import { hasOwn, ObjectCreate, awaitedHere } from \"../util/primordials.js\";",
+      "import * as nc from \"node:crypto\";",
+      "import { verify } from \"node:crypto\";",
       "declare const bytes: Uint8Array; declare const list: number[]; declare const ro: readonly string[]; declare const s: string;",
-      "declare const p: Promise<number>; declare const m: Map<string, number>; declare const st: Set<string>; declare const re: RegExp;",
-      "declare const d: Date; declare const buf: ArrayBuffer; declare const f: (x: number) => number; declare const maybe: Uint8Array | null;",
-      "declare const n: number; declare const rec: { length: number; then: number }; declare const loose: any;",
-      "export const ok = [bytes[0], list[1], list.length, ro.length, ro[0], s.length, s[0], f(1), rec.length, rec.then];",
-      "export const a = bytes.length;",
-      "export const b = list.push(1);",
-      "export const c = s.slice(1);",
-      "export const e = p.then(() => 1);",
-      "export const g = m.get(\"k\");",
-      "export const h = st.has(\"x\");",
-      "export const i = re.test(\"x\");",
-      "export const j = d.getTime();",
-      "export const k = buf.byteLength;",
-      "export const l = f.call(null, 1);",
-      "export const o = maybe!.byteOffset;",
-      "export const q = bytes[\"length\"];",
-      "export const r = n.toString();",
-      "export const t = ro.map((x) => x);",
-      "export const u = loose.length;",
-    ].join("\n");
-    const found = builtinReads(programOf(fileName, text), fileName).map((line) => line.split(" ").slice(0, 1).join(""));
-    expect(found).toEqual([
-      "builtin-reads-fixture.ts:6",
-      "builtin-reads-fixture.ts:7",
-      "builtin-reads-fixture.ts:8",
-      "builtin-reads-fixture.ts:9",
-      "builtin-reads-fixture.ts:10",
-      "builtin-reads-fixture.ts:11",
-      "builtin-reads-fixture.ts:12",
-      "builtin-reads-fixture.ts:13",
-      "builtin-reads-fixture.ts:14",
-      "builtin-reads-fixture.ts:15",
-      "builtin-reads-fixture.ts:16",
-      "builtin-reads-fixture.ts:17",
-      "builtin-reads-fixture.ts:18",
-      "builtin-reads-fixture.ts:19",
-      "builtin-reads-fixture.ts:20",
-    ]);
+      "declare const p: Promise<number>; declare const m: Map<string, number>; declare const f: (x: number) => number;",
+      "declare const n: number; declare const rec: { length: number; then: number; inner: { x: number } }; declare const loose: any;",
+      "declare const maybe: Uint8Array | null; declare const o: { toString(): string }; declare function shrink(): boolean;",
+      "class Derived extends Uint8Array {} declare const derived: Derived; declare const both: Uint8Array & { tag: 1 };",
+      "const capturedVerify = verify; const capturedGet = Map.prototype.get; const capturedNs = nc.hash; const capturedLater = (() => verify)();",
+      "const Uint8ArrayCtor = Uint8Array;",
+    ];
+    const allowed = [
+      "export function okTyped(i: number) { const out = new Uint8ArrayCtor(4); out[i] = bytes[i]! + bytes[99]! + derived[0]!; return out; }",
+      "export function okLength() { return list.length + ro.length + s.length + rec.length + rec.then + rec.inner.x; }",
+      "export function okOwn(i: number) { if (hasOwn(list, i)) return list[i]; return i > 0 && hasOwn(ro, i) ? ro[i] : undefined; }",
+      "export function okGuards(k: string, r: Record<string, number>, i: number) { const a = hasOwn(r, k) && r[k]! > 0; if (hasOwn(list, i)) { const first = list[i]; return a ? first : 0; } return hasOwn(r, k) ? (r as Record<string, number>)[k] : 0; }",
+      "export function okWrites() { const stack = [1, 2]; stack.length = stack.length - 1; return (f as (x: number) => number)(stack.length); }",
+      "export function okString() { let out = 0; for (let i = 0; i < s.length; i++) out += s[i]!.length; return out; }",
+      "export function okRecord(k: string) { const r = ObjectCreate(null) as Record<string, number>; r[k] = 1; r.x = 2; return r[k]! + r.x!; }",
+      "export function okCalls() { return f(1) + (undefined === undefined ? NaN : Infinity); }",
+      "export async function okAwait() { return await awaitedHere(p); }",
+      "export function okOps(a: number, b: string) { let c = a; c += 1; c++; return `${a}${b}` + (a < c ? -a : ~a) + (typeof b === \"string\" ? 1 : 0); }",
+      "export function okLiterals() { return { a: 1, [\"b\"]: 2, c: [1, 2, 3], d() { return 1; } }; }",
+      "export function okControl(x: number) { try { switch (x) { case 1: return 1; default: break; } } catch { return 0; } finally { x = 0; } while (x < 1) x++; do { x--; } while (x > 0); return x; }",
+    ];
+    const refused = [
+      "export function a() { return bytes.length; }",
+      "export const b = () => list.push(1);",
+      "export function c() { return s.slice(1); }",
+      "export function e() { return p.then(() => 1); }",
+      "export function g() { return m.get(\"k\"); }",
+      "export function h() { return f.call(null, 1); }",
+      "export function i() { return maybe!.byteOffset; }",
+      "export function j() { return bytes[\"length\"]; }",
+      "export function k() { return n.toString(); }",
+      "export function l() { return loose.length; }",
+      // astra pack 291:
+      "export function hole() { const holes: number[] = []; holes.length = 1; return holes[0]; }",
+      "export function outOfRange() { return s[99]; }",
+      "export function unbounded(i: number) { return list[i]; }",
+      "export function stringStep() { let out = 0; for (let i = 0; i < s.length; i += 2) out += s[i]!.length; return out; }",
+      "export function destructure() { const { byteLength } = bytes; return byteLength; }",
+      "export function inOperator() { return \"length\" in bytes; }",
+      "export function subclass() { return derived.byteLength; }",
+      "export function intersection() { return both.byteLength; }",
+      "export function constrained<T extends Uint8Array>(t: T) { return t.byteOffset; }",
+      "export function namespaceRead() { return nc[\"verify\"]; }",
+      "export function namespaceDot() { return nc.verify; }",
+      "export function liveBinding() { return verify; }",
+      "export function global() { return JSON; }",
+      // default-deny: forms nobody listed fail closed.
+      "export function forIn(x: object) { for (const key in x) return key; return null; }",
+      "export function forOf() { for (const x of list) return x; return 0; }",
+      "export function spread() { return [...list]; }",
+      "export function arrayPattern() { const [first] = list; return first; }",
+      "export function objectSpread() { return { ...rec }; }",
+      "export function instanceOf(x: unknown) { return x instanceof Uint8Array; }",
+      "export function looseEquality(x: unknown) { return x == null; }",
+      "export function deleteMember(r: Record<string, number>) { return delete r.x; }",
+      "export function regex() { return /a/; }",
+      "export function tagged() { return f`x`; }",
+      "export function templateObject() { return `${o}`; }",
+      "export function plusObject() { return \"\" + o; }",
+      "export function unpinnedAwait() { return (async () => await p)(); }",
+      "export function guardWrongIndex(i: number, j: number) { if (hasOwn(list, i)) return list[j]; return 0; }",
+      "export function lookAlike(i: number) { const hasOwn = (_l: unknown, _i: number) => true; if (hasOwn(list, i)) return list[i]; return 0; }",
+      "export function inheritedWrite(r: { x: number }) { r.x = 1; return r; }",
+      "export function recordRead(r: Record<string, number>, k: string) { return r[k]; }",
+      "export const notCalledAtLoad = () => verify;",
+      "export function memberCall(r: { go(): number }) { return r.go(); }",
+      "export function classExpression() { return class {}; }",
+      // A call between the check and the read could remove the element, so the read is not proven own.
+      "export function mutatedBetween(i: number) { return hasOwn(list, i) && shrink() ? list[i] : 0; }",
+      "export function mutatedInBranch(i: number) { if (hasOwn(list, i)) { shrink(); return list[i]; } return 0; }",
+      "export function guardWrongReceiver(i: number) { return hasOwn(list, i) ? ro[i] : undefined; }",
+      "export function lengthOfRecord(r: { length: number }) { r.length = 0; return r; }",
+      "export function lengthFromObject() { const stack = [1]; stack.length = loose; return stack; }",
+      "export function objectKey() { const r = ObjectCreate(null) as Record<string, number>; return r[loose]; }",
+      "export function lookAlikeCreate(k: string) { const ObjectCreate = (_p: null) => ({}) as Record<string, number>; const r = ObjectCreate(null); return r[k]; }",
+    ];
+    const text = [...head, ...allowed, ...refused].join("\n");
+    const lines = builtinReads(programOf(SPEC_DIR, fileName, text), fileName, OPTIONS);
+    const reported = new Set(lines.map((line) => Number(line.split(" ")[0]!.split(":")[1])));
+    const firstAllowed = head.length + 1;
+    const firstRefused = head.length + allowed.length + 1;
+    for (let k = 0; k < allowed.length; k++) {
+      expect(reported.has(firstAllowed + k), `allowed line reported: ${allowed[k]} => ${lines.filter((l) => l.includes(`:${firstAllowed + k} `)).join("; ")}`).toBe(false);
+    }
+    for (let k = 0; k < refused.length; k++) expect(reported.has(firstRefused + k), `refused line not reported: ${refused[k]}`).toBe(true);
+    for (let k = 0; k < head.length; k++) expect(reported.has(k + 1), `a load-time line was reported: ${head[k]}`).toBe(false);
   }, 60_000);
 
-  it("nor do the modules admission calls on its trusted path: the levels, binding, plain-data copies, governance, canonicalize and isFabricated", () => {
+  it("the forms it refuses do read a prototype, and the helpers it requires do not (astra pack 291's controls)", () => {
+    const written: Array<[object, string]> = [];
+    let seen: unknown[] = [];
+    try {
+      Object.defineProperty(Array.prototype, "0", { value: "from Array.prototype", writable: true, configurable: true, enumerable: false });
+      written.push([Array.prototype, "0"]);
+      Object.defineProperty(String.prototype, "5", { value: "from String.prototype", writable: true, configurable: true, enumerable: false });
+      written.push([String.prototype, "5"]);
+      const holes: unknown[] = new Array(1);
+      const text: string = "ab";
+      // Read while the prototypes are written; compared after they are restored, so nothing else sees them.
+      seen = [holes[0], text[5], listAt(holes, 0), hasOwn(holes, 0), charAt(text, 5)];
+    } finally {
+      for (const [target, key] of written) delete (target as Record<string, unknown>)[key];
+    }
+    // A hole and an out-of-range index continue to the prototype (the refused `hole` and `outOfRange` forms)...
+    expect(seen.slice(0, 2)).toEqual(["from Array.prototype", "from String.prototype"]);
+    // ...and the forms the check takes instead stop at the value's own data.
+    expect(seen.slice(2)).toEqual([undefined, false, ""]);
+    expect(Object.prototype.hasOwnProperty.call(Array.prototype, "0") || Object.prototype.hasOwnProperty.call(String.prototype, "5")).toBe(false);
+  });
+
+  it("so do the modules admission calls on its trusted path: the levels, binding, plain-data copies, governance, canonicalize and isFabricated", () => {
     const evidence = (rel: string) => join(SPEC_DIR, "src", "evidence", rel);
     const util = (rel: string) => join(SPEC_DIR, "src", "util", rel);
     const targets: Array<[string, ReadonlySet<string> | undefined]> = [
@@ -186,18 +149,18 @@ describe("profile-admission.ts reads nothing from a built-in except through a pr
       [util("canonical.ts"), new Set(["canonicalize"])],
       [evidence("is-fabricated.ts"), new Set(["isFabricated"])],
     ];
-    const program = ts.createProgram(targets.map(([file]) => file), compilerOptions());
+    const program = ts.createProgram(targets.map(([file]) => file), compilerOptions(SPEC_DIR));
     const found: string[] = [];
-    for (const [file, functions] of targets) found.push(...builtinReads(program, file, functions));
+    for (const [file, functions] of targets) found.push(...builtinReads(program, file, OPTIONS, functions));
     expect(found).toEqual([]);
     // The scoping is real: the rest of canonical.ts does read built-ins.
-    expect(builtinReads(program, util("canonical.ts")).length).toBeGreaterThan(0);
+    expect(builtinReads(program, util("canonical.ts"), OPTIONS).length).toBeGreaterThan(0);
   }, 60_000);
 
   it("profile-admission.ts has none", () => {
-    const program = ts.createProgram([ADMISSION], compilerOptions());
-    // Every import resolves and every type is known, so no receiver is silently `any` (which the check would pass).
+    const program = ts.createProgram([ADMISSION], compilerOptions(SPEC_DIR));
+    // Every import resolves and every type is known, so no receiver is silently `any` (which the check refuses anyway).
     expect(program.getSemanticDiagnostics(program.getSourceFile(ADMISSION)).map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "))).toEqual([]);
-    expect(builtinReads(program, ADMISSION)).toEqual([]);
+    expect(builtinReads(program, ADMISSION, OPTIONS)).toEqual([]);
   }, 60_000);
 });

@@ -1021,6 +1021,21 @@ const PATCH_ROWS: Array<[string, Apply]> = [
     both(replaceGetter(TypedArrayPrototype, "byteLength", () => () => 0), replaceGetter(TypedArrayPrototype, "byteOffset", () => () => 0)),
   )],
   ["String.prototype.toLowerCase", replace(String.prototype, "toLowerCase", () => () => "0x" + "00".repeat(32))],
+  // astra pack 291: an array's hole, and an index past an array's or a string's end, continue to the prototype.
+  // Admission reads elements only where they are proven own (listAt, charAt, a hasOwn guard), so none is served.
+  ["Array.prototype[0..63] and String.prototype[0..255] written", () => {
+    const written: Array<[object, string]> = [];
+    for (let i = 0; i < 64; i++) written.push([Array.prototype, `${i}`]);
+    for (let i = 0; i < 256; i++) written.push([String.prototype, `${i}`]);
+    for (let i = 0; i < written.length; i++) {
+      const [target, key] = written[i]!;
+      const value = target === Array.prototype ? "sha256:" + "3".repeat(64) : "Z";
+      ReflectDefineProperty(target, key, nullDescriptor({ value, writable: true, configurable: true, enumerable: false }));
+    }
+    return () => {
+      for (let i = 0; i < written.length; i++) ReflectDeleteProperty(written[i]![0], written[i]![1]);
+    };
+  }],
   ["Hash.prototype.update", replace(HashPrototype, "update", (o) => function (this: unknown) { return ReflectApply(o, this, ["tampered"]); })],
   ["Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
   ["Promise.prototype.then, forging a carried digest", replace(Promise.prototype, "then", forgingThen)],

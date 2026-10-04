@@ -184,6 +184,22 @@ export function charCodeAt(s: string, i: number): number {
   return StringPrototypeCharCodeAt(s, i);
 }
 
+const StringPrototypeCharAt = uncurryThis(String.prototype.charAt) as (s: string, i: number) => string;
+
+/** The code unit of `s` at `i` as a one-character string, or "" past either end: String.prototype.charAt as it was at load. */
+export function charAt(s: string, i: number): string {
+  return StringPrototypeCharAt(s, i);
+}
+
+/**
+ * The element of `list` at `index` if `list` OWNS it, else undefined (astra pack 291). A hole, or an
+ * index past the end, never continues to Array.prototype, where code running after load could plant
+ * an element or a getter.
+ */
+export function listAt<T>(list: readonly T[], index: number): T | undefined {
+  return hasOwn(list, index) ? list[index] : undefined;
+}
+
 const TAGGED_SHA256_PREFIX = "sha256:";
 
 /**
