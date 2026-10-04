@@ -44,6 +44,9 @@ export * from "./measurement-profile.js";
 // profileAdmitsBundle — does authenticated, bound evidence satisfy the committed
 // MeasurementProfile (level, device, version, window, samples, simulation)?
 export * from "./profile-admission.js";
+// checkProfileRegistration — may a MeasurementProfile be registered for a
+// (capability, device)? Run by the gateway registration route.
+export * from "./profile-registration.js";
 // Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),
 // device = ed25519:0x<key> (D2 signer, registry-held, never a compromised key).
 export * from "./principal-id.js";
