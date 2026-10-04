@@ -126,6 +126,22 @@ export interface Refusal {
  * Ownership is the kernel's recorded operatorAddress, the only owner column kernels have.
  */
 /**
+ * The ids of the kernels whose recorded operator is this PROVEN wallet, compared as addresses (an
+ * owner that is not an address, or the zero placeholder, never matches). For reads that list
+ * records across kernels (board N122): a proven operator sees its own kernels' records only.
+ */
+export function kernelsOperatedByProvenWallet(wallet: string): Set<string> {
+  const proven = wallet.trim().toLowerCase();
+  if (!WALLET_RE.test(proven)) return new Set();
+  const { db } = getStore();
+  const rows = db
+    .select({ id: schema.shopKernels.id, operatorAddress: schema.shopKernels.operatorAddress })
+    .from(schema.shopKernels)
+    .all() as Array<{ id: string; operatorAddress: string }>;
+  return new Set(rows.filter((k) => ownerOf(k.operatorAddress) === proven).map((k) => k.id));
+}
+
+/**
  * The whole check for a route that names its kernel in the body, query or a record: 401 for an
  * anonymous caller, then refuseKernelAction. Null when the caller may take `action`.
  */
