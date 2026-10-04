@@ -262,6 +262,48 @@ describe("F: the structured log", () => {
     expect(entry!.message).toBe("telemetry event emitted");
     await app.close();
   });
+
+  it("#538 r3: GET /api/telemetry/logs still filters by a job id, source or level as given (the stored keyed form matches)", async () => {
+    const { telemetryRoutes } = await import("../../routes/telemetry.js");
+    const app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      Object.assign(req, { apiKeyId: "key-r4-filter", operatorId: "operator-r4-filter" });
+    });
+    await app.register(telemetryRoutes);
+    await app.ready();
+    const res = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload: { jobId: "job-filter-r3", phase: "job_submit", status: "completed", source: "src-filter-r3" } });
+    expect(res.statusCode).toBe(200);
+    const entries = async (query: string) =>
+      ((await app.inject({ method: "GET", url: `/api/telemetry/logs?${query}` })).json() as { entries: Array<Record<string, unknown>> }).entries;
+    const byJob = await entries("jobId=job-filter-r3");
+    expect(byJob).toHaveLength(1);
+    expect(byJob[0]!.jobId).toBe(schema.keyedHash("job-filter-r3"));
+    expect(await entries("source=src-filter-r3")).toHaveLength(1);
+    expect(await entries("level=info&jobId=job-filter-r3")).toHaveLength(1);
+    expect(await entries("jobId=job-filter-other")).toHaveLength(0);
+    await app.close();
+  });
+
+  it("#538 r3: the structured log's query matches a field as given, stored readable or keyed, under its own key or a keyed key", async () => {
+    const { StructuredLogger } = await import("../../structured-logger.js");
+    const log = new StructuredLogger();
+    // Undeclared fields: key and value keyed (the source keyed).
+    log.info(schema.lit("filter probe a"), { kernelId: "kernel-raw-r3", source: "src-raw-r3" });
+    // Declared fields: a vocabulary member readable, an id keyed under its own key.
+    log.info(schema.lit("filter probe b"), { kernelId: schema.declare.code("kernel-a", ["kernel-a"]), jobId: schema.declare.id("job-b-r3") });
+    // A message no producer declared is stored keyed.
+    log.warn("raw message r3" as never);
+    const messages = (found: Array<{ message: string }>) => found.map((entry) => entry.message);
+    expect(messages(log.query({ kernelId: "kernel-raw-r3" }))).toEqual(["filter probe a"]);
+    expect(messages(log.query({ source: "src-raw-r3" }))).toEqual(["filter probe a"]);
+    expect(messages(log.query({ kernelId: "kernel-a" }))).toEqual(["filter probe b"]);
+    expect(messages(log.query({ jobId: "job-b-r3" }))).toEqual(["filter probe b"]);
+    expect(messages(log.query({ search: "raw message r3" }))).toEqual([schema.keyedHash("raw message r3")]);
+    expect(messages(log.query({ search: "PROBE" }))).toEqual(["filter probe a", "filter probe b"]);
+    expect(messages(log.query({ level: "warn" }))).toEqual([schema.keyedHash("raw message r3")]);
+    expect(log.query({ kernelId: "kernel-other" })).toHaveLength(0);
+    expect(log.query({ source: "gateway" })).toHaveLength(2);
+  });
 });
 
 describe("keyedHash", () => {

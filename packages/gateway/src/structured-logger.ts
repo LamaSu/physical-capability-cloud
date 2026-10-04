@@ -25,6 +25,17 @@ export interface LogEntry {
   [key: string]: unknown;
 }
 
+/**
+ * Whether a stored field matches a filter value given as itself (#538 round 3, astra source pack):
+ * the field holds the value (a declared readable value) or its keyed hash, under its own key or,
+ * when its producer did not declare it, under the keyed key. A query compares the stored form,
+ * as the audit query does.
+ */
+function matches(entry: LogEntry, key: string, given: string): boolean {
+  const hashed = keyedHash(given);
+  return [entry[key], entry[keyedHash(key)]].some((stored) => stored === given || stored === hashed);
+}
+
 export class StructuredLogger {
   private entries: LogEntry[] = [];
 
@@ -67,16 +78,19 @@ export class StructuredLogger {
     before?: string;
   } = {}): LogEntry[] {
     let filtered = [...this.entries];
-    if (opts.level) filtered = filtered.filter(e => e.level === opts.level);
-    if (opts.source) filtered = filtered.filter(e => e.source === opts.source);
+    if (opts.level) filtered = filtered.filter(e => matches(e, "level", opts.level!));
+    if (opts.source) filtered = filtered.filter(e => matches(e, "source", opts.source!));
     if (opts.since != null) filtered = filtered.filter(e => e.timestamp >= opts.since!);
     if (opts.after != null) filtered = filtered.filter(e => e.timestamp > opts.after!);
     if (opts.before != null) filtered = filtered.filter(e => e.timestamp < opts.before!);
-    if (opts.jobId) filtered = filtered.filter(e => (e as Record<string, unknown>).jobId === opts.jobId);
-    if (opts.kernelId) filtered = filtered.filter(e => (e as Record<string, unknown>).kernelId === opts.kernelId);
+    if (opts.jobId) filtered = filtered.filter(e => matches(e, "jobId", opts.jobId!));
+    if (opts.kernelId) filtered = filtered.filter(e => matches(e, "kernelId", opts.kernelId!));
     if (opts.search) {
+      // A declared message is searched as text; a message no producer declared is stored keyed,
+      // so it matches a search for its exact text.
       const s = opts.search.toLowerCase();
-      filtered = filtered.filter(e => e.message.toLowerCase().includes(s));
+      const hashed = keyedHash(opts.search);
+      filtered = filtered.filter(e => e.message.toLowerCase().includes(s) || e.message === hashed);
     }
     return filtered.slice(-(opts.limit ?? 100));
   }
