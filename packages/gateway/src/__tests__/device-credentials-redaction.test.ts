@@ -41,6 +41,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
+import { createRequire } from "node:module";
 
 process.env.PCC_DB_PATH = ":memory:";
 process.env.NODE_ENV = "test";
@@ -103,6 +104,43 @@ const inj = (method: string, url: string, raw: string, payload?: unknown) =>
     payload: payload as never,
     headers: { authorization: `Bearer ${raw}` },
   });
+
+/**
+ * N71 round 6: capturing the REQUEST logger (req.log), not just the response.
+ *
+ * createGateway() hardcodes `logger: true` with no way to inject a custom stream from
+ * here, so `vi.spyOn(app.log, "warn"/"error")` looks like the obvious move — but it does
+ * NOT work: Fastify's per-request `req.log` is a pino CHILD (`Object.create(app.log)`),
+ * and pino's `setLevel` (lib/levels.js, run again on every child at creation) assigns
+ * EACH instance its OWN fresh `.warn`/`.error` function objects as OWN properties —
+ * never inherited, never shared, so patching the parent's never touches a child's
+ * (confirmed empirically: the raw secret still hit real stdout while a parent-level spy
+ * saw zero calls). What a child never gets its own copy of is the destination STREAM —
+ * `child()` never reassigns pino's internal `streamSym`, so every child inherits the
+ * SAME stream object the root logger writes to. Spying on that one shared stream's
+ * `.write` therefore sees every request's log output, however deep the child chain.
+ * pino is a transitive dependency (via fastify), not a direct one, so it is resolved the
+ * same way fastify itself resolves it — rooting `require` at fastify's own location —
+ * rather than adding a new direct dependency for one test file.
+ */
+const pinoSymbols: { streamSym: symbol } = createRequire(createRequire(import.meta.url).resolve("fastify"))("pino").symbols;
+
+/** Runs `fn`, capturing every raw line pino's shared stream would have written during
+ *  it (as an array of strings), with real output suppressed for that duration. */
+async function captureAppLog<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const stream = (app.log as unknown as Record<symbol, { write: (chunk: string) => boolean }>)[pinoSymbols.streamSym];
+  const lines: string[] = [];
+  const spy = vi.spyOn(stream, "write").mockImplementation((chunk: string) => {
+    lines.push(chunk);
+    return true;
+  });
+  try {
+    const result = await fn();
+    return { result, lines };
+  } finally {
+    spy.mockRestore();
+  }
+}
 
 /** Run `fn` with the given env vars set (undefined = unset); every one is restored afterwards. */
 async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Promise<T>): Promise<T> {
@@ -721,6 +759,48 @@ describe("N71 round 3 (astra pack 83b): the health response carries a fixed code
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// C2: the health log's deviceId is never raw, even when it is credential-shaped
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 6 (astra pack 83e, C2): console.warn's deviceId is validated, not interpolated raw", () => {
+  // Astra: "construct the existing throwing adapter with device ID
+  // pcc_live_N71-SENTINEL, call checkDeviceHealth(), and inspect console.warn; the
+  // sentinel is emitted by the first argument. The current test varies only the
+  // exception message and uses a fixed clean device ID." — this device id is
+  // deliberately pcc_live_-shaped (credential-shaped), unlike the existing health-log
+  // tests above, which all use the fixed DEVICE = "dev_fdm_001".
+  let healthKernel: string;
+  const sentinelDeviceId = `pcc_live_${SENTINEL}-health-check`;
+
+  beforeAll(async () => {
+    healthKernel = `${kernelId}-health-r6`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: healthKernel, name: "A's r6 health workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+    const reg = await inj("POST", "/api/setup/register-device", keyA, {
+      kernelId: healthKernel,
+      deviceId: sentinelDeviceId,
+      type: "machine",
+      adapterType: "mock",
+    });
+    expect(reg.statusCode, reg.body).toBe(201);
+  });
+
+  it("[neg] console.warn never carries the credential-shaped deviceId, nor the adapter's thrown message", async () => {
+    const spy = vi.spyOn(MockFDMAdapter.prototype, "getStatus").mockRejectedValue(new Error(`password=${SENTINEL}`));
+    const warnSpy = vi.spyOn(console, "warn");
+    try {
+      const result = await getKernelService().checkDeviceHealth(sentinelDeviceId);
+      expect(JSON.stringify(result)).not.toContain(SENTINEL);
+      expect(warnSpy).toHaveBeenCalled();
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(SENTINEL);
+    } finally {
+      spy.mockRestore();
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // /api/setup/detect: URL-valued variables are present or not, never a value
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -953,18 +1033,24 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
     expect(made.statusCode, made.body).toBeLessThan(300);
   });
 
-  it("[neg] POST /api/setup/register-device: an exception from the repository is not returned", async () => {
+  it("[neg] POST /api/setup/register-device: an exception from the repository is not returned, NOR logged", async () => {
     const kernels = getRepos().kernels;
     const spy = vi.spyOn(kernels, "insertDevice").mockImplementation(() => {
       throw new Error(THROWN);
     });
     try {
-      const res = await inj("POST", "/api/setup/register-device", keyA, {
-        kernelId: catchKernel,
-        deviceId: `dev-catch-${catchKernel}`,
-        type: "sensor",
-        adapterType: "mock",
-      });
+      // N71 round 6 (astra pack 83e, C1, 2nd sink): the request logger is itself a
+      // sink — req.log.error used to carry err.message verbatim ("insertDevice()
+      // throwing Error('password=...') places the sentinel in the log even though the
+      // HTTP response is fixed"). Captured via captureAppLog (see its doc comment).
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/register-device", keyA, {
+          kernelId: catchKernel,
+          deviceId: `dev-catch-${catchKernel}`,
+          type: "sensor",
+          adapterType: "mock",
+        }),
+      );
       expect(res.statusCode).toBe(500);
       expect(res.body).not.toContain(SENTINEL);
       // toMatchObject, not toEqual: the gateway's onSend hook decorates every 5xx
@@ -973,21 +1059,59 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
       expect(bodyOf(res)).toMatchObject({ error: "upsert_failed", message: "Device registration failed" });
       // ...and NOTHING else but that decoration: no exception text or other field rides along.
       expect(Object.keys(bodyOf(res) as Record<string, unknown>).sort()).toEqual(["error", "message", "report_hint"]);
+      expect(lines.some((l) => l.includes("upsert failed"))).toBe(true);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
     } finally {
       spy.mockRestore();
     }
   });
 
-  it("[neg] POST /api/setup/test-job: an exception from the job submission is not returned", async () => {
+  it("[neg] POST /api/setup/register-device: the kernel-service refresh-catch logger never carries the thrown message or a credential-shaped deviceId", async () => {
+    // astra's C1 (the 1st sink, setup.ts's refresh catch) logs {err: msg, deviceId} —
+    // BOTH can be attacker/operator text: the thrown message, and the deviceId the
+    // caller just registered with. The sentinel id is ALSO pcc_live_-shaped on purpose,
+    // so this one test covers both the dependency-text and the caller-id angle at once.
+    const sentinelDeviceId = `pcc_live_${SENTINEL}-refresh-catch`;
+    const refreshSpy = vi.spyOn(getKernelService(), "refreshDeviceFromDb").mockImplementation(() => {
+      throw new Error(`password=${SENTINEL}`);
+    });
+    try {
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/register-device", keyA, {
+          kernelId: catchKernel,
+          deviceId: sentinelDeviceId,
+          type: "sensor",
+          adapterType: "mock",
+        }),
+      );
+      // The refresh failure is explicitly non-fatal — registration itself still succeeds.
+      // The response legitimately echoes the caller's OWN deviceId back (same
+      // caller's-own-input philosophy as generate-config, below) — that is not a leak,
+      // so only the LOGGED output is asserted sentinel-free here, not the response.
+      expect(res.statusCode, res.body).toBe(201);
+      expect(lines.some((l) => l.includes("kernel-service refresh failed"))).toBe(true);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
+    } finally {
+      refreshSpy.mockRestore();
+    }
+  });
+
+  it("[neg] POST /api/setup/test-job: an exception from the job submission is not returned, NOR logged", async () => {
     const spy = vi.spyOn(getKernelService(), "submitJob").mockRejectedValue(new Error(THROWN));
     try {
-      const res = await inj("POST", "/api/setup/test-job", keyB, { deviceId: "dev_fdm_001" });
+      const { result: res, lines } = await captureAppLog(() =>
+        inj("POST", "/api/setup/test-job", keyB, { deviceId: "dev_fdm_001" }),
+      );
       expect(res.statusCode).toBe(500);
       expect(res.body).not.toContain(SENTINEL);
       const body = bodyOf(res);
       expect(body).toMatchObject({ error: "job_submission_failed", message: "Test job submission failed" });
       expect(typeof body.jobId).toBe("string"); // the rest of the shape is unchanged
       expect(typeof body.duration).toBe("number");
+      // N71 round 6: the scanner's "every other site, the same way" extends this fixed-
+      // code-never-text treatment to this catch too, not just astra's two named sites.
+      expect(lines.some((l) => l.includes("test-job submission failed"))).toBe(true);
+      expect(lines.join("\n")).not.toContain(SENTINEL);
     } finally {
       spy.mockRestore();
     }
