@@ -9,15 +9,44 @@
 # Requirements: git, curl, jq, gh (GitHub CLI)
 # ─────────────────────────────────────────────────────────────────────────────
 
-set -euo pipefail
-
-# FC-8 round 2 (astra pack 61b, CRITICAL): disable xtrace BEFORE any secret is
-# read or expanded, so an inherited `bash -x` or exported SHELLOPTS=xtrace
-# never prints PCC_ORACLE_KEY or the provisioned API key. `set +x` toggles a
-# shell OPTION, not an env var, so it takes effect immediately even when this
-# script was itself invoked as `bash -x smoke-digital-verifier.sh` — kept off
-# for the rest of the script since credentials are handled throughout.
+# FC-8 round 4 (astra pack 61c, finding 4 — the steward's ruling, bus #6482):
+# `set +x` is the ABSOLUTE FIRST statement in this script — before even
+# `set -euo pipefail` — and the oracle key is read from a FILE, never an
+# env var. Both are necessary together; neither alone closes the finding.
+#
+# THREAT MODEL. Astra's reproduction:
+#   env PCC_ORACLE_KEY='SECRET' PS4='$PCC_ORACLE_KEY ' bash -x script.sh
+# Bash expands PS4 to build the trace line for EVERY traced command when
+# xtrace is on — including the trace of this script's own first statement,
+# which is emitted using whatever PS4/xtrace state the CALLER already had
+# active, before this script has executed anything at all. So no command
+# this script runs, however early, can retroactively un-trace its own first
+# statement: round 2's `set +x` (previously the first REAL command, after
+# `set -euo pipefail`) still left that one earlier statement — and `set +x`
+# itself — traced under a hostile inherited PS4. Moving `set +x` earlier
+# shrinks that window to a single, irreducible trace event (this line);
+# nothing placed before it inside this script could shrink it further.
+#
+# What reading the key from a FILE narrows: that one irreducible trace event
+# can still invoke an attacker's PS4 once, but PCC_ORACLE_KEY (the secret
+# itself) is never read into this process's environment — only
+# PCC_ORACLE_KEY_FILE, a file PATH, which is not a secret. Astra's exact
+# recipe (`PS4='$PCC_ORACLE_KEY '`, a bare variable reference, no command
+# substitution) now expands to nothing, because that variable no longer
+# exists here.
+#
+# What is NOT covered (the narrowed claim): a PS4 that already knows the
+# exact value of $PCC_ORACLE_KEY_FILE and runs
+# `$(cat "$PCC_ORACLE_KEY_FILE" 2>/dev/null)` could still read the key on
+# that one trace event, since the file's contents exist on disk before this
+# script starts, independent of anything this script does. Closing that
+# residual needs a process boundary this script cannot construct for
+# itself (something that holds the real key and is invoked only AFTER the
+# caller's own tracing/PS4 state is known-clean — out of scope here). The
+# guarantee this script makes is "the trivial, undirected attack astra
+# reproduced no longer works," not "no PS4 payload can ever work."
 set +x
+set -euo pipefail
 
 # ── Configuration ───────────────────────────────────────────────────────────
 REPO="global-mysterysnailrevolution/physical-capability-cloud"
@@ -25,12 +54,21 @@ BRANCH="digital-verifier/foundation"
 GW="https://capability.network"
 ORACLE_TUNNEL="https://refer-proxy-joint-cleaning.trycloudflare.com"
 ORACLE_DIRECT="${ORACLE_DIRECT:-http://localhost:4100}"
-# The oracle key comes from the environment. Keys are NEVER committed to this
-# repository (WP-A fold F8: the literal that used to sit here was exposed and is
-# listed for revocation in docs/security/WILDCARD_KEY_ROTATION.md).
-ORACLE_KEY="${PCC_ORACLE_KEY:-}"
+# FC-8 round 4: read from a FILE, never an env var — see the threat-model
+# comment above. Keys are NEVER committed to this repository (WP-A fold F8:
+# the literal that used to sit here was exposed and is listed for
+# revocation in docs/security/WILDCARD_KEY_ROTATION.md).
+if [ -z "${PCC_ORACLE_KEY_FILE:-}" ]; then
+  echo "PCC_ORACLE_KEY_FILE is not set: export the path to a file containing the oracle's x-oracle-key before running this script (FC-8 round 4: the key itself is never read from an environment variable). Keys are never committed to this repository." >&2
+  exit 1
+fi
+if [ ! -r "$PCC_ORACLE_KEY_FILE" ]; then
+  echo "PCC_ORACLE_KEY_FILE ($PCC_ORACLE_KEY_FILE) does not exist or is not readable." >&2
+  exit 1
+fi
+ORACLE_KEY="$(cat "$PCC_ORACLE_KEY_FILE")"
 if [ -z "$ORACLE_KEY" ]; then
-  echo "PCC_ORACLE_KEY is not set: export the oracle's x-oracle-key before running this script. Keys are never committed to this repository." >&2
+  echo "PCC_ORACLE_KEY_FILE ($PCC_ORACLE_KEY_FILE) is empty." >&2
   exit 1
 fi
 REPORT_FILE="ai/supervisor/smoke-test-report.json"
@@ -218,7 +256,10 @@ if [ "$HEALTH_RESP" = "CURL_ERROR" ]; then
   fail "Gateway unreachable at $GW"
   add_check "gateway-health" "FAIL" "Connection failed" "$DURATION"
 else
-  HEALTH_STATUS=$(echo "$HEALTH_RESP" | jq -r .status 2>/dev/null || echo "")
+  # FC-8 round 4 (finding 2): validate BEFORE any compare/print/add_check —
+  # round 3 printed this field after only swapping it for the extracted
+  # (but still unvalidated) value, not after actually validating it.
+  HEALTH_STATUS=$(safe_enum "$(echo "$HEALTH_RESP" | jq -r .status 2>/dev/null || echo "")" ok)
   if [ "$HEALTH_STATUS" = "ok" ]; then
     pass "Gateway healthy: status=$HEALTH_STATUS"
     add_check "gateway-health" "PASS" "status=$HEALTH_STATUS" "$DURATION"
@@ -301,7 +342,8 @@ if [ -z "$ORACLE_HEALTH" ]; then
   fail "Oracle unreachable (tunnel + direct both failed)"
   add_check "oracle-responds" "FAIL" "Oracle unreachable via tunnel and direct" "$DURATION"
 else
-  ORACLE_STATUS=$(echo "$ORACLE_HEALTH" | jq -r .status 2>/dev/null || echo "")
+  # FC-8 round 4 (finding 2): same fix as HEALTH_STATUS above.
+  ORACLE_STATUS=$(safe_enum "$(echo "$ORACLE_HEALTH" | jq -r .status 2>/dev/null || echo "")" ok)
   if [ "$ORACLE_STATUS" = "ok" ]; then
     pass "Oracle healthy via $ORACLE_URL_USED: status=$ORACLE_STATUS"
     add_check "oracle-responds" "PASS" "Oracle ok via $ORACLE_URL_USED" "$DURATION"
@@ -320,10 +362,13 @@ else
         "chainId": 84532
       }' 2>/dev/null || echo "")
     if [ -n "$VERIFY_RESP" ]; then
-      VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
       # FC-8 round 2: .result.reason is the oracle's free text and may
       # reflect a secret (e.g. a header value echoed into an error message);
       # only the validated boolean `verified` field is safe to log here.
+      # FC-8 round 4 (finding 2): "validated" means through safe_bool, not
+      # just "a different field than before" — round 3 printed this field
+      # raw.
+      VERIFIED=$(safe_bool "$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")")
       info "Verify response: verified=$VERIFIED"
     else
       info "Verify request returned empty (oracle may be processing)"
@@ -400,7 +445,9 @@ if $E2E_OK; then
   VALIDATE_RESP=$(curl -sS --max-time 10 \
     -H "Authorization: Bearer $API_KEY" \
     "$GW/api/auth/validate" 2>/dev/null || echo "")
-  IS_VALID=$(echo "$VALIDATE_RESP" | jq -r .valid 2>/dev/null || echo "false")
+  # FC-8 round 4 (finding 2): validate via safe_bool before the compare, not
+  # just before the print — round 3 only fixed the print site.
+  IS_VALID=$(safe_bool "$(echo "$VALIDATE_RESP" | jq -r .valid 2>/dev/null || echo "false")")
 
   if [ "$IS_VALID" = "true" ]; then
     info "API key validated successfully"

@@ -88,9 +88,22 @@ describe("FC-8 round 2 (astra pack 61b) — safeLogId", () => {
     expect(safeLogId(`error: ${SENTINEL}`)).not.toContain(SENTINEL);
   });
 
-  it("keeps an ordinary bounded id", () => {
-    expect(safeLogId("job_hp-printer-fullchain.1")).toBe("job_hp-printer-fullchain.1");
-    expect(safeLogId("job-real-e2e")).toBe("job-real-e2e");
+  it("FC-8 round 4: no longer 'keeps' an id — returns a fixed-length SHA-256 fingerprint instead, deterministic but never the value", () => {
+    // Round 2/3's "ID-shaped values pass through unchanged" was the exact
+    // defect astra's round-4 review (finding 3) rejected: a credential
+    // satisfies an id-shape check just as well as a real id does. The
+    // fingerprint reveals nothing about the input, regardless of shape.
+    const out = safeLogId("job_hp-printer-fullchain.1");
+    expect(out).not.toContain("job_hp-printer-fullchain.1");
+    expect(out).toMatch(/^id:[0-9a-f]{12}$/);
+    // Deterministic: the same id fingerprints the same way every time, so
+    // a reader can still see "this is the same id as three lines up".
+    expect(safeLogId("job_hp-printer-fullchain.1")).toBe(out);
+    // Different input, different fingerprint.
+    expect(safeLogId("job-real-e2e")).not.toBe(out);
+    // An id-shaped SECRET fingerprints the same way as any other string —
+    // it is never distinguishable from, or reducible to, a real id.
+    expect(safeLogId(SENTINEL.replace(/ /g, "-"))).toMatch(/^id:[0-9a-f]{12}$/);
   });
 
   it("falls back on a non-string or missing value", () => {

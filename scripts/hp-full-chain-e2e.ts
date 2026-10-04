@@ -243,9 +243,11 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     args: { text: printText, copies: 1 },
   });
   const toolCallId = (tcRes.data as any)?.id;
-  const toolCallStatus = (tcRes.data as any)?.status;
-  // FC-8 round 3: both fields are server-returned; validate before logging.
-  L(`     tool call: ${safeLogId(toolCallId)} status=${safeLogId(toolCallStatus)}`);
+  // FC-8 round 4: status is not an id (finding 3 — safeLogId must never be
+  // used on a status/mode/network/type/fee/route/amount) and has no
+  // confidently-closed enum in this codebase, so it is omitted; only the
+  // id (fingerprinted) is logged.
+  L(`     tool call: ${safeLogId(toolCallId)}`);
   L("");
 
   SEP();

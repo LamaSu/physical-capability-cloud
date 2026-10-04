@@ -20,15 +20,48 @@ export function allEncodings(canary: string): string[] {
 }
 
 /**
+ * True only for a request body that is actually destined for the printer
+ * (kernelId "kernel-hp-printer"), as opposed to e.g. the oracle /verify
+ * body, which legitimately echoes the jobId the oracle itself issued back
+ * to that SAME oracle — normal protocol traffic, not a leak to a human- or
+ * report-facing surface. Capturing every outgoing body indiscriminately
+ * produced a false positive on exactly that echo in the first draft of
+ * this fixture.
+ */
+function isPrinterBody(bodyStr: string): boolean {
+  return bodyStr.includes("kernel-hp-printer") || bodyStr.includes("printer_print_text");
+}
+
+/**
+ * Extracts just the field that is actually PRINTED — `parameters.content`
+ * (real-e2e-verbose.ts/real-e2e.ts) or `args.text`
+ * (hp-full-chain-e2e.ts) — from a printer-destined body, discarding
+ * routing metadata like `scopeId`. `scopeId` is itself a gateway-issued
+ * handle the script must echo back to route the SAME relay call, exactly
+ * like the oracle's jobId echo: necessary protocol traffic a human never
+ * reads, not something that reaches a report, stdout, or a printed page.
+ * Capturing the whole routing envelope produced a second false positive.
+ */
+function printedContentOf(body: unknown): string {
+  const obj = typeof body === "string" ? (() => { try { return JSON.parse(body); } catch { return {}; } })() : body;
+  const o = obj as Record<string, any>;
+  return String(o?.parameters?.content ?? o?.args?.text ?? "");
+}
+
+/**
  * A mock fetch for real-e2e-verbose.ts that sets EVERY field the script
  * reads from EVERY endpoint to `canary` (or `[canary]` for array fields) —
- * not a hand-picked subset. Recording the request body of every call lets
- * the test also inspect exactly what would have been sent to the printer.
+ * not a hand-picked subset. Recording only the PRINTER-destined request
+ * bodies lets the test also inspect exactly what would have been sent to
+ * the printer, without flagging ordinary id-echoing protocol traffic.
  */
 export function makeAllFieldsCanaryFetchVerbose(canary: string, sentBodies: unknown[]): typeof fetch {
   return (async (url: string | URL, opts?: any) => {
     const u = String(url);
-    if (opts?.body !== undefined) sentBodies.push(opts.body);
+    if (opts?.body !== undefined) {
+      const bodyStr = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+      if (isPrinterBody(bodyStr)) sentBodies.push(printedContentOf(opts.body));
+    }
 
     if (u.includes("/api/ot2/camera/latest")) {
       return fakeResponse(200, "", { "content-type": canary, "content-length": "99" });
@@ -84,7 +117,10 @@ export function makeAllFieldsCanaryFetchVerbose(canary: string, sentBodies: unkn
 export function makeAllFieldsCanaryFetchRealE2e(canary: string, sentBodies: unknown[]): typeof fetch {
   return (async (url: string | URL, opts?: any) => {
     const u = String(url);
-    if (opts?.body !== undefined) sentBodies.push(opts.body);
+    if (opts?.body !== undefined) {
+      const bodyStr = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+      if (isPrinterBody(bodyStr)) sentBodies.push(printedContentOf(opts.body));
+    }
 
     if (u.includes("/api/ot2/camera/latest")) {
       return fakeResponse(200, "", { "content-type": canary, "content-length": "99" });
@@ -106,7 +142,10 @@ export function makeAllFieldsCanaryFetchRealE2e(canary: string, sentBodies: unkn
 export function makeAllFieldsCanaryFetchHpFullChain(canary: string, sentBodies: unknown[]): typeof fetch {
   return (async (url: string | URL, opts?: any) => {
     const u = String(url);
-    if (opts?.body !== undefined) sentBodies.push(opts.body);
+    if (opts?.body !== undefined) {
+      const bodyStr = typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+      if (isPrinterBody(bodyStr)) sentBodies.push(printedContentOf(opts.body));
+    }
 
     if (u.endsWith("/verify") && opts?.method === "POST") {
       return fakeResponse(200, {

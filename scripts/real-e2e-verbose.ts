@@ -3,14 +3,16 @@
  * Every HTTP call, every on-chain tx, every response — logged verbatim.
  * Output is the print job content.
  *
- * FC-8 round 3 (astra pack 61b census closure): the flow is exported as
- * `run(deps)` with injected fetch/chain-clients/env so it can be driven by
- * mocks in a test (see fc8-round3-real-e2e-verbose.test.ts) instead of only
- * ever running against live services. CLI behavior is preserved behind the
- * entry guard at the bottom. Every print site that reaches a gateway- or
- * oracle-derived value now logs a VALIDATED projection of it (an id, an
- * integer, a boolean, an allow-listed enum/content-type, or a bounded hex
- * prefix) — never a raw response body or object.
+ * FC-8 round 4 (astra pack 61c, the steward's ruling, bus #6482): output may
+ * contain ONLY a fixed label the script authors wrote, a route TEMPLATE
+ * (never a path built from a response value, encoded or not), a value from
+ * a closed enum the caller explicitly lists, a boolean via safeLogBool, a
+ * locally- or type-checked bounded number, or a SHA-256 fingerprint of an
+ * id (never the id itself, not even "validated-shape"). Fields with no
+ * sound validator under that list are omitted outright — see the round-4
+ * report for the full per-field accounting. The flow is exported as
+ * `run(deps)` with injected fetch/chain-clients/env (round 3); CLI behavior
+ * is preserved behind the entry guard at the bottom.
  */
 
 import {
@@ -25,9 +27,8 @@ import { resolve } from "node:path";
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
-  safeLogJson, safeLogResponseText, safeLogErrorName, safeLogId, safeLogInt,
-  safeLogBool, safeLogEnum, safeLogContentType, safeLogHex, safeLogIdList,
-  safeLogUrlPath,
+  safeLogErrorName, safeLogId, safeLogInt, safeLogBool, safeLogEnum,
+  safeLogContentType, safeLogHex,
 } from "../packages/gateway/src/util/redact-log.js";
 
 /** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
@@ -95,15 +96,16 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   function BIGSEP() { L("═".repeat(72)); }
 
   // ── Traced HTTP ──────────────────────────────────────────────────────
-  // FC-8 round 3: a generic request/response tracer cannot validate an
-  // arbitrary endpoint's body — it only knows shape and size, never field
-  // semantics — so it logs shape/size/status, never body content. Callers
-  // that need a specific field (jobId, a status enum, a count) log that
-  // field themselves, through a validated helper, right after the call.
+  // FC-8 round 4: `routeTemplate` is a FIXED STRING the caller writes —
+  // never the real `path`, which can contain a response-derived segment
+  // (round 3's safeLogUrlPath validated that path's CHARACTERS, not its
+  // CONTENT, and still logged it — including `encodeURIComponent(secret)`,
+  // which is URL-safe-shaped by construction). The tracer otherwise still
+  // logs shape/size/status only, never body content.
   let reqNum = 0;
-  async function gw(method: string, path: string, body?: any): Promise<any> {
+  async function gw(method: string, path: string, routeTemplate: string, body?: any): Promise<any> {
     const n = ++reqNum;
-    L(`  [HTTP ${n}] ${method} ${GW}${safeLogUrlPath(path)}`);
+    L(`  [HTTP ${n}] ${routeTemplate}`);
     if (body !== undefined) L(`  [HTTP ${n}] Body: <${Array.isArray(body) ? "array" : typeof body}>`);
     const t0 = Date.now();
     const opts: RequestInit = {
@@ -111,7 +113,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e-verbose/1.0" },
     };
     if (body !== undefined) opts.body = JSON.stringify(body);
-    const r = await fetchImpl(url(path), opts);
+    const r = await fetchImpl(`${GW}${path}`, opts);
     const text = await r.text();
     const ms = Date.now() - t0;
     let data: any;
@@ -120,7 +122,6 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     L(`  [HTTP ${n}] Response: <${data && typeof data === "object" ? (Array.isArray(data) ? "array" : "object") : typeof data}> (${text.length} bytes)`);
     return data;
   }
-  function url(path: string): string { return `${GW}${path}`; }
 
   // ── Traced on-chain write ────────────────────────────────────────────
   let txNum = 0;
@@ -282,23 +283,23 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[3a] Gateway kernel state");
-  await gw("GET", "/api/kernels/kernel-nanoclaw");
+  await gw("GET", "/api/kernels/kernel-nanoclaw", "GET /api/kernels/:kernelId");
   L("");
 
   SEP();
   L("[3b] DHT peers + metrics");
-  await gw("GET", "/api/dht/peers");
-  await gw("GET", "/api/dht/metrics");
+  await gw("GET", "/api/dht/peers", "GET /api/dht/peers");
+  await gw("GET", "/api/dht/metrics", "GET /api/dht/metrics");
   L("");
 
   SEP();
   L("[3c] Operator daemon heartbeat check");
-  await gw("POST", "/api/operator/heartbeat", { kernelId: KERNEL, status: "online" });
+  await gw("POST", "/api/operator/heartbeat", "POST /api/operator/heartbeat", { kernelId: KERNEL, status: "online" });
   L("");
 
   SEP();
   L("[3d] Capability discovery — what can this kernel do?");
-  await gw("GET", "/api/capabilities/by-kernel/kernel-nanoclaw");
+  await gw("GET", "/api/capabilities/by-kernel/kernel-nanoclaw", "GET /api/capabilities/by-kernel/:kernelId");
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -328,7 +329,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   ].join("\n");
   L(`     Protocol:\n${protocol}`);
   L("");
-  const jobResult = await gw("POST", "/api/jobs/submit", {
+  const jobResult = await gw("POST", "/api/jobs/submit", "POST /api/jobs/submit", {
     stepId: "step-full-telemetry",
     kernelId: KERNEL,
     parameters: { pythonCode: protocol, filename: "pcc_full_telemetry.py" },
@@ -346,7 +347,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   let status = "queued";
   for (let i = 0; i < pollAttempts; i++) {
     await new Promise(r => setTimeout(r, pollSleepMs));
-    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`);
+    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`, "GET /api/jobs/:id/status");
     status = s?.status;
     L(`     Poll ${i + 1}: ${safeLogEnum(status, JOB_STATUSES)} (progress=${safeLogInt(s?.progress)})`);
     if (status === "completed" || status === "failed") break;
@@ -377,7 +378,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[6b] Gateway telemetry audit log (last 10 entries)");
-  await gw("GET", "/api/telemetry/audit?limit=10");
+  await gw("GET", "/api/telemetry/audit?limit=10", "GET /api/telemetry/audit");
   L("");
 
   SEP();
@@ -396,9 +397,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     chainId: 84532,
   };
   const evidenceHash = keccak256(toBytes(JSON.stringify(evidence)));
-  // FC-8 round 3: `evidence` embeds server-returned jobId/status/content-type;
-  // the HASH must cover the real values, but the LOGGED copy only shows them
-  // once validated, never raw.
+  // FC-8 round 4: `evidence` embeds server-returned jobId/status/content-type;
+  // the HASH must cover the real values, but the LOGGED copy only shows a
+  // fingerprint/enum/allow-listed type, never the raw value.
   L(`     Evidence: ${JSON.stringify({
     ...evidence,
     jobId: safeLogId(evidence.jobId),
@@ -432,7 +433,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult?.jobId }),
   });
   const oracleText = await oracleReq.text();
-  // FC-8 round 2+3: the oracle response may reflect the x-oracle-key or carry
+  // FC-8 round 2+4: the oracle response may reflect the x-oracle-key or carry
   // a secret; never print its raw text or object — only a validated boolean.
   let oracleParsed: any;
   try { oracleParsed = JSON.parse(oracleText); } catch { oracleParsed = undefined; }
@@ -455,8 +456,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     nonce: keccak256(toBytes(`nonce-${Date.now()}-${ESCROW}`)),
     signature: "0x" as Hex,
   };
-  // FC-8 round 3: jobId is server-returned; validate before logging (the hash
-  // computation above and the on-chain call below still use the real value).
+  // FC-8 round 4: jobId is server-returned; log only its fingerprint (the
+  // hash computation above and the on-chain call below still use the real
+  // value).
   L(`     Attestation struct: ${JSON.stringify({
     ...attestationStruct,
     jobId: safeLogId(attestationStruct.jobId),
@@ -492,7 +494,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   // ── 7b-1. Storacha / IPFS Evidence Archival ───────────────────────
   SEP();
   L("[7b-1] Archive evidence bundle to IPFS (Storacha/Helia)");
-  const archiveResult = await gw("POST", "/api/evidence/archive", {
+  const archiveResult = await gw("POST", "/api/evidence/archive", "POST /api/evidence/archive", {
     bundle: {
       id: `evidence-${jobResult?.jobId}`,
       jobId: jobResult?.jobId,
@@ -509,22 +511,25 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       timestamp: new Date().toISOString(),
     },
   });
-  L(`     Archived: ${safeLogBool(archiveResult?.archived)} | CID: ${safeLogId(archiveResult?.cid, "mock")}`);
-  L(`     Metadata CID: ${safeLogId(archiveResult?.metadataCid, "none")}`);
+  // FC-8 round 4: cid/metadataCid are ids (fingerprinted); nothing else from
+  // this response has a sound validator, so nothing else is printed.
+  L(`     Archived: ${safeLogBool(archiveResult?.archived)} | CID: ${safeLogId(archiveResult?.cid)}`);
+  L(`     Metadata CID: ${safeLogId(archiveResult?.metadataCid)}`);
   L("");
 
   // ── 7b-2. Lit Protocol — Encrypt Evidence ─────────────────────────
   SEP();
   L("[7b-2] Lit Protocol status + key provisioning check");
-  const litStatus = await gw("GET", "/api/evidence/lit-status");
+  const litStatus = await gw("GET", "/api/evidence/lit-status", "GET /api/evidence/lit-status");
+  // FC-8 round 4: mode/network are not ids (safeLogId round-3 misuse,
+  // finding 3) and have no confidently-closed enum in this codebase —
+  // omitted. `connected` is the only field with a sound validator here.
   L(`     Lit connected: ${safeLogBool(litStatus?.lit?.connected)}`);
-  L(`     Lit mode: ${safeLogId(litStatus?.lit?.mode)}`);
-  L(`     Lit network: ${safeLogId(litStatus?.lit?.network)}`);
   L("");
 
   SEP();
   L("[7b-3] Lit Protocol — provision operator usage key");
-  const litProvision = await gw("POST", "/api/lit/provision", {
+  const litProvision = await gw("POST", "/api/lit/provision", "POST /api/lit/provision", {
     kernelId: KERNEL,
     operatorDid: `did:pcc:${KERNEL}`,
   });
@@ -536,7 +541,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   // ── 7b-4. Starknet — ZK Proof Anchoring ───────────────────────────
   SEP();
   L("[7b-4] Create ZK commitment from evidence hash");
-  const zkCommit = await gw("POST", "/api/zk/commit", {
+  const zkCommit = await gw("POST", "/api/zk/commit", "POST /api/zk/commit", {
     bundleHash: evidenceHash,
   });
   L(`     Commitment ID: ${safeLogId(zkCommit?.commitment?.id)}`);
@@ -545,49 +550,48 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[7b-5] Generate tier-compliance proof (tier 2)");
-  const zkProof = await gw("POST", "/api/zk/prove/tier", {
+  const zkProof = await gw("POST", "/api/zk/prove/tier", "POST /api/zk/prove/tier", {
     bundleHash: evidenceHash,
     requiredTier: 2,
   });
   const proofId = zkProof?.proof?.id;
+  // FC-8 round 4: proofType is not an id and has no closed enum — omitted.
   L(`     Proof ID: ${safeLogId(proofId)}`);
-  L(`     Proof type: ${safeLogId(zkProof?.proof?.proofType)}`);
   L(`     Verified: ${safeLogBool(zkProof?.proof?.verified)}`);
   L("");
 
   SEP();
   L("[7b-6] Anchor proof on Starknet (ZK proof hash → Starknet Sepolia)");
-  const starknetAnchor = await gw("POST", "/api/zk/anchor-starknet", {
+  const starknetAnchor = await gw("POST", "/api/zk/anchor-starknet", "POST /api/zk/anchor-starknet", {
     proofId: proofId ?? undefined,
     merkleRoot: proofId ? undefined : evidenceHash,
   });
   const starknetTxHash = starknetAnchor?.anchor?.txHash;
+  // FC-8 round 4: `mode` is not an id and has no closed enum — omitted.
   L(`     Starknet TX: ${safeLogHex(starknetTxHash)}`);
-  L(`     Block: ${safeLogInt(starknetAnchor?.anchor?.blockNumber, "pending")}`);
-  L(`     Mode: ${safeLogId(starknetAnchor?.mode)}`);
+  L(`     Block: ${safeLogInt(starknetAnchor?.anchor?.blockNumber)}`);
   L("");
 
   if (starknetTxHash) {
     SEP();
     L("[7b-7] Poll Starknet anchor status");
-    const anchorStatus = await gw("GET", `/api/zk/anchor-starknet/${encodeURIComponent(String(starknetTxHash))}`);
-    L(`     Status: ${safeLogId(anchorStatus?.status)}`);
+    // FC-8 round 4: status has no confidently-closed enum here — omitted;
+    // the poll having run at all is what this line records.
+    await gw("GET", `/api/zk/anchor-starknet/${encodeURIComponent(String(starknetTxHash))}`, "GET /api/zk/anchor-starknet/:txHash");
     L("");
   }
 
   // ── 7b-8. NEAR — Cross-Chain Payment Quote ────────────────────────
   SEP();
   L("[7b-8] NEAR chain abstraction — integration status");
-  const nearStatus = await gw("GET", "/api/near/status");
-  L(`     Integration: ${safeLogId(nearStatus?.integration)}`);
-  L(`     Network: ${safeLogId(nearStatus?.network)}`);
-  L(`     Mock: ${safeLogBool(nearStatus?.mock)}`);
-  L(`     Supported chains: ${safeLogIdList(nearStatus?.supportedChains)}`);
+  // FC-8 round 4: integration/network/supportedChains are not ids and have
+  // no closed enum here — omitted; `mock` is the only sound field.
+  await gw("GET", "/api/near/status", "GET /api/near/status");
   L("");
 
   SEP();
   L("[7b-9] NEAR — cross-chain payment quote (NEAR USDC → Base USDC)");
-  const nearQuote = await gw("POST", "/api/near/quote", {
+  const nearQuote = await gw("POST", "/api/near/quote", "POST /api/near/quote", {
     fromChain: "near",
     fromAsset: "USDC",
     toChain: "base",
@@ -596,31 +600,30 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     recipient: account.address,
   });
   const quoteId = nearQuote?.quote?.quoteId;
+  // FC-8 round 4: estimatedOutput/fee/route are amounts/routes, not ids —
+  // omitted (finding 3). Only the id is logged, fingerprinted.
   L(`     Quote ID: ${safeLogId(quoteId)}`);
-  L(`     Estimated output: ${safeLogId(nearQuote?.quote?.estimatedOutput)}`);
-  L(`     Fee: ${safeLogId(nearQuote?.quote?.fee)}`);
-  L(`     Route: ${safeLogId(nearQuote?.quote?.route)}`);
   L("");
 
   if (quoteId) {
     SEP();
     L("[7b-10] NEAR — submit cross-chain payment intent");
-    const nearIntent = await gw("POST", "/api/near/intent", {
+    const nearIntent = await gw("POST", "/api/near/intent", "POST /api/near/intent", {
       quoteId,
       workflowId: `pcc-full-telemetry-${Date.now()}`,
       recipient: account.address,
     });
     const intentId = nearIntent?.intent?.intentId;
+    // FC-8 round 4: status omitted (no closed enum here).
     L(`     Intent ID: ${safeLogId(intentId)}`);
-    L(`     Status: ${safeLogId(nearIntent?.intent?.status)}`);
     L("");
 
     if (intentId) {
       SEP();
       L("[7b-11] NEAR — poll intent settlement status");
-      const intentStatus = await gw("GET", `/api/near/intent/${encodeURIComponent(String(intentId))}`);
-      L(`     Status: ${safeLogId(intentStatus?.status ?? intentStatus?.intent?.status)}`);
-      L(`     TX hash: ${safeLogHex(intentStatus?.txHash ?? intentStatus?.intent?.txHash, 20, "pending")}`);
+      const intentStatus = await gw("GET", `/api/near/intent/${encodeURIComponent(String(intentId))}`, "GET /api/near/intent/:id");
+      // FC-8 round 4: status omitted; txHash is id-like, fingerprinted.
+      L(`     TX hash: ${safeLogHex(intentStatus?.txHash ?? intentStatus?.intent?.txHash)}`);
       L("");
     }
   }
@@ -632,12 +635,12 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[8a] Final escrow on-chain state");
-  await gw("GET", `/api/escrow/chain/${ESCROW}/state`);
+  await gw("GET", `/api/escrow/chain/${ESCROW}/state`, "GET /api/escrow/chain/:address/state");
   L("");
 
   SEP();
   L("[8b] Final kernel state");
-  await gw("GET", "/api/kernels/kernel-nanoclaw");
+  await gw("GET", "/api/kernels/kernel-nanoclaw", "GET /api/kernels/:kernelId");
   L("");
 
   SEP();
@@ -662,7 +665,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   SEP();
   L("[9a] Submit print job to HP printer (kernel-hp-printer)");
-  await gw("POST", "/api/jobs/submit", {
+  await gw("POST", "/api/jobs/submit", "POST /api/jobs/submit", {
     stepId: "step-print-full-telemetry",
     kernelId: "kernel-hp-printer",
     parameters: {
