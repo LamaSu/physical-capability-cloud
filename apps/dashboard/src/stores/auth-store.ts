@@ -145,14 +145,14 @@ onStoredKeyChange(() => {
 });
 
 /**
- * Store `key` as the signed-in key, or sign out with null, without moving the
- * account generation: tests call it directly. login() and logout() store
- * through setStoredApiKey with the account change. It is write-only: writing
- * a key cannot leak one. Says how the browser's slot took the change
- * (KeyWrite: astra 19i, 19j, 19k; DECISIONS 04:14).
+ * Store `key` as the signed-in key, or sign out with null, WITHOUT moving the
+ * account generation: a write that keeps the account, which only tests make.
+ * login() and logout() store through setStoredApiKey as an account change. It
+ * is write-only: writing a key cannot leak one. Says how the browser's slot
+ * took the change (KeyWrite: astra 19i, 19j, 19k; DECISIONS 04:14).
  */
 export function adoptApiKey(key: string | null): KeyWrite {
-  return setStoredApiKey(key);
+  return setStoredApiKey(key, { accountChange: false });
 }
 
 /**

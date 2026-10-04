@@ -29,10 +29,13 @@ import { authorizedFetch } from "./authorized-fetch.js";
  *    ended (lib/account-generation.ts). A page that loads before then
  *    finishes the teardown first.
  *
- * Resolves true only when the gateway answered {ok: true}. A 2xx alone could
- * come from a proxy or a fallback page while the cookie is still live. On
- * false (no confirmation, or another tab held the lock too long), App keeps
- * the next account's shell from mounting and offers a retry (fail closed).
+ * Resolves true only when the gateway answered {ok: true} AND the
+ * confirmation is recorded where the request gate reads it (astra 19m). A 2xx
+ * alone could come from a proxy or a fallback page while the cookie is still
+ * live, and an unrecorded confirmation leaves every request withheld. On false
+ * (no confirmation, a generation that can't be read, a marker storage won't
+ * keep, or another tab held the lock too long), App keeps the next account's
+ * shell from mounting and offers a retry (fail closed).
  */
 export async function endWalletSession(): Promise<boolean> {
   for (const signIn of signIns) signIn.abort();
@@ -42,8 +45,7 @@ export async function endWalletSession(): Promise<boolean> {
   const teardown = async () => {
     const generation = accountGeneration(); // what this logout covers
     const ended = await logOut();
-    if (ended && generation !== null) confirmWalletSessionEnded(generation);
-    return ended;
+    return ended && generation !== null && confirmWalletSessionEnded(generation);
   };
   // Without Web Locks no sign-in can have started in this browser (verifySignIn needs them), so there's nothing to wait for.
   if (!webLocks()) return teardown();

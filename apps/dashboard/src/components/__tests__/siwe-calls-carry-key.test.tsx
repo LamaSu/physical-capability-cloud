@@ -61,7 +61,7 @@ beforeEach(async () => {
     }),
   );
   const { setStoredApiKey } = await import("../../lib/authorized-fetch.js");
-  setStoredApiKey(KEY);
+  setStoredApiKey(KEY, { accountChange: false }); // a signed-in, settled key (a key write is an account change by default, astra 19m)
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -71,7 +71,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   const { setStoredApiKey } = await import("../../lib/authorized-fetch.js");
-  setStoredApiKey(null);
+  setStoredApiKey(null, { accountChange: false });
   vi.unstubAllGlobals();
 });
 
