@@ -1,87 +1,82 @@
-"""N66: pcc-node never hands a string to a shell, and never runs code it was sent.
+"""N66: a regression tripwire for shell and code-loading forms in pcc-node's source.
 
 pcc_node/executor.py ran relay-supplied tool-call arguments with
 ``subprocess.run(cmd, shell=True)``: whoever could queue a tool call for a
 kernel got a shell on the operator's machine. It was deleted.
 
-This guard keeps the class out by reading the package's syntax trees, not its
-text (verdict 68b, finding 4: a regex scan missed ``shell=flag``,
-``**{"shell": True}``, ``from os import system``, ``getattr(subprocess, name)``,
-computed argv and ``/usr/bin/env sh``). The rules:
+This file reads the package's syntax trees, not its text (verdict 68b, finding
+4: a regex scan missed ``shell=flag``, ``**{"shell": True}``, ``from os import
+system``, ``getattr(subprocess, name)``, computed argv and ``/usr/bin/env sh``),
+and fails when the package uses one of the forms below. It claims exactly
+those forms, each pinned by a test case here (``EVASIONS``, ``IMPORT_EVASIONS``
+or a package-level test). It is NOT a proof that pcc-node cannot start a
+process or load code: three review rounds on #563 each found a new import form,
+so the property is enforced at run time by pcc-node's audit hook (board row
+N121, adk's #517), whose tests run this file's corpus under the hook.
+``EVASIONS``, ``IMPORT_EVASIONS`` and ``SAFE`` stay plain data (label ->
+source) for that, as does ``STARTS`` (label -> (source, expected starts)). A
+form missing here is a MEDIUM on N121, not a hole in the property. What it
+refuses:
 
-1. A process is started only by ``subprocess.run/call/check_call/
-   check_output/Popen`` or ``asyncio.create_subprocess_exec``. Its first
-   argument is a list or tuple literal whose first item is one of the fixed
-   executables pcc-node runs (``EXECUTABLES``), by bare name: an allowlist,
-   because a list of shells cannot name every interpreter (verdict 68e,
-   finding 2). No ``shell=`` other than the literal ``False``, no
-   ``executable=``, and no ``**`` keyword expansion (a dict with constant keys
-   and no ``shell`` is allowed). A starter is only ever called directly:
-   binding it to another name or passing it as a value is refused (verdict
-   68d, finding 2).
-2. Every other way to start a process or replace this one is refused:
-   ``os.system/popen/exec*/spawn*/posix_spawn*``, ``pty.spawn``,
-   ``subprocess.getoutput/getstatusoutput``,
-   ``asyncio.create_subprocess_shell``, whether called by attribute, by an
-   imported alias (``from os import system``) or through ``getattr``.
-3. No code or objects are loaded from data: ``eval``, ``exec``, ``compile``,
-   ``__import__``, ``importlib.import_module``, ``runpy``, ``pickle``/
-   ``marshal`` loads and ``yaml.load`` are refused.
-4. The package ships no bytecode. Its checked-in ``.pyc`` files were removed.
-5. ``getattr``/``hasattr`` with a constant name is judged as that attribute
+1. A call to ``subprocess.run/call/check_call/check_output/Popen`` or
+   ``asyncio.create_subprocess_exec`` whose first argument is not a list or
+   tuple literal whose first item is one of ``EXECUTABLES``, by bare name (an
+   allowlist: a list of shells cannot name every interpreter, verdict 68e,
+   finding 2); ``shell=`` other than the literal ``False``; ``executable=``;
+   ``**`` keyword expansion other than a dict with constant keys and no
+   ``shell``; and a starter bound to another name or passed as a value
+   (verdict 68d, finding 2).
+2. ``os.system/popen/exec*/spawn*/posix_spawn*``, ``pty.spawn``,
+   ``subprocess.getoutput/getstatusoutput`` and
+   ``asyncio.create_subprocess_shell``, called by attribute, by an imported
+   alias (``from os import system``) or through ``getattr``.
+3. ``eval``, ``exec``, ``compile``, ``__import__``, ``importlib.import_module``,
+   ``runpy``, ``pickle``/``marshal`` loads and ``yaml.load``: forms that load
+   code or objects from data.
+4. Checked-in bytecode: the package's ``.pyc`` files were removed.
+5. ``getattr``/``hasattr`` with a constant name are judged as that attribute
    only where the name is demonstrably the builtin: nothing in the package
    rebinds it (a def, an assignment, a parameter, an import, ``globals()``,
    ``setattr``, an attribute store), and nothing imports ``builtins``
    (verdict 68e, finding 2).
-6. A module is never reached through another module's attribute
-   (``subprocess.os``), and an attribute chain goes past a tracked module's
-   first attribute only through the few the package uses (``SAFE_CHAINS``:
-   ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f). That holds
-   however the path is named: ``from subprocess import os``, ``import os.path
-   as p`` and ``from os.path import os`` resolve to the same paths, and no
-   path passes a dunder. A chain's head, or anything past it, is never bound
-   to a name or passed as a value, where its attributes would escape these
-   rules (``path = os.path``) (verdict 105e).
-7. Nothing reaches a tracked module, an object's internals or a frame
-   through any other object (verdict 105f). On any object, no attribute is
-   named like a module the guard tracks (``pathlib.os``; ``.code`` stays
-   usable, since HTTP errors carry it), no dunder is used but the plain few in
-   ``ALLOWED_DUNDERS`` (``pathlib.__dict__``, ``().__class__``), and no frame
-   or traceback attribute (``f_globals``, ``tb_frame``). ``getattr`` and
-   ``hasattr`` take only a constant name, which those same rules judge, and
-   are never passed as values. No import names a module through another
-   module (``from pathlib import os``) or a dunder outside the allowlist
-   (``from os import __dict__``), and a name is imported as one thing only
-   (an alias reused for another module in an uncalled function would
-   otherwise hide which module it is). ``inspect``, ``gc``, ``sys._getframe``,
-   ``operator.attrgetter`` and ``breakpoint()`` are refused, and so is every
-   module that turns a string into a module or a callable: ``pkgutil``,
-   ``pydoc``, ``zipimport``, ``site`` and ``logging.config``.
+6. A module reached through another module's attribute (``subprocess.os``),
+   and an attribute chain past a tracked module's first attribute other than
+   the few the package uses (``SAFE_CHAINS``: ``os.path``, ``os.environ``,
+   ``sys.stdin``) (verdict 68f), however the path is named (``from subprocess
+   import os``, ``import os.path as p``, ``from os.path import os``), or
+   through a dunder; and a chain's head, or anything past it, bound to a name
+   or passed as a value (``path = os.path``) (verdict 105e).
+7. On any object (verdict 105f): an attribute named like a module the tripwire
+   tracks (``pathlib.os``; ``.code`` is allowed, since HTTP errors carry it), a
+   dunder outside ``ALLOWED_DUNDERS`` (``pathlib.__dict__``,
+   ``().__class__``), and a frame or traceback attribute (``f_globals``,
+   ``tb_frame``); ``getattr``/``hasattr`` with a computed name, or passed as a
+   value; an import naming a module through another module (``from pathlib
+   import os``) or a dunder outside the allowlist (``from os import
+   __dict__``); a name imported as more than one thing; ``inspect``, ``gc``,
+   ``sys._getframe``, ``operator.attrgetter`` and ``breakpoint()``; and the
+   modules that turn a string into a module or a callable (``pkgutil``,
+   ``pydoc``, ``zipimport``, ``site``, ``logging.config``).
+8. An import of a module outside ``ALLOWED_IMPORTS`` (verdict 105g), the exact
+   set the package imports today, kept exact by a census test, so a new
+   module is a reviewed change; a private name (``_run_code``,
+   ``_syscmd_ver``) reached through an imported module or imported from one;
+   a refused builtin passed as a value (``map(eval, ...)``);
+   ``ProcessPoolExecutor``, ``CGIHTTPRequestHandler``, ``click.edit`` and
+   ``click.launch`` by name, anywhere, and ``click`` passed as a value; a
+   package module importing a tracked module, or a name bound from one, from
+   another package module (``from .helper import platform``, where helper.py
+   did ``import os as platform``; ``from .bridge import run``, where bridge.py
+   did ``from subprocess import run``); a star import from any module, the
+   package's own included (``from .bridge import *``, #563 r2); and a
+   first-party module bound as an object (``import pcc_node.bridge``, aliased
+   or not, ``import pcc_node``, ``from . import bridge``), since a module
+   object carries every name its module binds at any depth (#563 r3).
+   ``executables_started()`` resolves calls exactly as ``violations()`` does.
 
-8. The package imports only what ``ALLOWED_IMPORTS`` lists (verdict 105g):
-   the exact set of modules its sources import today, kept exact by a census
-   test, so a new module is a reviewed change (``string``, ``runpy``,
-   ``pickle`` and every other module are refused). No private name
-   (``_run_code``, ``_syscmd_ver``) is reached through an imported module or
-   imported from one. A refused builtin is never passed as a value
-   (``map(eval, ...)``). ``ProcessPoolExecutor`` and ``CGIHTTPRequestHandler``
-   start processes, so they are refused by name, anywhere, as are ``click.edit``
-   and ``click.launch``. ``click`` is never passed as a value. No package
-   module re-exports a tracked module, or a name bound from one, to another
-   (``from .helper import platform``, where helper.py did ``import os as
-   platform``; ``from .bridge import run``, where bridge.py did ``from
-   subprocess import run``). No module is star-imported, the package's own
-   included (``from .bridge import *``): a star import binds names, a tracked
-   module or a starter among them, that none of these rules can see (#563 r2).
-   No first-party module is bound as an object (``import pcc_node.bridge``,
-   aliased or not, ``import pcc_node``, ``from . import bridge``): a module
-   object carries every name its module binds, at any depth and through any
-   value, so other modules import names from it instead, which the re-export
-   check sees (#563 r3). ``executables_started()`` resolves calls exactly as
-   ``violations()`` does.
-
-The guard reads syntax. It tracks names bound by imports, flow-insensitively,
-and it is not a sandbox: rules 1 and 3 stay the first barriers.
+It tracks names bound by imports, flow-insensitively. It is not a sandbox:
+rules 1 and 3 stay the first barriers in the code, and the audit hook (N121)
+is the enforcement.
 """
 
 import ast
@@ -117,7 +112,7 @@ REFUSED_IMPORTS = {"ctypes", "cffi", "multiprocessing", "webbrowser", "posix", "
                    "commands", "codeop", "shelve", "builtins", "inspect", "gc",
                    "pkgutil", "pydoc", "zipimport", "site"}
 REFUSED_BUILTINS = {"eval", "exec", "compile", "__import__", "breakpoint"}
-# The executables pcc-node runs, by bare name (test_the_allowlist_is_what_the_package_runs keeps
+# The executables pcc-node runs, by bare name (test_the_executables_allowlist_matches_the_resolved_starts keeps
 # this list exactly that). A path, or any other executable, is refused.
 EXECUTABLES = {"arp", "dd", "ffmpeg", "journalctl", "sysctl", "v4l2-ctl"}
 MODULES = set(REFUSED) | {m for m, _ in ALLOWED_STARTS}
@@ -586,14 +581,14 @@ def test_the_package_sources_are_scanned():
     assert "job_executor.py" in names and "daemon.py" in names and "camera.py" in names
 
 
-def test_no_module_starts_a_shell_or_runs_code_it_was_sent():
+def test_no_module_uses_a_refused_form():
     hits = []
     for path in _sources():
         source = path.read_text(encoding="utf-8")
         for v in violations(source, str(path)) + import_violations(source):
             hits.append(f"{path.relative_to(PACKAGE)}:{v}")
     hits += reexport_violations(_module_names())
-    assert hits == [], "pcc-node must never start a shell or run code it was sent:\n" + "\n".join(hits)
+    assert hits == [], "pcc-node uses forms this tripwire refuses:\n" + "\n".join(hits)
 
 
 def test_the_package_imports_only_what_it_lists():
@@ -604,7 +599,7 @@ def test_the_package_imports_only_what_it_lists():
     assert used == ALLOWED_IMPORTS
 
 
-def test_the_allowlist_is_what_the_package_runs():
+def test_the_executables_allowlist_matches_the_resolved_starts():
     # A new executable is a reviewed change to EXECUTABLES; an unused entry is removed.
     started = set()
     for path in _sources():
@@ -633,8 +628,8 @@ def test_no_bytecode_is_checked_in():
     assert [p for p in tracked if p.endswith((".pyc", ".pyo"))] == []
 
 
-# The guard's own proof: each evasion verdict 68b listed is caught, and the
-# package's real, fixed-argv calls are not.
+# The tripwire's own proof: each listed evasion is refused (the corpus the runtime audit hook's tests
+# execute, N121), and the package's real, fixed-argv calls are not.
 EVASIONS = {
     "shell=flag": "import subprocess\nsubprocess.run(['ls'], shell=flag)",
     "shell=True": "import subprocess\nsubprocess.run(['ls'], shell=True)",
@@ -786,7 +781,7 @@ EVASIONS = {
     "a star import of an untracked module": "from shutil import *\nos.system('id')",
     "a star import of the package's own module": "from .bridge import *\nrun(remote_argv, shell=True)",
 }
-# Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each caught by import_violations().
+# Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each refused by import_violations().
 IMPORT_EVASIONS = {
     "string.Formatter": "import pathlib\nfrom string import Formatter\nFormatter().get_field('0.os.system', (pathlib,), {})[0]('id')",
     "import string": "import string\nstring.Formatter().get_field('0.os', (pathlib,), {})",
@@ -837,24 +832,24 @@ SAFE = {
 
 
 @pytest.mark.parametrize("label", sorted(EVASIONS))
-def test_the_guard_catches(label):
+def test_the_tripwire_refuses_each_evasion(label):
     assert violations(EVASIONS[label]), label
 
 
 @pytest.mark.parametrize("label", sorted(IMPORT_EVASIONS))
-def test_the_import_allowlist_catches(label):
+def test_the_import_census_refuses_each_unlisted_module(label):
     assert import_violations(IMPORT_EVASIONS[label]), label
 
 
-def test_the_packages_own_absolute_imports_are_allowed():
+def test_the_census_allows_the_packages_own_modules():
     # pcc_node.x is the package itself, like a relative import; the operating runtime (#471) uses this form.
     # The census allows both lines; binding the module object (import pcc_node.http_util) is refused
-    # separately, by reexport_violations() (test_a_first_party_module_is_never_bound_as_an_object).
+    # separately, by reexport_violations() (test_binding_a_first_party_module_as_an_object_is_refused).
     assert import_violations("from pcc_node.log_capture import canonicalize\nimport pcc_node.http_util\n") == []
     assert import_violations("import pcc_nodes\n") != []  # only the package itself, not a lookalike
 
 
-def test_a_module_reexported_across_files_is_caught():
+def test_a_module_reexported_across_files_is_refused():
     # Verdict 105g: helper.py binds os under another name; consumer.py imports it (or reaches it).
     helper = ("import os as platform\n", False)
     for consumer in ("from .helper import platform\nplatform.system('id')\n",
@@ -868,7 +863,7 @@ def test_a_module_reexported_across_files_is_caught():
                                 "pcc_node.consumer": ("from .helper import VERSION\n", False)}) == []
 
 
-def test_a_first_party_module_is_never_bound_as_an_object():
+def test_binding_a_first_party_module_as_an_object_is_refused():
     # #563 r3: a module object carries every name its module binds, at any depth and through values.
     bridge = ("from subprocess import run\n", False)
     for consumer in (
@@ -894,7 +889,7 @@ def test_a_first_party_module_is_never_bound_as_an_object():
                                                       False)}) == []
 
 
-def test_a_starter_reexported_across_files_is_caught():
+def test_a_starter_reexported_across_files_is_refused():
     # #563 r2: bridge.py imports a starter by name; consumer.py takes it from bridge, by name or as an attribute.
     bridge = ("from subprocess import run\n", False)
     for consumer in ("from .bridge import run\nrun(remote_argv, shell=True)\n",
@@ -905,11 +900,11 @@ def test_a_starter_reexported_across_files_is_caught():
 
 
 @pytest.mark.parametrize("label", sorted(SAFE))
-def test_the_guard_allows(label):
+def test_the_tripwire_allows_each_safe_form(label):
     assert violations(SAFE[label]) == [], label
 
 
-# The allowlist check's own proof (#563): a start counts when it resolves to an allowed starter
+# The starts inventory's own proof (#563): a start counts when it resolves to an allowed starter
 # through any import form, and a call that only shares a starter's name does not count.
 STARTS = {
     "subprocess.run": ("import subprocess\nsubprocess.run(['arp', '-a'])", {"arp"}),
@@ -925,6 +920,6 @@ STARTS = {
 
 
 @pytest.mark.parametrize("label", sorted(STARTS))
-def test_the_allowlist_check_counts_only_real_starts(label):
+def test_the_starts_inventory_counts_only_resolved_starters(label):
     source, expected = STARTS[label]
     assert executables_started(source) == expected, label
