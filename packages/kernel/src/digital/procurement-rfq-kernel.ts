@@ -25,7 +25,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { ids, canonicalize, sha256 } from "@pcc/spec";
+import { ids, canonicalize, sha256, signingPreimage } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -215,6 +215,7 @@ export class ProcurementRFQKernel {
       timestamp: executionStartTime,
       source,
       payload: {
+        jobId: params.jobId,
         description: "Digital workflow input data verified",
         inputHash,
         workflowType: "procurement-rfq",
@@ -253,6 +254,7 @@ export class ProcurementRFQKernel {
 
     // ── Step 1: parse_rfq ───────────────────────────────────────────
     const step1 = await this.runStep({
+      jobId: params.jobId,
       stepId: "parse_rfq",
       source,
       input: params.rfqSpec,
@@ -263,6 +265,7 @@ export class ProcurementRFQKernel {
 
     // ── Step 2: filter_vendors ──────────────────────────────────────
     const step2 = await this.runStep({
+      jobId: params.jobId,
       stepId: "filter_vendors",
       source,
       input: {
@@ -277,6 +280,7 @@ export class ProcurementRFQKernel {
     // ── Step 3: solicit_quotes ──────────────────────────────────────
     const rfqHash = await sha256(canonicalize(step1.output));
     const step3 = await this.runStep({
+      jobId: params.jobId,
       stepId: "solicit_quotes",
       source,
       input: {
@@ -291,6 +295,7 @@ export class ProcurementRFQKernel {
 
     // ── Step 4: score_quotes ────────────────────────────────────────
     const step4 = await this.runStep({
+      jobId: params.jobId,
       stepId: "score_quotes",
       source,
       input: { quotes: step3.output.quotes },
@@ -301,6 +306,7 @@ export class ProcurementRFQKernel {
 
     // ── Step 5: select_vendor ───────────────────────────────────────
     const step5 = await this.runStep({
+      jobId: params.jobId,
       stepId: "select_vendor",
       source,
       input: {
@@ -314,6 +320,7 @@ export class ProcurementRFQKernel {
 
     // ── Step 6: emit_report ─────────────────────────────────────────
     const step6 = await this.runStep({
+      jobId: params.jobId,
       stepId: "emit_report",
       source,
       input: {
@@ -362,8 +369,7 @@ export class ProcurementRFQKernel {
     const bundleHash = await sha256(canonicalize(sortedHashes));
 
     // Sign the bundle with the session key
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const sig = nacl.sign.detached(bundleHashBytes, params.sessionPrivateKey);
+    const sig = nacl.sign.detached(signingPreimage(bundleHash), params.sessionPrivateKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -435,6 +441,7 @@ export class ProcurementRFQKernel {
   // ─────────────────────────────────────────────────────────────────────
 
   private async runStep<I, O>(params: {
+    jobId: string;
     stepId: string;
     source: EvidenceSource;
     input: I;
@@ -454,6 +461,7 @@ export class ProcurementRFQKernel {
     const outputSummary = JSON.stringify(output).slice(0, 200);
 
     const payload = {
+      jobId: params.jobId,
       stepId: params.stepId,
       inputHash,
       outputHash,

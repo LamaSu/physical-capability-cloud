@@ -9,7 +9,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { type Result, ok, err, Errors } from "@pcc/spec";
 import { BaseFacade } from "./base.facade.js";
-import { NotFoundError, BadRequestError } from "./facade-errors.js";
+import { NotFoundError, BadRequestError, ConflictError } from "./facade-errors.js";
 import type {
   JobDTO,
   JobDetailDTO,
@@ -32,6 +32,28 @@ import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { logSafeId } from "../redaction.js";
+import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
+
+/**
+ * Adapters that never count toward the operator-onboarding funnel's
+ * adapter_ready stage: "mock" is the test/simulator adapter and
+ * "generic-http" is the catch-all placeholder adapter — neither proves a
+ * real machine is reachable. Mirrors the unmerged onboarding-readiness.ts's
+ * NON_EXECUTING_ADAPTERS set (see item4-stage-inventory.md). Exported so it
+ * can be unit-tested independent of KernelService/adapter wiring.
+ */
+export function isRealAdapterHealthy(
+  healthy: boolean,
+  adapterType: string | null | undefined,
+): boolean {
+  return healthy === true && isExecutingAdapter(adapterType);
+}
+
+/** A real adapter: not the "mock" simulator and not the "generic-http" placeholder. */
+export function isExecutingAdapter(adapterType: string | null | undefined): boolean {
+  return !!adapterType && adapterType !== "mock" && adapterType !== "generic-http";
+}
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -104,6 +126,25 @@ const TYPE_ALIASES: Record<string, string[]> = {
   "assay": ["assay", "plate-reader", "absorbance", "fluorescence", "screening"],
 };
 
+// ── Pagination coercion ─────────────────────────────────────────────────────
+
+/**
+ * Coerce an offset/limit value to a safe non-negative integer (N111).
+ *
+ * `list()` is called from several places (routes/jobs.ts, routes/setup.ts,
+ * routes/status.ts, routes/operator-relay.ts) and not all of them validate
+ * their input the way routes/jobs.ts's querystring schema now does — so this
+ * is the last line of defense. Anything that isn't a finite, non-negative
+ * integer (a string, a float, NaN, a negative number) falls back to
+ * `fallback` instead of being used in `offset + limit` arithmetic, which is
+ * exactly how N111 happened: string concatenation standing in for addition.
+ */
+function toSafeOffsetOrLimit(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.trunc(n);
+}
+
 // ── Facade ─────────────────────────────────────────────────────────────────
 
 export class JobFacade extends BaseFacade {
@@ -130,8 +171,13 @@ export class JobFacade extends BaseFacade {
   ): Promise<Result<PaginatedResult<JobDTO>>> {
     return this.execute("list", async () => {
       const context = this.defaultContext(ctx);
-      const offset = pagination?.offset ?? 0;
-      const limit = pagination?.limit ?? 50;
+      // N111 — defensive coercion: the route's querystring schema already
+      // guarantees real numbers, but this facade is called from other
+      // places too (setup.ts, status.ts, operator-relay.ts), so don't trust
+      // the caller. toSafeOffsetOrLimit() forces integer-only arithmetic
+      // regardless of what's passed (string, float, NaN, negative, etc.).
+      const offset = toSafeOffsetOrLimit(pagination?.offset, 0);
+      const limit = toSafeOffsetOrLimit(pagination?.limit, 50);
 
       const opts = filters?.tenantId ? { tenantId: filters.tenantId } : undefined;
       let jobs;
@@ -194,10 +240,15 @@ export class JobFacade extends BaseFacade {
     progress?: number,
   ): Promise<Result<JobDTO>> {
     return this.execute("updateStatus", async () => {
-      const updated = this.repos.jobs.updateStatus(jobId, status, progress);
-      if (!updated) {
+      // N85(a): a generic writer may not finish, fail, cancel or re-open a paid job.
+      const outcome = writeJobStatusGuarded(jobId, status, progress);
+      if (outcome.kind === "not_found") {
         throw new NotFoundError("job", jobId);
       }
+      if (outcome.kind === "refused") {
+        throw new ConflictError(SETTLEMENT_OWNED_MESSAGE, "settlement_owned_status");
+      }
+      const updated = outcome.job;
 
       const kernelMap = this.loadKernelMap([updated.kernelId]);
       const capabilityMap = this.loadCapabilityMap([updated.capabilityId]);
@@ -468,9 +519,18 @@ export class JobFacade extends BaseFacade {
    */
   async checkDeviceHealth(
     deviceId: string,
+    opts: { operatorId?: string | null } = {},
   ): Promise<Result<{ healthy: boolean; details: unknown }>> {
     return this.execute("checkDeviceHealth", async () => {
       const svc = getKernelService();
+      // Snapshot the device row BEFORE the check, so the funnel attributes the
+      // result to the device that was actually checked (#469 round 1).
+      let before: { kernelId?: string | null; adapterType?: string | null } | undefined;
+      try {
+        before = this.repos.kernels.findDeviceById(deviceId);
+      } catch {
+        before = undefined;
+      }
       const result = await svc.checkDeviceHealth(deviceId);
 
       // Update DB health record (best-effort)
@@ -482,6 +542,30 @@ export class JobFacade extends BaseFacade {
         );
       } catch {
         // non-fatal
+      }
+
+      // Operator-onboarding funnel (ADK track item 4): adapter_ready. Only a
+      // REAL adapter (not mock/generic-http) that is actually healthy
+      // counts. kernelId + adapterType are resolved from the device's own
+      // DB row (the health-check route only has deviceId) — if the row
+      // can't be found, there's nothing to attribute the stage to, so we
+      // don't record. Telemetry must never break a health-check response.
+      // Recorded only for an authenticated caller, and only if the device row is
+      // unchanged across the check: a device moved to another kernel (or given
+      // another adapter) mid-check is not attributed to either (#469 round 1).
+      try {
+        const after = this.repos.kernels.findDeviceById(deviceId);
+        if (
+          opts.operatorId &&
+          before?.kernelId &&
+          after?.kernelId === before.kernelId &&
+          after?.adapterType === before.adapterType &&
+          isRealAdapterHealthy(result.healthy, before.adapterType)
+        ) {
+          recordOperatorStage(before.kernelId, "adapter_ready", { deviceId, operatorId: opts.operatorId });
+        }
+      } catch {
+        /* funnel tracking must never break a health-check response */
       }
 
       // Allow-listed here as well as fixed-coded in the service: this is what leaves
@@ -581,3 +665,13 @@ export class JobFacade extends BaseFacade {
     return scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
   }
 }
+// merge-up (master): the local ConflictError/NotFoundError duplicates master
+// defined here are dropped — NotFoundError is already imported from
+// facade-errors.ts above (a local redeclaration would be a duplicate
+// identifier), and ConflictError now also comes from facade-errors.ts (its
+// class there gained the optional `code` param master's duplicate existed to
+// provide). Using the SHARED classes, not file-local duplicates, is required
+// for base.facade.ts's `error instanceof ConflictError` / `instanceof
+// NotFoundError` checks to recognize errors thrown here — a local duplicate
+// class has a different identity and would silently fall through to the
+// generic 500 branch instead of the intended 409/404.

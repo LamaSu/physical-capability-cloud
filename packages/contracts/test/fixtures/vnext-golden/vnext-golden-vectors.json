@@ -1,0 +1,522 @@
+{
+  "status": "DONE",
+  "anchors": [
+    {
+      "name": "keccak256(\"\") [spec 8]",
+      "expected": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+      "computed": "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470",
+      "pass": true
+    },
+    {
+      "name": "keccak256(\"abc\") [task]",
+      "expected": "0x4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+      "computed": "0x4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45",
+      "pass": true
+    },
+    {
+      "name": "POLICY_SALT_DOMAIN = keccak256(\"PCC:vnext:policy-salt:v2\") [spec 8]",
+      "expected": "0x9c545f70e44ba4292821022010c5750f92d0a3f2cbf06099ed1eaec2ba2ec8ef",
+      "computed": "0x9c545f70e44ba4292821022010c5750f92d0a3f2cbf06099ed1eaec2ba2ec8ef",
+      "pass": true
+    },
+    {
+      "name": "EIP712_DOMAIN_TYPEHASH [spec 8]",
+      "expected": "0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f",
+      "computed": "0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f",
+      "pass": true
+    },
+    {
+      "name": "EIP712_VERSION_HASH = keccak256(\"1\") [spec 8]",
+      "expected": "0xc89efdaa54c0f20c7adf612882df0950f5a951637e0307cdcb4c672f298b8bc6",
+      "computed": "0xc89efdaa54c0f20c7adf612882df0950f5a951637e0307cdcb4c672f298b8bc6",
+      "pass": true
+    },
+    {
+      "name": "evidence commitment for the older gate-1 inputs [spec 8] (chainId 8453, escrow 0x...0E5C0F, jobIdHash=keccak256('golden-job'), milestoneIndex 3, stepId=keccak256('golden-step'), schema 1, format 1, packageDigest=keccak256('golden-evidence-package'))",
+      "expected": "0xba4753b572b0d79518e05c88932d213125d0634a2c2fbbd7e74d7d52578eb7aa",
+      "computed": "0xba4753b572b0d79518e05c88932d213125d0634a2c2fbbd7e74d7d52578eb7aa",
+      "pass": true
+    },
+    {
+      "name": "CREATE(sender 0x00000000000000000000000000000000000000D0, nonce 0) [task]",
+      "expected": "0xe61244BB1242d392fB53dF4979A62E955a9BC70d",
+      "computed": "0xe61244bb1242d392fb53df4979a62e955a9bc70d",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 0",
+      "expected": "0xa7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+      "computed": "0xa7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 3 'abc'",
+      "expected": "0x3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+      "computed": "0x3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 1 0x00",
+      "expected": "0x5d53469f20fef4f8eab52b88044ede69c77a6a68a60728609fc4a65ff531e7d0",
+      "computed": "0x5d53469f20fef4f8eab52b88044ede69c77a6a68a60728609fc4a65ff531e7d0",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 135 (single pad byte 0x86)",
+      "expected": "0x8094bb53c44cfb1e67b7c30447f9a1c33696d2463ecc1d9c92538913392843c9",
+      "computed": "0x8094bb53c44cfb1e67b7c30447f9a1c33696d2463ecc1d9c92538913392843c9",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 136 (exactly one rate block)",
+      "expected": "0x3fc5559f14db8e453a0a3091edbd2bc25e11528d81c66fa570a4efdcc2695ee1",
+      "computed": "0x3fc5559f14db8e453a0a3091edbd2bc25e11528d81c66fa570a4efdcc2695ee1",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 137",
+      "expected": "0xf8d6846cedd2ccfadf15c5879ef95af724d799eed7391fb1c91f95344e738614",
+      "computed": "0xf8d6846cedd2ccfadf15c5879ef95af724d799eed7391fb1c91f95344e738614",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 272 (two full rate blocks)",
+      "expected": "0x0b21ec4a8eff6d179e09ba9fe0ab08515b24e0923fbf419f5c30a38e64577db5",
+      "computed": "0x0b21ec4a8eff6d179e09ba9fe0ab08515b24e0923fbf419f5c30a38e64577db5",
+      "pass": true
+    },
+    {
+      "name": "SHA3-256 permutation cross-check (own sponge, pad 0x06, vs hashlib.sha3_256): len 1000",
+      "expected": "0xbd8b4d76041e0135e53fab1aaf425c7b1c129d8878ffb64cc31230ccafd7dc7c",
+      "computed": "0xbd8b4d76041e0135e53fab1aaf425c7b1c129d8878ffb64cc31230ccafd7dc7c",
+      "pass": true
+    },
+    {
+      "name": "extra: keccak256('The quick brown fox jumps over the lazy dog') (public Keccak-256 test vector)",
+      "expected": "0x4d741b6f1eb29cb2a9b9911c82f56fa8d73b04959d3d9d222895df6c0b28aa15",
+      "computed": "0x4d741b6f1eb29cb2a9b9911c82f56fa8d73b04959d3d9d222895df6c0b28aa15",
+      "pass": true
+    },
+    {
+      "name": "extra: selector transfer(address,uint256) (ERC-20)",
+      "expected": "0xa9059cbb",
+      "computed": "0xa9059cbb",
+      "pass": true
+    },
+    {
+      "name": "extra: EIP-712 'Ether Mail' example: domain separator",
+      "expected": "0xf2cee375fa42b42143804025fc449deafd50cc031ca257e0b194a650a912090f",
+      "computed": "0xf2cee375fa42b42143804025fc449deafd50cc031ca257e0b194a650a912090f",
+      "pass": true
+    },
+    {
+      "name": "extra: EIP-712 'Ether Mail' example: Mail typehash",
+      "expected": "0xa0cedeb2dc280ba39b857546d74f5549c3a1d7bdc2dd96bf881f76108e23dac2",
+      "computed": "0xa0cedeb2dc280ba39b857546d74f5549c3a1d7bdc2dd96bf881f76108e23dac2",
+      "pass": true
+    },
+    {
+      "name": "extra: EIP-712 'Ether Mail' example: hashStruct(message)",
+      "expected": "0xc52c0ee5d84264471806290a3f2c4cecfc5490626bf912d01f240d7a274b371e",
+      "computed": "0xc52c0ee5d84264471806290a3f2c4cecfc5490626bf912d01f240d7a274b371e",
+      "pass": true
+    },
+    {
+      "name": "extra: EIP-712 'Ether Mail' example: digest keccak256(0x1901 || ds || hashStruct)",
+      "expected": "0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2",
+      "computed": "0xbe609aee343fb3c4b28e1df9e632fca64fcfaede20f02e86244efddf30957bd2",
+      "pass": true
+    },
+    {
+      "name": "extra: Solidity ABI-spec example baz(69, true)",
+      "expected": "0xcdcd77c000000000000000000000000000000000000000000000000000000000000000450000000000000000000000000000000000000000000000000000000000000001",
+      "computed": "0xcdcd77c000000000000000000000000000000000000000000000000000000000000000450000000000000000000000000000000000000000000000000000000000000001",
+      "pass": true
+    },
+    {
+      "name": "extra: Solidity ABI-spec example bar(['abc', 'def']) (bytes3[2])",
+      "expected": "0xfce353f661626300000000000000000000000000000000000000000000000000000000006465660000000000000000000000000000000000000000000000000000000000",
+      "computed": "0xfce353f661626300000000000000000000000000000000000000000000000000000000006465660000000000000000000000000000000000000000000000000000000000",
+      "pass": true
+    },
+    {
+      "name": "extra: Solidity ABI-spec example sam('dave', true, [1,2,3])",
+      "expected": "0xa5643bf20000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000464617665000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003",
+      "computed": "0xa5643bf20000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000464617665000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003",
+      "pass": true
+    },
+    {
+      "name": "extra: Solidity ABI-spec example f(0x123, [0x456, 0x789], '1234567890', 'Hello, world!')",
+      "expected": "0x8be6524600000000000000000000000000000000000000000000000000000000000001230000000000000000000000000000000000000000000000000000000000000080313233343536373839300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000004560000000000000000000000000000000000000000000000000000000000000789000000000000000000000000000000000000000000000000000000000000000d48656c6c6f2c20776f726c642100000000000000000000000000000000000000",
+      "computed": "0x8be6524600000000000000000000000000000000000000000000000000000000000001230000000000000000000000000000000000000000000000000000000000000080313233343536373839300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000004560000000000000000000000000000000000000000000000000000000000000789000000000000000000000000000000000000000000000000000000000000000d48656c6c6f2c20776f726c642100000000000000000000000000000000000000",
+      "pass": true
+    },
+    {
+      "name": "extra: Solidity ABI-spec example g([[1, 2], [3]], ['one', 'two', 'three']) (nested dynamic offsets)",
+      "expected": "0x2289b18c000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000001400000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000036f6e650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000374776f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000057468726565000000000000000000000000000000000000000000000000000000",
+      "computed": "0x2289b18c000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000001400000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a000000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000036f6e650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000374776f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000057468726565000000000000000000000000000000000000000000000000000000",
+      "pass": true
+    }
+  ],
+  "constants": {
+    "SETTLEMENT_UNIT_DOMAIN": "0x2999f23df0b8dc0a4395e01bb071b526a68d659e9834e3952f403a9b7e3b511a",
+    "POLICY_SALT_DOMAIN": "0x9c545f70e44ba4292821022010c5750f92d0a3f2cbf06099ed1eaec2ba2ec8ef",
+    "POLICY_NONCE_DOMAIN": "0x4100c882ff75eaf8d18f6a8be89328b40d631d33d71e71bbe1f469f6f06f7b2c",
+    "EVIDENCE_COMMITMENT_DOMAIN": "0xae13dc2c47a210d242db75f30fde58d99e336c5c6cfea063b095efadbc5cf5f0",
+    "EIP712_DOMAIN_TYPEHASH": "0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f",
+    "EIP712_NAME_HASH": "0xe2e457cd120e2826d4315f6af338fb561270850be7d01f8c8d75ee8924c18969",
+    "EIP712_VERSION_HASH": "0xc89efdaa54c0f20c7adf612882df0950f5a951637e0307cdcb4c672f298b8bc6",
+    "JOB_POLICY_TYPEHASH": "0xda434b1043344df560573b6643eb6441876460071a7660bbe9f73214d62db142"
+  },
+  "derivedInputs": {
+    "jobIdHash": "0xefe464484039d8b2610c0719aa007f2ec19d1b7a3cab39e44b9a2e9b6cc9ad07",
+    "termsHash": "0x5bd8b6812d7f76d3ac1aecf197e53ad8dac34d43f382762570779cc43d2042bc",
+    "acceptedPolicyDigest": "0xca2881812de3c0ed41b81d5ae29ea56f6aa4bae1b0b960e79bdd532057ae6430",
+    "stepIdA": "0x012e76b28f24b769f2172713b56b980f5c9a9b24b8c9cb5f41b3cbf6dc136d6d",
+    "stepIdB": "0x2bb8b6d8553474bc66bf364fffa4611181ddc005540fa6385a08c316bcede4f1",
+    "compositionRoot": "0xd3afcdc6d5d44ae571b83908fa7331a73644e2f5f1ec82455e7e60f0f2cde6db",
+    "packageDigest": "0x85d72263a9d80c5eeecff75b5dd16e4d8cccc6441b7fe3c1c72d613bc1307d39"
+  },
+  "outputs": {
+    "factory": "0xc5806ea76348d369460284f39e7b65027e6052ba",
+    "implementation": "0x0448f3d8efeaec835e18bcca58539233bae5a5a6",
+    "initCodeHash": "0xba9d6c77ac1a8f5e64b35d8b87228496f1fad0bb189e9688ed7252857b4f0b1a",
+    "prePolicyRoot": "0xc715f1c1249e4fb6e7b8bd64593b1eb84f4161d3b601b5a8bfb965de70871222",
+    "salt": "0x2d1c6150450f10c652a7e59f26f0dd3ad0e39606e1fd071beabbf6f71353a425",
+    "escrow": "0x4c3c893ef98d67c55f88e7c6f491bb63606d4682",
+    "unitId0": "0x89fdc0545fa70c1557b4773ec4be1ad099c3eba97f62c1b505fa52e2562738a1",
+    "unitId1": "0x8baa29d524fcaa98cb7820ebd653bf3c656720069988de57e6ecec49460d4510",
+    "unitsRoot": "0x59cab750ff6458bb2f54033aa684ab5f8af18671019b73c3ecf2871f4d34d54a",
+    "jobPolicyHash": "0x9a76ae0d585f1ca8162005f051704b26d7077e5aff6c22b9406c00bda0976b47",
+    "domainSeparator": "0xb9653bb57f2627de01133194170d328d16d728b81a7a17c2490d861a4af57880",
+    "digest": "0x70396a1657b195306d333213cb89663fbab819ef9982557a30250e335dd65156",
+    "policyKey": "0xdbe1329b76f15734ac713883218519118d309989e4405d840ae804ba2615d969",
+    "feeScheduleHash0": "0x258438ded8181cd3430f8ba0afa19e0416f01386c42fe5628a31655f64882d7c",
+    "feeScheduleHash1": "0x197076bc51efdb4e475f7aedc50c0b7927847df52094fb8548a726fa1540b5b7",
+    "payoutConfigHash0": "0x76a1ace900e1466f058778acc04080011182e02cc61097cb95185c1d02e243a4",
+    "payoutConfigHash1": "0xe1c96f82e4d08d43719bda865e8f5dd015c2c05393d9193962cc287ea54c3110",
+    "claimId_u0_principal0": "0x8def2fb8a9c7ad07664aa4cc582436792ed218afb571c1a3688cec5e0b7ee872",
+    "claimId_u0_principal1": "0x65bb6d604a0cad95371fd60eae5c70513de5c5480a106f847fa2df6dde196ad8",
+    "claimId_u0_principal2": "0x172fd16edc971a0a44ee3b241973222669ae81021f6ba8de34a16c72d0c3d96d",
+    "claimId_u0_fee": "0xeb8b9fc5b6cc1c0556eb0debfe023150e82eafc69a1a65d673c4ba2b7e367964",
+    "claimId_u0_refund": "0x4d69ba3166cfe5f97567528fd7a604b8e4eba4d4edba822cf48dea9d0cc1ea67",
+    "claimId_u1_principal0": "0xe27061a0182573bd4bd244ef44c7451791a976e2eb3c2a6f6921e5e7571f0e2c",
+    "claimId_u1_refund": "0xa5511656bf6c0c6e96186853618a271f366397bd195c067f79105cdad6a949e9",
+    "evidenceCommitmentU0": "0x0c21605cc29c989f04c14b696ca7196fdc208c6483ebf77321ab6cc13b605439",
+    "f0": "23500000",
+    "n0": "976500003",
+    "f1": "0",
+    "n1": "7",
+    "encodedConfigsLength": "1280"
+  },
+  "selectors": {
+    "createEscrow((address,address,bytes32,bytes32,uint256,bytes32,bytes32))": "0x886deb02",
+    "predictEscrow((address,address,bytes32,bytes32,uint256,bytes32,bytes32))": "0xa5b0de55",
+    "saltOf((address,address,bytes32,bytes32,uint256,bytes32,bytes32))": "0xb9f0389f",
+    "policyKey(address,address,bytes32)": "0x68fe3ce4",
+    "revokePolicy(address,address,bytes32,uint256)": "0xd4a3d9af",
+    "fund((uint256,bytes32,uint8,uint8,uint256,uint256,uint256,uint16,address,uint256,uint16,bytes32,(address,uint256)[])[],(uint256,bytes,bytes))": "0x7976bcc7",
+    "policy()": "0x0505c8c9",
+    "unitState(bytes32)": "0x4ea93b0c",
+    "unitCount()": "0xf584fbf6",
+    "unitIdAt(uint256)": "0x57853e8e",
+    "unitTerms(bytes32)": "0x2ad489ed",
+    "feeScheduleHashOf(bytes32)": "0xee274758",
+    "payoutAt(bytes32,uint256)": "0x1e7d162f",
+    "finalize(bytes32)": "0x92584d80",
+    "reclaimAfterDeadline(bytes32)": "0xb3f8fa4a",
+    "dischargeClaim(bytes32)": "0xb409a86d"
+  },
+  "encodedConfigsHex": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000002c00000000000000000000000000000000000000000000000000000000000000000012e76b28f24b769f2172713b56b980f5c9a9b24b8c9cb5f41b3cbf6dc136d6d00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000003b9aca0300000000000000000000000000000000000000000000000000000000016694e0000000000000000000000000000000000000000000000000000000003a34352300000000000000000000000000000000000000000000000000000000000000eb0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000000000000000006b715f000000000000000000000000000000000000000000000000000000000000000003d3afcdc6d5d44ae571b83908fa7331a73644e2f5f1ec82455e7e60f0f2cde6db00000000000000000000000000000000000000000000000000000000000001a000000000000000000000000000000000000000000000000000000000000000030000000000000000000000001111111111111111111111111111111111111111000000000000000000000000000000000000000000000000000000001dcd650000000000000000000000000022222222222222222222222222222222222222220000000000000000000000000000000000000000000000000000000011e1a3000000000000000000000000003333333333333333333333333333333333333333000000000000000000000000000000000000000000000000000000000a852d23000000000000000000000000000000000102030405060708090a0b0c0d0e0f102bb8b6d8553474bc66bf364fffa4611181ddc005540fa6385a08c316bcede4f10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006d2b05800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001a0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000011111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000000000007",
+  "specAmbiguities": [
+    "Spec 8 'Outputs' contains no literal values: it only points at golden.ts and VNextAbiFreeze.t.sol, which this clean-room run was forbidden to read. So no output could be checked against the spec itself. Only the spec 8 self-check anchors plus the task's CREATE and keccak('abc') anchors validate the primitives, and none of those exercises DYNAMIC abi encoding (prePolicyRoot, payoutConfigHash). Interpretation: every output is computed from spec 1-7 alone; the dynamic encoder was additionally validated against the public Solidity ABI-spec examples (anchors prefixed 'extra:').",
+    "CREATE is not defined in the spec (spec 8 only says 'its CREATE at nonce 0' / 'at nonce 1'). Used the standard rule from the task brief: address = last 20 bytes of keccak256(rlp([sender, nonce])), sender RLP-encoded as a 20-byte string (0x94 prefix, leading zero bytes kept), nonce 0 -> 0x80, nonce 1 -> 0x01; preimages 0xd694<deployer 0x...D1>80 (factory) and 0xd694<factory>01 (implementation). Nonce 1 for the factory's first CREATE matches EIP-161 (contract nonces start at 1), as spec 8 states.",
+    "Gate-1 evidence anchor: spec 8 gives jobIdHash, milestoneIndex and stepId rather than a settlementUnitId. Interpretation: settlementUnitId = spec 3 step 4 over (SETTLEMENT_UNIT_DOMAIN, 8453, 0x00000000000000000000000000000000000E5C0F, keccak256('golden-job'), 3, keccak256('golden-step')); 'schema version 1' = uint16 compositionSchemaVersion, 'format 1' = uint8 packageFormat. The anchor reproduces 0xba4753b5..., which confirms this reading, both domain strings and both formulas.",
+    "Offset bases inside abi.encode(UnitConfig[]): spec 0 / spec 3 step 1 state the leading 0x20 word but not the nested offset bases. Used the Solidity ABI spec: element offsets are measured from the first byte after the array length word (0x40 and 0x2c0 for the two units); the payouts offset inside each UnitConfig is measured from the start of that UnitConfig's own encoding (13 head words = 0x1a0); PayoutEntry (address,uint256) is static, so each payouts array is a length word plus inline 2-word entries with no per-entry offsets. Total 1280 bytes.",
+    "Narrow integer fields (uint8 requiredTier, requestedTier, domainVersion, feeBasis, roundingRule, claimClass, packageFormat; uint16 feeBps, compositionSchemaVersion) are full 32-byte left-padded words everywhere (spec 0: standard abi.encode, never packed).",
+    "f and n are derived, not copied: f = floor(g * feeBps / 10000), n = g - f (spec 2 / spec 5). They reproduce the spec 8 stated values exactly.",
+    "feeScheduleHash literals are taken from spec 4 and cross-read against the spec 1 constants and the spec 2 FeeSchedule field list: domainVersion = DOMAIN_VERSION_V1 = 1 (uint8), feeBasis = FEE_BASIS_GROSS = 0 (uint8), denominator = FEE_DENOMINATOR = 10000 (uint256), roundingRule = ROUNDING_FLOOR = 0 (uint8), feeSplitConfigHash = bytes32(0). Unit 1 uses feeRecipient 0x0 and f = 0, as given.",
+    "claimId legIndex: PRINCIPAL uses the payout array index j (0, 1, 2 for unit 0; 0 for unit 1); FEE = 2^256-1 and REFUND = 2^256-2 as uint256 words; claimClass is a uint8 word. No claimId_u1_fee is produced: unit 1 has feeBps 0 and it was not requested.",
+    "Evidence commitment for unit 0 uses schema version 3 (spec 8 evidence line; equal to unit 0's compositionSchemaVersion), packageFormat = EVIDENCE_PACKAGE_FORMAT_V1 = 1, and the escrow and unitId0 computed here.",
+    "The settlement-token address is not among the golden inputs, so the spec 5 rule 'recipient != settlement token' could not be evaluated for the golden recipients (it enters no hash). The other allowed-recipient rules (nonzero, != escrow clone, != factory) were checked for every payout recipient, the unit 0 fee recipient and the operator; all hold.",
+    "Output format: bytes32 values as 0x + 64 lowercase hex; addresses as 0x + 40 lowercase hex (the spec's mixed-case inputs are parsed case-insensitively; the payer, operator and CREATE-anchor spellings were confirmed to be valid EIP-55 checksums); f0, n0, f1, n1 and encodedConfigsLength as decimal strings.",
+    "Spec 0 says the only packed preimages are the EIP-712 digest and the CREATE2 address; the EIP-1167 initCode (spec 3 step 3) is also a byte concatenation. Used exactly as spelled: 20-byte prefix || implementation || 15-byte suffix = 55 bytes.",
+    "Spec self-consistency (task-requested checks): f0 = floor(1000000003 * 235 / 10000) = 23500000 with remainder 705; n0 = 976500003; sum of unit 0 payouts = 500000000 + 300000000 + 176500003 = 976500003 = n0; unit 1 reclaimAt - funding time = 31536000 s = exactly 365 days = MAX_RECLAIM_DELAY (the legal upper edge). All consistent: NO inconsistency found. Also consistent: unit 0 reclaim delay = 30 days; MIN_RECLAIM_DELAY = 2 + 5 + 2 + 1 days; the spec 2/3 tuple types match the spec 7 fund/createEscrow/predictEscrow/saltOf signatures; the JobPolicy type string has 14 fields, matching the 15-word spec 3 step 6 layout (a generic EIP-712 hashStruct built from the type string reproduces jobPolicyHash and domainSeparator); every spec 5 rule that can be evaluated holds for the golden job; the golden fund() calldata with two 65-byte signatures is 1668 bytes <= MAX_CONFIG_BYTES 26372. (53/53 consistency checks pass.)"
+  ],
+  "files": [
+    "packages/contracts/test/fixtures/vnext-golden/vnext_golden.py",
+    "packages/contracts/test/fixtures/vnext-golden/vnext-golden-vectors.json"
+  ],
+  "notes": "INDEPENDENCE: written from exactly one source document, docs/VNEXT_SETTLEMENT_ABI.md, plus the task brief (which supplied the CREATE/RLP rule and the CREATE and keccak('abc') anchors). No .sol file and no TypeScript file was opened, grepped, listed or searched; no package source and no private repository was touched. The only other filesystem actions were: wc -l on the spec; an ls of the (then empty) output directory; a scratchpad Python check that read ONLY the spec file and this script, confirming that every string and golden number transcribed into this script appears verbatim in the spec (0 failures); and writing the two output files. No network, no pip, no node/npm, no foundry/cast; Python 3 standard library only. Keccak-f[1600] (round constants and rho offsets generated by the FIPS 202 LFSR/rho algorithms, not pasted tables), the sponge (rate 1088, pad 0x01..0x80), the ABI encoder, RLP/CREATE, CREATE2 and a small EIP-712 hashStruct were written from scratch. hashlib is used only for the SHA3-256 permutation cross-check; OpenSSL keccak-256 is not available on this box and nothing else was used as a keccak. ANCHORS: 26/26 pass: the 7 required ones (5 from the spec 8 table including the gate-1 evidence commitment, plus the task's CREATE and keccak('abc')), 8 SHA3-256 permutation cross-checks against hashlib.sha3_256 (lengths 0..1000, including the 135/136/137 rate-boundary cases), and 11 'extra:' public-standard vectors (Keccak-256 of the quick-brown-fox string, the ERC-20 transfer selector, the EIP-712 'Ether Mail' example, and the Solidity ABI-spec baz/bar/sam/f/g calldata examples, which exercise dynamic and nested-dynamic offsets). The extra vectors were written from knowledge of those public documents, not from any PCC source. INTERPRETATION CHOICES: see specAmbiguities (CREATE rule; gate-1 unit-id derivation; nested ABI offset bases; narrow ints as full words; f/n derived; fee-schedule literals; claim leg indices; evidence inputs; unknown settlement token; output formatting; initCode concatenation). SECOND CODE PATH: every hash output (and the encoded configs, factory and implementation) is recomputed by explicit 32-byte word concatenation with hand-computed offsets (0x20, 0x40, 0x2c0, 0x1a0), never calling the generic encoder; both paths agree byte for byte. CONSISTENCY: 53/53 checks pass; the JSON file additionally carries them under 'consistencyChecks' and 'extra' (fund() calldata length, decimal milestoneIndex of unit 1). Every other top-level key in the file equals the returned object.",
+  "consistencyChecks": [
+    {
+      "name": "factory CREATE preimage is 0xd6 0x94 <deployer> 0x80",
+      "pass": true,
+      "detail": "0xd69400000000000000000000000000000000000000d180"
+    },
+    {
+      "name": "implementation CREATE preimage is 0xd6 0x94 <factory> 0x01",
+      "pass": true,
+      "detail": "0xd694c5806ea76348d369460284f39e7b65027e6052ba01"
+    },
+    {
+      "name": "f0 = floor(g0*feeBps0/10000) equals the stated 23500000 (remainder 705)",
+      "pass": true,
+      "detail": "f0=23500000 remainder=705"
+    },
+    {
+      "name": "n0 = g0 - f0 equals the stated 976500003",
+      "pass": true,
+      "detail": "n0=976500003"
+    },
+    {
+      "name": "sum of unit 0 payouts == n0 (exact conservation)",
+      "pass": true,
+      "detail": "sum=976500003 n0=976500003"
+    },
+    {
+      "name": "f1 = 0 and n1 = 7 as stated",
+      "pass": true,
+      "detail": "f1=0 n1=7"
+    },
+    {
+      "name": "sum of unit 1 payouts == n1",
+      "pass": true,
+      "detail": "sum=7 n1=7"
+    },
+    {
+      "name": "unit 0 reclaimAt - funding time == 30 days (stated 'funding + 30 days')",
+      "pass": true,
+      "detail": "delta=2592000 s"
+    },
+    {
+      "name": "unit 1 reclaimAt - funding time == exactly 365 days == MAX_RECLAIM_DELAY",
+      "pass": true,
+      "detail": "delta=31536000 s"
+    },
+    {
+      "name": "MIN_RECLAIM_DELAY == (2 + 5 + 2 + 1) days; MAX_RECLAIM_DELAY == 365 days",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1 milestoneIndex is above 2^53 (as stated)",
+      "pass": true,
+      "detail": "milestoneIndex=1339673755198158349044581307228491536"
+    },
+    {
+      "name": "evidence schema version 3 (spec 8) == unit 0 compositionSchemaVersion; format == EVIDENCE_PACKAGE_FORMAT_V1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "UnitConfig[] type (spec 3 step 1) == UnitConfig tuple type (spec 2) + '[]'",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "encoded configs: leading offset word 0x20, then length 2",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "encoded configs: element offsets 0x40 and 0x40 + len(unit 0) (relative to after the length word)",
+      "pass": true,
+      "detail": "unit0 encoding = 640 bytes"
+    },
+    {
+      "name": "encoded configs: payouts offset inside each UnitConfig == 13 words (0x1a0); payout counts 3 and 1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "encoded configs total length == 32 + 32 + 64 + 640 + 512 == 1280",
+      "pass": true,
+      "detail": "len=1280"
+    },
+    {
+      "name": "salt preimage is eight static words",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "EIP-1167 initCode is 55 bytes",
+      "pass": true,
+      "detail": "len=55"
+    },
+    {
+      "name": "settlement unit ids are pairwise distinct (DuplicateUnit)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "(milestoneIndex, stepId) pairs are unique within the job",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "jobPolicyHash preimage is fifteen static words",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "EIP-712 digest preimage is 66 bytes",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "JobPolicy type string has 14 fields (typehash + 14 = the 15 words of spec 3 step 6)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "generic EIP-712 hashStruct(JobPolicy) == spec 3 step 6 jobPolicyHash",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "generic EIP-712 hashStruct(EIP712Domain) == spec 3 step 7 domainSeparator",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "payoutConfigHash preimage head = unitId, offset 0x40; tail = length, entries",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "1 <= unit count <= 16",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "total payout legs <= 256",
+      "pass": true,
+      "detail": "legs=4"
+    },
+    {
+      "name": "unit 0: requiredTier <= 3 and requestedTier == requiredTier",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 0: 5 <= g <= 2^128 - 1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 0: feeBps <= 1000",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 0: n > 0",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 0: feeBps > 0 -> feeRecipient allowed (nonzero, != escrow, != factory)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 0: 1..16 payout legs, each amount > 0, each recipient allowed",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 0: MIN_RECLAIM_DELAY <= reclaimAt - fundingTime <= MAX_RECLAIM_DELAY",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: requiredTier <= 3 and requestedTier == requiredTier",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: 5 <= g <= 2^128 - 1",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: feeBps <= 1000",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: n > 0",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: feeBps == 0 -> f == 0 and feeRecipient == 0x0",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: 1..16 payout legs, each amount > 0, each recipient allowed",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unit 1: MIN_RECLAIM_DELAY <= reclaimAt - fundingTime <= MAX_RECLAIM_DELAY",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "payer nonzero; operator != payer; operator allowed",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "funding time <= expiry (block.timestamp <= expiry)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "spec 7 fund signature == fund(UnitConfig[] type from spec 3, PolicyAcceptance type from spec 2)",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "spec 7 createEscrow/predictEscrow/saltOf take the spec 2 PolicyIdentity tuple",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "golden fund() calldata with two 65-byte signatures <= MAX_CONFIG_BYTES (26372)",
+      "pass": true,
+      "detail": "len=1668 bytes"
+    },
+    {
+      "name": "16 signatures in the spec 7 table, 16 distinct selectors",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "EIP-55: payer spelling 0xf39Fd6e5...2266 is a valid checksum",
+      "pass": true,
+      "detail": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    },
+    {
+      "name": "EIP-55: operator spelling 0x70997970...79C8 is a valid checksum",
+      "pass": true,
+      "detail": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    },
+    {
+      "name": "EIP-55: CREATE-anchor spelling 0xe61244BB...C70d is a valid checksum",
+      "pass": true,
+      "detail": "0xe61244BB1242d392fB53dF4979A62E955a9BC70d"
+    },
+    {
+      "name": "second code path (explicit word concatenation, no generic encoder) reproduces encodedConfigs, factory, implementation and the 23 other derived outputs",
+      "pass": true,
+      "detail": "26/26 agree"
+    }
+  ],
+  "extra": {
+    "fundCalldataLengthWith65ByteSigs": 1668,
+    "unit1MilestoneIndexDecimal": "1339673755198158349044581307228491536"
+  }
+}

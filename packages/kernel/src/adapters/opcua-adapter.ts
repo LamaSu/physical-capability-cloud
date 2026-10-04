@@ -25,6 +25,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export interface OPCUAConfig {
   /** OPC-UA server endpoint (e.g., "opc.tcp://192.168.1.100:4840") */
@@ -86,6 +87,9 @@ export class OPCUAAdapter implements MachineAdapter {
     status: "Idle",
     alarmActive: false,
   };
+  /** The mock execution loop: the only thing that emits after a command returns. */
+  private readonly work = new OutstandingWork();
+  private endPolling: (() => void) | null = null;
 
   constructor(id: string, config: OPCUAConfig) {
     this.id = id;
@@ -191,6 +195,15 @@ export class OPCUAAdapter implements MachineAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once the mock execution loop has emitted its completion and stopped, or was
+   * stopped; at once when none is running. Real mode emits nothing (every command fails
+   * loudly), so it resolves at once.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     this.stopPolling();
     this.listeners = [];
@@ -204,6 +217,7 @@ export class OPCUAAdapter implements MachineAdapter {
     this.stopPolling();
     const interval = this.config.pollIntervalMs ?? 1000;
 
+    this.endPolling = this.work.begin();
     this.pollTimer = setInterval(() => {
       if (this.config.mockMode) {
         this.updateMockState();
@@ -217,6 +231,8 @@ export class OPCUAAdapter implements MachineAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   // ---------------------------------------------------------------------------
@@ -290,7 +306,6 @@ export class OPCUAAdapter implements MachineAdapter {
     if (this.mockState.programProgress >= 100) {
       this.mockState.status = "Idle";
       this.mockState.spindleSpeed = 0;
-      this.stopPolling();
       this.emit({
         type: "execution_completed",
         timestamp: new Date().toISOString(),
@@ -300,6 +315,8 @@ export class OPCUAAdapter implements MachineAdapter {
           mock: true,
         },
       });
+      // Stopped, so the loop's work ends, only after the completion is emitted.
+      this.stopPolling();
     }
   }
 

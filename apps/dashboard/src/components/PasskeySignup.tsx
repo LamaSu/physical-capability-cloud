@@ -18,9 +18,8 @@ import React from "react";
 import { usePasskey } from "../hooks/usePasskey.js";
 
 export interface PasskeySignupProps {
-  /** Bind the credential to an operator (requires apiKey). Omit for anonymous. */
+  /** Bind the credential to this operator, as the signed-in user. Omit for anonymous. */
   operatorId?: string;
-  apiKey?: string;
   /** Called on a verified registration with the credential + persistence flag. */
   onRegistered?: (result: {
     credentialId: string;
@@ -32,14 +31,10 @@ export interface PasskeySignupProps {
 
 export function PasskeySignup({
   operatorId,
-  apiKey,
   onRegistered,
   onUnsupported,
 }: PasskeySignupProps): React.ReactElement {
-  const { status, error, result, supported, register, reset } = usePasskey({
-    operatorId,
-    apiKey,
-  });
+  const { status, error, result, supported, register, reset } = usePasskey({ operatorId });
 
   React.useEffect(() => {
     if (status === "success" && result?.verified) {

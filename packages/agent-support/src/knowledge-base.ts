@@ -76,7 +76,7 @@ export class KnowledgeBase {
         topic: "adapters",
         keywords: ["adapter", "machine", "interface", "wrap", "device", "api"],
         question: "What adapter interfaces does PCC support?",
-        answer: "PCC defines three adapter interfaces: MachineAdapter (for equipment that runs jobs — getStatus, execute, getProgress, onEvidence), SensorAdapter (for monitoring — startRecording, stopRecording, getCurrentReading, onEvidence), and CameraAdapter (for vision/QC — captureSnapshot, runInspection, onEvidence). All adapters emit EvidenceEvents through the onEvidence callback.",
+        answer: "PCC defines three adapter interfaces: MachineAdapter (for equipment that runs jobs — getStatus, execute, getProgress, onEvidence), SensorAdapter (for monitoring — startRecording, stopRecording, getCurrentReading, onEvidence), and CameraAdapter (for vision/QC — captureSnapshot, runInspection, onEvidence). All adapters emit EvidenceEvents through the onEvidence callback, and every adapter must implement quiesceEvidence(): it resolves once the adapter has emitted every evidence event of the work it was given (never while a poll loop, timer or call can still emit). The JobRunner refuses an adapter without it, and keeps a device from the next job until it resolves.",
         relatedTopics: ["evidence", "protocols"],
       },
       {
@@ -107,7 +107,7 @@ export class KnowledgeBase {
         topic: "adapters",
         keywords: ["evidence", "event", "emit", "callback", "listener"],
         question: "My adapter isn't emitting evidence events",
-        answer: "Check: 1) Your adapter calls this.emit() with the event object (type, timestamp, source, payload). 2) Listeners are registered via onEvidence() BEFORE execution starts. 3) EvidenceEmitter.registerStep() was called for the job/step. 4) The event type is a valid EvidenceEventType (gcode_received, execution_started, execution_progress, execution_completed, power_profile_sample, camera_snapshot, cv_inspection_result, sensor_data_summary). 5) The source.deviceType matches your device.",
+        answer: "Check: 1) Your adapter calls this.emit() with the event object (type, timestamp, source, payload). 2) Listeners are registered via onEvidence() BEFORE execution starts. 3) EvidenceEmitter.registerStep() was called for the job/step. 4) The event type is a valid EvidenceEventType (gcode_received, execution_started, execution_progress, execution_completed, power_profile_sample, camera_snapshot, cv_inspection_result, sensor_data_summary). 5) The source.deviceType matches your device. 6) Your adapter implements quiesceEvidence(): the JobRunner refuses an adapter without it, and an event emitted after it resolves is dropped (or lands in the next job).",
       },
 
       // ── Capabilities ──────────────────────────────────────────

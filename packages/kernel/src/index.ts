@@ -75,7 +75,7 @@ export type {
   CameraAdapterFactory,
 } from "./adapter-factory.js";
 export { JobRunner } from "./job-runner.js";
-export type { JobConfig, JobResult } from "./job-runner.js";
+export type { JobConfig, JobResult, JobRunnerOptions } from "./job-runner.js";
 export {
   runPrintJob,
   makeKernelEd25519Signer,

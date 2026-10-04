@@ -50,9 +50,11 @@ export class ForbiddenError extends Error {
 }
 
 export class ConflictError extends Error {
-  constructor(message: string) {
+  readonly code?: string;
+  constructor(message: string, code?: string) {
     super(message);
     this.name = "ConflictError";
+    if (code) this.code = code;
   }
 }
 

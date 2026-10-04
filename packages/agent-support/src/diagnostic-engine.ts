@@ -177,7 +177,7 @@ export class DiagnosticEngine {
         category: "adapter",
         status: "fail",
         message: "No machine adapter found",
-        fix: "Create a MachineAdapter that wraps your device's API (status, execute, progress, evidence)",
+        fix: "Create a MachineAdapter that wraps your device's API (status, execute, progress, evidence, and the required quiesceEvidence() handshake)",
       });
     }
 

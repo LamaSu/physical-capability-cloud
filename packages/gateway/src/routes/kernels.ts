@@ -1,7 +1,10 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import { createHash, timingSafeEqual } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
+import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -43,6 +46,33 @@ function buildCapabilityRegistrationHint(kernelId: string) {
       `-H 'Authorization: Bearer <key>' ` +
       `-H 'Content-Type: application/json' ` +
       `-d '{"kernelId":"${kernelId}","type":"pizza.order","name":"..."}'`,
+  };
+}
+
+/**
+ * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
+ * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
+ * grants nothing in any environment: there is no development bypass. (WP-A #326 adds a shared
+ * helper, auth/admin-key.ts; this route keeps its own until that merges.)
+ */
+function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
+  if (typeof expected !== "string" || expected.trim().length === 0) return false;
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const a = createHash("sha256").update(provided, "utf8").digest();
+  const b = createHash("sha256").update(expected, "utf8").digest();
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Board N68: what this request may do to a kernel's location visibility. Only a proven identity
+ * counts: WP-A (#326) sets `provenWallet` for a SIWE session or a key minted from one, and nothing
+ * sets it before that merges; `operatorId` is a claimed identity and never counts.
+ */
+function locationOptInAuthority(req: FastifyRequest): LocationOptInAuthority {
+  const proven = (req as { provenWallet?: unknown }).provenWallet;
+  return {
+    admin: hasAdminSecret(req.headers["x-admin-key"]),
+    provenWallet: typeof proven === "string" && proven.length > 0 ? proven : null,
   };
 }
 
@@ -136,10 +166,20 @@ export async function kernelRoutes(app: FastifyInstance) {
       actorId,
       req.ip,
       req.headers["user-agent"],
+      locationOptInAuthority(req),
     );
     if (!result.success) return sendResult(reply, result);
     const { kernel, created } = result.data;
     if (created) {
+      // Operator-onboarding funnel (ADK track item 4): kernel_created.
+      // Telemetry must never break kernel registration.
+      try {
+        recordOperatorStage(kernel.id, "kernel_created", {
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+        });
+      } catch {
+        /* funnel tracking must never break kernel registration */
+      }
       return reply.code(201).send({
         kernel,
         created: true,

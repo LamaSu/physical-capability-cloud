@@ -20,7 +20,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { ids, canonicalize, sha256 } from "@pcc/spec";
+import { ids, canonicalize, sha256, signingPreimage } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -133,6 +133,7 @@ export class AccountingReconcileKernel {
       timestamp: executionStartTime,
       source,
       payload: {
+        jobId: params.jobId,
         description: "Digital workflow input data verified",
         inputHash,
         workflowType: "accounting-reconcile",
@@ -171,6 +172,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 1: fetch_ledger ──────────────────────────────────────────
     const step1 = await this.runStep({
+      jobId: params.jobId,
       stepId: "fetch_ledger",
       source,
       input: params.ledgerData,
@@ -181,6 +183,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 2: parse_entries ─────────────────────────────────────────
     const step2 = await this.runStep({
+      jobId: params.jobId,
       stepId: "parse_entries",
       source,
       input: step1.output,
@@ -195,6 +198,7 @@ export class AccountingReconcileKernel {
       invoices: (params.invoiceData as any)?.invoices ?? [],
     };
     const step3 = await this.runStep({
+      jobId: params.jobId,
       stepId: "match_invoices",
       source,
       input: matchInput,
@@ -205,6 +209,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 4: compute_adjustments ───────────────────────────────────
     const step4 = await this.runStep({
+      jobId: params.jobId,
       stepId: "compute_adjustments",
       source,
       input: {
@@ -218,6 +223,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 5: emit_report ───────────────────────────────────────────
     const step5 = await this.runStep({
+      jobId: params.jobId,
       stepId: "emit_report",
       source,
       input: {
@@ -263,8 +269,7 @@ export class AccountingReconcileKernel {
     const bundleHash = await sha256(canonicalize(sortedHashes));
 
     // Sign the bundle with the session key
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const sig = nacl.sign.detached(bundleHashBytes, params.sessionPrivateKey);
+    const sig = nacl.sign.detached(signingPreimage(bundleHash), params.sessionPrivateKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -290,6 +295,7 @@ export class AccountingReconcileKernel {
   // ─────────────────────────────────────────────────────────────────────
 
   private async runStep<I, O>(params: {
+    jobId: string;
     stepId: string;
     source: EvidenceSource;
     input: I;
@@ -309,6 +315,7 @@ export class AccountingReconcileKernel {
     const outputSummary = JSON.stringify(output).slice(0, 200);
 
     const payload = {
+      jobId: params.jobId,
       stepId: params.stepId,
       inputHash,
       outputHash,

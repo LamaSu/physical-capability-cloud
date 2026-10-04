@@ -21,6 +21,7 @@ import type {
   StepStatus,
   EscrowStatus,
   RegisteredSigner,
+  ExecutionPhase,
 } from "@pcc/spec";
 
 // ── Population Context ─────────────────────────────────────────────────────
@@ -67,6 +68,21 @@ export interface PaginatedResult<T> {
   hasMore: boolean;
 }
 
+// ── Location projection (board N68) ─────────────────────────────────────────
+
+/**
+ * How precisely a read shows a site's location (board N68, operator item 81):
+ * - `exact`: the site's operator opted in to publishing it (a public storefront).
+ * - `approximate`: the default. `location` is the centre of the site's geohash-5 cell (about
+ *   5 km across), never the site's own coordinates.
+ * - `none`: no location is known (none was given, it is invalid, or it is the {0,0} placeholder
+ *   a registration without coordinates gets), so `location` is null.
+ */
+export type LocationPrecision = "exact" | "approximate" | "none";
+
+/** An operator's choice for its site: publish the exact location (opt-in), or not (the default). */
+export type LocationVisibility = "exact" | "approximate";
+
 // ── Capability DTOs ────────────────────────────────────────────────────────
 
 export interface CapabilityDTO {
@@ -80,7 +96,14 @@ export interface CapabilityDTO {
   envelope?: WorkEnvelope;
   assuranceTiers: AssuranceTier[];
   pricing: PricingModel;
-  location: GeoLocation;
+  /**
+   * The capability's site as `locationPrecision` describes it: exact only when its kernel's
+   * operator opted in, otherwise the centre of the site's ~5 km cell; null when none is known.
+   */
+  location: GeoLocation | null;
+  locationPrecision: LocationPrecision;
+  /** The site's geohash-5 cell (about 5 km across); null when no location is known. */
+  locationCell: string | null;
   tags?: string[];
   // ── Enrichment fields (not in raw model) ──
   /** Operator reputation score (0-1000) from ERC-8004 */
@@ -132,10 +155,16 @@ export interface JobDTO {
   escrowStatus?: EscrowStatus;
   /** Estimated completion */
   estimatedCompletion?: Timestamp;
+  /**
+   * Execution phase read from `status` by the exact @pcc/spec table
+   * (executionPhaseOf). Undocumented values are `unknown`. It says nothing about
+   * evidence, verification or payment; for those use GET /api/jobs/:jobId/execution.
+   */
+  executionPhase?: ExecutionPhase;
 }
 
 export interface JobTimelineEvent {
-  type: "queued" | "started" | "progress" | "evidence_received" | "verification_started" | "verified" | "settled" | "failed" | "disputed";
+  type: "queued" | "started" | "progress" | "evidence_received" | "verification_started" | "verified" | "completed" | "settled" | "failed" | "disputed";
   timestamp: Timestamp;
   details?: Record<string, unknown>;
 }
@@ -152,8 +181,16 @@ export interface KernelDTO {
   id: Id;
   name: string;
   operatorAddress: string;
-  location: GeoLocation;
-  physicalAddress: string;
+  /**
+   * The site as `locationPrecision` describes it: the operator's exact coordinates only when
+   * they opted in, otherwise the centre of the site's ~5 km cell; null when none is known.
+   */
+  location: GeoLocation | null;
+  locationPrecision: LocationPrecision;
+  /** The site's geohash-5 cell (about 5 km across); null when no location is known. */
+  locationCell: string | null;
+  /** The street address, only when the operator opted in to an exact location; otherwise null. */
+  physicalAddress: string | null;
   maxAssuranceTier: AssuranceTier;
   status: "online" | "offline" | "maintenance" | "suspended";
   lastHeartbeat: Timestamp;

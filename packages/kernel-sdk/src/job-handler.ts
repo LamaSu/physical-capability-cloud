@@ -24,7 +24,14 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { canonicalize, ids, sha256 } from "@pcc/spec";
+import {
+  canonicalize,
+  ids,
+  parseEd25519SignatureHex,
+  sessionKeyDelegationPreimage,
+  sha256,
+  signingPreimage,
+} from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Hex helpers (serialising bytes over JSON)
@@ -61,6 +68,15 @@ export interface KernelJobRequest {
   jobId: string;
   /** Payload forwarded to the builder's execute() */
   input: Record<string, unknown>;
+  /**
+   * The escrow settlement unit (milestone) this execution is for, and the
+   * gateway's challenge nonce for that unit: `0x` + 64 lowercase hex each.
+   * When present they are committed in the kernel-signed execution_started
+   * and execution_completed payloads, so the evidence binds that unit (LO-EV-9)
+   * and cannot settle another milestone of the same job.
+   */
+  settlementUnitId?: string;
+  challengeNonce?: string;
   /** Optional client-side session-signed event authorising the call */
   auth?: {
     /** Hex-encoded canonical event body the caller signed */
@@ -142,6 +158,22 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     if (!request.input || typeof request.input !== "object") {
       throw new KernelAuthError("input must be an object", 400);
     }
+    for (const field of ["settlementUnitId", "challengeNonce"] as const) {
+      const value: unknown = request[field];
+      if (value !== undefined && !(typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value))) {
+        throw new KernelAuthError(`${field} must be 0x + 64 lowercase hex`, 400);
+      }
+    }
+    // A unit is bound with its challenge nonce: half a binding settles nothing
+    // (the oracle requires both on every event) and only hides the gap.
+    if ((request.settlementUnitId === undefined) !== (request.challengeNonce === undefined)) {
+      throw new KernelAuthError("settlementUnitId and challengeNonce come together", 400);
+    }
+    // Committed only when the caller names a unit, so unit-less jobs keep their bytes.
+    const unitFields = {
+      ...(request.settlementUnitId !== undefined ? { settlementUnitId: request.settlementUnitId } : {}),
+      ...(request.challengeNonce !== undefined ? { challengeNonce: request.challengeNonce } : {}),
+    };
 
     // ── Optional inbound auth check ─────────────────────────────────────
     // Kernels may be advertised as open (no auth required) or locked to
@@ -199,21 +231,10 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       },
     };
 
-    const sessionCanonical = new TextEncoder().encode(
-      JSON.stringify({
-        sessionId: sessionKeyBody.sessionId,
-        parentAgentId: sessionKeyBody.parentAgentId,
-        publicKey: toHex(sessionKeyBody.publicKey),
-        issuedAt: sessionKeyBody.issuedAt,
-        expiresAt: sessionKeyBody.expiresAt,
-        scope: {
-          allowedActions: [...sessionKeyBody.scope.allowedActions].sort(),
-          contractIds: [...sessionKeyBody.scope.contractIds].sort(),
-          maxSignatures: sessionKeyBody.scope.maxSignatures,
-        },
-      }),
+    const parentSig = nacl.sign.detached(
+      sessionKeyDelegationPreimage(sessionKeyBody),
+      principalPrivateKey,
     );
-    const parentSig = nacl.sign.detached(sessionCanonical, principalPrivateKey);
     const sessionKey: SessionKey = {
       ...sessionKeyBody,
       parentSignature: parentSig,
@@ -241,10 +262,13 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
       timestamp: executionStart,
       source,
       payload: {
+        // Every event names its job (and unit): the binding is per event.
+        jobId: request.jobId,
         description: "Input data committed",
         inputHash,
         kernelId: manifest.kernelId,
         capabilityType: manifest.capabilityType,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -268,6 +292,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         jobId: request.jobId,
         kernelId: manifest.kernelId,
         stepCount: manifest.workflowSteps.length,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -289,9 +314,11 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         timestamp: new Date().toISOString(),
         source,
         payload: {
+          jobId: request.jobId,
           stepId: step.stepId,
           stepType: step.stepType,
           description: step.description,
+          ...unitFields,
         },
         hash: "" as SHA256,
       };
@@ -319,6 +346,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
         jobId: request.jobId,
         kernelId: manifest.kernelId,
         outputHash,
+        ...unitFields,
       },
       hash: "" as SHA256,
     };
@@ -335,8 +363,7 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
     // ── Finalise bundle (hash + sign with sessionKey) ───────────────────
     const sortedHashes = events.map((e) => e.hash).sort();
     const bundleHash = await sha256(canonicalize(sortedHashes));
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const bundleSig = nacl.sign.detached(bundleHashBytes, sessionKeypair.secretKey);
+    const bundleSig = nacl.sign.detached(signingPreimage(bundleHash), sessionKeypair.secretKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -371,15 +398,30 @@ export function createKernelHandler(opts: CreateKernelHandlerOptions) {
   };
 }
 
-/** Verify an EvidenceBundle signature against a known session public key. */
+/**
+ * Verify an EvidenceBundle signature against a known session public key.
+ *
+ * Transport form: the signature value is UNPREFIXED hex, which is what the SDK
+ * signs and what this verifier has always required. A "0x"/"0X"-prefixed
+ * value decoded to 65 bytes before LO-EV-1 and never verified, so it must not
+ * verify now (parseEd25519SignatureHex alone would strip the prefix).
+ *
+ * Deliberate narrowings vs the pre-LO-EV-1 decoder: a value with a trailing
+ * extra nibble (129 hex) used to be truncated to 64 bytes and could verify; it
+ * is now rejected, as is a bundleHash that is not a canonical tagged digest.
+ */
 export function verifyBundleSignature(
   bundle: EvidenceBundle,
   sessionPublicKey: Uint8Array,
 ): boolean {
+  const value: unknown = bundle.kernelSignature?.value;
+  if (typeof value !== "string" || /^0x/i.test(value)) return false;
   try {
-    const bundleHashBytes = new TextEncoder().encode(bundle.bundleHash);
-    const sig = fromHex(bundle.kernelSignature.value);
-    return nacl.sign.detached.verify(bundleHashBytes, sig, sessionPublicKey);
+    return nacl.sign.detached.verify(
+      signingPreimage(bundle.bundleHash),
+      parseEd25519SignatureHex(value),
+      sessionPublicKey,
+    );
   } catch {
     return false;
   }

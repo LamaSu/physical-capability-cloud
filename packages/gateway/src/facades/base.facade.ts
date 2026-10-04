@@ -110,9 +110,14 @@ export abstract class BaseFacade {
             this.emitTelemetry(operation, "failed", { error: message });
             outcome = err("FORBIDDEN", message, 403) as Result<T>;
           } else if (error instanceof ConflictError) {
-            code = "SIGNER_ALREADY_BOUND";
+            // Merge-up (master, N85(a)): a ConflictError may carry its own attached
+            // code (e.g. "settlement_owned_status" from job.facade.ts's
+            // updateStatus) — preserved via the facade-errors.ts ConflictError's
+            // optional `code`, same pattern as NotFoundError/BadRequestError above.
+            // Default stays the pre-existing signer-bind conflict.
+            code = error.code ?? "SIGNER_ALREADY_BOUND";
             this.emitTelemetry(operation, "failed", { error: message });
-            outcome = err("SIGNER_ALREADY_BOUND", message, 409) as Result<T>;
+            outcome = err(code, message, 409) as Result<T>;
           } else if (error instanceof WriteDisabledError) {
             code = "WRITE_DISABLED";
             this.emitTelemetry(operation, "failed", { error: message });

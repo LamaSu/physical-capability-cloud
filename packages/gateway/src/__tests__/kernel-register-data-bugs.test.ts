@@ -8,12 +8,17 @@
  * Root cause for both: `KernelFacade.register()` hardcoded the values instead
  * of reading from the input body. CreateKernelInput interface also did not
  * even declare maxAssuranceTier, so TS couldn't catch the silent drop.
+ *
+ * Board N68: the submitted location and address are STORED as sent (checked in
+ * the store), and reads show them as every read does: the centre of the site's
+ * ~5 km cell and no street address, unless the operator opted in.
  */
 
 import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { kernelRoutes } from "../routes/kernels.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+import { geohashCenter } from "../facades/populators/public-location.js";
 
 describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", () => {
   let app: FastifyInstance;
@@ -48,12 +53,14 @@ describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", (
     });
     expect(create.statusCode).toBe(201);
 
+    expect(getRepos().kernels.findById(id)!.location).toEqual({ lat: 40.71, lng: -74.0 });
+
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
     expect(get.statusCode).toBe(200);
-    const body = JSON.parse(get.body) as { kernel: { location?: { lat: number; lng: number } } };
-    expect(body.kernel.location).toBeDefined();
-    expect(body.kernel.location?.lat).toBe(40.71);
-    expect(body.kernel.location?.lng).toBe(-74.0);
+    const body = JSON.parse(get.body) as { kernel: Record<string, unknown> };
+    expect(body.kernel.location).toEqual(geohashCenter("dr5rs"));
+    expect(body.kernel.locationPrecision).toBe("approximate");
+    expect(body.kernel.locationCell).toBe("dr5rs");
   });
 
   it("[a8207dfa] persists string-form location to physicalAddress (legacy alias)", async () => {
@@ -70,10 +77,12 @@ describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", (
     });
     expect(create.statusCode).toBe(201);
 
+    expect(getRepos().kernels.findById(id)!.physicalAddress).toBe("555 Main St, Brooklyn NY");
+
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
     expect(get.statusCode).toBe(200);
-    const body = JSON.parse(get.body) as { kernel: { physicalAddress?: string } };
-    expect(body.kernel.physicalAddress).toBe("555 Main St, Brooklyn NY");
+    const body = JSON.parse(get.body) as { kernel: Record<string, unknown> };
+    expect(body.kernel.physicalAddress).toBeNull();
   });
 
   it("[a8207dfa] persists both object location AND separate physicalAddress when both sent", async () => {
@@ -91,11 +100,14 @@ describe("POST /api/kernels — data persistence (coord a8207dfa + c6b48ca1)", (
     });
     expect(create.statusCode).toBe(201);
 
+    const row = getRepos().kernels.findById(id)!;
+    expect([row.location, row.physicalAddress]).toEqual([{ lat: 37.77, lng: -122.42 }, "123 Maker St, SF CA"]);
+
     const get = await app.inject({ method: "GET", url: `/api/kernels/${id}` });
-    const body = JSON.parse(get.body) as { kernel: { location?: { lat: number; lng: number }; physicalAddress?: string } };
-    expect(body.kernel.location?.lat).toBe(37.77);
-    expect(body.kernel.location?.lng).toBe(-122.42);
-    expect(body.kernel.physicalAddress).toBe("123 Maker St, SF CA");
+    const body = JSON.parse(get.body) as { kernel: Record<string, unknown> };
+    expect(body.kernel.location).toEqual(geohashCenter("9q8yy"));
+    expect(body.kernel.locationPrecision).toBe("approximate");
+    expect(body.kernel.physicalAddress).toBeNull();
   });
 
   it("[c6b48ca1] persists submitted maxAssuranceTier=1 (not silently overridden to 2)", async () => {

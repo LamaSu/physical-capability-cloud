@@ -18,6 +18,9 @@ import print2dCsd from "../csds/2d-print.csd.json" with { type: "json" };
 import makePizzaCsd from "../csds/make-pizza.csd.json" with { type: "json" };
 import courierRouteCsd from "../csds/courier-route.csd.json" with { type: "json" };
 import hotFoodPrepCsd from "../csds/hot-food-prep.csd.json" with { type: "json" };
+// The reference vertical's workflow CSD (print + hand-off + mail). It was added on 8/27, after this list
+// was written, and was never registered, so production could not resolve its print leg (#433, board N64).
+import documentPrintAndMailCsd from "../csds/document-print-and-mail.csd.json" with { type: "json" };
 
 /**
  * Per-CSD usage attribution.
@@ -385,6 +388,7 @@ export class CsdRegistry {
  *   pcc://capabilities/make-pizza/v1
  *   pcc://capabilities/courier-route/v1
  *   pcc://capabilities/hot-food-prep/v1
+ *   pcc://capabilities/document-print-and-mail/v1 (workflow: the reference vertical)
  *
  * @param usageRepo Optional persistent usage backend (e.g. SQLite-backed).
  *   When omitted, the registry uses an in-memory map — matches the original
@@ -403,6 +407,7 @@ export function loadBuiltinCsds(usageRepo?: CsdUsageRepository): CsdRegistry {
     makePizzaCsd,
     courierRouteCsd,
     hotFoodPrepCsd,
+    documentPrintAndMailCsd,
   ];
   for (const raw of builtins) {
     // Use validate first to get a clear error message, then register

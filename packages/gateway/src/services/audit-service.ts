@@ -23,9 +23,11 @@ class AuditService {
    * Append an audit entry to the database.
    *
    * Fire-and-forget: this method is synchronous (SQLite is sync) but wrapped
-   * in a try/catch so audit failures never propagate to the caller.
+   * in a try/catch so audit failures never propagate to the caller. Returns
+   * whether the row was written, for callers that must know (the operator
+   * funnel marks a stage recorded only after its durable row exists).
    */
-  log(entry: AuditEntry): void {
+  log(entry: AuditEntry): boolean {
     try {
       const repos = getRepos();
       repos.auditLog.insert({
@@ -39,8 +41,10 @@ class AuditService {
         ip: entry.ip ?? null,
         userAgent: entry.userAgent ?? null,
       });
+      return true;
     } catch {
       // Audit failures must never crash request handling — swallow silently.
+      return false;
     }
   }
 
@@ -51,6 +55,7 @@ class AuditService {
     eventType?: string;
     actor?: string;
     resourceType?: string;
+    resourceId?: string;
     since?: string;
     limit?: number;
   }): AuditEntry[] {

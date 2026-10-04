@@ -347,6 +347,14 @@ export class MyDeviceAdapter implements MachineAdapter {
     // Emit evidence events (logs, photos, sensor data) during execution
   }
 
+  async quiesceEvidence(): Promise<void> {
+    // REQUIRED (the kernel refuses an adapter without it): resolve once every evidence
+    // event of the work this adapter was given has been emitted, and never while that work
+    // can still emit (a poll loop that may still report the completion or a failure, a
+    // command or callback in flight). The kernel keeps the device from the next job until
+    // it resolves. Count what is outstanding with OutstandingWork from @pcc/kernel.
+  }
+
   async dispose(): Promise<void> {
     // Clean up connections
   }
