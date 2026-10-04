@@ -125,6 +125,30 @@ describe("scope-checker — defaults compose with governance rows, session holds
       expect(res.statusCode).toBe(403);
       expect(res.json().reached).toBeUndefined();
     });
+
+    it("REFUSES a write when a row covers the SAME route as a default but the default is unsatisfied", async () => {
+      // A row can ADD a requirement; it must never let a caller skip a
+      // default that also matches this exact route. Insert a row on the
+      // IDENTICAL path the jobs default covers, requiring a scope the
+      // default does not accept, and prove the default alone still binds —
+      // satisfying the row is not enough.
+      app = await buildApp();
+      getRepos().governance.insertEndpointScope({
+        id: "scope:test:jobs-create-row",
+        method: "POST",
+        routePattern: "/api/jobs/create",
+        requiredScopes: ["ops:custom"],
+        description: "test-only row overlapping the jobs default",
+      });
+      const rawKey = issueApiKey(["ops:custom"]); // satisfies the ROW, not the default
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/jobs/create",
+        headers: { authorization: `Bearer ${rawKey}` },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reached).toBeUndefined();
+    });
   });
 
   describe("N109 repro — a session with no API key holds no scopes", () => {
