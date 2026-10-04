@@ -12,6 +12,7 @@ import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
 import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
 import type { MachineAdapter } from "@pcc/kernel";
+import { OctoPrintAdapter, OPCUAAdapter, OpentronsMachineAdapter, SiLAAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
@@ -65,12 +66,57 @@ interface RunningJob {
 // KernelService
 // ---------------------------------------------------------------------------
 
+/**
+ * The built-in machine adapters whose every simulating path sets
+ * `source.simulated: true`, checked per class (N59 rounds 4 and 5): each
+ * simulates only in its declared mock mode (SiLA's `mock`), which sets the
+ * marker at construction, and OPC UA and SiLA refuse real operations they do
+ * not implement. An instance of EXACTLY one of these classes with no marker is
+ * driving its real transport. Any other adapter counts as real only when its
+ * source says `simulated: false`: an extension registered at runtime, a
+ * subclass, Hamilton (@pcc/kernel does not export it), and IPP. A real-mode
+ * IppAdapter serves mock answers while its optional `ipp` import is still
+ * pending, before any marker is set, so an unmarked IPP counts as simulated.
+ */
+const MARKS_ITS_OWN_SIMULATION: ReadonlySet<object> = new Set<object>([
+  OctoPrintAdapter.prototype,
+  OPCUAAdapter.prototype,
+  OpentronsMachineAdapter.prototype,
+  SiLAAdapter.prototype,
+]);
+
+const MOCK_LIKE_CLASS = /mock|chatterbox|stub|simulat|fake/i;
+
+/**
+ * Whether `machine` is serving simulation, as far as the gateway can tell.
+ * Fail closed: no adapter, no evidence source, a mock-like class name, a
+ * marker that is anything but a clean boolean, or no marker on an adapter
+ * outside MARKS_ITS_OWN_SIMULATION all count as simulated. This says what the
+ * adapter reports about itself, not what hardware is attached: physical
+ * verification against the kernel's registered key is D4a, #428.
+ */
+export function adapterIsSimulated(machine: MachineAdapter | undefined): boolean {
+  if (!machine) return true;
+  if (MOCK_LIKE_CLASS.test(machine.constructor?.name ?? "")) return true;
+  const source: unknown = machine.source;
+  if (typeof source !== "object" || source === null) return true; // nothing to read a marker from
+  const marker = (source as { simulated?: unknown }).simulated;
+  if (marker === false) return false; // the adapter says, affirmatively, that it is real
+  if (marker !== undefined) return true; // true, or anything but a clean boolean
+  return !MARKS_ITS_OWN_SIMULATION.has(Object.getPrototypeOf(machine) as object);
+}
+
+/** How many finished jobs keep the adapter that ran them; an evicted one reads as simulated. */
+const JOB_ADAPTER_MEMORY = 1000;
+
 export class KernelService {
   private runners: Map<string, JobRunner> = new Map();
   private machines: Map<string, MachineAdapter> = new Map();
   private emitter: EvidenceEmitter;
   private config: KernelConfig;
   private runningJobs: Map<string, RunningJob> = new Map();
+  /** The adapter each dispatched job ran on, for jobRanSimulated (the newest JOB_ADAPTER_MEMORY jobs). */
+  private jobAdapters: Map<string, MachineAdapter | undefined> = new Map();
   /** Cache of finalized evidence bundles, keyed by jobId */
   private completedBundles: Map<string, EvidenceBundle> = new Map();
 
@@ -86,13 +132,29 @@ export class KernelService {
     // This guarantees the singleton exists before submitJob can be called.
     initSafetyGateway();
     this.initAdapters();
-    // Also load any DB-registered devices for this kernel so test-job lands
-    // on the operator's REAL device, not the KERNEL_CONFIG mock fallback.
+    // Also load any DB-registered devices for this kernel so test-job runs the
+    // adapter registered for the operator's device, not the KERNEL_CONFIG mock
+    // fallback. (Whether that adapter served real I/O for a job is jobRanSimulated.)
     this.loadDbDevicesIntoRuntime();
     // Cache finalized bundles so we can pass them to the settlement service
     this.emitter.onBundle((bundle) => {
       this.completedBundles.set(bundle.jobId, bundle);
     });
+  }
+
+  /** The kernel this in-process service runs jobs for (from KERNEL_CONFIG). */
+  get kernelId(): string {
+    return this.config.kernelId;
+  }
+
+  /**
+   * Whether a machine runner for `deviceId` is loaded in this running service,
+   * i.e. a job on that device would actually execute here rather than on a
+   * remote operator node. Used by /api/setup/test-job to refuse a test it
+   * cannot honestly run.
+   */
+  hasRunner(deviceId: string): boolean {
+    return this.runners.has(deviceId);
   }
 
   private initAdapters(): void {
@@ -197,7 +259,27 @@ export class KernelService {
   refreshDeviceFromDb(deviceId: string): { installed: boolean; reason?: string } {
     const row = getRepos().kernels.findDeviceById(deviceId);
     if (!row) return { installed: false, reason: "row_not_found" };
+    // N59 F1: never load a device from another kernel into this service's
+    // runtime. The runners map is keyed by device id alone, and the emitter and
+    // adapters here belong to THIS kernel; loading a foreign row would let a
+    // device-id collision actuate the wrong kernel's hardware.
+    if (row.kernelId !== this.config.kernelId) {
+      return { installed: false, reason: "foreign_kernel" };
+    }
     return this.installMachineFromDbRow(row);
+  }
+
+  /**
+   * Whether the job `jobId` ran on an adapter serving simulation, judged on the
+   * adapter instance submitJob dispatched it to, read now. So an IPP downgrade
+   * during the run counts, and an adapter a refresh installs under the same
+   * device id meanwhile does not stand in for the one that ran (N59 round 4).
+   * A job this service did not dispatch, or no longer remembers, counts as
+   * simulated (fail closed).
+   */
+  jobRanSimulated(jobId: string): boolean {
+    if (!this.jobAdapters.has(jobId)) return true;
+    return adapterIsSimulated(this.jobAdapters.get(jobId));
   }
 
   /**
@@ -234,6 +316,10 @@ export class KernelService {
     }
 
     const runner = this.runners.get(deviceId)!;
+    // The adapter this runner drives, captured with it in this same turn (both
+    // maps are only ever set together): the post-run simulation check must
+    // judge the adapter that ran, whatever a refresh installs meanwhile.
+    const machine = this.machines.get(deviceId);
 
     // ── Safety gateway pre-flight ──────────────────────────────────────────
     // Build a PhysicalCommand descriptor for this job. Jobs submitted without
@@ -269,6 +355,10 @@ export class KernelService {
 
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
+    this.jobAdapters.set(jobId, machine);
+    if (this.jobAdapters.size > JOB_ADAPTER_MEMORY) {
+      this.jobAdapters.delete(this.jobAdapters.keys().next().value as string);
+    }
 
     // Telemetry: job accepted by a device
     pipelineTelemetry.emit(jobId, "job_accepted", "completed", {
@@ -323,10 +413,12 @@ export class KernelService {
               this.runningJobs.delete(jobId);
               // Feed the REAL execution outcome into the safety breaker. Admission
               // used validateOnly (which records nothing), so this is the only
-              // place a genuine device success/failure reaches the breaker.
+              // place a genuine device success/failure reaches the breaker. A busy
+              // refusal is neither: the runner refused before commanding the device,
+              // because another job holds it (#5205), so it records nothing.
               if (result.success) {
                 gateway.recordDeviceSuccess(deviceId);
-              } else {
+              } else if (result.busy === undefined) {
                 gateway.recordDeviceFailure(deviceId);
               }
               try {
@@ -410,9 +502,10 @@ export class KernelService {
         .then(async (result) => {
           this.runningJobs.delete(jobId);
           // Feed the REAL execution outcome into the safety breaker (fallback path).
+          // A busy refusal never commanded the device, so it records nothing (#5205).
           if (result.success) {
             gateway.recordDeviceSuccess(deviceId);
-          } else {
+          } else if (result.busy === undefined) {
             gateway.recordDeviceFailure(deviceId);
           }
           try {

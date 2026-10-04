@@ -11,7 +11,8 @@
  *   - On-chain writes (fundEscrow, approveToken, releaseMilestone, fileDispute, depositBond,
  *     submitEvidenceHash, submitAttestation)
  *   - Batch settlement (getBatchStatus, getEpochHistory, submitBatchIntent, flushBatch)
- *   - Job settlement (releaseMilestoneForJob, getJobSettlementStatus, getJobEvidence)
+ *   - Job settlement (releaseMilestoneForJob, getJobEvidence; GET /api/settlement/:jobId is
+ *     readmodels/legacy-settlement.ts, a projection of the execution read model)
  */
 
 import { type Result, ok, err, Errors } from "@pcc/spec";
@@ -700,33 +701,6 @@ export class SettlementFacade extends BaseFacade {
         protocolFee: "0",
         txHash: result.txHash,
         chain: "base",
-      };
-    });
-  }
-
-  /**
-   * Get settlement status for a completed job.
-   * Replaces: GET /api/settlement/:jobId
-   */
-  async getJobSettlementStatus(jobId: string): Promise<Result<unknown>> {
-    return this.execute("getJobSettlementStatus", async () => {
-      const job = this.repos.jobs.findById(jobId);
-      if (!job) {
-        throw new NotFoundError("job", jobId);
-      }
-
-      const bundles = this.repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
-      const settled = job.status === "settled" || job.status === "completed";
-
-      return {
-        jobId: job.id,
-        status: job.status,
-        evidenceBundleId: latestBundle?.id ?? job.evidenceBundleId ?? null,
-        evidenceHash: latestBundle?.bundleHash ?? null,
-        assuranceTier: latestBundle?.assuranceTier ?? null,
-        settled,
-        settledAt: job.completedAt ?? null,
       };
     });
   }

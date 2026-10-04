@@ -36,9 +36,30 @@ export async function jobRoutes(app: FastifyInstance) {
   /**
    * List jobs with optional kernel/status filtering and DTO enrichment.
    * Supports: ?kernelId=, ?status=, or both.
+   *
+   * N111 — offset/limit carry a querystring schema so Fastify's ajv coerces
+   * "10" -> 10 (coerceTypes is on by default) before the handler ever sees
+   * them. Without this, both arrive as strings and the facade's
+   * `offset + limit` becomes string concatenation, not addition. The schema
+   * also bounds limit to [1, 200] and offset to >= 0; an unparsable or
+   * out-of-bounds value is a 400 from Fastify before this handler runs.
    */
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            kernelId: { type: "string" },
+            status: { type: "string" },
+            offset: { type: "integer", minimum: 0, default: 0 },
+            // 50 matches the facade's pre-existing default (job.facade.ts list()).
+            limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+          },
+        },
+      },
+    },
     async (req, reply) => {
       const asOf = new Date().toISOString();
       // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true.

@@ -5,6 +5,7 @@ import { getCapabilityFacade, type CreateCapabilityInput } from "../facades/inde
 import { JOB_STATUSES } from "../config/job-status.js";
 import { getCsdRegistry } from "./csd.js";
 import { lit } from "../observability/closed-schema.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 // ── POST /api/capabilities — accepted top-level body fields ─────────────────
 //
@@ -738,6 +739,16 @@ export async function capabilityRoutes(app: FastifyInstance) {
     }
     const { capability, created } = result.data;
     if (created) {
+      // Operator-onboarding funnel (ADK track item 4): capability_published.
+      // Telemetry must never break capability creation.
+      try {
+        recordOperatorStage(kernelId, "capability_published", {
+          capabilityId: (capability as { id?: string } | undefined)?.id ?? null,
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+        });
+      } catch {
+        /* funnel tracking must never break capability creation */
+      }
       const ignoredFields = bodyKeys.filter((k) => !CAPABILITY_CREATE_FIELDS.has(k)).sort();
       const hints = ignoredFields.includes("requirementsSchema")
         ? [
