@@ -9,8 +9,12 @@
 # This runs every test on the oldest Python pcc-node supports (3.9, its requires-python)
 # and on 3.12, with the optional dependencies the tests exercise installed at pinned
 # versions. It fails if ANY test is skipped, deselected, xfailed or xpassed: each would be
-# a safety test that silently stopped counting. There is deliberately no path filter, so
-# a required check never waits on a run that was never started.
+# a safety test that silently stopped counting. A test that never reaches pytest's report
+# at all (a conftest's collect_ignore, a collection hook) leaves no word in that summary, so
+# a second step collects the suite again without any ini file or conftest and checks, node
+# ID by node ID, that the run executed exactly those tests, once each, and that all passed
+# (N117b, tests/run_manifest_check.py). There is deliberately no path filter, so a required
+# check never waits on a run that was never started.
 
 name: pcc-node tests
 
@@ -57,8 +61,17 @@ jobs:
       - name: The whole suite, failing unless every test ran and passed
         run: |
           set -o pipefail
-          python -m pytest -q -p no:cacheprovider -rsxX 2>&1 | tee "$RUNNER_TEMP/pcc-node-pytest.log"
+          python -m pytest -q -p no:cacheprovider -rsxX --junitxml="$RUNNER_TEMP/pcc-node-junit.xml" \
+            -o junit_family=xunit1 2>&1 | tee "$RUNNER_TEMP/pcc-node-pytest.log"
           if tail -n 3 "$RUNNER_TEMP/pcc-node-pytest.log" | grep -E -q '[0-9]+ (skipped|deselected|xfailed|xpassed|error)'; then
             echo "::error::a pcc-node test was skipped, deselected, xfailed, xpassed or errored; every test must run and pass in this job"
             exit 1
           fi
+
+      - name: Every test the suite holds ran, once, and passed (an independent collection)
+        run: |
+          set -o pipefail
+          env -u PYTEST_ADDOPTS -u PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            python -I -B -m pytest --collect-only -q -c /dev/null --rootdir . -p no:cacheprovider --noconftest tests \
+            > "$RUNNER_TEMP/pcc-node-collected.txt"
+          python -I -B tests/run_manifest_check.py "$RUNNER_TEMP/pcc-node-collected.txt" "$RUNNER_TEMP/pcc-node-junit.xml"
