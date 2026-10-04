@@ -309,6 +309,14 @@ const SLOT_KEY = /^(slot|sample)_?id$/i;
 const SLOT_LIST_KEY = /^(slot|sample)_?ids$/i;
 const BATCH_KEY = /^batch_?id$/i;
 const BATCH_LIST_KEY = /^batch_?ids$/i;
+/**
+ * A field name #538's closed log keyed (structured-logger.ts: an UNDECLARED field leaves with its
+ * name and value keyed). Such a field may be a binding the filter cannot read (#538 merge-up, astra
+ * CRITICAL: a tenant-scoped admin received another tenant's line), so its record's owners are
+ * unknown, unless its value is a plain object, which is only a container: its declared fields
+ * keep their names.
+ */
+const KEYED_KEY = /^h:[0-9a-f]{32}$/;
 const MAX_DEPTH = 8;
 
 export interface RecordBindings {
@@ -324,8 +332,9 @@ export interface RecordBindings {
 /**
  * Every job, kernel, batch slot and batch a record names, at any depth (up to MAX_DEPTH), in
  * objects and arrays.
- * A binding key whose value is not a nonempty string, or a record nested deeper than
- * MAX_DEPTH, is malformed: the filter then keeps the record only for an unscoped admin.
+ * A binding key whose value is not a nonempty string, a keyed field name (KEYED_KEY) whose value
+ * is not a plain object, or a record nested deeper than MAX_DEPTH, is malformed: the filter then
+ * keeps the record only for an unscoped admin.
  */
 export function recordBindingsOf(record: unknown): RecordBindings {
   return walkBindings(record).bound;
@@ -367,6 +376,11 @@ function walkBindings(record: unknown): { bound: RecordBindings; nodes: BindingN
     const node: BindingNode = { root: depth === 0, batches: [], slots: [] };
     nodes.push(node);
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (KEYED_KEY.test(key)) {
+        if (child !== null && typeof child === "object" && !Array.isArray(child)) walk(child, depth + 1);
+        else out.malformed = true;
+        continue;
+      }
       if (JOB_KEY.test(key)) one(child, out.jobs);
       else if (JOB_LIST_KEY.test(key)) many(child, out.jobs);
       else if (KERNEL_KEY.test(key)) one(child, out.kernels);
@@ -452,7 +466,8 @@ export function recordOwnersOf(record: unknown, ctx: { batchId?: string } = {}):
  * filter compares it with the keyed hashes of exactly those ids (computed once, when a keyed value
  * is first met). A keyed value that is no readable id's hash is a job or kernel the caller may not
  * read, so the line is left out. A field whose producer did not declare it is stored with its key
- * keyed too, so it binds nothing, and its line is an unscoped admin's only (the free-text rule).
+ * keyed too, so the filter cannot tell whether it binds a job: walkBindings marks such a record
+ * malformed (owners unknown), and it is an unscoped admin's only.
  */
 export type JobRecordFilter =
   | { ok: true; keep: (record: unknown) => boolean }

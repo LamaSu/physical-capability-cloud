@@ -289,3 +289,33 @@ describe("MEDIUM 6: an unmatched /sse/stream/ path takes no connection slot", ()
     expect(res.status).toBe(200);
   });
 });
+
+describe("#538 merge-up (astra, CRITICAL): a line whose job binding was not declared is no tenant-scoped admin's", () => {
+  // #538's closed log keys an undeclared field's NAME and value, so the filter cannot see that the
+  // line is bound to tenant B's job-003. Such a line's owners are unknown: an unscoped admin's only.
+  it("a tenant-A admin does not get tenant B's undeclared-binding line by the REST read; an unscoped admin does", async () => {
+    const { logger } = await import("../../structured-logger.js");
+    const closed = await import("../../observability/closed-schema.js");
+    logger.log("info", closed.lit("mu2 tenant-B undeclared line"), { jobId: "job-003" } as never);
+    await withTenantEnforce(async () => {
+      const a = await get("/api/telemetry/logs", { ...ADMIN_H, "x-test-tenant": "tenant-a" });
+      expect(a.statusCode).toBe(200);
+      expect(a.body).not.toContain("mu2 tenant-B undeclared line");
+    });
+    expect((await get("/api/telemetry/logs", ADMIN_H)).body).toContain("mu2 tenant-B undeclared line");
+  });
+
+  it("nor by the live log stream", async () => {
+    const closed = await import("../../observability/closed-schema.js");
+    await withTenantEnforce(async () => {
+      const res = await stream("/api/telemetry/logs/stream", { ...ADMIN_H, "x-test-tenant": "tenant-a" }, () => {
+        streamHub.publish([{ type: "global", id: "*" }], {
+          type: "log_entry",
+          payload: { [closed.keyedHash("jobId")]: closed.keyedHash("job-003"), message: "mu2 tenant-B undeclared live", level: "info", source: "gateway" },
+        } as never);
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).not.toContain("mu2 tenant-B undeclared live");
+    });
+  });
+});
