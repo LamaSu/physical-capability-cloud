@@ -14,7 +14,9 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vite
 import Fastify, { type FastifyInstance } from "fastify";
 import { auditService } from "../services/audit-service.js";
 import { writeAuditHook } from "../services/write-audit-hook.js";
-import { GATEWAY_LOGGER_OPTIONS, canonicalRequestPath, isTelemetrySinkRequest, telemetryLookalikeHook } from "../services/telemetry-privacy.js";
+import { canonicalRequestPath, isTelemetrySinkRequest, telemetryLookalikeHook } from "../services/telemetry-privacy.js";
+import { emitted, isDeclared } from "../observability/closed-schema.js";
+import { closedLoggerHooks, gatewayLoggerOptions, issueRequestId } from "../observability/closed-sinks.js";
 import { Writable } from "node:stream";
 import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,8 +50,16 @@ const logStream = new Writable({
 });
 
 async function buildProductionApp(): Promise<FastifyInstance> {
-  // The production logger configuration (server.ts), writing to a capture stream.
-  const app = Fastify({ logger: { ...GATEWAY_LOGGER_OPTIONS, level: "info", stream: logStream }, bodyLimit: 1_048_576, trustProxy: true });
+  // The production logger configuration (server.ts: the closed logger of N107b, #538), writing to a
+  // capture stream, with its hooks registered before any route as server.ts does.
+  const app = Fastify({
+    logger: { ...gatewayLoggerOptions(), level: "info", stream: logStream },
+    requestIdHeader: false,
+    genReqId: issueRequestId,
+    bodyLimit: 1_048_576,
+    trustProxy: true,
+  });
+  closedLoggerHooks(app);
   app.decorateRequest("userId", null);
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
@@ -80,7 +90,11 @@ const attempt = (extra: Record<string, unknown> = {}) => ({ kind: "attempt", ses
 const lines = () => (existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : []);
 const settle = () => new Promise((r) => setTimeout(r, 30)); // onResponse hooks finish after inject resolves
 
-type Audit = { eventType: string; ip?: string; userAgent?: string; metadata?: Record<string, unknown> };
+type Audit = { eventType: unknown; ip?: string; userAgent?: string; metadata?: Record<string, unknown> };
+/** A field as the audit call carries it: a declared value's emitted form (N107b), or the value itself. */
+const text = (v: unknown) => (isDeclared(v) ? String(emitted(v)) : v);
+const writeAuditOf = (audits: Audit[], route: string) =>
+  audits.find((a) => text(a.eventType) === "http.write" && text(a.metadata?.route) === route);
 
 describe("attempt reports through the production wiring", () => {
   it("keep no raw User-Agent, email, bearer token or client IP in the sink or any audit row", async () => {
@@ -98,8 +112,8 @@ describe("attempt reports through the production wiring", () => {
     for (const leak of ["alice@example.com", "A".repeat(20), "203.0.113.9"]) expect(line).not.toContain(leak);
 
     const audits = spy.mock.calls.map((c) => c[0] as Audit);
-    const attemptAudit = audits.find((a) => a.eventType === "agent.attempt");
-    const writeAudit = audits.find((a) => a.eventType === "http.write" && a.metadata?.url === "/api/feedback");
+    const attemptAudit = audits.find((a) => text(a.eventType) === "agent.attempt");
+    const writeAudit = writeAuditOf(audits, "/api/feedback");
     expect(attemptAudit).toBeDefined();
     expect(writeAudit).toBeDefined();
     expect(attemptAudit!.ip).toBeUndefined();
@@ -114,7 +128,9 @@ describe("attempt reports through the production wiring", () => {
     const spy = vi.spyOn(auditService, "log").mockImplementation((() => undefined) as never);
     await app.inject({ method: "POST", url: "/api/other-write", headers: { "user-agent": "curl/8", "x-forwarded-for": "198.51.100.4" }, payload: {} });
     await settle();
-    const writeAudit = spy.mock.calls.map((c) => c[0] as Audit).find((a) => a.eventType === "http.write" && a.metadata?.url === "/api/other-write");
+    const writeAudit = writeAuditOf(spy.mock.calls.map((c) => c[0] as Audit), "/api/other-write");
+    // The hook hands the audit service the client's IP and User-Agent for other routes; the service
+    // keeps only their keyed hash and class (the closed schema, N107b).
     expect(writeAudit).toMatchObject({ ip: "198.51.100.4", userAgent: "curl/8" });
   });
 
@@ -149,18 +165,21 @@ describe("attempt reports through the production wiring", () => {
     expect(res.statusCode).toBe(201);
     await settle();
     const audits = spy.mock.calls.map((c) => c[0] as Audit);
-    const writeAudit = audits.find((a) => a.eventType === "http.write" && String(a.metadata?.url).startsWith("/api/feedback"));
-    expect(writeAudit?.metadata?.url).toBe("/api/feedback");
+    const writeAudit = writeAuditOf(audits, "/api/feedback");
+    expect(writeAudit).toBeDefined();
     expect(JSON.stringify(audits)).not.toContain("abc123456789");
     expect(JSON.stringify(audits)).not.toContain("alice@example.com");
   });
 
-  it("keep the raw URL in other routes' write audit", async () => {
+  it("record other routes' write audit by route template, never the raw URL (N107b)", async () => {
     const spy = vi.spyOn(auditService, "log").mockImplementation((() => true) as never);
     await app.inject({ method: "POST", url: "/api/other-write?page=2", payload: {} });
     await settle();
-    const writeAudit = spy.mock.calls.map((c) => c[0] as Audit).find((a) => a.eventType === "http.write" && String(a.metadata?.url).startsWith("/api/other-write"));
-    expect(writeAudit?.metadata?.url).toBe("/api/other-write?page=2");
+    const writeAudit = writeAuditOf(spy.mock.calls.map((c) => c[0] as Audit), "/api/other-write");
+    expect(writeAudit).toBeDefined();
+    // #458 kept other routes' raw URL; the closed schema (#538, the steward's 10/03 ruling) keeps no
+    // request value in any sink, so the query never reaches the audit.
+    expect(JSON.stringify(writeAudit)).not.toContain("page=2");
   });
 
   it("treat malformed and encoded lookalikes of the sink as the sink (round 3)", async () => {
@@ -169,10 +188,11 @@ describe("attempt reports through the production wiring", () => {
       await app.inject({ method: "POST", url, headers: { "user-agent": UA, "x-forwarded-for": "203.0.113.9" }, payload: attempt() });
     }
     await settle();
-    const writes = spy.mock.calls.map((c) => c[0] as Audit).filter((a) => a.eventType === "http.write");
+    const writes = spy.mock.calls.map((c) => c[0] as Audit).filter((a) => text(a.eventType) === "http.write");
     expect(writes).toHaveLength(3);
     for (const w of writes) {
-      expect(w.metadata).toMatchObject({ url: "/api/feedback", route_matched: false });
+      // An unrouted lookalike has no route template: it is recorded as "unmatched", never its path.
+      expect(text(w.metadata?.route)).toBe("unmatched");
       expect(w.ip).toBeUndefined();
       expect(w.userAgent).toBeUndefined();
     }
@@ -194,16 +214,20 @@ describe("attempt reports through the production wiring", () => {
     for (const leak of ["token-abc", "alice@example.com", "203.0.113.9", "secret-agent"]) expect(everything).not.toContain(leak);
   });
 
-  it("keep the sink's raw URL, IP and host out of the production request log, and leave other routes' log lines as they were (round 3)", async () => {
+  it("keep the sink's raw URL, IP and host out of the production request log, and log other routes by route template and client hash only (round 3, N107b)", async () => {
     await app.inject({ method: "POST", url: "/api/feedback?token=abc123456789&email=alice@example.com", headers: { "x-forwarded-for": "203.0.113.9" }, payload: attempt() });
     await app.inject({ method: "POST", url: "/api/other-write?page=2", headers: { "x-forwarded-for": "198.51.100.4" }, payload: {} });
     const all = logLines.join("");
     expect(all).toContain("incoming request");
     for (const leak of ["abc123456789", "alice@example.com", "203.0.113.9"]) expect(all).not.toContain(leak);
-    const sinkLine = logLines.map((l) => JSON.parse(l)).find((l) => l.msg === "incoming request" && l.req?.url === "/api/feedback");
-    expect(sinkLine?.req).toEqual({ method: "POST", url: "/api/feedback" });
-    const otherLine = logLines.map((l) => JSON.parse(l)).find((l) => l.msg === "incoming request" && String(l.req?.url).startsWith("/api/other-write"));
-    expect(otherLine?.req).toMatchObject({ method: "POST", url: "/api/other-write?page=2", remoteAddress: "198.51.100.4" });
+    // The closed logger (N107b): a request line is its method and route template. The sink's line
+    // carries not even the client's keyed hash (#458); other routes carry it, never the raw IP or URL.
+    const sinkLine = logLines.map((l) => JSON.parse(l)).find((l) => l.msg === "incoming request" && l.req?.route === "/api/feedback");
+    expect(sinkLine?.req).toEqual({ method: "POST", route: "/api/feedback" });
+    const otherLine = logLines.map((l) => JSON.parse(l)).find((l) => l.msg === "incoming request" && l.req?.route === "/api/other-write");
+    expect(otherLine?.req).toMatchObject({ method: "POST", route: "/api/other-write" });
+    expect(String(otherLine?.req?.client)).toMatch(/^h:[0-9a-f]+$/);
+    expect(JSON.stringify(otherLine)).not.toContain("page=2");
   });
 });
 

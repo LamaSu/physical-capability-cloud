@@ -37,6 +37,7 @@ import {
   type JobExecutionSources,
   type JobRow,
 } from "./job-execution.js";
+import { lit } from "../observability/closed-schema.js";
 
 /** A job row as the legacy reads use it (the read-model row plus the recorded bundle id). */
 export interface LegacyJobRow {
@@ -332,7 +333,7 @@ export function loadLegacySettlement(
     store = getStore();
     job = store.repos.jobs.findById(jobId) as (JobRow & LegacyJobRow) | undefined;
   } catch (error) {
-    req.log.error({ jobId, err: error }, "legacy settlement read: job row read failed");
+    req.log.error({ jobId, err: error }, lit("legacy settlement read: job row read failed"));
     return { kind: "unavailable" };
   }
   if (!job) return { kind: "not_found" };
@@ -345,14 +346,14 @@ export function loadLegacySettlement(
     try {
       allowed = authorizeJobRead(job, pre.wallet, store.repos as unknown as JobExecutionRepos, store.db).allow;
     } catch (error) {
-      req.log.error({ jobId, err: error }, "legacy settlement read: authorization read failed");
+      req.log.error({ jobId, err: error }, lit("legacy settlement read: authorization read failed"));
       return { kind: "unavailable" };
     }
     if (!allowed) return { kind: "not_found" };
   }
 
   const onReadError = (source: string, error: unknown) =>
-    req.log.warn({ jobId, source, err: error }, "legacy settlement read: source read failed");
+    req.log.warn({ jobId, source, err: error }, lit("legacy settlement read: source read failed"));
   // The job's tenant was checked above; its evidence is read through the job (#353 @938a180e).
   const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, { onReadError });
   const dto = buildJobExecutionDTO(sources, asOf);

@@ -29,6 +29,7 @@
 
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { trace } from "@opentelemetry/api";
+import { addClosedEvent } from "../observability/closed-otel.js";
 import { auditService, isStoredId, storedIdKey } from "./audit-service.js";
 import { identifyAgent, trackServerEvent } from "./posthog-service.js";
 import { declare, declaredRoute, isDeclared, lit, routeTemplates, type Declared } from "../observability/closed-schema.js";
@@ -348,6 +349,9 @@ export const OPERATOR_STAGES: OperatorStage[] = [
   "verified_run",
 ];
 
+/** The operator-funnel span event names, one per stage (a closed vocabulary for the exporter). */
+const OPERATOR_FUNNEL_EVENT_NAMES: readonly string[] = OPERATOR_STAGES.map((stage) => `pcc.operator_funnel.${stage}`);
+
 /** auditService eventType used for every operator-funnel stage row. */
 export const OPERATOR_FUNNEL_AUDIT_EVENT = "operator.funnel";
 
@@ -504,15 +508,20 @@ export function recordOperatorStage(
     /* analytics must never break request flow */
   }
 
-  // 3. OTel span event on the active span (no new span).
+  // 3. OTel span event on the active span (no new span), declared for the closed exporter
+  // (N107b): the stage from OPERATOR_STAGES, the ids as producer-supplied ids.
   try {
-    trace.getActiveSpan()?.addEvent(`pcc.operator_funnel.${stage}`, {
-      "pcc.kernel_id": kernelId,
-      "pcc.operator_funnel.stage": stage,
-      ...(deviceId ? { "pcc.device_id": deviceId } : {}),
-      ...(capabilityId ? { "pcc.capability_id": capabilityId } : {}),
-      ...(jobId ? { "pcc.job_id": jobId } : {}),
-    });
+    const span = trace.getActiveSpan();
+    if (span) {
+      const fields: Record<string, Declared> = {
+        "pcc.kernel_id": declare.id(kernelId),
+        "pcc.operator_funnel.stage": declare.code(stage, OPERATOR_STAGES),
+      };
+      if (deviceId) fields["pcc.device_id"] = declare.id(deviceId);
+      if (capabilityId) fields["pcc.capability_id"] = declare.id(capabilityId);
+      if (jobId) fields["pcc.job_id"] = declare.id(jobId);
+      addClosedEvent(span, declare.code(`pcc.operator_funnel.${stage}`, OPERATOR_FUNNEL_EVENT_NAMES), fields);
+    }
   } catch {
     /* OTel may be uninitialised in tests */
   }

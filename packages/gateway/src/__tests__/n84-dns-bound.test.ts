@@ -43,6 +43,7 @@ import {
   dispatchToChannels,
   _clearOperatorChannelsForTests,
 } from "../routes/operator-channels.js";
+import { emitted, isDeclared } from "../observability/closed-schema.js";
 
 type Guard = typeof import("../services/outbound-url-guard.js");
 async function loadGuard(): Promise<Guard> {
@@ -492,8 +493,10 @@ describe("N84 DNS bound C: through the channel send path", () => {
     expect(probe.state.calls, "the refused send never reached the resolver").toBe(1);
 
     // the operator log keeps the code (so saturation is visible) and never the host
-    const logged = warn.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(logged).toContain('"code":"dns_busy"');
+    // Under the closed schema (#538, N107b) the warning's fields are separate declared arguments,
+    // so read every argument as it leaves: a declared value's emitted form.
+    const logged = warn.mock.calls.map((c) => c.map((a) => (isDeclared(a) ? String(emitted(a)) : String(a))).join(" ")).join("\n");
+    expect(logged).toContain("dns_busy");
     expect(logged).not.toMatch(/victim|leakcheck/);
 
     // word for word what a destination that resolves to a private address reads like

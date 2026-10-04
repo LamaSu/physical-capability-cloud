@@ -39,9 +39,21 @@ import { checkOutboundUrl, guardedFetch, OutboundError, type OutboundErrorCode }
 import { declare, lit } from "../observability/closed-schema.js";
 
 /** OutboundErrorCode (services/outbound-url-guard.ts) — a type-enforced closed set. */
-const OUTBOUND_ERROR_CODES: readonly OutboundErrorCode[] = [
-  "invalid_url", "blocked_destination", "dns_failure", "redirect_not_followed", "timeout", "request_failed",
-];
+/**
+ * Every OutboundErrorCode, complete by construction: a Record over the union fails to compile when
+ * a code is added without it. The #538 merge-up found master's dns_busy (N84) missing from the old
+ * list, so a saturated resolver's code was keyed out of the operator log N84 keeps it in.
+ */
+const OUTBOUND_ERROR_CODE_SET: Record<OutboundErrorCode, true> = {
+  invalid_url: true,
+  blocked_destination: true,
+  dns_failure: true,
+  dns_busy: true,
+  redirect_not_followed: true,
+  timeout: true,
+  request_failed: true,
+};
+const OUTBOUND_ERROR_CODES: readonly OutboundErrorCode[] = Object.keys(OUTBOUND_ERROR_CODE_SET) as OutboundErrorCode[];
 /** ChannelTransport (this file, above) — a type-enforced closed set. */
 const CHANNEL_TRANSPORTS: readonly string[] = ["webhook", "email", "sms", "voice", "push", "mqtt", "file", "manual"];
 

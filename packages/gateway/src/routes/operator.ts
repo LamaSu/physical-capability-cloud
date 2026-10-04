@@ -4,6 +4,7 @@ import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
+import { lit } from "../observability/closed-schema.js";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay } = schema;
 
@@ -94,7 +95,7 @@ export async function operatorRoutes(app: FastifyInstance) {
       } catch (err) {
         // A failed read is not "no policy set": answering the default here would show
         // an operator's real guardrails as the defaults.
-        req.log.warn({ kernelId: req.params.kernelId, err }, "operator policy read failed");
+        req.log.warn({ kernelId: req.params.kernelId, err }, lit("operator policy read failed"));
         return reply.code(503).send({ error: "read_failed", message: "The operator policy could not be read. Try again shortly." });
       }
       if (!row) {
@@ -356,7 +357,7 @@ export async function operatorRoutes(app: FastifyInstance) {
     } catch (err) {
       // A failed read is not "no approvals": an empty list here would hide recorded
       // approvals during an outage. Same refusal as the operator policy read above.
-      req.log.warn({ kernelId, status, err }, "operator approvals read failed");
+      req.log.warn({ kernelId, status, err }, lit("operator approvals read failed"));
       return reply.code(503).send({ error: "read_failed", message: "The approvals could not be read. Try again shortly." });
     }
   });
