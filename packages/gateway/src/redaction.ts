@@ -210,6 +210,31 @@ export function logSafeSmallInt(value: unknown, min: number, max: number): numbe
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max ? value : null;
 }
 
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #4): a safe-int formatter for fields with no
+ * natural small bound (elapsed seconds/minutes since a heartbeat) where
+ * logSafeSmallInt's fixed [min, max] would be arbitrary. `value` itself when it is a
+ * non-negative safe integer, else null — same "launder or drop" shape as every other
+ * formatter here, recognized by the sink scanner by declaration.
+ */
+export function logSafeInt(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #4): a safe ISO-8601 timestamp formatter.
+ * `value` itself when it is a string that round-trips through Date.parse/toISOString
+ * unchanged (an actual well-formed instant, not just a prefix Date.parse tolerates),
+ * else null. Used by emitKernelLifecycleEvent for lastHeartbeatAt, which — like every
+ * other field on that exported function — must be treated as caller-suppliable, not
+ * trusted just because every IN-REPO caller today happens to pass a server timestamp.
+ */
+export function logSafeIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const t = Date.parse(value);
+  return Number.isFinite(t) && new Date(t).toISOString() === value ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // N71 round 3 (astra pack 83b, Q3): does an arbitrary caller-supplied value carry
 // something that reads as a credential? Used to REFUSE a public matching artifact (a

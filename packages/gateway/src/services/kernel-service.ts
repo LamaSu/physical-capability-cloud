@@ -19,7 +19,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
-import { knownErrorClassName, logSafeId } from "../redaction.js";
+import { knownErrorClassName, logSafeId, logSafeSmallInt } from "../redaction.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -364,15 +364,33 @@ export class KernelService {
     // matched an existing registration with no shape check at registration time) —
     // validated echo, never the raw value. this.config.kernelId is this service's own
     // fixed KernelConfig, never per-request input.
+    // N71 round 7 (astra pack 83f, CRITICAL #3): this.config.kernelId is raw
+    // operator config/env (KERNEL_ID, kernel-config.ts's buildDefaultConfig) — not a
+    // closed value just because it is "this service's own", so it goes through
+    // logSafeId at this sink like every other id, same as jobId/deviceId above.
     pipelineTelemetry.emit(logSafeId(jobId), "job_accepted", "completed", {
-      metadata: { deviceId: logSafeId(deviceId), kernelId: this.config.kernelId ?? "default" },
+      metadata: { deviceId: logSafeId(deviceId), kernelId: logSafeId(this.config.kernelId ?? "default") },
     });
 
-    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
+    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it.
+    // N71 round 7 (astra pack 83f, CRITICAL #2): startTrace wasn't in the round-6
+    // scanner's sink list at all, and received raw jobId/stepId. jobId now goes
+    // through logSafeId and the tier through logSafeSmallInt, same treatment as
+    // every other sink. The "job.type" attribute (which actually held stepId, not a
+    // type — a pre-existing mislabel) is DROPPED rather than echoed: logSafeId's
+    // identifier grammar validates SHAPE (rejects credential/URL/free-text), not
+    // uniqueness of content, so a caller-chosen stepId that happens to be
+    // identifier-shaped is admitted as-is by design (the same treatment
+    // job.facade.ts's round-6 code already gives stepId, unchallenged). That is not
+    // provable-safe enough for an UNLABELED free-form value with no fixed vocabulary
+    // to validate against (unlike jobId, which this job's own DB row anchors) — same
+    // "drop, don't guess" boundary this round already applies to body.reason and
+    // evidenceBundleHash (settlement.facade.ts). jobId (in "job.id") still
+    // correlates this span to the job.
     const { traceId, spanId: lifecycleLocalSpanId } = startTrace(
       "job.lifecycle",
       "kernel",
-      { "job.id": jobId, "job.type": stepId, "job.assurance_tier": assuranceTier },
+      { "job.id": logSafeId(jobId), "job.assurance_tier": logSafeSmallInt(assuranceTier, 0, 3) ?? -1 },
     );
     // Store traceId on the running job so we can reference it in callbacks
     (this.runningJobs.get(jobId) as unknown as { traceId: string }).traceId = traceId;
@@ -393,10 +411,12 @@ export class KernelService {
         {
           name: "job.lifecycle",
           op: "job.lifecycle",
+          // N71 round 7 (astra pack 83f, CRITICAL #2): same treatment as startTrace
+          // above — jobId through logSafeId, tier through logSafeSmallInt,
+          // "job.type" (stepId) dropped rather than echoed (see startTrace's comment).
           attributes: {
-            "job.id": jobId,
-            "job.type": stepId,
-            "job.assurance_tier": assuranceTier,
+            "job.id": logSafeId(jobId),
+            "job.assurance_tier": logSafeSmallInt(assuranceTier, 0, 3) ?? undefined,
           },
         },
         (lifecycleSpan) => {

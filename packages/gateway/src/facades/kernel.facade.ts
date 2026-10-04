@@ -31,7 +31,7 @@ import {
 import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
-import { logSafeId } from "../redaction.js";
+import { logSafeId, logSafeInt, logSafeIsoTimestamp } from "../redaction.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -905,12 +905,58 @@ export interface KernelLifecycleEvent {
   ageMinutes?: number;
 }
 
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #4): the closed set emitKernelLifecycleEvent's
+ * own `event` field is checked against at RUNTIME. The interface above's union type is
+ * erased at runtime — a caller that bypasses TypeScript (an `as unknown as never`
+ * cast, or any JS caller) can pass anything at all, so the type alone proves nothing
+ * about what this function actually writes.
+ */
+const KNOWN_LIFECYCLE_EVENTS: ReadonlySet<string> = new Set<KernelLifecycleEvent["event"]>([
+  "kernel.heartbeat.received",
+  "kernel.expired",
+  "kernel.resurrected",
+  "capability.expired",
+]);
+/** Substituted for any event name outside the closed set above. */
+const UNKNOWN_LIFECYCLE_EVENT = "unknown_event";
+
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #4): this emitter now sanitizes EVERY field
+ * at its OWN boundary, so every caller — in the scanner's scope or not
+ * (routes/kernels.ts and services/kernel-ttl-sweeper.ts both call this from outside
+ * the sink-scanner's scanned-file list, and the round-6 scanner only trusted the
+ * call SITES, not this function) — is protected without touching them. THE SINK IS
+ * THE BOUNDARY: the write below is scanned like any other call, so every field must
+ * be a literal or a formatter output — none may be a bare, unformatted read of `evt`.
+ * `event` goes through the closed set above; kernelId goes through logSafeId; every
+ * number goes through logSafeInt; the one timestamp goes through
+ * logSafeIsoTimestamp. Each formatter call is written directly (never through an
+ * intermediate local), inline in the object JSON.stringify serializes, so the
+ * declaration-based scanner can recurse straight through JSON.stringify's own
+ * (non-laundering) argument to each one.
+ *
+ * capabilityId is DROPPED rather than echoed through logSafeId. logSafeId's
+ * identifier grammar validates SHAPE (rejects credential/URL/free-text), not
+ * uniqueness of content, so a caller-chosen capabilityId that happens to be
+ * identifier-shaped is admitted as-is by design — capability ids are NOT drawn from
+ * a fixed vocabulary this emitter can anchor against (capability.facade.ts's create()
+ * accepts an arbitrary caller-supplied `body.id`). Same "drop, don't guess" boundary
+ * this round already applies to body.reason/evidenceBundleHash (settlement.facade.ts)
+ * and kernel-service.ts's "job.type". kernelId still identifies which kernel's
+ * capability expired; only the specific capability id is not echoed here (it remains
+ * available in the DB row the caller ultimately found it from).
+ */
 export function emitKernelLifecycleEvent(evt: KernelLifecycleEvent): void {
-  const line = JSON.stringify({
-    ts: new Date().toISOString(),
-    ...evt,
-  });
-  // Use stderr so it doesn't collide with Fastify request logs on stdout.
-  // Dashboard collector reads both.
-  process.stderr.write(`[kernel-lifecycle] ${line}\n`);
+  process.stderr.write(
+    `[kernel-lifecycle] ${JSON.stringify({
+      ts: new Date().toISOString(),
+      event: KNOWN_LIFECYCLE_EVENTS.has(evt.event) ? evt.event : UNKNOWN_LIFECYCLE_EVENT,
+      kernelId: logSafeId(evt.kernelId),
+      sinceLastHeartbeatSec: logSafeInt(evt.sinceLastHeartbeatSec),
+      wasExpiredForMinutes: evt.wasExpiredForMinutes === undefined ? undefined : logSafeInt(evt.wasExpiredForMinutes),
+      lastHeartbeatAt: logSafeIsoTimestamp(evt.lastHeartbeatAt),
+      ageMinutes: evt.ageMinutes === undefined ? undefined : logSafeInt(evt.ageMinutes),
+    })}\n`,
+  );
 }

@@ -24,6 +24,7 @@ import {
   ConflictError,
   WriteDisabledError,
   BatchDisabledError,
+  facadeErrorTelemetryCode,
 } from "./facade-errors.js";
 
 /** Shared tracer for all facade spans */
@@ -98,33 +99,40 @@ export abstract class BaseFacade {
           if (error instanceof NotFoundError) {
             // Use attached code if present, otherwise derive from facade name
             code = error.code ?? `${this.facadeName.toUpperCase()}_NOT_FOUND`;
-            this.emitTelemetry(operation, "failed", { error: message });
+            // N71 round 7 (astra pack 83f, CRITICAL #1): telemetry carries a FIXED
+            // class-level code (facadeErrorTelemetryCode, a formatter recognized by
+            // declaration), never `message` — NotFoundError interpolates the
+            // caller-controlled id into its own message. The response below is the
+            // SAME caller's own boundary and may keep the richer `code`/message.
+            this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err(code, message, 404) as Result<T>;
           } else if (error instanceof BadRequestError) {
             // Preserve the specific error code if one was attached (e.g. "missing_step_id")
             code = error.code ?? "BAD_REQUEST";
-            this.emitTelemetry(operation, "failed", { error: message });
+            this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err(code, message, 400) as Result<T>;
           } else if (error instanceof ForbiddenError) {
             code = "FORBIDDEN";
-            this.emitTelemetry(operation, "failed", { error: message });
+            this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err("FORBIDDEN", message, 403) as Result<T>;
           } else if (error instanceof ConflictError) {
             // Merge-up (master, N85(a)): a ConflictError may carry its own attached
             // code (e.g. "settlement_owned_status" from job.facade.ts's
             // updateStatus) — preserved via the facade-errors.ts ConflictError's
             // optional `code`, same pattern as NotFoundError/BadRequestError above.
-            // Default stays the pre-existing signer-bind conflict.
+            // Default stays the pre-existing signer-bind conflict. Telemetry still
+            // gets only the fixed class-level code (facadeErrorTelemetryCode), never
+            // this attached code and never `message` — see round 7 CRITICAL #1.
             code = error.code ?? "SIGNER_ALREADY_BOUND";
-            this.emitTelemetry(operation, "failed", { error: message });
+            this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err(code, message, 409) as Result<T>;
           } else if (error instanceof WriteDisabledError) {
             code = "WRITE_DISABLED";
-            this.emitTelemetry(operation, "failed", { error: message });
+            this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err("WRITE_DISABLED", message, 503) as Result<T>;
           } else if (error instanceof BatchDisabledError) {
             code = "BATCH_DISABLED";
-            this.emitTelemetry(operation, "failed", { error: message });
+            this.emitTelemetry(operation, "failed", { error: facadeErrorTelemetryCode(error) });
             outcome = err("BATCH_DISABLED", message, 503) as Result<T>;
           } else if (isTransientError(error)) {
             // E2: a transient transport/RPC/mempool failure is retryable. Tag it

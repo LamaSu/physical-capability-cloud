@@ -788,7 +788,12 @@ export class SettlementFacade extends BaseFacade {
   }
 
   private validateMilestoneIndex(index: number): void {
-    if (isNaN(index) || index < 0) {
+    // N71 round 7 (astra pack 83f, MEDIUM #5): isNaN() coerces its argument, so
+    // isNaN("2") is false and the string "2" was admitted as if it were the number
+    // 2. Number.isSafeInteger performs NO coercion — it is false for any non-number
+    // (string, object, array), for Infinity, and for a non-integer fraction — so
+    // only an actual safe integer can pass, same contract the fix's own tests pin.
+    if (!Number.isSafeInteger(index) || index < 0) {
       throw new BadRequestError("Invalid milestone index");
     }
   }

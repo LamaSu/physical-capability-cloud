@@ -71,3 +71,26 @@ export class BatchDisabledError extends Error {
     this.name = "BatchDisabledError";
   }
 }
+
+/**
+ * N71 round 7 (astra pack 83f, CRITICAL #1): a closed, fixed error-code map for
+ * TELEMETRY only — never a typed error's own `.message` (NotFoundError interpolates
+ * the caller-controlled id into it; see the constructor above). Checked via
+ * `instanceof` (never `.name` — see the file doc comment), and every branch returns
+ * one literal from this fixed list. Deliberately does NOT read `error.code` (the
+ * optional, sometimes caller-influenced override BaseFacade.execute() uses for the
+ * HTTP response's `code` field, e.g. ConflictError's "settlement_owned_status") — the
+ * response is the same caller's own boundary and may keep that richer code and the
+ * typed message; the shared telemetry/SSE stream (consumed across tenants/dashboards)
+ * gets only the fixed class-level code below, recognized by the sink scanner as a
+ * formatter by declaration.
+ */
+export function facadeErrorTelemetryCode(error: unknown): string {
+  if (error instanceof NotFoundError) return "NOT_FOUND";
+  if (error instanceof BadRequestError) return "BAD_REQUEST";
+  if (error instanceof ForbiddenError) return "FORBIDDEN";
+  if (error instanceof ConflictError) return "CONFLICT";
+  if (error instanceof WriteDisabledError) return "WRITE_DISABLED";
+  if (error instanceof BatchDisabledError) return "BATCH_DISABLED";
+  return "INTERNAL_ERROR";
+}
