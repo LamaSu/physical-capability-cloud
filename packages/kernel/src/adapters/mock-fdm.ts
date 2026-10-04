@@ -10,6 +10,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export class MockFDMAdapter implements MachineAdapter {
   readonly id: string;
@@ -21,6 +22,9 @@ export class MockFDMAdapter implements MachineAdapter {
   private gcodeHash: string | null = null;
   private executionTimer: ReturnType<typeof setInterval> | null = null;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  /** The simulated execution, the only thing that emits after a command returns. */
+  private readonly work = new OutstandingWork();
+  private endExecution: (() => void) | null = null;
 
   /** Simulated job duration in ms */
   private jobDurationMs: number;
@@ -84,6 +88,7 @@ export class MockFDMAdapter implements MachineAdapter {
 
         // Simulate progress
         const intervalMs = this.jobDurationMs / 20;
+        this.endExecution = this.work.begin();
         this.executionTimer = setInterval(() => {
           this.progress = Math.min(100, this.progress + 5);
 
@@ -111,8 +116,8 @@ export class MockFDMAdapter implements MachineAdapter {
       }
 
       case "pause": {
-        if (this.executionTimer) clearInterval(this.executionTimer);
-        this.executionTimer = null;
+        // Nothing resumes a paused simulation (there is no resume command), so it is over.
+        this.stopExecution();
         this.status = "idle";
         return { success: true, message: "Paused" };
       }
@@ -142,6 +147,15 @@ export class MockFDMAdapter implements MachineAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once the simulated execution has emitted its completion, or was paused or
+   * stopped; at once when none is running. Every other event is emitted inside the
+   * command that causes it.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     this.cancelJob();
     this.listeners = [];
@@ -153,6 +167,14 @@ export class MockFDMAdapter implements MachineAdapter {
     for (const listener of this.listeners) {
       listener(tagged);
     }
+  }
+
+  /** Stop the simulated execution. It emits nothing from here on. */
+  private stopExecution(): void {
+    if (this.executionTimer) clearInterval(this.executionTimer);
+    this.executionTimer = null;
+    this.endExecution?.();
+    this.endExecution = null;
   }
 
   private completeJob(): void {
@@ -174,11 +196,12 @@ export class MockFDMAdapter implements MachineAdapter {
         avgNozzleTemp: 201.2,
       },
     });
+    // Ended only after the completion is emitted.
+    this.stopExecution();
   }
 
   private cancelJob(): void {
-    if (this.executionTimer) clearInterval(this.executionTimer);
-    this.executionTimer = null;
+    this.stopExecution();
     this.status = "idle";
     this.progress = 0;
     this.gcodeHash = null;

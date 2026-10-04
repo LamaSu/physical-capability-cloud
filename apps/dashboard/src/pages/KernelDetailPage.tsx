@@ -5,6 +5,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useKernel, RecordNotFoundError } from "../api/hooks/use-pcc-data.js";
 import { isActiveJob, isKernelOnline } from "../lib/live-status.js";
 import { UnavailableState, StaleNotice } from "../components/LiveState.js";
+import { siteAddressLabel, siteLocationLabel } from "./kernel-location.js";
 
 /**
  * One kernel, read from GET /api/kernels/:kernelId (KernelHealthSnapshot).
@@ -70,8 +71,6 @@ export function KernelDetailPage() {
   const capabilityTypes = Array.isArray(kernel.capabilityTypes) ? kernel.capabilityTypes : null;
   const devices = Array.isArray(kernel.devices) ? kernel.devices : null;
   const activeJobs = Array.isArray(kernel.recentJobs) ? kernel.recentJobs.filter(isActiveJob) : null;
-  const loc = kernel.location;
-  const hasCoords = loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng);
 
   return (
     <div className="space-y-6">
@@ -173,12 +172,8 @@ export function KernelDetailPage() {
           {/* Location */}
           <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Location</h3>
           <GlassPanel padding="md">
-            <div className="text-sm text-white/60">{kernel.physicalAddress || "No address given"}</div>
-            {hasCoords && (
-              <div className="text-xs text-white/25 font-mono mt-1">
-                {loc.lat.toFixed(4)}, {loc.lng.toFixed(4)}
-              </div>
-            )}
+            <div className="text-sm text-white/60">{siteAddressLabel(kernel)}</div>
+            <div className="text-xs text-white/25 font-mono mt-1">{siteLocationLabel(kernel)}</div>
           </GlassPanel>
         </div>
       </div>

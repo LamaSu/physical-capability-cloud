@@ -36,6 +36,12 @@ import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS, computeCompositionSignature, b
 import { createJobFromSession, isMockSettlement } from "./paid-job-flow.js";
 import { getEventBus } from "../services/event-bus.js";
 import {
+  captureUnmetThenEmit,
+  capturePrincipal,
+  intentActor,
+  isUnmetCaptureEnabled,
+} from "../services/unmet-capture.js";
+import {
   getCapabilityDescriptor,
   checkKernelOffersCapability,
 } from "../services/ad-hoc-pricing.js";
@@ -294,15 +300,25 @@ export async function negotiationRoutes(app: FastifyInstance) {
           originAgentId: body.userAgentId,
           createdAt: now.toISOString(),
         };
-        getEventBus().publish({
-          eventType: "intent.atomic_session",
-          category: "intent",
-          actorId: body.userAgentId,
-          actorType: "agent",
-          resourceType: "intent",
-          resourceId: envelope.id,
-          payload: envelope as unknown as Record<string, unknown>,
-        });
+        // R44 D2 (flag-gated, default OFF): server-computed unmet types, off
+        // the response path, and the authenticated principal instead of the
+        // body's userAgentId.
+        const actor = intentActor(capturePrincipal(req), { actorId: body.userAgentId, actorType: "agent" });
+        const publish = (env: DemandEnvelope) =>
+          getEventBus().publish({
+            eventType: "intent.atomic_session",
+            category: "intent",
+            actorId: actor.actorId,
+            actorType: actor.actorType,
+            resourceType: "intent",
+            resourceId: env.id,
+            payload: env as unknown as Record<string, unknown>,
+          });
+        if (isUnmetCaptureEnabled()) {
+          void captureUnmetThenEmit(envelope, publish);
+        } else {
+          publish(envelope);
+        }
       } catch {
         // best-effort
       }

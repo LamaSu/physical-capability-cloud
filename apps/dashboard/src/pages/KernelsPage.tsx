@@ -5,16 +5,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useKernels } from "../api/hooks/use-pcc-data.js";
 import { isKernelOnline } from "../lib/live-status.js";
 import { UnavailableState, StaleNotice } from "../components/LiveState.js";
-import type { KernelDTO } from "../types/dto.js";
-
-/** Where a kernel is, as text. `location` is a {lat, lng} object, never a renderable string. */
-function kernelPlace(kernel: KernelDTO): string {
-  if (kernel.physicalAddress) return kernel.physicalAddress;
-  const loc = kernel.location;
-  if (loc?.label) return loc.label;
-  if (loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng)) return `${loc.lat.toFixed(3)}, ${loc.lng.toFixed(3)}`;
-  return "Location not set";
-}
+import { siteAddressLabel, siteLocationLabel } from "./kernel-location.js";
 
 export function KernelsPage() {
   const navigate = useNavigate();
@@ -95,7 +86,8 @@ export function KernelsPage() {
                   <GlowBadge color="gray">+{kernel.capabilityTypes.length - 4}</GlowBadge>
                 )}
               </div>
-              <div className="text-xs text-white/25">{kernelPlace(kernel)}</div>
+              <div className="text-xs text-white/25">{siteAddressLabel(kernel)}</div>
+              <div className="text-[10px] text-white/15 font-mono">{siteLocationLabel(kernel)}</div>
             </GlassPanel>
           ))}
         </div>

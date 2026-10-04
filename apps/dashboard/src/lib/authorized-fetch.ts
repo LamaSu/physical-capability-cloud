@@ -42,11 +42,11 @@ function writeStorage(key: string | null): void {
 }
 
 const keyListeners = new Set<() => void>();
-/** Rounds of re-entrant changes delivered before setStoredApiKey gives up on listeners that keep changing the key. */
+/** Rounds of delivery one setStoredApiKey call runs before it refuses listeners' further changes. */
 const MAX_KEY_CHANGE_ROUNDS = 32;
-/** Changes not yet told to every listener, and whether a delivery is under way. */
+/** Changes not yet told to every listener; the round being delivered, or -1 when none is. */
 let undelivered = 0;
-let delivering = false;
+let round = -1;
 
 /**
  * Hold `key` as the signed-in key, or clear it with null. Write-only: nothing
@@ -55,23 +55,23 @@ let delivering = false;
  * Every listener hears every change, even if another one throws (astra A03e
  * N1): the auth store's identity change can't be skipped by an observer that
  * failed before it. The first error is rethrown once all have heard. A
- * listener that changes the key again doesn't recurse: its change is told
- * to everyone after the current round, up to MAX_KEY_CHANGE_ROUNDS.
+ * listener that changes the key again doesn't recurse: its change is told to
+ * everyone in the next round. A change made in the last round is refused
+ * before it touches the key (astra A03f N1), so the key never holds a value
+ * its listeners weren't told of.
  */
 export function setStoredApiKey(key: string | null): void {
+  if (round >= MAX_KEY_CHANGE_ROUNDS - 1) {
+    throw new Error("Key listeners kept changing the key; this change was refused.");
+  }
   storedApiKey = key || null;
   writeStorage(storedApiKey);
   undelivered += 1;
-  if (delivering) return;
-  delivering = true;
+  if (round >= 0) return; // a delivery is under way: the next round tells everyone
   let failed = false;
   let failure: unknown;
   try {
-    for (let round = 0; undelivered > 0; round++) {
-      if (round === MAX_KEY_CHANGE_ROUNDS) {
-        undelivered = 0;
-        throw new Error("Key listeners kept changing the key; stopped telling them.");
-      }
+    for (round = 0; undelivered > 0; round++) {
       undelivered -= 1;
       for (const listener of [...keyListeners]) {
         try {
@@ -85,7 +85,7 @@ export function setStoredApiKey(key: string | null): void {
       }
     }
   } finally {
-    delivering = false;
+    round = -1;
   }
   if (failed) throw failure;
 }

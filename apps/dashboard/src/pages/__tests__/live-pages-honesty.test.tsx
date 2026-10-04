@@ -311,6 +311,7 @@ describe("live data", () => {
               status: "online",
               isStale: false,
               location: { lat: 37.7749, lng: -122.4194 },
+              locationPrecision: "approximate",
               physicalAddress: "",
               capabilityCount: 2,
               capabilityTypes: ["3d-printing"],
@@ -321,6 +322,7 @@ describe("live data", () => {
               status: "online",
               isStale: true,
               location: { lat: 1, lng: 2 },
+              locationPrecision: "approximate",
               physicalAddress: "12 Maker St",
               capabilityCount: 1,
               capabilityTypes: [],
@@ -331,7 +333,7 @@ describe("live data", () => {
     });
     const t = await renderPage(<KernelsPage />);
     expect(t).toContain("Shop A");
-    expect(t).toContain("37.775, -122.419");
+    expect(t).toContain("Approximate (within about 5 km): 37.7749, -122.4194");
     expect(t).toContain("12 Maker St");
     expect(t).toContain("stale heartbeat");
   });
