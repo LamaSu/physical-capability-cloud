@@ -39,6 +39,7 @@ import { sessionKeyDelegationPreimage, signingPreimage } from "../evidence/signi
 import { canonicalize, hashBundle, hashEvent, sha256 } from "../util/canonical.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../evidence/subject-binding.js";
 import type { EvidenceEvent } from "../types/evidence.js";
+import { awaitedHere, fulfillsWithTrue, ownPromise } from "../util/primordials.js";
 
 const JOB = "job-admission-1";
 const KERNEL = "kernel-admission-1";
@@ -558,6 +559,9 @@ describe("profile admission — a signature authorizes only what its key's grant
     expect(codes(await admit(p, printer, { registryKeys: withA([{ role: "witness", kernelId: KERNEL }]) }))).toEqual(["unauthorized-signer"]);
     const several: SignerGrant[] = [{ role: "witness", kernelId: "kernel-other" }, { role: "executor", kernelId: KERNEL }];
     expect((await admit(p, printer, { registryKeys: withA(several) })).decision).toBe("admit");
+    // Grants that differ only in their job are two grants, not one twice.
+    const kernelAndJob: SignerGrant[] = [{ role: "executor", kernelId: KERNEL }, { role: "executor", kernelId: KERNEL, jobId: JOB }];
+    expect((await admit(p, printer, { registryKeys: withA(kernelAndJob) })).decision).toBe("admit");
   });
 
   it("a witness signs inspections only: its bundle holding the kernel's completion beside the inspection is refused", async () => {
@@ -678,12 +682,17 @@ describe("profile admission — a signature authorizes only what its key's grant
     // The profile's policy decides it, as for any level shortfall.
     const holding = { ...p, onMissingData: "hold" as const };
     expect((await admit(holding, [await toBundle(PILOT, holding, SIGNER_A)], { registryKeys: noWitness })).decision).toBe("hold");
-    // A witness for another job, or a session key whose scope leaves this job out, is not a witness for this subject.
+    // A witness for another job is not a witness for this subject.
     const otherJobWitness = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: "job-other" }] }];
     expect(codes(await admit(p, executorOnly, { registryKeys: otherJobWitness }))).toEqual(["no-witness-authorized"]);
+    // The question is whether ANY pinned row grants a witness, and a session key holds only its root's grants (astra
+    // pack 287): it adds no witness its root does not already grant, whatever its scope. Rooted in a key that is no
+    // witness, it adds none; rooted in B, a registered witness for KERNEL, B itself already answers, with or without it.
     const scopedOut = delegate(keyB, { contractIds: ["job-other"] });
+    const bNoWitness = { ...REGISTRY[1]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] };
+    expect(codes(await admit(p, executorOnly, { registryKeys: [REGISTRY[0]!, bNoWitness, sessionRow(scopedOut, KEY_B)] }))).toEqual(["no-witness-authorized"]);
     expect(codes(await admit(p, executorOnly, { registryKeys: [...REGISTRY, sessionRow(scopedOut, KEY_B)] }))).toEqual(["level-not-reached"]);
-    expect(codes(await admit(p, executorOnly, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }, sessionRow(scopedOut, KEY_B)] }))).toEqual(["no-witness-authorized"]);
+    expect(codes(await admit(p, executorOnly, { registryKeys: REGISTRY }))).toEqual(["level-not-reached"]);
     // With a witness granted, the same shortfall is level-not-reached; a device_reported profile needs no witness.
     expect(codes(await admit(p, executorOnly))).toEqual(["level-not-reached"]);
     const d = deviceReportedProfile();
@@ -703,6 +712,105 @@ describe("profile admission — a signature authorizes only what its key's grant
     const bundles = [await toBundle(PILOT.slice(0, 2), p, session.signer), await toBundle(PILOT.slice(2), p, SIGNER_B)];
     expect(codes(await admit(p, bundles, { registryKeys: [...REGISTRY, sessionRow(widened)], pinnedRegistryDigest: pin }))).toEqual(["registry-mismatch"]);
     expect((await admit(p, bundles, { registryKeys: pinned, pinnedRegistryDigest: pin })).decision).toBe("admit");
+  });
+});
+
+describe("profile admission — #519: a delegation's bytes are LO-EV-1's, rebuilt from own data with intrinsics captured at load", () => {
+  /** A delegation by A with every field chosen, signed over spec's own sessionKeyDelegationPreimage. */
+  const delegateWith = (fields: { sessionId: string; parentAgentId: string; allowedActions: string[]; contractIds: string[]; derivationPath?: string }) => {
+    const pair = generateKeyPairSync("ed25519");
+    const raw = rawKey(pair);
+    const body = {
+      sessionId: fields.sessionId,
+      parentAgentId: fields.parentAgentId,
+      publicKey: Buffer.from(raw.slice(2), "hex"),
+      issuedAt: Math.floor(T0 / 1000) - 60,
+      expiresAt: Math.floor(T0 / 1000) + 3600,
+      scope: { allowedActions: fields.allowedActions, contractIds: fields.contractIds, maxSignatures: 7 },
+      ...(fields.derivationPath !== undefined ? { derivationPath: fields.derivationPath } : {}),
+    };
+    const parentSignature = sign(null, sessionKeyDelegationPreimage(body as never), key.privateKey).toString("hex");
+    const signer = raw.slice(0, 42);
+    KEYS[signer] = pair;
+    // The wire spells hex either way: an uppercase key, and a 0X-prefixed uppercase signature.
+    return { raw, signer, authorization: { ...body, publicKey: raw.slice(2).toUpperCase(), parentSignature: `0X${parentSignature.toUpperCase()}` } };
+  };
+  const run = async (session: ReturnType<typeof delegateWith>, authorization: unknown = session.authorization) => {
+    const p = inspectedPageProfile();
+    const bundles = [await toBundle(PILOT.slice(0, 2), p, session.signer), await toBundle(PILOT.slice(2), p, SIGNER_B)];
+    return admit(p, bundles, { registryKeys: [...REGISTRY, { publicKey: session.raw, delegatedBy: KEY_A, authorization }] as ProfileAdmissionInput["registryKeys"] });
+  };
+
+  it("verifies a delegation whose strings need escaping and multi-byte UTF-8, with unsorted lists and a derivation path", async () => {
+    const fields = {
+      sessionId: `s\u00e9ssion-\u{1F600}-\ud800-"q"\\-\u2028`,
+      parentAgentId: "agent-\u00fc-\u4e2d",
+      allowedActions: ["heartbeat", "evidence_submit", "\u00c9vidence"],
+      contractIds: ["job-\u00fc", JOB, "Job-0"],
+      derivationPath: "m/8004'/84532'/42'/0'",
+    };
+    expect(await run(delegateWith(fields))).toMatchObject({ decision: "admit", reached: "inspected_output" });
+    const { derivationPath: _path, ...withoutPath } = fields;
+    expect(await run(delegateWith(withoutPath))).toMatchObject({ decision: "admit", reached: "inspected_output" });
+    // A control: one character of the signed sessionId changed after signing no longer verifies under A.
+    const session = delegateWith(fields);
+    const r = await run(session, { ...session.authorization, sessionId: `${fields.sessionId}x` });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(r.reasons[0]!.detail).toMatch(/is not signed by its root key/);
+  });
+
+  it("refuses a root signature over a preimage that names no key, which no LO-EV-1 delegation is (astra pack 289)", async () => {
+    const session = delegateWith({ sessionId: "session-0001", parentAgentId: "agent-1", allowedActions: ["evidence_submit"], contractIds: [JOB] });
+    const { issuedAt, expiresAt } = session.authorization;
+    // A signs the canonical delegation JSON with an EMPTY publicKey; the authorization still names the full session key.
+    const keyless = `{"sessionId":"session-0001","parentAgentId":"agent-1","publicKey":"","issuedAt":${issuedAt},"expiresAt":${expiresAt},"scope":{"allowedActions":["evidence_submit"],"contractIds":["${JOB}"],"maxSignatures":7}}`;
+    const parentSignature = sign(null, Buffer.from(keyless, "utf8"), key.privateKey).toString("hex");
+    const r = await run(session, { ...session.authorization, parentSignature });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(r.reasons[0]!.detail).toMatch(/is not signed by its root key/);
+  });
+
+  it("counts a delegation's window in whole seconds, floored, as the session verifier does", async () => {
+    const p = inspectedPageProfile();
+    const camera = await toBundle(PILOT.slice(2), p, SIGNER_B);
+    // The printer's events at T0+0.5s and T0+10.5s fall in seconds 0 and 10.
+    const drafts: Draft[] = [
+      { type: "execution_started", t: 0.5, device: PRINTER },
+      { type: "execution_completed", t: 10.5, device: PRINTER },
+    ];
+    const second = Math.floor(T0 / 1000);
+    const run = async (session: ReturnType<typeof delegate>) =>
+      admit(p, [await toBundle(drafts, p, session.signer), camera], { registryKeys: [...REGISTRY, sessionRow(session)] });
+    expect((await run(delegate(key, { issuedAt: second, expiresAt: second + 10 }))).decision).toBe("admit");
+    expect(codes(await run(delegate(key, { issuedAt: second + 1, expiresAt: second + 10 })))).toEqual(["unauthorized-signer"]);
+    expect(codes(await run(delegate(key, { issuedAt: second, expiresAt: second + 9 })))).toEqual(["unauthorized-signer"]);
+  });
+
+  it("computeRegistryDigest reads the rows as admission does, through a plain-data copy: a non-enumerable field is not data", async () => {
+    const row = { ...REGISTRY[0]! };
+    Object.defineProperty(row, "note", { value: "not data", enumerable: false });
+    const rows = [row, REGISTRY[1]!];
+    expect(await computeRegistryDigest(rows)).toBe(REGISTRY_PIN);
+    const p = inspectedPageProfile();
+    expect((await admit(p, await toBundles(PILOT, p), { registryKeys: rows, pinnedRegistryDigest: REGISTRY_PIN })).decision).toBe("admit");
+  });
+
+  it("refuses numbers and lists outside the delegation contract's input domain, as sessionKeyDelegationPreimage does", async () => {
+    const session = delegateWith({ sessionId: "s", parentAgentId: "a", allowedActions: ["evidence_submit"], contractIds: [JOB] });
+    const scope = session.authorization.scope;
+    for (const [label, authorization] of [
+      ["a negative issuedAt", { ...session.authorization, issuedAt: -1 }],
+      ["an unsafe expiresAt", { ...session.authorization, expiresAt: 2 ** 53 }],
+      ["a fractional maxSignatures", { ...session.authorization, scope: { ...scope, maxSignatures: 1.5 } }],
+      ["a job id that is not a string", { ...session.authorization, scope: { ...scope, contractIds: [JOB, 5] } }],
+      ["an action that is not a string", { ...session.authorization, scope: { ...scope, allowedActions: ["evidence_submit", null] } }],
+      ["a sessionId that is not a string", { ...session.authorization, sessionId: 1 }],
+      ["a derivation path that is not a string", { ...session.authorization, derivationPath: 7 }],
+    ] as const) {
+      const r = await run(session, authorization);
+      expect(codes(r), label).toEqual(["input-unreadable"]);
+      expect(r.reasons[0]!.detail, label).toMatch(/not a well-formed session key authorization/);
+    }
   });
 });
 
@@ -1958,5 +2066,386 @@ describe("profile admission: the proxy check is loaded at runtime, and fails clo
       vi.doUnmock("node:util");
       vi.resetModules();
     }
+  });
+});
+
+// ── astra pack 187 (#519): what a caller receives through the promise, and through every promise derived from it ──
+/**
+ * Native `then`, `catch` and `finally` build the promise they return with
+ * SpeciesConstructor(promise, %Promise%), that is
+ * `promise.constructor[Symbol.species]`. #363 round 9 gave each returned
+ * promise its own `constructor` (the Promise captured at load) and `then`, but
+ * the global Promise's species is a configurable accessor: code running after
+ * load can replace it with a constructor whose "promise" is a forged thenable,
+ * and `await profileAdmitsBundle(signatureFails).then((x) => x)` receives the
+ * forgery. Checked with it: `.catch` and `.finally` looked up on
+ * Promise.prototype, and the promise `.then` returned (not pinned) awaited
+ * after Promise.prototype.then and .constructor are replaced.
+ *
+ * Every input and clean value is built before a change; each change is undone
+ * in `finally`. The test's own awaits never run on a promise a live change can
+ * reach (see `deliveredUnder`).
+ */
+describe("profile admission — astra pack 187: .then, .catch and .finally deliver what admission decided", () => {
+  const FORGED_ADMIT = { decision: "admit", admits: true, reached: "inspected_output", qualifyingSamples: 1, reasons: [] };
+  const FORGED_DIGEST = "sha256:" + "f".repeat(64);
+  const SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+  const SET = ["sha256:" + "1".repeat(64), "sha256:" + "2".repeat(64)];
+
+  /** astra's `signatureFails`: a well-formed input, pinned to its own bundle, whose signature does not verify (pack 275: checked here). */
+  async function signatureFails(): Promise<ProfileAdmissionInput> {
+    const p = inspectedPageProfile();
+    const signed = await toBundle(PILOT, p);
+    const value = (signed.kernelSignature as { value: string }).value;
+    const bundle = { ...signed, kernelSignature: { ...(signed.kernelSignature as Record<string, unknown>), value: `${value.slice(0, -1)}${value.endsWith("0") ? "1" : "0"}` } };
+    return {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: SUBJECT,
+      bundles: [bundle],
+      pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [bundle.bundleHash]),
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
+      executorTrustDomains: [OPERATOR_A],
+      verifyPrimitiveInstance: () => true,
+    };
+  }
+
+  /** astra's recipe: a constructor that calls its executor with two no-op functions and returns a thenable resolving with `forged`. */
+  function forgingSpecies(forged: unknown) {
+    return function Forged(executor: (resolve: () => void, reject: () => void) => void) {
+      executor(
+        () => undefined,
+        () => undefined,
+      );
+      return {
+        then(resolve: (value: unknown) => void) {
+          resolve(forged);
+        },
+      };
+    };
+  }
+
+  /** Replace Promise[Symbol.species] (a configurable accessor on the global Promise), as code running after load can. */
+  function speciesReplaced(species: unknown): () => () => void {
+    return () => {
+      const original = Object.getOwnPropertyDescriptor(Promise, Symbol.species)!;
+      Object.defineProperty(Promise, Symbol.species, { value: species, configurable: true });
+      return () => void Object.defineProperty(Promise, Symbol.species, original);
+    };
+  }
+
+  /** Replace Promise.prototype[name] with a method answering a thenable that resolves with `forged`. `this` still gets a handler, so nothing is left unhandled. */
+  function methodReplaced(name: "catch" | "finally", forged: unknown): () => () => void {
+    return () => {
+      const original = Object.getOwnPropertyDescriptor(Promise.prototype, name)!;
+      const thenBefore = Promise.prototype.then;
+      Object.defineProperty(Promise.prototype, name, {
+        ...original,
+        value: function (this: Promise<unknown>) {
+          thenBefore.call(this, undefined, () => undefined);
+          return {
+            then(resolve: (value: unknown) => void) {
+              resolve(forged);
+            },
+          };
+        },
+      });
+      return () => void Object.defineProperty(Promise.prototype, name, original);
+    };
+  }
+
+  /**
+   * What `deliver` hands its caller while `change` is in place ("threw" for a
+   * rejection). Only for changes that leave Promise.prototype.then and
+   * .constructor alone: this helper's own promise is awaited while the change
+   * is live, and `await` reads both (the then-and-constructor test awaits
+   * inline instead).
+   */
+  async function deliveredUnder(change: () => () => void, deliver: () => Promise<unknown>): Promise<unknown> {
+    const undo = change();
+    try {
+      return await deliver();
+    } catch {
+      return "threw";
+    } finally {
+      undo();
+    }
+  }
+
+  const unchanged = () => () => undefined;
+
+  /** Every way a caller consumes the promise, each USING the promise `.then`, `.catch` or `.finally` returns. */
+  const SHAPES: Array<[string, (p: Promise<unknown>) => Promise<unknown>]> = [
+    ["p.then((x) => x)", (p) => p.then((x) => x)],
+    ["p.then((x) => x).then((y) => y)", (p) => p.then((x) => x).then((y) => y)],
+    ['p.then(undefined, () => "caught")', (p) => p.then(undefined, () => "caught")],
+    ['p.catch(() => "caught")', (p) => p.catch(() => "caught")],
+    ["p.finally(() => undefined)", (p) => p.finally(() => undefined)],
+  ];
+
+  /** Each shape whose value under `change` differs from its clean value, as "shape: clean -> delivered". `make` runs under the change too. */
+  async function forgedShapes(change: () => () => void, make: () => Promise<unknown>): Promise<string[]> {
+    const out: string[] = [];
+    for (const [name, consume] of SHAPES) {
+      const clean = await deliveredUnder(unchanged, () => consume(make()));
+      const delivered = await deliveredUnder(change, () => consume(make()));
+      if (JSON.stringify(delivered) !== JSON.stringify(clean)) out.push(`${name}: ${JSON.stringify(clean)} -> ${JSON.stringify(delivered)}`);
+    }
+    return out;
+  }
+
+  /** "label: expected -> delivered" for each pair that differs, so one failure shows every case. */
+  function mismatches(pairs: Array<[string, unknown, unknown]>): string[] {
+    const out: string[] = [];
+    for (const [label, delivered, expected] of pairs) {
+      if (JSON.stringify(delivered) !== JSON.stringify(expected)) out.push(`${label}: ${JSON.stringify(expected)} -> ${JSON.stringify(delivered)}`);
+    }
+    return out;
+  }
+
+  it("astra's recipe: with Promise[Symbol.species] replaced, await profileAdmitsBundle(signatureFails).then((x) => x) is still the rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    expect(codes(clean)).toEqual(["unauthenticated-bundle"]);
+    const original = Object.getOwnPropertyDescriptor(Promise, Symbol.species)!;
+    Object.defineProperty(Promise, Symbol.species, { value: forgingSpecies(FORGED_ADMIT), configurable: true });
+    let delivered: unknown;
+    try {
+      delivered = await profileAdmitsBundle(made).then((x) => x);
+    } finally {
+      Object.defineProperty(Promise, Symbol.species, original);
+    }
+    expect(delivered).toEqual(clean);
+  });
+
+  it("the replaced species, through every shape: admission's result is never forged", async () => {
+    const made = await signatureFails();
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(FORGED_ADMIT)), () => profileAdmitsBundle(made))).toEqual([]);
+  });
+
+  it("the replaced species, through every shape: a chained digest is the digest", async () => {
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(FORGED_DIGEST)), () => computeBundleSetDigest(SUBJECT, SET))).toEqual([]);
+  });
+
+  it("the replaced species, through every shape: a rejected digest (the empty set) is never turned into a value", async () => {
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(FORGED_DIGEST)), () => computeBundleSetDigest(SUBJECT, []))).toEqual([]);
+  });
+
+  it("the replaced species, through every shape: fulfillsWithTrue's promise (util/primordials.ts) delivers false as false", async () => {
+    expect(await forgedShapes(speciesReplaced(forgingSpecies(true)), () => fulfillsWithTrue(Promise.resolve(false)) as Promise<boolean>)).toEqual([]);
+  });
+
+  it("Promise.prototype.catch replaced after load: p.catch(...) still delivers admission's rejection, the digest, and a digest's rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const digest = await computeBundleSetDigest(SUBJECT, SET);
+    expect(
+      mismatches([
+        ["admission", await deliveredUnder(methodReplaced("catch", FORGED_ADMIT), () => profileAdmitsBundle(made).catch(() => "caught")), clean],
+        ["digest", await deliveredUnder(methodReplaced("catch", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, SET).catch(() => "caught")), digest],
+        ["rejected digest", await deliveredUnder(methodReplaced("catch", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, []).catch(() => "caught")), "caught"],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("Promise.prototype.finally replaced after load: p.finally(...) still delivers admission's rejection, the digest, and a digest's rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const digest = await computeBundleSetDigest(SUBJECT, SET);
+    expect(
+      mismatches([
+        ["admission", await deliveredUnder(methodReplaced("finally", FORGED_ADMIT), () => profileAdmitsBundle(made).finally(() => undefined)), clean],
+        ["digest", await deliveredUnder(methodReplaced("finally", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, SET).finally(() => undefined)), digest],
+        ["rejected digest", await deliveredUnder(methodReplaced("finally", FORGED_DIGEST), () => computeBundleSetDigest(SUBJECT, []).finally(() => undefined)), "threw"],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("Promise.prototype.then and .constructor replaced after load: the promise p.then(...) returns, awaited or chained, still delivers the rejection", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    // Both taken before any change: `derived` is awaited under it, and `chained` gets its second link under it.
+    const derived = profileAdmitsBundle(made).then((x) => x);
+    const chained = profileAdmitsBundle(made).then((x) => x);
+    const hasOwn = Object.prototype.hasOwnProperty;
+    const forge = (v: unknown) => (typeof v === "object" && v !== null && hasOwn.call(v, "decision") ? FORGED_ADMIT : v);
+    const thenBefore = Promise.prototype.then;
+    const then = Object.getOwnPropertyDescriptor(Promise.prototype, "then")!;
+    const constructor = Object.getOwnPropertyDescriptor(Promise.prototype, "constructor")!;
+    Object.defineProperty(Promise.prototype, "constructor", { ...constructor, value: function NotPromise() {} });
+    Object.defineProperty(Promise.prototype, "then", {
+      ...then,
+      value: function (this: Promise<unknown>, f?: unknown, r?: unknown) {
+        const onFulfilled = typeof f === "function" ? (v: unknown) => (f as (x: unknown) => unknown)(forge(v)) : f;
+        return thenBefore.call(this, onFulfilled as (x: unknown) => unknown, r as (e: unknown) => unknown);
+      },
+    });
+    let awaited: unknown;
+    let secondLink: unknown;
+    try {
+      awaited = await derived;
+      secondLink = await chained.then((y) => y);
+    } finally {
+      Object.defineProperty(Promise.prototype, "then", then);
+      Object.defineProperty(Promise.prototype, "constructor", constructor);
+    }
+    expect(
+      mismatches([
+        ["await p.then((x) => x)", awaited, clean],
+        ["await p.then((x) => x).then((y) => y), second link under the change", secondLink, clean],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("a caller holding any promise these functions return cannot re-point the species every other caller's .then uses", async () => {
+    const made = await signatureFails();
+    const clean = await profileAdmitsBundle(made);
+    const held = computeBundleSetDigest(SUBJECT, SET);
+    await held;
+    const holder = held.constructor as unknown as object;
+    const before = Object.getOwnPropertyDescriptor(holder, Symbol.species);
+    let repointed = true;
+    let delivered: unknown;
+    try {
+      try {
+        Object.defineProperty(holder, Symbol.species, { value: forgingSpecies(FORGED_ADMIT), configurable: true });
+      } catch {
+        repointed = false;
+      }
+      delivered = await profileAdmitsBundle(made).then((x) => x);
+    } finally {
+      if (before !== undefined) {
+        try {
+          Object.defineProperty(holder, Symbol.species, before);
+        } catch {
+          // a frozen holder: nothing was changed
+        }
+      }
+    }
+    expect(delivered).toEqual(clean);
+    expect(repointed).toBe(false);
+  });
+
+  it("admission's own await of binding's answer looks nothing up on it: binding's own resolution is the only `then` lookup", async () => {
+    const p = inspectedPageProfile();
+    // The pilot world: the printer's bundle signed by the executor A, the camera's by the independent inspector B.
+    const bundles = await toBundles(PILOT, p);
+    const bundle = bundles[0]!;
+    const input: ProfileAdmissionInput = {
+      profile: p,
+      committedDigest: computeMeasurementProfileDigest(p),
+      subject: SUBJECT,
+      bundles,
+      pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, bundles.map((b) => b.bundleHash)),
+      registryKeys: REGISTRY,
+      pinnedRegistryDigest: REGISTRY_PIN,
+      executorTrustDomains: [OPERATOR_A],
+      verifyPrimitiveInstance: () => true,
+    };
+    const hasOwn = Object.prototype.hasOwnProperty;
+    // Lookups of `then` on binding's answer ({ ok, events }), counted per answer object; the getter answers
+    // undefined, as an absent `then` would, so nothing else changes.
+    const lookups = new Map<object, number>();
+    Object.defineProperty(Object.prototype, "then", {
+      configurable: true,
+      get(this: unknown) {
+        if (typeof this === "object" && this !== null && hasOwn.call(this, "ok") && hasOwn.call(this, "events")) {
+          lookups.set(this, (lookups.get(this) ?? 0) + 1);
+        }
+        return undefined;
+      },
+    });
+    let r: ProfileAdmissionResult | undefined;
+    try {
+      r = await profileAdmitsBundle(input);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).then;
+    }
+    expect(r?.decision).toBe("admit");
+    // LO-EV-9's binding (#341) answers with a frozen null-prototype object, so no inherited `then` is ever
+    // looked up on its answer: not when its own promise resolves, and not by any await of it, admission's
+    // included. A polluted Object.prototype.then cannot reach admission through binding's answer.
+    expect([...lookups.values()]).toEqual([]);
+    const answer = await verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject: SUBJECT });
+    expect(Object.getPrototypeOf(answer), "binding's answer has no prototype to inherit `then` from").toBeNull();
+    expect(Object.isFrozen(answer)).toBe(true);
+  });
+
+  it("awaitedHere (util/primordials.ts): awaiting it looks nothing up on the value; awaiting an ownPromise looks `then` up once", async () => {
+    const value = { k: 1 };
+    // Both settled before the lookup is counted: Promise.resolve looks `then` up on the value itself.
+    const here = awaitedHere(Promise.resolve(value));
+    const handedOut = ownPromise(Promise.resolve(value));
+    await Promise.resolve();
+    let lookups = 0;
+    Object.defineProperty(Object.prototype, "then", {
+      configurable: true,
+      get(this: unknown) {
+        if (this === value) lookups++;
+        return undefined;
+      },
+    });
+    let first: unknown;
+    let afterFirst = -1;
+    let second: unknown;
+    try {
+      first = await here;
+      afterFirst = lookups;
+      second = await handedOut;
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).then;
+    }
+    expect(first).toBe(value);
+    expect(afterFirst).toBe(0);
+    // Why only a primitive or a null-prototype object is handed out through ownPromise.
+    expect(second).toBe(value);
+    expect(lookups).toBe(1);
+  });
+});
+
+describe("profile admission — the pinned key registry holds as data (#519 on #363's pack-275 contract)", () => {
+  it("a malformed registry is refused at the input boundary: input-unreadable is the only reason, before any bundle is evaluated", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    // A pin that is not the presented set would add bundle-set-mismatch if evaluation had begun.
+    const r = await admit(p, bundles, {
+      registryKeys: [...REGISTRY, { publicKey: KEY_A, trustDomain: OPERATOR_B }],
+      pinnedRegistryDigest: REGISTRY_PIN,
+      pinnedBundleSetDigest: "sha256:" + "e".repeat(64),
+    });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+  });
+
+  it("computeRegistryDigest is byte-identical to sha256 over canonical JSON (the unhardened admission's), and returns an own promise", async () => {
+    const reference = await sha256(
+      canonicalize({ domain: REGISTRY_SNAPSHOT_DOMAIN, keys: [...REGISTRY].sort((x, y) => (x.publicKey < y.publicKey ? -1 : 1)) }),
+    );
+    expect(REGISTRY_PIN).toBe(reference);
+    const promise = computeRegistryDigest(REGISTRY);
+    expect(Object.prototype.hasOwnProperty.call(promise, "then")).toBe(true);
+    await expect(promise).resolves.toBe(reference);
+  });
+
+  it("executorTrustDomains is refused at the input boundary: input-unreadable is the only reason, before any bundle is evaluated", async () => {
+    const p = inspectedPageProfile();
+    const bundles = await toBundles(PILOT, p);
+    // A pin that is not the presented set would add bundle-set-mismatch if evaluation had begun.
+    const r = await admit(p, bundles, {
+      executorTrustDomains: ["not-a-principal"],
+      pinnedBundleSetDigest: "sha256:" + "e".repeat(64),
+    });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+  });
+
+  it("executorTrustDomains is walked for code with the other data: an accessor element is refused as code, never run", async () => {
+    const p = inspectedPageProfile();
+    let runs = 0;
+    const accessor: string[] = [];
+    Object.defineProperty(accessor, 0, { get: () => (runs++, OPERATOR_A), enumerable: true });
+    const r = await admit(p, await toBundles(PILOT, p), { executorTrustDomains: accessor });
+    expect(codes(r)).toEqual(["input-unreadable"]);
+    expect(r.reasons[0]!.detail).toMatch(/no code supplied with the data may run/);
+    expect(runs).toBe(0);
   });
 });

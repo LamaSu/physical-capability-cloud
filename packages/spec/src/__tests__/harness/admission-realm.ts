@@ -1,0 +1,1384 @@
+/**
+ * One realm for the realm-mutation harness (../profile-admission-intrinsics.test.ts).
+ *
+ * Why a child process: vitest runs its own runner in the realm of the test it
+ * runs. A test that holds a replaced intrinsic across an event-loop turn
+ * therefore breaks vitest itself, not only the code under test: with
+ * Array.prototype[Symbol.iterator] replaced across a 300 ms timer, a test with
+ * no @pcc/spec code in it never completes. So each scenario runs here, in a
+ * process that holds only @pcc/spec, this file and Node (whose internals use
+ * their own load-time primordials). That is also the threat: post-load code in
+ * a process that loaded @pcc/spec first.
+ *
+ *   1. load: the static imports below;
+ *   2. build every item, and run them clean;
+ *   3. apply the scenario's change, run the items again, undo the change;
+ *   4. print one JSON line: { scenario, clean, patched } or { scenario, clean, hung: true }.
+ *
+ * Usage: tsx admission-realm.ts <scenario id> | --list
+ * Every builder runs before any change is applied. The code that runs while a
+ * change is in place (`results`, `summarize`, `copyList` and the recipes'
+ * items) uses index loops, literals and operators only.
+ */
+import { createHash, createPrivateKey, createPublicKey, sign, type KeyObject } from "node:crypto";
+import { createRequire, syncBuiltinESMExports } from "node:module";
+import { pathToFileURL } from "node:url";
+
+import * as admissionModule from "../../evidence/profile-admission.js";
+import {
+  computeBundleSetDigest,
+  computeRegistryDigest,
+  NON_NUMERIC_UNIT,
+  REGISTRY_SNAPSHOT_DOMAIN,
+  PROFILE_OBSERVATION_FIELD,
+  profileAdmitsBundle,
+  unverifiableProfileTerms,
+  type AdmissionBundle,
+  type ProfileAdmissionInput,
+  type ProfileAdmissionResult,
+  type ProfileObservation,
+} from "../../evidence/profile-admission.js";
+import {
+  DEVICE_REPORTED_EVENT_TYPES,
+  EVIDENCE_LEVELS,
+  EXECUTION_EVENT_TYPES,
+  INSPECTION_EVENT_TYPES,
+  NO_OUTCOME_LEVEL_EVENT_TYPES,
+  SUBMITTED_EVENT_TYPES,
+} from "../../evidence/evidence-level.js";
+import { computeMeasurementProfileDigest, type MeasurementProfileV1 } from "../../evidence/measurement-profile.js";
+import { EVIDENCE_PRIMITIVES } from "../../evidence/primitives.js";
+import { sessionKeyDelegationPreimage, signingPreimage, TAGGED_DIGEST_PATTERN } from "../../evidence/signing-preimage.js";
+import type { EvidenceSubject } from "../../evidence/subject-binding.js";
+import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, type EvidenceEvent } from "../../types/evidence.js";
+import { canonicalize, hashBundle, hashEvent } from "../../util/canonical.js";
+
+// -- what this file itself calls while a change is in place, captured at load --
+const ReflectDefineProperty = Reflect.defineProperty;
+const ReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+const ReflectDeleteProperty = Reflect.deleteProperty;
+const ObjectCreate = Object.create;
+const ObjectPrototypeHasOwnProperty = Object.prototype.hasOwnProperty;
+const ReflectApply = Reflect.apply;
+const setTimeoutAtLoad = setTimeout;
+const PromiseAtLoad = Promise;
+const PromiseThenAtLoad = Promise.prototype.then;
+const clearTimeoutAtLoad = clearTimeout;
+const hasOwn = (o: object, k: PropertyKey): boolean => ReflectApply(ObjectPrototypeHasOwnProperty, o, [k]) === true;
+
+/** A property descriptor with a null prototype: once Object.prototype.value or .get is written, a literal would inherit it. */
+export function nullDescriptor(fields: Record<string, unknown>): PropertyDescriptor {
+  const d = ObjectCreate(null) as Record<string, unknown>;
+  const keys = Object.keys(fields);
+  for (let i = 0; i < keys.length; i++) d[keys[i]!] = fields[keys[i]!];
+  return d as PropertyDescriptor;
+}
+
+// -- builders (profile-admission.test.ts), run before any change --
+const JOB = "job-admission-1";
+const KERNEL = "kernel-admission-1";
+const PRINTER = "dev-printer";
+const CAMERA = "dev-camera";
+const SCALE = "dev-scale";
+const PRINTER_VERSION = "IppAdapter-1.0.0";
+const CAMERA_VERSION = "PhotoCameraAdapter-1.0.0";
+const SCALE_VERSION = "ScaleAdapter-1.0.0";
+const DOCUMENT = { kind: "documentHash", value: "sha256:" + "b".repeat(64) };
+const UNIT = "0x" + "ab".repeat(32);
+const OTHER_UNIT = "0x" + "cd".repeat(32);
+const NONCE = "0x" + "ef".repeat(32);
+const SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
+const UNIT_SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL, settlementUnitId: UNIT, challengeNonce: NONCE };
+
+/**
+ * An Ed25519 key pair from a fixed 32-byte seed (PKCS#8 DER). Every child realm builds the same keys, so the
+ * signer ids derived from them, and every reason that names one, are the same in each realm's clean run.
+ */
+const seededKey = (seedByte: number): { privateKey: KeyObject; publicKey: KeyObject } => {
+  const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, seedByte)]), format: "der", type: "pkcs8" });
+  return { privateKey, publicKey: createPublicKey(privateKey) };
+};
+const key = seededKey(0xa1);
+// Two operators with registered keys (#345's one rule, steward #6478): A runs the job (the deal assigns it),
+// B is an independent inspector. An inspection is inspected_output only from B's bundle.
+const keyB = seededKey(0xb2);
+const OPERATOR_A = `eip155:84532:0x${"aa".repeat(20)}`;
+const OPERATOR_B = `eip155:84532:0x${"bb".repeat(20)}`;
+const OPERATOR_C = `eip155:84532:0x${"cc".repeat(20)}`;
+/** A key's raw 32 bytes as 0x + lowercase hex: the last 32 bytes of its SPKI DER. */
+const rawKey = (k: { publicKey: KeyObject }) => `0x${(k.publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(12).toString("hex")}`;
+const KEY_A = rawKey(key);
+const KEY_B = rawKey(keyB);
+/** Each key's signer id, as kernels declare it: 0x and the key's first 40 hex digits (astra pack 275). */
+const SIGNER_A = KEY_A.slice(0, 42);
+const SIGNER_B = KEY_B.slice(0, 42);
+const KEYS: Record<string, { privateKey: KeyObject; publicKey: KeyObject }> = { [SIGNER_A]: key, [SIGNER_B]: keyB };
+const DOMAINS: Record<string, string> = { [SIGNER_A]: OPERATOR_A, [SIGNER_B]: OPERATOR_B };
+const T0 = Date.parse("2026-09-24T12:00:00.000Z");
+const at = (seconds: number) => new Date(T0 + seconds * 1000).toISOString();
+
+function defaultSource(device: string): Record<string, unknown> {
+  if (device === PRINTER) {
+    return { deviceType: "controller", adapterType: "ipp", adapterVersion: PRINTER_VERSION, firmwareVersion: "printer-fw-7.3" };
+  }
+  if (device === SCALE) {
+    return { deviceType: "instrument", adapterType: "scale", adapterVersion: SCALE_VERSION, firmwareVersion: "scale-fw-1.0" };
+  }
+  return { deviceType: "camera", adapterType: "photo", adapterVersion: CAMERA_VERSION, firmwareVersion: "cam-fw-2.1.0" };
+}
+
+function mergeDefined<T extends Record<string, unknown>>(base: T, override?: Record<string, unknown>): T {
+  const merged: Record<string, unknown> = { ...base, ...override };
+  for (const k of Object.keys(merged)) if (merged[k] === undefined) delete merged[k];
+  return merged as T;
+}
+
+interface Draft {
+  type: string;
+  t: number;
+  device: string;
+  source?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
+  observation?: null | Partial<ProfileObservation>;
+  simulated?: boolean;
+  jobId?: string;
+  kernelId?: string;
+  timestamp?: string;
+}
+
+function defaultObservation(profile: MeasurementProfileV1, d: Draft): ProfileObservation {
+  const sampleId = "sha256:" + createHash("sha256").update(`${d.device}|${d.type}|${d.t}`).digest("hex");
+  const obs: ProfileObservation = {
+    profileDigest: computeMeasurementProfileDigest(profile),
+    primitiveId: profile.interpretation.evidenceTypeIds[0]!,
+    object: { ...profile.outcome.objectIdentity },
+    method: profile.measurement.method,
+    quantity: profile.measurement.quantity,
+    unit: profile.measurement.unit,
+    sampleId,
+  };
+  if (profile.measurement.unit !== NON_NUMERIC_UNIT) obs.value = "12.5";
+  return obs;
+}
+
+async function toEvent(d: Draft): Promise<EvidenceEvent> {
+  const source = mergeDefined({ deviceId: d.device, kernelId: d.kernelId ?? KERNEL, ...defaultSource(d.device) }, d.source);
+  if (d.simulated) (source as Record<string, unknown>).simulated = true;
+  const payload = { jobId: d.jobId ?? JOB, ...(d.payload ?? {}) };
+  const unsigned = { type: d.type, timestamp: d.timestamp ?? at(d.t), source, payload };
+  const hash = await hashEvent(unsigned as unknown as Omit<EvidenceEvent, "hash" | "id">);
+  return { ...unsigned, id: `${d.type}-${d.t}-${d.device}`, hash } as unknown as EvidenceEvent;
+}
+
+async function toBundle(drafts: Draft[], profile: MeasurementProfileV1, signer: string = SIGNER_A): Promise<AdmissionBundle> {
+  const events: EvidenceEvent[] = [];
+  for (const d of drafts) {
+    if (d.observation === null) {
+      events.push(await toEvent(d));
+      continue;
+    }
+    const merged = mergeDefined(
+      defaultObservation(profile, d) as unknown as Record<string, unknown>,
+      d.observation as Record<string, unknown> | undefined,
+    );
+    events.push(await toEvent({ ...d, payload: { ...(d.payload ?? {}), [PROFILE_OBSERVATION_FIELD]: merged } }));
+  }
+  const bundleHash = await hashBundle(events);
+  const value = sign(null, signingPreimage(bundleHash), KEYS[signer]!.privateKey).toString("hex");
+  return { bundleHash, events, kernelSignature: { signer, algorithm: "ed25519", value } };
+}
+
+/** The two-operator world: the printer's events in the executor A's bundle, every other device's in the independent inspector B's. */
+async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promise<AdmissionBundle[]> {
+  const executor: Draft[] = [];
+  const inspector: Draft[] = [];
+  for (const d of drafts) (d.device === PRINTER ? executor : inspector).push(d);
+  const out: AdmissionBundle[] = [];
+  if (executor.length > 0) out.push(await toBundle(executor, profile, SIGNER_A));
+  if (inspector.length > 0) out.push(await toBundle(inspector, profile, SIGNER_B));
+  return out;
+}
+
+/**
+ * The pinned key registry (astra packs 271, 275, 281): each registered key, the operator that owns it, and its
+ * grants. A is the executor of KERNEL (the kernel's own key); B is an independent witness for KERNEL.
+ */
+const EXECUTOR_GRANTS = [{ role: "executor" as const, kernelId: KERNEL }];
+const REGISTRY = [
+  { publicKey: KEY_A, trustDomain: DOMAINS[SIGNER_A]!, grants: EXECUTOR_GRANTS },
+  { publicKey: KEY_B, trustDomain: DOMAINS[SIGNER_B]!, grants: [{ role: "witness" as const, kernelId: KERNEL }] },
+];
+const REGISTRY_PIN = await computeRegistryDigest(REGISTRY);
+/** The pin for `rows`, or a well-formed stand-in when admission is to refuse the rows themselves. */
+async function pinOf(rows: unknown): Promise<string> {
+  try {
+    return await computeRegistryDigest(rows as ProfileAdmissionInput["registryKeys"]);
+  } catch {
+    return "sha256:" + "0".repeat(64);
+  }
+}
+/**
+ * A session key `root` delegates (LO-EV-1), as kernel-sdk makes one, from a fixed seed so every realm builds the
+ * same key and the same signature. Its key pair joins KEYS, so toBundle can sign with it. By default it is valid from
+ * a minute before the pilot to an hour after, for JOB.
+ */
+function delegate(root: { privateKey: KeyObject }, seedByte: number, over: { contractIds?: string[]; expiresAt?: number } = {}) {
+  const pair = seededKey(seedByte);
+  const raw = rawKey(pair);
+  const body = {
+    sessionId: "session-0001",
+    parentAgentId: "eip155:84532:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:7",
+    publicKey: Buffer.from(raw.slice(2), "hex"),
+    issuedAt: Math.floor(T0 / 1000) - 60,
+    expiresAt: over.expiresAt ?? Math.floor(T0 / 1000) + 3600,
+    scope: { allowedActions: ["evidence_submit"], contractIds: over.contractIds ?? [JOB], maxSignatures: 1000 },
+  };
+  const parentSignature = sign(null, sessionKeyDelegationPreimage(body as never), root.privateKey).toString("hex");
+  KEYS[raw.slice(0, 42)] = pair;
+  return { raw, signer: raw.slice(0, 42), authorization: { ...body, publicKey: raw.slice(2), parentSignature } };
+}
+/** The registry row of a delegated session key: its key, its root's key, and the root's delegation as received. */
+const sessionRow = (session: ReturnType<typeof delegate>, root: string = KEY_A) => ({ publicKey: session.raw, delegatedBy: root, authorization: session.authorization });
+
+/** `bundle` with its kernelSignature changed. */
+function resigned(bundle: AdmissionBundle, change: Record<string, unknown>): AdmissionBundle {
+  return { ...bundle, kernelSignature: { ...(bundle.kernelSignature as Record<string, unknown>), ...change } };
+}
+
+const PILOT: Draft[] = [
+  { type: "execution_started", t: 0, device: PRINTER },
+  { type: "execution_completed", t: 10, device: PRINTER },
+  { type: "cv_inspection_result", t: 20, device: CAMERA, payload: { passed: true } },
+];
+const PRINTED = PILOT.slice(0, 2);
+const FAILURE: Draft[] = [{ type: "execution_failed", t: 11, device: PRINTER }];
+const MASS_PILOT: Draft[] = [
+  { type: "execution_started", t: 0, device: PRINTER },
+  { type: "execution_completed", t: 10, device: PRINTER },
+  // instrument_result's verdict is `pass`, evidence's pinned field (#345), not `passed`.
+  { type: "instrument_result", t: 20, device: SCALE, payload: { pass: true } },
+];
+
+function inspectedPageProfile(): MeasurementProfileV1 {
+  return {
+    profileVersion: 1,
+    profileId: "pcc://profiles/test/inspected-page/v1",
+    outcome: { capabilityType: "document-printing", statement: "The page was printed and a separate camera inspected it.", objectIdentity: DOCUMENT },
+    device: { deviceId: CAMERA, kind: "camera", adapterType: "photo", permittedAdapterVersions: [CAMERA_VERSION], permittedFirmwareVersions: ["cam-fw-2.1.0"] },
+    measurement: { method: "optical-capture", quantity: "printed-page-image", unit: "none", sampling: { minSamples: 1 } },
+    capture: { startCondition: "execution_completed", endCondition: "open", coverage: { policy: "one-shot", minFraction: 1 } },
+    calibration: { required: false },
+    interpretation: { evidenceTypeIds: ["capture.photo_nonced"], acceptanceLevel: "inspected_output", onDeviceFailure: "reject" },
+    simulationProhibited: true,
+    witnesses: { requiredRoles: [], independentOfClaimant: false },
+    onMissingData: "reject",
+    onContradiction: "reject",
+  };
+}
+
+function deviceReportedProfile(): MeasurementProfileV1 {
+  const p = inspectedPageProfile();
+  p.device = { deviceId: PRINTER, kind: "controller", adapterType: "ipp", permittedAdapterVersions: [PRINTER_VERSION], permittedFirmwareVersions: ["printer-fw-7.3"] };
+  p.capture = { ...p.capture, startCondition: "execution_started" };
+  p.interpretation = { ...p.interpretation, acceptanceLevel: "device_reported", evidenceTypeIds: ["receipt.kernel_signed"] };
+  return p;
+}
+
+function massProfile(): MeasurementProfileV1 {
+  const p = inspectedPageProfile();
+  p.device = { deviceId: SCALE, kind: "instrument", adapterType: "scale", permittedAdapterVersions: [SCALE_VERSION], permittedFirmwareVersions: ["scale-fw-1.0"] };
+  p.measurement = { method: "load-cell", quantity: "mass", unit: "kg", sampling: { minSamples: 1 } };
+  p.interpretation = { ...p.interpretation, evidenceTypeIds: ["artifact.hash"] };
+  return p;
+}
+
+function edit(change: (p: MeasurementProfileV1) => void, base: () => MeasurementProfileV1 = inspectedPageProfile): MeasurementProfileV1 {
+  const p = base();
+  change(p);
+  return p;
+}
+
+/** A full admission input; the pin is over exactly `bundles` unless `over` names one. */
+async function input(
+  profile: MeasurementProfileV1,
+  bundles: AdmissionBundle[],
+  over: Partial<ProfileAdmissionInput> = {},
+  subject: EvidenceSubject = SUBJECT,
+): Promise<ProfileAdmissionInput> {
+  const pinnedBundleSetDigest =
+    bundles.length > 0 ? await computeBundleSetDigest(subject, bundles.map((b) => b.bundleHash)) : "sha256:" + "0".repeat(64);
+  return {
+    profile,
+    committedDigest: computeMeasurementProfileDigest(profile),
+    subject,
+    bundles,
+    pinnedBundleSetDigest,
+    registryKeys: REGISTRY,
+    pinnedRegistryDigest: over.registryKeys !== undefined ? await pinOf(over.registryKeys) : REGISTRY_PIN,
+    executorTrustDomains: [OPERATOR_A],
+    verifyPrimitiveInstance: () => true,
+    ...over,
+  };
+}
+
+/** A copy of `bundle` whose event `index` is re-hashed after `change`: its own hash verifies, the signed bundle hash does not. */
+async function rehashed(bundle: AdmissionBundle, index: number, change: (e: Record<string, any>) => void): Promise<AdmissionBundle> {
+  const events = structuredClone(bundle.events) as Record<string, any>[];
+  change(events[index]!);
+  const { type, timestamp, source, payload } = events[index]!;
+  events[index]!.hash = await hashEvent({ type, timestamp, source, payload } as unknown as Omit<EvidenceEvent, "hash" | "id">);
+  return { ...bundle, events };
+}
+
+/** The canonical text binding hashes for an event. */
+function hashedText(e: unknown): string {
+  const { type, timestamp, source, payload } = e as Record<string, unknown>;
+  return canonicalize({ type, timestamp, source, payload });
+}
+
+/** The leg's obligation (profile-admission.test.ts 39-D): the claimed sampleId commits the capture the event carries. */
+const capturesMatch = (_id: string, obs: EvidenceEvent): boolean => {
+  const payload = obs.payload as Record<string, unknown>;
+  const observation = payload[PROFILE_OBSERVATION_FIELD] as { sampleId: string };
+  return observation.sampleId === payload.captureHash;
+};
+
+// The evidence levels' own realm items live in #577's harness (evidence-level-realm.ts); this one runs admission's.
+
+// -- every item, built once --
+let CASES: Array<[string, ProfileAdmissionInput]> = [];
+let DIGEST_CASES: Array<[string, Pick<EvidenceSubject, "jobId" | "kernelId" | "settlementUnitId">, readonly string[]]> = [];
+/** Promises a caller is handed, each also consumed through every delivery shape (SHAPES): kind, label, how to make it. */
+type Delivery = [kind: string, label: string, make: () => Promise<unknown>];
+let DELIVERIES: Delivery[] = [];
+let TERM_CASES: Array<[string, MeasurementProfileV1]> = [];
+/** Forged resolutions for the Promise.prototype.then rows: a real value mapped to the one a forger wants. */
+const FORGE_FROM: string[] = [];
+const FORGE_TO: string[] = [];
+let INHERITABLE_RECORD: Record<string, unknown> = {};
+const RECIPE: Record<string, any> = {};
+
+async function buildCases(): Promise<void> {
+  const p = inspectedPageProfile();
+  // The pilot is two bundles: the printer's (the executor A's) and the camera's (the independent inspector B's).
+  const pilot = await toBundles(PILOT, p);
+  const pilotHashes = pilot.map((b) => b.bundleHash);
+  const failure = await toBundle(FAILURE, p);
+  const cases: Array<[string, ProfileAdmissionInput]> = [];
+  const add = (label: string, value: ProfileAdmissionInput) => cases.push([label, value]);
+
+  // admit
+  add("admit: the pilot, inspected_output", await input(p, pilot));
+  const dr = deviceReportedProfile();
+  add("admit: device_reported on the printer's completion", await input(dr, await toBundles(PILOT, dr)));
+  const mass = massProfile();
+  add("admit: the mass profile, a decimal value", await input(mass, await toBundles(MASS_PILOT, mass)));
+  add("admit: three bundles of one job", await input(p, [await toBundle(PILOT.slice(0, 1), p), ...(await toBundles(PILOT.slice(1), p))]));
+  const two = edit((x) => (x.measurement.sampling.minSamples = 2));
+  add(
+    "admit: two distinct samples for minSamples 2",
+    await input(two, await toBundles([...PRINTED, { ...PILOT[2]! }, { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true } }], two)),
+  );
+  const unitDrafts = PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), settlementUnitId: UNIT, challengeNonce: NONCE } }));
+  add("admit: a unit-scoped job, unit and challenge committed", await input(p, await toBundles(unitDrafts, p), {}, UNIT_SUBJECT));
+  const captureHash = "sha256:" + "d".repeat(64);
+  const committedCapture = await toBundles([...PRINTED, { ...PILOT[2]!, payload: { passed: true, captureHash }, observation: { sampleId: captureHash } }], p);
+  add("admit: a leg that checks the capture, which matches", await input(p, committedCapture, { verifyPrimitiveInstance: capturesMatch }));
+  // The window opens at the EARLIEST start event and closes at the LATEST end event: an observation between two
+  // starts, or between two ends, is inside it.
+  const fromStart = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started" }));
+  add(
+    "admit: an inspection between two starts (the window opens at the earliest)",
+    await input(
+      fromStart,
+      await toBundles(
+        [PILOT[0]!, { type: "execution_started", t: 15, device: PRINTER }, { type: "execution_completed", t: 16, device: PRINTER }, { ...PILOT[2]!, t: 10 }],
+        fromStart,
+      ),
+    ),
+  );
+  const startToEnd = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started", endCondition: "execution_completed" }));
+  add(
+    "admit: an inspection between two ends (the window closes at the latest)",
+    await input(startToEnd, await toBundles([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 30, device: PRINTER }, PILOT[2]!], startToEnd)),
+  );
+
+  // reject: the set, the signature, binding
+  const pin2 = await computeBundleSetDigest(SUBJECT, [...pilotHashes, failure.bundleHash]);
+  const omitted = await input(p, pilot, { pinnedBundleSetDigest: pin2 });
+  add("reject: a stored failure bundle left out of the pinned set", omitted);
+  const presented = await computeBundleSetDigest(SUBJECT, pilotHashes);
+  RECIPE.omitted = { input: omitted, presented, pin: pin2, pilotHashes };
+  RECIPE.notAPin = { ...omitted, pinnedBundleSetDigest: "not-a-pin" };
+  FORGE_FROM.push(presented);
+  FORGE_TO.push(pin2);
+  add("reject: a bundle outside the pinned set", await input(p, [...pilot, failure], { pinnedBundleSetDigest: presented }));
+  add("reject: a malformed pin", await input(p, pilot, { pinnedBundleSetDigest: "0x" + "a".repeat(64) }));
+  // The signature is checked here, under the pinned registry's key (astra pack 275): a flipped bit fails it.
+  const printerValue = (pilot[0]!.kernelSignature as { value: string }).value;
+  const flipped = resigned(pilot[0]!, { value: `${printerValue.slice(0, -1)}${printerValue.endsWith("0") ? "1" : "0"}` });
+  const signatureFails = await input(p, [flipped, pilot[1]!]);
+  add("reject: the signature fails", signatureFails);
+  RECIPE.signatureFails = signatureFails;
+  const asyncPrimitiveFails = await input(p, pilot, { verifyPrimitiveInstance: async () => false });
+  add("reject: an async primitive leg answers false", asyncPrimitiveFails);
+  RECIPE.asyncPrimitiveFails = asyncPrimitiveFails;
+  add("admit: an async primitive leg that answers true", await input(p, pilot, { verifyPrimitiveInstance: async () => true }));
+  // The pinned key registry (astra packs 271, 275): the declared signer names one key, which must verify the signature.
+  const byB = await toBundle(PILOT.slice(0, 2), p, SIGNER_B);
+  add("reject: a bundle signed by another registered key than it declares", await input(p, [resigned(byB, { signer: SIGNER_A }), pilot[1]!]));
+  const cameraByA = await toBundle(PILOT.slice(2), p, SIGNER_A);
+  add("reject: one key under two signer ids (astra pack 275)", await input(p, [pilot[0]!, resigned(cameraByA, { signer: SIGNER_B })]));
+  add("reject: a declared signer no registry key has", await input(p, [resigned(pilot[0]!, { signer: `0x${"9".repeat(40)}` }), pilot[1]!]));
+  add("reject: another signature algorithm", await input(p, [resigned(pilot[0]!, { algorithm: "secp256k1" }), pilot[1]!]));
+  add("reject: a signature over another digest", await input(p, [resigned(pilot[0]!, { value: (pilot[1]!.kernelSignature as { value: string }).value }), pilot[1]!]));
+  const unknownOperators = REGISTRY.map((row) => ({ ...row, trustDomain: null }));
+  add("admit: a registry naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { registryKeys: unknownOperators }));
+  add("reject: a registry naming no operator, for an inspected profile", await input(p, pilot, { registryKeys: unknownOperators }));
+  const sameKey = [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), cameraByA];
+  add("reject: the executor's own camera, one key signing both bundles (astra pack 271)", await input(p, sameKey));
+  const G = EXECUTOR_GRANTS;
+  add("reject: a registry listing one key twice", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: KEY_B, trustDomain: OPERATOR_A, grants: G }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: another spelling of a registry key", await input(p, pilot, { registryKeys: [{ publicKey: `0x${KEY_A.slice(2).toUpperCase()}`, trustDomain: OPERATOR_A, grants: G }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: two registry keys sharing a signer id", await input(p, pilot, { registryKeys: [...REGISTRY, { publicKey: `0x${"ab".repeat(20)}${"00".repeat(12)}`, trustDomain: null, grants: G }, { publicKey: `0x${"ab".repeat(20)}${"11".repeat(12)}`, trustDomain: null, grants: G }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a registry rotated after the pin", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, trustDomain: OPERATOR_A }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a registry re-granted after the pin", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: JOB }] }], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a row with no grants", await input(p, pilot, { registryKeys: [{ publicKey: KEY_A, trustDomain: OPERATOR_A }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  add("reject: a grant with an unknown role", await input(p, pilot, { registryKeys: [{ ...REGISTRY[0]!, grants: [{ role: "owner", kernelId: KERNEL }] }, REGISTRY[1]!], pinnedRegistryDigest: REGISTRY_PIN }));
+  // Grants (astra pack 281, DECISIONS 00:26): a signature authorizes only what its key's grant names.
+  add("reject: astra 281, a witness signs the kernel's execution", await input(dr, [await toBundle(PILOT.slice(0, 2), dr, SIGNER_B)]));
+  const bElsewhere = [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }];
+  add("reject: a registered key with no grant for the subject", await input(dr, [await toBundle(PILOT.slice(0, 2), dr, SIGNER_B)], { registryKeys: bElsewhere }));
+  add("admit: a witness for this one job", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: JOB }] }] }));
+  add("reject: a witness for another job", await input(p, pilot, { registryKeys: [REGISTRY[0]!, { ...REGISTRY[1]!, grants: [{ role: "witness" as const, kernelId: KERNEL, jobId: "job-other" }] }] }));
+  add("reject: the executor's grant names another kernel", await input(dr, [await toBundle(PILOT.slice(0, 2), dr, SIGNER_A)], { registryKeys: [{ ...REGISTRY[0]!, grants: [{ role: "executor" as const, kernelId: "kernel-other" }] }, REGISTRY[1]!] }));
+  add("reject: a witness bundle holding the completion", await input(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), await toBundle(PILOT.slice(1), p, SIGNER_B)]));
+  // Session keys count only through a delegation rooted in a registered row and committed in the pin.
+  const session = delegate(key, 0xc3);
+  const withSession = [...REGISTRY, sessionRow(session)];
+  const bySession = [await toBundle(PILOT.slice(0, 2), p, session.signer), pilot[1]!];
+  add("admit: a session key delegated by the executor, committed in the pin", await input(p, bySession, { registryKeys: withSession }));
+  add("reject: a session key left out of the pinned rows", await input(p, bySession));
+  add("reject: a session row whose authorization has a field the wire form does not", await input(p, bySession, { registryKeys: [...REGISTRY, { ...sessionRow(session), authorization: { ...session.authorization, extra: 1 } }], pinnedRegistryDigest: await pinOf(withSession) }));
+  add("reject: a session row with a field beside delegatedBy", await input(p, bySession, { registryKeys: [...REGISTRY, { ...sessionRow(session), trustDomain: OPERATOR_B }], pinnedRegistryDigest: await pinOf(withSession) }));
+  const otherJob = delegate(key, 0xc4, { contractIds: ["job-other"] });
+  add("reject: a session key delegated for another job", await input(p, [await toBundle(PILOT.slice(0, 2), p, otherJob.signer), pilot[1]!], { registryKeys: [...REGISTRY, sessionRow(otherJob)] }));
+  const expired = delegate(key, 0xc5, { expiresAt: Math.floor(T0 / 1000) + 5 });
+  add("reject: a session key whose window the events fall outside", await input(p, [await toBundle(PILOT.slice(0, 2), p, expired.signer), pilot[1]!], { registryKeys: [...REGISTRY, sessionRow(expired)] }));
+  add("reject: a delegation its named root did not sign", await input(p, pilot, { registryKeys: [...REGISTRY, sessionRow(delegate(keyB, 0xc6))], pinnedRegistryDigest: REGISTRY_PIN }));
+  // astra pack 289: A signs the canonical delegation JSON with an EMPTY publicKey, which names no key; the row and the
+  // authorization name the full session key. Its pin is computed here over the rows, so only the signature can refuse it.
+  const keyless = `{"sessionId":"session-0001","parentAgentId":"eip155:84532:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:7","publicKey":"","issuedAt":${session.authorization.issuedAt},"expiresAt":${session.authorization.expiresAt},"scope":{"allowedActions":["evidence_submit"],"contractIds":["${JOB}"],"maxSignatures":1000}}`;
+  const keylessRows = [...REGISTRY, { ...sessionRow(session), authorization: { ...session.authorization, parentSignature: sign(null, Buffer.from(keyless, "utf8"), key.privateKey).toString("hex") } }];
+  const keylessPin = `sha256:${createHash("sha256").update(canonicalize({ domain: REGISTRY_SNAPSHOT_DOMAIN, keys: [...keylessRows].sort((a, b) => (a.publicKey < b.publicKey ? -1 : 1)) })).digest("hex")}`;
+  add("reject: a delegation whose root signed a preimage naming no key (astra pack 289)", await input(p, bySession, { registryKeys: keylessRows, pinnedRegistryDigest: keylessPin }));
+  const widened = [...REGISTRY, sessionRow(delegate(key, 0xc3, { contractIds: [JOB, "job-other"] }))];
+  add("reject: a delegation re-scoped after the pin", await input(p, bySession, { registryKeys: widened, pinnedRegistryDigest: await pinOf(withSession) }));
+  // Only a witness reaches inspected_output (steward #6694).
+  add("reject: no witness granted for the subject", await input(p, [await toBundle(PILOT, p, SIGNER_A)], { registryKeys: [REGISTRY[0]!] }));
+  add("reject: the executor's own inspections-only bundle, its operator left out of the deal", await input(p, [await toBundle(PILOT.slice(2), p, SIGNER_A)], { executorTrustDomains: [OPERATOR_C] }));
+  add("reject: a malformed registry pin", await input(p, pilot, { pinnedRegistryDigest: "0x" + "a".repeat(64) }));
+  add("reject: no executor assigned", await input(p, pilot, { executorTrustDomains: [] }));
+  add("reject: executorTrustDomains naming no operator principal", await input(p, pilot, { executorTrustDomains: ["not-a-principal"] }));
+  add("reject: a leg answering 1, truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (() => 1) as unknown as () => boolean }));
+  add("reject: an async leg answering \"true\", truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (async () => "true") as unknown as () => Promise<boolean> }));
+  add("reject: evidence from another job", await input(p, await toBundles(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)));
+  add("reject: evidence from another kernel", await input(p, await toBundles(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p)));
+  const altered = await toBundles(PILOT, p);
+  (altered[1]!.events[0] as { payload: Record<string, unknown> }).payload.passed = false;
+  add("reject: an event altered after hashing", await input(p, altered));
+  add("reject: evidence for another settlement unit", await input(p, await toBundles(unitDrafts, p), {}, { ...UNIT_SUBJECT, settlementUnitId: OTHER_UNIT }));
+  const unitOnly = PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), settlementUnitId: UNIT } }));
+  add("reject: the challenge nonce not committed", await input(p, await toBundles(unitOnly, p), {}, UNIT_SUBJECT));
+  const kernelInPayload = await toBundles(PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), kernelId: "kernel-other" } })), p);
+  add("reject: a payload kernelId naming another kernel", await input(p, kernelInPayload));
+  const OUTPUT = "sha256:" + "a".repeat(64);
+  const outputSubject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL, outputHash: OUTPUT };
+  add("reject: the output not committed", await input(p, pilot, {}, outputSubject));
+  const otherOutput = await toBundles(PILOT.map((d) => (d.type === "execution_completed" ? { ...d, payload: { outputHash: "sha256:" + "9".repeat(64) } } : d)), p);
+  add("reject: another output committed", await input(p, otherOutput, {}, outputSubject));
+  // Binding checks each bundle on its own (LO-EV-9 rule 7), so the inspector's bundle names the output it inspected too.
+  const ownOutput = await toBundles(
+    PILOT.map((d) => (d.type === "execution_completed" || d.device === CAMERA ? { ...d, payload: { ...(d.payload ?? {}), outputHash: OUTPUT } } : d)),
+    p,
+  );
+  add("admit: the output committed", await input(p, ownOutput, {}, outputSubject));
+  // A score of its own, so flipping `passed` back cannot reproduce the pilot's inspection byte for byte.
+  const failedPair = await toBundles([...PRINTED, { ...PILOT[2]!, payload: { passed: false, score: 0.2 } }], p);
+  const failedInspection = failedPair[1]!;
+  const tampered = await rehashed(failedInspection, 0, (e) => (e.payload.passed = true));
+  const tamperedInput = await input(p, [failedPair[0]!, tampered]);
+  add("reject: an inspection re-hashed after signing", tamperedInput);
+  const realBundleHash = await hashBundle(tampered.events as unknown as EvidenceEvent[]);
+  RECIPE.tampered = {
+    input: tamperedInput,
+    tamperedHash: (tampered.events[0] as EvidenceEvent).hash,
+    originalHash: (failedInspection.events[0] as EvidenceEvent).hash,
+  };
+  FORGE_FROM.push(realBundleHash);
+  FORGE_TO.push(failedInspection.bundleHash);
+  const genuineFailure = await input(p, failedPair);
+  add("reject: a failed inspection (contradiction), genuine", genuineFailure);
+  RECIPE.genuineFailure = { input: genuineFailure, text: hashedText(failedInspection.events[0]) };
+
+  // reject: simulation, contradiction, failure, level
+  add("reject: a simulated source", await input(p, await toBundles(PILOT.map((d) => (d.device === CAMERA ? { ...d, simulated: true } : d)), p)));
+  add("reject: a payload.mock event", await input(p, await toBundles([...PILOT, { type: "execution_progress", t: 5, device: PRINTER, payload: { mock: true } }], p)));
+  add("reject: completion and execution_failed", await input(p, await toBundles([...PILOT, FAILURE[0]!], p)));
+  add("reject: a device failure", await input(p, await toBundles([PILOT[0]!, { type: "execution_failed", t: 10, device: PRINTER }], p)));
+  add("reject: the printer inspecting its own output", await input(p, await toBundles(PILOT.map((d) => (d.device === CAMERA ? { ...d, device: PRINTER } : d)), p)));
+  add("reject: printer_job_verified alone", await input(dr, await toBundles([{ type: "printer_job_verified", t: 10, device: PRINTER }], dr)));
+
+  // reject: missing measurements, one exclusion each
+  const cam = (over: Partial<Draft>) => [...PRINTED, { ...PILOT[2]!, ...over }];
+  add("reject: an inspection from another camera", await input(p, await toBundles(cam({ device: "dev-other-camera" }), p)));
+  add("reject: an unpermitted version", await input(p, await toBundles(cam({ source: { adapterVersion: "PhotoCameraAdapter-9.9.9" } }), p)));
+  add("reject: no version at all", await input(p, await toBundles(cam({ source: { adapterVersion: undefined, firmwareVersion: undefined } }), p)));
+  add("reject: an inspection before the window opened", await input(p, await toBundles(cam({ t: 5 }), p)));
+  add("reject: an unparseable observation timestamp", await input(p, await toBundles(cam({ timestamp: "not a date" }), p)));
+  // Two start events and two end events, so the window's earliest start and latest end are both computed.
+  const windowed = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started", endCondition: "execution_completed" }));
+  add(
+    "reject: an inspection after the window closed",
+    await input(windowed, await toBundles([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 12, device: PRINTER }, PILOT[2]!], windowed)),
+  );
+  const earliest = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started" }));
+  add(
+    "reject: an inspection before the earliest start",
+    await input(
+      earliest,
+      await toBundles(
+        [
+          { type: "execution_started", t: 10, device: PRINTER },
+          { type: "execution_started", t: 15, device: PRINTER },
+          { type: "execution_completed", t: 20, device: PRINTER },
+          { ...PILOT[2]!, t: 5 },
+        ],
+        earliest,
+      ),
+    ),
+  );
+  add("reject: an inspection with no verdict", await input(p, await toBundles(cam({ payload: { score: 0.97 } }), p)));
+  add("reject: no profileObservation record", await input(p, await toBundles(cam({ observation: null }), p)));
+  add("reject: another object", await input(p, await toBundles(cam({ observation: { object: { kind: "documentHash", value: "sha256:" + "c".repeat(64) } } }), p)));
+  add("reject: another primitive", await input(p, await toBundles(cam({ observation: { primitiveId: "artifact.hash" } }), p)));
+  const scale = (observation: Partial<ProfileObservation>) => MASS_PILOT.map((d) => (d.device === SCALE ? { ...d, observation } : d));
+  // The "value" in recipes run on the numeric profile: there, a value on an observation is expected, so
+  // Object.prototype.value written cannot exclude the observation and mask what the input boundary read.
+  const massPilot = await toBundles(MASS_PILOT, mass);
+  const massHashes = massPilot.map((b) => b.bundleHash);
+  const massFailure = await toBundle(FAILURE, mass);
+  const massPin = await computeBundleSetDigest(SUBJECT, [...massHashes, massFailure.bundleHash]);
+  const massPresented = await computeBundleSetDigest(SUBJECT, massHashes);
+  const forgedSignature = sign(null, signingPreimage("sha256:" + "f".repeat(64)), key.privateKey).toString("hex");
+  const badlySigned = { ...massPilot[0]!, kernelSignature: { ...(massPilot[0]!.kernelSignature as Record<string, unknown>), value: forgedSignature } };
+  RECIPE.massOmitted = { input: await input(mass, massPilot, { pinnedBundleSetDigest: massPin }), presented: massPresented, pin: massPin };
+  RECIPE.badlySigned = await input(mass, [badlySigned, massPilot[1]!]);
+  add("reject: a bundle signed over another digest (mass)", RECIPE.badlySigned);
+  add("reject: a stored failure bundle left out of the pinned set (mass)", RECIPE.massOmitted.input);
+  const exponent = await input(mass, await toBundles(scale({ value: "1e-7" }), mass));
+  add("reject: an exponent value (1e-7)", exponent);
+  RECIPE.exponent = exponent;
+  add("reject: a numeric observation with no value", await input(mass, await toBundles(scale({ value: undefined }), mass)));
+  add("reject: a value on a unit-none observation", await input(p, await toBundles(cam({ observation: { value: "3" } }), p)));
+  const frame = await input(p, await toBundles(cam({ observation: { sampleId: "frame-7" } }), p));
+  add("reject: a sampleId that is not a digest", frame);
+  RECIPE.frame = frame;
+  const reissue = "sha256:" + "c".repeat(64);
+  add(
+    "reject: one sample reissued, minSamples 2",
+    await input(two, await toBundles([...PRINTED, { ...PILOT[2]!, observation: { sampleId: reissue } }, { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true }, observation: { sampleId: reissue } }], two)),
+  );
+  add("reject: the primitive leg fails", await input(p, pilot, { verifyPrimitiveInstance: () => false }));
+  add(
+    "reject: a leg that writes to its frozen observation",
+    await input(p, pilot, {
+      verifyPrimitiveInstance: (_id, observation) => {
+        (observation.payload as Record<string, unknown>).passed = false;
+        return true;
+      },
+    }),
+  );
+  const otherCapture = await toBundles(
+    [...PRINTED, { ...PILOT[2]!, payload: { passed: true, captureHash: "sha256:" + "e".repeat(64) }, observation: { sampleId: captureHash } }],
+    p,
+  );
+  const otherCaptureInput = await input(p, otherCapture, { verifyPrimitiveInstance: capturesMatch });
+  add("reject: a leg that checks the capture, which is another", otherCaptureInput);
+  RECIPE.otherCapture = { input: otherCaptureInput, captureHash };
+
+  // reject: terms, governance, the input boundary
+  const term = async (label: string, change: (x: MeasurementProfileV1) => void) => {
+    const q = edit(change);
+    add(`reject: unverifiable ${label}`, await input(q, await toBundles(PILOT, q)));
+  };
+  await term("tolerance", (x) => (x.measurement.tolerance = { comparator: ">=", target: 0.9 }));
+  await term("primitive id", (x) => (x.interpretation.evidenceTypeIds = ["capture.no_such_primitive"]));
+  await term("device kind", (x) => (x.device.kind = "machine"));
+  await term("start condition", (x) => (x.capture.startCondition = "printer_warm"));
+  await term("wildcard pin", (x) => (x.device.permittedFirmwareVersions = ["*-unpinned-pilot"]));
+  const loosened = edit((x) => (x.interpretation.acceptanceLevel = "device_reported"));
+  add("reject: a profile changed after acceptance", await input(loosened, pilot, { committedDigest: computeMeasurementProfileDigest(p) }));
+  add("reject: a sha256:-family committed digest", await input(p, pilot, { committedDigest: `sha256:${computeMeasurementProfileDigest(p).slice(2)}` }));
+  add("reject: a proxy profile", await input(p, pilot, { profile: new Proxy({ ...p }, {}) as unknown as MeasurementProfileV1 }));
+  const accessorPair = await toBundles(PILOT, p);
+  Object.defineProperty((accessorPair[1]!.events[0] as { payload: object }).payload, "passed", nullDescriptor({ get: () => true, enumerable: true, configurable: true }));
+  const accessorDeep = await input(p, accessorPair, { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, accessorPair.map((b) => b.bundleHash)) });
+  add("reject: an accessor inside the bundles", accessorDeep);
+  RECIPE.accessorDeep = accessorDeep;
+  add("reject: no bundles", await input(p, []));
+
+  // hold
+  const held = (change: (x: MeasurementProfileV1) => void) => edit((x) => { change(x); x.onMissingData = "hold"; });
+  const hold2 = held((x) => (x.measurement.sampling.minSamples = 2));
+  add("hold: too few samples", await input(hold2, await toBundles(PILOT, hold2)));
+  const holdC = edit((x) => (x.onContradiction = "hold"));
+  add("hold: a contradiction", await input(holdC, await toBundles([...PILOT, FAILURE[0]!], holdC)));
+  const holdL = held(() => undefined);
+  add("hold: level not reached", await input(holdL, await toBundles(PRINTED, holdL)));
+  const holdPilot = await toBundles(PILOT, holdL);
+  add("hold: a bundle left out of the pin", await input(holdL, holdPilot, { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [...holdPilot.map((b) => b.bundleHash), (await toBundle(FAILURE, holdL)).bundleHash]) }));
+  add("hold: no bundles", await input(holdL, []));
+  // A malformed pin is invalid authority: it rejects even under onMissingData "hold" (a widened pin check would hold).
+  const notAPinHold = await input(holdL, holdPilot, { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
+  add("reject: a malformed pin under onMissingData hold", notAPinHold);
+  RECIPE.notAPinHold = notAPinHold;
+  CASES = cases;
+  const BINDING_REJECTS = [
+    "reject: evidence from another job",
+    "reject: evidence from another kernel",
+    "reject: a payload kernelId naming another kernel",
+    "reject: evidence for another settlement unit",
+    "reject: the challenge nonce not committed",
+    "reject: the output not committed",
+    "reject: another output committed",
+    "reject: an event altered after hashing",
+  ];
+  RECIPE.bindingRejects = BINDING_REJECTS.map((label) => {
+    const made = cases.find((c) => c[0] === label)![1];
+    return { label, input: made, events: structuredClone((made.bundles[0] as AdmissionBundle).events) };
+  });
+
+  const h1 = "sha256:" + "1".repeat(64);
+  const h2 = "sha256:" + "2".repeat(64);
+  const holey: string[] = [h1];
+  holey.length = 2;
+  DIGEST_CASES = [
+    ["digest: golden", { jobId: "job-golden-1", kernelId: "kernel-golden-1" }, [h2, h1, h2]],
+    ["digest: golden with a unit", { jobId: "job-golden-1", kernelId: "kernel-golden-1", settlementUnitId: "0x" + "ab".repeat(32) }, [h1, h2]],
+    ["digest: one hash", SUBJECT, [h1]],
+    ["digest: the pilot set", SUBJECT, [...pilotHashes, failure.bundleHash]],
+    ["digest: empty", SUBJECT, []],
+    ["digest: an entry that is not a digest", SUBJECT, [h1, "not-a-digest"]],
+    ["digest: a hole", SUBJECT, holey],
+  ];
+
+  const deliverAdmission = (label: string): Delivery => {
+    const made = cases.find((c) => c[0] === label)![1];
+    return ["admission", label, () => profileAdmitsBundle(made)];
+  };
+  DELIVERIES = [
+    deliverAdmission("reject: the signature fails"),
+    deliverAdmission("admit: the pilot, inspected_output"),
+    deliverAdmission("hold: too few samples"),
+    deliverAdmission("reject: a stored failure bundle left out of the pinned set"),
+    // The pilot bundle alone digests to a value in FORGE_FROM, so a forger has something to rewrite.
+    ["digest", "digest: the pilot bundles alone", () => computeBundleSetDigest(SUBJECT, pilotHashes)],
+    ["digest", "digest: golden", () => computeBundleSetDigest({ jobId: "job-golden-1", kernelId: "kernel-golden-1" }, [h2, h1, h2])],
+    ["digest", "digest: empty", () => computeBundleSetDigest(SUBJECT, [])],
+  ];
+  RECIPE.signatureFailsDelivery = DELIVERIES[0];
+
+  TERM_CASES = [
+    ["terms: a clean profile", inspectedPageProfile()],
+    ["terms: every term at once", edit((x) => {
+      x.measurement.tolerance = { comparator: ">=", target: 0.9 };
+      x.measurement.sampling = { minSamples: 1, maxIntervalMs: 1000 };
+      x.calibration = { required: true, procedureId: "cal-1", validityWindowSeconds: 3600 };
+      x.witnesses = { requiredRoles: ["inspector"], independentOfClaimant: true };
+      x.capture = { startCondition: "printer_warm", endCondition: "capture_complete", coverage: { policy: "continuous", minFraction: 0.9 } };
+      x.device.kind = "machine";
+      x.device.permittedAdapterVersions = ["*", CAMERA_VERSION];
+      x.device.permittedFirmwareVersions = ["fw-*"];
+      x.interpretation.evidenceTypeIds = ["capture.photo_nonced", "capture.no_such_primitive"];
+    })],
+    ["terms: one-shot below 1", edit((x) => (x.capture.coverage = { policy: "one-shot", minFraction: 0.5 }))],
+    ["terms: an open end", edit((x) => (x.capture.endCondition = "open"))],
+    ["terms: an unknown primitive", edit((x) => (x.interpretation.evidenceTypeIds = ["capture.no_such_primitive"]))],
+    ["terms: a wildcard firmware pin", edit((x) => (x.device.permittedFirmwareVersions = ["*-unpinned-pilot"]))],
+  ];
+
+  INHERITABLE_RECORD = defaultObservation(p, PILOT[2]!) as unknown as Record<string, unknown>;
+
+  // Accessors on the input itself, defined before any pollution, with null-prototype descriptors.
+  const accessorPin = { ...RECIPE.massOmitted.input } as Record<string, unknown>;
+  Object.defineProperty(accessorPin, "pinnedBundleSetDigest", nullDescriptor({ get: () => RECIPE.massOmitted.pin, enumerable: true, configurable: true }));
+  RECIPE.accessorPin = accessorPin as unknown as ProfileAdmissionInput;
+  const accessorRegistry = { ...RECIPE.badlySigned } as Record<string, unknown>;
+  Object.defineProperty(accessorRegistry, "registryKeys", nullDescriptor({ get: () => REGISTRY, enumerable: true, configurable: true }));
+  RECIPE.accessorRegistry = accessorRegistry as unknown as ProfileAdmissionInput;
+}
+
+// -- running items while a change is in place: index loops, literals and operators only --
+export type Row = [kind: string, label: string, value: unknown];
+
+function summarize(r: ProfileAdmissionResult): unknown {
+  const reasons: unknown[] = [];
+  const list = r.reasons;
+  for (let i = 0; i < list.length; i++) reasons[i] = [list[i]!.code, list[i]!.detail];
+  return { decision: r.decision, admits: r.admits, reached: r.reached, qualifyingSamples: r.qualifyingSamples, reasons };
+}
+
+function copyList(list: unknown): unknown {
+  if (typeof list !== "object" || list === null) return list;
+  const out: unknown[] = [];
+  const l = list as unknown[];
+  for (let i = 0; i < l.length; i++) out[i] = l[i];
+  return out;
+}
+
+async function admissionRow(label: string, made: ProfileAdmissionInput): Promise<Row> {
+  let value: unknown;
+  try {
+    value = summarize(await profileAdmitsBundle(made));
+  } catch {
+    value = "threw";
+  }
+  return ["admission", label, value];
+}
+
+type Shape = [name: string, consume: (p: Promise<unknown>) => Promise<unknown>];
+
+/**
+ * How callers consume a returned promise. Each shape USES the promise that `.then`, `.catch` or `.finally`
+ * returns, and awaits it: native `then` builds that promise with `promise.constructor[Symbol.species]`, so a
+ * forged species shows only there. (`viaThen` reads the result through a callback and discards that promise,
+ * which is how astra pack 187's species forgery went unseen.) A rejection reads "threw" in every shape, as in
+ * the direct rows, so a refusal stays a refusal.
+ */
+const SHAPES: Shape[] = [
+  [".then((x) => x)", (p) => p.then((x) => x)],
+  [".then((x) => x).then((y) => y)", (p) => p.then((x) => x).then((y) => y)],
+  ['.then(undefined, () => "threw")', (p) => p.then(undefined, () => "threw")],
+  ['.catch(() => "threw")', (p) => p.catch(() => "threw")],
+  [".finally(() => undefined)", (p) => p.finally(() => undefined)],
+];
+
+/** What a caller receives from `item`'s promise consumed through `shape`; an admission result is summarized. */
+async function deliveredRow(item: Delivery, shape: Shape): Promise<Row> {
+  let value: unknown;
+  try {
+    value = await shape[1](item[2]());
+  } catch {
+    value = "threw";
+  }
+  if (typeof value === "object" && value !== null && hasOwn(value, "decision")) value = summarize(value as ProfileAdmissionResult);
+  return [item[0], `${item[1]} | delivered as p${shape[0]}`, value];
+}
+
+/** Every delivery, through every shape. */
+async function deliveredRows(): Promise<Row[]> {
+  const rows: Row[] = [];
+  let n = 0;
+  for (let i = 0; i < DELIVERIES.length; i++) {
+    for (let s = 0; s < SHAPES.length; s++) rows[n++] = await deliveredRow(DELIVERIES[i]!, SHAPES[s]!);
+  }
+  return rows;
+}
+
+async function results(): Promise<Row[]> {
+  const rows: Row[] = [];
+  let n = 0;
+  for (let i = 0; i < CASES.length; i++) rows[n++] = await admissionRow(CASES[i]![0], CASES[i]![1]);
+  for (let i = 0; i < DIGEST_CASES.length; i++) {
+    let value: unknown;
+    try {
+      value = await computeBundleSetDigest(DIGEST_CASES[i]![1], DIGEST_CASES[i]![2]);
+    } catch {
+      value = "threw";
+    }
+    rows[n++] = ["digest", DIGEST_CASES[i]![0], value];
+  }
+  for (let i = 0; i < TERM_CASES.length; i++) {
+    let value: unknown;
+    try {
+      value = copyList(unverifiableProfileTerms(TERM_CASES[i]![1]));
+    } catch {
+      value = "threw";
+    }
+    rows[n++] = ["terms", TERM_CASES[i]![0], value];
+  }
+  const delivered = await deliveredRows();
+  for (let i = 0; i < delivered.length; i++) rows[n++] = delivered[i]!;
+  return rows;
+}
+
+// -- the changes --
+type Apply = () => () => void;
+
+function replace(target: object, key: PropertyKey, make: (original: any) => unknown): Apply {
+  return () => {
+    const original = ReflectGetOwnPropertyDescriptor(target, key)!;
+    const changed = nullDescriptor({ configurable: original.configurable, enumerable: original.enumerable, writable: original.writable, value: make(original.value) });
+    ReflectDefineProperty(target, key, changed);
+    return () => void ReflectDefineProperty(target, key, original);
+  };
+}
+
+/** node:crypto's CommonJS exports: what `require("node:crypto")` hands any code in the process. */
+const NODE_CRYPTO = createRequire(import.meta.url)("node:crypto") as object;
+
+/** `replace` on a builtin module's exports, synced into its ES module bindings (and synced back on undo). */
+function replaceBuiltin(target: object, key: PropertyKey, make: (original: any) => unknown): Apply {
+  return () => {
+    const undo = replace(target, key, make)();
+    syncBuiltinESMExports();
+    return () => {
+      undo();
+      syncBuiltinESMExports();
+    };
+  };
+}
+
+function replaceGetter(target: object, key: PropertyKey, make: (original: any) => () => unknown): Apply {
+  return () => {
+    const original = ReflectGetOwnPropertyDescriptor(target, key)!;
+    ReflectDefineProperty(target, key, nullDescriptor({ configurable: original.configurable, enumerable: original.enumerable, get: make(original.get), set: original.set }));
+    return () => void ReflectDefineProperty(target, key, original);
+  };
+}
+
+/** Write `values` onto Object.prototype (non-enumerable), as post-load code could. */
+function pollute(values: () => Record<string, unknown>): Apply {
+  return () => {
+    const v = values();
+    const keys = Object.keys(v);
+    for (let i = 0; i < keys.length; i++) {
+      ReflectDefineProperty(Object.prototype, keys[i]!, nullDescriptor({ value: v[keys[i]!], writable: true, configurable: true, enumerable: false }));
+    }
+    return () => {
+      for (let i = 0; i < keys.length; i++) ReflectDeleteProperty(Object.prototype, keys[i]!);
+    };
+  };
+}
+
+function both(a: Apply, b: Apply): Apply {
+  return () => {
+    const undoA = a();
+    const undoB = b();
+    return () => {
+      undoB();
+      undoA();
+    };
+  };
+}
+
+const HashPrototype = Object.getPrototypeOf(createHash("sha256")) as object;
+const ArrayIteratorPrototype = Object.getPrototypeOf([][Symbol.iterator]()) as object;
+const SubtleCryptoPrototype = Object.getPrototypeOf(globalThis.crypto.subtle) as object;
+const TypedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+
+function forged(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  for (let i = 0; i < FORGE_FROM.length; i++) if (FORGE_FROM[i] === v) return FORGE_TO[i];
+  return v;
+}
+
+/** Promise.prototype.then, forging a resolution it carries: a value in FORGE_FROM becomes its FORGE_TO. */
+function forgingThen(original: (this: Promise<unknown>, f?: unknown, r?: unknown) => unknown) {
+  return function (this: Promise<unknown>, f?: unknown, r?: unknown) {
+    const onFulfilled = typeof f === "function" ? (v: unknown) => (f as (x: unknown) => unknown)(forged(v)) : f;
+    return ReflectApply(original, this, [onFulfilled, r]);
+  };
+}
+
+const FORGED_ADMIT = () => ({ decision: "admit", admits: true, reached: "inspected_output", qualifyingSamples: 1, reasons: [] });
+
+/** What a forger swaps in: false becomes true, a carried digest becomes its FORGE_TO, an admission result admits. */
+function forgedAnything(v: unknown): unknown {
+  if (v === false) return true;
+  if (typeof v === "object" && v !== null && hasOwn(v, "decision")) return FORGED_ADMIT();
+  return forged(v);
+}
+
+/**
+ * A Promise[Symbol.species] as post-load code could install it. Native `then`, `catch` and `finally` build the
+ * promise they return with the species, and this one's promise resolves with what a forger wants
+ * (`forgedAnything`). It is a native promise, so code that discards that promise (an async function's
+ * resolution, a `then` called for its callbacks) runs on unchanged: astra pack 187's forgery, made transparent.
+ */
+function ForgingSpecies(executor: (resolve: (v: unknown) => void, reject: (e: unknown) => void) => void): Promise<unknown> {
+  let fulfil: (v: unknown) => void = () => undefined;
+  let fail: (e: unknown) => void = () => undefined;
+  const real = new PromiseAtLoad<unknown>((resolve, reject) => {
+    fulfil = resolve;
+    fail = reject;
+  });
+  executor(
+    (v) => fulfil(forgedAnything(v)),
+    (e) => fail(e),
+  );
+  return real;
+}
+
+/** A Promise.prototype method replaced: it runs as before, and what its promise delivers is forged on the way out. */
+function forgingAfter(original: (this: Promise<unknown>, ...args: unknown[]) => Promise<unknown>) {
+  return function (this: Promise<unknown>, ...args: unknown[]) {
+    return ReflectApply(PromiseThenAtLoad, ReflectApply(original, this, args), [forgedAnything]) as Promise<unknown>;
+  };
+}
+
+/** The events a forged binding answer carries, for the case being run. */
+let CURRENT_EVENTS: unknown[] | null = null;
+
+/**
+ * The admission result, read through the promise's own `.then` as a caller might, into a promise this harness
+ * made and gave its own `constructor`, so the harness's own `await` reads nothing on Promise.prototype.
+ * The promise `.then` returns is discarded here; the delivery shapes (SHAPES) use and await it.
+ */
+function viaThen(made: ProfileAdmissionInput): Promise<unknown> {
+  const settled = new PromiseAtLoad<unknown>((resolve) => {
+    profileAdmitsBundle(made).then((r) => resolve(summarize(r)), () => resolve("threw"));
+  });
+  // Not an async function's promise: the harness's own `await` on it must read its own constructor.
+  ReflectDefineProperty(settled, "constructor", nullDescriptor({ value: PromiseAtLoad }));
+  return settled;
+}
+
+/** Every scenario: an id, the change, and the items it runs (all of them unless named). */
+interface Scenario {
+  id: string;
+  apply: Apply;
+  items?: () => Promise<Row[]>;
+}
+
+const PATCH_ROWS: Array<[string, Apply]> = [
+  ["Array.prototype.map", replace(Array.prototype, "map", () => () => [])],
+  ["Array.prototype.filter", replace(Array.prototype, "filter", () => () => [])],
+  ["Array.prototype.some", replace(Array.prototype, "some", () => () => false)],
+  ["Array.prototype.every", replace(Array.prototype, "every", () => () => true)],
+  ["Array.prototype.includes", replace(Array.prototype, "includes", () => () => true)],
+  ["Array.prototype.indexOf", replace(Array.prototype, "indexOf", () => () => 2)],
+  ["Array.prototype.find", replace(Array.prototype, "find", () => () => undefined)],
+  ["Array.prototype.findIndex", replace(Array.prototype, "findIndex", () => () => -1)],
+  ["Array.prototype.join", replace(Array.prototype, "join", () => () => "")],
+  ["Array.prototype.push", replace(Array.prototype, "push", () => () => 0)],
+  ["Array.prototype.sort", replace(Array.prototype, "sort", (o) => function (this: unknown[]) { return ReflectApply(o, this, []).reverse(); })],
+  ["Array.prototype.slice", replace(Array.prototype, "slice", () => () => [])],
+  ["Array.prototype.concat", replace(Array.prototype, "concat", () => () => [])],
+  ["Array.prototype[Symbol.iterator]", replace(Array.prototype, Symbol.iterator, () => function* () {})],
+  ["%ArrayIteratorPrototype%.next", replace(ArrayIteratorPrototype, "next", () => () => ({ done: true, value: undefined }))],
+  ["Array.from", replace(Array, "from", () => () => [])],
+  ["Array.isArray", replace(Array, "isArray", () => () => false)],
+  ["Object.keys", replace(Object, "keys", () => () => [])],
+  ["Object.entries", replace(Object, "entries", () => () => [])],
+  ["Object.values", replace(Object, "values", () => () => [])],
+  ["Object.assign", replace(Object, "assign", () => (t: unknown) => t)],
+  ["Object.freeze", replace(Object, "freeze", () => (v: unknown) => v)],
+  ["Object.isFrozen", replace(Object, "isFrozen", () => () => true)],
+  ["Object.getOwnPropertyDescriptor", replace(Object, "getOwnPropertyDescriptor", () => () => undefined)],
+  ["Object.getPrototypeOf", replace(Object, "getPrototypeOf", () => () => null)],
+  ["Object.create", replace(Object, "create", () => () => ({}))],
+  ["Object.prototype.hasOwnProperty", replace(Object.prototype, "hasOwnProperty", () => () => true)],
+  ["Reflect.ownKeys", replace(Reflect, "ownKeys", () => () => [])],
+  ["JSON.stringify", replace(JSON, "stringify", () => () => '"x"')],
+  ["JSON.parse", replace(JSON, "parse", () => () => ({}))],
+  ["String", replace(globalThis, "String", () => () => "x")],
+  ["Number.isFinite", replace(Number, "isFinite", () => () => true)],
+  ["Date.parse", replace(Date, "parse", () => () => 0)],
+  ["Math.min", replace(Math, "min", () => () => -Infinity)],
+  ["Math.max", replace(Math, "max", () => () => Infinity)],
+  ["Set.prototype.has", replace(Set.prototype, "has", () => () => false)],
+  ["Set.prototype.add", replace(Set.prototype, "add", () => function (this: unknown) { return this; })],
+  ["Set.prototype.size", replaceGetter(Set.prototype, "size", () => () => 1)],
+  ["Map.prototype.get", replace(Map.prototype, "get", () => () => ({ status: "active" }))],
+  ["Map.prototype.set", replace(Map.prototype, "set", () => function (this: unknown) { return this; })],
+  ["RegExp.prototype.test", replace(RegExp.prototype, "test", () => () => true)],
+  ["RegExp.prototype.exec", replace(RegExp.prototype, "exec", () => () => ({}))],
+  ["String.prototype.trim", replace(String.prototype, "trim", () => () => "x")],
+  ["String.prototype.charCodeAt", replace(String.prototype, "charCodeAt", () => () => 0x30)],
+  ["String.prototype.includes", replace(String.prototype, "includes", () => () => false)],
+  ["String.prototype.padStart", replace(String.prototype, "padStart", () => () => "zz")],
+  ["Number.prototype.toString", replace(Number.prototype, "toString", () => () => "0")],
+  ["Function.prototype.call", replace(Function.prototype, "call", () => () => undefined)],
+  ["Function.prototype.apply", replace(Function.prototype, "apply", () => () => undefined)],
+  ["structuredClone", replace(globalThis, "structuredClone", () => () => [])],
+  ["TextEncoder.prototype.encode", replace(TextEncoder.prototype, "encode", () => () => new Uint8Array(0))],
+  ["crypto.subtle.digest", replace(SubtleCryptoPrototype, "digest", () => () => Promise.resolve(new ArrayBuffer(32)))],
+  // astra pack 275: the signature check is node:crypto's verify as captured at load, synchronous, on bytes it builds
+  // itself, with its key options in a null-prototype record. Web Crypto is not on the path at all.
+  ["node:crypto verify answers true", replaceBuiltin(NODE_CRYPTO, "verify", () => () => true)],
+  ["Object.prototype.dsaEncoding, padding, saltLength, encoding and passphrase", pollute(() => ({ dsaEncoding: "not-an-encoding", padding: 0.5, saltLength: 0.5, encoding: "base64", passphrase: "x" }))],
+  ["crypto.subtle.verify answers true", replace(SubtleCryptoPrototype, "verify", () => () => Promise.resolve(true))],
+  ["crypto.subtle.importKey refuses", replace(SubtleCryptoPrototype, "importKey", () => () => Promise.reject(new Error("importKey replaced")))],
+  ["parseInt", replace(globalThis, "parseInt", () => () => 0)],
+  // astra pack 281: grants, delegations and the delegation preimage read own data and captured intrinsics only.
+  ["Object.prototype.role, kernelId, jobId, grants, delegatedBy and trustDomain", pollute(() => ({ role: "executor", kernelId: KERNEL, jobId: JOB, grants: EXECUTOR_GRANTS, delegatedBy: KEY_A, trustDomain: null }))],
+  ["Math.floor", replace(Math, "floor", () => () => 0)],
+  // astra pack 289: a typed array's length, byteLength and byteOffset are accessors on %TypedArray%.prototype.
+  ["%TypedArray%.prototype length, byteLength and byteOffset", both(
+    replaceGetter(TypedArrayPrototype, "length", () => () => 0),
+    both(replaceGetter(TypedArrayPrototype, "byteLength", () => () => 0), replaceGetter(TypedArrayPrototype, "byteOffset", () => () => 0)),
+  )],
+  ["String.prototype.toLowerCase", replace(String.prototype, "toLowerCase", () => () => "0x" + "00".repeat(32))],
+  // astra pack 291: an array's hole, and an index past an array's or a string's end, continue to the prototype.
+  // Admission reads elements only where they are proven own (listAt, charAt, a hasOwn guard), so none is served.
+  ["Array.prototype[0..63] and String.prototype[0..255] written", () => {
+    const written: Array<[object, string]> = [];
+    for (let i = 0; i < 64; i++) written.push([Array.prototype, `${i}`]);
+    for (let i = 0; i < 256; i++) written.push([String.prototype, `${i}`]);
+    for (let i = 0; i < written.length; i++) {
+      const [target, key] = written[i]!;
+      const value = target === Array.prototype ? "sha256:" + "3".repeat(64) : "Z";
+      ReflectDefineProperty(target, key, nullDescriptor({ value, writable: true, configurable: true, enumerable: false }));
+    }
+    return () => {
+      for (let i = 0; i < written.length; i++) ReflectDeleteProperty(written[i]![0], written[i]![1]);
+    };
+  }],
+  ["Hash.prototype.update", replace(HashPrototype, "update", (o) => function (this: unknown) { return ReflectApply(o, this, ["tampered"]); })],
+  ["Hash.prototype.digest", replace(HashPrototype, "digest", () => () => "0".repeat(64))],
+  ["Promise.prototype.then, forging a carried digest", replace(Promise.prototype, "then", forgingThen)],
+  ["Promise.prototype.constructor", replace(Promise.prototype, "constructor", () => function NotPromise() {})],
+  // astra pack 187: a configurable accessor on the global Promise, read by every native then, catch and finally.
+  ["Promise[Symbol.species]", replaceGetter(Promise, Symbol.species, () => () => ForgingSpecies)],
+  ["Promise.prototype.catch", replace(Promise.prototype, "catch", forgingAfter)],
+  ["Promise.prototype.finally", replace(Promise.prototype, "finally", forgingAfter)],
+  ["Object.prototype.passed = true", pollute(() => ({ passed: true }))],
+  ["Object.prototype.value = \"12.5\"", pollute(() => ({ value: "12.5" }))],
+  ["Object.prototype.adapterVersion and firmwareVersion", pollute(() => ({ adapterVersion: CAMERA_VERSION, firmwareVersion: "cam-fw-2.1.0" }))],
+  ["Object.prototype.deviceId", pollute(() => ({ deviceId: PRINTER }))],
+  ["Object.prototype.settlementUnitId", pollute(() => ({ settlementUnitId: UNIT }))],
+  ["Object.prototype.profileObservation", pollute(() => ({ [PROFILE_OBSERVATION_FIELD]: INHERITABLE_RECORD }))],
+  ["Object.prototype.passed = false", pollute(() => ({ passed: false }))],
+  ["Object.prototype.simulated = true", pollute(() => ({ simulated: true }))],
+  ["Object.prototype.value = true", pollute(() => ({ value: true }))],
+  ["Array.prototype[1] = a tagged digest", () => {
+    ReflectDefineProperty(Array.prototype, "1", nullDescriptor({ value: "sha256:" + "3".repeat(64), writable: true, configurable: true, enumerable: false }));
+    return () => void ReflectDeleteProperty(Array.prototype, "1");
+  }],
+  ["Object.prototype.mock = true", pollute(() => ({ mock: true }))],
+];
+
+/** Exported data admission or evidence-level read: each written as post-load code could; a frozen one refuses. */
+function mutate(change: () => () => void): Apply {
+  return () => {
+    try {
+      return change();
+    } catch {
+      return () => undefined;
+    }
+  };
+}
+const pushOnto = (list: readonly unknown[], value: unknown) => () => {
+  (list as unknown[]).push(value);
+  return () => void (list as unknown[]).pop();
+};
+const DATA_ROWS: Array<[string, Apply]> = [
+  ["DEVICE_REPORTED_EVENT_TYPES += printer_job_verified", mutate(pushOnto(DEVICE_REPORTED_EVENT_TYPES, "printer_job_verified"))],
+  ["SUBMITTED_EVENT_TYPES += cv_inspection_result", mutate(pushOnto(SUBMITTED_EVENT_TYPES, "cv_inspection_result"))],
+  ["INSPECTION_EVENT_TYPES += execution_completed", mutate(pushOnto(INSPECTION_EVENT_TYPES, "execution_completed"))],
+  ["NO_OUTCOME_LEVEL_EVENT_TYPES += cv_inspection_result", mutate(pushOnto(NO_OUTCOME_LEVEL_EVENT_TYPES, "cv_inspection_result"))],
+  ["EXECUTION_EVENT_TYPES += cv_inspection_result", mutate(pushOnto(EXECUTION_EVENT_TYPES, "cv_inspection_result"))],
+  ["EXECUTION_EVENT_TYPES[0] = cv_inspection_result", mutate(() => {
+    const list = EXECUTION_EVENT_TYPES as unknown as string[];
+    const before = list[0];
+    list[0] = "cv_inspection_result";
+    return () => void (list[0] = before!);
+  })],
+  ["EVIDENCE_LEVELS += vibes", mutate(pushOnto(EVIDENCE_LEVELS, "vibes"))],
+  ["EVIDENCE_EVENT_TYPES += printer_warm", mutate(pushOnto(EVIDENCE_EVENT_TYPES, "printer_warm"))],
+  ["EVIDENCE_DEVICE_TYPES += machine", mutate(pushOnto(EVIDENCE_DEVICE_TYPES, "machine"))],
+  ["EVIDENCE_PRIMITIVES += an active capture.no_such_primitive", mutate(pushOnto(EVIDENCE_PRIMITIVES, { ...EVIDENCE_PRIMITIVES[0]!, id: "capture.no_such_primitive", status: "active" }))],
+  ["EVIDENCE_PRIMITIVES capture.photo_nonced status = deprecated", mutate(() => {
+    let def: { status: string } | undefined;
+    for (let i = 0; i < EVIDENCE_PRIMITIVES.length; i++) if (EVIDENCE_PRIMITIVES[i]!.id === "capture.photo_nonced") def = EVIDENCE_PRIMITIVES[i] as unknown as { status: string };
+    const before = def!.status;
+    def!.status = "deprecated";
+    return () => void (def!.status = before);
+  })],
+];
+
+/** Targeted recipes: changes a generic replacement cannot express. Each runs its own items. */
+const one = (label: string, made: () => ProfileAdmissionInput) => async (): Promise<Row[]> => [await admissionRow(label, made())];
+
+const RECIPES: Scenario[] = [
+  {
+    // astra pack 167: RegExp.prototype.compile rewrites a RegExp's matcher in place, frozen or not.
+    id: "recipe: DECIMAL_VALUE_PATTERN recompiled to .*",
+    apply: () => {
+      const pattern = (admissionModule as Record<string, unknown>).DECIMAL_VALUE_PATTERN;
+      if (!(pattern instanceof RegExp)) return () => undefined;
+      const source = pattern.source;
+      pattern.compile(".*");
+      return () => void pattern.compile(source);
+    },
+    items: one("an exponent value (1e-7)", () => RECIPE.exponent),
+  },
+  {
+    id: "recipe: TAGGED_DIGEST_PATTERN (signing-preimage.ts) recompiled to .*",
+    apply: () => {
+      const source = TAGGED_DIGEST_PATTERN.source;
+      TAGGED_DIGEST_PATTERN.compile(".*");
+      return () => void TAGGED_DIGEST_PATTERN.compile(source);
+    },
+    items: async () => [
+      await admissionRow("a sampleId that is not a digest", RECIPE.frame),
+      await admissionRow("a pin that is not a digest", RECIPE.notAPin),
+      await admissionRow("a malformed pin under onMissingData hold", RECIPE.notAPinHold),
+    ],
+  },
+  {
+    // astra pack 162's HIGH: `"value" in descriptor` consults Object.prototype. The accessor is
+    // defined (null-prototype descriptor) before the pollution is written.
+    id: "recipe: Object.prototype.value written; an accessor pin on the input",
+    apply: pollute(() => ({ value: RECIPE.massOmitted.presented })),
+    items: one("an accessor pin, a stored failure bundle left out", () => RECIPE.accessorPin),
+  },
+  {
+    id: "recipe: Object.prototype.value written; an accessor registry on the input",
+    apply: pollute(() => ({ value: REGISTRY })),
+    items: one("an accessor registry, a bundle signed over another digest", () => RECIPE.accessorRegistry),
+  },
+  {
+    id: "recipe: Object.prototype.value written; an accessor deep in the bundles (codeInData)",
+    apply: pollute(() => ({ value: true })),
+    items: one("an accessor deep in the bundles", () => RECIPE.accessorDeep),
+  },
+  {
+    // unverifiableProfileTerms is exported: a caller may pass an ordinary object. It reads own data only, so a
+    // term written on Object.prototype is never taken for the profile's (identical, not merely more terms).
+    id: "recipe: Object.prototype.tolerance and maxIntervalMs written; unverifiableProfileTerms on an ordinary profile",
+    apply: pollute(() => ({ tolerance: { comparator: ">=", target: 1 }, maxIntervalMs: 5 })),
+    items: async () => {
+      const rows: Row[] = [];
+      for (let i = 0; i < TERM_CASES.length; i++) {
+        let value: unknown;
+        try {
+          value = copyList(unverifiableProfileTerms(TERM_CASES[i]![1]));
+        } catch {
+          value = "threw";
+        }
+        rows[i] = ["terms", TERM_CASES[i]![0], value];
+      }
+      return rows;
+    },
+  },
+  {
+    id: "recipe: Promise.prototype.then forges the presented set digest",
+    apply: replace(Promise.prototype, "then", forgingThen),
+    items: async () => {
+      let digest: unknown;
+      try {
+        digest = await computeBundleSetDigest(SUBJECT, RECIPE.omitted.pilotHashes);
+      } catch {
+        digest = "threw";
+      }
+      return [["digest", "the presented set", digest], await admissionRow("a stored failure bundle left out", RECIPE.omitted.input)];
+    },
+  },
+  {
+    id: "recipe: Promise.prototype.then forges binding's bundle hash",
+    apply: replace(Promise.prototype, "then", forgingThen),
+    items: one("an inspection re-hashed after signing", () => RECIPE.tampered.input),
+  },
+  {
+    // `await` reads a promise's constructor; with it replaced, every await resolves through `then`.
+    id: "recipe: Promise.prototype.constructor and then forge a leg's false, a digest and a result",
+    apply: both(
+      replace(Promise.prototype, "constructor", () => function NotPromise() {}),
+      replace(Promise.prototype, "then", (original) => function (this: Promise<unknown>, f?: unknown, r?: unknown) {
+        const onFulfilled = typeof f === "function" ? (v: unknown) => (f as (x: unknown) => unknown)(forgedAnything(v)) : f;
+        return ReflectApply(original, this, [onFulfilled, r]);
+      }),
+    ),
+    items: async () => {
+      let digest: unknown;
+      try {
+        digest = await computeBundleSetDigest(SUBJECT, RECIPE.omitted.pilotHashes);
+      } catch {
+        digest = "threw";
+      }
+      const rows: Row[] = [
+        await admissionRow("the signature fails", RECIPE.signatureFails),
+        await admissionRow("an async primitive leg answers false", RECIPE.asyncPrimitiveFails),
+        await admissionRow("a stored failure bundle left out", RECIPE.omitted.input),
+        ["digest", "the presented set", digest],
+        ["admission", "the result read through .then", await viaThen(RECIPE.signatureFails)],
+      ];
+      // The promise `.then` returns, awaited: with `constructor` and `then` replaced, an unpinned one resolves through the forger.
+      let n = rows.length;
+      for (let s = 0; s < SHAPES.length; s++) rows[n++] = await deliveredRow(RECIPE.signatureFailsDelivery, SHAPES[s]!);
+      return rows;
+    },
+  },
+  {
+    // astra pack 187, verbatim: Promise[Symbol.species] replaced with a constructor that calls its executor with
+    // two no-op functions and returns a thenable resolving with a forged admission. Every delivery, every shape.
+    id: "recipe: Promise[Symbol.species] builds a forged thenable (astra pack 187)",
+    apply: () => {
+      const original = ReflectGetOwnPropertyDescriptor(Promise, Symbol.species)!;
+      ReflectDefineProperty(
+        Promise,
+        Symbol.species,
+        nullDescriptor({
+          configurable: true,
+          value: function Forged(executor: (resolve: () => void, reject: () => void) => void) {
+            executor(
+              () => undefined,
+              () => undefined,
+            );
+            return {
+              then(resolve: (v: unknown) => void) {
+                resolve(FORGED_ADMIT());
+              },
+            };
+          },
+        }),
+      );
+      return () => void ReflectDefineProperty(Promise, Symbol.species, original);
+    },
+    items: deliveredRows,
+  },
+  {
+    // binding's failure is resolved as an ordinary object: a `then` on Object.prototype can turn it into ok.
+    id: "recipe: Object.prototype.then forges binding's failure into ok, with the presented events",
+    apply: () => {
+      const install = (): void =>
+        void ReflectDefineProperty(Object.prototype, "then", nullDescriptor({
+          configurable: true,
+          writable: true,
+          value: function (this: object, resolve: (v: unknown) => void) {
+            ReflectDeleteProperty(Object.prototype, "then");
+            try {
+              const forgeIt = hasOwn(this, "ok") && (this as { ok: unknown }).ok === false && CURRENT_EVENTS !== null;
+              resolve(forgeIt ? { ok: true, events: CURRENT_EVENTS } : this);
+            } finally {
+              install();
+            }
+          },
+        }));
+      install();
+      return () => void ReflectDeleteProperty(Object.prototype, "then");
+    },
+    items: async () => {
+      const rows: Row[] = [];
+      const list = RECIPE.bindingRejects as Array<{ label: string; input: ProfileAdmissionInput; events: unknown[] }>;
+      for (let i = 0; i < list.length; i++) {
+        CURRENT_EVENTS = list[i]!.events;
+        rows[i] = await admissionRow(list[i]!.label, list[i]!.input);
+      }
+      CURRENT_EVENTS = null;
+      return rows;
+    },
+  },
+  {
+    id: "recipe: Object.prototype.then forges the result admission resolves with",
+    apply: () => {
+      const install = (): void =>
+        void ReflectDefineProperty(Object.prototype, "then", nullDescriptor({
+          configurable: true,
+          writable: true,
+          value: function (this: object, resolve: (v: unknown) => void) {
+            ReflectDeleteProperty(Object.prototype, "then");
+            try {
+              resolve(hasOwn(this, "decision") ? FORGED_ADMIT() : this);
+            } finally {
+              install();
+            }
+          },
+        }));
+      install();
+      return () => void ReflectDeleteProperty(Object.prototype, "then");
+    },
+    // Directly, and through every delivery shape: a derived promise is resolved with the result too.
+    items: async () => {
+      const rows: Row[] = [await admissionRow("the signature fails", RECIPE.signatureFails)];
+      for (let s = 0; s < SHAPES.length; s++) rows[s + 1] = await deliveredRow(RECIPE.signatureFailsDelivery, SHAPES[s]!);
+      return rows;
+    },
+  },
+  {
+    id: "recipe: Array.prototype.sort swaps a re-hashed event back into the signed list",
+    apply: replace(Array.prototype, "sort", (original) => function (this: unknown[], ...args: unknown[]) {
+      const out = ReflectApply(original, this, args) as unknown[];
+      for (let i = 0; i < out.length; i++) if (out[i] === RECIPE.tampered.tamperedHash) out[i] = RECIPE.tampered.originalHash;
+      return ReflectApply(original, out, args);
+    }),
+    items: one("an inspection re-hashed after signing", () => RECIPE.tampered.input),
+  },
+  {
+    id: "recipe: JSON.parse answers a passing verdict for a signed failure",
+    apply: replace(JSON, "parse", (original) => function (s: string, reviver?: unknown) {
+      const v = ReflectApply(original, JSON, [s, reviver]);
+      if (s === RECIPE.genuineFailure.text) (v as { payload: Record<string, unknown> }).payload.passed = true;
+      return v;
+    }),
+    items: one("a failed inspection, genuine", () => RECIPE.genuineFailure.input),
+  },
+  {
+    id: "recipe: structuredClone hands the primitive leg a capture that matches",
+    apply: replace(globalThis, "structuredClone", (original) => (v: unknown, o?: unknown) => {
+      const out = original(v, o) as Array<{ payload?: Record<string, unknown> }>;
+      for (let i = 0; i < out.length; i++) {
+        const payload = out[i]?.payload;
+        if (payload !== undefined && payload.captureHash !== undefined) payload.captureHash = RECIPE.otherCapture.captureHash;
+      }
+      return out;
+    }),
+    items: one("a leg that checks the capture, which is another", () => RECIPE.otherCapture.input),
+  },
+];
+
+export const SCENARIOS: Scenario[] = [
+  ...PATCH_ROWS.map(([label, apply]) => ({ id: `patch: ${label}`, apply })),
+  ...DATA_ROWS.map(([label, apply]) => ({ id: `data: ${label}`, apply })),
+  ...RECIPES,
+];
+
+// -- main --
+const HANG_MS = 20_000;
+
+function write(line: unknown): void {
+  process.stdout.write(`${JSON.stringify(line)}\n`);
+}
+
+async function main(): Promise<void> {
+  const id = process.argv[2];
+  if (id === "--list") {
+    write(SCENARIOS.map((s) => s.id));
+    return;
+  }
+  const scenario = SCENARIOS.find((s) => s.id === id);
+  if (scenario === undefined) throw new Error(`no scenario ${JSON.stringify(id)}`);
+  await buildCases();
+  const items = scenario.items ?? results;
+  const clean = await items();
+  let restored = false;
+  let undo: () => void = () => undefined;
+  const restore = () => {
+    if (!restored) {
+      restored = true;
+      undo();
+    }
+  };
+  const watchdog = setTimeoutAtLoad(() => {
+    restore();
+    write({ scenario: id, clean, hung: true });
+    process.exit(0);
+  }, HANG_MS);
+  let patched: unknown;
+  try {
+    undo = scenario.apply();
+    patched = await items();
+  } catch (err) {
+    patched = `the scenario threw: ${String(err)}`;
+  } finally {
+    restore();
+  }
+  clearTimeoutAtLoad(watchdog);
+  write({ scenario: id, clean, patched });
+}
+
+// Run only when invoked as a script (tsx admission-realm.ts ...), never when imported.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { canonicalize, hashEvent } from "../util/canonical.js";
-import { computeBundleSetDigest, DECIMAL_VALUE_PATTERN } from "../evidence/profile-admission.js";
+import { computeBundleSetDigest, isDecimalValue } from "../evidence/profile-admission.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
 const MODULE = fileURLToPath(new URL("../../../pcc-node/pcc_node/log_capture.py", import.meta.url));
@@ -126,7 +126,7 @@ describe("profile observation event hash: Python and TS agree (evidence #3419)",
   });
 
   it("the value is a decimal string because a JSON float would split the hash between producers", () => {
-    expect(EVENT.payload.profileObservation.value).toMatch(DECIMAL_VALUE_PATTERN);
+    expect(isDecimalValue(EVENT.payload.profileObservation.value)).toBe(true);
     // The same reading as a float canonicalizes differently in the two languages.
     expect(canonicalize({ v: 1e-7 })).toBe('{"v":1e-7}');
     expect(python().float).toBe('{"v":1e-07}');

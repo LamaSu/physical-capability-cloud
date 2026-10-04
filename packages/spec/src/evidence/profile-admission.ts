@@ -14,7 +14,7 @@
  *     passes a subset (for example the first bundle that verifies) gets
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
  *   - SIGNATURE, run here: every bundle's Ed25519 signature over its
- *     `bundleHash` (`signingPreimage`) verifies, through Web Crypto, under the
+ *     `bundleHash` (`signingPreimage`) verifies, through node:crypto, under the
  *     key its declared signer names in ONE pinned registry snapshot
  *     (`registryKeys`, bound by `pinnedRegistryDigest`, see
  *     `computeRegistryDigest`). A signer id is 0x and the key's first 40 hex
@@ -143,8 +143,8 @@
  *     from a trust domain independent of every executor. An event present in
  *     several bundles counts at the HIGHEST level any of its occurrences gets,
  *     each levelled by its own bundle, exactly as #345 does (steward #6623,
- *     evidence #6559): with one domain per signer (the pinned snapshot), only a
- *     copy in a truly independent signer's bundle can lift it;
+ *     evidence #6559): with one domain per key (the pinned registry), only a
+ *     copy in a truly independent key's bundle can lift it;
  *   - if it is an inspection, carries its own positive verdict: evidence's
  *     pinned verdict field (`inspectionVerdict` is pass: cv_inspection_result
  *     `passed: true`, instrument_result `pass: true`, batch_sample_result
@@ -222,7 +222,63 @@
  *   simulationProhibited             applied: any fabricated event rejects
  *   witnesses.requiredRoles          non-empty fails closed; independentOfClaimant
  *                                    only applies to required roles
+ *
+ * NOTHING THAT RUNS AFTER LOAD CHANGES A DECISION, A DIGEST OR A RETURNED VALUE
+ * (#363 round 9, steward #5186: the realm-mutation class of astra packs 162,
+ * 164, 167, 170 and 171).
+ *   - This module calls only intrinsics captured when util/primordials.ts
+ *     loads, plain loops and operators: never a method looked up on a prototype
+ *     or a global at the time of the call, never the iterator protocol, never
+ *     `in`, never a RegExp. Formats are checked code unit by code unit
+ *     (`isDecimalValue`, `isTaggedSha256`, `isOperatorPrincipalId`):
+ *     RegExp.prototype.compile rewrites a RegExp in place, frozen or not
+ *     (pack 167).
+ *   - Its sets are null-prototype records built at load, the vocabulary's
+ *     active primitives included (primitives.ts's defs are exported, mutable
+ *     objects), and its exported data is frozen.
+ *   - Everything it evaluates is its own plain-data copy, with no prototype at
+ *     any depth, so a value written on Object.prototype is never read as the
+ *     input's. The input boundary reads descriptors through their own
+ *     properties: `"value" in descriptor` would also find one written on
+ *     Object.prototype and pass an accessor off as data (pack 162).
+ *   - The hash, for the bundle-set digest and the binding re-check, is
+ *     node:crypto's SHA-256 with its methods captured at load, as in
+ *     measurement-profile.ts, byte-identical to util/canonical.ts `sha256`.
+ *   - The binding leg (`verifyEvidenceSubjectBinding`, the evidence lane's
+ *     subject-binding.ts) is not built this way yet: it hashes through
+ *     Array.prototype methods, JSON.parse, crypto.subtle and promise
+ *     resolutions looked up at call time. Its answer is therefore re-verified
+ *     here before anything it returns is evaluated: each event re-hashed, the
+ *     bundle hash recomputed, and every subject commitment checked again, with
+ *     the captured hash and own reads. The re-check can only refuse more.
+ *   - Promises: `await` reads a promise's `constructor`, a resolution looks up
+ *     `then`, and a native `then` builds the promise it returns with
+ *     `constructor[Symbol.species]`. Every promise returned
+ *     (`profileAdmitsBundle`, `computeBundleSetDigest`) is an `ownPromise`:
+ *     its own `then`, `catch` and `finally` are the ones captured at load and
+ *     its species is pinned, so every promise a caller derives from it is
+ *     pinned too, at any depth (astra pack 187). The binding leg's promise is
+ *     awaited through `awaitedHere`, so that `await` reads only its own
+ *     `constructor` and looks nothing up on the answer. The primitive leg's
+ *     promise is followed through the `then` captured at load
+ *     (`fulfillsWithTrue`). The signatures are checked synchronously, through
+ *     node:crypto's `verify` as captured at load, on bytes built here code
+ *     unit by code unit (the key's SPKI, the signature hex, the tagged
+ *     digest's ASCII), never through TextEncoder, parseInt or a string method
+ *     (astra pack 275). No promise is on that path: Web Crypto resolves
+ *     importKey with a CryptoKey object, and that resolution would look `then`
+ *     up on Object.prototype.
+ *     The result is a null-prototype object, so a `then` written on
+ *     Object.prototype cannot take over its resolution.
+ * The boundary, named honestly: the verification callback is the caller's
+ * trusted code (the primitive leg's answer must be true, false or a native
+ * promise; any other thenable is refused). A realm whose intrinsics were replaced BEFORE
+ * @pcc/spec loaded is out of scope: no in-process check can tell. Anything
+ * replaced after load can make admission refuse, or, for a promise that never
+ * settles, never answer; it cannot change an acceptance or a value.
  */
+
+import { createHash, verify } from "node:crypto";
 
 import { isFabricated } from "./is-fabricated.js";
 import {
@@ -239,23 +295,54 @@ import {
   type EventLevel,
   type EvidenceLevel,
 } from "./evidence-level.js";
-import { parseOperatorPrincipalId } from "./principal-id.js";
 import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
-// The trap-free proxy check, loaded at runtime (no static node:util import, so browser bundles of @pcc/spec build).
+// The trap-free proxy check: util/plain-data.ts binds Node's own from node:util when it loads.
 import { isProxy } from "../util/plain-data.js";
-import { getPrimitive } from "./primitives.js";
-import {
-  isTaggedDigest,
-  parseEd25519PublicKeyHex,
-  parseEd25519SignatureHex,
-  sessionKeyDelegationPreimage,
-  signingPreimage,
-} from "./signing-preimage.js";
+import { EVIDENCE_PRIMITIVES } from "./primitives.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "./subject-binding.js";
-import type { SessionAction, SessionKey } from "../identity/ephemeral.js";
 import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, type EvidenceEvent, type SessionKeyAuthorization } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
-import { canonicalize, sha256 } from "../util/canonical.js";
+import { canonicalize } from "../util/canonical.js";
+import {
+  append,
+  ArrayIsArray,
+  ArrayPrototype,
+  awaitedHere,
+  charCodeAt,
+  DateParse,
+  deepFreeze,
+  defineIndex,
+  ErrorCtor,
+  fulfillsWithTrue,
+  hasOwn,
+  includesValue,
+  inSet,
+  isHex256Digest,
+  isTaggedSha256,
+  joinStrings,
+  JSONStringify,
+  mapList,
+  newList,
+  NumberIsFinite,
+  NumberIsInteger,
+  ObjectCreate,
+  ObjectFreeze,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectGetPrototypeOf,
+  ObjectKeys,
+  ownDataValue,
+  ownPromise,
+  PromiseCtor,
+  ReflectOwnKeys,
+  sortedStrings,
+  StringCtor,
+  stringSet,
+  StructuredClone,
+  Uint8ArrayCtor,
+  uncurryThis,
+  charAt,
+  listAt,
+} from "../util/primordials.js";
 
 export const PROFILE_ADMISSION_CONTRACT = "pcc.evidence.profile-admission.v1";
 
@@ -274,8 +361,100 @@ export const REGISTRY_SNAPSHOT_DOMAIN = "PCC:evidence-registry-snapshot:v2";
 /** The payload field that carries a qualifying observation's record. */
 export const PROFILE_OBSERVATION_FIELD = "profileObservation";
 
-/** An observation's `value`: a plain decimal, no exponent, no leading zeros, no "+". */
-export const DECIMAL_VALUE_PATTERN = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?$/;
+function isDigit(unit: number): boolean {
+  return unit >= 0x30 && unit <= 0x39;
+}
+
+/**
+ * An observation's `value`: a plain decimal string, exactly
+ * `^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`. An optional minus, an integer part with no
+ * leading zero, and an optional fraction of at least one digit: no exponent,
+ * no "+", no whitespace, ASCII digits only. False for anything that is not a
+ * string. A predicate, not an exported RegExp, checked code unit by code
+ * unit: RegExp.prototype.compile rewrites a RegExp's matcher in place after
+ * load, frozen or not (astra pack 167; this replaces DECIMAL_VALUE_PATTERN).
+ */
+export function isDecimalValue(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const n = value.length;
+  let i = 0;
+  if (i < n && charCodeAt(value, i) === 0x2d) i++; // "-"
+  if (i >= n) return false;
+  const first = charCodeAt(value, i);
+  if (first === 0x30) {
+    i++; // a lone "0": no leading zero
+  } else if (first >= 0x31 && first <= 0x39) {
+    i++;
+    while (i < n && isDigit(charCodeAt(value, i))) i++;
+  } else {
+    return false;
+  }
+  if (i === n) return true;
+  if (charCodeAt(value, i) !== 0x2e) return false; // "."
+  i++;
+  if (i >= n) return false; // a fraction needs a digit
+  for (; i < n; i++) if (!isDigit(charCodeAt(value, i))) return false;
+  return true;
+}
+
+const OPERATOR_PRINCIPAL_PREFIX = "eip155:";
+/** Number.MAX_SAFE_INTEGER as decimal digits. */
+const MAX_SAFE_INTEGER_DIGITS = "9007199254740991";
+
+/**
+ * An operator principal id, the operator form of pcc.evidence.principal-id.v1:
+ * exactly what principal-id.ts `parseOperatorPrincipalId` accepts
+ * (`^eip155:([1-9][0-9]*):0x([0-9a-f]{40})$` with a safe-integer chain id). A
+ * predicate checked code unit by code unit, not that RegExp (pack 167);
+ * evidence-level.ts keeps the same predicate privately, and a test holds this
+ * one equal to parseOperatorPrincipalId.
+ */
+export function isOperatorPrincipalId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const n = value.length;
+  const prefix = OPERATOR_PRINCIPAL_PREFIX.length;
+  if (n < prefix) return false;
+  for (let i = 0; i < prefix; i++) {
+    if (charCodeAt(value, i) !== charCodeAt(OPERATOR_PRINCIPAL_PREFIX, i)) return false;
+  }
+  let i = prefix;
+  if (i >= n) return false;
+  const first = charCodeAt(value, i);
+  if (first < 0x31 || first > 0x39) return false; // [1-9]: no leading zero
+  const chainStart = i;
+  while (i < n && isDigit(charCodeAt(value, i))) i++;
+  const chainDigits = i - chainStart;
+  if (i + 3 + 40 !== n) return false;
+  if (charCodeAt(value, i) !== 0x3a || charCodeAt(value, i + 1) !== 0x30 || charCodeAt(value, i + 2) !== 0x78) return false; // ":0x"
+  for (i += 3; i < n; i++) {
+    const unit = charCodeAt(value, i);
+    if (!(isDigit(unit) || (unit >= 0x61 && unit <= 0x66))) return false; // lowercase hex only
+  }
+  // A safe integer: fewer digits than 2^53 - 1 has, or as many and not above it.
+  if (chainDigits !== MAX_SAFE_INTEGER_DIGITS.length) return chainDigits < MAX_SAFE_INTEGER_DIGITS.length;
+  for (let k = 0; k < chainDigits; k++) {
+    const digit = charCodeAt(value, chainStart + k);
+    const bound = charCodeAt(MAX_SAFE_INTEGER_DIGITS, k);
+    if (digit !== bound) return digit < bound;
+  }
+  return true;
+}
+
+/**
+ * A registry key as the pinned snapshot spells it: 0x and exactly 64 LOWERCASE
+ * hex digits, the raw 32-byte Ed25519 key, one spelling per key. Checked code
+ * unit by code unit with no RegExp (pack 167). Exported; a test holds it equal
+ * to `^0x[0-9a-f]{64}$`.
+ */
+export function isRegistryKey(value: unknown): value is string {
+  if (typeof value !== "string" || value.length !== 66) return false;
+  if (charCodeAt(value, 0) !== 0x30 || charCodeAt(value, 1) !== 0x78) return false; // "0x"
+  for (let i = 2; i < 66; i++) {
+    const unit = charCodeAt(value, i);
+    if (!(isDigit(unit) || (unit >= 0x61 && unit <= 0x66))) return false;
+  }
+  return true;
+}
 
 /**
  * What a qualifying observation states about itself, in its hashed payload
@@ -293,7 +472,7 @@ export interface ProfileObservation {
   quantity: string;
   unit: string;
   /**
-   * The measured value in `unit`, as a decimal string (`DECIMAL_VALUE_PATTERN`),
+   * The measured value in `unit`, as a decimal string (`isDecimalValue`),
    * present exactly when `unit` is not "none". A string, not a JSON number:
    * JS and Python print some floats differently (1e-7 vs 1e-07), which would
    * give one reading two event hashes.
@@ -457,9 +636,115 @@ export interface ProfileAdmissionInput {
   ) => boolean | Promise<boolean>;
 }
 
-const EVENT_TYPES = new Set<string>(EVIDENCE_EVENT_TYPES);
-const DEVICE_TYPES = new Set<string>(EVIDENCE_DEVICE_TYPES);
-const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
+// -- built when this module loads --
+
+/** The vocabularies as null-prototype records: membership consults no prototype and no Set method. */
+const EVENT_TYPES = stringSet(EVIDENCE_EVENT_TYPES);
+const DEVICE_TYPES = stringSet(EVIDENCE_DEVICE_TYPES);
+const INSPECTION = stringSet(INSPECTION_EVENT_TYPES);
+
+/**
+ * The vocabulary's active primitive ids, read once, here. primitives.ts's defs
+ * are exported, mutable objects, and its `getPrimitive` answers from a Map, so
+ * a status written, or a Map method replaced, after load would change which
+ * terms registration and admission can evaluate. A later def wins, as it does
+ * in getPrimitive's Map.
+ */
+const ACTIVE_PRIMITIVES = ((): Readonly<Record<string, true>> => {
+  const status = ObjectCreate(null) as Record<string, unknown>;
+  for (let i = 0; i < EVIDENCE_PRIMITIVES.length; i++) {
+    const def = listAt(EVIDENCE_PRIMITIVES, i)!;
+    status[def.id] = def.status;
+  }
+  const ids = ObjectKeys(status);
+  const active = newList<string>(0);
+  for (let i = 0; i < ids.length; i++) if (status[listAt(ids, i)!] === "active") append(active, listAt(ids, i)!);
+  return stringSet(active);
+})();
+
+/** The input fields admission reads, in the order it reads them. */
+const INPUT_FIELDS = deepFreeze([
+  "pinnedBundleSetDigest",
+  "verifyPrimitiveInstance",
+  "subject",
+  "bundles",
+  "committedDigest",
+  "profile",
+  "executorTrustDomains",
+  "registryKeys",
+  "pinnedRegistryDigest",
+] as const);
+type InputField = (typeof INPUT_FIELDS)[number];
+
+/** The input fields that are data, walked for code before anything is copied. */
+const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles", "executorTrustDomains", "registryKeys"] as const);
+
+const VERSION_PIN_FIELDS = deepFreeze(["permittedAdapterVersions", "permittedFirmwareVersions"] as const);
+
+/** SHA-256 through node:crypto's Hash, with its methods captured when this module loads (as measurement-profile.ts does). */
+const createHashAtLoad = createHash;
+const HashPrototype = ObjectGetPrototypeOf(createHash("sha256")) as { update: (data: string) => unknown; digest: (encoding: "hex") => string };
+const HashPrototypeUpdate = uncurryThis(HashPrototype.update);
+const HashPrototypeDigest = uncurryThis(HashPrototype.digest);
+
+/**
+ * `sha256:` + hex(SHA-256(UTF-8 text)): byte-identical to util/canonical.ts
+ * `sha256`, which calls crypto.subtle, Array.from, map and join at call time.
+ */
+function taggedSha256(text: string): SHA256 {
+  const hash = createHashAtLoad("sha256");
+  HashPrototypeUpdate(hash, text);
+  return `sha256:${HashPrototypeDigest(hash, "hex")}` as SHA256;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !ArrayIsArray(v);
+}
+
+/** A thrown value's own `message`, for a diagnostic; never runs code supplied with it. */
+function messageOf(err: unknown): string {
+  const message = ownDataValue(err, "message");
+  return typeof message === "string" ? message : "it threw";
+}
+
+/** A subject field for the set digest: its own data property; an accessor is refused, never run. */
+function subjectField(subject: unknown, key: string): unknown {
+  if (typeof subject !== "object" || subject === null) throw new ErrorCtor("computeBundleSetDigest: the subject is not an object");
+  const descriptor = ObjectGetOwnPropertyDescriptor(subject, key);
+  if (descriptor === undefined) return undefined;
+  if (!hasOwn(descriptor, "value")) throw new ErrorCtor(`computeBundleSetDigest: subject.${key} is an accessor`);
+  return descriptor.value;
+}
+
+/**
+ * The set digest, computed now: the hashes de-duplicated and sorted in
+ * code-unit order, the subject's own fields, the domain, hashed with the
+ * captured SHA-256. Throws on an empty set or an entry that is not a `sha256:`
+ * tagged digest; an index the array does not own (a hole, or one
+ * Array.prototype serves) is not an entry.
+ */
+function bundleSetDigest(subject: unknown, bundleHashes: unknown): SHA256 {
+  if (!ArrayIsArray(bundleHashes)) throw new ErrorCtor("computeBundleSetDigest: the bundle hashes are not an array");
+  if (bundleHashes.length === 0) throw new ErrorCtor("computeBundleSetDigest: the set is empty");
+  const distinct = ObjectCreate(null) as Record<string, true>;
+  const hashes = newList<string>(0);
+  for (let i = 0; i < bundleHashes.length; i++) {
+    const hash = ownDataValue(bundleHashes, i);
+    if (!isTaggedSha256(hash)) throw new ErrorCtor(`computeBundleSetDigest: entry ${i} is not a sha256: tagged digest`);
+    if (!hasOwn(distinct, hash)) {
+      distinct[hash] = true;
+      append(hashes, hash);
+    }
+  }
+  const preimage = ObjectCreate(null) as Record<string, unknown>;
+  preimage.domain = BUNDLE_SET_DOMAIN;
+  preimage.jobId = subjectField(subject, "jobId");
+  preimage.kernelId = subjectField(subject, "kernelId");
+  const settlementUnitId = subjectField(subject, "settlementUnitId");
+  if (settlementUnitId !== undefined) preimage.settlementUnitId = settlementUnitId;
+  preimage.bundleHashes = sortedStrings(hashes);
+  return taggedSha256(canonicalize(preimage));
+}
 
 /**
  * The digest a job's pinned evidence set is committed to:
@@ -468,34 +753,43 @@ const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
  * order. `settlementUnitId` is included exactly when the subject names one, so a
  * unit-scoped pin cannot stand for another unit. The pinning party computes it
  * with this function over every row it pins (see the caller contract).
- * Throws on an empty set or an entry that is not a `sha256:` tagged digest:
+ * Rejects on an empty set or an entry that is not a `sha256:` tagged digest:
  * there is nothing meaningful to pin.
+ *
+ * It reads only the subject's own data properties and the array's own
+ * indices, hashes with the SHA-256 captured at load, and returns an
+ * `ownPromise` (util/primordials.ts): awaiting it, or following it with
+ * `.then`, `.catch` or `.finally` at any depth, hands the caller this digest
+ * or this rejection, whatever code running after load replaced on Promise.
  */
-export async function computeBundleSetDigest(
+export function computeBundleSetDigest(
   subject: Pick<EvidenceSubject, "jobId" | "kernelId" | "settlementUnitId">,
   bundleHashes: readonly string[],
 ): Promise<SHA256> {
-  if (bundleHashes.length === 0) throw new Error("computeBundleSetDigest: the set is empty");
-  const bad = bundleHashes.findIndex((h) => !isTaggedDigest(h));
-  if (bad !== -1) throw new Error(`computeBundleSetDigest: entry ${bad} is not a sha256: tagged digest`);
-  return sha256(
-    canonicalize({
-      domain: BUNDLE_SET_DOMAIN,
-      jobId: subject.jobId,
-      kernelId: subject.kernelId,
-      ...(subject.settlementUnitId !== undefined ? { settlementUnitId: subject.settlementUnitId } : {}),
-      bundleHashes: [...new Set(bundleHashes)].sort(),
+  return ownPromise(
+    new PromiseCtor<SHA256>((resolve, reject) => {
+      try {
+        resolve(bundleSetDigest(subject, bundleHashes));
+      } catch (err) {
+        reject(err);
+      }
     }),
   );
 }
 
-/** A registry key as the snapshot spells it: 0x and 64 lowercase hex digits, the raw 32-byte Ed25519 key. */
-const REGISTRY_KEY = /^0x[0-9a-f]{64}$/;
+/** A session key's delegation, as a checked row holds it. No prototype; frozen once read. */
+interface RowDelegation {
+  /** The root's key: a registered row of the same snapshot. */
+  root: string;
+  /** The authorization as given (admission's own plain-data copy), which the pin commits. */
+  authorization: unknown;
+  /** The job ids its scope names, and its validity window in Unix seconds. */
+  contractIds: readonly string[];
+  issuedAt: number;
+  expiresAt: number;
+}
 
-/** The session action a delegation must allow for its key to sign evidence (identity/ephemeral.ts). */
-const EVIDENCE_SUBMIT: SessionAction = "evidence_submit";
-
-/** A checked row (see `RegistryKey`). */
+/** A checked row (see `RegistryKey`). No prototype; frozen once read. */
 interface RegistryRow {
   /** The key, and the signer id kernels declare for it: 0x and the key's first 40 hex digits. */
   publicKey: string;
@@ -503,32 +797,29 @@ interface RegistryRow {
   /** The operator and the grants: a session key's are its root's. */
   trustDomain: string | null;
   grants: readonly SignerGrant[];
-  /**
-   * A session key's delegation: its root's key, the authorization as given,
-   * the job ids its scope names, and its validity window in Unix seconds.
-   * Null for a registered key.
-   */
-  delegation: { root: string; authorization: unknown; contractIds: readonly string[]; issuedAt: number; expiresAt: number } | null;
+  /** A session key's delegation; null for a registered key. */
+  delegation: RowDelegation | null;
 }
 
-const ROW_FIELDS: readonly string[] = ["publicKey", "trustDomain", "grants"];
-const DELEGATED_ROW_FIELDS: readonly string[] = ["publicKey", "delegatedBy", "authorization"];
-const GRANT_FIELDS: readonly string[] = ["role", "kernelId", "jobId"];
-const AUTHORIZATION_FIELDS: readonly string[] = [
-  "sessionId",
-  "parentAgentId",
-  "publicKey",
-  "issuedAt",
-  "expiresAt",
-  "scope",
-  "parentSignature",
-  "derivationPath",
-];
-const SCOPE_FIELDS: readonly string[] = ["allowedActions", "contractIds", "maxSignatures"];
+const ROW_FIELDS = deepFreeze(["publicKey", "trustDomain", "grants"] as const);
+const DELEGATED_ROW_FIELDS = deepFreeze(["publicKey", "delegatedBy", "authorization"] as const);
+const GRANT_FIELDS = deepFreeze(["role", "kernelId", "jobId"] as const);
+const AUTHORIZATION_FIELDS = deepFreeze(
+  ["sessionId", "parentAgentId", "publicKey", "issuedAt", "expiresAt", "scope", "parentSignature", "derivationPath"] as const,
+);
+const SCOPE_FIELDS = deepFreeze(["allowedActions", "contractIds", "maxSignatures"] as const);
+/** The session action a delegation must allow for its key to sign evidence (identity/ephemeral.ts). */
+const EVIDENCE_SUBMIT = "evidence_submit";
+const MAX_SAFE_INTEGER = 9007199254740991;
+const EMPTY_GRANTS: readonly SignerGrant[] = ObjectFreeze(newList<SignerGrant>(0));
+const EMPTY_IDS: readonly string[] = ObjectFreeze(newList<string>(0));
+const HEX_DIGITS = "0123456789abcdef";
 
-/** Whether every own key of `value` is one of `allowed`. */
-function onlyFields(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every((k) => allowed.includes(k));
+/** Whether every own key of `record` is one of `allowed`, read through Reflect.ownKeys as captured at load. */
+function onlyFields(record: object, allowed: readonly string[]): boolean {
+  const keys = ReflectOwnKeys(record);
+  for (let i = 0; i < keys.length; i++) if (!includesValue(allowed, listAt(keys, i))) return false;
+  return true;
 }
 
 /** A job or kernel id as subject binding requires one: a non-empty string. */
@@ -536,184 +827,382 @@ function isName(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-/** A grant's identity, for order and duplicates: its fields in a fixed order. */
-const grantKey = (g: SignerGrant): string => JSON.stringify([g.role, g.kernelId, g.jobId ?? null]);
+/** A non-negative safe integer, as the LO-EV-1 delegation contract requires of its numbers. */
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && NumberIsInteger(value) && value >= 0 && value <= MAX_SAFE_INTEGER;
+}
+
+/** A dense list of strings, every index its own, as the LO-EV-1 delegation contract requires of its lists. */
+function isStringList(value: unknown): value is readonly string[] {
+  if (!ArrayIsArray(value)) return false;
+  for (let i = 0; i < value.length; i++) if (!hasOwn(value, i) || typeof listAt(value, i) !== "string") return false;
+  return true;
+}
+
+/**
+ * A grant's identity, for order and duplicates: its fields JSON-quoted (by
+ * JSON.stringify as captured at load; a string has no toJSON to consult) in a
+ * fixed order. It orders grants exactly as the unhardened admission's
+ * `JSON.stringify([role, kernelId, jobId ?? null])` does, so the digest is the
+ * same.
+ */
+function grantKey(role: string, kernelId: string, jobId: string | undefined): string {
+  return `${JSONStringify(role)},${JSONStringify(kernelId)},${jobId === undefined ? "null" : JSONStringify(jobId)}`;
+}
 
 /**
  * A registered row's grants, checked and sorted, or null. They must be a
  * non-empty list; each grant is a role, a kernel and at most one job, and no
- * grant appears twice.
+ * grant appears twice. Reads own data only; the grants are frozen
+ * null-prototype records.
  */
-function readGrants(value: unknown): SignerGrant[] | null {
-  if (!Array.isArray(value) || value.length === 0) return null;
-  const grants: SignerGrant[] = [];
-  const seen = new Set<string>();
-  for (const g of value) {
+function readGrants(value: unknown): readonly SignerGrant[] | null {
+  if (!ArrayIsArray(value) || value.length === 0) return null;
+  const byKey = ObjectCreate(null) as Record<string, SignerGrant>;
+  const keys = newList<string>(0);
+  for (let i = 0; i < value.length; i++) {
+    const g = ownDataValue(value, i);
     if (!isRecord(g) || !onlyFields(g, GRANT_FIELDS)) return null;
-    const { role, kernelId, jobId } = g;
+    const role = ownDataValue(g, "role");
+    const kernelId = ownDataValue(g, "kernelId");
+    const jobId = ownDataValue(g, "jobId");
     if ((role !== "executor" && role !== "witness") || !isName(kernelId) || !(jobId === undefined || isName(jobId))) return null;
-    const grant: SignerGrant = jobId === undefined ? { role, kernelId } : { role, kernelId, jobId };
-    if (seen.has(grantKey(grant))) return null;
-    seen.add(grantKey(grant));
-    grants.push(grant);
+    const key = grantKey(role, kernelId, jobId);
+    if (hasOwn(byKey, key)) return null;
+    const grant = ObjectCreate(null) as { role: SignerRole; kernelId: string; jobId?: string };
+    grant.role = role;
+    grant.kernelId = kernelId;
+    if (jobId !== undefined) grant.jobId = jobId;
+    byKey[key] = ObjectFreeze(grant);
+    append(keys, key);
   }
-  return grants.sort((a, b) => (grantKey(a) < grantKey(b) ? -1 : grantKey(a) > grantKey(b) ? 1 : 0));
+  const sorted = sortedStrings(keys);
+  const grants = newList<SignerGrant>(0);
+  for (let i = 0; i < sorted.length; i++) append(grants, byKey[listAt(sorted, i)!]!);
+  return ObjectFreeze(grants);
 }
 
 /**
- * A session key's delegation, checked, or why it is not one. It must be:
- *   - the LO-EV-1 delegation of THIS row's key (`sessionKeyDelegationPreimage`
- *     refuses anything outside its input domain);
- *   - signed by the root's key;
+ * Lowercase hex of the first `count` bytes of `bytes`, digit by digit. The
+ * count is the caller's, never read from the array: a typed array's `length`
+ * is an accessor inherited from %TypedArray%.prototype, which code running
+ * after load can replace, and a shorter key here would sign a preimage that
+ * names no key (astra pack 289). An element read never consults a prototype.
+ */
+function lowerHex(bytes: Uint8Array, count: number): string {
+  let out = "";
+  for (let i = 0; i < count; i++) out = `${out}${charAt(HEX_DIGITS, bytes[i]! >> 4)!}${charAt(HEX_DIGITS, bytes[i]! & 15)!}`;
+  return out;
+}
+
+/** Whether code unit `i` of `text` starts a surrogate pair. */
+function startsPair(text: string, i: number): boolean {
+  const unit = charCodeAt(text, i);
+  if (unit < 0xd800 || unit > 0xdbff || i + 1 >= text.length) return false;
+  const next = charCodeAt(text, i + 1);
+  return next >= 0xdc00 && next <= 0xdfff;
+}
+
+/**
+ * The UTF-8 bytes of `text`, read code unit by code unit: what TextEncoder
+ * makes (a lone surrogate becomes U+FFFD), with no TextEncoder or string method.
+ */
+function utf8(text: string): Uint8Array {
+  let length = 0;
+  for (let i = 0; i < text.length; i++) {
+    const unit = charCodeAt(text, i);
+    if (startsPair(text, i)) {
+      length += 4;
+      i++;
+    } else length += unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
+  }
+  const out = new Uint8ArrayCtor(length);
+  let o = 0;
+  for (let i = 0; i < text.length; i++) {
+    let point = charCodeAt(text, i);
+    if (startsPair(text, i)) {
+      point = 0x10000 + (point - 0xd800) * 0x400 + (charCodeAt(text, i + 1) - 0xdc00);
+      i++;
+    } else if (point >= 0xd800 && point <= 0xdfff) {
+      point = 0xfffd;
+    }
+    if (point < 0x80) {
+      out[o++] = point;
+    } else if (point < 0x800) {
+      out[o++] = 0xc0 | (point >> 6);
+      out[o++] = 0x80 | (point & 0x3f);
+    } else if (point < 0x10000) {
+      out[o++] = 0xe0 | (point >> 12);
+      out[o++] = 0x80 | ((point >> 6) & 0x3f);
+      out[o++] = 0x80 | (point & 0x3f);
+    } else {
+      out[o++] = 0xf0 | (point >> 18);
+      out[o++] = 0x80 | ((point >> 12) & 0x3f);
+      out[o++] = 0x80 | ((point >> 6) & 0x3f);
+      out[o++] = 0x80 | (point & 0x3f);
+    }
+  }
+  return out;
+}
+
+/** A JSON array of strings, each quoted by JSON.stringify as captured at load. */
+function jsonStrings(list: readonly string[]): string {
+  let out = "[";
+  for (let i = 0; i < list.length; i++) out = `${out}${i === 0 ? "" : ","}${JSONStringify(listAt(list, i)!)}`;
+  return `${out}]`;
+}
+
+/**
+ * The bytes a root signs to delegate a session key: exactly
+ * `sessionKeyDelegationPreimage` (signing-preimage.ts, LO-EV-1 item 2). That is
+ * the UTF-8 of JSON.stringify over a FIXED-ORDER object, both lists sorted by
+ * code unit. It is built here from strings: each string is quoted by
+ * JSON.stringify as captured at load, the numbers are safe integers, and the
+ * lists are sorted with sortedStrings.
+ */
+function delegationPreimage(d: {
+  sessionId: string;
+  parentAgentId: string;
+  publicKey: Uint8Array;
+  issuedAt: number;
+  expiresAt: number;
+  allowedActions: readonly string[];
+  contractIds: readonly string[];
+  maxSignatures: number;
+  derivationPath: string | undefined;
+}): Uint8Array {
+  const scope =
+    `{"allowedActions":${jsonStrings(sortedStrings(d.allowedActions))},` +
+    `"contractIds":${jsonStrings(sortedStrings(d.contractIds))},"maxSignatures":${d.maxSignatures}}`;
+  const path = d.derivationPath === undefined ? "" : `,"derivationPath":${JSONStringify(d.derivationPath)}`;
+  return utf8(
+    `{"sessionId":${JSONStringify(d.sessionId)},"parentAgentId":${JSONStringify(d.parentAgentId)},"publicKey":"${lowerHex(d.publicKey, 32)}",` +
+      `"issuedAt":${d.issuedAt},"expiresAt":${d.expiresAt},"scope":${scope}${path}}`,
+  );
+}
+
+/**
+ * A session key's delegation, checked, or why it is not one, in the
+ * unhardened admission's order. It must be:
+ *   - the LO-EV-1 wire form and nothing more;
+ *   - of THIS row's key;
+ *   - inside the delegation contract's input domain;
  *   - allowing evidence_submit, for at least one named job (an empty scope
  *     means any job, which no subject-scoped grant allows);
- *   - with issuedAt <= expiresAt.
+ *   - with issuedAt <= expiresAt;
+ *   - signed by the root's key, through node:crypto's verify as captured at load.
+ * Reads own data only.
  */
-async function readDelegation(
+function readDelegation(
   authorization: unknown,
   publicKey: string,
   rootKey: string,
-): Promise<{ ok: true; contractIds: readonly string[]; issuedAt: number; expiresAt: number } | { ok: false; reason: string }> {
+): { ok: true; contractIds: readonly string[]; issuedAt: number; expiresAt: number } | { ok: false; reason: string } {
   const a = authorization;
-  if (!isRecord(a) || !onlyFields(a, AUTHORIZATION_FIELDS) || !isRecord(a.scope) || !onlyFields(a.scope, SCOPE_FIELDS)) {
+  const scope = isRecord(a) ? ownDataValue(a, "scope") : undefined;
+  if (!isRecord(a) || !onlyFields(a, AUTHORIZATION_FIELDS) || !isRecord(scope) || !onlyFields(scope, SCOPE_FIELDS)) {
     return { ok: false, reason: "is not a session key authorization (the LO-EV-1 wire form)" };
   }
-  const scope = a.scope;
-  let preimage: Uint8Array;
-  let parentSignature: Uint8Array;
-  try {
-    const sessionKey = parseEd25519PublicKeyHex(a.publicKey);
-    const spelled = (a.publicKey as string).toLowerCase();
-    if ((spelled.startsWith("0x") ? spelled : `0x${spelled}`) !== publicKey) return { ok: false, reason: "delegates another key than its row's" };
-    parentSignature = parseEd25519SignatureHex(a.parentSignature);
-    preimage = sessionKeyDelegationPreimage({
-      sessionId: a.sessionId as string,
-      parentAgentId: a.parentAgentId as SessionKey["parentAgentId"],
-      publicKey: sessionKey,
-      issuedAt: a.issuedAt as number,
-      expiresAt: a.expiresAt as number,
-      scope: {
-        allowedActions: scope.allowedActions as SessionAction[],
-        contractIds: scope.contractIds as string[],
-        maxSignatures: scope.maxSignatures as number,
-      },
-      ...(a.derivationPath !== undefined ? { derivationPath: a.derivationPath as string } : {}),
-    });
-  } catch {
-    return { ok: false, reason: "is not a well-formed session key authorization (LO-EV-1)" };
+  const malformed = { ok: false as const, reason: "is not a well-formed session key authorization (LO-EV-1)" };
+  const sessionKey = hexBytes(ownDataValue(a, "publicKey"), 32);
+  if (sessionKey === null) return malformed;
+  const rowKey = hexBytes(publicKey, 32)!;
+  for (let i = 0; i < 32; i++) if (sessionKey[i] !== rowKey[i]) return { ok: false, reason: "delegates another key than its row's" };
+  const parentSignature = hexBytes(ownDataValue(a, "parentSignature"), 64);
+  const sessionId = ownDataValue(a, "sessionId");
+  const parentAgentId = ownDataValue(a, "parentAgentId");
+  const issuedAt = ownDataValue(a, "issuedAt");
+  const expiresAt = ownDataValue(a, "expiresAt");
+  const derivationPath = ownDataValue(a, "derivationPath");
+  const allowedActions = ownDataValue(scope, "allowedActions");
+  const contractIds = ownDataValue(scope, "contractIds");
+  const maxSignatures = ownDataValue(scope, "maxSignatures");
+  if (
+    parentSignature === null ||
+    typeof sessionId !== "string" ||
+    typeof parentAgentId !== "string" ||
+    !isCount(issuedAt) ||
+    !isCount(expiresAt) ||
+    !isStringList(allowedActions) ||
+    !isStringList(contractIds) ||
+    !isCount(maxSignatures) ||
+    !(derivationPath === undefined || (typeof derivationPath === "string" && derivationPath.length > 0))
+  ) {
+    return malformed;
   }
-  const allowedActions = scope.allowedActions as string[];
-  const contractIds = scope.contractIds as string[];
-  if (!allowedActions.includes(EVIDENCE_SUBMIT)) return { ok: false, reason: "does not allow evidence_submit" };
+  if (!includesValue(allowedActions, EVIDENCE_SUBMIT)) return { ok: false, reason: "does not allow evidence_submit" };
   if (contractIds.length === 0) return { ok: false, reason: "names no job: an empty scope means any job, which no subject-scoped grant allows" };
-  if ((a.issuedAt as number) > (a.expiresAt as number)) return { ok: false, reason: "expires before it is issued" };
-  if (!(await ed25519Verifies(rootKey, preimage, parentSignature))) return { ok: false, reason: `is not signed by its root key ${rootKey}` };
-  return { ok: true, contractIds: Object.freeze([...contractIds]), issuedAt: a.issuedAt as number, expiresAt: a.expiresAt as number };
+  if (issuedAt > expiresAt) return { ok: false, reason: "expires before it is issued" };
+  const preimage = delegationPreimage({
+    sessionId,
+    parentAgentId,
+    publicKey: sessionKey,
+    issuedAt,
+    expiresAt,
+    allowedActions,
+    contractIds,
+    maxSignatures,
+    derivationPath,
+  });
+  if (!ed25519Verifies(rootKey, preimage, parentSignature)) return { ok: false, reason: `is not signed by its root key ${rootKey}` };
+  const ids = newList<string>(0);
+  for (let i = 0; i < contractIds.length; i++) append(ids, listAt(contractIds, i)!);
+  return { ok: true, contractIds: ObjectFreeze(ids), issuedAt, expiresAt };
 }
 
 /**
  * The rows of a registry snapshot, checked and sorted by key, or why they are
  * not one (astra packs 271, 275, 281).
  *   - Each key has one spelling and one row, and no two keys share a signer id
- *     (0x + the first 40 hex digits), so a bundle's declared signer names at
- *     most one key.
+ *     (0x + the first 40 hex digits), so a declared signer names at most one
+ *     key.
  *   - A registered row names its operator and its grants.
  *   - A session key's row names its root, a registered row of this snapshot,
  *     and holds the root's delegation of it, which must verify under the
  *     root's key. The chain is one link: a session key never roots another.
+ * Reads own data only; the rows are frozen null-prototype records.
  */
-async function readRegistry(value: unknown): Promise<{ ok: true; rows: RegistryRow[] } | { ok: false; reason: string }> {
-  if (!Array.isArray(value)) {
+function readRegistry(value: unknown): { ok: true; rows: readonly RegistryRow[] } | { ok: false; reason: string } {
+  if (!ArrayIsArray(value)) {
     return {
       ok: false,
       reason: "registryKeys (the pinned registry snapshot) must be a list of { publicKey, trustDomain, grants } and { publicKey, delegatedBy, authorization } rows",
     };
   }
-  const rows: RegistryRow[] = [];
-  const byKey = new Map<string, RegistryRow>();
-  const signers = new Set<string>();
+  const rowOfKey = ObjectCreate(null) as Record<string, RegistryRow>;
+  const signers = ObjectCreate(null) as Record<string, true>;
+  const keys = newList<string>(0);
   for (let k = 0; k < value.length; k++) {
-    const row: unknown = value[k];
-    const publicKey = isRecord(row) ? row.publicKey : undefined;
-    if (!isRecord(row) || typeof publicKey !== "string" || !REGISTRY_KEY.test(publicKey)) {
+    const row = ownDataValue(value, k);
+    const publicKey = isRecord(row) ? ownDataValue(row, "publicKey") : undefined;
+    if (!isRecord(row) || !isRegistryKey(publicKey)) {
       return { ok: false, reason: `registryKeys[${k}] must be a row whose publicKey is 0x<64 lowercase hex>` };
     }
-    let checked: RegistryRow;
-    if (Object.prototype.hasOwnProperty.call(row, "delegatedBy")) {
-      const root = row.delegatedBy;
-      if (!onlyFields(row, DELEGATED_ROW_FIELDS) || typeof root !== "string" || !REGISTRY_KEY.test(root) || !isRecord(row.authorization)) {
+    let signer = "";
+    for (let i = 0; i < 42; i++) signer = `${signer}${charAt(publicKey, i)!}`;
+    const record = ObjectCreate(null) as RegistryRow;
+    record.publicKey = publicKey;
+    record.signer = signer;
+    if (hasOwn(row, "delegatedBy")) {
+      const root = ownDataValue(row, "delegatedBy");
+      const authorization = ownDataValue(row, "authorization");
+      if (!onlyFields(row, DELEGATED_ROW_FIELDS) || !isRegistryKey(root) || !isRecord(authorization)) {
         return { ok: false, reason: `registryKeys[${k}] must be { publicKey, delegatedBy: a registered key, authorization: its delegation }` };
       }
-      const delegation = { root, authorization: row.authorization, contractIds: [], issuedAt: 0, expiresAt: 0 };
-      checked = { publicKey, signer: publicKey.slice(0, 42), trustDomain: null, grants: [], delegation };
+      const delegation = ObjectCreate(null) as RowDelegation;
+      delegation.root = root;
+      delegation.authorization = authorization;
+      delegation.contractIds = EMPTY_IDS;
+      delegation.issuedAt = 0;
+      delegation.expiresAt = 0;
+      record.trustDomain = null;
+      record.grants = EMPTY_GRANTS;
+      record.delegation = delegation;
     } else {
-      const trustDomain = row.trustDomain;
-      const grants = readGrants(row.grants);
-      if (
-        !onlyFields(row, ROW_FIELDS) ||
-        !(trustDomain === null || (typeof trustDomain === "string" && parseOperatorPrincipalId(trustDomain) !== null)) ||
-        grants === null
-      ) {
+      const trustDomain = ownDataValue(row, "trustDomain");
+      const grants = readGrants(ownDataValue(row, "grants"));
+      if (!onlyFields(row, ROW_FIELDS) || !(trustDomain === null || isOperatorPrincipalId(trustDomain)) || grants === null) {
         return {
           ok: false,
           reason: `registryKeys[${k}] must be { publicKey, trustDomain: an operator principal id or null, grants: a non-empty list of { role: executor | witness, kernelId, jobId? }, none twice }`,
         };
       }
-      checked = { publicKey, signer: publicKey.slice(0, 42), trustDomain, grants, delegation: null };
+      record.trustDomain = trustDomain;
+      record.grants = grants;
+      record.delegation = null;
     }
-    if (byKey.has(publicKey)) return { ok: false, reason: `registryKeys lists key ${publicKey} twice: a key has one row` };
-    if (signers.has(checked.signer)) {
-      return { ok: false, reason: `registryKeys lists two keys whose signer id is ${checked.signer}: a declared signer would not name one key` };
+    if (hasOwn(rowOfKey, publicKey)) return { ok: false, reason: `registryKeys lists key ${publicKey} twice: a key has one row` };
+    if (hasOwn(signers, signer)) {
+      return { ok: false, reason: `registryKeys lists two keys whose signer id is ${signer}: a declared signer would not name one key` };
     }
-    byKey.set(publicKey, checked);
-    signers.add(checked.signer);
-    rows.push(checked);
+    signers[signer] = true;
+    rowOfKey[publicKey] = record;
+    append(keys, publicKey);
   }
   // A session key counts only through a delegation rooted in a registered row of this snapshot.
-  for (const row of rows) {
-    if (row.delegation === null) continue;
-    const root = byKey.get(row.delegation.root);
-    if (root === undefined || root.delegation !== null) {
-      return { ok: false, reason: `session key ${row.publicKey} names ${row.delegation.root} as its root, which is not a registered row of this snapshot` };
+  for (let k = 0; k < keys.length; k++) {
+    const row = rowOfKey[listAt(keys, k)!]!;
+    const delegation = row.delegation;
+    if (delegation === null) continue;
+    const root = hasOwn(rowOfKey, delegation.root) ? rowOfKey[delegation.root]! : null;
+    if (root === null || root.delegation !== null) {
+      return { ok: false, reason: `session key ${row.publicKey} names ${delegation.root} as its root, which is not a registered row of this snapshot` };
     }
-    const delegation = await readDelegation(row.delegation.authorization, row.publicKey, root.publicKey);
-    if (!delegation.ok) return { ok: false, reason: `the delegation of session key ${row.publicKey} ${delegation.reason}` };
-    row.trustDomain = root.trustDomain;
-    row.grants = root.grants;
-    row.delegation = { ...row.delegation, contractIds: delegation.contractIds, issuedAt: delegation.issuedAt, expiresAt: delegation.expiresAt };
+    const checked = readDelegation(delegation.authorization, row.publicKey, root.publicKey);
+    if (!checked.ok) return { ok: false, reason: `the delegation of session key ${row.publicKey} ${checked.reason}` };
+    // A fresh row and delegation, each a null-prototype record built here: a write into a record made
+    // elsewhere could not be shown to run no inherited setter (astra pack 291).
+    const filledDelegation = ObjectCreate(null) as RowDelegation;
+    filledDelegation.root = delegation.root;
+    filledDelegation.authorization = delegation.authorization;
+    filledDelegation.contractIds = checked.contractIds;
+    filledDelegation.issuedAt = checked.issuedAt;
+    filledDelegation.expiresAt = checked.expiresAt;
+    const filled = ObjectCreate(null) as RegistryRow;
+    filled.publicKey = row.publicKey;
+    filled.signer = row.signer;
+    filled.trustDomain = root.trustDomain;
+    filled.grants = root.grants;
+    filled.delegation = ObjectFreeze(filledDelegation);
+    rowOfKey[listAt(keys, k)!] = filled;
   }
-  rows.sort((a, b) => (a.publicKey < b.publicKey ? -1 : a.publicKey > b.publicKey ? 1 : 0));
-  return { ok: true, rows };
+  const sorted = sortedStrings(keys);
+  const rows = newList<RegistryRow>(0);
+  for (let i = 0; i < sorted.length; i++) append(rows, ObjectFreeze(rowOfKey[listAt(sorted, i)!]!));
+  return { ok: true, rows: ObjectFreeze(rows) };
 }
 
-function registryDigestOf(rows: readonly RegistryRow[]): Promise<SHA256> {
-  return sha256(
-    canonicalize({
-      domain: REGISTRY_SNAPSHOT_DOMAIN,
-      keys: rows.map((r) =>
-        r.delegation === null
-          ? { publicKey: r.publicKey, trustDomain: r.trustDomain, grants: r.grants }
-          : { publicKey: r.publicKey, delegatedBy: r.delegation.root, authorization: r.delegation.authorization },
-      ),
-    }),
-  );
+/**
+ * sha256(canonicalize({ domain, keys })), over rows sorted by key, each
+ * registered row's grants sorted, and each delegation as given: byte-identical
+ * to the unhardened admission's.
+ */
+function registryDigestOf(rows: readonly RegistryRow[]): SHA256 {
+  const keys = newList<Record<string, unknown>>(0);
+  for (let i = 0; i < rows.length; i++) {
+    const row = listAt(rows, i)!;
+    const key = ObjectCreate(null) as Record<string, unknown>;
+    key.publicKey = row.publicKey;
+    if (row.delegation === null) {
+      key.trustDomain = row.trustDomain;
+      key.grants = row.grants;
+    } else {
+      key.delegatedBy = row.delegation.root;
+      key.authorization = row.delegation.authorization;
+    }
+    append(keys, key);
+  }
+  const preimage = ObjectCreate(null) as Record<string, unknown>;
+  preimage.domain = REGISTRY_SNAPSHOT_DOMAIN;
+  preimage.keys = keys;
+  return taggedSha256(canonicalize(preimage));
 }
 
 /**
  * The digest a pinned registry snapshot is committed to:
  *   sha256(canonicalize({ domain, keys }))
  * `sha256:`-tagged, over the rows sorted by key, each registered row's grants
- * sorted, and each delegation as given. The pinning party computes it over the
- * rows it builds when it pins the evidence set (see the caller contract).
+ * sorted, and each delegation as given. The pinning party computes it over
+ * the rows it builds when it pins the evidence set (see the caller contract).
  * Rejects on rows admission would refuse, a delegation that does not verify
- * included: there is nothing meaningful to pin.
+ * included: there is nothing meaningful to pin. It reads a plain-data copy of
+ * the rows, as admission does, hashes with the SHA-256 captured at load, and
+ * returns an `ownPromise`, as computeBundleSetDigest does.
  */
-export async function computeRegistryDigest(registryKeys: readonly RegistryKey[]): Promise<SHA256> {
-  const copy = plainDataCopy(registryKeys);
-  if (!copy.ok) throw new Error(`computeRegistryDigest: the registry is not plain JSON data (${copy.reason})`);
-  const registry = await readRegistry(copy.value);
-  if (!registry.ok) throw new Error(`computeRegistryDigest: ${registry.reason}`);
-  return registryDigestOf(registry.rows);
+export function computeRegistryDigest(registryKeys: readonly RegistryKey[]): Promise<SHA256> {
+  return ownPromise(
+    new PromiseCtor<SHA256>((resolve, reject) => {
+      try {
+        const copy = plainDataCopy(registryKeys);
+        if (!copy.ok) throw new ErrorCtor(`computeRegistryDigest: the registry is not plain JSON data (${copy.reason})`);
+        const registry = readRegistry(copy.value);
+        if (!registry.ok) throw new ErrorCtor(`computeRegistryDigest: ${registry.reason}`);
+        resolve(registryDigestOf(registry.rows));
+      } catch (err) {
+        reject(err);
+      }
+    }),
+  );
 }
 
 /** Whether `grant` names `subject`: its kernel is the subject's, and its job, if it names one, is the subject's. */
@@ -721,9 +1210,18 @@ function grantNames(grant: SignerGrant, subject: EvidenceSubject): boolean {
   return grant.kernelId === subject.kernelId && (grant.jobId === undefined || grant.jobId === subject.jobId);
 }
 
+/** Whether one of `row`'s grants names `subject` in `role`. */
+function holdsGrant(row: RegistryRow, role: SignerRole, subject: EvidenceSubject): boolean {
+  for (let i = 0; i < row.grants.length; i++) {
+    const g = listAt(row.grants, i)!;
+    if (g.role === role && grantNames(g, subject)) return true;
+  }
+  return false;
+}
+
 /** Whether `row`'s key is the executor for `subject`: one of its grants names it in the executor role. */
 function isExecutorFor(row: RegistryRow, subject: EvidenceSubject): boolean {
-  return row.grants.some((g) => g.role === "executor" && grantNames(g, subject));
+  return holdsGrant(row, "executor", subject);
 }
 
 /**
@@ -732,7 +1230,8 @@ function isExecutorFor(row: RegistryRow, subject: EvidenceSubject): boolean {
  * its root, a registered row here, does not already grant.
  */
 function witnessAuthorized(rows: readonly RegistryRow[], subject: EvidenceSubject): boolean {
-  return rows.some((row) => row.grants.some((g) => g.role === "witness" && grantNames(g, subject)));
+  for (let i = 0; i < rows.length; i++) if (holdsGrant(listAt(rows, i)!, "witness", subject)) return true;
+  return false;
 }
 
 /**
@@ -750,107 +1249,220 @@ function witnessAuthorized(rows: readonly RegistryRow[], subject: EvidenceSubjec
  * and kernel, so a grant matched against the subject covers every event.
  */
 function authorizationDenied(row: RegistryRow, subject: EvidenceSubject, events: readonly EvidenceEvent[]): string | null {
-  if (row.delegation !== null) {
-    if (!row.delegation.contractIds.includes(subject.jobId)) {
-      return `session key ${row.signer} is delegated for job(s) ${row.delegation.contractIds.join(", ")}, not job ${subject.jobId}`;
+  const delegation = row.delegation;
+  if (delegation !== null) {
+    if (!includesValue(delegation.contractIds, subject.jobId)) {
+      return `session key ${row.signer} is delegated for job(s) ${joinStrings(delegation.contractIds, ", ")}, not job ${subject.jobId}`;
     }
-    for (const e of events) {
-      const second = Math.floor(Date.parse(e.timestamp) / 1000);
-      if (!(second >= row.delegation.issuedAt && second <= row.delegation.expiresAt)) {
-        return `session key ${row.signer} signed an event timestamped ${e.timestamp}, outside its delegation's window`;
+    for (let k = 0; k < events.length; k++) {
+      const timestamp = listAt(events, k)!.timestamp;
+      const ms = DateParse(timestamp);
+      // Whole seconds, floored, with no Math method: a millisecond count's remainder taken to [0, 1000).
+      const second = (ms - (((ms % 1000) + 1000) % 1000)) / 1000;
+      if (!(second >= delegation.issuedAt && second <= delegation.expiresAt)) {
+        return `session key ${row.signer} signed an event timestamped ${timestamp}, outside its delegation's window`;
       }
     }
   }
   if (isExecutorFor(row, subject)) return null;
-  if (!row.grants.some((g) => g.role === "witness" && grantNames(g, subject))) {
+  if (!holdsGrant(row, "witness", subject)) {
     return `key ${row.signer} holds no grant for kernel ${subject.kernelId}, job ${subject.jobId}: registry membership alone authorizes nothing`;
   }
-  const other = events.find((e) => !INSPECTION.has(e.type));
-  return other === undefined ? null : `key ${row.signer} is a witness for this subject, which signs inspections only, not ${other.type}`;
+  for (let k = 0; k < events.length; k++) {
+    if (!inSet(INSPECTION, listAt(events, k)!.type)) {
+      return `key ${row.signer} is a witness for this subject, which signs inspections only, not ${listAt(events, k)!.type}`;
+    }
+  }
+  return null;
 }
 
-/** Whether `signature` is the Ed25519 signature of `message` under the raw `publicKey` (0x + 64 hex), through Web Crypto. */
-async function ed25519Verifies(publicKey: string, message: Uint8Array, signature: Uint8Array): Promise<boolean> {
+/**
+ * The executor set #345 judges independence against (steward #6694): the
+ * deal's executors and the operator of every key that signed as the subject's
+ * executor. An executor key whose operator the registry does not name leaves
+ * no inspection independent, and a deal that names no executor gets none
+ * added: #345 then shows no independence, as before.
+ */
+function levelExecutorsOf(deal: readonly string[], signedAsExecutor: readonly string[], unknownExecutor: boolean): readonly string[] {
+  const out = newList<string>(0);
+  if (deal.length === 0 || unknownExecutor) return deepFreeze(out);
+  const added = ObjectCreate(null) as Record<string, true>;
+  for (let i = 0; i < deal.length; i++) {
+    if (hasOwn(added, listAt(deal, i)!)) continue;
+    added[listAt(deal, i)!] = true;
+    append(out, listAt(deal, i)!);
+  }
+  for (let i = 0; i < signedAsExecutor.length; i++) {
+    if (hasOwn(added, listAt(signedAsExecutor, i)!)) continue;
+    added[listAt(signedAsExecutor, i)!] = true;
+    append(out, listAt(signedAsExecutor, i)!);
+  }
+  return deepFreeze(out);
+}
+
+/** The value of one hex digit's code unit, or -1. Lowercase and uppercase are both digits here. */
+function hexValue(unit: number): number {
+  if (unit >= 0x30 && unit <= 0x39) return unit - 0x30;
+  if (unit >= 0x61 && unit <= 0x66) return unit - 0x57;
+  if (unit >= 0x41 && unit <= 0x46) return unit - 0x37;
+  return -1;
+}
+
+/**
+ * Exactly `count` bytes of hex, after an optional 0x or 0X, read code unit by
+ * code unit into a fresh Uint8Array, or null: parseEd25519SignatureHex's
+ * acceptance, with no RegExp, parseInt or string method.
+ */
+function hexBytes(text: unknown, count: number): Uint8Array | null {
+  if (typeof text !== "string") return null;
+  let start = 0;
+  if (text.length >= 2 && charCodeAt(text, 0) === 0x30 && (charCodeAt(text, 1) === 0x78 || charCodeAt(text, 1) === 0x58)) start = 2;
+  if (text.length - start !== count * 2) return null;
+  const out = new Uint8ArrayCtor(count);
+  for (let i = 0; i < count; i++) {
+    const high = hexValue(charCodeAt(text, start + 2 * i));
+    const low = hexValue(charCodeAt(text, start + 2 * i + 1));
+    if (high < 0 || low < 0) return null;
+    out[i] = high * 16 + low;
+  }
+  return out;
+}
+
+/** The bytes `signingPreimage` signs for a tagged digest: its UTF-8, which is its ASCII, one byte per code unit. */
+function digestPreimage(digest: string): Uint8Array {
+  const out = new Uint8ArrayCtor(digest.length);
+  for (let i = 0; i < digest.length; i++) out[i] = charCodeAt(digest, i);
+  return out;
+}
+
+/** node:crypto's one-shot verify, captured at load: synchronous, so no promise, `then` or species is on its path. */
+const verifyAtLoad = verify;
+/** An Ed25519 SubjectPublicKeyInfo in DER, up to the raw key: SEQUENCE { SEQUENCE { OID 1.3.101.112 }, BIT STRING ( */
+const ED25519_SPKI_PREFIX = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00] as const;
+
+/**
+ * Whether `signature` is the Ed25519 signature of `message` under the raw
+ * `publicKey` (0x + 64 hex), through node:crypto's one-shot `verify` as
+ * captured at load (astra pack 275). Synchronous: Web Crypto's importKey
+ * resolves its promise with a CryptoKey object, and resolving with an object
+ * looks `then` up on it, which code running after load can plant on
+ * Object.prototype to hand verify another key. The key travels as SPKI DER in
+ * a null-prototype options record, so no option (padding, dsaEncoding, ...)
+ * is read from a prototype. Any failure is false.
+ */
+function ed25519Verifies(publicKey: string, message: Uint8Array, signature: Uint8Array): boolean {
+  const raw = hexBytes(publicKey, 32);
+  if (raw === null) return false;
+  const der = new Uint8ArrayCtor(ED25519_SPKI_PREFIX.length + 32);
+  for (let i = 0; i < ED25519_SPKI_PREFIX.length; i++) der[i] = listAt(ED25519_SPKI_PREFIX, i)!;
+  for (let i = 0; i < 32; i++) der[ED25519_SPKI_PREFIX.length + i] = raw[i]!;
+  const key = ObjectCreate(null) as Record<string, unknown>;
+  key.key = der;
+  key.format = "der";
+  key.type = "spki";
   try {
-    // Fresh copies: Web Crypto takes ArrayBuffer-backed bytes.
-    const key = await crypto.subtle.importKey("raw", new Uint8Array(parseEd25519PublicKeyHex(publicKey)), { name: "Ed25519" }, false, ["verify"]);
-    return await crypto.subtle.verify({ name: "Ed25519" }, key, new Uint8Array(signature), new Uint8Array(message));
+    return verifyAtLoad(null, message, key as never, signature) === true;
   } catch {
     return false;
   }
 }
 
+/** A result with no prototype: an async return is resolved with it, and a `then` on Object.prototype must not be consulted. */
 function result(
   decision: ProfileAdmissionDecision,
   reasons: ProfileAdmissionReason[],
   reached: EvidenceLevel | null = null,
   qualifyingSamples = 0,
 ): ProfileAdmissionResult {
-  return { decision, admits: decision === "admit", reached, qualifyingSamples, reasons };
+  const out = ObjectCreate(null) as ProfileAdmissionResult;
+  out.decision = decision;
+  out.admits = decision === "admit";
+  out.reached = reached;
+  out.qualifyingSamples = qualifyingSamples;
+  out.reasons = reasons;
+  return out;
 }
 
-const reject = (code: ProfileAdmissionCode, detail: string) => result("reject", [{ code, detail }]);
+function reason(code: ProfileAdmissionCode, detail: string): ProfileAdmissionReason {
+  return { code, detail };
+}
+
+function only(code: ProfileAdmissionCode, detail: string): ProfileAdmissionReason[] {
+  const reasons = newList<ProfileAdmissionReason>(0);
+  append(reasons, reason(code, detail));
+  return reasons;
+}
+
+const reject = (code: ProfileAdmissionCode, detail: string) => result("reject", only(code, detail));
+
+/** True when `s` contains "*". */
+function hasWildcard(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (charCodeAt(s, i) === 0x2a) return true;
+  return false;
+}
 
 /**
  * Terms of a valid profile this version cannot evaluate. Registration refuses
  * a profile with any of them (profile-registration.ts), so admission and
- * registration share one definition.
+ * registration share one definition. It reads the profile's own data
+ * properties only, so a value on Object.prototype (a `tolerance`, say) is
+ * never taken for a term, and an accessor is never run.
  */
 export function unverifiableProfileTerms(profile: MeasurementProfileV1): string[] {
-  const terms: string[] = [];
-  if (profile.measurement.tolerance !== undefined) {
-    terms.push("measurement.tolerance: comparing the observed value with a tolerance is not evaluated yet");
+  const terms = newList<string>(0);
+  const measurement = ownDataValue(profile, "measurement");
+  if (ownDataValue(measurement, "tolerance") !== undefined) {
+    append(terms, "measurement.tolerance: comparing the observed value with a tolerance is not evaluated yet");
   }
-  if (profile.measurement.sampling.maxIntervalMs !== undefined) {
-    terms.push("measurement.sampling.maxIntervalMs: a continuous-capture term; only one-shot capture is evaluated");
+  if (ownDataValue(ownDataValue(measurement, "sampling"), "maxIntervalMs") !== undefined) {
+    append(terms, "measurement.sampling.maxIntervalMs: a continuous-capture term; only one-shot capture is evaluated");
   }
-  if (profile.calibration.required) {
-    terms.push("calibration.required: no evidence event carries a calibration record yet");
+  if (ownDataValue(ownDataValue(profile, "calibration"), "required")) {
+    append(terms, "calibration.required: no evidence event carries a calibration record yet");
   }
-  if (profile.witnesses.requiredRoles.length > 0) {
-    terms.push("witnesses.requiredRoles: independent witness attestation is not evaluated here");
+  if ((ownDataValue(ownDataValue(profile, "witnesses"), "requiredRoles") as readonly unknown[]).length > 0) {
+    append(terms, "witnesses.requiredRoles: independent witness attestation is not evaluated here");
   }
-  const coverage = profile.capture.coverage;
-  if (coverage.policy !== "one-shot") {
-    terms.push(`capture.coverage.policy ${JSON.stringify(coverage.policy)}: only "one-shot" is evaluated`);
-  } else if (coverage.minFraction !== 1) {
-    terms.push(
-      `capture.coverage.minFraction ${coverage.minFraction}: a one-shot capture covers its window whole, so only 1 is evaluated`,
-    );
+  const capture = ownDataValue(profile, "capture");
+  const coverage = ownDataValue(capture, "coverage");
+  const policy = ownDataValue(coverage, "policy");
+  const minFraction = ownDataValue(coverage, "minFraction");
+  if (policy !== "one-shot") {
+    append(terms, `capture.coverage.policy ${JSONStringify(policy)}: only "one-shot" is evaluated`);
+  } else if (minFraction !== 1) {
+    append(terms, `capture.coverage.minFraction ${StringCtor(minFraction)}: a one-shot capture covers its window whole, so only 1 is evaluated`);
   }
-  if (!DEVICE_TYPES.has(profile.device.kind)) {
-    terms.push(`device.kind ${JSON.stringify(profile.device.kind)} is not an evidence device type, so no evidence source can match it`);
+  const device = ownDataValue(profile, "device");
+  const kind = ownDataValue(device, "kind");
+  if (!inSet(DEVICE_TYPES, kind)) {
+    append(terms, `device.kind ${JSONStringify(kind)} is not an evidence device type, so no evidence source can match it`);
   }
-  for (const field of ["permittedAdapterVersions", "permittedFirmwareVersions"] as const) {
-    for (const pin of profile.device[field]) {
-      if (pin.includes("*")) {
-        terms.push(`device.${field} ${JSON.stringify(pin)}: version pins are exact strings, not patterns`);
+  for (let f = 0; f < VERSION_PIN_FIELDS.length; f++) {
+    const field = listAt(VERSION_PIN_FIELDS, f)!;
+    const pins = ownDataValue(device, field) as readonly unknown[];
+    for (let p = 0; p < pins.length; p++) {
+      const pin = ownDataValue(pins, p);
+      if (typeof pin === "string" && hasWildcard(pin)) {
+        append(terms, `device.${field} ${JSONStringify(pin)}: version pins are exact strings, not patterns`);
       }
     }
   }
-  for (const id of profile.interpretation.evidenceTypeIds) {
-    if (getPrimitive(id)?.status !== "active") {
-      terms.push(`interpretation.evidenceTypeIds ${JSON.stringify(id)} is not an active vocabulary primitive`);
+  const ids = ownDataValue(ownDataValue(profile, "interpretation"), "evidenceTypeIds") as readonly unknown[];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ownDataValue(ids, i);
+    if (!inSet(ACTIVE_PRIMITIVES, id)) {
+      append(terms, `interpretation.evidenceTypeIds ${JSONStringify(id)} is not an active vocabulary primitive`);
     }
   }
-  if (!EVENT_TYPES.has(profile.capture.startCondition)) {
-    terms.push(`capture.startCondition ${JSON.stringify(profile.capture.startCondition)} is not an evidence event type`);
+  const start = ownDataValue(capture, "startCondition");
+  if (!inSet(EVENT_TYPES, start)) {
+    append(terms, `capture.startCondition ${JSONStringify(start)} is not an evidence event type`);
   }
-  const end = profile.capture.endCondition;
-  if (end !== OPEN_CAPTURE_WINDOW_END && !EVENT_TYPES.has(end)) {
-    terms.push(`capture.endCondition ${JSON.stringify(end)} is neither an evidence event type nor "${OPEN_CAPTURE_WINDOW_END}"`);
+  const end = ownDataValue(capture, "endCondition");
+  if (end !== OPEN_CAPTURE_WINDOW_END && !inSet(EVENT_TYPES, end)) {
+    append(terms, `capture.endCondition ${JSONStringify(end)} is neither an evidence event type nor "${OPEN_CAPTURE_WINDOW_END}"`);
   }
   return terms;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** Membership by own index reads, never through Array.prototype methods. */
-function ownIncludes(list: readonly unknown[], x: unknown): boolean {
-  for (let i = 0; i < list.length; i++) if (list[i] === x) return true;
-  return false;
 }
 
 /**
@@ -859,46 +1471,99 @@ function ownIncludes(list: readonly unknown[], x: unknown): boolean {
  * Array.prototype (a prototype supplied with the data serves every index the
  * array lacks; astra pack 154), anywhere inside. It reads property
  * descriptors and prototypes only, so no getter runs; null when the value is
- * plain data. A cycle stops the walk here, and plainDataCopy refuses it later.
+ * plain data. A descriptor's `value` counts only as its OWN property: one
+ * written on Object.prototype must not pass an accessor off as data (astra
+ * pack 162). `ancestors` is the path from the root: a cycle stops the walk
+ * here, and plainDataCopy refuses it later.
  */
-function codeInData(value: unknown, path: string, seen: Set<object>): string | null {
+function codeInData(value: unknown, path: string, ancestors: object[]): string | null {
   if (value === null || typeof value !== "object") return null;
   if (isProxy === null) return `${path}: this runtime has no trap-free proxy check`;
   if (isProxy(value)) return `${path}: a proxy`;
-  if (Array.isArray(value) && Object.getPrototypeOf(value) !== Array.prototype) return `${path}: an array with a nonstandard prototype`;
-  if (seen.has(value)) return null;
-  seen.add(value);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined) continue;
-    if (!("value" in descriptor)) return `${path}.${String(key)}: an accessor (a getter or setter)`;
-    const found = codeInData(descriptor.value, `${path}.${String(key)}`, seen);
-    if (found !== null) return found;
+  if (ArrayIsArray(value) && ObjectGetPrototypeOf(value) !== ArrayPrototype) return `${path}: an array with a nonstandard prototype`;
+  for (let i = 0; i < ancestors.length; i++) if (listAt(ancestors, i) === value) return null;
+  append(ancestors, value);
+  try {
+    const keys = ReflectOwnKeys(value);
+    for (let k = 0; k < keys.length; k++) {
+      const descriptor = ObjectGetOwnPropertyDescriptor(value, listAt(keys, k)!);
+      if (descriptor === undefined) continue;
+      const at = `${path}.${StringCtor(listAt(keys, k))}`;
+      if (!hasOwn(descriptor, "value")) return `${at}: an accessor (a getter or setter)`;
+      const found = codeInData(descriptor.value, at, ancestors);
+      if (found !== null) return found;
+    }
+    return null;
+  } finally {
+    ancestors.length = ancestors.length - 1;
   }
+}
+
+/** Every subject field binding checks, with the form binding requires. */
+function subjectProblem(subject: EvidenceSubject): string | null {
+  const nonEmpty = (v: unknown) => typeof v === "string" && v.length > 0;
+  if (!nonEmpty(subject.jobId) || !nonEmpty(subject.kernelId)) return "the subject names no job or kernel";
+  if (subject.outputHash !== undefined && !nonEmpty(subject.outputHash)) return "the subject's outputHash is malformed";
+  if (subject.settlementUnitId !== undefined && !isHex256Digest(subject.settlementUnitId)) return "the subject's settlementUnitId is malformed";
+  if (subject.challengeNonce !== undefined && !isHex256Digest(subject.challengeNonce)) return "the subject's challengeNonce is malformed";
   return null;
 }
 
-function deepFreeze<T>(value: T): T {
-  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const v of Object.values(value)) deepFreeze(v);
+/**
+ * Why the binding leg's answer does not hold, recomputed here with the
+ * captured hash and own reads; null when it does. `events` is admission's
+ * plain-data copy of what binding returned: no prototype at any depth. Each
+ * event must hash to its own `hash` (util/canonical.ts hashEvent's preimage),
+ * the events must hash to `bundleHash` (hashBundle's: the sorted event
+ * hashes), and every event must commit the subject, as LO-EV-9 requires: the
+ * job and kernel on every event, the settlement unit and challenge on every
+ * event when the subject names them, and the output on at least one event
+ * (and on no event otherwise) when the subject names one.
+ */
+function bindingDisagreement(events: readonly unknown[], bundleHash: string, subject: EvidenceSubject): string | null {
+  if (events.length === 0) return "no events";
+  const hashes = newList<string>(events.length);
+  let outputCommitted = false;
+  for (let i = 0; i < events.length; i++) {
+    const e = listAt(events, i);
+    if (!isRecord(e) || typeof e.type !== "string" || typeof e.timestamp !== "string" || !isRecord(e.source) || !isRecord(e.payload) || !isTaggedSha256(e.hash)) {
+      return `event ${i} is not an event`;
+    }
+    if (taggedSha256(canonicalize({ type: e.type, timestamp: e.timestamp, source: e.source, payload: e.payload })) !== e.hash) {
+      return `event ${i} does not hash to its hash`;
+    }
+    defineIndex(hashes, i, e.hash);
+    const payload = e.payload;
+    if (payload.jobId !== subject.jobId) return `event ${i} does not commit the job`;
+    if (e.source.kernelId !== subject.kernelId || (payload.kernelId !== undefined && payload.kernelId !== subject.kernelId)) {
+      return `event ${i} does not commit the kernel`;
+    }
+    if (subject.settlementUnitId !== undefined && payload.settlementUnitId !== subject.settlementUnitId) return `event ${i} does not commit the settlement unit`;
+    if (subject.challengeNonce !== undefined && payload.challengeNonce !== subject.challengeNonce) return `event ${i} does not commit the challenge`;
+    if (subject.outputHash !== undefined && payload.outputHash !== undefined) {
+      if (payload.outputHash !== subject.outputHash) return `event ${i} commits another output`;
+      outputCommitted = true;
+    }
   }
-  return value;
+  if (subject.outputHash !== undefined && !outputCommitted) return "no event commits the output";
+  if (taggedSha256(canonicalize(sortedStrings(hashes))) !== bundleHash) return "the events do not hash to the bundle hash";
+  return null;
 }
 
 /**
  * The observation record, if it matches the profile; otherwise why not (the
- * first profile term it fails, in a fixed order).
+ * first profile term it fails, in a fixed order). `event` is admission's
+ * copy: no prototype at any depth, so every read here is the event's own.
  */
 function readObservation(
   event: EvidenceEvent,
   profile: MeasurementProfileV1,
   committedDigest: string,
 ): { ok: true; observation: ProfileObservation } | { ok: false; why: string } {
-  const record = isRecord(event.payload) ? event.payload[PROFILE_OBSERVATION_FIELD] : undefined;
+  const record = isRecord(event.payload) ? ownDataValue(event.payload, PROFILE_OBSERVATION_FIELD) : undefined;
   if (!isRecord(record)) return { ok: false, why: "without a profileObservation record" };
   if (record.profileDigest !== committedDigest) return { ok: false, why: "not matching the committed profile digest" };
-  if (typeof record.primitiveId !== "string" || !ownIncludes(profile.interpretation.evidenceTypeIds, record.primitiveId)) {
+  if (typeof record.primitiveId !== "string" || !includesValue(profile.interpretation.evidenceTypeIds, record.primitiveId)) {
     return { ok: false, why: "not matching interpretation.evidenceTypeIds" };
   }
   const object = record.object;
@@ -910,16 +1575,15 @@ function readObservation(
   if (record.quantity !== profile.measurement.quantity) return { ok: false, why: "not matching measurement.quantity" };
   if (record.unit !== profile.measurement.unit) return { ok: false, why: "not matching measurement.unit" };
   const numeric = profile.measurement.unit !== NON_NUMERIC_UNIT;
-  const decimal = typeof record.value === "string" && DECIMAL_VALUE_PATTERN.test(record.value);
-  if (numeric ? !decimal : "value" in record) {
+  if (numeric ? !isDecimalValue(record.value) : hasOwn(record, "value")) {
     return { ok: false, why: numeric ? "without a decimal-string value" : "with a value on a non-numeric (unit none) observation" };
   }
-  if (!isTaggedDigest(record.sampleId)) return { ok: false, why: "without a sha256: sampleId" };
+  if (!isTaggedSha256(record.sampleId)) return { ok: false, why: "without a sha256: sampleId" };
   return { ok: true, observation: record as unknown as ProfileObservation };
 }
 
 function time(event: EvidenceEvent): number {
-  return Date.parse(event.timestamp);
+  return DateParse(event.timestamp);
 }
 
 /** [opens, closes] from the committed window events; null bound = event absent. */
@@ -927,18 +1591,19 @@ function captureWindow(
   profile: MeasurementProfileV1,
   events: readonly EvidenceEvent[],
 ): { opens: number | null; closes: number | null } {
-  const at = (type: string, pick: (a: number, b: number) => number) => {
+  const bound = (type: string, earliest: boolean): number | null => {
     let t: number | null = null;
-    for (const e of events) {
+    for (let k = 0; k < events.length; k++) {
+      const e = listAt(events, k)!;
       if (e.type !== type) continue;
       const ms = time(e);
-      if (Number.isFinite(ms)) t = t === null ? ms : pick(t, ms);
+      if (NumberIsFinite(ms) && (t === null || (earliest ? ms < t : ms > t))) t = ms;
     }
     return t;
   };
-  const opens = at(profile.capture.startCondition, Math.min);
+  const opens = bound(profile.capture.startCondition, true);
   const end = profile.capture.endCondition;
-  const closes = end === OPEN_CAPTURE_WINDOW_END ? Number.POSITIVE_INFINITY : at(end, Math.max);
+  const closes = end === OPEN_CAPTURE_WINDOW_END ? Infinity : bound(end, false);
   return { opens, closes };
 }
 
@@ -946,9 +1611,10 @@ function policyDecision(policy: "reject" | "hold"): ProfileAdmissionDecision {
   return policy === "hold" ? "hold" : "reject";
 }
 
-async function legPasses(leg: () => boolean | Promise<boolean>): Promise<boolean> {
+/** A trusted leg's answer, ready to await (see `fulfillsWithTrue`). A leg that throws fails. */
+function legAnswer(leg: () => unknown): boolean | Promise<boolean> {
   try {
-    return (await leg()) === true;
+    return fulfillsWithTrue(leg());
   } catch {
     return false;
   }
@@ -961,6 +1627,20 @@ function higherLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): Evidence
   return evidenceLevelRank(a) >= evidenceLevelRank(b) ? a : b;
 }
 
+/** A list of operator principal ids, every index its own (a plain-data copy has no holes). */
+function isOperatorList(value: unknown): value is readonly string[] {
+  if (!ArrayIsArray(value)) return false;
+  for (let i = 0; i < value.length; i++) {
+    if (!hasOwn(value, i) || !isOperatorPrincipalId(listAt(value, i))) return false;
+  }
+  return true;
+}
+
+interface Finding {
+  decision: ProfileAdmissionDecision;
+  reason: ProfileAdmissionReason;
+}
+
 /**
  * Admit, reject or hold the evidence for one job against its committed
  * measurement profile. Never throws.
@@ -969,66 +1649,62 @@ function higherLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): Evidence
  * the profile (through `profileGoverns`, which returns the snapshot it
  * validated and digested), the subject, the pin and the bundles. Everything
  * after reads only the copies, so nothing the caller changes, or a getter
- * answers, after that point can reach the decision.
+ * answers, after that point can reach the decision. The promise returned is an
+ * `ownPromise` (util/primordials.ts): it, and every promise a caller derives
+ * from it with `.then`, `.catch` or `.finally`, delivers this decision,
+ * whatever code running after load replaced on Promise (see the header).
  */
-export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
+export function profileAdmitsBundle(input: ProfileAdmissionInput): Promise<ProfileAdmissionResult> {
+  return ownPromise(admit(input));
+}
+
+async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // No code supplied with the input runs during admission. The input object,
   // and everything in its profile, subject and bundles, must be plain data: a
   // proxy or an accessor anywhere is refused, found through property
   // descriptors alone, before anything is read. (A getter that ran during the
   // copy could change shared built-ins, such as Array.prototype.includes,
   // while admission waits; astra pack 127.) The verification callbacks are the
-  // caller's trusted code. A process whose built-ins were changed before the
-  // call is beyond what any in-process check can defend.
+  // caller's trusted code. A process whose built-ins were changed before
+  // @pcc/spec loaded is beyond what any in-process check can defend.
   if (typeof input !== "object" || input === null || isProxy === null || isProxy(input)) {
     return reject("input-unreadable", "the admission input must be a plain object, not a proxy");
   }
-  const fields = ["pinnedBundleSetDigest", "verifyPrimitiveInstance", "subject", "bundles", "committedDigest", "profile", "executorTrustDomains", "registryKeys", "pinnedRegistryDigest"] as const;
-  const read = Object.create(null) as Record<(typeof fields)[number], unknown>;
-  for (const key of fields) {
-    const descriptor = Object.getOwnPropertyDescriptor(input, key);
-    if (descriptor !== undefined && !("value" in descriptor)) {
+  const read = ObjectCreate(null) as Record<InputField, unknown>;
+  for (let k = 0; k < INPUT_FIELDS.length; k++) {
+    const key = listAt(INPUT_FIELDS, k)!;
+    const descriptor = ObjectGetOwnPropertyDescriptor(input, key);
+    // The descriptor's OWN value: one written on Object.prototype must not pass an accessor off as data.
+    if (descriptor !== undefined && !hasOwn(descriptor, "value")) {
       return reject("input-unreadable", `input.${key} is an accessor; the admission input must be plain data`);
     }
-    read[key] = descriptor?.value;
+    read[key] = descriptor === undefined ? undefined : descriptor.value;
   }
-  for (const key of ["profile", "subject", "bundles", "executorTrustDomains", "registryKeys"] as const) {
-    const code = codeInData(read[key], `input.${key}`, new Set());
+  for (let k = 0; k < DATA_FIELDS.length; k++) {
+    const key = listAt(DATA_FIELDS, k)!;
+    const code = codeInData(read[key], `input.${key}`, newList<object>(0));
     if (code !== null) return reject("input-unreadable", `${code}: no code supplied with the data may run during admission`);
   }
 
-  // Every read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
-  let entry: {
-    pinnedBundleSetDigest: unknown;
-    pinnedRegistryDigest: unknown;
-    verifyPrimitiveInstance: ProfileAdmissionInput["verifyPrimitiveInstance"];
-    subjectCopy: ReturnType<typeof plainDataCopy>;
-    bundlesCopy: ReturnType<typeof plainDataCopy>;
-    executorsCopy: ReturnType<typeof plainDataCopy>;
-    registryCopy: ReturnType<typeof plainDataCopy>;
-    committedDigest: string;
-    presentedProfile: MeasurementProfileV1;
-  };
+  const pinnedBundleSetDigest = read.pinnedBundleSetDigest;
+  const verifyPrimitiveInstance = read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"];
+  // Each read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
+  let subjectCopy: ReturnType<typeof plainDataCopy>;
+  let bundlesCopy: ReturnType<typeof plainDataCopy>;
+  let executorsCopy: ReturnType<typeof plainDataCopy>;
+  let registryCopy: ReturnType<typeof plainDataCopy>;
   try {
-    entry = {
-      pinnedBundleSetDigest: read.pinnedBundleSetDigest,
-      pinnedRegistryDigest: read.pinnedRegistryDigest,
-      verifyPrimitiveInstance: read.verifyPrimitiveInstance as ProfileAdmissionInput["verifyPrimitiveInstance"],
-      subjectCopy: plainDataCopy(read.subject),
-      bundlesCopy: plainDataCopy(read.bundles),
-      executorsCopy: plainDataCopy(read.executorTrustDomains),
-      registryCopy: plainDataCopy(read.registryKeys),
-      committedDigest: read.committedDigest as string,
-      presentedProfile: read.profile as MeasurementProfileV1,
-    };
+    subjectCopy = plainDataCopy(read.subject);
+    bundlesCopy = plainDataCopy(read.bundles);
+    executorsCopy = plainDataCopy(read.executorTrustDomains);
+    registryCopy = plainDataCopy(read.registryKeys);
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
-  const { pinnedBundleSetDigest, pinnedRegistryDigest, verifyPrimitiveInstance, subjectCopy, bundlesCopy, executorsCopy, registryCopy } = entry;
 
-  const governance = profileGoverns(entry.committedDigest, entry.presentedProfile);
+  const governance = profileGoverns(read.committedDigest as string, read.profile as MeasurementProfileV1);
   if (!governance.governs || governance.profile === null || governance.presentedDigest === null) {
-    return reject(governance.code ?? "profile-invalid", governance.reasons.join("; "));
+    return reject(governance.code ?? "profile-invalid", joinStrings(governance.reasons, "; "));
   }
   const profile = governance.profile;
   const committedDigest = governance.presentedDigest;
@@ -1040,37 +1716,37 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
 
   // The deal's executors: a list of operator principal ids, possibly empty, never absent.
   const executors: unknown = executorsCopy.ok ? executorsCopy.value : undefined;
-  if (!Array.isArray(executors) || !executors.every((d) => typeof d === "string" && parseOperatorPrincipalId(d) !== null)) {
+  if (!isOperatorList(executors)) {
     return reject(
       "input-unreadable",
       "executorTrustDomains (the deal's assigned operators) must be a list of operator principal ids, eip155:<chainId>:0x<40 lowercase hex>",
     );
   }
-  const executorTrustDomains = deepFreeze([...executors]) as readonly string[];
+  const executorTrustDomains = deepFreeze(executors);
 
   // The pinned registry snapshot (astra packs 271, 275): each key's one trust domain, unique by key and by signer id.
-  const registry = await readRegistry(registryCopy.ok ? registryCopy.value : undefined);
+  const registry = readRegistry(registryCopy.ok ? registryCopy.value : undefined);
   if (!registry.ok) return reject("input-unreadable", registry.reason);
-  const rowOfSigner = new Map<string, RegistryRow>();
-  for (const row of registry.rows) rowOfSigner.set(row.signer, row);
+  const rowOfSigner = ObjectCreate(null) as Record<string, RegistryRow>;
+  for (let r = 0; r < registry.rows.length; r++) rowOfSigner[listAt(registry.rows, r)!.signer] = listAt(registry.rows, r)!;
+  ObjectFreeze(rowOfSigner);
 
   const terms = unverifiableProfileTerms(profile);
-  if (terms.length > 0) return reject("unverifiable-term", terms.join("; "));
+  if (terms.length > 0) return reject("unverifiable-term", joinStrings(terms, "; "));
 
   if (!bundlesCopy.ok) return reject("unbound-bundle", "the bundles are not plain JSON data");
   const presented: unknown = deepFreeze(bundlesCopy.value);
-  if (!Array.isArray(presented) || presented.length === 0) {
-    return result(policyDecision(profile.onMissingData), [
-      { code: "no-bundles", detail: "no evidence bundle was presented for the job" },
-    ]);
+  if (!ArrayIsArray(presented) || presented.length === 0) {
+    return result(policyDecision(profile.onMissingData), only("no-bundles", "no evidence bundle was presented for the job"));
   }
 
   // The registry's pin binds the keys and their domains to the registry as it was pinned: a malformed pin, or rows
   // that are not the pinned ones (a key rotated or reassigned since), are refused before any signature is checked.
-  if (!isTaggedDigest(pinnedRegistryDigest)) {
+  const pinnedRegistryDigest = read.pinnedRegistryDigest;
+  if (!isTaggedSha256(pinnedRegistryDigest)) {
     return reject("registry-pin-invalid", "the pinned registry digest is not a sha256: tagged digest, so no registry is committed to");
   }
-  const presentedRegistry = await registryDigestOf(registry.rows);
+  const presentedRegistry = registryDigestOf(registry.rows);
   if (presentedRegistry !== pinnedRegistryDigest) {
     return reject(
       "registry-mismatch",
@@ -1080,7 +1756,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
 
   // The pin is authority: a malformed one is refused outright, never read as
   // missing data.
-  if (!isTaggedDigest(pinnedBundleSetDigest)) {
+  if (!isTaggedSha256(pinnedBundleSetDigest)) {
     return reject(
       "bundle-set-pin-invalid",
       "the pinned bundle-set digest is not a sha256: tagged digest, so there is no valid commitment to evaluate against",
@@ -1088,94 +1764,128 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   // SET leg: the presented bundles are exactly the pinned set.
-  const bundles: AdmissionBundle[] = [];
+  const bundles = newList<AdmissionBundle>(0);
   for (let i = 0; i < presented.length; i++) {
-    const b: unknown = presented[i];
-    if (!isRecord(b) || !isTaggedDigest(b.bundleHash) || !Array.isArray(b.events)) {
+    const b: unknown = listAt(presented, i);
+    if (!isRecord(b) || !isTaggedSha256(b.bundleHash) || !ArrayIsArray(b.events)) {
       return reject("unbound-bundle", `bundle ${i}: not a bundle with a sha256: tagged bundleHash and an events array`);
     }
-    bundles.push(b as unknown as AdmissionBundle);
+    append(bundles, b as unknown as AdmissionBundle);
   }
-  const hashes = bundles.map((b) => b.bundleHash);
-  const findings: { decision: ProfileAdmissionDecision; reason: ProfileAdmissionReason }[] = [];
+  const hashes = mapList(bundles, (b) => b.bundleHash);
+  const findings = newList<Finding>(0);
   let presentedSet: string;
   try {
-    presentedSet = await computeBundleSetDigest(subject, hashes);
+    presentedSet = bundleSetDigest(subject, hashes);
   } catch (err) {
-    presentedSet = `(not computable: ${err instanceof Error ? err.message : String(err)})`;
+    presentedSet = `(not computable: ${messageOf(err)})`;
   }
   if (presentedSet !== pinnedBundleSetDigest) {
     // Never admit, but keep evaluating: a set that is not the pinned one must
     // not hide a hard reject in what WAS presented (reject outranks hold).
-    findings.push({
+    const distinct = ObjectCreate(null) as Record<string, true>;
+    let presentedCount = 0;
+    for (let i = 0; i < hashes.length; i++) {
+      if (!hasOwn(distinct, listAt(hashes, i)!)) {
+        distinct[listAt(hashes, i)!] = true;
+        presentedCount++;
+      }
+    }
+    append(findings, {
       decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "bundle-set-mismatch",
-        detail: `the ${new Set(hashes).size} presented bundle(s) digest to ${presentedSet}, not the pinned set ${pinnedBundleSetDigest}: a bundle is missing or was not pinned`,
-      },
+      reason: reason(
+        "bundle-set-mismatch",
+        `the ${presentedCount} presented bundle(s) digest to ${presentedSet}, not the pinned set ${pinnedBundleSetDigest}: a bundle is missing or was not pinned`,
+      ),
     });
   }
-  const rejectNow = (code: ProfileAdmissionCode, detail: string): ProfileAdmissionResult =>
-    result("reject", [...findings.map((f) => f.reason), { code, detail }]);
+  const rejectNow = (code: ProfileAdmissionCode, detail: string): ProfileAdmissionResult => {
+    const reasons = mapList(findings, (f) => f.reason);
+    append(reasons, reason(code, detail));
+    return result("reject", reasons);
+  };
 
-  const events: EvidenceEvent[] = [];
-  const seen = new Set<string>();
+  const events = newList<EvidenceEvent>(0);
+  const seen = ObjectCreate(null) as Record<string, true>;
   // Each bundle as evidence-level reads it: its bound events and its signer's trust domain.
-  const authenticated: AuthenticatedBundle[] = [];
+  const authenticated = newList<AuthenticatedBundle>(0);
   // The operators of the keys that signed as the subject's executor, and whether one of them names none.
-  const executorDomains = new Set<string>();
+  const executorDomains = ObjectCreate(null) as Record<string, true>;
+  const executorDomainList = newList<string>(0);
   let executorDomainUnknown = false;
   for (let i = 0; i < bundles.length; i++) {
-    const bundle = bundles[i]!;
+    const bundle = listAt(bundles, i)!;
     // SIGNATURE, run here (astra packs 271, 275): the declared signer names one key of the pinned registry, the
     // bundle hash's Ed25519 signature must verify under THAT key, and the bundle's trust domain is that key's row.
+    // Everything is read from admission's own null-prototype copy of the bundle.
     const signature: unknown = bundle.kernelSignature;
     const declared: unknown = isRecord(signature) ? signature.signer : undefined;
-    const row = typeof declared === "string" ? rowOfSigner.get(declared) : undefined;
-    if (!isRecord(signature) || signature.algorithm !== "ed25519" || row === undefined) {
+    const row = typeof declared === "string" && hasOwn(rowOfSigner, declared) ? rowOfSigner[declared]! : null;
+    if (!isRecord(signature) || signature.algorithm !== "ed25519" || row === null) {
       return rejectNow("unauthenticated-bundle", `bundle ${i}: its signature is not an ed25519 signature by a key of the pinned registry (registryKeys)`);
     }
-    let signed = false;
-    try {
-      signed = await ed25519Verifies(row.publicKey, signingPreimage(bundle.bundleHash), parseEd25519SignatureHex(signature.value));
-    } catch {
-      signed = false;
-    }
-    if (!signed) {
+    const signatureBytes = hexBytes(signature.value, 64);
+    if (signatureBytes === null || !ed25519Verifies(row.publicKey, digestPreimage(bundle.bundleHash), signatureBytes)) {
       return rejectNow("unauthenticated-bundle", `bundle ${i}: its signature does not verify under the registered key of ${row.signer}`);
     }
     const trustDomain = row.trustDomain;
-    const binding = await verifyEvidenceSubjectBinding({
-      bundleHash: bundle.bundleHash,
-      events: bundle.events,
-      subject,
-    });
-    if (!binding.ok) {
-      const at = binding.eventIndex === undefined ? "" : ` at event ${binding.eventIndex}`;
-      return rejectNow("unbound-bundle", `bundle ${i}: ${binding.reason}${at}`);
+
+    let answer: unknown;
+    try {
+      answer = await awaitedHere(verifyEvidenceSubjectBinding({ bundleHash: bundle.bundleHash, events: bundle.events, subject }));
+    } catch {
+      answer = undefined;
     }
+    // The answer as plain data, read through its own properties: no prototype, no accessor.
+    const copied = plainDataCopy(answer);
+    const binding = copied.ok && isRecord(copied.value) ? copied.value : null;
+    if (binding === null) return rejectNow("unbound-bundle", `bundle ${i}: the binding leg's answer is not plain data`);
+    if (binding.ok !== true) {
+      const why = typeof binding.reason === "string" ? binding.reason : "the binding leg failed";
+      const at = typeof binding.eventIndex === "number" ? ` at event ${binding.eventIndex}` : "";
+      return rejectNow("unbound-bundle", `bundle ${i}: ${why}${at}`);
+    }
+    // Evaluate only what was hashed: the verified canonical snapshots, re-verified here first.
+    const opened = binding.events;
+    const disagreement = ArrayIsArray(opened)
+      ? subjectProblem(subject) ?? bindingDisagreement(opened, bundle.bundleHash, subject)
+      : "the binding leg returned no events";
+    if (disagreement !== null) {
+      return rejectNow("unbound-bundle", `bundle ${i}: the binding leg's answer does not re-verify with intrinsics captured at load: ${disagreement}`);
+    }
+    const verified = opened as readonly EvidenceEvent[];
     // AUTHORIZATION (astra pack 281, DECISIONS 00:26): a valid signature by a registered key authorizes nothing by
-    // itself. The key must hold a grant naming this subject, in a role that fits what the bundle holds.
-    const denied = authorizationDenied(row, subject, binding.events);
+    // itself. The key must hold a grant naming this subject, in a role that fits what the bundle holds. Binding has
+    // just shown, re-verified with intrinsics captured at load, that every event names the subject's job and kernel.
+    const denied = authorizationDenied(row, subject, verified);
     if (denied !== null) return rejectNow("unauthorized-signer", `bundle ${i}: ${denied}`);
     if (isExecutorFor(row, subject)) {
       if (trustDomain === null) executorDomainUnknown = true;
-      else executorDomains.add(trustDomain);
+      else if (!hasOwn(executorDomains, trustDomain)) {
+        executorDomains[trustDomain] = true;
+        append(executorDomainList, trustDomain);
+      }
     }
-    authenticated.push(trustDomain === null ? { events: binding.events } : { events: binding.events, trustDomain });
-    // Evaluate only what was hashed: the verified canonical snapshots.
-    for (const e of binding.events) {
-      if (seen.has(e.hash)) continue;
-      seen.add(e.hash);
-      events.push(e);
+    const entry = ObjectCreate(null) as { events: readonly EvidenceEvent[]; trustDomain?: string };
+    entry.events = verified;
+    if (trustDomain !== null) entry.trustDomain = trustDomain;
+    append(authenticated, entry as AuthenticatedBundle);
+    for (let k = 0; k < verified.length; k++) {
+      const e = listAt(verified, k)!;
+      if (hasOwn(seen, e.hash)) continue;
+      seen[e.hash] = true;
+      append(events, e);
     }
   }
+  deepFreeze(events);
+  deepFreeze(authenticated);
 
-  const fabricated = events.filter(isFabricated).length;
-  if (fabricated > 0) {
+  let fabricatedCount = 0;
+  for (let k = 0; k < events.length; k++) if (isFabricated(listAt(events, k)!)) fabricatedCount++;
+  if (fabricatedCount > 0) {
     return rejectNow(
       "simulated-evidence",
-      `${fabricated} fabricated event(s); the profile prohibits simulation, so the evidence is not authentic`,
+      `${fabricatedCount} fabricated event(s); the profile prohibits simulation, so the evidence is not authentic`,
     );
   }
 
@@ -1185,61 +1895,73 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   let contradictions: ContradictionKind[];
   let eventLevels: readonly EventLevel[];
   let reached: EvidenceLevel | null;
-  // A key that signed as the executor is the executor's own, never an independent inspector (steward #6694): its
-  // operator joins the deal's executors when levels are judged, so only a witness can reach inspected_output. An
-  // executor key whose operator the registry does not name leaves no inspection independent. When the deal names no
-  // executor, none is added: #345 then shows no independence, as before.
-  const levelExecutors =
-    executorTrustDomains.length === 0 || executorDomainUnknown ? [] : [...new Set([...executorTrustDomains, ...executorDomains])];
+  // The level an event counts at: the MAX over its occurrences, each levelled by its own bundle, as #345 takes it
+  // (steward #6623, evidence #6559). A test holds this and `reached` equal to evidence-level.ts on duplicates.
+  const levelByHash = ObjectCreate(null) as Record<string, EvidenceLevel | null>;
   try {
     contradictions = deriveContradictions(authenticated);
-    eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains: levelExecutors });
+    const context = ObjectCreate(null) as { executorTrustDomains: readonly string[] };
+    context.executorTrustDomains = levelExecutorsOf(executorTrustDomains, executorDomainList, executorDomainUnknown);
+    eventLevels = evidenceLevelsOfEvents(authenticated, context);
     // The strongest level the bundles prove: #345's own function, the maximum over every occurrence.
-    reached = evidenceLevelOfBundles(authenticated, { executorTrustDomains: levelExecutors });
+    reached = evidenceLevelOfBundles(authenticated, context);
+    for (let x = 0; x < eventLevels.length; x++) {
+      const level = listAt(eventLevels, x)!;
+      const hash = listAt(listAt(authenticated, level.bundleIndex)!.events, level.eventIndex)!.hash;
+      levelByHash[hash] = hasOwn(levelByHash, hash) ? higherLevel(levelByHash[hash] ?? null, level.level) : level.level;
+    }
   } catch (err) {
-    return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${err instanceof Error ? err.message : String(err)}`);
+    return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${messageOf(err)}`);
   }
-  const executionFailed = events.some((e) => e.type === "execution_failed");
-  const failedInspections = events.filter(inspectionFailed).length;
-  const failure = [
-    ...(executionFailed ? ["execution_failed"] : []),
-    ...(failedInspections > 0 ? [`${failedInspections} failed inspection(s)`] : []),
-  ].join(" and ");
+  const levelOf = (e: EvidenceEvent): EvidenceLevel | null => (hasOwn(levelByHash, e.hash) ? (levelByHash[e.hash] ?? null) : null);
+  let executionFailed = false;
+  let failedInspections = 0;
+  for (let k = 0; k < events.length; k++) {
+    if (listAt(events, k)!.type === "execution_failed") executionFailed = true;
+    if (inspectionFailed(listAt(events, k)!)) failedInspections++;
+  }
+  let failure = executionFailed ? "execution_failed" : "";
+  if (failedInspections > 0) failure = `${failure === "" ? "" : `${failure} and `}${failedInspections} failed inspection(s)`;
   if (contradictions.length > 0) {
-    findings.push({
+    append(findings, {
       decision: policyDecision(profile.onContradiction),
-      reason: { code: "contradictory-evidence", detail: `contradictions: ${contradictions.join(", ")}` },
+      reason: reason("contradictory-evidence", `contradictions: ${joinStrings(contradictions, ", ")}`),
     });
-  } else if (failure) {
-    findings.push({
+  } else if (failure !== "") {
+    append(findings, {
       decision: policyDecision(profile.interpretation.onDeviceFailure),
-      reason: { code: "device-failure", detail: `the evidence reports ${failure}` },
+      reason: reason("device-failure", `the evidence reports ${failure}`),
     });
   }
 
   const required = profile.interpretation.acceptanceLevel;
-  // The level an event counts at: the MAX over its occurrences, each levelled by its own bundle, as #345 takes
-  // it (steward #6623, evidence #6559). A test holds this and `reached` equal to evidence-level.ts on duplicates.
-  const levelByHash = new Map<string, EvidenceLevel | null>();
-  for (const { bundleIndex, eventIndex, level } of eventLevels) {
-    const hash = authenticated[bundleIndex]!.events[eventIndex]!.hash;
-    levelByHash.set(hash, levelByHash.has(hash) ? higherLevel(levelByHash.get(hash)!, level) : level);
-  }
-  const levelOf = (e: EvidenceEvent): EvidenceLevel | null => levelByHash.get(e.hash) ?? null;
-  const { device } = profile;
+  const device = profile.device;
   const window = captureWindow(profile, events);
 
   let atLevel = 0;
   let otherDevices = 0;
-  const excluded = new Map<string, number>();
-  const exclude = (why: string) => excluded.set(why, (excluded.get(why) ?? 0) + 1);
-  const samples = new Set<string>();
+  // Exclusion reasons and counts, in the order first seen.
+  const excludedWhy = newList<string>(0);
+  const excludedCount = newList<number>(0);
+  const exclude = (why: string) => {
+    for (let x = 0; x < excludedWhy.length; x++) {
+      if (listAt(excludedWhy, x) === why) {
+        defineIndex(excludedCount, x, listAt(excludedCount, x)! + 1);
+        return;
+      }
+    }
+    append(excludedWhy, why);
+    append(excludedCount, 1);
+  };
+  const samples = ObjectCreate(null) as Record<string, true>;
+  let qualifying = 0;
   // What the primitive leg sees: frozen copies, so nothing it does can reach
   // the snapshots evaluated here (a leg that tries to mutate them throws, and
-  // a throw is a failure).
-  const legEvents = deepFreeze(structuredClone(events));
+  // a throw is a failure). The structured clone captured at load makes them
+  // ordinary objects, as the leg has always received.
+  const legEvents = deepFreeze((StructuredClone as <T>(value: T) => T)(events));
   for (let k = 0; k < events.length; k++) {
-    const e = events[k]!;
+    const e = listAt(events, k)!;
     if (!meetsEvidenceLevel(levelOf(e), required)) continue;
     if (e.source.deviceId !== device.deviceId) {
       otherDevices++;
@@ -1250,7 +1972,7 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       exclude("failed inspection(s)");
       continue;
     }
-    if (INSPECTION.has(e.type) && inspectionVerdict(e) !== "pass") {
+    if (inSet(INSPECTION, e.type) && inspectionVerdict(e) !== "pass") {
       exclude("without a positive verdict");
       continue;
     }
@@ -1258,63 +1980,59 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
       exclude("from another device kind or adapter");
       continue;
     }
-    const { adapterVersion, firmwareVersion } = e.source;
+    const adapterVersion = e.source.adapterVersion;
+    const firmwareVersion = e.source.firmwareVersion;
     if (
       typeof adapterVersion !== "string" ||
       typeof firmwareVersion !== "string" ||
-      !ownIncludes(device.permittedAdapterVersions, adapterVersion) ||
-      !ownIncludes(device.permittedFirmwareVersions, firmwareVersion)
+      !includesValue(device.permittedAdapterVersions, adapterVersion) ||
+      !includesValue(device.permittedFirmwareVersions, firmwareVersion)
     ) {
       exclude("unpermitted version");
       continue;
     }
     const ms = time(e);
-    if (
-      window.opens === null ||
-      window.closes === null ||
-      !Number.isFinite(ms) ||
-      ms < window.opens ||
-      ms > window.closes
-    ) {
+    if (window.opens === null || window.closes === null || !NumberIsFinite(ms) || ms < window.opens || ms > window.closes) {
       exclude("outside the capture window");
       continue;
     }
-    const read = readObservation(e, profile, committedDigest);
-    if (!read.ok) {
-      exclude(read.why);
+    const observed = readObservation(e, profile, committedDigest);
+    if (!observed.ok) {
+      exclude(observed.why);
       continue;
     }
-    if (!(await legPasses(() => verifyPrimitiveInstance(read.observation.primitiveId, legEvents[k]!, legEvents)))) {
-      exclude(`not verified as ${read.observation.primitiveId}`);
+    const observation = observed.observation;
+    let verified: boolean;
+    try {
+      verified = (await legAnswer(() => verifyPrimitiveInstance(observation.primitiveId, listAt(legEvents, k)!, legEvents))) === true;
+    } catch {
+      verified = false;
+    }
+    if (!verified) {
+      exclude(`not verified as ${observation.primitiveId}`);
       continue;
     }
-    if (samples.has(read.observation.sampleId)) {
+    if (hasOwn(samples, observation.sampleId)) {
       exclude("repeating a counted sample");
       continue;
     }
-    samples.add(read.observation.sampleId);
+    samples[observation.sampleId] = true;
+    qualifying++;
   }
-  const qualifying = samples.size;
 
-  if (!meetsEvidenceLevel(reached, required) && required === "inspected_output" && !witnessAuthorized(registry.rows, subject)) {
-    // Only a witness's inspection reaches inspected_output, and the pinned rows grant no witness for this subject.
-    // No registry record assigns witnesses yet (N132), so say so rather than report a generic shortfall.
-    findings.push({
+  if (!meetsEvidenceLevel(reached, required)) {
+    append(findings, {
       decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "no-witness-authorized",
-        detail:
-          `the profile requires inspected_output, which only an independent witness's inspection reaches, and no pinned row grants a witness ` +
-          `for kernel ${subject.kernelId}, job ${subject.jobId} (no registry record assigns witnesses yet); the evidence reaches ${reached ?? "no level"}`,
-      },
-    });
-  } else if (!meetsEvidenceLevel(reached, required)) {
-    findings.push({
-      decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "level-not-reached",
-        detail: `the evidence reaches ${reached ?? "no level"}; the profile requires ${required}`,
-      },
+      reason:
+        required === "inspected_output" && !witnessAuthorized(registry.rows, subject)
+          ? // Only a witness's inspection reaches inspected_output, and the pinned rows grant no witness for this
+            // subject. No registry record assigns witnesses yet (N132), so say so rather than a generic shortfall.
+            reason(
+              "no-witness-authorized",
+              `the profile requires inspected_output, which only an independent witness's inspection reaches, and no pinned row grants a witness ` +
+                `for kernel ${subject.kernelId}, job ${subject.jobId} (no registry record assigns witnesses yet); the evidence reaches ${reached ?? "no level"}`,
+            )
+          : reason("level-not-reached", `the evidence reaches ${reached ?? "no level"}; the profile requires ${required}`),
     });
   } else if (qualifying < profile.measurement.sampling.minSamples) {
     const windowNote =
@@ -1323,24 +2041,28 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
         : window.closes === null
           ? `; the window never closed (no ${profile.capture.endCondition} event)`
           : "";
-    const exclusions = [...excluded].map(([why, n]) => `${n} ${why}`).join(", ") || "none";
-    findings.push({
+    let exclusions = "";
+    for (let x = 0; x < excludedWhy.length; x++) {
+      exclusions = `${exclusions}${x === 0 ? "" : ", "}${listAt(excludedCount, x)} ${listAt(excludedWhy, x)}`;
+    }
+    if (exclusions === "") exclusions = "none";
+    append(findings, {
       decision: policyDecision(profile.onMissingData),
-      reason: {
-        code: "missing-measurements",
-        detail:
-          `${qualifying} qualifying sample(s) from ${device.deviceId}, the profile requires ${profile.measurement.sampling.minSamples}` +
+      reason: reason(
+        "missing-measurements",
+        `${qualifying} qualifying sample(s) from ${device.deviceId}, the profile requires ${profile.measurement.sampling.minSamples}` +
           ` (at ${required}: ${atLevel} from the profiled device, ${otherDevices} from other devices;` +
           ` excluded: ${exclusions}${windowNote})`,
-      },
+      ),
     });
   }
 
-  if (findings.length === 0) return result("admit", [], reached, qualifying);
-  const decision = findings.some((f) => f.decision === "reject") ? "reject" : "hold";
+  if (findings.length === 0) return result("admit", newList<ProfileAdmissionReason>(0), reached, qualifying);
+  let decision: ProfileAdmissionDecision = "hold";
+  for (let x = 0; x < findings.length; x++) if (listAt(findings, x)!.decision === "reject") decision = "reject";
   return result(
     decision,
-    findings.map((f) => f.reason),
+    mapList(findings, (f) => f.reason),
     reached,
     qualifying,
   );
