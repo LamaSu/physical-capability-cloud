@@ -313,15 +313,18 @@ function ownedScopeOrReply(
 }
 
 /**
- * Routes that authorize or drive a device: a DECISION (the steward's #6508 (2), N126). Opening or
- * revoking an execution scope, and a chat instruction (the kernel's device agent reads and may act
- * on it), need the admin or a PROVEN wallet that is the kernel's operator. A write tool call is a
- * decision too (relayAccessGuard checks the tool). A scope grant is a claimed identity, so it never
- * authorizes actuation until WP-A proves identities (operator item 138 may loosen this).
+ * Routes that authorize or drive a device: a DECISION (the steward's #6508 (2), N126). Opening an
+ * execution scope, and a chat instruction (the kernel's device agent reads and may act on it), need
+ * the admin or a PROVEN wallet that is the kernel's operator. A write tool call is a decision too
+ * (relayAccessGuard checks the tool). A scope grant is a claimed identity, so it never authorizes
+ * actuation until WP-A proves identities (operator item 138 may loosen this).
+ *
+ * Revoking a scope is NOT a decision: it takes the stop tier (the steward's #6677 (2)). It only
+ * removes authority, so the scope's creator, the kernel's claimed operator or the admin may revoke
+ * (#400's object_owner check, ownsScope, whose operator test admits what "stop_or_submit" does).
  */
 const RELAY_DECISION_ROUTES: ReadonlySet<string> = new Set([
   "POST /api/relay/:kernelId/scope",
-  "POST /api/relay/:kernelId/scope/:scopeId/revoke",
   "POST /api/relay/:kernelId/chat",
 ]);
 

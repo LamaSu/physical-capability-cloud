@@ -11,10 +11,10 @@
  * Now (the steward's ruling #6508, fail-closed): the floor for every relay route, heartbeat and
  * capability announce is "operate": the kernel's own principal (the identity its operatorAddress
  * records), a proven operator wallet, or the admin. What authorizes or drives a device is a
- * decision on top: opening or revoking an execution scope, a WRITE tool call and a chat
- * instruction need the admin or the PROVEN operator wallet (WP-A's field, simulated here by a
- * test header). Anonymous is 401, anyone else 403, and an unregistered kernel 404 for a
- * non-admin.
+ * decision on top: opening an execution scope, a WRITE tool call and a chat instruction need the
+ * admin or the PROVEN operator wallet (WP-A's field, simulated here by a test header). Revoking
+ * a scope takes the stop tier (#6677): its creator, the kernel's own principal or the admin.
+ * Anonymous is 401, anyone else 403, and an unregistered kernel 404 for a non-admin.
  *
  * Mounted as production mounts it: apiGate, then the routes; the kernel is registered by the
  * operator's own key.
@@ -102,7 +102,8 @@ describe("N31 device relay on master: #400's relayAccessGuard refuses a stranger
   // stranger's key gets nothing from another operator's kernel, and the kernel's own key keeps the
   // executor side. dc6d3833 (N126) runs that guard on auth/kernel-authority.ts, which puts the
   // steward's #6508 decision tier (the admin or the proven operator wallet) on the relay: opening
-  // and revoking a scope, a chat instruction and a write tool call; every other route is "operate".
+  // a scope, a chat instruction and a write tool call. A revoke takes the stop tier (#6677), and
+  // every other route is "operate".
   it("anonymous is 401 on a write and a read", async () => {
     expect((await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: ANON, payload: SCOPE_BODY })).statusCode).toBe(401);
     expect((await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: ANON })).statusCode).toBe(401);

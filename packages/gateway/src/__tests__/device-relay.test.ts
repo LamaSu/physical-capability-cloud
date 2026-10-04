@@ -771,11 +771,11 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
       },
     });
 
-    // Revoke (the operator's emergency stop; a decision, so the admin key, N126)
+    // Revoke (the operator's emergency stop: the stop tier, so the kernel's own key, #6677)
     const res = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
-      headers: opAdmin,
+      headers: op,
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("revoked");
@@ -785,24 +785,17 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
   it("returns 409 for already revoked scope", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
 
-    // N126: a revoke is a decision, so the holder's claimed key can no longer
-    // give up its own scope; the admin revokes it, twice.
-    const byHolder = await app.inject({
+    // Revoke twice (the holder may give up its own scope: a revoke takes the stop tier, #6677)
+    const res1 = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
       headers: asKey("agent-1"),
     });
-    expect(byHolder.statusCode).toBe(403);
-    expect(byHolder.json().reason).toBe("operator_proof_required");
-    await app.inject({
-      method: "POST",
-      url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
-      headers: adminFor("agent-1"),
-    });
+    expect(res1.statusCode).toBe(200);
     const res2 = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
-      headers: adminFor("agent-1"),
+      headers: asKey("agent-1"),
     });
     expect(res2.statusCode).toBe(409);
   });
@@ -1463,12 +1456,10 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
       const res = await app.inject({ method: "GET", url, headers: asKey(OPERATOR_2) });
       expect(res.statusCode, url).toBe(404);
     }
-    // N126: a revoke is a decision, so operator-2 sends the admin key; the handler still does not
-    // find kernel-test-1's scope through kernel-test-2's path.
     const revoke = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-2/scope/${scope1}/revoke`,
-      headers: op2Admin,
+      headers: asKey(OPERATOR_2),
     });
     expect(revoke.statusCode).toBe(404);
   });
@@ -1500,8 +1491,7 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
     }
 
     const scope2 = await mintScope("agent-1", ["run_create"]);
-    // N126: a revoke is a decision (the admin key).
-    await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope2}/revoke`, headers: opAdmin });
+    await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope2}/revoke`, headers: op });
     const res = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/camera/latest", headers: asKey("agent-1") });
     expect(res.statusCode).toBe(403);
   });
@@ -1509,12 +1499,12 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
 
 // N126: the kernel's own claimed key (the identity its operatorAddress records, #400's operator)
 // still runs the kernel, but makes no decision: that needs the admin or a PROVEN operator wallet.
+// A revoke is not a decision: it takes the stop tier (#6677), so that key may revoke.
 describe("N126: the kernel's own claimed key is refused every relay decision", () => {
-  it("refuses its scope mint, revoke, chat instruction and writes, changing nothing; its safe call still runs", async () => {
+  it("refuses its scope mint, chat instruction and writes, changing nothing; its safe call and its revoke still run", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
     const decisions: Array<{ url: string; payload?: Record<string, unknown> }> = [
       { url: "/api/relay/kernel-test-1/scope", payload: { createdBy: OPERATOR, allowedTools: ["run_create"] } },
-      { url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke` },
       { url: "/api/relay/kernel-test-1/chat", payload: { message: "start the run" } },
       { url: "/api/relay/kernel-test-1/tool-call", payload: { scopeId, toolName: "run_create" } },
       { url: "/api/relay/kernel-test-1/tool-call", payload: { toolName: "run_create" } },
@@ -1535,6 +1525,11 @@ describe("N126: the kernel's own claimed key is refused every relay decision", (
       method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: op, payload: { toolName: "health" },
     });
     expect(safe.statusCode).toBe(201);
+
+    // And it may revoke the scope (the stop tier, #6677): revoking only removes authority.
+    const revoke = await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`, headers: op });
+    expect(revoke.statusCode).toBe(200);
+    expect(db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.status).toBe("revoked");
   });
 });
 
@@ -1578,8 +1573,7 @@ describe("N4b-gw: a call linked to another kernel's scope stays on its own kerne
 
   it("revoking the scope leaves the other kernel's pending call alone", async () => {
     const { id, foreignScope } = await crossLinkedCall("pending");
-    // N126: a revoke is a decision (the admin key, as operator-2).
-    const res = await app.inject({ method: "POST", url: `/api/relay/kernel-test-2/scope/${foreignScope}/revoke`, headers: op2Admin });
+    const res = await app.inject({ method: "POST", url: `/api/relay/kernel-test-2/scope/${foreignScope}/revoke`, headers: asKey(OPERATOR_2) });
     expect(res.statusCode).toBe(200);
     expect(res.json().rejectedPendingCalls).toBe(0);
     const row = getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get();
@@ -1787,12 +1781,11 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
 
 // Astra r2 finding 3 noted that object-owner routes do not require an ACTIVE
 // scope. That is the policy: a scope's creator keeps its own records (its
-// calls' results, the scope and its audit) after the scope ends. Nothing that
-// commands or observes the device stays open to it. N126: revoking is a
-// decision (the admin or a proven operator wallet), so the creator, whose
-// grant is a claimed identity, may no longer revoke it.
+// calls' results, the scope and its audit) and may still revoke it after the
+// scope ends (a revoke takes the stop tier, #6677). Nothing that commands or
+// observes the device stays open to it.
 describe("N4b-gw: a scope's creator keeps its own records after the scope ends", () => {
-  it("reads its call's result, the scope and its audit; it can't queue, watch, chat or revoke (N126)", async () => {
+  it("reads its call's result, the scope and its audit, and may revoke; it can't queue, watch or chat", async () => {
     const scope = await mintScope("agent-past", ["run_create"]);
     const who = asKey("agent-past");
     // N126: a scoped write is a decision, so the creator's own is refused and queues nothing;
@@ -1824,11 +1817,8 @@ describe("N4b-gw: a scope's creator keeps its own records after the scope ends",
     expect((await get("/api/relay/kernel-test-1/camera/snapshot")).statusCode).toBe(403);
     expect((await get("/api/relay/kernel-test-1/chat/messages")).statusCode).toBe(403);
 
-    // N126: was 200. A revoke is a decision, and the scope stays as the read above recorded it.
     const revoke = await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope}/revoke`, headers: who });
-    expect(revoke.statusCode).toBe(403);
-    expect(revoke.json().reason).toBe("operator_proof_required");
-    expect(getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scope)).get()!.status).toBe("expired");
+    expect(revoke.statusCode).toBe(200);
   });
 });
 
@@ -2354,8 +2344,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       seedCall("tc-a", { toolName: "run_create", scopeId });
       const res = await pollWhileGovernorIsHeld(async () => {
-        // N126: a revoke is a decision (the admin key).
-        const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: opAdmin });
+        const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: op });
         expect(revoke.statusCode).toBe(200);
       });
       expect(res.json().calls).toEqual([]);
@@ -2550,8 +2539,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       seedCall("tc-inflight", { status: "claimed", claimedAt: new Date().toISOString() });
       engageStop();
 
-      // N126: a revoke is a decision (the admin key); it stays open while the kernel is stopped.
-      const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: opAdmin });
+      const revoke = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope/${scopeId}/revoke`, headers: op });
       expect(revoke.statusCode).toBe(200);
       expect(revoke.json().status).toBe("revoked");
 

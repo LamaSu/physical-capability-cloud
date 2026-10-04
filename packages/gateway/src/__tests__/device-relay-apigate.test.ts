@@ -308,8 +308,8 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
     const stream = openStream(viewer);
     try {
       await until(() => stream.text().includes("event: connected"));
-      // N126: a revoke is a decision (the operator's key with the admin key).
-      const res = await app.inject({ method: "POST", url: `/api/relay/kernel-a/scope/${scope}/revoke`, headers: asOperatorAdmin() });
+      // A revoke takes the stop tier (#6677): the operator's own key, as on #400.
+      const res = await app.inject({ method: "POST", url: `/api/relay/kernel-a/scope/${scope}/revoke`, headers: bearer(operatorKey) });
       expect(res.statusCode).toBe(200);
       expect(await frameReaches(stream)).toBe(false);
       await until(() => stream.ended());
