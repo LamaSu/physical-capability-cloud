@@ -9,6 +9,8 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { isIrBindablePath } from "../mcp/dashboard-ir.js";
+import { projectIrRead } from "../mcp/dashboard-ir-read-projection.js";
 
 // ── CORS Allowlist ──────────────────────────────────────────────────────────
 
@@ -39,6 +41,83 @@ export function corsOriginValidator(
 
   // Reject unknown origins for credentialed requests
   return cb(null, false);
+}
+
+/** The gateway's CORS options before row 37, unchanged: the credentialed allowlist above. */
+export const CORS_ALLOWLIST_OPTIONS = Object.freeze({
+  origin: corsOriginValidator,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
+  maxAge: 86400, // Cache preflight for 24h
+});
+
+/** Credential-less READ access for the governed GenUI view (row 37; operator item 109(b)).
+ *  The IR kit fetches PCC's public read routes with credentials:"omit"
+ *  (mcp/dashboard-ir-browser-entry.ts) from the MCP App domain or a host's sandbox origin
+ *  (which can even be the opaque "null"). So it needs `Access-Control-Allow-Origin` and
+ *  NOTHING else:
+ *  - never Allow-Credentials, so no cookie-authenticated response is ever readable cross-origin;
+ *  - GET only.
+ *  "*" is safe here because these routes are public and the response is never credentialed. */
+export const CORS_IR_READ_OPTIONS = Object.freeze({
+  origin: "*",
+  credentials: false,
+  methods: ["GET"],
+  allowedHeaders: ["Accept"],
+  maxAge: 86400,
+});
+
+/** The marker corsDelegator puts on a GET it grants the credential-less wildcard: the IR path. */
+const IR_CORS_READ = Symbol.for("pcc.irCorsReadPath");
+
+/** onSend hook (registered at the ROOT, so it wraps every route). A response to a GET that
+ *  received the CORS wildcard is replaced by the server-side IR projection: only the fields the
+ *  closed IR reads (projectIrRead). The raw body's other fields (operator addresses, precise
+ *  locations, physical addresses) never reach a cross-origin script (astra #562 r1 F1).
+ *  - A non-200 response becomes "{}": the view only needs the status.
+ *  - An unparseable payload also becomes "{}": fail closed, never the raw bytes.
+ *  - Unmarked requests (allowlisted origins, no Origin, everything else) are untouched. */
+export async function irCorsReadProjection(
+  req: { method: string },
+  reply: { statusCode: number; header: (name: string, value: string) => unknown },
+  payload: unknown,
+): Promise<unknown> {
+  const path = (req as unknown as Record<symbol, unknown>)[IR_CORS_READ];
+  if (typeof path !== "string" || req.method !== "GET") return payload;
+  reply.header("content-type", "application/json; charset=utf-8");
+  if (reply.statusCode !== 200) return "{}";
+  let body: unknown;
+  try {
+    body = JSON.parse(typeof payload === "string" ? payload : Buffer.isBuffer(payload) ? payload.toString("utf8") : "");
+  } catch {
+    return "{}";
+  }
+  return JSON.stringify(projectIrRead(path, body));
+}
+
+/** Per-request CORS options for @fastify/cors's `delegator`. Every request gets
+ *  CORS_ALLOWLIST_OPTIONS exactly as before, with ONE exception: an Origin outside the
+ *  allowlist making a GET (or the CORS preflight for a GET) of a route the closed IR can bind to
+ *  (isIrBindablePath). That gets CORS_IR_READ_OPTIONS. Methods other than GET, routes outside
+ *  the IR bind registry, reserved routes and encoded or dotted paths keep the allowlist (so an
+ *  unknown origin gets no CORS headers at all). */
+export function corsDelegator(
+  req: { headers: Record<string, string | string[] | undefined>; method: string; url: string },
+  cb: (err: Error | null, options: typeof CORS_ALLOWLIST_OPTIONS | typeof CORS_IR_READ_OPTIONS) => void,
+): void {
+  const origin = typeof req.headers.origin === "string" ? req.headers.origin : undefined;
+  if (origin !== undefined && !ALLOWED_ORIGINS.has(origin)) {
+    const path = (req.url ?? "").split("?")[0] ?? "";
+    const preflightForGet = req.method === "OPTIONS" && req.headers["access-control-request-method"] === "GET";
+    if ((req.method === "GET" || preflightForGet) && isIrBindablePath(path)) {
+      // Mark the GET: its response must be the server-side IR projection (irCorsReadProjection),
+      // never the raw body (astra #562 r1 F1).
+      if (req.method === "GET") (req as unknown as Record<symbol, unknown>)[IR_CORS_READ] = path;
+      return cb(null, CORS_IR_READ_OPTIONS);
+    }
+  }
+  return cb(null, CORS_ALLOWLIST_OPTIONS);
 }
 
 // ── SSE Connection Limiter ──────────────────────────────────────────────────

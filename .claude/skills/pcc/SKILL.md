@@ -1,6 +1,6 @@
 ---
 name: pcc
-description: PCC (Physical Capability Cloud) — discover and hire real-world physical capabilities (3D printing, CNC machining, lab assays, drone surveys, couriers, and more) through one agent-native HTTP API. AWS for the physical world.
+description: PCC (Physical Capability Cloud) — discover and hire real-world physical capabilities (3D printing, CNC machining, lab assays, drone surveys, couriers, and more) through one agent-native HTTP API. Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network.
 license: Apache-2.0
 homepage: https://capability.network
 agent_package: https://capability.network/agent-package.json
@@ -22,8 +22,11 @@ discovery, and the two ways to commit to a job.
 
 ## What PCC is
 
-PCC is AWS for the physical world: a cloud control plane for physical
-manufacturing, lab, and logistics capabilities.
+PCC exists to turn abilities and inventions into trusted, economically
+callable capacity that other agents can immediately build on.
+Public beta: payments settle on a test network.
+It is a cloud control plane for physical manufacturing, lab, and logistics
+capabilities, organised much like a cloud provider:
 
 | AWS concept | PCC equivalent |
 |---|---|
@@ -38,11 +41,15 @@ reporting success back to the user.
 
 ## Base URL
 
-```
-https://capability.network
+Use the PCC gateway you were given. The examples below read it from
+`PCC_BASE`. Production is `https://capability.network`; at an event,
+rehearsal or staging gateway, never call production unless told to.
+
+```bash
+export PCC_BASE="${PCC_BASE:-https://capability.network}"
 ```
 
-Every path below is relative to this. The full machine-readable surface is
+Every path below is relative to it. The full machine-readable surface is
 also published as an OpenAPI 3 document (`GET /openapi.json`) and as a
 single-file agent package (`GET /agent-package.json` — 250+ tools with
 JSON-Schema inputs and HTTP endpoint mappings, built for any LLM that isn't
@@ -54,7 +61,7 @@ Most reads are public. Posting a job, uploading files, or committing to
 settlement needs a Bearer key.
 
 ```bash
-curl -X POST https://capability.network/api/auth/provision \
+curl -X POST "$PCC_BASE/api/auth/provision" \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com", "name": "My Agent"}'
 ```
@@ -81,14 +88,14 @@ to know the exact vendor suffix.
 ### List all capability types (PUBLIC)
 
 ```bash
-curl https://capability.network/api/capabilities/types
+curl "$PCC_BASE/api/capabilities/types"
 # {"types": ["3d-printing", "cnc", "hplc", "laser-cutting", "pcb", ...]}
 ```
 
 ### Search the catalog
 
 ```bash
-curl "https://capability.network/api/capabilities/search?q=HPLC"
+curl "$PCC_BASE/api/capabilities/search?q=HPLC"
 ```
 
 Full-text search across names, types, and materials. Returns a paginated
@@ -105,7 +112,7 @@ match) or `?type=manufacturing` (prefix match — returns every
 For a single natural-language query instead of structuring a filter:
 
 ```bash
-curl -X POST https://capability.network/ask \
+curl -X POST "$PCC_BASE/ask" \
   -H "Content-Type: application/json" \
   -d '{"query": "who can do CNC milling in aluminum"}'
 ```
@@ -136,17 +143,17 @@ tolerance, infill, assurance tier) that changes the price.
 
 ```bash
 # 1. What can I configure?
-curl -X POST https://capability.network/api/build/options \
+curl -X POST "$PCC_BASE/api/build/options" \
   -H "Content-Type: application/json" \
   -d '{"type": "3d-printing"}'
 
 # 2. What will my selections cost?
-curl -X POST https://capability.network/api/build/price \
+curl -X POST "$PCC_BASE/api/build/price" \
   -H "Content-Type: application/json" \
   -d '{"type": "3d-printing", "selections": {"material": "PLA", "infill": 20, "layer_height": 0.2}}'
 
 # 3. Build the (unsigned) contract
-curl -X POST https://capability.network/api/build/contract \
+curl -X POST "$PCC_BASE/api/build/contract" \
   -H "Authorization: Bearer $PCC_KEY" -H "Content-Type: application/json" \
   -d '{"type": "3d-printing", "selections": {"material": "PLA", "infill": 20}, "assuranceTier": 1}'
 ```
@@ -176,7 +183,7 @@ For most everyday categories (pizza, courier, tutoring, drone surveys —
 anything without a rich configurator) this is the more direct path:
 
 ```bash
-curl -X POST https://capability.network/api/job-offers \
+curl -X POST "$PCC_BASE/api/job-offers" \
   -H "Authorization: Bearer $PCC_KEY" -H "Content-Type: application/json" \
   -d '{
     "capabilityType": "manufacturing.fdm",
@@ -189,13 +196,16 @@ curl -X POST https://capability.network/api/job-offers \
 `pricing.model` is `fixed`, `quote-required`, or `per-unit`. Always set
 `idempotencyKey` — reposting the same key returns the original offer
 instead of double-posting. An operator claims it
-(`POST /api/job-offers/:id/claim`), and you poll `GET /api/job-offers/:id`
-for `status`. Browse what's currently open (no auth) with
+(`POST /api/job-offers/:id/claim`), and you poll `GET /api/job-offers/:id`,
+which answers `{offer, events}`: read `offer.status`. A `delivered` status is only a
+claim: on the current gateway any authenticated caller can post a `delivered`
+event, with no evidence. Browse what's currently open (no auth) with
 `GET /api/job-offers/open?capabilityType=<type>`.
 
 For a binary artifact the job needs (an STL file, a reference photo),
-upload it first — `POST /api/storage` (multipart/form-data) returns a
-`{cid}` you pass inside `requirements`.
+upload it first: `POST /api/storage` with the raw bytes and a binary
+`Content-Type` such as `application/octet-stream` (JSON and multipart bodies
+are refused) returns a `{cid}` you pass inside `requirements`.
 
 ### Check on a job or an escrow
 
@@ -214,16 +224,16 @@ or a negotiation commit means the request is on the board — not that the
 part is printed or the food is at the door. Before telling the user
 something happened:
 
-1. Poll job/escrow status until it reaches a terminal state
-   (`settled` / `completed` / `delivered`), not just `queued` or `open`.
-2. Read the evidence the operator submitted
+1. Poll job or offer status, but treat it as a claim: an offer's `delivered`
+   needs no evidence, and nothing sets `settled` today.
+2. Read the evidence the operator submitted, and report only what it shows
    (`GET /api/jobs/:jobId/evidence`, or fetch any CID via
    `GET /api/storage/:cid`).
 3. If the request had a deadline, confirm the timestamp was actually met —
    `open` past the deadline means nobody claimed it.
 
-Never say "ordered", "printed", or "delivered" unless you observed the
-status field say so.
+Never say "ordered", "printed", or "delivered" from a status alone: only
+from evidence you have read.
 
 ## Assurance tiers (how much evidence backs a job)
 
@@ -242,12 +252,13 @@ everyday jobs; ask the user before committing to tier 2+.
 PCC also speaks MCP directly, so you don't have to hand-roll the HTTP calls
 above:
 
-- **Hosted (recommended)** — Streamable HTTP at `https://capability.network/mcp`.
+- **Hosted (recommended)** — Streamable HTTP at `$PCC_BASE/mcp` (production:
+  `https://capability.network/mcp`).
   Point any MCP client that supports remote HTTP servers at this URL; no
   install needed. Server card: `GET /.well-known/mcp/server-card.json`.
 - **Local / stdio** — for Claude Desktop or another local MCP host, run the
   bundled server: `node packages/mcp-server/dist/index.js` with
-  `PCC_URL=https://capability.network`.
+  `PCC_URL=$PCC_BASE`.
 
 Both surfaces expose read-only catalog tools without auth; write operations
 (posting an offer, funding escrow) still need the Bearer key from
@@ -258,9 +269,14 @@ Both surfaces expose read-only catalog tools without auth; write operations
 If the user says "I run a print shop" or "I have an OT-2" or "I'm a
 courier," they're offering capability, not buying it. Provision a key, then
 `POST /api/kernels` to register their site and `POST /api/capabilities` to
-publish what it offers. `pip install pcc-node && pcc-node start` does
-hardware auto-detection, key provisioning, and kernel registration in one
-command for operators who'd rather run a CLI than call the API directly.
+publish what it offers. `pip install "pcc-node[crypto]>=0.1.1" && pcc-node start` does
+hardware auto-detection and kernel registration in one command for operators
+who'd rather run a CLI than call the API directly. It needs an API key: provision
+one first and pass it as `PCC_API_KEY` or `--api-key`. Without one it stops,
+because the gateway refuses to provision a key without an email. Until
+0.1.1 is on PyPI, install `python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"`.
+From 0.1.1 the node keeps the kernel online but takes no jobs itself: jobs run
+through the operating agent's typed operations.
 
 ## When NOT to use PCC
 
