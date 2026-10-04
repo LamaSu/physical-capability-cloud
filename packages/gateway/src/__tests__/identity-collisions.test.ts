@@ -20,12 +20,12 @@ const FULL_SCHEMA: Readonly<Record<string, readonly string[]>> = {
   ui_artifacts: ["owner"],
 };
 type FakeReader = { prepare(sql: string): { all(...p: unknown[]): unknown[] } };
-/** Answers the catalog queries (sqlite_master, pragma_table_info) from `schema`; every other query goes to `reader`. */
+/** Answers the catalog queries (sqlite_master, pragma_table_xinfo) from `schema`; every other query goes to `reader`. */
 function withCatalog(reader: FakeReader, schema: Readonly<Record<string, readonly string[]>> = FULL_SCHEMA): FakeReader {
   return {
     prepare(sql: string) {
       if (sql.includes("sqlite_master")) return { all: (t: unknown) => (schema[String(t)] ? [{ name: String(t) }] : []) };
-      if (sql.includes("pragma_table_info")) return { all: (t: unknown, c: unknown) => ((schema[String(t)] ?? []).includes(String(c)) ? [{ name: String(c) }] : []) };
+      if (sql.includes("pragma_table_xinfo")) return { all: (t: unknown, c: unknown) => ((schema[String(t)] ?? []).includes(String(c)) ? [{ name: String(c) }] : []) };
       return reader.prepare(sql);
     },
   };
@@ -154,7 +154,7 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
   function readerFailing(sourceTable: string, err: () => Error) {
     return withCatalog({
       prepare(sql: string) {
-        if (sql.includes(`FROM ${sourceTable}`)) throw err();
+        if (sql.includes(`FROM main.${sourceTable}`)) throw err();
         return { all: () => [] as unknown[] };
       },
     });
@@ -189,7 +189,7 @@ describe("AZ-9 round 2: only a confirmed absence is allowlistable (astra pack 95
   it("[neg] a query that fails part-way through .all() is a FAILED read (exit 4), even when allowlisted", () => {
     const reader = withCatalog({
       prepare(sql: string) {
-        if (sql.includes("FROM ui_artifacts")) return { all: () => { throw CORRUPT(); } };
+        if (sql.includes("FROM main.ui_artifacts")) return { all: () => { throw CORRUPT(); } };
         return { all: () => [] as unknown[] };
       },
     });
@@ -225,7 +225,7 @@ describe("AZ-9 round 3: absence is a genuine SQLite error, never message text al
   function readerThrowing(sourceTable: string, thrown: () => unknown) {
     return withCatalog({
       prepare(sql: string) {
-        if (sql.includes(`FROM ${sourceTable}`)) throw thrown();
+        if (sql.includes(`FROM main.${sourceTable}`)) throw thrown();
         return { all: () => [] };
       },
     });
@@ -277,7 +277,7 @@ describe("AZ-9 round 3: absence is a genuine SQLite error, never message text al
     const poisoned = { get v(): string { throw new Error("row decode failed"); } };
     const reader = withCatalog({
       prepare(sql: string) {
-        return { all: () => (sql.includes("FROM ui_artifacts") ? [poisoned] : []) };
+        return { all: () => (sql.includes("FROM main.ui_artifacts") ? [poisoned] : []) };
       },
     });
     const out = findIdentityCollisions(reader);
@@ -292,8 +292,8 @@ describe("AZ-9 round 3: absence is a genuine SQLite error, never message text al
     initStore({ seed: false });
     const client = (getStore().db as unknown as { $client: { prepare(sql: string): { all(...p: unknown[]): unknown[] } } }).$client;
     const cases: Array<[string, string]> = [
-      ["FROM ui_artifacts", "FROM ui_artifacts_absent_95c"],
-      ["SELECT DISTINCT owner AS v FROM ui_artifacts", "SELECT DISTINCT owner_absent_95c AS v FROM api_keys"],
+      ["FROM main.ui_artifacts", "FROM main.ui_artifacts_absent_95c"],
+      ["SELECT DISTINCT owner AS v FROM main.ui_artifacts", "SELECT DISTINCT owner_absent_95c AS v FROM main.api_keys"],
     ];
     for (const [needle, replacement] of cases) {
       // The catalog is asked about the real ui_artifacts.owner (present); only the DATA query is redirected,
@@ -320,8 +320,8 @@ describe("AZ-9 round 4: a source the catalog says EXISTS is never excused, whate
     return {
       prepare(sql: string) {
         if (sql.includes("sqlite_master")) return { all: (t: unknown) => (schema[String(t)] ? [{ name: String(t) }] : []) };
-        if (sql.includes("pragma_table_info")) return { all: (t: unknown, c: unknown) => ((schema[String(t)] ?? []).includes(String(c)) ? [{ name: String(c) }] : []) };
-        if (sql.includes("FROM ui_artifacts")) throw thrown();
+        if (sql.includes("pragma_table_xinfo")) return { all: (t: unknown, c: unknown) => ((schema[String(t)] ?? []).includes(String(c)) ? [{ name: String(c) }] : []) };
+        if (sql.includes("FROM main.ui_artifacts")) throw thrown();
         return { all: () => [] as unknown[] };
       },
     };
@@ -352,7 +352,7 @@ describe("AZ-9 round 4: a source the catalog says EXISTS is never excused, whate
     const db = presentButThrowing(() => new Error("unused"));
     const reader = {
       prepare(sql: string) {
-        if (sql.includes("FROM ui_artifacts")) return { all: () => [poisoned] };
+        if (sql.includes("FROM main.ui_artifacts")) return { all: () => [poisoned] };
         return db.prepare(sql);
       },
     };
