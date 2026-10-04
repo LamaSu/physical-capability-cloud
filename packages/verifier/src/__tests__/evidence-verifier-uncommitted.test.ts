@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { EvidenceVerifier } from "../evidence-verifier.js";
-import { hashBundle, hashEvent } from "@pcc/spec";
+import { EvidenceBundleSchema, EvidenceEventSchema, hashBundle, hashEvent } from "@pcc/spec";
 import type { DigitalWorkflowStep, EvidenceBundle, EvidenceEvent, SHA256, Signature } from "@pcc/spec";
 
 const source = { deviceId: "dev_uncommitted", deviceType: "controller" as const, kernelId: "kernel_uncommitted" };
@@ -154,32 +154,55 @@ describe("N118 — the verifier reads nothing unsigned (the property, not a rout
     if (withPower) events.push(await sealed({ type: "power_profile_summary", timestamp: T(6), source, payload: { durationSeconds: 4 } }, "ev-power"));
     return bundleOf(events);
   }
+  /** A well-formed delegation, so the field is also tried with a value a verifier could act on (E11f). */
+  const WELL_FORMED_SESSION_KEY = {
+    sessionId: "sess-1",
+    parentAgentId: "agent-1",
+    publicKey: "ab".repeat(32),
+    issuedAt: 1,
+    expiresAt: 2,
+    scope: { allowedActions: ["evidence.sign"], contractIds: ["contract-1"], maxSignatures: 1 },
+    parentSignature: "cd".repeat(64),
+  };
   /** Values that differ from `v`, for an uncommitted field. */
-  const mutationsOf = (v: unknown): unknown[] =>
-    ["mutated-value", "", 0, 7, null, { injected: true }, ["injected"]].filter((m) => JSON.stringify(m) !== JSON.stringify(v));
+  const mutationsOf = (v: unknown, key: string): unknown[] =>
+    ["mutated-value", "", 0, 7, null, { injected: true }, ["injected"], ...(key === "sessionKeyAuthorization" ? [WELL_FORMED_SESSION_KEY] : [])].filter(
+      (m) => JSON.stringify(m) !== JSON.stringify(v),
+    );
   // Committed: the bundleHash (recomputed from the events) and each event's hashed fields and hash.
-  // Every other bundle field, assuranceTier included, is uncommitted and mutated below (E11e).
+  // Every other DECLARED field is uncommitted and mutated below: the field lists come from the schema,
+  // so an optional field a fixture omits (sessionKeyAuthorization) is tried too (E11e, E11f).
   const COMMITTED_BUNDLE = new Set(["events", "bundleHash"]);
   const COMMITTED_EVENT = new Set(["type", "timestamp", "source", "payload", "hash"]);
+  const BUNDLE_FIELDS = Object.keys(EvidenceBundleSchema.shape);
+  const EVENT_FIELDS = Object.keys(EvidenceEventSchema.shape);
+
+  it("the field lists are the schema's, optional fields included", () => {
+    expect(BUNDLE_FIELDS).toEqual(expect.arrayContaining(["assuranceTier", "kernelSignature", "sessionKeyAuthorization", "createdAt", "events", "bundleHash"]));
+    expect(EVENT_FIELDS).toEqual(expect.arrayContaining(["id", "type", "timestamp", "source", "payload", "hash"]));
+  });
 
   it("mutating any uncommitted field of a sealed bundle, or of any event, or the order, never changes the verdict", async () => {
     for (const honest of [await tier1Bundle(true), await tier1Bundle(false)]) {
       const base = verdictOf(await verifier.verify(honest, ACCEPTED));
       const variants: Array<[string, EvidenceBundle]> = [];
-      for (const key of [...Object.keys(honest), "unsignedExtra"]) {
+      for (const key of [...BUNDLE_FIELDS, "unsignedExtra"]) {
         if (COMMITTED_BUNDLE.has(key)) continue;
-        for (const value of mutationsOf((honest as unknown as Record<string, unknown>)[key])) {
+        for (const value of mutationsOf((honest as unknown as Record<string, unknown>)[key], key)) {
           variants.push([`bundle.${key} = ${JSON.stringify(value)}`, { ...honest, [key]: value } as EvidenceBundle]);
         }
       }
       honest.events.forEach((event, i) => {
-        for (const key of [...Object.keys(event), "unsignedExtra"]) {
+        for (const key of [...EVENT_FIELDS, "unsignedExtra"]) {
           if (COMMITTED_EVENT.has(key)) continue;
-          for (const value of mutationsOf((event as unknown as Record<string, unknown>)[key])) {
+          for (const value of mutationsOf((event as unknown as Record<string, unknown>)[key], key)) {
             const events = honest.events.map((e, j) => (j === i ? ({ ...e, [key]: value } as EvidenceEvent) : e));
             variants.push([`events[${i}].${key} = ${JSON.stringify(value)}`, { ...honest, events }]);
           }
         }
+        // The payload is committed through its canonical form, so its key order is not committed.
+        const reversed = Object.fromEntries(Object.entries(event.payload).reverse());
+        variants.push([`events[${i}].payload keys reversed`, { ...honest, events: honest.events.map((e, j) => (j === i ? { ...e, payload: reversed } : e)) }]);
       });
       variants.push(["events reversed", { ...honest, events: [...honest.events].reverse() }]);
       expect(variants.length).toBeGreaterThan(40);
