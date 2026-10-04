@@ -23,6 +23,7 @@ import type { CWMStep } from "@pcc/spec";
 import { computeAssuranceScore } from "@pcc/verifier";
 import type { CaptureVerdictRow } from "@pcc/store";
 import { BaseFacade } from "./base.facade.js";
+import { NotFoundError } from "./facade-errors.js";
 import type {
   EvidenceSummaryDTO,
   ComplianceReportDTO,
@@ -49,15 +50,6 @@ const ISO_9001_INSPECTION = "ISO-9001:8.6";
 const ISO_9001_MEASUREMENT = "ISO-9001:9.1.1";
 const ISO_9001_TEE = "ISO-9001:8.6-TEE";
 const FDA_21_CFR_PART_11 = "FDA-21CFR-Part11";
-
-// ── Internal error helper ─────────────────────────────────────────────────────
-
-class NotFoundError extends Error {
-  constructor(entity: string, id: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
-  }
-}
 
 // ── Bundle shape with pre-loaded events ──────────────────────────────────────
 

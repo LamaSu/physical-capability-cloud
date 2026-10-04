@@ -18,6 +18,12 @@ import { type Result, ok, err, Errors } from "@pcc/spec";
 import { isAddress, type Address, type Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { BaseFacade } from "./base.facade.js";
+import {
+  NotFoundError,
+  BadRequestError,
+  WriteDisabledError,
+  BatchDisabledError,
+} from "./facade-errors.js";
 import type {
   EscrowSummaryDTO,
   SettlementResultDTO,
@@ -346,7 +352,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateAddress(address);
       this.requireWriteEnabled();
       if (!amount) {
-        throw Object.assign(new Error("amount is required"), { name: "BadRequestError" });
+        throw new BadRequestError("amount is required");
       }
       const result = await chainApproveToken(address, amount, tokenAddress);
       return { ...result, action: "approve", spender: address, amount };
@@ -409,10 +415,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       if (!body.challengerBond || !body.challengerEvidenceHash || !body.reason) {
-        throw Object.assign(
-          new Error("Missing required fields: challengerBond, challengerEvidenceHash, reason"),
-          { name: "BadRequestError" },
-        );
+        throw new BadRequestError("Missing required fields: challengerBond, challengerEvidenceHash, reason");
       }
       const result = useEasV2()
         ? await chainFileDisputeV2(
@@ -498,7 +501,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       if (!evidenceBundleHash) {
-        throw Object.assign(new Error("evidenceBundleHash is required"), { name: "BadRequestError" });
+        throw new BadRequestError("evidenceBundleHash is required");
       }
       const result = await chainSubmitEvidence(
         milestoneIndex,
@@ -544,7 +547,7 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       if (!attestation || !attestation.escrowAddress) {
-        throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
+        throw new BadRequestError("attestation struct is required");
       }
       const result = await chainSubmitAttestation(
         milestoneIndex,
@@ -617,23 +620,17 @@ export class SettlementFacade extends BaseFacade {
   async submitBatchIntent(intent: BatchIntentInput): Promise<Result<unknown>> {
     return this.execute("submitBatchIntent", async () => {
       if (!isBatchEnabled()) {
-        throw Object.assign(
-          new Error("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable."),
-          { name: "BatchDisabledError" },
-        );
+        throw new BatchDisabledError("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.");
       }
 
       const { intentId, agentId, escrowAddress, operation, usdcValue } = intent;
 
       if (!intentId || !agentId || !escrowAddress || !operation?.type) {
-        throw Object.assign(
-          new Error("Missing required fields: intentId, agentId, escrowAddress, operation.type"),
-          { name: "BadRequestError" },
-        );
+        throw new BadRequestError("Missing required fields: intentId, agentId, escrowAddress, operation.type");
       }
 
       if (!isAddress(escrowAddress)) {
-        throw Object.assign(new Error("Invalid escrowAddress"), { name: "BadRequestError" });
+        throw new BadRequestError("Invalid escrowAddress");
       }
 
       const parsedOp = parseOperation(operation);
@@ -673,10 +670,10 @@ export class SettlementFacade extends BaseFacade {
   ): Promise<Result<SettlementResultDTO>> {
     return this.execute("releaseMilestoneForJob", async () => {
       if (!jobId) {
-        throw Object.assign(new Error("jobId is required"), { name: "BadRequestError" });
+        throw new BadRequestError("jobId is required");
       }
       if (!attestation || !attestation.escrowAddress) {
-        throw Object.assign(new Error("attestation struct is required"), { name: "BadRequestError" });
+        throw new BadRequestError("attestation struct is required");
       }
 
       const idx = milestoneIndex ?? 0;
@@ -768,10 +765,7 @@ export class SettlementFacade extends BaseFacade {
   async flushBatch(): Promise<Result<unknown>> {
     return this.execute("flushBatch", async () => {
       if (!isBatchEnabled()) {
-        throw Object.assign(
-          new Error("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable."),
-          { name: "BatchDisabledError" },
-        );
+        throw new BatchDisabledError("Batch settlement is not configured. Set PCC_BUNDLER_URL to enable.");
       }
 
       const summary = await flushSettlements();
@@ -802,31 +796,22 @@ export class SettlementFacade extends BaseFacade {
 
   private validateAddress(address: string): void {
     if (!isAddress(address)) {
-      throw Object.assign(new Error("Invalid Ethereum address"), { name: "BadRequestError" });
+      throw new BadRequestError("Invalid Ethereum address");
     }
   }
 
   private validateMilestoneIndex(index: number): void {
     if (isNaN(index) || index < 0) {
-      throw Object.assign(new Error("Invalid milestone index"), { name: "BadRequestError" });
+      throw new BadRequestError("Invalid milestone index");
     }
   }
 
   private requireWriteEnabled(): void {
     if (!isWriteEnabled()) {
-      throw Object.assign(
-        new Error("Write operations are not available — PCC_GATEWAY_PRIVATE_KEY is not configured."),
-        { name: "WriteDisabledError" },
+      throw new WriteDisabledError(
+        "Write operations are not available — PCC_GATEWAY_PRIVATE_KEY is not configured.",
       );
     }
-  }
-}
-
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  constructor(entity: string, id: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
   }
 }
 

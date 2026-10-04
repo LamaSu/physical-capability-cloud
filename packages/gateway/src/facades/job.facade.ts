@@ -9,6 +9,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { type Result, ok, err, Errors } from "@pcc/spec";
 import { BaseFacade } from "./base.facade.js";
+import { NotFoundError, BadRequestError } from "./facade-errors.js";
 import type {
   JobDTO,
   JobDetailDTO,
@@ -488,7 +489,7 @@ export class JobFacade extends BaseFacade {
 
   /** Return a bad-request result (shorthand used inside execute()) */
   private badRequest<T>(code: string, message: string): T {
-    throw Object.assign(new Error(message), { name: "BadRequestError", code });
+    throw new BadRequestError(message, code);
   }
 
   private loadKernelMap(kernelIds: string[]): Map<string, any> {
@@ -565,15 +566,5 @@ export class JobFacade extends BaseFacade {
 
     scored.sort((a, b) => b.score - a.score);
     return scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
-  }
-}
-
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  readonly code?: string;
-  constructor(entity: string, id: string, code?: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
-    if (code) this.code = code;
   }
 }

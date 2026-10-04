@@ -12,6 +12,7 @@ import { kernelSigningProofMessage } from "@pcc/kernel";
 import { type Result, type RegisteredSigner, ok, err, Errors } from "@pcc/spec";
 import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
 import { BaseFacade } from "./base.facade.js";
+import { NotFoundError, ForbiddenError, ConflictError } from "./facade-errors.js";
 import type {
   KernelDTO,
   KernelHealthSnapshot,
@@ -311,10 +312,7 @@ export class KernelFacade extends BaseFacade {
         // unit test with no apiGate wired) there is no owner to check against; the
         // SET-ONCE signer bind still fail-closes via the CAS below.
         if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
-          throw Object.assign(
-            new Error(`Authenticated actor does not own kernel '${id}'`),
-            { name: "ForbiddenError" },
-          );
+          throw new ForbiddenError(`Authenticated actor does not own kernel '${id}'`);
         }
         // Upsert: update heartbeat + optional fields
         const updates: Record<string, unknown> = {
@@ -358,10 +356,7 @@ export class KernelFacade extends BaseFacade {
             const current = repos.kernels.findById(id) ?? kernel;
             const currentSigner = this.signerFromRow(current);
             if (!currentSigner || !this.sameSigner(currentSigner, provenSigner)) {
-              throw Object.assign(
-                new Error(`Kernel '${id}' already has a different registered signer`),
-                { name: "ConflictError" },
-              );
+              throw new ConflictError(`Kernel '${id}' already has a different registered signer`);
             }
             kernel = current;
           }
@@ -773,14 +768,6 @@ export class KernelFacade extends BaseFacade {
       }
     }
     return map;
-  }
-}
-
-/** Internal error for flow control — caught by BaseFacade.execute() */
-class NotFoundError extends Error {
-  constructor(entity: string, id: string) {
-    super(`${entity} '${id}' not found`);
-    this.name = "NotFoundError";
   }
 }
 

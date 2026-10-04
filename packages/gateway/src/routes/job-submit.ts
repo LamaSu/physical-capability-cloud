@@ -256,8 +256,12 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterDeviceInput }>("/api/devices/register", async (req, reply) => {
     const result = await facade.registerDevice(req.body);
     if (!result.success) {
-      // Map duplicate error to 409
-      if (result.error.message?.includes("UNIQUE") || result.error.message?.includes("unique")) {
+      // N71 round 4 (astra pack 83c, HIGH #4): detect the structured CONFLICT code
+      // BaseFacade.execute() now emits for a UNIQUE-constraint violation (never the
+      // driver's own message — that message no longer reaches this Result at all, so
+      // there is nothing left here to sniff). The 409 device_already_exists response
+      // is unchanged; what changed is that it is driven by a code, not message text.
+      if (result.error.code === "CONFLICT") {
         return reply.code(409).send({ error: "device_already_exists" });
       }
       return sendResult(reply, result);
