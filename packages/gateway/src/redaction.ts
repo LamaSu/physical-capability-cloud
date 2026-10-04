@@ -12,11 +12,13 @@
  * control is that the agent should never send secrets. Unit-tested in redaction.test.ts.
  *
  * Also here: scrubbing for DIAGNOSTIC text that leaves the gateway in a response (an adapter's
- * exception message, a status line). redactUrlCredentials drops the userinfo, query and fragment
- * of every URL in the text, because an error that quotes the URL a device was configured with
- * quotes its credentials too (Node's fetch does: "Request cannot be constructed from a URL that
- * includes credentials: http://user:pass@host/"). redactDiagnostic adds redactSecrets. Neither is
- * a substitute for not putting a value in the message in the first place (N71).
+ * exception message, a status line). redactUrlCredentials replaces every URL-shaped token in the
+ * text with a fixed marker (N71 round 4, astra pack 83c: there is no safe partial projection of a
+ * URL embedded in arbitrary surrounding text — see the comment on URL_WITH_SCHEME), because an
+ * error that quotes the URL a device was configured with quotes its credentials too (Node's fetch
+ * does: "Request cannot be constructed from a URL that includes credentials: http://user:pass@host/").
+ * redactDiagnostic adds redactSecrets. Neither is a substitute for not putting a value in the
+ * message in the first place (N71).
  */
 
 export const REDACTED = "[redacted]";
@@ -55,34 +57,46 @@ export function redactOrNull(s: string | null): string | null {
   return s === null ? null : redactSecrets(s);
 }
 
-// scheme://[userinfo@]authority-and-path[?query][#fragment], per URL grammar: the authority ends at the
-// first "/", "?" or "#" (or whitespace), and its userinfo is everything before the LAST "@" in it.
-// Userinfo, query and fragment are dropped; the location (host, port, path) is kept.
+// N71 round 4 (astra pack 83c, CRITICAL #1): rounds 2-3 tried to parse out a "safe" part of
+// the URL to KEEP (host + path, as $2) and drop only userinfo/query/fragment around it. Both
+// rounds' bugs were in that KEPT group, not the dropped ones:
+//   - round 2/3: $2 excluded a wrapping-delimiter set (quote, angle bracket, backtick,
+//     backslash) so the match wouldn't swallow `url='...'`. But those same characters are
+//     LEGAL inside a real URL's userinfo/query/fragment, so a credential containing one
+//     ended the match early, leaving the rest (the credential's tail, or a second
+//     back-to-back URL) to fall outside the match and pass through .replace()'s /g loop
+//     completely untouched.
+//   - round 3 (astra pack 83c): even after fixing the DROPPED groups' boundary characters,
+//     $2 itself never excluded comma, ':' or '@' — so a second, back-to-back URL (with its
+//     OWN credentials) was consumed as if it were part of the first URL's "path" and
+//     returned unchanged; and because $2 DID still exclude an apostrophe, a legal apostrophe
+//     in an ordinary (credential-free) path truncated $2 — and therefore the whole match —
+//     before the query group could even run, so a credential right after it was never
+//     reached by any group.
 //
-// N71 round 3 (astra pack 83b): userinfo, query and fragment used to ALSO exclude a quote, angle
-// bracket, backtick and backslash — meant to stop the match swallowing a wrapping delimiter the URL
-// sits inside (`url='...'`, `<...>`). But all four are legal inside a URL's userinfo, query or
-// fragment (the WHATWG URL parser — what Node's fetch uses — accepts them there), so a credential
-// containing one defeated the match instead of ending it: `http://u:pa'ss@host.invalid/x` matched
-// only as far as "pa", leaving the password (and "@host...") untouched; a trailing `'SECRET` in a
-// query or fragment was left dangling the same way. Userinfo, query and fragment now keep only the
-// boundary characters they actually need — userinfo stops at "/", "?", "#" or whitespace (the
-// authority's own delimiters); query stops at "#" or whitespace; fragment stops at whitespace. None
-// of the three is reinserted (only $1 = scheme and $2 = host+path survive the replace), so loosening
-// them cannot leak more than before. The KEPT group (host + path, $2) is UNCHANGED: it still excludes
-// the wrapping-delimiter set, since — unlike userinfo/query/fragment, discarded either way — a looser
-// $2 could let a second, back-to-back URL's own credentials ride along inside what this URL's path
-// keeps, instead of being matched (and scrubbed) as its own URL by the next iteration of /g.
-const URL_WITH_SCHEME =
-  /\b([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/?#]*@)?([^\s?#'"<>`]*)(?:\?[^\s#]*)?(?:#[^\s]*)?/gi;
+// There is no fix that keeps parsing out a "safe" part of an arbitrary URL embedded in
+// arbitrary surrounding text: any character excluded from the kept group to stop one bypass
+// is legal syntax somewhere else and opens another. So round 4 keeps NOTHING. It matches a
+// URL token conservatively (scheme through the next whitespace) and replaces the WHOLE thing
+// with a fixed marker — never a reconstructed host/path, whether or not THIS token happens to
+// carry a credential. A single bounded field that IS known to hold exactly one URL (not
+// arbitrary prose) can still safely show host/path — but it must get there by parsing that
+// field with the real URL constructor (as e.g. valueCarriesCredential does), never by this
+// regex, and never by re-deriving a substring from matched groups.
+const URL_WITH_SCHEME = /\b[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+
+/** What redactUrlCredentials shows in place of an entire matched URL token. */
+export const URL_REDACTED = "[url]";
 
 /**
- * Drop the credentials from every URL in `s`: userinfo (`user:pass@`), query string and fragment, which
- * routinely carry tokens (`?apikey=...`). The scheme, host, port and path stay, so the text is still a
- * usable diagnostic. Idempotent; text with no URL in it is returned unchanged.
+ * Replace every URL-shaped token in `s` — scheme through the next whitespace — with a fixed
+ * marker. Conservative on purpose (N71 round 4, astra pack 83c): there is no safe partial
+ * projection of a URL embedded in arbitrary surrounding text, so the whole token goes, not
+ * just its userinfo/query/fragment, and not just the ones that happen to carry a credential.
+ * Idempotent; text with no "scheme://" in it is returned unchanged.
  */
 export function redactUrlCredentials(s: string): string {
-  return s.replace(URL_WITH_SCHEME, "$1$2");
+  return s.replace(URL_WITH_SCHEME, URL_REDACTED);
 }
 
 /**
@@ -151,23 +165,47 @@ export const INVALID_ID = "[invalid id]";
 // N71 round 3 (astra pack 83b, Q3): does an arbitrary caller-supplied value carry
 // something that reads as a credential? Used to REFUSE a public matching artifact (a
 // device's emits[] manifest, returned verbatim by every registration view) at the
-// door — not to scrub a response. Two independent signals, either is enough:
+// door — not to scrub a response. Independent signals, any one is enough:
 //   - a secret-SHAPED key anywhere in the structure (apiKey, token, password, ...),
 //     regardless of its value;
 //   - a string value that is a URL with non-empty userinfo (via the real WHATWG URL
 //     parser, not a hand-rolled regex — the same one Node's fetch uses, so it agrees
-//     on what counts as userinfo, apostrophe included) or whose query string names a
-//     secret-shaped key.
+//     on what counts as userinfo, apostrophe included), or whose query OR FRAGMENT
+//     names a secret-shaped key (N71 round 4, astra pack 83c HIGH #5: a fragment is
+//     not part of `.searchParams` — that reflects only the `?query` — but is
+//     conventionally `key=value`-shaped too, e.g. an OAuth2 implicit-flow token);
+//   - ANY string value (URL or not) that is itself vendor-key/JWT/hex/bearer-shaped
+//     (N71 round 4, astra pack 83c HIGH #5: reuses redactSecrets' own, already-tested
+//     shapes — never a new pattern — so a bare `via: "sk-proj-..."` is caught even
+//     though it is not a URL at all and `new URL(...)` on it throws).
 // A plain identifier, a URL with no userinfo and an ordinary query (?id=7), or a bare
-// non-URL string (a CSD id, a bind/via identifier) never matches either signal —
-// verified empirically against both the attack cases and the controls below before
-// this was written, not just reasoned about.
+// non-URL, non-vendor-key-shaped string (a CSD id, a bind/via identifier) never
+// matches any signal — verified empirically against both the attack cases and the
+// controls below before this was written, not just reasoned about.
 // ---------------------------------------------------------------------------
 
 const SECRET_KEY_NAME =
-  /^(api[-_]?key|secret|token|password|passwd|pwd|auth|credentials?|private[-_]?key|client[-_]?secret)$/i;
+  /^(api[-_]?key|secret|token|password|passwd|pwd|auth|credentials?|private[-_]?key|client[-_]?secret|access[-_]?token|refresh[-_]?token|id[-_]?token)$/i;
+
+/** Does a URL's fragment (`#`-prefixed or not) carry a credential-shaped key or value?
+ *  `.searchParams` never sees this — it reflects only the `?query` — so without this,
+ *  `#token=...` rode through untouched (N71 round 4, astra pack 83c HIGH #5). */
+function fragmentCarriesCredential(hash: string): boolean {
+  const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!raw) return false;
+  if (redactSecrets(raw) !== raw) return true; // vendor-key/JWT/hex/bearer shape anywhere in it
+  for (const key of new URLSearchParams(raw).keys()) {
+    if (SECRET_KEY_NAME.test(key)) return true;
+  }
+  return false;
+}
 
 function stringLooksLikeCredential(s: string): boolean {
+  // N71 round 4 (astra pack 83c, HIGH #5): a value does not need to be a URL to be
+  // credential-shaped — `via: "sk-proj-..."` is a bare vendor key, not a URL. Reuse the
+  // SAME shapes redactSecrets already recognizes (never a new pattern) as an
+  // independent signal, checked before (and regardless of) URL parsing.
+  if (redactSecrets(s) !== s) return true;
   let url: URL;
   try {
     url = new URL(s);
@@ -178,6 +216,7 @@ function stringLooksLikeCredential(s: string): boolean {
   for (const key of url.searchParams.keys()) {
     if (SECRET_KEY_NAME.test(key)) return true;
   }
+  if (url.hash && fragmentCarriesCredential(url.hash)) return true;
   return false;
 }
 
