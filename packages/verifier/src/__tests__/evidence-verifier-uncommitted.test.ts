@@ -158,8 +158,8 @@ describe("N118 — the verifier reads nothing unsigned (the property, not a rout
   const mutationsOf = (v: unknown): unknown[] =>
     ["mutated-value", "", 0, 7, null, { injected: true }, ["injected"]].filter((m) => JSON.stringify(m) !== JSON.stringify(v));
   // Committed: the bundleHash (recomputed from the events) and each event's hashed fields and hash.
-  // assuranceTier is not committed either: it has its own tests below, because a mismatch is rejected.
-  const COMMITTED_BUNDLE = new Set(["events", "bundleHash", "assuranceTier"]);
+  // Every other bundle field, assuranceTier included, is uncommitted and mutated below (E11e).
+  const COMMITTED_BUNDLE = new Set(["events", "bundleHash"]);
   const COMMITTED_EVENT = new Set(["type", "timestamp", "source", "payload", "hash"]);
 
   it("mutating any uncommitted field of a sealed bundle, or of any event, or the order, never changes the verdict", async () => {
@@ -199,18 +199,13 @@ describe("N118 — the verifier reads nothing unsigned (the property, not a rout
     expect(verdicts[0]!.findings.filter((f) => f.startsWith("tier_requirement_")), "no requirement is chosen without an accepted tier").toEqual([]);
   });
 
-  it("a bundle that claims a tier other than the accepted one is rejected; the matching claim is valid", async () => {
+  it("the bundle's claimed tier is never read: the verdict is the accepted tier's, whatever the bundle claims (E11e)", async () => {
     const valid = await tier1Bundle(true);
     const honest = verdictOf(await verifier.verify(valid, ACCEPTED));
     expect(honest.result).toBe("valid");
-    const acceptedRequirements = honest.findings.filter((f) => f.startsWith("tier_requirement_"));
-    expect(acceptedRequirements).toContain("tier_requirement_power_profile_summary:true:-");
-    for (const tier of [0, 2, 3]) {
-      const v = verdictOf(await verifier.verify({ ...valid, assuranceTier: tier } as EvidenceBundle, ACCEPTED));
-      expect(v.result, `claims ${tier}`).toBe("invalid");
-      expect(v.findings, `claims ${tier}`).toContain("assurance_tier_accepted:false:critical");
-      // The evidence required is still the ACCEPTED tier's, whatever tier the bundle claims.
-      expect(v.findings.filter((f) => f.startsWith("tier_requirement_")), `claims ${tier}`).toEqual(acceptedRequirements);
+    expect(honest.findings).toContain("tier_requirement_power_profile_summary:true:-");
+    for (const tier of [0, 2, 3, "1", null, undefined]) {
+      expect(verdictOf(await verifier.verify({ ...valid, assuranceTier: tier } as unknown as EvidenceBundle, ACCEPTED)), String(tier)).toEqual(honest);
     }
     // An accepted tier that is not a tier is no accepted tier at all.
     for (const bad of ["1", 4, -1, 1.5, null]) {

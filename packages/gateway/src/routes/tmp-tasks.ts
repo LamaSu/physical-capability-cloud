@@ -8,11 +8,12 @@
  * - Validate benchmark proofs
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
   TMPMode,
   MilestoneProcurement,
   ModeConfig,
+  BenchmarkConfig,
   Address,
 } from "@pcc/spec";
 import { selectMode, getAvailableModes } from "@pcc/scheduler";
@@ -26,9 +27,32 @@ import {
 } from "@pcc/verifier";
 import type { BenchmarkProofEnvelope } from "@pcc/verifier";
 
-// ── In-Memory Store (dev mode) ───────────────────────────────────────
+// ── Authoritative task state (E11e) ──────────────────────────────────
 
-const tmpTasks: Map<string, MilestoneProcurement> = new Map();
+/**
+ * What decides a TMP proof's verdict (the tier and the pipeline) comes from the TASK, and the task comes
+ * only from the milestone's owner (its poster), never from a worker's submission or another caller
+ * (N118, restated end to end in bus #6161).
+ */
+export interface TmpTaskRouteOptions {
+  /**
+   * The principal that owns a milestone (its poster), from authoritative state outside this route, or
+   * null when unknown. Without a resolver no TMP task can be created, so the routes fail closed: the
+   * gateway cannot yet resolve a milestone's poster here.
+   */
+  milestoneOwner?: (milestoneId: string) => Promise<string | null> | string | null;
+}
+
+/** The caller's authenticated principal: the operator behind the API key, else the key, else the session user. */
+function callerPrincipal(req: FastifyRequest): string | null {
+  const r = req as unknown as { operatorId?: unknown; apiKeyId?: unknown; userId?: unknown };
+  for (const v of [r.operatorId, r.apiKeyId, r.userId]) {
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return null;
+}
+
+const ASSURANCE_TIERS: readonly unknown[] = [0, 1, 2, 3];
 
 // ── Singleton Validator Bridge ───────────────────────────────────────
 // Config driven by env vars — set ORACLE_MOCK=false for live verification.
@@ -42,7 +66,10 @@ const validatorBridge = new TMPValidatorBridge(
 
 // ── Routes ───────────────────────────────────────────────────────────
 
-export async function tmpTaskRoutes(app: FastifyInstance) {
+export async function tmpTaskRoutes(app: FastifyInstance, opts: TmpTaskRouteOptions = {}) {
+  // One store per app instance, not per process (E11e): each entry is created once, by its milestone's owner.
+  const tmpTasks: Map<string, MilestoneProcurement & { owner: string }> = new Map();
+
   // ── List available TMP modes ───────────────────────────────────────
 
   app.get("/api/tmp/modes", async () => {
@@ -105,6 +132,18 @@ export async function tmpTaskRoutes(app: FastifyInstance) {
         assuranceTier?: unknown;
       };
 
+      // Owner-bound (E11e): only the milestone's poster creates its task, once.
+      const principal = callerPrincipal(req);
+      if (principal === null) {
+        return reply.code(401).send({ error: "unauthenticated", message: "creating a TMP task needs an authenticated caller" });
+      }
+      if (!opts.milestoneOwner) {
+        return reply.code(503).send({
+          error: "owner_resolver_unavailable",
+          message: "TMP tasks are owner-bound, and this gateway cannot resolve a milestone's poster yet, so none can be created",
+        });
+      }
+
       if (!body.mode || !body.modeConfig) {
         return reply.code(400).send({
           error: "bad_request",
@@ -120,18 +159,32 @@ export async function tmpTaskRoutes(app: FastifyInstance) {
         });
       }
 
-      if (body.assuranceTier !== undefined && ![0, 1, 2, 3].includes(body.assuranceTier as number)) {
+      if (!ASSURANCE_TIERS.includes(body.assuranceTier)) {
         return reply.code(400).send({
           error: "bad_request",
-          message: "assuranceTier, when given, is one of 0, 1, 2, 3",
+          message: "assuranceTier is required: one of 0, 1, 2, 3",
         });
       }
 
-      const task: MilestoneProcurement = {
+      let owner: string | null;
+      try {
+        owner = await opts.milestoneOwner(milestoneId);
+      } catch {
+        owner = null;
+      }
+      if (owner === null || owner !== principal) {
+        return reply.code(403).send({ error: "not_milestone_owner", message: "only the milestone's poster creates its TMP task" });
+      }
+      if (tmpTasks.has(milestoneId)) {
+        return reply.code(409).send({ error: "task_exists", message: "a milestone's TMP task is created once" });
+      }
+
+      const task: MilestoneProcurement & { owner: string } = {
         milestoneId,
         mode: body.mode,
         modeConfig: body.modeConfig,
-        ...(body.assuranceTier !== undefined ? { acceptedTier: body.assuranceTier as 0 | 1 | 2 | 3 } : {}),
+        acceptedTier: body.assuranceTier as 0 | 1 | 2 | 3,
+        owner,
         status: "pending",
         createdAt: new Date().toISOString(),
       };
@@ -333,9 +386,12 @@ export async function tmpTaskRoutes(app: FastifyInstance) {
         submittedAt: new Date().toISOString(),
       };
 
-      // The tier is the task's own (set at creation), never the worker's envelope (N118). A task with
-      // none leaves the tier-dependent proofs refused.
-      const result = await validatorBridge.validate(envelope, { acceptedTier: task.acceptedTier });
+      // The tier and the pipeline are the task's own, set at creation by the milestone's owner, never the
+      // worker's envelope (N118, E11e).
+      const result = await validatorBridge.validate(envelope, {
+        acceptedTier: task.acceptedTier,
+        proofType: (task.modeConfig as BenchmarkConfig).proofType,
+      });
       const acceptance = validatorBridge.formatAcceptance(envelope, result);
 
       // Update task status if validation passed

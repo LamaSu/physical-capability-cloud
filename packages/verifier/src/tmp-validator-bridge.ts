@@ -26,6 +26,13 @@ import { OracleVerificationBridge } from "./oracle/oracle-bridge.js";
 export interface ValidationContext {
   /** The assurance tier the task was accepted at (its own record, set when the task was created). */
   acceptedTier?: AssuranceTier;
+  /** The proof pipeline the task requires (its own record). A submission on any other pipeline is refused. */
+  proofType?: BenchmarkProofEnvelope["proofType"];
+}
+
+/** A one-finding refusal. */
+function refusal(check: string, details: string): ValidationResult {
+  return { valid: false, confidence: 0, findings: [{ check, passed: false, details }] };
 }
 
 /** The accepted tier as the routes need it, or a refusal: absent, or contradicted by the worker's proof. */
@@ -127,13 +134,24 @@ export class TMPValidatorBridge {
    * @returns ValidationResult with findings and confidence
    */
   async validate(envelope: BenchmarkProofEnvelope, context?: ValidationContext): Promise<ValidationResult> {
-    switch (envelope.proofType) {
+    // The pipeline is the TASK's, never the worker's choice (E11e): a submission on any other one is refused.
+    const pipeline = context?.proofType;
+    if (pipeline === undefined) {
+      return refusal("task_pipeline", "No pipeline for this task: a worker's proof cannot choose one");
+    }
+    if (envelope.proofType !== pipeline) {
+      return refusal("task_pipeline", `The proof uses ${String(envelope.proofType)}, but the task requires ${String(pipeline)}`);
+    }
+    switch (pipeline) {
       case "sensor_evidence":
         return this.validateSensorEvidence(envelope, context);
       case "zk_proof":
-        return this.validateZKProof(envelope);
       case "merkle_commitment":
-        return this.validateMerkleCommitment(envelope);
+        // Every assurance tier (0 to 3) requires evidence events (gcode_hash_verified, execution_completed,
+        // and more). A ZK proof or a Merkle inclusion evidences none of them, so these pipelines cannot
+        // enforce a tier, and they refuse (E11e: every pipeline enforces the tier or refuses). That also
+        // ends the empty-path Merkle accept: a worker-chosen root equal to its leaf proved nothing.
+        return refusal("tier_unenforceable", `${pipeline} cannot evidence an assurance tier's required events, so it cannot validate a task`);
       case "bittensor_verification":
         return this.validateViaBittensor(envelope, context);
       case "oracle_verification":
@@ -202,87 +220,6 @@ export class TMPValidatorBridge {
         details: f.details,
       })),
       attestationHash: attestation.attestationHash,
-    };
-  }
-
-  private async validateZKProof(
-    envelope: BenchmarkProofEnvelope,
-  ): Promise<ValidationResult> {
-    const zkProof = envelope.proof.zkProof as ZKProof | undefined;
-
-    if (!zkProof) {
-      return {
-        valid: false,
-        confidence: 0,
-        findings: [
-          {
-            check: "zk_proof_present",
-            passed: false,
-            details: "No ZK proof provided in proof payload",
-          },
-        ],
-      };
-    }
-
-    const verified = await this.zkProofService.verifyProof(zkProof);
-
-    return {
-      valid: verified,
-      confidence: verified ? 0.95 : 0,
-      findings: [
-        {
-          check: "zk_proof_verification",
-          passed: verified,
-          details: verified
-            ? `ZK proof ${zkProof.id} verified successfully`
-            : `ZK proof ${zkProof.id} verification failed`,
-        },
-      ],
-      attestationHash: verified ? zkProof.proof : undefined,
-    };
-  }
-
-  private async validateMerkleCommitment(
-    envelope: BenchmarkProofEnvelope,
-  ): Promise<ValidationResult> {
-    const root = envelope.proof.merkleRoot as SHA256 | undefined;
-    const leaf = envelope.proof.leaf as SHA256 | undefined;
-    const path = envelope.proof.path as SHA256[] | undefined;
-    const indices = envelope.proof.indices as number[] | undefined;
-
-    if (!root || !leaf || !path || !indices) {
-      return {
-        valid: false,
-        confidence: 0,
-        findings: [
-          {
-            check: "merkle_proof_complete",
-            passed: false,
-            details: "Incomplete Merkle proof: need root, leaf, path, and indices",
-          },
-        ],
-      };
-    }
-
-    const verified = await this.commitmentService.verifyMerkleProof(
-      root,
-      leaf,
-      { path, indices },
-    );
-
-    return {
-      valid: verified,
-      confidence: verified ? 0.99 : 0,
-      findings: [
-        {
-          check: "merkle_inclusion",
-          passed: verified,
-          details: verified
-            ? `Leaf ${leaf} proven in tree with root ${root}`
-            : `Merkle proof invalid for leaf ${leaf}`,
-        },
-      ],
-      attestationHash: verified ? root : undefined,
     };
   }
 

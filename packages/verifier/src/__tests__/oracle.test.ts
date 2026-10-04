@@ -472,6 +472,8 @@ describe("OracleVerificationBridge: all oracles fail", () => {
 
 /** The task's accepted tier, as a caller passes it from its own record (N118); the envelopes name 2. */
 const ACCEPTED_TIER_2 = { acceptedTier: 2 as const };
+/** The task's own record for an envelope: its pipeline (here the envelope's) and tier 2 (E11e). */
+const taskCtx2 = (envelope: { proofType: BenchmarkProofEnvelope["proofType"] }) => ({ proofType: envelope.proofType, acceptedTier: 2 as const });
 
 describe("TMPValidatorBridge backward compat", () => {
   let bridge: OracleVerificationBridge;
@@ -507,7 +509,7 @@ describe("TMPValidatorBridge backward compat", () => {
 
   it("routes oracle_verification proof type through oracle bridge", async () => {
     const envelope = makeOracleEnvelope("oracle_verification");
-    const result = await validatorBridge.validate(envelope, ACCEPTED_TIER_2);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(true);
     expect(result.confidence).toBeGreaterThanOrEqual(0.6);
     expect(result.findings[0].check).toBe("oracle_verification");
@@ -515,7 +517,7 @@ describe("TMPValidatorBridge backward compat", () => {
 
   it("routes bittensor_verification proof type through oracle bridge (backward compat)", async () => {
     const envelope = makeOracleEnvelope("bittensor_verification");
-    const result = await validatorBridge.validate(envelope, ACCEPTED_TIER_2);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(true);
     expect(result.confidence).toBeGreaterThanOrEqual(0.6);
     // The check name uses oracle_consensus for new bridge
@@ -529,7 +531,7 @@ describe("TMPValidatorBridge backward compat", () => {
       new ZKProofService(),
     );
     const envelope = makeOracleEnvelope("bittensor_verification");
-    const result = await bridgeLessValidator.validate(envelope, ACCEPTED_TIER_2);
+    const result = await bridgeLessValidator.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(false);
     expect(result.confidence).toBe(0);
   });
@@ -537,7 +539,7 @@ describe("TMPValidatorBridge backward compat", () => {
   it("returns invalid for missing bundleHash in oracle_verification", async () => {
     const envelope = makeOracleEnvelope("oracle_verification");
     envelope.proof = {}; // missing bundleHash and bundleData
-    const result = await validatorBridge.validate(envelope, ACCEPTED_TIER_2);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(false);
     expect(result.findings[0].check).toBe("oracle_input");
   });
@@ -545,7 +547,7 @@ describe("TMPValidatorBridge backward compat", () => {
   it("returns invalid for missing bundleHash in bittensor_verification", async () => {
     const envelope = makeOracleEnvelope("bittensor_verification");
     envelope.proof = {};
-    const result = await validatorBridge.validate(envelope, ACCEPTED_TIER_2);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(false);
     expect(result.findings[0].check).toBe("bittensor_input");
   });

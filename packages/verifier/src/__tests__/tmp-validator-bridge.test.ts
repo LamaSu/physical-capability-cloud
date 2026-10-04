@@ -73,6 +73,8 @@ function makeMockBundle(): EvidenceBundle {
 
 describe("TMPValidatorBridge", () => {
   let bridge: TMPValidatorBridge;
+  /** The task's own record, as the route passes it: its pipeline (here the envelope's) and its tier. */
+  const taskCtx = (envelope: BenchmarkProofEnvelope, acceptedTier: 0 | 1 | 2 | 3 = 1) => ({ proofType: envelope.proofType, acceptedTier });
   let evidenceVerifier: EvidenceVerifier;
   let commitmentService: CommitmentService;
   let zkProofService: ZKProofService;
@@ -108,7 +110,7 @@ describe("TMPValidatorBridge", () => {
         proof: { evidenceBundle: bundle },
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
       // The mock bundle may not pass all checks (hash mismatch), but it should
       // produce a structured result with findings
@@ -118,7 +120,7 @@ describe("TMPValidatorBridge", () => {
       expect(result.findings.length).toBeGreaterThan(0);
     });
 
-    it("routes zk_proof to ZKProofService", async () => {
+    it("zk_proof refuses, even with a genuine proof: it cannot evidence an assurance tier (E11e)", async () => {
       // Generate a real ZK proof first
       const commitment = await commitmentService.createCommitment(
         "sha256:1111111111111111111111111111111111111111111111111111111111111111" as SHA256,
@@ -134,16 +136,14 @@ describe("TMPValidatorBridge", () => {
         proof: { zkProof: proof },
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
-      expect(result.valid).toBe(true);
-      expect(result.confidence).toBeGreaterThanOrEqual(0.9);
-      expect(result.findings).toHaveLength(1);
-      expect(result.findings[0].check).toBe("zk_proof_verification");
-      expect(result.findings[0].passed).toBe(true);
+      expect(result.valid).toBe(false);
+      expect(result.confidence).toBe(0);
+      expect(result.findings[0].check).toBe("tier_unenforceable");
     });
 
-    it("routes merkle_commitment to CommitmentService", async () => {
+    it("merkle_commitment refuses, even with a genuine inclusion proof: it cannot evidence an assurance tier (E11e)", async () => {
       // Build a Merkle tree with commitments
       const h1 =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111" as SHA256;
@@ -167,12 +167,10 @@ describe("TMPValidatorBridge", () => {
         },
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
-      expect(result.valid).toBe(true);
-      expect(result.confidence).toBeGreaterThanOrEqual(0.95);
-      expect(result.findings[0].check).toBe("merkle_inclusion");
-      expect(result.findings[0].passed).toBe(true);
+      expect(result.valid).toBe(false);
+      expect(result.findings[0].check).toBe("tier_unenforceable");
     });
 
     it("routes bittensor_verification to BittensorSubnetBridge", async () => {
@@ -186,8 +184,8 @@ describe("TMPValidatorBridge", () => {
         },
       });
 
-      // The task's accepted tier is authenticated state from the caller, never the proof (N118).
-      const result = await bridge.validate(envelope, { acceptedTier: 1 });
+      // The task's pipeline and accepted tier are its own record, never the proof's (N118, E11e).
+      const result = await bridge.validate(envelope, taskCtx(envelope, 1));
 
       expect(result).toBeDefined();
       expect(typeof result.valid).toBe("boolean");
@@ -206,7 +204,7 @@ describe("TMPValidatorBridge", () => {
         proof: {},
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
       expect(result.valid).toBe(false);
       expect(result.confidence).toBe(0);
@@ -220,10 +218,10 @@ describe("TMPValidatorBridge", () => {
         proof: {},
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
       expect(result.valid).toBe(false);
-      expect(result.findings[0].check).toBe("zk_proof_present");
+      expect(result.findings[0].check).toBe("tier_unenforceable");
     });
 
     it("fails gracefully when Merkle proof is incomplete", async () => {
@@ -232,10 +230,10 @@ describe("TMPValidatorBridge", () => {
         proof: { merkleRoot: "sha256:abc" },
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
       expect(result.valid).toBe(false);
-      expect(result.findings[0].check).toBe("merkle_proof_complete");
+      expect(result.findings[0].check).toBe("tier_unenforceable");
     });
 
     it("fails gracefully when Bittensor bridge is unavailable", async () => {
@@ -251,7 +249,7 @@ describe("TMPValidatorBridge", () => {
         proof: { bundleHash: "test", bundleData: "{}", requiredTier: 1 },
       });
 
-      const result = await bridgeNoBittensor.validate(envelope);
+      const result = await bridgeNoBittensor.validate(envelope, taskCtx(envelope));
 
       expect(result.valid).toBe(false);
       expect(result.findings[0].check).toBe("bittensor_available");
@@ -263,7 +261,7 @@ describe("TMPValidatorBridge", () => {
         proof: {},
       });
 
-      const result = await bridge.validate(envelope, { acceptedTier: 1 });
+      const result = await bridge.validate(envelope, taskCtx(envelope, 1));
 
       expect(result.valid).toBe(false);
       expect(result.findings[0].check).toBe("bittensor_input");
@@ -275,7 +273,7 @@ describe("TMPValidatorBridge", () => {
         proof: {},
       });
 
-      const result = await bridge.validate(envelope);
+      const result = await bridge.validate(envelope, taskCtx(envelope));
 
       expect(result.valid).toBe(false);
       expect(result.findings[0].check).toBe("proof_type");
@@ -286,21 +284,10 @@ describe("TMPValidatorBridge", () => {
 
   describe("formatAcceptance", () => {
     it("formats acceptance callback for valid result", async () => {
-      const commitment = await commitmentService.createCommitment(
-        "sha256:1111111111111111111111111111111111111111111111111111111111111111" as SHA256,
-      );
-      const proof = await zkProofService.generateProof(
-        "data_integrity",
-        commitment,
-        { data: "test" },
-      );
-
-      const envelope = makeEnvelope({
-        proofType: "zk_proof",
-        proof: { zkProof: proof },
-      });
-
-      const result = await bridge.validate(envelope);
+      // formatAcceptance is pure: a valid result built directly (the ZK pipeline that used to produce one
+      // refuses since E11e).
+      const envelope = makeEnvelope();
+      const result = { valid: true, confidence: 0.95, findings: [] };
       const acceptance = bridge.formatAcceptance(envelope, result);
 
       expect(acceptance.taskId).toBe("task_001");
@@ -346,29 +333,57 @@ describe("TMPValidatorBridge", () => {
 
     it.each(["bittensor_verification", "oracle_verification"] as const)("%s without an accepted tier is refused, whatever the proof claims", async (proofType) => {
       for (const claimed of [undefined, 0, 1, 3]) {
-        const result = await bridge.validate(oracleOrBittensor(proofType, claimed));
+        const result = await bridge.validate(oracleOrBittensor(proofType, claimed), { proofType });
         expect(result.valid, String(claimed)).toBe(false);
         expect(result.findings[0]!.check, String(claimed)).toMatch(/_accepted_tier$/);
       }
     });
 
     it.each(["bittensor_verification", "oracle_verification"] as const)("%s whose proof claims another tier is refused", async (proofType) => {
-      const result = await bridge.validate(oracleOrBittensor(proofType, 0), { acceptedTier: 2 });
+      const result = await bridge.validate(oracleOrBittensor(proofType, 0), { proofType, acceptedTier: 2 });
       expect(result.valid).toBe(false);
       expect(result.findings[0]!.details).toMatch(/claims tier 0, but the task was accepted at tier 2/);
     });
 
     it("sensor_evidence without an accepted tier fails closed in the verifier", async () => {
-      const result = await bridge.validate(makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: makeMockBundle() } }));
+      const result = await bridge.validate(makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: makeMockBundle() } }), { proofType: "sensor_evidence" });
       expect(result.valid).toBe(false);
       expect(result.findings.find((f) => f.check === "assurance_tier_accepted")?.passed).toBe(false);
     });
 
-    it("sensor_evidence whose bundle claims another tier is rejected", async () => {
+    it("a sensor bundle's claimed tier is never read: the task's accepted tier chooses the evidence (E11e)", async () => {
       const bundle = { ...makeMockBundle(), assuranceTier: 0 as const };
-      const result = await bridge.validate(makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: bundle } }), { acceptedTier: 2 });
+      const result = await bridge.validate(makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: bundle } }), { proofType: "sensor_evidence", acceptedTier: 2 });
+      expect(result.findings.find((f) => f.check === "assurance_tier_accepted")?.passed).toBe(true);
+      // Tier 2's camera requirement applies although the bundle claims tier 0.
+      expect(result.findings.some((f) => f.check === "tier_requirement_cv_inspection_result_or_camera_snapshot")).toBe(true);
+    });
+  });
+
+  // ── E11e: the pipeline is the task's, and every pipeline enforces the tier or refuses ──
+
+  describe("E11e: a worker's proof never chooses the pipeline, and no pipeline accepts without the tier", () => {
+    it("an empty-path Merkle proof (root === leaf) does not pass a tier-3 task that requires sensor evidence", async () => {
+      const leaf = "sha256:" + "cd".repeat(32);
+      const envelope = makeEnvelope({ proofType: "merkle_commitment", proof: { merkleRoot: leaf, leaf, path: [], indices: [] } });
+      const result = await bridge.validate(envelope, { acceptedTier: 3, proofType: "sensor_evidence" });
       expect(result.valid).toBe(false);
-      expect(result.findings.find((f) => f.check === "assurance_tier_accepted")?.passed).toBe(false);
+      expect(result.findings[0]!.check).toBe("task_pipeline");
+      // Even a task that itself names merkle_commitment refuses it: no tier can be enforced through it.
+      const onMerkle = await bridge.validate(envelope, { acceptedTier: 3, proofType: "merkle_commitment" });
+      expect(onMerkle.valid).toBe(false);
+      expect(onMerkle.findings[0]!.check).toBe("tier_unenforceable");
+    });
+
+    it("a submission without the task's pipeline, or on another pipeline, is refused before anything is verified", async () => {
+      const envelope = makeEnvelope({ proofType: "sensor_evidence", proof: { evidenceBundle: makeMockBundle() } });
+      for (const context of [undefined, {}, { acceptedTier: 2 as const }]) {
+        const result = await bridge.validate(envelope, context);
+        expect(result.valid, JSON.stringify(context)).toBe(false);
+        expect(result.findings[0]!.check, JSON.stringify(context)).toBe("task_pipeline");
+      }
+      const other = await bridge.validate(envelope, { proofType: "oracle_verification", acceptedTier: 2 });
+      expect(other.findings[0]!.details).toMatch(/uses sensor_evidence, but the task requires oracle_verification/);
     });
   });
 });

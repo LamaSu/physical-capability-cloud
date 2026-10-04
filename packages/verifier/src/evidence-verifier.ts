@@ -16,9 +16,9 @@
  * not the bundle-level fields (`assuranceTier`, `id`, `jobId`, `stepId`, `kernelId`, `createdAt`,
  * `kernelSignature`). So none of them may change a verdict.
  *   - The evidence a tier requires comes from `options.acceptedTier`: the tier the job was accepted
- *     at, which the CALLER takes from authenticated state (the accepted plan or program, or its own
- *     task record), never from the bundle. A bundle that claims another tier is rejected. Without an
- *     accepted tier no requirement can be chosen, so the verdict fails closed.
+ *     at, which the CALLER takes from authoritative, owner-bound state (the accepted plan or its
+ *     poster), never from the bundle. The bundle's own `assuranceTier` is not read at all (E11e).
+ *     Without an accepted tier no requirement can be chosen, so the verdict fails closed.
  *   - The lifecycle and power events checked in step 4 are chosen by committed fields (timestamp,
  *     then hash), never by position.
  *   - A workflow step in step 6 is covered only by a committed `payload.stepId`, never by an id.
@@ -50,9 +50,8 @@ import { ChallengeService } from "./workflow/challenge-service.js";
 export interface DigitalVerifyOptions {
   /**
    * The assurance tier the job was ACCEPTED at, taken by the caller from authenticated state (the
-   * accepted plan or program, or its own task record), never from the bundle, whose `assuranceTier`
-   * is not signed (N118). It chooses the evidence required. A bundle that claims another tier is
-   * rejected, and without it the verdict fails closed.
+   * accepted plan or its poster), never from the bundle, whose `assuranceTier` is not signed and is
+   * not read (N118, E11e). It chooses the evidence required, and without it the verdict fails closed.
    */
   acceptedTier?: AssuranceTier;
   /** Declared workflow steps from the contract. Enables step-completeness checking. */
@@ -156,8 +155,8 @@ export class EvidenceVerifier {
       });
     }
 
-    // 3. Tier requirements, chosen by the ACCEPTED tier only (N118). The bundle's own assuranceTier is
-    // not signed: it never chooses the requirements, it is only checked against the accepted tier.
+    // 3. Tier requirements, chosen by the ACCEPTED tier only (N118, E11e). The bundle's own assuranceTier
+    // is not signed, so it is not read at all.
     const acceptedTier = options?.acceptedTier;
     if (!isAssuranceTier(acceptedTier)) {
       findings.push({
@@ -169,15 +168,13 @@ export class EvidenceVerifier {
         severity: "critical",
       });
     } else {
-      const matches = bundle.assuranceTier === acceptedTier;
+      // The bundle's own assuranceTier is never read, not even to compare (E11e): an unsigned field may
+      // not change a verdict in either direction.
       findings.push({
         evidenceEventId: "",
         check: "assurance_tier_accepted",
-        passed: matches,
-        details: matches
-          ? `The bundle claims the accepted tier ${acceptedTier}`
-          : `The bundle claims tier ${String(bundle.assuranceTier)}, but the job was accepted at tier ${acceptedTier}`,
-        severity: matches ? undefined : "critical",
+        passed: true,
+        details: `The evidence required is the accepted tier ${acceptedTier}'s`,
       });
       const tierReq = DEFAULT_TIER_REQUIREMENTS.find((r) => r.tier === acceptedTier);
       if (tierReq) {
