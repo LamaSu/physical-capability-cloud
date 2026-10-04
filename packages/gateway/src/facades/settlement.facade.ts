@@ -77,6 +77,7 @@ import {
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
 import { swfAccrue } from "../routes/swf.js";
+import { logSafeSmallInt } from "../redaction.js";
 
 /**
  * Whether on-chain escrow operations route through the EAS-gated
@@ -565,14 +566,14 @@ export class SettlementFacade extends BaseFacade {
       // N71 round 6 (astra pack 83e): attestation.evidenceHash is caller-supplied
       // (the OracleAttestation struct is accepted from the request body with no
       // shape check beyond !attestation.escrowAddress) — dropped from telemetry for
-      // the same reason as the two sinks above. attestation.tier is kept: it is
-      // typed `number` (@pcc/contracts/ts/oracle-attestation.ts) — the assurance
-      // tier 0-3, never free text.
+      // the same reason as the two sinks above. attestation.tier is kept only
+      // through logSafeSmallInt: it is typed `number` but arrives from the request
+      // body unchecked, so anything but an integer 0-3 is logged as null.
       pipelineTelemetry.emit(address, "verification_result", "completed", {
         metadata: {
           escrow: address,
           milestoneIndex,
-          tier: attestation.tier,
+          tier: logSafeSmallInt(attestation.tier, 0, 3),
         },
       });
       auditService.log({

@@ -187,6 +187,14 @@ export function logSafeId(value: unknown): string {
   return isPlainIdentifier(value) ? value : INVALID_ID;
 }
 
+/**
+ * A small integer safe to log: `value` itself when it is an integer within [min, max], otherwise
+ * null. For fields that are typed as numbers but arrive from a request body, unchecked at runtime.
+ */
+export function logSafeSmallInt(value: unknown, min: number, max: number): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // N71 round 3 (astra pack 83b, Q3): does an arbitrary caller-supplied value carry
 // something that reads as a credential? Used to REFUSE a public matching artifact (a
