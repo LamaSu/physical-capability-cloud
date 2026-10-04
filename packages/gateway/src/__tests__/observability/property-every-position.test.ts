@@ -562,9 +562,10 @@ describe("N107b round 4, the property: a marker in every position of every sink 
     // gateway code passes a time to a Sentry or OpenTelemetry span API (sentry-timing-ratchet.test.ts).
     // Fed a marker directly, they keep a number and nothing else; every other position keeps nothing.
     const sdkTimes = results.filter((r) => SDK_TIME_POSITION.test(r.label));
+    const leaked = violations("Sentry", results.filter((r) => !SDK_TIME_POSITION.test(r.label)));
     expect(new Set(sdkTimes.map((r) => r.label.replace(/ = .*$/, ""))), "the SDK-time positions").toEqual(new Set(SDK_TIME_PATHS));
     expect(sdkTimes.filter((r) => r.text === undefined || markerIn(r.text).includes("string")).map((r) => r.label), "an SDK time keeps only a number").toEqual([]);
-    expect(violations("Sentry", results.filter((r) => !SDK_TIME_POSITION.test(r.label))), "positions that reached Sentry").toBe("");
+    expect(leaked, "positions that reached Sentry").toBe("");
   });
 
   describe("the PostHog boundary", () => {
