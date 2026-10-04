@@ -21,13 +21,18 @@
  *   - the audit service, each stored row read back;
  *   - the structured log, written directly and through POST /api/telemetry/emit then
  *     GET /api/telemetry/logs;
- *   - console output in a request's scope.
+ *   - console output in a request's scope;
+ *   - the trace collector (trace-collector.ts and its producers' helpers in tracing.ts): every field
+ *     a span stores (its ids, parent, operation, description, service, attributes, status and end
+ *     time), read back through getRecentTraces and getTrace, GET /api/traces, /api/traces/:traceId
+ *     and the stream's snapshot (N107b round 5).
  * The assertion, for each entry point: neither the marker string nor the marker number appears
  * anywhere in any output, and every input produced output (no sink passes by writing nothing).
  * Positive controls show that declared values and the server's own values stay readable.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { appendFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { Readable, Writable } from "node:stream";
@@ -70,7 +75,7 @@ function render(value: unknown): string {
   try {
     return (
       JSON.stringify(value, (_key, item: unknown) => {
-        if (typeof item === "bigint") return `${item.toString()}n`;
+        if (typeof item === "bigint") return item.toString();
         if (typeof item === "symbol") return String(item);
         if (typeof item === "function") return `[function ${item.name}]`;
         if (item instanceof Map) return { map: [...item.entries()] };
@@ -714,6 +719,150 @@ describe("N107b round 4, the property: a marker in every position of every sink 
     expect(violations("console in request scope", results), "positions that reached request-path console output").toBe("");
     expect(declared, "a declared console message stays readable").toContain("declared console line");
   });
+
+  it("the trace collector: every stored field of a span, read back through the collector, GET /api/traces, /api/traces/:traceId and the stream snapshot", async () => {
+    const { traceCollector, TraceCollector } = await import("../../trace-collector.js");
+    const tracing = await import("../../tracing.js");
+    const { traceRoutes } = await import("../../routes/traces.js");
+    const app = Fastify({ logger: false });
+    // The stream route's own handler, kept to read its snapshot: it writes the snapshot and then
+    // holds the connection open for good, so it is called with a reply that records what it writes.
+    let streamHandler: ((req: unknown, reply: unknown) => Promise<unknown>) | undefined;
+    app.addHook("onRoute", (route) => {
+      if (route.url === "/api/traces/stream") streamHandler = route.handler as unknown as typeof streamHandler;
+    });
+    await app.register(traceRoutes);
+    await app.ready();
+    const collector = traceCollector as unknown as {
+      startSpan(opts: Record<string, unknown>): void;
+      endSpan(opts: Record<string, unknown>): void;
+      getRecentTraces(limit?: number): Array<{ traceId: unknown }>;
+      getTrace(id: string): unknown;
+    };
+    const helpers = tracing as unknown as {
+      startTrace(operation: unknown, service: unknown, attributes?: unknown): { traceId: string; spanId: string };
+      withSpanSync(opts: Record<string, unknown>, fn: () => unknown): unknown;
+      endTrace(traceId: unknown, spanId: unknown, status: unknown, endTime?: unknown): void;
+    };
+    const results: Result[] = [];
+    let pending: string[] = [];
+
+    /** The stream's snapshot (the most recent traces), as its handler writes it before it holds the connection open. */
+    const streamSnapshot = async () => {
+      const written: string[] = [];
+      const raw = new EventEmitter();
+      const reply = {
+        raw: { writeHead: () => undefined, write: (chunk: unknown) => written.push(String(chunk)) },
+        status: () => ({ send: (body: unknown) => written.push(JSON.stringify(body)) }),
+      };
+      const pendingHandler = streamHandler!.call(app, { ip: "127.0.0.1", raw }, reply);
+      pendingHandler.catch((error: unknown) => written.push(`<the stream handler threw ${String(error)}>`));
+      await new Promise((resolve) => setImmediate(resolve));
+      raw.emit("close");
+      return written.join("");
+    };
+    const flushStream = async () => {
+      if (pending.length === 0) return;
+      const text = await streamSnapshot();
+      const label = `the stream snapshot of: ${pending.join(" | ")}`;
+      results.push({ label, text });
+      if (!text.includes("event: connected")) results.push({ label: `${label} (the stream did not complete)`, text: undefined });
+      pending = [];
+    };
+    /** Reads the newest traces back through every read path (all 50 when a variant poisons the trace id itself). */
+    const readBack = async (label: string, all = false) => {
+      const limit = all ? 50 : 1;
+      const texts: string[] = [];
+      try {
+        const recent = collector.getRecentTraces(limit);
+        if (recent.length === 0) {
+          results.push({ label, text: undefined });
+          return;
+        }
+        texts.push(render(recent), (await app.inject({ method: "GET", url: `/api/traces?limit=${limit}` })).body);
+        for (const trace of recent) {
+          let id: string;
+          try {
+            id = String(trace.traceId);
+          } catch {
+            id = "unprintable";
+          }
+          texts.push(render(collector.getTrace(id)), (await app.inject({ method: "GET", url: `/api/traces/${encodeURIComponent(id)}` })).body);
+        }
+      } catch (error) {
+        // A read that throws (the collector cannot even list its traces) is a sink that broke.
+        results.push({ label: `${label} (a read threw ${String(error)})`, text: undefined });
+        return;
+      }
+      results.push({ label, text: texts.join("\n") });
+      pending.push(label);
+      if (pending.length >= 20) await flushStream();
+    };
+    const base = () => ({
+      traceId: TraceCollector.newTraceId(),
+      spanId: TraceCollector.newSpanId(),
+      operation: schema.lit("n107b.prop.operation"),
+      service: schema.lit("n107b"),
+      description: schema.lit("n107b description"),
+      attributes: { count: schema.declare.metric(1) },
+    });
+    const span = async (label: string, opts: Record<string, unknown>, end: Record<string, unknown> = {}, all = false) => {
+      try {
+        collector.startSpan(opts);
+        collector.endSpan({ traceId: opts.traceId, spanId: opts.spanId, status: "ok", ...end });
+      } catch (error) {
+        results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
+        return;
+      }
+      await readBack(label, all);
+    };
+    // Every field a span stores: its ids, its parent's id, its operation, description and service.
+    for (const field of ["traceId", "spanId", "parentSpanId", "operation", "description", "service"]) {
+      for (const [kind, make] of Object.entries(ALL_KINDS)) await span(`startSpan ${field} = ${kind}`, { ...base(), [field]: make() }, {}, field === "traceId");
+    }
+    // Every attribute key and value, at every depth.
+    for (const { label, value } of namedFields(ALL_KINDS)) await span(`attributes ${label}`, { ...base(), attributes: value });
+    for (const { label, value } of positionsOf({ a: "v", nested: { b: { c: "v" } }, list: ["v", { d: "v" }] }, ALL_KINDS)) {
+      await span(`attributes ${label}`, { ...base(), attributes: value });
+    }
+    // What endSpan stores: the status and the end time.
+    for (const [kind, make] of Object.entries(ALL_KINDS)) {
+      await span(`endSpan status = ${kind}`, base(), { status: make() });
+      await span(`endSpan endTime = ${kind}`, base(), { endTime: make() });
+    }
+    // The producers' helpers (tracing.ts).
+    const viaStartTrace = async (label: string, start: () => { traceId: string; spanId: string }, status: unknown = "ok", endTime?: unknown) => {
+      try {
+        const { traceId, spanId } = start();
+        helpers.endTrace(traceId, spanId, status, endTime);
+      } catch (error) {
+        results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
+        return;
+      }
+      await readBack(label);
+    };
+    for (const [kind, make] of Object.entries(ALL_KINDS)) {
+      await viaStartTrace(`startTrace operation = ${kind}`, () => helpers.startTrace(make(), schema.lit("n107b")));
+      await viaStartTrace(`startTrace service = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), make()));
+      await viaStartTrace(`startTrace attributes = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b"), { [MARK]: make(), a: make() }));
+      await viaStartTrace(`endTrace status = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b")), make());
+      await viaStartTrace(`endTrace endTime = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b")), "ok", make());
+      for (const field of ["traceId", "parentSpanId", "operation", "service", "description", "attributes"]) {
+        const label = `withSpanSync ${field} = ${kind}`;
+        try {
+          const opts = { traceId: TraceCollector.newTraceId(), operation: schema.lit("n107b.op"), service: schema.lit("n107b"), [field]: field === "attributes" ? { [MARK]: make() } : make() };
+          helpers.withSpanSync(opts, () => 1);
+        } catch (error) {
+          results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
+          continue;
+        }
+        await readBack(label, field === "traceId");
+      }
+    }
+    await flushStream();
+    expect(violations("the trace collector", results), "positions that reached the trace collector").toBe("");
+    await app.close();
+  });
 });
 
 describe("N107b round 4, positive controls: declared values and the server's own values stay readable", () => {
@@ -784,5 +933,32 @@ describe("N107b round 4, positive controls: declared values and the server's own
     } finally {
       db.closeStore();
     }
+  });
+  it("the trace collector keeps its own ids, a declared operation, service and attribute, and the server's clock (round 5)", async () => {
+    const { traceCollector, TraceCollector } = await import("../../trace-collector.js");
+    const { traceRoutes } = await import("../../routes/traces.js");
+    const traceId = TraceCollector.newTraceId();
+    const spanId = TraceCollector.newSpanId();
+    const before = Date.now();
+    traceCollector.startSpan({
+      traceId,
+      spanId,
+      operation: schema.lit("n107b.control"),
+      service: schema.lit("n107b"),
+      attributes: { count: schema.declare.metric(3), stage: schema.declare.code("fund", ["fund"]) },
+    } as never);
+    traceCollector.endSpan({ traceId, spanId, status: "ok" });
+    const after = Date.now();
+    const app = Fastify({ logger: false });
+    await app.register(traceRoutes);
+    await app.ready();
+    const res = await app.inject({ method: "GET", url: `/api/traces/${traceId}` });
+    expect(res.statusCode).toBe(200);
+    const { trace } = res.json() as { trace: Record<string, any> };
+    expect(trace.traceId).toBe(traceId);
+    expect(trace.spans[0]).toMatchObject({ spanId, operation: "n107b.control", service: "n107b", status: "ok", attributes: { count: 3, stage: "fund" } });
+    expect(trace.spans[0].startTime).toBeGreaterThanOrEqual(before);
+    expect(trace.spans[0].endTime).toBeLessThanOrEqual(after);
+    await app.close();
   });
 });
