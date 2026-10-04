@@ -203,7 +203,7 @@ describe("19j: a sign-out that couldn't be confirmed lands on the login page, wh
     container.remove();
   });
 
-  it("Disconnect with the removal unconfirmed: this tab is signed out, and the login page carries the reason", async () => {
+  it("Disconnect with the removal unconfirmed: this tab is signed out; its teardown waits for storage, then the login page carries the reason", async () => {
     const { App } = await import("../App.js");
     window.history.replaceState(null, "", "/dashboard");
     container = document.createElement("div");
@@ -216,7 +216,14 @@ describe("19j: a sign-out that couldn't be confirmed lands on the login page, wh
     commitThenUnreadable();
     await act(async () => disconnect!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     for (let i = 0; i < 20; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
+    // While the record can't be read, the teardown can't record that it finished (astra 19m): the
+    // failure screen and its retry show, not a shell or a page that would send nothing.
+    expect(container.textContent).toMatch(/Couldn't confirm that the previous wallet session ended/);
     restoreStorage();
+    const retry = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Try again");
+    expect(retry, "the retry").toBeDefined();
+    await act(async () => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    for (let i = 0; i < 20; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
     expect(container.textContent, "the login page").toContain("Enter your API key");
     expect(container.textContent).toMatch(/couldn't confirm it removed your saved API key/);
   });

@@ -18,8 +18,8 @@ const CONFIRMED_KEY = "pcc-wallet-session-confirmed";
  * account generation it was stored under, as one JSON value written by one
  * setItem. A storage item reads as one value, so one read gives the key with
  * its generation, and no other tab's write can fall between them (astra 19l).
- * A key stored before the record existed (a plain string) reads as that key,
- * with generation "".
+ * A key stored before the record existed (a plain bearer token) reads as that
+ * key, with generation "". Anything that is neither is no key (astra 19m).
  *
  * The key leaves this module in two ways only, and no export returns it:
  * - fetchWithKey, which sends it to the configured gateway and nowhere else
@@ -43,6 +43,9 @@ interface AccountRecord {
   generation: string;
 }
 
+/** A bearer token's characters (RFC 6750 b64token): what a key stored before the record can be. */
+const PLAIN_KEY = /^[A-Za-z0-9\-._~+/]+=*$/;
+
 /** The slot's record, from one read; null when the slot can't be read. */
 function readRecord(): AccountRecord | null {
   let raw: string | null;
@@ -52,16 +55,30 @@ function readRecord(): AccountRecord | null {
     return null;
   }
   if (!raw) return { key: null, generation: "" };
-  if (!raw.startsWith("{")) return { key: raw, generation: "" }; // stored before the record
+  if (PLAIN_KEY.test(raw)) return { key: raw, generation: "" }; // stored before the record
+  return parseRecord(raw) ?? { key: null, generation: "" }; // not a record this module wrote: no key (fail closed)
+}
+
+/**
+ * The record exactly as this module writes it: an object with only `key`
+ * (null, or a non-empty string) and `generation` (a string). Anything else is
+ * null, as a whole: no field is filled in or defaulted, so a part of a record
+ * can't pass as one (astra 19m).
+ */
+function parseRecord(raw: string): AccountRecord | null {
+  let value: unknown;
   try {
-    const value = JSON.parse(raw) as { key?: unknown; generation?: unknown };
-    return {
-      key: typeof value.key === "string" && value.key ? value.key : null,
-      generation: typeof value.generation === "string" ? value.generation : "",
-    };
+    value = JSON.parse(raw);
   } catch {
-    return { key: null, generation: "" }; // not a record this module wrote: no key (fail closed)
+    return null;
   }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const fields = Object.keys(value);
+  if (fields.length !== 2 || !fields.includes("key") || !fields.includes("generation")) return null;
+  const { key, generation } = value as { key: unknown; generation: unknown };
+  if (typeof generation !== "string") return null;
+  if (key !== null && (typeof key !== "string" || key === "")) return null;
+  return { key, generation };
 }
 
 function readKey(): string | null {
@@ -112,18 +129,21 @@ export function walletSessionEnding(): boolean {
 }
 
 /**
- * Records that the wallet session ended, as of `generation`. Only a teardown
- * holding the wallet-session lock calls this, after the gateway confirmed its
- * logout, with the generation it read before sending it. It is a slot of its
- * own: a teardown never rewrites the account record, so it can't undo a login
+ * Records that the wallet session ended, as of `generation`, and says whether
+ * storage shows it: true only when the marker reads back as `generation`, the
+ * value the request gate compares (astra 19m). Only a teardown holding the
+ * wallet-session lock calls this, after the gateway confirmed its logout, with
+ * the generation it read before sending it. It is a slot of its own: a
+ * teardown never rewrites the account record, so it can't undo a login
  * another tab makes meanwhile (localStorage has no compare-and-swap).
  */
-export function confirmWalletSessionEnded(generation: string): void {
+export function confirmWalletSessionEnded(generation: string): boolean {
   try {
     localStorage.setItem(CONFIRMED_KEY, generation);
   } catch {
-    // Unrecorded: the next page ends the session again.
+    // Not proof that it didn't land: the read below decides.
   }
+  return confirmedGeneration() === generation;
 }
 
 function newGeneration(): string {
@@ -156,11 +176,11 @@ let delivering = 0;
  * Write `key` to the record, or empty it with null, and say how it came out
  * (KeyWrite). Write-only: nothing reads the key back out.
  *
- * `accountChange` moves the generation in the same write. Login and logout
- * pass it, so the next key and its generation land together, and every tab
- * withholds the key until a teardown confirms the change. Without it the
- * record keeps its generation: a write that doesn't change the account
- * (tests).
+ * Every write is an account change unless it says otherwise (astra 19m): the
+ * next key, or none, and a new generation land together, and every tab
+ * withholds the key until a teardown confirms the change. A write that keeps
+ * the account passes `accountChange: false`, and the record keeps its
+ * generation: only tests do, through the auth store's adoptApiKey.
  *
  * Every change that may have been made is told to every listener, even if one
  * of them throws (astra A03e N1); the first error is rethrown once all have
@@ -173,7 +193,7 @@ export function setStoredApiKey(key: string | null, options: { accountChange?: b
   if (delivering > 0) return "busy";
   const record: AccountRecord = {
     key: key || null,
-    generation: options.accountChange ? newGeneration() : (readRecord()?.generation ?? ""),
+    generation: options.accountChange === false ? (readRecord()?.generation ?? "") : newGeneration(),
   };
   const written = JSON.stringify(record);
   try {
