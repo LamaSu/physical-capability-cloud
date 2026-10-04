@@ -204,6 +204,7 @@ describe("#538 r3: the OTLP path carries no marker from any producer's span", ()
     const { keyedHash } = await import("../../observability/closed-schema.js");
     const bridge = spans.find((span) => span.attributes["event.level"] === "err");
     expect(bridge?.name).toBe("event-bus.event");
+    expect(bridge?.instrumentationScope).toEqual({ name: "orchestrator-sdk.event-bus", version: "2.0.0" });
     expect(bridge?.attributes).toMatchObject({ "event.kind": keyedHash(M("kind")), "event.text": keyedHash(M("text")) });
     expect(bridge?.status).toEqual({ code: 2 });
     expect(bridge?.events.map((event) => [event.name, event.attributes])).toEqual([
@@ -245,5 +246,36 @@ describe("#538 r3: the OTLP path carries no marker from any producer's span", ()
     expect(exported!.name).toBe("n107b.otlp.control");
     expect(exported!.attributes).toEqual({ stage: "fund", count: 3, who: keyedHash("caller-id"), [keyedHash("size")]: keyedHash(6) });
     expect(exported!.events.map((event) => [event.name, event.attributes])).toEqual([["n107b.otlp.event", { step: "lock" }]]);
+  });
+
+  it("ids leave remapped under the server key, with no trace state, a closed kind and scope, under the server's own resource", async () => {
+    memory.reset();
+    const { keyedHexId, lit } = await import("../../observability/closed-schema.js");
+    const otel = (await import("../../otel.js")) as unknown as { getTracer(name: unknown, version?: unknown): Tracer };
+    const { ROOT_CONTEXT, createTraceState } = await import("@opentelemetry/api");
+    // A remote parent, as a propagated request header makes it: its ids and its trace state are the caller's.
+    const parent = {
+      traceId: `${NUM}`.padEnd(32, "a"),
+      spanId: `${NUM}`.padEnd(16, "b"),
+      traceFlags: 1,
+      isRemote: true,
+      traceState: createTraceState(`n107b=${MARK}`),
+    };
+    otel.getTracer(lit("n107b.otlp.scope"), lit("9.9.9")).startSpan("n107b.remote.child", {}, trace.setSpanContext(ROOT_CONTEXT, parent)).end();
+    // A raw kind, and a tracer whose name and version no producer declared.
+    trace.getTracer(MARK, `${NUM}`).startSpan("n107b.raw.scope", { kind: NUM as never }).end();
+    const [child, raw] = await flushed();
+    expect(child!.spanContext().traceId).toBe(keyedHexId(parent.traceId, 32));
+    expect(child!.parentSpanContext?.spanId).toBe(keyedHexId(parent.spanId, 16));
+    expect(child!.spanContext().traceState).toBeUndefined();
+    expect(child!.instrumentationScope).toEqual({ name: "n107b.otlp.scope", version: "9.9.9" });
+    expect(raw!.kind).toBe(0);
+    for (const span of [child!, raw!]) {
+      expect(span.resource.attributes).toEqual({
+        "service.name": process.env.OTEL_SERVICE_NAME ?? "pcc-gateway",
+        "service.version": process.env.OTEL_SERVICE_VERSION ?? "2.0.0",
+      });
+      expect(markerIn(JSON.stringify(exportedFields(span))), `${span.name}: a marker left`).toEqual([]);
+    }
   });
 });

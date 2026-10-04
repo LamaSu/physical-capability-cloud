@@ -1003,13 +1003,17 @@ describe("#538 r3: the OTLP exporter (otel.ts) carries no marker from any span f
     const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
     const tracer = provider.getTracer("n107b-prop-otlp");
     const results: Result[] = [];
-    // The positions the OpenTelemetry SDK itself refuses: its recordException builds a diagnostic
-    // with a template literal for a value it cannot record, which throws for a symbol and for an
-    // object with no prototype. The producer's call throws before the span ends: nothing is
+    // The positions the OpenTelemetry SDK itself refuses: its recordException builds a diagnostic,
+    // and its getTracer a cache key, with a template literal, which throws for a symbol and for an
+    // object with no prototype. The producer's call throws before any span ends: nothing is
     // exported. Any other throw, and any attempt that exports no span, is a violation.
     const REFUSALS: ReadonlyMap<string, RegExp> = new Map([
       ["recordException = symbol", /Cannot convert a Symbol value to a string/],
       ["recordException = nullPrototype", /Cannot convert object to primitive value/],
+      ["tracer name = symbol", /Cannot convert a Symbol value to a string/],
+      ["tracer name = nullPrototype", /Cannot convert object to primitive value/],
+      ["tracer version = symbol", /Cannot convert a Symbol value to a string/],
+      ["tracer version = nullPrototype", /Cannot convert object to primitive value/],
     ]);
     const refused: string[] = [];
     const exported = (label: string, run: () => void) => {
@@ -1069,6 +1073,10 @@ describe("#538 r3: the OTLP exporter (otel.ts) carries no marker from any span f
         other.end();
         tracer.startSpan("n", { links: [{ context: other.spanContext(), attributes: { a: value(make), [MARK]: "v" } }] }).end();
       });
+      // What a producer names besides the span: its kind, and its tracer's name and version.
+      exported(`span kind = ${kind}`, () => tracer.startSpan("n", { kind: value(make) }).end());
+      exported(`tracer name = ${kind}`, () => provider.getTracer(value(make)).startSpan("n").end());
+      exported(`tracer version = ${kind}`, () => provider.getTracer("t", value(make)).startSpan("n").end());
     }
     for (const name of SPECIAL_NAMES) {
       exported(`attribute key {${name}}`, () => {
@@ -1078,8 +1086,15 @@ describe("#538 r3: the OTLP exporter (otel.ts) carries no marker from any span f
         span.end();
       });
     }
+    // A resource carrying the marker: the exporter sends the server's own resource instead.
+    const { resourceFromAttributes } = await import("@opentelemetry/resources");
+    const marked = new BasicTracerProvider({
+      resource: resourceFromAttributes({ [MARK]: MARK, "service.name": MARK, n: NUM }),
+      spanProcessors: [new SimpleSpanProcessor(exporter)],
+    });
+    exported("a provider whose resource carries the marker", () => marked.getTracer("r").startSpan("n").end());
     expect(violations("the OTLP exporter", results), "positions that reached the OTLP exporter").toBe("");
-    expect(refused, "the SDK's refusals, each as documented").toEqual([...REFUSALS.keys()]);
+    expect([...refused].sort(), "the SDK's refusals, each as documented").toEqual([...REFUSALS.keys()].sort());
     await provider.shutdown();
   });
 });
@@ -1144,16 +1159,22 @@ describe("#538 r3: a stored record stays as its chokepoint closed it, whatever a
       service: schema.lit("n107b"),
       attributes: { count: schema.declare.metric(1), nested: { inner: schema.declare.metric(2) } },
     } as never);
+    // Subscribers share the tree a notification carries: one that writes to it, then one that
+    // reads it (as the stream's fan-out does).
     const unsubscribe = traceCollector.subscribe((trace) => tamper(trace));
+    const seen: string[] = [];
+    const witness = traceCollector.subscribe((trace) => seen.push(render(trace)));
     traceCollector.endSpan({ traceId, spanId, status: "ok" });
     unsubscribe();
+    witness();
+    expect(seen, "the later subscriber was notified").toHaveLength(1);
     tamper(traceCollector.getTrace(traceId));
     tamper(traceCollector.getRecentTraces(5));
     const app = Fastify({ logger: false });
     await app.register(traceRoutes);
     await app.ready();
     const body = (await app.inject({ method: "GET", url: `/api/traces/${traceId}` })).body;
-    const text = render([traceCollector.getTrace(traceId), traceCollector.getRecentTraces(5)]) + body;
+    const text = render([traceCollector.getTrace(traceId), traceCollector.getRecentTraces(5)]) + body + seen.join("\n");
     expect(text).toContain("n107b.immutability");
     expect(markerIn(text), "a marker a reader wrote into what it read").toEqual([]);
     await app.close();
