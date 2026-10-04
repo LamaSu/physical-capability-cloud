@@ -27,12 +27,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC_ROOT = path.join(__dirname, "..");
 const MUTATING = new Set(["post", "put", "patch", "delete"]);
 /**
- * The guards: auth/kernel-authority.ts's refuseKernelAction, and master's #400 relayAccessGuard
- * (routes/device-relay.ts: the relay plugin's preHandler, a default-deny per-route table over the
- * kernel's recorded operator). Unifying #400's ownership check into kernel-authority.ts is a
- * tracked follow-up.
+ * The guards: auth/kernel-authority.ts's refuseKernelAction and refuseKernelRequest. A function
+ * counts as a guard when it calls one (the same-file helper rule below), and a preHandler counts
+ * when it is one, by name or inline. N31b (N126) moved master's #400 relayAccessGuard onto the
+ * kernel-authority tiers, so it now counts through that rule, not by name (the gateway owner's
+ * #6568 (c)).
  */
-const GUARD_NAMES = new Set(["refuseKernelAction", "refuseKernelRequest", "relayAccessGuard"]);
+const GUARD_NAMES = new Set(["refuseKernelAction", "refuseKernelRequest"]);
 const GUARDED_TABLES = new Set(["operatorPolicies", "pendingApprovals"]);
 
 /**
