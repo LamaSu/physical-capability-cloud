@@ -246,7 +246,8 @@ describe("DECISIONS 00:53 (#6711): the relay's human- and agent-facing side need
   const mintFor = async (holder: string) => {
     const res = await app.inject({
       method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: asProvenOperator(),
-      payload: { createdBy: holder, allowedTools: ["printer_print_text"], maxCommands: 5, expiresInMinutes: 5 },
+      // KERNEL has no resolved device type, so even a read tool must be in the scope (#579 r1).
+      payload: { createdBy: holder, allowedTools: ["printer_print_text", "health"], maxCommands: 5, expiresInMinutes: 5 },
     });
     expect(res.statusCode).toBe(201);
     return res.json().id as string;
@@ -272,8 +273,10 @@ describe("DECISIONS 00:53 (#6711): the relay's human- and agent-facing side need
   });
 
   it("the proven operator and the admin are admitted to each", async () => {
+    // Every tool call names a scope that allows the tool, the operator's included (#6771).
+    const opScope = await mintFor(OPERATOR);
     for (const headers of [asProvenOperator(), asAdmin()]) {
-      for (const [method, url, payload] of human()) {
+      for (const [method, url, payload] of human(opScope)) {
         const res = await app.inject({ method, url, headers, ...(payload ? { payload } : {}) });
         expect(res.statusCode, `${method} ${url}`).toBeLessThan(300);
       }
@@ -307,6 +310,92 @@ describe("DECISIONS 00:53 (#6711): the relay's human- and agent-facing side need
     const res = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/camera/latest`, headers: asStranger() });
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe("relay_access_denied");
+  });
+});
+
+describe("#579 r1 HIGH (astra): a tool the manifest calls 'safe' never widens a scope", () => {
+  // The manifests list physical controls (category safe_control: home, reset, lights, identify,
+  // connect, disconnect) among their safeTools, and a kernel whose device type cannot be resolved
+  // falls back to the generic manifest, which lists reset. A scoped call may skip the scope's tool
+  // list, budget and escrow only for a READ tool of an authoritatively resolved device type.
+  const HOLDER2 = "0xD00D000000000000000000000000000000000531";
+  const OT_KERNEL = "kernel-n31-relay-opentrons";
+  let holderRawKey = "";
+  const proven = () => ({ ...bearer((holderRawKey ||= provisionApiKey({ operatorId: HOLDER2, name: "n31-relay-holder2", scopes: ["*"] }).rawKey)), "x-test-proven-wallet": HOLDER2 });
+  const mint = async (kernelId: string, allowedTools: string[]) => {
+    const res = await app.inject({
+      method: "POST", url: `/api/relay/${kernelId}/scope`, headers: asProvenOperator(),
+      payload: { createdBy: HOLDER2, allowedTools, maxCommands: 5, expiresInMinutes: 5 },
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
+  };
+  const call = (kernelId: string, scopeId: string, toolName: string) =>
+    app.inject({ method: "POST", url: `/api/relay/${kernelId}/tool-call`, headers: proven(), payload: { scopeId, toolName, args: {} } });
+  const scopeRow = (id: string) => getStore().db.select().from(schema.executionScopes).where(eq(schema.executionScopes.id, id)).get()!;
+  const rowsUnder = (id: string) => getStore().db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.scopeId, id)).all();
+
+  beforeAll(async () => {
+    const reg = await app.inject({ method: "POST", url: "/api/kernels", headers: asOperator(), payload: { id: OT_KERNEL, name: "N31 relay opentrons kernel", location: { lat: 1, lng: 1 }, physicalAddress: "x" } });
+    expect(reg.statusCode).toBe(201);
+    getStore().db.insert(schema.kernelDevices).values({
+      id: "dev-n31-relay-ot2", kernelId: OT_KERNEL, type: "machine", model: "OT-2", firmware: "1.0", status: "idle",
+      contributesToCapabilities: [], lastUpdated: new Date().toISOString(), adapterType: "opentrons",
+    }).run();
+  });
+
+  it("an unresolved device type grants no 'safe' tool: reset outside the scope is refused, nothing queued or spent", async () => {
+    const scopeId = await mint(KERNEL, ["printer_print_text"]);
+    const res = await call(KERNEL, scopeId, "reset");
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reason).toBe("tool_not_allowed");
+    expect(scopeRow(scopeId).commandCount).toBe(0);
+    expect(rowsUnder(scopeId).filter((r) => r.status !== "rejected")).toHaveLength(0);
+  });
+
+  it("an unresolved device type fails closed: even a read tool must be in the scope", async () => {
+    const scopeId = await mint(KERNEL, ["printer_print_text"]);
+    const res = await call(KERNEL, scopeId, "health");
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reason).toBe("tool_not_allowed");
+  });
+
+  it("a physical safe_control (opentrons home) outside the scope is refused", async () => {
+    const scopeId = await mint(OT_KERNEL, ["run_create"]);
+    const res = await call(OT_KERNEL, scopeId, "home");
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reason).toBe("tool_not_allowed");
+    expect(scopeRow(scopeId).commandCount).toBe(0);
+  });
+
+  it("a safe_control the scope allows runs, and spends one command of its budget", async () => {
+    const scopeId = await mint(OT_KERNEL, ["home"]);
+    const res = await call(OT_KERNEL, scopeId, "home");
+    expect(res.statusCode).toBe(201);
+    expect(scopeRow(scopeId).commandCount).toBe(1);
+  });
+
+  it("nothing bypasses the scope (#6771): even a READ tool of a resolved device type must be listed, and spends budget", async () => {
+    const scopeId = await mint(OT_KERNEL, ["run_create"]);
+    const res = await call(OT_KERNEL, scopeId, "health");
+    expect(res.statusCode).toBe(403);
+    expect(res.json().reason).toBe("tool_not_allowed");
+    const listed = await mint(OT_KERNEL, ["health"]);
+    expect((await call(OT_KERNEL, listed, "health")).statusCode).toBe(201);
+    expect(scopeRow(listed).commandCount).toBe(1);
+  });
+
+  it("dispatch re-checks it: a queued home outside its scope is rejected when the executor polls", async () => {
+    const scopeId = await mint(OT_KERNEL, ["run_create"]);
+    // A row admitted before this rule (or by any path that skipped admission) must not dispatch.
+    getStore().db.insert(schema.toolCallRelay).values({
+      id: "call-n31-legacy-home", scopeId, kernelId: OT_KERNEL, toolName: "home", toolArgs: {}, status: "pending", createdAt: new Date().toISOString(),
+    }).run();
+    const poll = await app.inject({ method: "GET", url: `/api/relay/${OT_KERNEL}/tool-call/pending`, headers: { ...asOperator(), "x-pcc-lease": "1" } });
+    expect(poll.statusCode).toBe(200);
+    expect((poll.json().calls as Array<{ id: string }>).map((c) => c.id)).not.toContain("call-n31-legacy-home");
+    const row = getStore().db.select().from(schema.toolCallRelay).where(eq(schema.toolCallRelay.id, "call-n31-legacy-home")).get();
+    expect(row).toMatchObject({ status: "rejected", error: "tool_not_allowed" });
   });
 });
 
