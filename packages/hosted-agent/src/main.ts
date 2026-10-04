@@ -204,6 +204,42 @@ export function readConfig(env: NodeJS.ProcessEnv): HostedConfig {
  * lifetime: one call site for the life of the service) with NO content, since
  * the far end's status/body/URL are not this sink's to repeat into a log.
  */
+const ATTEMPT_OUTCOME: ReadonlySet<unknown> = new Set(["ok", "budget_stop", "failed"]);
+const REPORT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const isCount = (v: unknown): v is number => Number.isSafeInteger(v) && (v as number) >= 0;
+
+/**
+ * The line the sink logs for a report: closed fields only, never the report itself (round 8, 246 MEDIUM).
+ * The report carries operator config the log has no need for (the model string, the pack version), and a
+ * credential pasted into one of those must not reach the log. Every read of the report happens inside one
+ * try, and the result holds only members of closed sets and safe integers, so serializing it cannot throw.
+ */
+function attemptLine(report: unknown): Record<string, unknown> {
+  try {
+    const r = report as Record<string, unknown> | null;
+    const outcome = r?.outcome;
+    const phase = r?.phase;
+    const seq = r?.seq;
+    const durationMs = r?.durationMs;
+    const sessionId = r?.sessionId;
+    const tokens = r?.tokens as Record<string, unknown> | null | undefined;
+    const tokensIn = tokens?.in;
+    const tokensOut = tokens?.out;
+    return {
+      event: "attempt-report",
+      ...(ATTEMPT_OUTCOME.has(outcome) ? { outcome } : {}),
+      ...(phase === "session" ? { phase } : {}),
+      ...(isCount(seq) ? { seq } : {}),
+      ...(Number.isSafeInteger(durationMs) ? { durationMs } : {}),
+      ...(isCount(tokensIn) ? { tokensIn } : {}),
+      ...(isCount(tokensOut) ? { tokensOut } : {}),
+      ...(typeof sessionId === "string" && REPORT_ID.test(sessionId) ? { sessionId } : {}),
+    };
+  } catch {
+    return { event: "attempt-report" };
+  }
+}
+
 export function attemptSink(
   gatewayBase: string,
   log: (line: string) => void = (l) => console.log(l),
@@ -213,7 +249,7 @@ export function attemptSink(
   const safeLog = totalLog(log);
   let notAcceptedLogged = false;
   return async (report) => {
-    safeLog(JSON.stringify({ attempt: report }));
+    safeLog(JSON.stringify(attemptLine(report)));
     let accepted = false;
     try {
       const res = await fetch(url, {

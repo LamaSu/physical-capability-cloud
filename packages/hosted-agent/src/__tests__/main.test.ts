@@ -529,3 +529,78 @@ describe("round 7: every startup failure line is total and closed", () => {
     await expect(sink({ kind: "attempt", contract: 1, sessionId: "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90", seq: 0 } as never)).resolves.toBeUndefined();
   });
 });
+
+/**
+ * Round 8 (246 MEDIUM): the attempt sink logs a closed projection of the report, never the report itself.
+ * The report carries operator config the log has no need for (the model string, the pack version), so a
+ * credential pasted into PCC_HOSTED_MODEL must not reach the log. The sink is also total: a report that
+ * cannot be serialized (a throwing toJSON, a cycle, a bigint) never makes it reject.
+ */
+describe("round 8: the attempt sink's log line is closed, and the sink is total", () => {
+  const MARK = "AttemptFixture246";
+  const BASE = {
+    kind: "attempt",
+    contract: 1,
+    sessionId: "6f1c2a4e-8b7d-4c3f-9a21-0d5e6b7c8f90",
+    seq: 3,
+    phase: "session",
+    outcome: "failed",
+    durationMs: 1234,
+    summary: "session: failed",
+    harness: { name: "pcc-hosted", version: "0.1.0", model: "claude-sonnet-5" },
+    pack: { version: "2.19.1", digest: `sha256:${"b".repeat(64)}` },
+    tokens: { in: 10, out: 5, source: "metered" },
+    consent: { transcript: false },
+  };
+  const OUTCOMES = ["ok", "budget_stop", "failed"];
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  function expectClosedAttemptLine(line: string): Record<string, unknown> {
+    expect(line).not.toContain(MARK);
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key === "event") expect(["attempt-report", "attempt-report-not-accepted"]).toContain(value);
+      else if (key === "outcome") expect(OUTCOMES).toContain(value);
+      else if (key === "phase") expect(value).toBe("session");
+      else if (key === "seq" || key === "tokensIn" || key === "tokensOut") expect(Number.isSafeInteger(value) && (value as number) >= 0).toBe(true);
+      else if (key === "durationMs") expect(Number.isSafeInteger(value)).toBe(true);
+      else if (key === "sessionId") expect(value).toMatch(UUID);
+      else expect.unreachable(`an attempt line carries a key outside the closed set: ${key}`);
+    }
+    return parsed;
+  }
+  async function linesFor(report: unknown): Promise<string[]> {
+    const { attemptSink } = await import("../main.js");
+    const lines: string[] = [];
+    // Port 9 refuses at once: the send fails, which is "not accepted", never thrown onward.
+    await expect(attemptSink("http://127.0.0.1:9", (l) => lines.push(l))(report as never)).resolves.toBeUndefined();
+    return lines;
+  }
+
+  it("246's reproduction: a credential pasted into the model string never reaches the log", async () => {
+    const lines = await linesFor({ ...BASE, harness: { ...BASE.harness, model: `pcc_live_${MARK}` }, pack: { ...BASE.pack, version: `pcc_live_${MARK}` } });
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expectClosedAttemptLine(line);
+    expect(JSON.parse(lines[0]!)).toEqual({ event: "attempt-report", outcome: "failed", phase: "session", seq: 3, durationMs: 1234, tokensIn: 10, tokensOut: 5, sessionId: BASE.sessionId });
+  });
+
+  it.each([
+    ["a throwing toJSON", () => ({ ...BASE, toJSON: () => { throw new Error(`pcc_live_${MARK}`); } })],
+    [
+      "a cycle",
+      () => {
+        const r: Record<string, unknown> = { ...BASE };
+        r.self = r;
+        return r;
+      },
+    ],
+    ["a bigint", () => ({ ...BASE, tokens: { in: 10n, out: 5, source: "metered" } })],
+    ["a Proxy whose get trap throws", () => new Proxy({}, { get: () => { throw new Error(`pcc_live_${MARK}`); } })],
+    [
+      "values outside the closed sets",
+      () => ({ ...BASE, sessionId: `pcc_live_${MARK}`, outcome: `pcc_live_${MARK}`, phase: `pcc_live_${MARK}`, seq: -1, durationMs: `pcc_live_${MARK}`, tokens: { in: 1.5, out: "5", source: "metered" } }),
+    ],
+  ])("246's reproduction: a report with %s never makes the sink reject, and its line is closed", async (_label, make) => {
+    const lines = await linesFor(make());
+    for (const line of lines) expectClosedAttemptLine(line);
+  });
+});
