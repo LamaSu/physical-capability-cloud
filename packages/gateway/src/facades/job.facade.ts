@@ -59,6 +59,9 @@ export interface JobFilters {
    *  under TENANT_ENFORCE), filters rows to this tenant. Omitted = today's
    *  cross-tenant default. */
   tenantId?: string;
+  /** Only these jobs: the ids the caller may read (jobReadScopeOf). Applied before the
+   *  page is cut, so `total` and `hasMore` count only readable jobs. */
+  jobIds?: ReadonlySet<string>;
 }
 
 export interface SubmitJobInput {
@@ -184,6 +187,10 @@ export class JobFacade extends BaseFacade {
         jobs = this.repos.jobs.findByStatus(filters.status, opts);
       } else {
         jobs = this.repos.jobs.findAll(opts);
+      }
+      if (filters?.jobIds) {
+        const readable = filters.jobIds;
+        jobs = jobs.filter((job) => readable.has(job.id));
       }
 
       const total = jobs.length;

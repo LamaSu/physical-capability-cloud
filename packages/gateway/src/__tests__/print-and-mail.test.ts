@@ -149,17 +149,24 @@ async function makeCarrierPickupEvent(opts: {
 
 // ── Setup / teardown ──────────────────────────────────────────────────────────
 
+// GET /api/print-and-mail/:jobId is identity-first and admin-only (F3 round 2): the courier
+// job records no proven party. These tests read it as the admin.
+const ADMIN_KEY = "print-and-mail-test-admin";
+const ADMIN = { "x-admin-key": ADMIN_KEY };
+
 beforeEach(() => {
   _resetCourierJobsStoreForTests();
   _resetPrintAndMailHandoffStoreForTests();
   mockNowMs = Date.parse("2026-08-27T00:00:00.000Z");
   initCourierJobsStore({ now });
   initPrintAndMailHandoffStore({ now });
+  process.env.PCC_ADMIN_KEY = ADMIN_KEY;
 });
 
 afterEach(() => {
   _resetCourierJobsStoreForTests();
   _resetPrintAndMailHandoffStoreForTests();
+  delete process.env.PCC_ADMIN_KEY;
 });
 
 // ── Vocabulary is fixed (no new event/device types) ──────────────────────────
@@ -379,7 +386,7 @@ describe("NEGATIVE CONTROL: the photo can never close the mail leg", () => {
     try {
       const jobId = await createAndClaimJob(app, { jobId: "job-5" });
       await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
-      const res = await app.inject({ method: "GET", url: `/api/print-and-mail/${jobId}` });
+      const res = await app.inject({ method: "GET", url: `/api/print-and-mail/${jobId}`, headers: ADMIN });
       expect(res.statusCode).toBe(200);
       expect(res.json().mailLeg.closed).toBe(false);
     } finally {
@@ -481,7 +488,7 @@ describe("with the CarrierBridge wired (post-merge behaviour)", () => {
       const carrier = await makeCarrierPickupEvent({ jobId });
       wireBridge(jobId, [carrier]);
 
-      const res = await app.inject({ method: "GET", url: `/api/print-and-mail/${jobId}` });
+      const res = await app.inject({ method: "GET", url: `/api/print-and-mail/${jobId}`, headers: ADMIN });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body.carrierEventCount).toBe(1);

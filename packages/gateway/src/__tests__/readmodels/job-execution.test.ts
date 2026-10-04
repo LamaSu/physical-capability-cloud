@@ -572,7 +572,12 @@ describe("GET /api/jobs/:jobId/execution", () => {
   };
 
   it("GET /api/jobs keeps { jobs } and adds collection-v1 items, the true total and asOf", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/jobs?limit=2" });
+    // The list is the caller's jobs (F3 round 2): here, kernel-nyc's operator's.
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/jobs?limit=2",
+      headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": OPERATOR_NYC },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(Array.isArray(body.jobs)).toBe(true);
@@ -832,7 +837,7 @@ describe("GET /api/jobs/:jobId/execution", () => {
       insertJob("job-label-buyer", "s-l", "cwm-label");
       await insertSession("neg-label", "job-label-buyer", { userAgentId: "agent-buyer-1" });
       const job = getStore().repos.jobs.findById("job-label-buyer") as any;
-      const repos = { kernels: { findById: () => ({ operatorAddress: "ops@example.invalid" }) } };
+      const repos = { kernels: { findAll: () => [{ id: job.kernelId, operatorAddress: "ops@example.invalid" }] } };
       expect(authorizeJobRead(job, BUYER, repos as any, getStore().db)).toEqual({ allow: false, reason: "not_a_party" });
       expect((await get("job-label-buyer", BUYER)).statusCode).toBe(404);
     });

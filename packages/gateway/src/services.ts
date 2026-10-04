@@ -11,6 +11,7 @@ import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
 import { declare, lit } from "./observability/closed-schema.js";
+import { batchOwnershipOf, registerBatchOwnership } from "./readmodels/batch-ownership.js";
 
 /** @pcc/kernel's evidence-storage-factory.ts backend selection (EVIDENCE_STORAGE env var). */
 const EVIDENCE_STORAGE_BACKENDS: readonly string[] = ["storacha", "helia"];
@@ -115,6 +116,10 @@ sensorPipeline.onAnomaly((anomaly) => {
 // ── Batch Tracker ───────────────────────────────────────────────────
 
 export const batchTracker = new BatchTracker();
+
+// Who owns a batch-tied record (a slot, a sample's reading, a batch event) is what this tracker
+// holds, never what the record's payload says (cross-family review r5 of #403).
+registerBatchOwnership(batchOwnershipOf(batchTracker));
 
 // Forward batch events to StreamHub
 batchTracker.onBatchEvent((event) => {
