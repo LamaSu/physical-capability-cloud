@@ -463,6 +463,27 @@ describe("assertScheduleIsWellFormed", () => {
     expect(() => assertScheduleIsWellFormed(s)).toThrow(/overlaps/);
   });
 
+  it("throws when a segment follows an open-ended one (it could never apply) — pcc-economics D1", () => {
+    // Before the fix, endTime null reset the overlap guard, so this schedule was accepted and sealed,
+    // and evaluateRateSchedule silently ignored segments[1] and segments[2] forever.
+    const s = makeSchedule([
+      { kind: "constant", startTime: 0, endTime: null, bps: 500 },
+      { kind: "constant", startTime: 100, endTime: 200, bps: 200 },
+      { kind: "constant", startTime: 200, endTime: null, bps: 100 },
+    ]);
+    expect(() => assertScheduleIsWellFormed(s)).toThrow(/open-ended/);
+    expect(evaluateRateSchedule(s, { now: 150, jobValueCents: 0, jobsPerDay: 0 }).segmentIndex).toBe(0);
+  });
+
+  it("still accepts a schedule whose LAST segment is open-ended", () => {
+    const s = makeSchedule([
+      { kind: "constant", startTime: 0, endTime: 100, bps: 500 },
+      { kind: "linear-decay", startTime: 100, endTime: 200, startBps: 500, endBps: 100 },
+      { kind: "constant", startTime: 200, endTime: null, bps: 100 },
+    ]);
+    expect(() => assertScheduleIsWellFormed(s)).not.toThrow();
+  });
+
   it("throws when linear-decay endTime <= startTime", () => {
     const s = makeSchedule([
       { kind: "linear-decay", startTime: 100, endTime: 100, startBps: 500, endBps: 200 },

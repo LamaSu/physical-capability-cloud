@@ -10,6 +10,8 @@ import {
   signingPreimage,
   parseEd25519SignatureHex,
   parseEd25519PublicKeyHex,
+  parseSigningInputJson,
+  SIGNING_JSON_MAX_DEPTH,
   sessionKeyDelegationPreimage,
   sessionRevocationPreimage,
 } from "../evidence/signing-preimage.js";
@@ -307,16 +309,12 @@ describe("cross-language goldens (packages/pcc-node/tests/goldens.json)", () => 
   });
 
   it("agrees with every accept/reject parity vector, decoding the JSON text itself", () => {
-    // The vectors are JSON TEXT: JSON.parse is part of the pinned boundary, so
-    // 1.0 and 1e2 are integers here exactly as json.loads' floats are in Python.
+    // The vectors are JSON TEXT: the decode boundary (parseSigningInputJson,
+    // mirrored by pcc-node's loads_strict) is part of what they pin, so 1.0 and
+    // 1e2 are integers here exactly as the doubles are in Python.
     const outcome = (v: { kind: string; json: string }): string => {
-      let parsed: Record<string, unknown>;
       try {
-        parsed = JSON.parse(v.json);
-      } catch {
-        return "REJECT";
-      }
-      try {
+        const parsed = parseSigningInputJson(v.json) as Record<string, unknown>;
         if (v.kind === "revocation") {
           return new TextDecoder().decode(sessionRevocationPreimage(parsed as never));
         }
@@ -328,7 +326,7 @@ describe("cross-language goldens (packages/pcc-node/tests/goldens.json)", () => 
         return "REJECT";
       }
     };
-    expect(goldens.parity_vectors.length).toBeGreaterThanOrEqual(27);
+    expect(goldens.parity_vectors.length).toBeGreaterThanOrEqual(37);
     for (const v of goldens.parity_vectors) {
       expect({ name: v.name, got: outcome(v) }).toEqual({ name: v.name, got: v.reject ? "REJECT" : v.preimage_utf8 });
     }
@@ -366,5 +364,54 @@ describe("session revocation preimage", () => {
     expect(
       codeOf(() => sessionRevocationPreimage({ sessionId: "s", revokedAt: 1.5, reason: "x" })),
     ).toBe("malformed-revocation");
+  });
+});
+
+describe("parseSigningInputJson — the JSON boundary both languages share (R20 round 3)", () => {
+  const REVOCATION = '{"sessionId":"sess-001","revokedAt":1727201000,"reason":"rotated","unused":%}';
+  const withUnused = (unused: string) => REVOCATION.replace("%", unused);
+  const code = (text: unknown) => {
+    try {
+      parseSigningInputJson(text);
+      return "ACCEPT";
+    } catch (e) {
+      if (!(e instanceof SigningPreimageError)) throw e;
+      return e.code;
+    }
+  };
+
+  it("refuses non-standard tokens anywhere, including fields the preimage ignores", () => {
+    for (const token of ["NaN", "Infinity", "-Infinity", '{"a":[NaN]}', "undefined", "0x10", "'x'"]) {
+      expect(code(withUnused(token)), token).toBe("malformed-json");
+    }
+  });
+
+  it("refuses nesting deeper than SIGNING_JSON_MAX_DEPTH, and accepts exactly that depth", () => {
+    const nest = (n: number) => "[".repeat(n) + "]".repeat(n);
+    expect(SIGNING_JSON_MAX_DEPTH).toBe(64);
+    expect(code(withUnused(nest(63)))).toBe("ACCEPT"); // the object is depth 1, so 64 in all
+    expect(code(withUnused(nest(64)))).toBe("malformed-json");
+    expect(code(withUnused(nest(5000)))).toBe("malformed-json");
+    expect(code(withUnused(nest(20000)))).toBe("malformed-json"); // past CPython's RecursionError point
+    expect(code(nest(64))).toBe("ACCEPT");
+    expect(code(nest(65))).toBe("malformed-json");
+  });
+
+  it("measures depth on the TEXT, so a duplicate key cannot hide an over-depth value (A01b-q1)", () => {
+    const nest = (n: number) => "[".repeat(n) + "]".repeat(n);
+    const shadowed = (n: number) => withUnused(nest(n) + ',"unused":0');
+    expect(code(shadowed(63))).toBe("ACCEPT"); // 64 in all, then replaced by the duplicate
+    for (const n of [64, 99, 19999]) expect(code(shadowed(n)), `shadowed ${n}`).toBe("malformed-json");
+    // Brackets inside a string are not nesting, and escapes are honoured.
+    expect(code(withUnused('"' + "[".repeat(100) + '"'))).toBe("ACCEPT");
+    expect(code(withUnused('"\\"' + "[".repeat(100) + '"'))).toBe("ACCEPT");
+    expect(code(withUnused('["\\\\",' + nest(70) + "]"))).toBe("malformed-json");
+  });
+
+  it("decodes numbers as JSON.parse does and refuses non-text and non-JSON", () => {
+    expect(parseSigningInputJson(withUnused("1" + "0".repeat(5000)))).toMatchObject({ unused: Infinity });
+    for (const bad of [undefined, 7, Buffer.from("{}"), "", "\ufeff{}", "{} x", "{'a':1}"]) {
+      expect(code(bad), String(bad)).toBe("malformed-json");
+    }
   });
 });

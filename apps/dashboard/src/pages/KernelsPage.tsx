@@ -56,7 +56,11 @@ export function KernelsPage() {
                   <GlowBadge color="gray">+{kernel.capabilities.length - 4}</GlowBadge>
                 )}
               </div>
-              <div className="text-xs text-white/25">{kernel.location ?? "Location not set"}</div>
+              <div className="text-xs text-white/25">
+                {kernel.physicalAddress ||
+                  kernel.location?.label ||
+                  (kernel.location ? `${kernel.location.lat.toFixed(4)}, ${kernel.location.lng.toFixed(4)}` : "Location not set")}
+              </div>
             </GlassPanel>
           ))}
         </div>
