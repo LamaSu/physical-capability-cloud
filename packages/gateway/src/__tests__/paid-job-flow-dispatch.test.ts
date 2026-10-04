@@ -91,9 +91,17 @@ vi.mock("../services/kernel-service.js", async (importActual) => {
 // Test app builder
 // ---------------------------------------------------------------------------
 
+// N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, or the
+// gateway admin acts for it. This suite has no caller stand-in and its buyers are not wallets, so
+// the admin submits each fast-track job for its buyer.
+const ADMIN = "paid-job-flow-dispatch-admin";
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
@@ -110,6 +118,7 @@ async function submitJob(app: FastifyInstance, kernelId: string, userAgentId: st
   const res = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
+    headers: { "x-admin-key": ADMIN },
     payload: { kernelId, capabilityType: "liquid-handler", userAgentId },
   });
   expect(res.statusCode).toBe(201);
@@ -140,6 +149,8 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   it("dispatches a job as 'queued' when the gateway has NO local kernel (remote node picks it up)", async () => {
