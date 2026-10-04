@@ -207,7 +207,11 @@ export interface PolicyEvaluation {
 
 // ── Pending Approval ──────────────────────────────────────────────
 
-export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
+/**
+ * "consumed": an approved request that an agent has CLAIMED for execution, at most once, through
+ * POST /api/operator/approvals/:id/consume. It means claimed, not that the job ran or completed.
+ */
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired" | "consumed";
 
 export interface PendingApproval {
   id: Id;
