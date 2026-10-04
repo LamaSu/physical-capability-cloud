@@ -99,8 +99,10 @@
  *     over the authenticated bundles, each with its signer's trust domain, and
  *     the deal's `executorTrustDomains`: an inspection is inspected_output only
  *     from a trust domain independent of every executor. An event present in
- *     several bundles counts at the LOWEST level any of them gives it, so a copy
- *     in a fabricated or executor's bundle never lifts it (steward #6478);
+ *     several bundles counts at the HIGHEST level any of its occurrences gets,
+ *     each levelled by its own bundle, exactly as #345 does (steward #6623,
+ *     evidence #6559): with one domain per signer (the pinned snapshot), only a
+ *     copy in a truly independent signer's bundle can lift it;
  *   - if it is an inspection, carries its own positive verdict: evidence's
  *     pinned verdict field (`inspectionVerdict` is pass: cv_inspection_result
  *     `passed: true`, instrument_result `pass: true`, batch_sample_result
@@ -180,6 +182,7 @@
 
 import { isFabricated } from "./is-fabricated.js";
 import {
+  evidenceLevelOfBundles,
   evidenceLevelRank,
   evidenceLevelsOfEvents,
   meetsEvidenceLevel,
@@ -574,10 +577,11 @@ async function signatureLeg(leg: () => BundleSignatureAnswer | Promise<BundleSig
   }
 }
 
-/** The lower of two levels; null (no level) is the lowest. */
-function lowerLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
-  if (a === null || b === null) return null;
-  return evidenceLevelRank(a) <= evidenceLevelRank(b) ? a : b;
+/** The higher of two levels; null (no level) is the lowest. */
+function higherLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return evidenceLevelRank(a) >= evidenceLevelRank(b) ? a : b;
 }
 
 /**
@@ -796,9 +800,12 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   // completion is a device failure, judged here under onDeviceFailure.
   let contradictions: ContradictionKind[];
   let eventLevels: readonly EventLevel[];
+  let reached: EvidenceLevel | null;
   try {
     contradictions = deriveContradictions(authenticated);
     eventLevels = evidenceLevelsOfEvents(authenticated, { executorTrustDomains });
+    // The strongest level the bundles prove: #345's own function, the maximum over every occurrence.
+    reached = evidenceLevelOfBundles(authenticated, { executorTrustDomains });
   } catch (err) {
     return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -821,18 +828,14 @@ export async function profileAdmitsBundle(input: ProfileAdmissionInput): Promise
   }
 
   const required = profile.interpretation.acceptanceLevel;
-  // The level of each distinct event: the LOWEST any of its copies gets (steward #6478).
+  // The level an event counts at: the MAX over its occurrences, each levelled by its own bundle, as #345 takes
+  // it (steward #6623, evidence #6559). A test holds this and `reached` equal to evidence-level.ts on duplicates.
   const levelByHash = new Map<string, EvidenceLevel | null>();
   for (const { bundleIndex, eventIndex, level } of eventLevels) {
     const hash = authenticated[bundleIndex]!.events[eventIndex]!.hash;
-    levelByHash.set(hash, levelByHash.has(hash) ? lowerLevel(levelByHash.get(hash)!, level) : level);
+    levelByHash.set(hash, levelByHash.has(hash) ? higherLevel(levelByHash.get(hash)!, level) : level);
   }
   const levelOf = (e: EvidenceEvent): EvidenceLevel | null => levelByHash.get(e.hash) ?? null;
-  let reached: EvidenceLevel | null = null;
-  for (const e of events) {
-    const level = levelOf(e);
-    if (level !== null && (reached === null || evidenceLevelRank(level) > evidenceLevelRank(reached))) reached = level;
-  }
   const { device } = profile;
   const window = captureWindow(profile, events);
 

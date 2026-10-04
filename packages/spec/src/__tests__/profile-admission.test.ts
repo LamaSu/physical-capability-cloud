@@ -31,6 +31,7 @@ import {
   profileGoverns,
   type MeasurementProfileV1,
 } from "../evidence/measurement-profile.js";
+import { evidenceLevelOfBundles, evidenceLevelsOfEvents } from "../evidence/evidence-level.js";
 import { signingPreimage } from "../evidence/signing-preimage.js";
 import { canonicalize, hashBundle, hashEvent } from "../util/canonical.js";
 import { verifyEvidenceSubjectBinding, type EvidenceSubject } from "../evidence/subject-binding.js";
@@ -281,16 +282,33 @@ describe("profile admission — admits evidence that satisfies the committed pro
 });
 
 describe("profile admission — trust domains (#345's one rule, steward #6478)", () => {
-  it("an event present in two bundles counts at the LOWER level: the inspector's copy cannot lift the executor's", async () => {
+  it("an event present in two bundles counts at the MAX over its occurrences, as #345 does: the independent inspector's copy lifts it (steward #6623)", async () => {
     const p = inspectedPageProfile();
     // The camera's inspection in operator B's bundle (independent) AND in operator A's own (the executor's).
     const both = [await toBundle(PILOT, p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_B)];
     expect(both[0]!.events[2]!.hash).toBe(both[1]!.events[0]!.hash);
     const r = await admit(p, both);
-    expect(r).toMatchObject({ decision: "reject", reached: "device_reported", qualifyingSamples: 0 });
-    expect(codes(r)).toEqual(["level-not-reached"]);
-    // Without the executor's copy, the same inspection is independent and admits.
-    expect((await admit(p, [await toBundle(PILOT.slice(0, 2), p, SIGNER_A), both[1]!])).decision).toBe("admit");
+    expect(r).toMatchObject({ decision: "admit", reached: "inspected_output", qualifyingSamples: 1 });
+    // With only the executor's copy, nothing independent attests it: device_reported.
+    const ownOnly = await admit(p, [await toBundle(PILOT, p, SIGNER_A)]);
+    expect(ownOnly).toMatchObject({ decision: "reject", reached: "device_reported" });
+  });
+
+  it("on duplicates, admission's levels are #345's: reached is evidenceLevelOfBundles, and the counted level is the max of evidenceLevelsOfEvents", async () => {
+    const p = inspectedPageProfile();
+    const both = [await toBundle(PILOT, p, SIGNER_A), await toBundle(PILOT.slice(2), p, SIGNER_B)];
+    const authenticated = [
+      { events: both[0]!.events as EvidenceEvent[], trustDomain: OPERATOR_A },
+      { events: both[1]!.events as EvidenceEvent[], trustDomain: OPERATOR_B },
+    ];
+    const context = { executorTrustDomains: [OPERATOR_A] };
+    const r = await admit(p, both);
+    expect(r.reached).toBe(evidenceLevelOfBundles(authenticated, context));
+    // The camera's inspection: one occurrence per bundle, and admission counted it at their maximum.
+    const cameraHash = both[1]!.events[0]!.hash;
+    const levels = evidenceLevelsOfEvents(authenticated, context).filter((l) => authenticated[l.bundleIndex]!.events[l.eventIndex]!.hash === cameraHash);
+    expect(levels.map((l) => l.level)).toEqual(["device_reported", "inspected_output"]);
+    expect(r.qualifyingSamples).toBe(1);
   });
 
   it("the signature leg must name the verified signer the bundle declares: true, a domain record, a malformed id or another signer fails it", async () => {
