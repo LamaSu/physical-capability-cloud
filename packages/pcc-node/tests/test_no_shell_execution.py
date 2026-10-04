@@ -37,6 +37,14 @@ computed argv and ``/usr/bin/env sh``). The rules:
    (``subprocess.os``), and an attribute chain goes past a tracked module's
    first attribute only through the few the package uses (``SAFE_CHAINS``:
    ``os.path``, ``os.environ``, ``sys.stdin``) (verdict 68f).
+7. A tracked module is imported whole, by its own name (``import X`` or
+   ``import X as Y``), and only its starters are imported by name
+   (``from subprocess import run``). A dotted import (``import
+   asyncio.subprocess``, ``import os.path``), a ``from`` import of a
+   submodule (``from asyncio.subprocess import create_subprocess_shell``)
+   and any other ``from`` import (``from os import path``, ``from subprocess
+   import os``) are refused: each binds a module or a function under a name
+   the guard does not resolve (#563 r1, HIGH).
 """
 
 import ast
@@ -128,6 +136,8 @@ def violations(source, filename="<src>"):
                     bad(node, f"import {alias.name}")
                 if alias.name in MODULES:
                     modules[alias.asname or alias.name] = alias.name
+                elif _root(alias.name) in MODULES:
+                    bad(node, f"import {alias.name}: a tracked module is imported whole, by its own name")
         elif isinstance(node, ast.ImportFrom) and node.module:
             if _root(node.module) in REFUSED_IMPORTS:
                 bad(node, f"from {node.module} import ...")
@@ -136,6 +146,10 @@ def violations(source, filename="<src>"):
                     names[alias.asname or alias.name] = (node.module, alias.name)
                     if alias.name == "*" or alias.name in REFUSED.get(node.module, ()):
                         bad(node, f"from {node.module} import {alias.name}")
+                    elif (node.module, alias.name) not in ALLOWED_STARTS:
+                        bad(node, f"from {node.module} import {alias.name}: only a starter is imported by name")
+            elif _root(node.module) in MODULES:
+                bad(node, f"from {node.module} import ...: a tracked module's submodule")
 
     # Names used as the object of an attribute access (os in os.path.join), and called expressions.
     attribute_bases = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
@@ -274,7 +288,9 @@ def executables_started(source):
 
     A call counts only when it resolves, through the source's imports, to an allowed starter,
     as violations() resolves it: a local function or method that happens to be named call or
-    run is not a starter (runtime.py's call("GET", path) is an HTTP request).
+    run is not a starter (runtime.py's call("GET", path) is an HTTP request). These are the
+    only import forms rule 7 permits, so every start the package can contain is counted; a
+    start reached any other way (from asyncio.subprocess import ...) is refused outright.
     """
     tree = ast.parse(source)
     modules = {}  # local name -> module, for `import subprocess as sp`
@@ -430,6 +446,22 @@ EVASIONS = {
     "node -e": "import subprocess\nsubprocess.run(['node', '-e', payload])",
     "awk": "import subprocess\nsubprocess.run(['awk', payload])",
     "a path to an allowed name": "import subprocess\nsubprocess.run(['/tmp/x/arp', '-a'])",
+    # #563 r1 (HIGH): a tracked module reached through a dotted import or a from import.
+    "from asyncio.subprocess import create_subprocess_shell":
+        "from asyncio.subprocess import create_subprocess_shell\nasync def launch(payload):\n"
+        "    await create_subprocess_shell(payload)",
+    "from asyncio.subprocess import create_subprocess_exec":
+        "from asyncio.subprocess import create_subprocess_exec\ncreate_subprocess_exec(remote_exe)",
+    "import asyncio.subprocess": "import asyncio.subprocess\nasyncio.subprocess.create_subprocess_shell(x)",
+    "import asyncio.subprocess as asp": "import asyncio.subprocess as asp\nasp.create_subprocess_shell(x)",
+    "from asyncio import subprocess": "from asyncio import subprocess as asp\nasp.create_subprocess_shell(x)",
+    "import os.path binds os": "import os.path\nos.system('id')",
+    "from os import path": "from os import path\npath.os.system('id')",
+    "from os.path import os": "from os.path import os\nos.system('id')",
+    "import importlib.util binds importlib": "import importlib.util\nimportlib.import_module(name)",
+    "from importlib import util": "from importlib import util\nutil.spec_from_file_location(n, p)",
+    "from subprocess import os": "from subprocess import os\nos.system('id')",
+    "from os import sys": "from os import sys\nsys.modules['os'].system('id')",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
@@ -444,6 +476,9 @@ SAFE = {
     "os.environ chain": "import os\nvalue = os.environ.get('X')",
     "sys.stdin chain": "import sys\ninteractive = sys.stdin.isatty()",
     "an unrelated name that contains getattr": "import os\nmy_getattr = 1\nflags = getattr(os, 'O_NOFOLLOW', 0)",
+    # Rule 7 keeps the starters' own from import: it is judged at the call.
+    "an imported starter with a fixed argv": "from subprocess import run\nrun(['arp', '-a'], capture_output=True)",
+    "an aliased module import": "import subprocess as sp\nsp.run(['dd', 'if=/dev/zero', 'count=1'])",
 }
 
 
