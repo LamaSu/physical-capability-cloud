@@ -786,27 +786,13 @@ export async function setupRoutes(app: FastifyInstance) {
       });
     }
 
-    // Owner check: the authenticated principal apiGate resolved must be the
-    // kernel's operator. Both identities are trimmed (N59 F3: a whitespace
-    // principal must not match a whitespace/legacy operatorAddress), a
-    // normalized-empty principal is rejected, and the zero address is matched
-    // case-insensitively as an unowned placeholder.
-    const principal = (
-      (typeof req.userId === "string" && req.userId) ||
-      (typeof req.operatorId === "string" && req.operatorId) ||
-      ""
-    ).trim();
-    const operatorAddress = (kernel.operatorAddress ?? "").trim();
-    const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-    const isUnowned = operatorAddress === "" || operatorAddress.toLowerCase() === ZERO_ADDRESS;
-    if (!principal || isUnowned || operatorAddress !== principal) {
-      return reply.code(403).send({
-        error: "not_kernel_operator",
-        message: "Only this kernel's operator may run its test job.",
-        ran: false,
-        passed: false,
-      });
-    }
+    // Owner check (N31c, the steward's #6540): a test job ACTUATES the operator's
+    // device, so it is a decision for the admin or a PROVEN wallet that is the
+    // kernel's operator, through the one kernel-ownership guard. A claimed key
+    // is not proof. The guard treats a blank or zero-address operatorAddress as
+    // unowned (N59 F3), and anonymous is 401.
+    const refusal = refuseKernelRequest(req, kernelId, "decide");
+    if (refusal) return reply.code(refusal.status).send({ ...refusal.body, ran: false, passed: false });
 
     // The test must name a device on this kernel.
     if (!deviceId || typeof deviceId !== "string") {

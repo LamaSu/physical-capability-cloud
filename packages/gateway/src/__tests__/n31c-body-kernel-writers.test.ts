@@ -57,10 +57,12 @@ beforeAll(async () => {
   const { capabilityRoutes } = await import("../routes/capabilities.js");
   const { setupRoutes } = await import("../routes/setup.js");
   const { operatorRelayRoutes } = await import("../routes/operator-relay.js");
+  const { diagnosticLogRoutes } = await import("../routes/diagnostic-logs.js");
   await app.register(apiGate);
   await app.register(capabilityRoutes);
   await app.register(setupRoutes);
   await app.register(operatorRelayRoutes);
+  await app.register(diagnosticLogRoutes);
   await app.ready();
   expect(getStore().db.select().from(schema.shopKernels).where(eq(schema.shopKernels.id, KERNEL)).get()?.operatorAddress.toLowerCase()).toBe(OPERATOR);
 }, 60_000);
@@ -187,5 +189,45 @@ describe("N31c POST /api/operator/job-status: only the job's kernel operator or 
   it("the kernel's operator (its own key) updates its job", async () => {
     const res = await app.inject({ method: "POST", url: "/api/operator/job-status", headers: asOperator(), payload: { jobId: JOB, status: "in_progress" } });
     expect(res.statusCode).not.toBe(403);
+  });
+});
+
+describe("N31c POST /api/operator/diagnostics: a bundle that names a kernel needs that kernel's operator or the admin", () => {
+  // The steward's #6540: the bundle is filed under the kernel it names, so a stranger must not file
+  // bundles under another operator's kernel. A bundle naming no kernel is filed as "unknown".
+  const bundle = (kernelId?: string) => ({
+    ...(kernelId === undefined ? {} : { kernelId }),
+    encrypted: { ciphertext_b64: "Y2lwaGVy", iv_b64: "aXY=", salt_b64: "c2FsdA==", tag_b64: "dGFn" },
+    bundleHash: "n31c-bundle", bundleSize: 6, logLineCount: 1, systemPlatform: "linux", collectedAt: new Date().toISOString(),
+  });
+  const upload = (headers: Record<string, string>, kernelId?: string) =>
+    app.inject({ method: "POST", url: "/api/operator/diagnostics", headers, payload: bundle(kernelId) });
+
+  it("anonymous naming a kernel is 401", async () => {
+    expect((await upload(ANON, KERNEL)).statusCode).toBe(401);
+  });
+
+  it("a stranger naming another operator's kernel is 403 and files nothing", async () => {
+    const res = await upload(asStranger(), KERNEL);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).not.toHaveProperty("uploadId");
+  });
+
+  it("an unknown kernel is 404 for a non-admin", async () => {
+    expect((await upload(asStranger(), "kernel-n31c-ghost")).statusCode).toBe(404);
+  });
+
+  it("the kernel's operator (its own key) and the admin file a bundle under it", async () => {
+    for (const headers of [asOperator(), asAdmin()]) {
+      const res = await upload(headers, KERNEL);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().uploadId).toMatch(/^diag-/);
+    }
+  });
+
+  it("a bundle naming no kernel is filed for any key", async () => {
+    const res = await upload(asStranger());
+    expect(res.statusCode).toBe(200);
+    expect(res.json().uploadId).toMatch(/^diag-/);
   });
 });

@@ -129,14 +129,18 @@ async function buildApp(): Promise<FastifyInstance> {
       (req as { userId?: string }).userId = key;
       (req as { operatorId?: string }).operatorId = key;
     }
+    // WP-A's proven wallet, simulated (N31c: a test job is a decision, which needs proof).
+    const proven = req.headers["x-test-proven-wallet"];
+    if (typeof proven === "string") (req as { provenWallet?: string }).provenWallet = proven;
   });
   await app.register(setupRoutes);
   await app.ready();
   return app;
 }
 
-// A kernel owned by OWNER, with one machine device, for the test-job cases.
-const OWNER = "op-owner";
+// A kernel owned by OWNER, with one machine device, for the test-job cases. N31c: a wallet, so its
+// proven form can make the test job's decision.
+const OWNER = "0x5e7000000000000000000000000000000000c31c";
 function seedKernel(id: string, operatorAddress: string): void {
   const now = new Date().toISOString();
   getRepos().kernels.insert({
@@ -778,7 +782,10 @@ describe("Setup API", () => {
       jobRanSimulated: ReturnType<typeof vi.fn>;
     } })._mockService;
     const GW_KERNEL = "kernel-setup-test"; // the kernel this gateway's service runs
-    const owner = { "x-test-key": OWNER };
+    // N31c (the steward's #6540): a test job actuates the device, so it is a decision. These cases
+    // send no admin key ("" grants nothing), so the owner acts by its PROVEN wallet.
+    const noAdmin = { "x-admin-key": "" };
+    const owner = { "x-test-key": OWNER, "x-test-proven-wallet": OWNER, ...noAdmin };
     const post = (payload: unknown, headers: Record<string, string> = owner) =>
       app.inject({ method: "POST", url: "/api/setup/test-job", headers, payload });
 
@@ -802,20 +809,28 @@ describe("Setup API", () => {
       expect(res.json().error).toBe("kernel_not_found");
     });
 
-    it("403s a caller who is not the kernel operator, and an anonymous caller", async () => {
-      const stranger = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, { "x-test-key": "someone-else" });
+    it("refuses a stranger, the owner's merely claimed key and an anonymous caller, running nothing", async () => {
+      const stranger = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, { "x-test-key": "someone-else", ...noAdmin });
       expect(stranger.statusCode).toBe(403);
-      expect(stranger.json()).toMatchObject({ error: "not_kernel_operator", ran: false, passed: false });
-      const anon = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, {});
-      expect(anon.statusCode).toBe(403);
+      expect(stranger.json()).toMatchObject({ reason: "operator_proof_required", ran: false, passed: false });
+      // N31c: the kernel's own key is a claim, not proof.
+      const claimed = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, { "x-test-key": OWNER, ...noAdmin });
+      expect(claimed.statusCode).toBe(403);
+      expect(claimed.json()).toMatchObject({ reason: "operator_proof_required", ran: false, passed: false });
+      const anon = await post({ kernelId: GW_KERNEL, deviceId: "dev-owned" }, noAdmin);
+      expect(anon.statusCode).toBe(401);
+      expect(_svc.submitJob).not.toHaveBeenCalled();
     });
 
     it("403s a whitespace principal against a whitespace/legacy operatorAddress (F3)", async () => {
       // kernel-ws has operatorAddress "   ". A whitespace principal must NOT
       // match it: both normalize to empty (unowned), so the owner check refuses.
-      const res = await post({ kernelId: "kernel-ws", deviceId: "dev-ws" }, { "x-test-key": "   " });
-      expect(res.statusCode).toBe(403);
-      expect(res.json().error).toBe("not_kernel_operator");
+      // N31c: the guard trims both, so a whitespace principal is no principal at all (401), and a
+      // whitespace proven wallet proves nothing against a whitespace (unowned) operatorAddress.
+      const res = await post({ kernelId: "kernel-ws", deviceId: "dev-ws" }, { "x-test-key": "   ", ...noAdmin });
+      expect(res.statusCode).toBe(401);
+      const proven = await post({ kernelId: "kernel-ws", deviceId: "dev-ws" }, { "x-test-key": "op-ws", "x-test-proven-wallet": "   ", ...noAdmin });
+      expect(proven.statusCode).toBe(403);
       expect(_svc.submitJob).not.toHaveBeenCalled();
     });
 

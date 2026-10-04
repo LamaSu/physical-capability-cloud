@@ -12,6 +12,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 import { v4 as uuidv4 } from "uuid";
 
 // In-memory store (backed by audit log for persistence across restarts).
@@ -91,6 +92,15 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
       systemPlatform,
       collectedAt,
     } = req.body ?? {};
+
+    // N31c (the steward's #6540): a bundle that names a kernel is filed under that
+    // kernel, so it needs the kernel's operator at the "operate" tier (its own key,
+    // a proven operator wallet, or the admin). A bundle naming no kernel is filed
+    // as "unknown".
+    if (kernelId !== undefined) {
+      const refusal = refuseKernelRequest(req, String(kernelId), "operate");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+    }
 
     if (!encrypted?.ciphertext_b64) {
       return reply.code(400).send({ error: "encrypted payload required" });
