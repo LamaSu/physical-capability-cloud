@@ -6,8 +6,12 @@ import { ParticleBackground } from "@pcc/ui";
 export function LoginPage() {
   const login = useAuthStore((s) => s.login);
   const [key, setKey] = React.useState("");
-  // A sign-out this browser couldn't confirm lands here, so its reason shows on arrival (astra 19j).
-  const [error, setError] = React.useState<string | null>(() => useAuthStore.getState().error);
+  // Every account change remounts this page, and a sign-out or sign-in this
+  // browser couldn't confirm lands here: its reason shows on arrival (astra 19j).
+  const [error, setError] = React.useState<string | null>(() => {
+    const { lastSignOut, error: lastError } = useAuthStore.getState();
+    return lastSignOut && lastSignOut.status !== "signed-out" ? lastSignOut.reason : lastError;
+  });
   const [loading, setLoading] = React.useState(false);
 
   async function handleSubmit(e: React.FormEvent) {

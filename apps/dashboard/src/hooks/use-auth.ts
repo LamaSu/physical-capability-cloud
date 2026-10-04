@@ -8,7 +8,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { useAccount, useSignMessage } from "wagmi";
-import { useAuthStore } from "../stores/auth-store.js";
+import { useAuthStore, type SignOutResult } from "../stores/auth-store.js";
 import { beginSignIn, signInCurrent, verifySignIn } from "../lib/wallet-session.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
 
@@ -134,8 +134,8 @@ export function useAuth() {
     }
   }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 
-  /** True once signed out; false with the store's `error` saying why it didn't finish (astra 19j). */
-  const logout = useCallback(async (): Promise<boolean> => {
+  /** How the sign-out came out: a refusal carries the reason to render (astra 19j; DECISIONS 04:14). */
+  const logout = useCallback(async (): Promise<SignOutResult> => {
     try {
       await fetch("/api/auth/logout", {
         method: "POST",

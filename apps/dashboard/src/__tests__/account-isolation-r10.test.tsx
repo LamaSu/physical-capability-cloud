@@ -90,11 +90,20 @@ async function page() {
   return { store, owner, generation, sends: () => sentBy(owner.authorizedFetch) };
 }
 
-/** What a page loaded now would act as (storage behaving normally again). */
+/**
+ * What a page loaded now would act as, storage behaving normally again: nothing
+ * while an account change is pending, then, once its load-time teardown has
+ * confirmed (App.tsx), the slot's key (DECISIONS 04:14).
+ */
 async function aFreshLoadSends(): Promise<string | null> {
   restoreStorage();
   vi.resetModules();
   const owner = await import("../lib/authorized-fetch.js");
+  const generation = await import("../lib/account-generation.js");
+  if (generation.walletSessionEnding()) {
+    expect(sentBy(owner.authorizedFetch), "a page loaded while a change is pending sends no key").toBeNull();
+    generation.confirmWalletSessionEnded(generation.accountGeneration() ?? "");
+  }
   return sentBy(owner.authorizedFetch);
 }
 
@@ -136,19 +145,23 @@ describe("19j HIGH: a write that committed but can't be confirmed leaves no prev
     const result = store.useAuthStore.getState().logout();
     expect(sends(), "this tab no longer acts as A").toBeNull();
     expect(generation.accountGeneration(), "the change may have been made, so every tab sees it pending").not.toBe(before);
-    expect(result, "logout can't report success it couldn't confirm").toBe(false);
-    expect(store.useAuthStore.getState().error).toMatch(/couldn't confirm/i);
+    expect(result, "logout can't report success it couldn't confirm").toEqual({
+      status: "unconfirmed",
+      reason: expect.stringMatching(/couldn't confirm/i),
+    });
     expect(await aFreshLoadSends(), "the slot is empty").toBeNull();
   });
 
-  it("a write that doesn't throw but reads back the old value can't be told from a stale read: this tab holds no key", async () => {
-    const { store, sends } = await page();
+  it("a write that doesn't throw but reads back the old value can't be told from a stale read: the tab acts as the slot", async () => {
+    const { store, generation, sends } = await page();
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
       if (key !== "pcc-api-key") original.setItem.call(this, key, value); // the key's write is silently dropped
     };
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
-    expect(sends(), "neither A nor B stays live here").toBeNull();
+    expect(sends(), "nothing while the change is pending").toBeNull();
     expect(store.useAuthStore.getState().error).toMatch(/couldn't confirm/i);
+    generation.confirmWalletSessionEnded(generation.accountGeneration() ?? "");
+    expect(sends(), "then the slot's A: no key kept here differs from it (DECISIONS 04:14)").toBe(KEY_A);
   });
 });
 
@@ -176,8 +189,13 @@ describe("19j MEDIUM: the shell says why a sign-out didn't happen", () => {
     };
     await act(async () => disconnect!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     for (let i = 0; i < 5; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
-    expect(container.textContent).toContain("Disconnect");
-    expect(container.textContent, "the reason, where the person clicked").toMatch(/wouldn't remove your saved API key/);
+    // A refusal can't be told from a removal that went through and then threw (astra 19k), so it
+    // runs the account boundary; the outcome is kept above it, and the remounted shell says why.
+    const after = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Disconnect");
+    expect(after, "the shell, still signed in as the slot is").toBeDefined();
+    const beside = after!.nextElementSibling;
+    expect(beside?.getAttribute("role"), "an alert beside the shell's Disconnect").toBe("alert");
+    expect(beside?.textContent ?? "", "the reason, where the person clicked").toMatch(/couldn't confirm it removed your saved API key/);
   });
 });
 
@@ -208,21 +226,25 @@ describe("19j: a sign-out that couldn't be confirmed lands on the login page, wh
   });
 });
 
-describe("19j MEDIUM: a listener that signs in again during logout is a change of account", () => {
-  it("logout() doesn't report success when a key is held at the end", async () => {
+describe("19j MEDIUM: a listener can't sign in again during logout", () => {
+  // Since the 04:14 ruling key changes are serialized: one asked for while another is being told is
+  // refused before it touches the slot (astra 19k's no-key variant is in account-isolation-r11).
+  it("the listener's B is refused, and logout signs out", async () => {
     const { store, owner, sends } = await page();
+    let answer: unknown;
     let once = true;
     owner.onStoredKeyChange(() => {
       if (!once) return;
       once = false;
-      owner.setStoredApiKey(KEY_B);
+      answer = owner.setStoredApiKey(KEY_B);
     });
     const result = store.useAuthStore.getState().logout();
-    expect(sends(), "B is held at the end").toBe(KEY_B);
-    expect(result, "not signed out").toBe(false);
+    expect(answer).toBe("busy");
+    expect(sends(), "no key at the end").toBeNull();
+    expect(result).toEqual({ status: "signed-out" });
   });
 
-  it("with another listener throwing, the generation still moves: A gave way to B", async () => {
+  it("with another listener throwing, the error goes on, no key is left, and the generation moves", async () => {
     const { store, owner, generation, sends } = await page();
     const before = generation.accountGeneration();
     let once = true;
@@ -235,7 +257,8 @@ describe("19j MEDIUM: a listener that signs in again during logout is a change o
       throw new Error("a listener failed");
     });
     expect(() => store.useAuthStore.getState().logout()).toThrow("a listener failed");
-    expect(sends()).toBe(KEY_B);
+    expect(sends()).toBeNull();
+    expect(localStorage.getItem("pcc-api-key")).toBeNull();
     expect(generation.accountGeneration(), "every tab sees the change pending").not.toBe(before);
   });
 });

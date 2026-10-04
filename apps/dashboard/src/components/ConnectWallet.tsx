@@ -43,9 +43,10 @@ export function ConnectWallet() {
   const { disconnect } = useDisconnect();
   const { signMessageAsync } = useSignMessage();
   const [showModal, setShowModal] = React.useState(false);
-  // Why a sign-out didn't finish (astra 19j). Kept here: disconnecting the wallet can switch this
-  // component to its not-connected view, so each view shows it.
-  const [signOutProblem, setSignOutProblem] = React.useState<string | null>(null);
+  // Why the last sign-out didn't finish (astra 19j): logout()'s typed outcome, kept in the store so
+  // it survives the account boundary's remount (DECISIONS 04:14). Disconnecting the wallet can
+  // switch this component to its not-connected view, so each view shows it.
+  const signOutProblem = useAuthStore((s) => (s.lastSignOut && s.lastSignOut.status !== "signed-out" ? s.lastSignOut.reason : null));
 
   const {
     sessionToken,
@@ -162,12 +163,7 @@ export function ConnectWallet() {
       credentials: "include",
     }).catch(() => {});
     disconnect();
-    if (authLogout()) {
-      setSignOutProblem(null);
-      setShowModal(false);
-    } else {
-      setSignOutProblem(useAuthStore.getState().error ?? "Signing out didn't finish.");
-    }
+    if (authLogout().status === "signed-out") setShowModal(false);
   };
 
   const signOutAlert = signOutProblem ? (

@@ -87,9 +87,13 @@ interface Tab {
   name: string;
   container: HTMLDivElement;
   root: Root;
-  store: { getState: () => { sessionToken: string | null; login: (key: string) => Promise<boolean>; logout: () => void } };
+  store: { getState: () => { sessionToken: string | null; keyEpoch: number; login: (key: string) => Promise<boolean>; logout: () => void } };
   /** This tab's own authorizedFetch, from its module instance of lib/authorized-fetch.ts. */
   authorizedFetch: (target: string, init?: RequestInit) => Promise<Response>;
+  /** Whether the slot held A's key in the view this tab opened with, read on the test's side. */
+  openedAsA: boolean;
+  /** The tab's keyEpoch when it opened: a later one means it has heard of a key change. */
+  openedAtEpoch: number;
 }
 let tabs: Tab[] = [];
 let violations: string[] = [];
@@ -199,14 +203,21 @@ function sentKey(tab: Tab): string | null {
 }
 
 /**
- * A cookie of A's is live in this browser, and a tab that is no longer A's
- * shows its shell beside it, or holds A's session. (A tab still signed in as A
- * may show A's shell with A's own cookie until it hears of the switch.)
+ * A cookie of A's is live in this browser. Every tab's request follows the
+ * browser's storage, read at use (DECISIONS 2026-10-04 04:14), so:
+ * - no tab sends a key other than A's beside it (astra 19f's harm: the next
+ *   account's key with the previous account's wallet session);
+ * - a tab that is no longer A's shows no shell beside it, and holds no session
+ *   of A's. A tab is no longer A's once it has heard of a key change, or if it
+ *   didn't open as A's. One that opened as A's and hasn't heard may still show
+ *   A's shell beside A's own cookie; once a change is pending it sends no key.
  */
 function watch() {
   if (!gateway.siweCookie) return;
   for (const tab of tabs) {
-    if (sentKey(tab) === KEY_A) continue;
+    const sent = sentKey(tab);
+    if (sent !== null && sent !== KEY_A) violations.push(`${tab.name} sent the next account's key beside A's SIWE cookie`);
+    if (tab.openedAsA && tab.store.getState().keyEpoch === tab.openedAtEpoch) continue;
     if (!transitioning(tab)) violations.push(`${tab.name} showed the next account's shell while A's SIWE cookie was live`);
     if (tab.store.getState().sessionToken !== null) violations.push(`${tab.name} adopted A's SIWE session`);
   }
@@ -224,6 +235,7 @@ async function settle(n = 20) {
 /** Opens a tab: its own module instances (registry, run counter, store), the shared window, storage and gateway. */
 async function openTab(name: string, options: { laggingGeneration?: boolean } = {}): Promise<Tab> {
   vi.resetModules();
+  const openedWith = localStorage.getItem("pcc-api-key");
   if (options.laggingGeneration) {
     // This tab's view of the generation stays where it was when it opened (astra 19g's stale read).
     vi.doMock("../lib/account-generation.js", async (importOriginal) => {
@@ -239,7 +251,15 @@ async function openTab(name: string, options: { laggingGeneration?: boolean } = 
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const tab: Tab = { name, container, root, store: useAuthStore, authorizedFetch };
+  const tab: Tab = {
+    name,
+    container,
+    root,
+    store: useAuthStore,
+    authorizedFetch,
+    openedAsA: openedWith === KEY_A,
+    openedAtEpoch: useAuthStore.getState().keyEpoch,
+  };
   tabs.push(tab);
   await act(async () => root.render(<App />));
   await settle();

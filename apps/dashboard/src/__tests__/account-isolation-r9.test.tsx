@@ -69,11 +69,25 @@ async function page() {
   return { store, owner, generation, sends: () => sentBy(owner.authorizedFetch) };
 }
 
-/** What a page loaded now would act as: a fresh module instance, hydrated from the slot. */
+/**
+ * What a page loaded now would act as: nothing while an account change is
+ * pending, then, once its load-time teardown has confirmed (App.tsx), the
+ * slot's key (DECISIONS 04:14).
+ */
 async function aFreshLoadSends(): Promise<string | null> {
   vi.resetModules();
   const owner = await import("../lib/authorized-fetch.js");
+  const generation = await import("../lib/account-generation.js");
+  if (generation.walletSessionEnding()) {
+    expect(sentBy(owner.authorizedFetch), "a page loaded while a change is pending sends no key").toBeNull();
+    teardownConfirmed(generation);
+  }
   return sentBy(owner.authorizedFetch);
+}
+
+/** A teardown confirms the previous wallet session ended, as App's does after the gateway's logout. */
+function teardownConfirmed(generation: typeof import("../lib/account-generation.js")) {
+  generation.confirmWalletSessionEnded(generation.accountGeneration() ?? "");
 }
 
 /** The browser refuses one kind of write to the key's slot only (a full quota, or a blocked write). */
@@ -92,37 +106,47 @@ function refuseKeySlot(op: "setItem" | "removeItem", how: "throw" | "ignore" = "
 }
 
 describe("19i HIGH: a key change the browser refused is not made", () => {
+  // Since 19k a refused write is "unconfirmed", not "unchanged": a write can go through and then
+  // throw, and a stale read looks like a dropped write. Every listener hears it, and the tab acts
+  // as the slot holds (DECISIONS 04:14), which here kept A.
   it("login(B) fails closed when the browser won't save B: this tab, the slot and the next load all stay A", async () => {
-    const { store, sends } = await page();
+    const { store, generation, sends } = await page();
     expect(sends()).toBe(KEY_A);
     refuseKeySlot("setItem");
     const ok = await store.useAuthStore.getState().login(KEY_B);
     expect(ok, "login reports the refusal").toBe(false);
-    expect(sends(), "this tab still acts as A").toBe(KEY_A);
+    expect(sends(), "nothing while the change login began is pending").toBeNull();
+    teardownConfirmed(generation);
+    expect(sends(), "then A, which the slot kept").toBe(KEY_A);
     expect(localStorage.getItem("pcc-api-key")).toBe(KEY_A);
-    expect(store.useAuthStore.getState().error, "the reason, for the login page").toMatch(/wouldn't save your API key/);
+    expect(store.useAuthStore.getState().error, "the reason, for the login page").toMatch(/couldn't confirm it saved your API key/);
     expect(await aFreshLoadSends()).toBe(KEY_A);
   });
 
-  it("a silently dropped write fails too; it can't be told from a stale read (astra 19j), so this tab holds no key", async () => {
-    const { store, sends } = await page();
+  it("a silently dropped write fails too; it can't be told from a stale read (astra 19j), and the tab acts as the slot, which kept A", async () => {
+    const { store, generation, sends } = await page();
     refuseKeySlot("setItem", "ignore");
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
-    expect(sends(), "neither A nor B stays live here").toBeNull();
+    expect(sends(), "not B: nothing while the change is pending").toBeNull();
+    teardownConfirmed(generation);
+    expect(sends(), "then the slot's A").toBe(KEY_A);
     expect(await aFreshLoadSends(), "the slot kept A").toBe(KEY_A);
   });
 
-  it("logout() fails closed when the browser won't remove A: this tab stays signed in as A, and the generation doesn't move", async () => {
+  it("logout() when the browser won't remove A: this tab stays signed in as A, as the slot is, and says why", async () => {
     const { store, generation, sends } = await page();
     const before = generation.accountGeneration();
     refuseKeySlot("removeItem");
     const result = store.useAuthStore.getState().logout();
-    expect(sends(), "this tab is still A's, as the slot is").toBe(KEY_A);
     expect(store.useAuthStore.getState().isAuthenticated).toBe(true);
     expect(localStorage.getItem("pcc-api-key")).toBe(KEY_A);
-    expect(generation.accountGeneration(), "nothing changed, so no tab is told of a change").toBe(before);
-    expect(result, "logout reports the refusal").toBe(false);
-    expect(store.useAuthStore.getState().error).toMatch(/wouldn't remove your saved API key/);
+    expect(result).toEqual({ status: "unconfirmed", reason: expect.stringMatching(/couldn't confirm it removed your saved API key/) });
+    expect(store.useAuthStore.getState().lastSignOut, "kept for the surfaces, above the account boundary").toEqual(result);
+    // A refusal can't be told from a removal that went through and then threw (astra 19k): every tab is told.
+    expect(generation.accountGeneration(), "every tab sees the change pending").not.toBe(before);
+    expect(sends(), "nothing while it is pending").toBeNull();
+    teardownConfirmed(generation);
+    expect(sends(), "then A, as the slot is").toBe(KEY_A);
     expect(await aFreshLoadSends()).toBe(KEY_A);
   });
 
@@ -130,18 +154,19 @@ describe("19i HIGH: a key change the browser refused is not made", () => {
     const { store } = await page();
     refuseKeySlot("setItem");
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
-    expect(store.useAuthStore.getState().error).toMatch(/wouldn't save your API key/);
+    expect(store.useAuthStore.getState().error).toMatch(/couldn't confirm it saved your API key/);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "invalid key" }), { status: 401 })));
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
     expect(store.useAuthStore.getState().error, "the login page says 'Invalid API key' for this one").toBeNull();
   });
 
   it("a key change the browser accepts still goes through (login B, then logout)", async () => {
-    const { store, sends } = await page();
+    const { store, generation, sends } = await page();
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(true);
+    teardownConfirmed(generation);
     expect(sends()).toBe(KEY_B);
     expect(localStorage.getItem("pcc-api-key")).toBe(KEY_B);
-    expect(store.useAuthStore.getState().logout(), "logout reports success").toBe(true);
+    expect(store.useAuthStore.getState().logout(), "logout reports success").toEqual({ status: "signed-out" });
     expect(sends()).toBeNull();
     expect(localStorage.getItem("pcc-api-key")).toBeNull();
     expect(await aFreshLoadSends()).toBeNull();

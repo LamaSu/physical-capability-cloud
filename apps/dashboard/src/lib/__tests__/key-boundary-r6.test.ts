@@ -31,18 +31,22 @@ describe("astra A03e N1: one listener can't stop the identity change", () => {
     }
   });
 
-  it("a listener that changes the key on every change is stopped with an error, not a stack overflow, and the store still follows", async () => {
+  it("a listener that changes the key on every change can't: its change during delivery is refused, and the store follows the slot", async () => {
     vi.resetModules();
     const keys = await import("../authorized-fetch.js");
     const auth = await import("../../stores/auth-store.js");
     let n = 0;
+    const answers: unknown[] = [];
     const stopLooping = keys.onStoredKeyChange(() => {
       n += 1;
-      keys.setStoredApiKey([KEY_B, String(n)].join("-"));
+      answers.push(keys.setStoredApiKey([KEY_B, String(n)].join("-")));
     });
     try {
-      expect(() => keys.setStoredApiKey(KEY_B)).toThrow("kept changing the key");
-      expect(n).toBeGreaterThan(1);
+      // One change at a time (DECISIONS 2026-10-04 04:14): a change asked for while another is
+      // being told is refused before it touches the slot, so there is no loop to cap.
+      expect(keys.setStoredApiKey(KEY_B)).toBe("committed");
+      expect(n).toBe(1);
+      expect(answers).toEqual(["busy"]);
       expect(auth.useAuthStore.getState().isAuthenticated).toBe(true);
     } finally {
       stopLooping();
@@ -51,22 +55,20 @@ describe("astra A03e N1: one listener can't stop the identity change", () => {
     expect(auth.useAuthStore.getState().isAuthenticated).toBe(false);
   });
 
-  it("at the round cap no committed change goes untold: the store and the key agree, one epoch per change (astra A03f N1)", async () => {
+  it("no change goes untold, and none is told twice: one epoch per change, and the store and the slot agree (astra A03f N1)", async () => {
     vi.resetModules();
     const keys = await import("../authorized-fetch.js");
     const auth = await import("../../stores/auth-store.js"); // the store registers first
     const before = auth.useAuthStore.getState().keyEpoch;
     let n = 0;
-    let committed = 1; // the call below
     const stop = keys.onStoredKeyChange(() => {
       n += 1;
-      keys.setStoredApiKey(n % 2 === 1 ? KEY_B : null);
-      committed += 1; // not reached when the change is refused
+      keys.setStoredApiKey(n % 2 === 1 ? KEY_B : null); // refused: a change is being told
     });
     try {
-      expect(() => keys.setStoredApiKey(KEY_B)).toThrow("kept changing the key");
-      expect(auth.useAuthStore.getState().isAuthenticated, "the store follows the key it ended on").toBe(keys.hasStoredApiKey());
-      expect(auth.useAuthStore.getState().keyEpoch - before, "every committed change was told, once").toBe(committed);
+      expect(keys.setStoredApiKey(KEY_B)).toBe("committed");
+      expect(auth.useAuthStore.getState().isAuthenticated, "the store follows the slot").toBe(keys.hasStoredApiKey());
+      expect(auth.useAuthStore.getState().keyEpoch - before, "the one change was told, once").toBe(1);
     } finally {
       stop();
       keys.setStoredApiKey(null);

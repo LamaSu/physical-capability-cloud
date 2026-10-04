@@ -614,15 +614,29 @@ describe("self-found (19e's weakest link, another tab): the account follows the 
     expect(gateway.siweCookie).toBe(false);
   }, 20_000);
 
-  it("a storage event for anything else, or for the key this tab already holds, changes nothing", async () => {
-    const useAuthStore = await renderAt("/dashboard");
+  it("a storage event for anything else changes nothing; one for the key's slot runs the boundary, and the tab acts as the slot holds", async () => {
+    await renderAt("/dashboard");
     gateway.logoutMode = "hold";
     await act(async () => {
       window.dispatchEvent(new StorageEvent("storage", { key: "pcc-something-else", newValue: "x" }));
-      window.dispatchEvent(new StorageEvent("storage", { key: "pcc-api-key", oldValue: null, newValue: "pcc_test_key" }));
     });
     await settle(5);
     expect(await sentKey(), "this tab still acts as A").toBe("pcc_test_key");
-    expect(container.textContent, "no account boundary here").not.toContain("Signing out of the previous account");
+    expect(container.textContent, "no account boundary for another key").not.toContain("Signing out of the previous account");
+    // No key is kept to compare an event with (DECISIONS 2026-10-04 04:14), so an event for the
+    // slot is a change even when the slot reads as before: a spare teardown, which fails closed.
+    await act(async () => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "pcc-api-key", oldValue: null, newValue: "pcc_test_key" }));
+    });
+    await settle(5);
+    expect(container.textContent, "the account boundary runs").toContain("Signing out of the previous account");
+    expect(await sentKey(), "and the tab acts as the slot holds").toBe("pcc_test_key");
+    gateway.logoutMode = "ok";
+    await act(async () => {
+      for (const answer of gateway.logoutWaiting.splice(0)) answer();
+    });
+    await settle();
+    expect(container.textContent).not.toContain("Signing out of the previous account");
+    expect(await sentKey()).toBe("pcc_test_key");
   }, 20_000);
 });

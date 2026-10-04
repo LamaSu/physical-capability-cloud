@@ -1,8 +1,10 @@
 /**
  * astra 19j MEDIUM: a sign-out the browser refused must be explained where the
- * person asked for it. The shell's Disconnect is covered in
- * __tests__/account-isolation-r10. These are ConnectWallet's Disconnect and
- * useAuth().logout, the store's other two callers.
+ * person asked for it, from logout()'s typed result (DECISIONS 04:14). The
+ * shell's Disconnect is covered in __tests__/account-isolation-r10. These are
+ * ConnectWallet's Disconnect and useAuth().logout, the store's other two
+ * callers. Since 19k a refused removal is "unconfirmed": it can't be told
+ * from one that went through and then threw.
  *
  * @vitest-environment jsdom
  */
@@ -76,11 +78,11 @@ describe("a refused sign-out is explained (astra 19j)", () => {
     expect(disconnect, "the panel's Disconnect").toBeDefined();
     await act(async () => disconnect!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await settle();
-    expect(container.querySelector('[role="alert"]')?.textContent ?? "").toMatch(/wouldn't remove your saved API key/);
+    expect(container.querySelector('[role="alert"]')?.textContent ?? "").toMatch(/couldn't confirm it removed your saved API key/);
     expect(button("Disconnect"), "the panel stays open").toBeDefined();
   });
 
-  it("useAuth().logout answers false, and the store says why", async () => {
+  it("useAuth().logout answers with the typed result, and the store keeps it for the surfaces", async () => {
     const { useAuth } = await import("../../hooks/use-auth.js");
     const { useAuthStore } = await import("../../stores/auth-store.js");
     let auth: ReturnType<typeof useAuth> | null = null;
@@ -90,11 +92,11 @@ describe("a refused sign-out is explained (astra 19j)", () => {
     }
     await act(async () => root.render(<Probe />));
     await settle();
-    let result: boolean | undefined;
+    let result: Awaited<ReturnType<ReturnType<typeof useAuth>["logout"]>> | undefined;
     await act(async () => {
       result = await auth!.logout();
     });
-    expect(result).toBe(false);
-    expect(useAuthStore.getState().error).toMatch(/wouldn't remove your saved API key/);
+    expect(result).toEqual({ status: "unconfirmed", reason: expect.stringMatching(/couldn't confirm it removed your saved API key/) });
+    expect(useAuthStore.getState().lastSignOut).toEqual(result);
   });
 });
