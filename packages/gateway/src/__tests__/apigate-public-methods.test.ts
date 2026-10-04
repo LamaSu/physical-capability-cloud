@@ -269,6 +269,7 @@ describe("F5 — the public (method, path) set is pinned", () => {
       "POST exact /api/auth/provision",
       "GET exact /api/auth/nonce",
       "POST exact /api/auth/verify",
+      "POST exact /api/auth/logout",
       "POST exact /api/waitlist",
       "POST exact /api/beta-apply",
       "POST exact /api/feedback",
@@ -299,7 +300,7 @@ describe("F5 — the public (method, path) set is pinned", () => {
   it("every public write is EXACT and carries a justification", async () => {
     const { publicWriteJustifications, publicRouteSnapshot } = await import("../middleware/api-gate.js");
     const writes = publicWriteJustifications();
-    expect(writes.length).toBe(13); // 14 before POST /api/dht/announce left the public list (#2883)
+    expect(writes.length).toBe(14); // 14 before POST /api/dht/announce left the public list (#2883); 14 again with POST /api/auth/logout (N103)
     for (const w of writes) {
       expect(w.why.trim().length, `${w.method} ${w.path}`).toBeGreaterThan(10);
     }

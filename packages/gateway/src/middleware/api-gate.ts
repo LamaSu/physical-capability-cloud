@@ -126,6 +126,10 @@ const PUBLIC_BY_DESIGN: PublicRoute[] = [
   // sibling can leak public; verify carries its own per-IP rate limit.
   { methods: GET, match: "exact", path: "/api/auth/nonce", why: "SIWE challenge — issues a single-use nonce (server state, rate-limited); login needs it before any key exists" },
   { methods: POST, match: "exact", path: "/api/auth/verify", why: "SIWE signature verify -> session; the login endpoint itself" },
+  // N103: logout ends the session its own signed cookie (or Bearer session token) names, and
+  // authenticates nothing. Under N103 a cookie alone no longer passes this gate, so a gated
+  // logout would answer 401 and leave the session alive.
+  { methods: POST, match: "exact", path: "/api/auth/logout", why: "ends the session its own cookie or token names; authenticates nothing (N103)" },
   { methods: POST, match: "exact", path: "/api/waitlist", why: "public beta waitlist signup (email only, rate-limited)" },
   { methods: POST, match: "exact", path: "/api/beta-apply", why: "public beta-tester application" },
   { methods: POST, match: "exact", path: "/api/feedback", why: "public feedback sink — cold agents have no key (honeypot + per-IP limit)" },

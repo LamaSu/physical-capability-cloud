@@ -110,8 +110,9 @@ export async function resolveSSEAuth(req: FastifyRequest): Promise<SSEAuthResult
     return {
       authenticated: false,
       reason:
-        "SSE authentication required. Provide ?token=<api-key-or-session-token> " +
-        "or ensure the pcc_session cookie is set.",
+        "SSE authentication required. Provide ?token=<session token from POST /api/auth/verify> " +
+        "or an Authorization: Bearer API key. A pcc_session cookie counts only beside the API key " +
+        "it was verified under (N103).",
     };
   }
 

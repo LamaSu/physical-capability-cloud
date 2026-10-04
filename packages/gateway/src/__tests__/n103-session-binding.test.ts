@@ -318,6 +318,14 @@ describe("what still works", () => {
     expect((await get("/api/auth/me", { cookie: unbound.cookie, ...bearer(keyA) })).statusCode).toBe(401);
   });
 
+  it("revoking the key ends its cookie: beside the revoked key the session names no one", async () => {
+    const k = mintKey(`n103-revoked-later-${randomUUID()}@x.test`);
+    const { cookie } = await signedInUnder(k);
+    expect((await get("/_test/require-auth", { cookie, ...bearer(k) })).statusCode).toBe(200);
+    getRepos().apiKeys.revoke(k.id);
+    expect((await get("/_test/require-auth", { cookie, ...bearer(k) })).statusCode).toBe(401);
+  });
+
   it("a cookie that isn't honored is left in place: beside its own key it works again", async () => {
     const { token, cookie } = await signedInUnder(keyA);
     expect((await get("/api/auth/me", { cookie, ...bearer(keyB) })).statusCode).toBe(401);
