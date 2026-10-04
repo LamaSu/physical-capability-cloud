@@ -26,6 +26,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 /**
@@ -119,6 +120,25 @@ const TYPE_ALIASES: Record<string, string[]> = {
   "assay": ["assay", "plate-reader", "absorbance", "fluorescence", "screening"],
 };
 
+// ── Pagination coercion ─────────────────────────────────────────────────────
+
+/**
+ * Coerce an offset/limit value to a safe non-negative integer (N111).
+ *
+ * `list()` is called from several places (routes/jobs.ts, routes/setup.ts,
+ * routes/status.ts, routes/operator-relay.ts) and not all of them validate
+ * their input the way routes/jobs.ts's querystring schema now does — so this
+ * is the last line of defense. Anything that isn't a finite, non-negative
+ * integer (a string, a float, NaN, a negative number) falls back to
+ * `fallback` instead of being used in `offset + limit` arithmetic, which is
+ * exactly how N111 happened: string concatenation standing in for addition.
+ */
+function toSafeOffsetOrLimit(value: unknown, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.trunc(n);
+}
+
 // ── Facade ─────────────────────────────────────────────────────────────────
 
 export class JobFacade extends BaseFacade {
@@ -145,8 +165,13 @@ export class JobFacade extends BaseFacade {
   ): Promise<Result<PaginatedResult<JobDTO>>> {
     return this.execute("list", async () => {
       const context = this.defaultContext(ctx);
-      const offset = pagination?.offset ?? 0;
-      const limit = pagination?.limit ?? 50;
+      // N111 — defensive coercion: the route's querystring schema already
+      // guarantees real numbers, but this facade is called from other
+      // places too (setup.ts, status.ts, operator-relay.ts), so don't trust
+      // the caller. toSafeOffsetOrLimit() forces integer-only arithmetic
+      // regardless of what's passed (string, float, NaN, negative, etc.).
+      const offset = toSafeOffsetOrLimit(pagination?.offset, 0);
+      const limit = toSafeOffsetOrLimit(pagination?.limit, 50);
 
       const opts = filters?.tenantId ? { tenantId: filters.tenantId } : undefined;
       let jobs;
@@ -209,10 +234,15 @@ export class JobFacade extends BaseFacade {
     progress?: number,
   ): Promise<Result<JobDTO>> {
     return this.execute("updateStatus", async () => {
-      const updated = this.repos.jobs.updateStatus(jobId, status, progress);
-      if (!updated) {
+      // N85(a): a generic writer may not finish, fail, cancel or re-open a paid job.
+      const outcome = writeJobStatusGuarded(jobId, status, progress);
+      if (outcome.kind === "not_found") {
         throw new NotFoundError("job", jobId);
       }
+      if (outcome.kind === "refused") {
+        throw new ConflictError(SETTLEMENT_OWNED_MESSAGE, "settlement_owned_status");
+      }
+      const updated = outcome.job;
 
       const kernelMap = this.loadKernelMap([updated.kernelId]);
       const capabilityMap = this.loadCapabilityMap([updated.capabilityId]);
@@ -573,6 +603,16 @@ export class JobFacade extends BaseFacade {
 
     scored.sort((a, b) => b.score - a.score);
     return scored[0].score > 0 ? scored[0].cap.id : caps[0].id;
+  }
+}
+
+/** Internal error for flow control — caught by BaseFacade.execute(), which answers 409 with `code`. */
+class ConflictError extends Error {
+  readonly code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "ConflictError";
+    this.code = code;
   }
 }
 

@@ -49,6 +49,26 @@
  * (/api/escrow/chain/:address/events) — fixed by GET_STREAM_ROUTES, an explicit per-url list
  * with reasons (mirrors POST_EXCLUSIONS), so a brand-new stream-shaped GET route is no longer
  * silently dropped and the three false positives above are now sweept normally.
+ *
+ * #533 MERGE-UP WITH MASTER (test-only refresh, implementer-oscar): merging current master
+ * (108c7788) into #533's reviewed head broke 10 POST routes master changed underneath this
+ * file. #400 (N4b-gw item 1) retired the /api/ot2/* family behind a catch-all 410 (POST_EXCLUSIONS
+ * above gained that entry) and (N4b-gw item 4) added relayAccessGuard — default-deny, per
+ * kernel — to every /api/relay/:kernelId/* route, so CANARY.kernelId (owned by this file's
+ * OWNER identity) stopped authorizing any relay fixture called as the stranger pass. Fixed by
+ * createOwnRelayKernel(), a shared helper every relay dynamic fixture below now uses to
+ * register a fresh kernel as the CURRENT pass's own identity before calling tool-call,
+ * tool-call/:callId/start (NEW on master, the execution lease), scope, scope/:scopeId/revoke,
+ * camera/frame, chat or chat/respond. bounty/claim was independently broken (the shared
+ * BountyService never auto-creates a bounty from demand — fixed by seeding one directly via
+ * its own _bountyServiceForTests() seam); bounty/verify is now permanently retired (ledger
+ * R45, caller-supplied verification refused with an unconditional 410) and moved to
+ * POST_EXCLUSIONS rather than NOT_REACHED. setup/test-job needed the one kernel id this
+ * gateway process's in-process KernelService actually runs ("kernel_dev_001", the
+ * KERNEL_ID-unset default) registered and a real device loaded on it. Verified counts after
+ * the fix (FINAL COUNTS, STRUCTURAL test): registered=318 called=234 reached=202 notReached=32
+ * excluded=84 — all 32 NOT_REACHED entries carry a reviewable reason, zero are the bare
+ * "⚠ NO ENTRY" that failed this merge (up from reached=193 of called=235 pre-fix).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -63,6 +83,7 @@ import { geohashCenter, geohashEncode, LOCATION_CELL_PRECISION } from "../facade
 import { signWithPrivateKeyHex } from "../auth/ed25519.js";
 import { setCaptureChainClientForTests, type CaptureChainClient } from "../routes/capture.js";
 import { _setSmokeTestFetch } from "../routes/kernel-marketplace.js";
+import { _bountyServiceForTests } from "../routes/bounty.js";
 
 const ROUTES = vi.hoisted(() => [] as Array<{ method: string | string[]; url: string; websocket?: boolean; schema?: unknown }>);
 vi.mock("fastify", async (orig) => {
@@ -1104,10 +1125,12 @@ const FIXTURE_POST_BODIES: Record<string, object | DynamicFixture> = {
   "/api/ot2/tool-call": {"kernelId":"kernel-n68-canary","toolName":"ot2_health"},
   "/api/photo/compare": {"capturedImageBase64":"dGVzdA==","referenceImageBase64":"dGVzdA=="},
   "/api/photo/upload": {"imageBase64":"dGVzdA=="},
-  "/api/relay/:kernelId/camera/frame": {"frame":"dGVzdA=="},
-  "/api/relay/:kernelId/chat": {"message":"test message"},
-  "/api/relay/:kernelId/chat/respond": {"response":"test response"},
-  "/api/relay/:kernelId/scope": {"createdBy":"stranger-agent","allowedTools":["move_to"]},
+  // /api/relay/:kernelId/{camera/frame,chat,chat/respond,scope} moved to dynamic fixtures
+  // below (#533 merge-up with master): master's relayAccessGuard (device-relay.ts:318-346,
+  // see the dynamic-fixture comment near createOwnRelayKernel) now default-denies every relay
+  // route to a caller who isn't the kernel's operator or an active scope holder, so a STATIC
+  // body posted against a generic kernelId/capId/operatorId path-fill can no longer reach a
+  // real kernel this pass controls.
   "/api/requests": {"title":"N68 sweep test request","description":"Direct-match request pinned to the canary capability — the task's own cheapest-repro target (requests.ts's direct-match branch shares the exact success return as the generic NL-decompose branch; R2 mutated both and confirmed the sweep now catches an injected leak on this line)","capabilityType":"3d-printing","kernelId":"kernel-n68-canary"},
   "/api/setup/generate-config": {"devices":[{"name":"Test Printer","type":"machine","adapterType":"mock"}]},
   "/api/setup/register-device": {"kernelId":"kernel-n68-canary","deviceId":"dev-n68-sweep-001","type":"machine","adapterType":"mock"},
@@ -1142,6 +1165,29 @@ const FIXTURE_POST_BODIES: Record<string, object | DynamicFixture> = {
 // the identical gap — a real row/entity that only exists after a prior, already-reachable
 // POST, keyed by an id the generic kernelId/capId/operatorId path-filler could never guess.
 // ─────────────────────────────────────────────────────────────────────────────────────────
+
+// ── #533 merge-up with master (N68 sweep refresh, implementer-oscar): master's #400 (N4b-gw
+// item 4) added relayAccessGuard to every /api/relay/:kernelId/* route (device-relay.ts:
+// 318-346) — default-deny per kernel, admitting only the kernel's recorded operator or an
+// active execution-scope holder. CANARY.kernelId (owned by this file's OWNER identity, not
+// the stranger pass) stopped working for every relay fixture below that used it, tool-call
+// included — pre-#400 the only gate there was per-tool safety. createOwnRelayKernel() is the
+// shared fix: register a FRESH kernel as the CURRENT pass's own authenticated identity (POST
+// /api/kernels sets operatorAddress from the authenticated caller, kernel.facade.ts:493), so
+// isKernelOperator(kernelId, principal) is true for that kernel — device-relay.ts:334-336
+// checks this before ever branching on the route's listed access level, so it satisfies
+// "kernel_operator" AND "operator_or_grant" routes alike, and object_owner routes (scope
+// revoke) via ownsScope()'s own operator fallback (device-relay.ts:283-289). Shared by every
+// /api/relay/* dynamic fixture below (tool-call, tool-call/:callId/start, tool-result, scope,
+// scope/:scopeId/revoke, camera/frame, chat, chat/respond).
+async function createOwnRelayKernel(ctx: FixtureCtx): Promise<string> {
+  const kernelId = `n68-dynfix-relay-${ctx.ip()}-${Date.now()}`;
+  await fixtureCall(ctx, "POST", "/api/kernels", {
+    id: kernelId, name: "N68 dynamic fixture relay kernel", maxAssuranceTier: 1,
+  });
+  return kernelId;
+}
+
 Object.assign(FIXTURE_POST_BODIES, {
   // ── R1: binary body + auth (storage.ts requireAuth; non-JSON Content-Type) ──────────────
   "/api/storage": (async (ctx: FixtureCtx) => {
@@ -1228,37 +1274,60 @@ Object.assign(FIXTURE_POST_BODIES, {
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
 
-  // ── bounty/claim + bounty/verify: checkAndCreateBounties() (bounty-service.ts) auto-mints
-  // a bounty off ANY demand signal meeting EITHER threshold — a single high-value/daily demand
-  // for a fresh capabilityType clears the $10k-annualized threshold without needing 3 distinct
-  // requesters. claim requires an authenticated caller (operatorId); verify requires claimed
-  // status first — both chained below. ──────────────────────────────────────────────────────
+  // ── bounty/claim (#533 merge-up with master, implementer-oscar): bounty/verify (the sibling
+  // this entry used to chain into) is now retired — POST_EXCLUSIONS above — so this sweep
+  // never calls it. claim itself was ALSO already broken before that, for an unrelated reason:
+  // the shared bountyService instance (routes/bounty.ts:13, "Treasury auto-bounties stay off
+  // (the service default)") is `new BountyService()` with no options, and checkAndCreateBounties()
+  // (bounty-service.ts:285-286) returns [] unconditionally whenever autoCreateTreasuryBounties
+  // is not explicitly true — no demand signal, however large, EVER auto-creates a bounty
+  // through the public /api/bounty/demand route. The chain this fixture used to drive
+  // (demand -> auto-create -> list -> claim) could never produce a bountyId to claim.
+  // _bountyServiceForTests() (bounty.ts:16-18) is the route file's own test seam for exactly
+  // this: seed an open bounty directly on the SAME shared instance the route reads, then claim
+  // it as this pass's own authenticated identity (claim derives operatorId from the auth
+  // header, not the body — red team #10, bounty.ts:114-118 — so the KEYED pass's stranger key
+  // satisfies it; the ANON pass 401s, which is fine since only one pass needs to reach 2xx). ──
   "/api/bounty/claim": (async (ctx: FixtureCtx) => {
-    const capType = `n68-dynfix-bounty-claim-${ctx.ip()}`;
-    await fixtureCall(ctx, "POST", "/api/bounty/demand", {
-      requesterId: "n68-dynfix-requester", capabilityType: capType,
-      description: "N68 dynamic fixture demand", estimatedJobValue: 100, estimatedFrequency: "daily",
+    const bounty = _bountyServiceForTests().createBounty({
+      capabilityType: `n68-dynfix-bounty-claim-${ctx.ip()}`,
+      description: "N68 dynamic fixture bounty",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 0, mustComplete1Job: false, mustPassVerification: false },
+      expiresInDays: 30,
     });
-    const list = await fixtureCall(ctx, "GET", `/api/bounty/list?capabilityType=${encodeURIComponent(capType)}&status=open`);
-    const bounties = (list.json.bounties as Array<Record<string, unknown>> | undefined) ?? [];
-    const bountyId = String(bounties[0]?.id ?? "");
-    if (!bountyId) return { status: -3, body: "dynamic fixture setup failed: no auto-created bounty" };
-    const r = await fixtureCall(ctx, "POST", "/api/bounty/claim", { bountyId });
+    const r = await fixtureCall(ctx, "POST", "/api/bounty/claim", { bountyId: bounty.id });
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
-  "/api/bounty/verify": (async (ctx: FixtureCtx) => {
-    const capType = `n68-dynfix-bounty-verify-${ctx.ip()}`;
-    await fixtureCall(ctx, "POST", "/api/bounty/demand", {
-      requesterId: "n68-dynfix-requester-2", capabilityType: capType,
-      description: "N68 dynamic fixture demand 2", estimatedJobValue: 100, estimatedFrequency: "daily",
+
+  // ── setup/test-job (#533 merge-up with master, implementer-oscar): N59/ADK item 8 (setup.ts:
+  // 783-803) owner-gates this to the kernel's OWN recorded operator, AND (setup.ts:836-852)
+  // "the gateway runs jobs only for its OWN in-process kernel" — the kernelId in the body must
+  // equal svc.kernelId, the ONE kernel id this gateway process's KernelService was constructed
+  // with. With KERNEL_ID/KERNEL_CONFIG/KERNEL_CONFIG_FILE all unset in this sweep (confirmed:
+  // none match the env-clearing list or EXTERNAL_ENV_RE above), loadKernelConfig() falls
+  // through to buildDefaultConfig() (packages/kernel/src/kernel-config.ts:61-65), which fixes
+  // that id at the literal string "kernel_dev_001" for the life of this process — not a kernel
+  // this sweep gets to choose, so the fixture registers THAT exact id as its own identity (no
+  // row exists for it yet; a fresh create sets operatorAddress = the caller, kernel.facade.ts:
+  // 493) rather than minting a fresh random one like every other relay/kernel fixture here.
+  // register-device (setup.ts:605-612, no ownership check of its own) then installs a real
+  // "mock" adapter runner for a fresh deviceId via refreshDeviceFromDb (kernel-service.ts:
+  // 257-268, since both rows' kernelId agree), which is what hasRunner(deviceId) (setup.ts:860,
+  // 867) needs before test-job will dispatch anything. The route's final reply has no
+  // `.code()` override (setup.ts:1010), so it answers 200 regardless of whether the mock job's
+  // polled outcome reports simulated/passed — ran:true is all REACHED needs. ─────────────────
+  "/api/setup/test-job": (async (ctx: FixtureCtx) => {
+    const kernelId = "kernel_dev_001";
+    const deviceId = `n68-dynfix-test-job-device-${ctx.ip()}`;
+    await fixtureCall(ctx, "POST", "/api/kernels", {
+      id: kernelId, name: "N68 dynamic fixture dev kernel", maxAssuranceTier: 1,
     });
-    const list = await fixtureCall(ctx, "GET", `/api/bounty/list?capabilityType=${encodeURIComponent(capType)}&status=open`);
-    const bounties = (list.json.bounties as Array<Record<string, unknown>> | undefined) ?? [];
-    const bountyId = String(bounties[0]?.id ?? "");
-    if (!bountyId) return { status: -3, body: "dynamic fixture setup failed: no auto-created bounty" };
-    const claim = await fixtureCall(ctx, "POST", "/api/bounty/claim", { bountyId });
-    if (claim.status < 200 || claim.status >= 300) return { status: claim.status, body: claim.body };
-    const r = await fixtureCall(ctx, "POST", "/api/bounty/verify", { bountyId, jobId: "n68-dynfix-job", score: 0.9 });
+    await fixtureCall(ctx, "POST", "/api/setup/register-device", {
+      kernelId, deviceId, type: "machine", adapterType: "mock",
+    });
+    const r = await fixtureCall(ctx, "POST", "/api/setup/test-job", { kernelId, deviceId, assuranceTier: 0 });
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
 
@@ -1404,16 +1473,31 @@ Object.assign(FIXTURE_POST_BODIES, {
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
 
-  // ── relay/:kernelId/scope/:scopeId/revoke: device-relay.ts mirrors ot2-scope.ts (no
-  // ownership gate on revoke itself); /api/relay/:kernelId/scope is already fixture'd and
-  // reachable, re-used here with the canary kernelId to mint a real scope id. ────────────────
+  // ── relay/:kernelId/scope + scope/:scopeId/revoke (#533 merge-up with master): POST scope
+  // is "kernel_operator"-only (device-relay.ts:230) — CANARY.kernelId is owned by this file's
+  // OWNER identity, not the stranger pass, so relayAccessGuard (device-relay.ts:318-346) now
+  // 403s scope creation there regardless of the "createdBy" body field (that field only names
+  // who the scope belongs to AFTER creation; creating one at all still requires being the
+  // kernel's operator). createOwnRelayKernel() (defined above) registers a fresh kernel as
+  // the CURRENT pass's own identity instead. ownsScope() (device-relay.ts:283-289) allows the
+  // scope's own creator OR the kernel operator; createdBy is left unset so it defaults to the
+  // caller's own principal (device-relay.ts:1401), which is also this fresh kernel's operator
+  // either way. ──────────────────────────────────────────────────────────────────────────────
+  "/api/relay/:kernelId/scope": (async (ctx: FixtureCtx) => {
+    const kernelId = await createOwnRelayKernel(ctx);
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/scope`, {
+      allowedTools: ["move_to"],
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
   "/api/relay/:kernelId/scope/:scopeId/revoke": (async (ctx: FixtureCtx) => {
-    const created = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(CANARY.kernelId)}/scope`, {
-      createdBy: "n68-dynfix-agent", allowedTools: ["move_to"],
+    const kernelId = await createOwnRelayKernel(ctx);
+    const created = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/scope`, {
+      allowedTools: ["move_to"],
     });
     const id = String(created.json.id ?? "");
     if (!id) return { status: -3, body: "dynamic fixture setup failed: no device-relay scope id" };
-    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(CANARY.kernelId)}/scope/${encodeURIComponent(id)}/revoke`, {});
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/scope/${encodeURIComponent(id)}/revoke`, {});
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
 
@@ -1764,20 +1848,82 @@ Object.assign(FIXTURE_POST_BODIES, {
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
 
-  // ── relay/:kernelId/tool-call + relay/:kernelId/tool-result: resolveDeviceType() (device-
-  // relay.ts:50-68) falls back to "generic" when a kernel has no registered devices —
-  // generic.tools.json's safeTools list (packages/spec/src/tool-manifests/generic.tools.json)
-  // includes "health", so isToolSafe("generic","health") is true and no execution scope is
-  // required at all (device-relay.ts:290-306) — CANARY.kernelId works fine for tool-call
-  // alone. tool-result is DIFFERENT: it 403s "tool_result_not_yours" for any caller who isn't
-  // the kernel's operatorAddress or the owning scope (device-relay.ts:536, confirmed
-  // empirically — CANARY.kernelId is owned by this file's OWNER identity, not the stranger
-  // pass) — so tool-result registers its OWN fresh kernel AS the current pass's identity
-  // first (POST /api/kernels sets operatorAddress from the authenticated caller), making the
-  // SAME caller naturally the operator for the tool-call + tool-result pair that follows. ────
+  // ── relay/:kernelId/tool-call + tool-call/:callId/start (#533 merge-up with master):
+  // relayAccessGuard (device-relay.ts:318-346) now default-denies every relay route to a
+  // caller who is neither the kernel's recorded operator nor an active scope holder.
+  // CANARY.kernelId (owned by this file's OWNER identity) used to work for tool-call alone —
+  // pre-#400 the only gate was per-tool safety — but no longer does for the stranger pass.
+  // createOwnRelayKernel() (defined above) is the fix: register a FRESH kernel as the CURRENT
+  // pass's own identity, so isKernelOperator(kernelId, principal) is true for it and the guard
+  // admits every access level (device-relay.ts:334-336 checks isKernelOperator before ever
+  // branching on the route's listed access level). resolveDeviceType() (device-relay.ts:
+  // 158-176) falls back to "generic" for this device-less kernel, and generic.tools.json's
+  // safeTools list (packages/spec/src/tool-manifests/generic.tools.json) includes "health",
+  // so isToolSafe("generic","health") is true and POST tool-call needs no scopeId at all
+  // (device-relay.ts:637-644) once the caller is the kernel's own operator.
+  // tool-call/:callId/start is NEW on master (N4b-gw r7/r8, the execution lease, F3): the
+  // executor must claim the call via GET pending with X-PCC-Lease: 1 (RELAY_LEASE_ENFORCE
+  // defaults to requiring one, device-relay.ts:120-124,893-896) before it may start it. Access
+  // is "kernel_operator" for both the poll and the start (device-relay.ts:226-227) — the same
+  // fresh kernel qualifies for both. tool-result (below, unchanged) already used this exact
+  // own-kernel pattern before #400 landed, so it needs no fix. ─────────────────────────────
   "/api/relay/:kernelId/tool-call": (async (ctx: FixtureCtx) => {
-    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(CANARY.kernelId)}/tool-call`, {
+    const kernelId = await createOwnRelayKernel(ctx);
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/tool-call`, {
       toolName: "health",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/relay/:kernelId/tool-call/:callId/start": (async (ctx: FixtureCtx) => {
+    const kernelId = await createOwnRelayKernel(ctx);
+    const created = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/tool-call`, {
+      toolName: "health",
+    });
+    const callId = String(created.json.id ?? "");
+    if (!callId) {
+      return { status: -3, body: `dynamic fixture setup failed: no relay tool-call id (status=${created.status})` };
+    }
+    const pending = await fixtureCall(ctx, "GET", `/api/relay/${encodeURIComponent(kernelId)}/tool-call/pending`, undefined, {
+      "x-pcc-lease": "1",
+    });
+    const calls = (pending.json.calls as Array<Record<string, unknown>> | undefined) ?? [];
+    const claimToken = String(calls.find((c) => c.id === callId)?.claimToken ?? "");
+    if (!claimToken) {
+      return {
+        status: -3,
+        body: `dynamic fixture setup failed: no claim token (pending status=${pending.status}, body=${pending.body.slice(0, 200)})`,
+      };
+    }
+    const r = await fixtureCall(
+      ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/tool-call/${encodeURIComponent(callId)}/start`,
+      { claimToken },
+    );
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  // ── camera/frame + chat + chat/respond (#533 merge-up with master): camera/frame and
+  // chat/respond are "kernel_operator"-only (device-relay.ts:234,241); chat itself is
+  // "operator_or_grant" (device-relay.ts:238), which the operator check also satisfies
+  // (device-relay.ts:334-336). Same fresh-kernel pattern as tool-call above — these three were
+  // STATIC entries in FIXTURE_POST_BODIES before #400 (removed above), reached only because a
+  // generic path-param fill happened to be irrelevant when the only gate was per-tool safety. ──
+  "/api/relay/:kernelId/camera/frame": (async (ctx: FixtureCtx) => {
+    const kernelId = await createOwnRelayKernel(ctx);
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/camera/frame`, {
+      frame: "dGVzdA==",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/relay/:kernelId/chat": (async (ctx: FixtureCtx) => {
+    const kernelId = await createOwnRelayKernel(ctx);
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/chat`, {
+      message: "test message",
+    });
+    return { status: r.status, body: r.body };
+  }) as DynamicFixture,
+  "/api/relay/:kernelId/chat/respond": (async (ctx: FixtureCtx) => {
+    const kernelId = await createOwnRelayKernel(ctx);
+    const r = await fixtureCall(ctx, "POST", `/api/relay/${encodeURIComponent(kernelId)}/chat/respond`, {
+      response: "test response",
     });
     return { status: r.status, body: r.body };
   }) as DynamicFixture,
@@ -2209,6 +2355,22 @@ interface PostExclusion {
  * money; sends twice (DOUBLE_SEND, above); admin-token-only; external side effect.
  */
 const POST_EXCLUSIONS: PostExclusion[] = [
+  {
+    // Master's #400 (N4b-gw item 1) retired the OT-2 relay family: ot2-legacy-gone.ts registers
+    // one catch-all that answers 410 Gone for every /api/ot2/* request, reading and writing
+    // nothing. The /api/ot2/* fixtures above no longer match a registered route.
+    test: (u) => u === "/api/ot2/*",
+    reason: "retired family (#400, routes/ot2-legacy-gone.ts): every /api/ot2/* request answers 410 Gone; nothing is read or written",
+  },
+  {
+    // Master retired caller-supplied bounty verification (ledger R45, astra pack 36 HIGH 2):
+    // the handler unconditionally replies 410 Gone for every request, same shape as the
+    // retired /api/ot2/* family above — no auth state, body or env can change the outcome, so
+    // this sweep calls it never, with a reviewable reason, instead of recording a permanent
+    // called-but-unreachable row.
+    test: (u) => u === "/api/bounty/verify",
+    reason: "retired (ledger R45, astra pack 36 HIGH 2, routes/bounty.ts:139-145): every /api/bounty/verify request answers 410 Gone unconditionally — caller-supplied verification is no longer accepted, and the route reads/writes nothing",
+  },
   {
     test: (u) => /^\/api\/escrow\/chain\/:address\//.test(u),
     reason:
