@@ -13,7 +13,7 @@
  * waive the default's requirement.
  */
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import { apiGate } from "../middleware/api-gate.js";
@@ -41,6 +41,7 @@ async function buildApp(): Promise<FastifyInstance> {
   const ok = async () => ({ reached: true });
   app.get("/api/admin/widgets", ok);
   app.post("/api/jobs/create", ok);
+  app.post("/api/contributors", ok);
 
   await app.ready();
   return app;
@@ -124,6 +125,91 @@ describe("scope-checker: defaults compose with governance rows", () => {
       });
       expect(res.statusCode).toBe(403);
       expect(res.json().reached).toBeUndefined();
+    });
+  });
+
+  describe("governance rows are enforced, and their loading fails closed (pack n108-589)", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    function insertRow(id: string, method: string, routePattern: string, requiredScopes: string[]): void {
+      getRepos().governance.insertEndpointScope({ id, method, routePattern, requiredScopes, description: "test-only row" });
+    }
+
+    async function post(url: string, scopes: string[]) {
+      const rawKey = issueApiKey(scopes);
+      return app.inject({ method: "POST", url, headers: { authorization: `Bearer ${rawKey}` } });
+    }
+
+    it("a row on the same route as a default binds too: the default's scope alone is refused, both reach the handler", async () => {
+      app = await buildApp();
+      insertRow("scope:test:jobs-create-extra", "POST", "/api/jobs/create", ["ops:custom"]);
+      const onlyDefault = await post("/api/jobs/create", ["requestor"]);
+      expect(onlyDefault.statusCode).toBe(403);
+      expect(onlyDefault.json().reached).toBeUndefined();
+      const both = await post("/api/jobs/create", ["requestor", "ops:custom"]);
+      expect(both.statusCode, both.body).toBe(200);
+      expect(both.json().reached).toBe(true);
+    });
+
+    it("equal specificity across layers: a row with the default's exact pattern adds its requirement", async () => {
+      app = await buildApp();
+      insertRow("scope:test:jobs-star-extra", "POST", "/api/jobs/*", ["ops:custom"]);
+      const onlyDefault = await post("/api/jobs/create", ["requestor"]);
+      expect(onlyDefault.statusCode).toBe(403);
+      const both = await post("/api/jobs/create", ["requestor", "ops:custom"]);
+      expect(both.statusCode, both.body).toBe(200);
+    });
+
+    it("a row-only route (the seeded POST /api/contributors -> contributor:write): refused without it, reached with it", async () => {
+      app = await buildApp();
+      const without = await post("/api/contributors", ["contributor:read"]);
+      expect(without.statusCode).toBe(403);
+      expect(without.json().reached).toBeUndefined();
+      const withIt = await post("/api/contributors", ["contributor:write"]);
+      expect(withIt.statusCode, withIt.body).toBe(200);
+      expect(withIt.json().reached).toBe(true);
+    });
+
+    it("[neg] a failed first load of the governance rows refuses scoped keys (503) until a load succeeds", async () => {
+      app = await buildApp();
+      const governance = getRepos().governance;
+      const spy = vi.spyOn(governance, "findAllEndpointScopes").mockImplementationOnce(() => {
+        throw new Error("governance table unavailable");
+      });
+      const during = await post("/api/contributors", ["contributor:read"]);
+      expect(during.json().reached).toBeUndefined();
+      expect(during.statusCode).toBe(503);
+      expect(during.json().error).toBe("scope_requirements_unavailable");
+      spy.mockRestore();
+      // The read works again: the very next request loads the rows (no TTL wait) and the row binds.
+      const after = await post("/api/contributors", ["contributor:read"]);
+      expect(after.statusCode).toBe(403);
+      expect(after.json().error).toBe("insufficient_scope");
+    });
+
+    it("[neg] a failed refresh after the TTL never extends the stale snapshot: scoped keys get 503", async () => {
+      app = await buildApp();
+      const first = await post("/api/contributors", ["contributor:write"]);
+      expect(first.statusCode, first.body).toBe(200); // rows loaded
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now + 10 * 60_000); // past the 5-minute TTL
+      vi.spyOn(getRepos().governance, "findAllEndpointScopes").mockImplementation(() => {
+        throw new Error("governance table unavailable");
+      });
+      const stale = await post("/api/contributors", ["contributor:write"]);
+      expect(stale.statusCode).toBe(503);
+      expect(stale.json().reached).toBeUndefined();
+    });
+
+    it("control: a wildcard key is unaffected by a failed load (unchanged)", async () => {
+      app = await buildApp();
+      vi.spyOn(getRepos().governance, "findAllEndpointScopes").mockImplementation(() => {
+        throw new Error("governance table unavailable");
+      });
+      const res = await post("/api/contributors", ["*"]);
+      expect(res.statusCode, res.body).toBe(200);
     });
   });
 
