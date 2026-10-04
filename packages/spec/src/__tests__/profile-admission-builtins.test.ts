@@ -35,6 +35,12 @@ const ADMISSION_OPTIONS: CheckOptions = {
   ...OPTIONS,
   collaborators: new Map([
     [
+      "packages/spec/src/util/primordials.ts:PinnedSpecies:PromiseCtor()",
+      "the species of every promise ownPromise pins: native then, catch and finally construct it with the capability executor they make " +
+        "(engine code), which it hands to the Promise captured at load. A caller that calls it with a function of its own runs that function " +
+        "in its own call, off admission's path (astra pack 307).",
+    ],
+    [
       "packages/spec/src/evidence/profile-admission.ts:admit:verifyPrimitiveInstance()",
       "the PRIMITIVE leg: the caller's verifier (ProfileAdmissionInput.verifyPrimitiveInstance, composed by the oracle from its verifier registry). " +
         "Admission takes it once from the input at the boundary and calls it only through legAnswer: exactly true, or a native promise fulfilled with " +
@@ -56,7 +62,7 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "declare const maybe: Uint8Array | null; declare const o: { toString(): string }; declare function shrink(): boolean; let t = \"abc\"; const resetT = () => { t = \"\"; };",
       "class Derived extends Uint8Array {} declare const derived: Derived; declare const both: Uint8Array & { tag: 1 }; function applyTwice(fn: (x: number) => number, x: number): number { return fn(fn(x)); }",
       "const capturedVerify = verify; const capturedGet = Map.prototype.get; const capturedNs = nc.hash; const capturedLater = (() => verify)();",
-      "const Uint8ArrayCtor = Uint8Array;",
+      "const Uint8ArrayCtor = Uint8Array; const ReflectApply = Reflect.apply; const PromiseCtor = Promise; JSON.stringify(1);",
     ];
     const allowed = [
       "export function okTyped(i: number) { const out = new Uint8ArrayCtor(4); out[i] = bytes[i]! + bytes[99]! + derived[0]!; return out; }",
@@ -75,6 +81,9 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "export function okHigherOrder() { return applyTwice((x) => x + 1, 1); }",
       "export const okStaticField = class { static value = f(1); };",
       "export function okNamedCollaborator(input: { verify: () => boolean }) { const verify = input.verify; return verify(); }",
+      // astra pack 307: an opaque callee may invoke a function operand, so the operand must be seen code.
+      "export function okApplyFixed() { return ReflectApply(f, undefined, [1]); }",
+      "export function okExecutor() { return new PromiseCtor<number>((resolve) => resolve(1)); }",
     ];
     const refused = [
       "export function a() { return bytes.length; }",
@@ -144,6 +153,10 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
       "export class Holder { #run: (x: number) => number = f; go() { return this.#run(1); } }",
       // astra pack 303: an instance field's initializer runs at `new`, after load, even in a class evaluated at load.
       "export const instanceField = class { value = JSON; };",
+      // astra pack 307: Reflect.apply, an uncurried call or a Promise runs the function operand it is given.
+      "export function applyCallback(cb: () => number) { return ReflectApply(cb, undefined, []); }",
+      "export function callbackInArguments(cb: () => number) { return ReflectApply(f, undefined, [cb]); }",
+      "export function executorFromCaller(executor: (resolve: (v: number) => void) => void) { return new PromiseCtor(executor); }",
     ];
     const text = [...head, ...allowed, ...refused].join("\n");
     const fixtureOptions: CheckOptions = {
@@ -301,8 +314,11 @@ describe("profile-admission.ts passes the default-deny check (DECISIONS 01:30, s
     ]) {
       expect(reached, name).toContain(`packages/spec/src/${name}`);
     }
-    // The one call whose target admission cannot see is the caller's verifier, named with its reason.
-    expect(collaboratorsUsed).toEqual(["packages/spec/src/evidence/profile-admission.ts:admit:verifyPrimitiveInstance()"]);
+    // The calls whose target or operand admission cannot see: the caller's verifier, and the engine's executor to the pinned species.
+    expect(collaboratorsUsed).toEqual([
+      "packages/spec/src/evidence/profile-admission.ts:admit:verifyPrimitiveInstance()",
+      "packages/spec/src/util/primordials.ts:PinnedSpecies:PromiseCtor()",
+    ]);
     expect(found).toEqual([]);
   }, 120_000);
 });

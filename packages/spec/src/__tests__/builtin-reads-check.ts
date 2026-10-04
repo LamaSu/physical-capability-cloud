@@ -198,7 +198,22 @@ export function trustedClosure(
     }
   };
   for (const file of seedFiles) enqueue(program.getSourceFile(file)!);
+  // A module's top-level statements run at load in any module the closure reaches, and they may install
+  // a function where reached code finds it (`table[key] = fn`), so they join the closure (astra pack 307).
+  const modulesEntered = new Set<ts.SourceFile>();
+  const enterModule = (source: ts.SourceFile): void => {
+    if (modulesEntered.has(source)) return;
+    modulesEntered.add(source);
+    for (const statement of source.statements) {
+      if (!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement) && !ts.isInterfaceDeclaration(statement) &&
+        !ts.isTypeAliasDeclaration(statement) && !ts.isFunctionDeclaration(statement) && !ts.isClassDeclaration(statement) &&
+        !ts.isVariableStatement(statement) && !ts.isModuleDeclaration(statement) && !ts.isEnumDeclaration(statement)) {
+        enqueue(statement);
+      }
+    }
+  };
   for (let i = 0; i < roots.length; i++) {
+    enterModule(roots[i]!.getSourceFile());
     const walk = (node: ts.Node): void => {
       if (ts.isTypeNode(node) && !ts.isExpressionWithTypeArguments(node)) return; // erased
       if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) return;
@@ -686,7 +701,7 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     return same.length > 1 ? `${base}#${same.indexOf(call) + 1}` : base;
   };
   /** A call whose target is not fixed and seen: allowed only at a call site named as a collaborator. */
-  const unseenTarget = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression): void => {
+  const unseenTarget = (call: ts.CallExpression | ts.NewExpression, callee: ts.Expression, what = "a call whose target the check cannot see (supplied at run time, or third-party code)"): void => {
     const key = callSiteKey(call, callee);
     if (options.collaborators?.has(key) === true) {
       let matched = matches.get(key);
@@ -694,7 +709,77 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
       matched.add(call);
       return;
     }
-    report(call, `a call whose target the check cannot see (supplied at run time, or third-party code); name the call site ${key} as a collaborator, with its reason`);
+    report(call, `${what}; name the call site ${key} as a collaborator, with its reason`);
+  };
+  /**
+   * Whether the callee is code the check walks: a function, method or class declared in the
+   * repository (directly or through a const alias), or a function written in place. A call into it
+   * is seen through its own body, where a call through a parameter is resolved against its callers.
+   */
+  const walkedTarget = (callee: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
+    if (isPrivateMember(callee)) {
+      const declarations = symbolOf((callee as ts.PropertyAccessExpression).name)?.declarations ?? [];
+      return declarations.length > 0 && declarations.every((d) => ts.isMethodDeclaration(d));
+    }
+    if (!ts.isIdentifier(callee)) return false;
+    const declarations = symbolOf(callee)?.declarations ?? [];
+    return declarations.length > 0 && declarations.every((d) => {
+      if (seen.has(d) || isIntrinsic(d) || isThirdParty(d)) return false;
+      seen.add(d);
+      if (ts.isFunctionDeclaration(d) || ts.isMethodDeclaration(d) || ts.isClassDeclaration(d)) return true;
+      if (isConst(d) && d.initializer !== undefined) {
+        const init = unwrap(d.initializer);
+        return ts.isArrowFunction(init) || ts.isFunctionExpression(init) || ts.isClassExpression(init) || (ts.isIdentifier(init) && walkedTarget(init, seen));
+      }
+      return false;
+    });
+  };
+  /** Whether a parameter of this type may be invoked by its callee: a function type, `Function`, or a type parameter constrained to one. */
+  const isCallableType = (type: ts.Type, seen: Set<ts.Type> = new Set()): boolean => {
+    if (seen.has(type)) return false;
+    seen.add(type);
+    if (type.isUnion() || type.isIntersection()) return type.types.some((part) => isCallableType(part, seen));
+    if (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Never)) return false;
+    const t = type;
+    if (t.flags & ts.TypeFlags.TypeParameter) {
+      const constraint = checker.getBaseConstraintOfType(t);
+      return constraint !== undefined && constraint !== t && isCallableType(constraint, seen);
+    }
+    if (t.getCallSignatures().length + t.getConstructSignatures().length > 0) return true;
+    const name = (t.getSymbol() ?? t.aliasSymbol)?.getName();
+    return name === "Function" || name === "CallableFunction" || name === "NewableFunction";
+  };
+  /** Whether `argument` may be invoked by the callee: its parameter is callable, or is `any` and the argument is a function. */
+  const mayBeInvoked = (argument: ts.Expression): boolean => {
+    const parameter = checker.getContextualType(argument);
+    if (parameter === undefined) return isCallableType(typeOf(argument));
+    if (isCallableType(parameter)) return true;
+    return (parameter.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 && isCallableType(typeOf(argument));
+  };
+  /**
+   * Whether every function an opaque callee (an intrinsic, a node: built-in, a load-time capture) may
+   * invoke among its operands is seen code (astra pack 307): `Reflect.apply(f, ...)`, an uncurried
+   * `call` or `bind`, `new Promise(executor)` or `then(onFulfilled)` run their function operand. An
+   * operand in a callable parameter position, a callable element of an array literal passed as an
+   * argument list, and an array argument of callable elements must each be fixed.
+   */
+  const operandsSeen = (call: ts.CallExpression | ts.NewExpression): boolean => {
+    const atLoad = runsAtLoad(call);
+    const fixed = (e: ts.Expression): boolean => (atLoad ? loadTimeFixed(e, new Set()) : valueFixed(e, new Set()));
+    for (const argument of call.arguments ?? []) {
+      const a = unwrap(argument);
+      if (mayBeInvoked(argument) && !fixed(argument)) return false;
+      if (ts.isArrayLiteralExpression(a)) {
+        for (const element of a.elements) {
+          if (ts.isSpreadElement(element)) return false;
+          if (mayBeInvoked(element) && !fixed(element)) return false;
+        }
+      } else {
+        const elementType = checker.getIndexTypeOfType(checker.getNonNullableType(typeOf(argument)), ts.IndexKind.Number);
+        if (elementType !== undefined && isCallableType(elementType) && !fixed(argument)) return false;
+      }
+    }
+    return true;
   };
 
   const checkIdentifier = (node: ts.Identifier): void => {
@@ -834,6 +919,8 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
           report(n, "a call whose callee is looked up at call time");
         } else if (!callTargetFixed(callee)) {
           unseenTarget(n, callee);
+        } else if (!walkedTarget(callee) && !operandsSeen(n)) {
+          unseenTarget(n, callee, "a call into code the check does not walk, which may invoke a function operand the check cannot see");
         }
         return true;
       }
@@ -841,6 +928,9 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
         const n = node as ts.NewExpression;
         if (!ts.isIdentifier(n.expression)) report(n, "new of a constructor looked up at call time");
         else if (!callTargetFixed(n.expression)) unseenTarget(n, n.expression);
+        else if (!walkedTarget(n.expression) && !operandsSeen(n)) {
+          unseenTarget(n, n.expression, "a construction by code the check does not walk, which may invoke a function operand the check cannot see");
+        }
         return true;
       }
       case ts.SyntaxKind.PrefixUnaryExpression: {
@@ -973,8 +1063,15 @@ function makeWalker(program: ts.Program, options: CheckOptions, scope: readonly 
     if (loadTime === undefined) {
       loadTime = new Set<ts.Node>();
       for (const statement of source.statements) {
-        if (ts.isVariableStatement(statement)) for (const d of statement.declarationList.declarations) if (d.initializer) loadTime.add(d.initializer);
-        if (ts.isClassDeclaration(statement)) for (const clause of statement.heritageClauses ?? []) loadTime.add(clause);
+        if (ts.isVariableStatement(statement)) {
+          for (const d of statement.declarationList.declarations) if (d.initializer) loadTime.add(d.initializer);
+        } else if (ts.isClassDeclaration(statement)) {
+          for (const clause of statement.heritageClauses ?? []) loadTime.add(clause);
+        } else if (!ts.isFunctionDeclaration(statement) && !ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement) &&
+          !ts.isInterfaceDeclaration(statement) && !ts.isTypeAliasDeclaration(statement)) {
+          // A top-level statement (`table[key] = fn;`, `ObjectFreeze(x);`) runs once, at load.
+          loadTime.add(statement);
+        }
       }
       loadTimes.set(source, loadTime);
     }
