@@ -190,6 +190,28 @@ class TestRunDaemonLoop:
         values.update(overrides)
         return NodeConfig(**values)
 
+    def test_the_daemon_fails_closed_on_a_registration_401(self):
+        # verdict 133a MED: a refused (non-2xx) registration must stop the daemon BEFORE it creates the
+        # gateway client, sends an "online" heartbeat, writes running state, or logs "Daemon running" --
+        # so `status` cannot report a false "PCC: connected".
+        from pcc_node import daemon as daemon_module
+        from pcc_node.register import RegistrationError
+        with mock.patch.object(daemon_module, "load_or_create_keys", return_value=("pub", "sec")), \
+             mock.patch.object(daemon_module, "discover_network", return_value=[]), \
+             mock.patch.object(daemon_module, "register_kernel",
+                               side_effect=RegistrationError(401, {"error": "unauthorized"})), \
+             mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
+             mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
+             mock.patch("pcc_node.ui_server.start_ui_server"), \
+             mock.patch.object(daemon_module, "_write_state") as write_state, \
+             mock.patch.object(daemon_module.time, "sleep", side_effect=KeyboardInterrupt):
+            try:
+                daemon_module.run_daemon(self._config())
+            except (KeyboardInterrupt, SystemExit):
+                pass
+        MockClient.assert_not_called()   # no gateway client / no "online" heartbeat
+        write_state.assert_not_called()  # no running state written
+
     def test_the_daemon_keeps_the_kernel_online_without_taking_jobs(self):
         client, _, _ = self._run_once(self._config())
         client.send_heartbeat.assert_any_call("online", accepting_jobs=False)

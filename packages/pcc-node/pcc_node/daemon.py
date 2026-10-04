@@ -25,7 +25,7 @@ from .camera import push_camera_frame, detect_camera_device
 from .config import NodeConfig
 from .crypto import load_or_create_keys
 from .discovery import discover_network, device_to_adapter_config
-from .register import register_kernel
+from .register import register_kernel, RegistrationError
 from .ws_client import PCCGatewayClient
 
 log = logging.getLogger("pcc-node.daemon")
@@ -207,6 +207,12 @@ def run_daemon(config: NodeConfig):
     try:
         register_kernel(config.pcc_base, config.pcc_api_key, config)
         log.info(f"Kernel {config.kernel_id} registered")
+    except RegistrationError as e:
+        # Fail CLOSED (verdict 133a MED): a kernel whose registration was REFUSED (a non-2xx) is not
+        # connected. Do NOT create the gateway client, send an "online" heartbeat, write running state,
+        # or log "Daemon running" -- stop here, so `status` cannot report a false "PCC: connected".
+        log.error(f"Kernel registration refused ({e}); the node is NOT registered. Daemon not started.")
+        return
     except Exception as e:
         log.warning(f"Kernel registration failed: {e}")
 

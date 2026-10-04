@@ -136,7 +136,13 @@ def register_kernel(pcc_base, api_key, config):
     Returns
     -------
     dict
-        Registration response, or error dict.
+        The gateway's registration response, on a 2xx (200 upsert / 201 create).
+
+    Raises
+    ------
+    RegistrationError
+        On any non-2xx response, carrying the status and body, so callers fail CLOSED instead of
+        mistaking an error for success (item 133).
     """
     payload = {
         "id": config.kernel_id,

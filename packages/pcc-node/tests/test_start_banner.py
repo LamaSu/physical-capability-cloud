@@ -147,3 +147,25 @@ def test_no_key_with_default_gateway_refuses_before_any_network_step(tmp_path):
     detect.assert_not_called()
     provision.assert_not_called()
     register.assert_not_called()
+
+
+def test_whitespace_only_api_key_does_not_bypass_the_no_key_guard(tmp_path):
+    # verdict 133a MED: `--api-key "   "` is not a usable key -- it must not slip past the fix-2 guard
+    # (which now trims), so no discovery / detect / provision / register happens.
+    config_path = tmp_path / "node-config.json"
+    with mock.patch("pcc_node.cli.is_running", return_value=(False, None)), \
+         mock.patch("pcc_node.cli._interactive", return_value=False), \
+         mock.patch("pcc_node.cli.discover_network") as discover, \
+         mock.patch("pcc_node.cli.detect_all") as detect, \
+         mock.patch("pcc_node.cli.provision_api_key") as provision, \
+         mock.patch("pcc_node.cli.register_kernel") as register, \
+         mock.patch("pcc_node.cli.run_daemon"):
+        result = CliRunner().invoke(
+            main, ["start", "-c", str(config_path), "--api-key", "   ", "--yes", "--discover"],
+            env={"PCC_BASE": ""})
+    assert result.exit_code == 1, result.output
+    assert "no gateway chosen and no API key" in result.output
+    discover.assert_not_called()
+    detect.assert_not_called()
+    provision.assert_not_called()
+    register.assert_not_called()

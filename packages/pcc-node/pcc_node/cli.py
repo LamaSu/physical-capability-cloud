@@ -357,7 +357,7 @@ def start(config_file, pcc_base, api_key, kernel_id, discover, subnet, yes):
     # hazard. Require an explicit gateway or an API key. The systemd unit sets PCC_BASE (-> source
     # "env", not "default") and PCC_API_KEY, so it is unaffected; a provisioned flow (key present)
     # still defaults to the public gateway as before.
-    if target_source == "default" and not api_key:
+    if target_source == "default" and not (api_key or "").strip():
         click.echo(
             "Refusing to start: no gateway chosen and no API key, so pcc-node will not assume the "
             "public network (capability.network). Choose a gateway with PCC_BASE or --pcc-base, and "
