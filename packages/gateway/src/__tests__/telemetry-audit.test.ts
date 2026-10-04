@@ -5,11 +5,20 @@
  * filtering by limit, method, eventType, actor, and since.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { initStore, closeStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { telemetryRoutes } from "../routes/telemetry.js";
+
+// N122 (#6488): the gateway-wide audit log is the admin's; this suite reads it with the admin key.
+const N122_ADMIN = "n122-telemetry-audit-admin";
+const PREV_N122_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N122_ADMIN;
+afterAll(() => {
+  if (PREV_N122_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N122_ADMIN;
+});
 
 // ---------------------------------------------------------------------------
 // Test app builder
@@ -21,6 +30,9 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: false });
 
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", async (req) => {
+    if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N122_ADMIN;
+  });
   await app.register(telemetryRoutes);
   await app.ready();
   return app;
