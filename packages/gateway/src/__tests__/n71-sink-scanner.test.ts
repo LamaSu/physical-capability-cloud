@@ -13,7 +13,7 @@
  * with a reason. A sixth instance of "dependency or caller text in a log" cannot exist in
  * these 12 files without either being fixed or being named, with a reason, right here.
  *
- * ── SINKS (exactly the 8 shapes below; see matchSink) ──────────────────────────────────
+ * ── SINKS (the shapes below; see matchSink) ──────────────────────────────────────────
  *   console.log/info/warn/error/debug · <expr>.log.<trace|debug|info|warn|error|fatal>(...)
  *   · logger.<method>(...) · {span|*Span}.{setStatus,recordException,setAttribute,
  *   setAttributes,addEvent,updateName}(...) · pipelineTelemetry.emit(...) ·
@@ -115,10 +115,27 @@ const SPAN_METHODS = new Set(["setStatus", "recordException", "setAttribute", "s
 const SENTRY_METHODS = new Set(["captureException", "captureMessage"]);
 
 /** Returns a human-readable sink name, or null if `call` isn't one of the 8 shapes. */
+/** Functions in scope that write their argument to a log stream themselves; each call site is a sink. */
+const STREAM_EMITTERS = new Set(["emitKernelLifecycleEvent"]);
+
 function matchSink(call: ts.CallExpression): string | null {
+  const callee = unwrap(call.expression);
+  if (ts.isIdentifier(callee) && STREAM_EMITTERS.has(callee.text)) return callee.text;
+
   const outer = asPropertyAccess(call.expression);
   if (!outer) return null;
   const { receiver, name: method } = outer;
+
+  // process.stdout.write(...) / process.stderr.write(...)
+  const stream = asPropertyAccess(receiver);
+  if (
+    stream &&
+    method === "write" &&
+    (stream.name === "stdout" || stream.name === "stderr") &&
+    isIdentifierNamed(stream.receiver, "process")
+  ) {
+    return `process.${stream.name}.write`;
+  }
 
   if (isIdentifierNamed(receiver, "console") && CONSOLE_METHODS.has(method)) return `console.${method}`;
   if (isIdentifierNamed(receiver, "Sentry") && SENTRY_METHODS.has(method)) return `Sentry.${method}`;
@@ -401,6 +418,9 @@ describe("N71 round 6: sink scanner mechanics", () => {
       ["this.emitTelemetry", "class X { m() { this.emitTelemetry(bad); } }"],
       ["Sentry.captureException", "Sentry.captureException(bad);"],
       ["Sentry.captureMessage", "Sentry.captureMessage(bad);"],
+      ["process.stderr.write", "process.stderr.write(bad);"],
+      ["process.stdout.write", "process.stdout.write(`x ${bad}`);"],
+      ["emitKernelLifecycleEvent", "emitKernelLifecycleEvent({ event: 'k', kernelId: bad });"],
     ];
     for (const [label, src] of cases) {
       const violations = violationsIn(src);
