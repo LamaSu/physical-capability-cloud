@@ -97,19 +97,7 @@ function buildWorkspaceAliases(): { find: RegExp; replacement: string }[] {
 
 export default defineConfig({
   resolve: {
-    alias: [
-      ...buildWorkspaceAliases(),
-      // FC-8 round 3 (astra pack 61b census closure): tests under src/__tests__/
-      // import `run()` from the repo-root scripts/*.ts e2e scripts (to drive
-      // them with mocks instead of only reading their source text). Node
-      // resolves THOSE files' own bare imports relative to scripts/'s own
-      // ancestors, which has no node_modules/viem — unlike packages/gateway's
-      // own src/, which resolves it trivially. Alias straight to gateway's
-      // already-installed copy so vite's resolver can apply viem's own
-      // package.json `exports` from there.
-      { find: /^viem$/, replacement: resolve(here, "node_modules/viem") },
-      { find: /^viem\/(.+)$/, replacement: resolve(here, "node_modules/viem/$1") },
-    ],
+    alias: buildWorkspaceAliases(),
   },
   test: {
     setupFiles: ["./vitest.setup.ts"],

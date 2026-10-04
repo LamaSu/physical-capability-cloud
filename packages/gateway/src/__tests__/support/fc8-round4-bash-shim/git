@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-if [ "$1" = "ls-remote" ]; then
-  echo "fatal: shimmed — no network in test" >&2
-  exit 128
-fi
-exec /usr/bin/git "$@"

@@ -8,12 +8,6 @@
  * 5. Submit evidence hash on-chain
  * 6. Release milestone (settle USDC to operator)
  * 7. Collect everything → print on HP printer
- *
- * FC-8 round 3 (astra pack 61b census closure): exported as `run(deps)` with
- * injected fetch/chain-clients/env (see fc8-round3-real-e2e.test.ts). CLI
- * behavior is preserved behind the entry guard at the bottom. Every print
- * site reaching a gateway- or oracle-derived value now logs a VALIDATED
- * projection, never a raw response body or object.
  */
 
 import {
@@ -27,38 +21,50 @@ import {
   toBytes,
   type Address,
   type Hex,
-  type WalletClient,
-  type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  safeLogJson, safeLogId, safeLogErrorName, safeLogInt, safeLogBool,
-  safeLogEnum, safeLogContentType, safeLogHex,
-} from "../packages/gateway/src/util/redact-log.js";
 
-/** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
-export class MissingEnvError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "MissingEnvError";
-  }
-}
+const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
+if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
 
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
-const KERNEL = "kernel-nanoclaw";
-const JOB_STATUSES = ["queued", "running", "completed", "failed"] as const;
-
-function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
-  const value = env[name]?.trim();
+const ORACLE_ADDRESS = "0x3850F24ACd88F6729692e2d05F75d499F0a661f5" as Address;
+/**
+ * Read a required secret from the environment and exit with a clear message
+ * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
+ * the literal that used to sit here was exposed and is listed for revocation
+ * in docs/security/WILDCARD_KEY_ROTATION.md).
+ */
+function requireEnv(name: string, what: string): string {
+  const value = process.env[name]?.trim();
   if (!value) {
-    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+    process.exit(1);
   }
   return value;
+}
+
+const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+const KERNEL = "kernel-nanoclaw";
+let USDC: Address; // Will be deployed fresh
+
+const account = privateKeyToAccount(PK);
+const rpc = http("https://sepolia.base.org");
+const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc });
+const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
+
+// Force fresh nonce on every call to avoid nonce collisions
+async function writeContract(params: any) {
+  const n = await pub.getTransactionCount({ address: account.address });
+  return wallet.writeContract({ ...params, nonce: n });
+}
+async function deployContract(params: any) {
+  const n = await pub.getTransactionCount({ address: account.address });
+  return wallet.deployContract({ ...params, nonce: n });
 }
 
 const ERC20 = [
@@ -94,61 +100,23 @@ const ESCROW_ABI = [
   { name: "getMilestoneCount", type: "function" as const, inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" as const },
 ] as const;
 
-export interface RunDeps {
-  fetchImpl?: typeof fetch;
-  wallet?: WalletClient;
-  pub?: PublicClient;
-  env?: Record<string, string | undefined>;
-  pollSleepMs?: number;
-  pollAttempts?: number;
-  contractsDir?: string;
+const report: string[] = [];
+function log(msg: string) { console.log(msg); report.push(msg); }
+
+async function waitTx(hash: Hex) {
+  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+  await new Promise(r => setTimeout(r, 2000)); // let nonce propagate
+  return receipt;
 }
 
-export interface RunResult {
-  report: string;
+async function gw(method: string, path: string, body?: any) {
+  const opts: RequestInit = { method, headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e/1.0" } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(`${GATEWAY}${path}`, opts);
+  return r.json();
 }
 
-export async function run(deps: RunDeps = {}): Promise<RunResult> {
-  const env = deps.env ?? process.env;
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const pollSleepMs = deps.pollSleepMs ?? 5000;
-  const pollAttempts = deps.pollAttempts ?? 40;
-
-  const PK = (env.PCC_GATEWAY_PRIVATE_KEY || env.DEPLOYER_PRIVATE_KEY) as Hex | undefined;
-  if (!PK) throw new MissingEnvError("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY");
-  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
-  let USDC: Address; // Will be deployed fresh
-
-  const account = privateKeyToAccount(PK);
-  const rpc = http("https://sepolia.base.org");
-  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport: rpc });
-  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport: rpc });
-
-  async function writeContract(params: any) {
-    const n = await pub.getTransactionCount({ address: account.address });
-    return wallet.writeContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
-  }
-  async function deployContract(params: any) {
-    const n = await pub.getTransactionCount({ address: account.address });
-    return wallet.deployContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
-  }
-
-  const report: string[] = [];
-  function log(msg: string) { console.log(msg); report.push(msg); }
-
-  async function waitTx(hash: Hex) {
-    const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
-    await new Promise(r => setTimeout(r, pollSleepMs > 0 ? 2000 : 0));
-    return receipt;
-  }
-
-  async function gw(method: string, path: string, body?: any) {
-    const opts: RequestInit = { method, headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e/1.0" } };
-    if (body) opts.body = JSON.stringify(body);
-    const r = await fetchImpl(`${GATEWAY}${path}`, opts);
-    return r.json();
-  }
-
+async function main() {
   log("================================================================");
   log("  PCC REAL END-TO-END PROTOCOL EXECUTION");
   log("  " + new Date().toISOString());
@@ -158,6 +126,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   const ethBal = await pub.getBalance({ address: account.address });
   log(`Deployer:    ${account.address}`);
   log(`ETH:         ${formatEther(ethBal)}`);
+  log(`USDC:        ${USDC}`);
   log(`Network:     Base Sepolia (chain 84532)`);
   log(`Gateway:     ${GATEWAY}`);
   log(`Kernel:      ${KERNEL}`);
@@ -165,7 +134,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   // ── 1. Deploy MockUSDC + PCCProtocol + Escrow (via factory) ─────────
   log("[1] DEPLOYING FRESH CONTRACTS");
-  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
+  const contractsDir = resolve(process.cwd(), "packages/contracts");
   const usdcArtifact = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
   const protocolArtifact = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
 
@@ -176,14 +145,17 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     bytecode: usdcArtifact.bytecode.object as `0x${string}`,
     args: [parseUnits("1000000", 6)],
   });
-  const usdcReceipt: any = await waitTx(usdcDeployTx);
+  const usdcReceipt = await waitTx(usdcDeployTx);
   USDC = usdcReceipt.contractAddress!;
   log(`    MockUSDC:   ${USDC}`);
   log(`    TX:         ${usdcDeployTx}`);
 
   // 1b. Deploy PCCProtocol (fee factory)
   log("    Deploying PCCProtocol (2.35% fee, oracle-gated)...");
-  const oracleVerifier = (env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  // Oracle verifier is immutable on PCCProtocol. Use ORACLE_VERIFIER_ADDRESS
+  // from env (real PCC Verification Oracle) or fall back to the deployer
+  // address so the full E2E can be exercised end-to-end (dev only).
+  const oracleVerifier = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
   log(`    Oracle verifier: ${oracleVerifier}`);
   const protocolDeployTx = await deployContract({
     abi: protocolArtifact.abi,
@@ -195,7 +167,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       oracleVerifier,    // oracleVerifier (immutable)
     ],
   });
-  const protocolReceipt: any = await waitTx(protocolDeployTx);
+  const protocolReceipt = await waitTx(protocolDeployTx);
   const PROTOCOL = protocolReceipt.contractAddress!;
   log(`    PCCProtocol: ${PROTOCOL}`);
   log(`    TX:          ${protocolDeployTx}`);
@@ -211,8 +183,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     args: [account.address, account.address, USDC, cwmId],
   });
   log(`    TX:          ${createEscrowTx}`);
-  const createReceipt: any = await waitTx(createEscrowTx);
-  const escrowLog = createReceipt.logs.find((l: any) => l.topics.length >= 2);
+  const createReceipt = await waitTx(createEscrowTx);
+  // Parse the EscrowCreated event to get the escrow address
+  const escrowLog = createReceipt.logs.find(l => l.topics.length >= 2);
   const ESCROW = ("0x" + (escrowLog?.topics[1]?.slice(26) ?? "")) as Address;
   log(`    Escrow:      ${ESCROW}`);
   log(`    Block:       ${createReceipt.blockNumber}`);
@@ -254,7 +227,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     args: [],
   });
   log(`    Fund TX:         ${fundTx}`);
-  const fundReceipt: any = await waitTx(fundTx);
+  const fundReceipt = await waitTx(fundTx);
   log(`    Block:           ${fundReceipt.blockNumber}`);
 
   const funded = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "funded" });
@@ -292,35 +265,34 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       filename: "pcc_real_e2e.py",
     },
   });
-  // FC-8 round 3: jobId/status are server-returned; validate before logging.
-  log(`    Job ID:  ${safeLogId(jobResult?.jobId)}`);
-  log(`    Status:  ${safeLogEnum(jobResult?.status, JOB_STATUSES)}`);
+  log(`    Job ID:  ${jobResult.jobId}`);
+  log(`    Status:  ${jobResult.status}`);
   log("");
 
   // ── 5. Wait for execution ─────────────────────────────────────────
   log("[5] WAITING FOR DAEMON EXECUTION...");
   let status = "queued";
-  for (let i = 0; i < pollAttempts; i++) {
-    await new Promise(r => setTimeout(r, pollSleepMs));
-    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`);
-    status = s?.status;
-    process.stdout.write(`    ${i + 1}/${pollAttempts}: ${safeLogEnum(status, JOB_STATUSES)}   \r`);
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 5000));
+    const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
+    status = s.status;
+    process.stdout.write(`    ${i + 1}/40: ${status}   \r`);
     if (status === "completed" || status === "failed") break;
   }
   console.log();
-  log(`    Final:   ${safeLogEnum(status, JOB_STATUSES)}`);
+  log(`    Final:   ${status}`);
   log("");
 
   // ── 6. Capture camera evidence ────────────────────────────────────
   log("[6] CAMERA EVIDENCE");
-  const camResp = await fetchImpl(`${GATEWAY}/api/ot2/camera/latest`);
+  const camResp = await fetch(`${GATEWAY}/api/ot2/camera/latest`);
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
-  log(`    Frame:   ${safeLogInt(camBytes)} bytes (${safeLogContentType(camResp.headers.get("content-type"))})`);
+  log(`    Frame:   ${camBytes} bytes (${camResp.headers.get("content-type")})`);
   log("");
 
   // ── 7. Submit evidence hash on-chain ──────────────────────────────
   const evidence = {
-    jobId: jobResult?.jobId,
+    jobId: jobResult.jobId,
     kernel: KERNEL,
     escrow: ESCROW,
     protocol: "PCC Slot Inspection 1-3-5",
@@ -337,7 +309,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     args: [0n, evidenceHash as Hex],
   });
   log(`    TX:      ${evTx}`);
-  const evReceipt: any = await waitTx(evTx);
+  const evReceipt = await waitTx(evTx);
   log(`    Block:   ${evReceipt.blockNumber}`);
   log(`    Gas:     ${evReceipt.gasUsed}`);
   log("");
@@ -345,29 +317,26 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   // ── 8. Oracle verification + attestation ────────────────────────────
   log("[8] REQUESTING ORACLE VERIFICATION");
   log(`    Oracle:  ${ORACLE_URL}`);
-  const oracleReq = await fetchImpl(`${ORACLE_URL}/verify`, {
+  const oracleReq = await fetch(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-oracle-key": ORACLE_KEY },
     body: JSON.stringify({
       escrowAddress: ESCROW,
       milestoneIndex: 0,
       evidenceHash,
-      jobId: jobResult?.jobId,
+      jobId: jobResult.jobId,
     }),
   });
-  const oracleResult = await oracleReq.json().catch(() => undefined) as any;
-  // FC-8 round 2+3: never print the raw oracle body/object — only validated
-  // fields the script actually needs (status code, verified boolean,
-  // whether an attestation/tx hash came back).
-  log(`    Status:  ${safeLogInt(oracleReq.status)}`);
-  log(`    Result:  verified=${safeLogBool(oracleResult?.verified)} hasTransactionHash=${safeLogBool(!!oracleResult?.transactionHash)}`);
+  const oracleResult = await oracleReq.json() as any;
+  log(`    Status:  ${oracleReq.status}`);
+  log(`    Result:  ${JSON.stringify(oracleResult)}`);
 
   // Build the on-chain Attestation struct. The escrow stores
   // keccak256(abi.encode(attestation)) so the SAME struct must be passed
   // back to release() for settlement. See IPCCOracle.Attestation.
   const attestationStruct = {
     escrowAddress: ESCROW,
-    jobId: jobResult?.jobId ?? "job-real-e2e",
+    jobId: jobResult.jobId ?? "job-real-e2e",
     evidenceHash: evidenceHash as Hex,
     tier: 1,
     verified: true,
@@ -378,10 +347,8 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
 
   // If oracle pre-submitted its attestation on-chain, acknowledge and move on.
   // Otherwise we submit the struct ourselves as the authorized verifier.
-  if (oracleResult?.transactionHash) {
-    // FC-8 round 3: transactionHash is oracle-returned; validate as hex
-    // before logging (the real value is still used for waitTx below).
-    log(`    Oracle-submitted attest TX: ${safeLogHex(oracleResult.transactionHash)}`);
+  if (oracleResult.transactionHash) {
+    log(`    Oracle-submitted attest TX: ${oracleResult.transactionHash}`);
     await waitTx(oracleResult.transactionHash);
   } else {
     log("    Submitting attestation struct as arbiter");
@@ -402,7 +369,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     args: [0n, attestationStruct],
   });
   log(`    TX:      ${relTx}`);
-  const relReceipt: any = await waitTx(relTx);
+  const relReceipt = await waitTx(relTx);
   log(`    Block:   ${relReceipt.blockNumber}`);
   log(`    Gas:     ${relReceipt.gasUsed}`);
   log("    SETTLED. USDC released to operator.");
@@ -430,23 +397,9 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       filename: "pcc-real-e2e-report.txt",
     },
   });
-  // FC-8 round 2: printResult.error is a raw server error string — never
-  // fall back to printing it; an id-shaped jobId or a static "(none)" only.
-  log(`    Print Job: ${safeLogId(printResult?.jobId)}`);
+  log(`    Print Job: ${printResult.jobId ?? printResult.error}`);
   log("");
   log("DONE. Full protocol executed. No mocks.");
-
-  return { report: report.join("\n") };
 }
 
-// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
-// of this module (as a test does) never executes main.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  run().catch((e) => {
-    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
-    // FC-8 round 2: e.message is free text that can carry a caught secret;
-    // only the bounded error-class name is safe to log here.
-    console.error("FATAL:", safeLogErrorName(e));
-    process.exitCode = 1;
-  });
-}
+main().catch((e) => { console.error("FATAL:", e.message ?? e); process.exit(1); });

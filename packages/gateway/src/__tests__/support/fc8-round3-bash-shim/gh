@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# FC-8 round 3 test fixture: gh is not part of astra's census and a real
-# GitHub API call is a live service — fail fast so Check 2 takes its
-# existing SKIP/ERROR fallback deterministically, offline.
-echo "shimmed: no network in test" >&2
-exit 1

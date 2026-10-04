@@ -9,58 +9,6 @@
 # Requirements: git, curl, jq, gh (GitHub CLI)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# FC-8 round 4 (astra pack 61c, finding 4 — the steward's ruling, bus #6482):
-# `set +x` is the ABSOLUTE FIRST statement in this script — before even
-# `set -euo pipefail` — and the oracle key is read from a FILE, never an
-# env var. Both are necessary together; neither alone closes the finding.
-#
-# THREAT MODEL. Astra's reproduction:
-#   env PCC_ORACLE_KEY='SECRET' PS4='$PCC_ORACLE_KEY ' bash -x script.sh
-# Bash expands PS4 to build the trace line for EVERY traced command when
-# xtrace is on — including the trace of this script's own first statement,
-# which is emitted using whatever PS4/xtrace state the CALLER already had
-# active, before this script has executed anything at all. So no command
-# this script runs, however early, can retroactively un-trace its own first
-# statement: round 2's `set +x` (previously the first REAL command, after
-# `set -euo pipefail`) still left that one earlier statement — and `set +x`
-# itself — traced under a hostile inherited PS4. Moving `set +x` earlier
-# shrinks that window to a single, irreducible trace event (this line);
-# nothing placed before it inside this script could shrink it further.
-#
-# What reading the key from a FILE narrows: this script itself never reads
-# PCC_ORACLE_KEY (the secret value) into its own logic — only
-# PCC_ORACLE_KEY_FILE, a file PATH, which is not a secret. Astra's exact
-# recipe (`PS4='$PCC_ORACLE_KEY '`, a bare variable reference, no command
-# substitution) expands to nothing IF PCC_ORACLE_KEY is not present in the
-# environment this script is invoked from.
-#
-# What is NOT covered (the narrowed claim — two residuals, not one):
-#   1. If something ELSE upstream of this script (a sibling script, a
-#      Makefile, a CI job, a lingering shell export from before this fix
-#      rolled out) still sets PCC_ORACLE_KEY in the environment for its own
-#      reasons, astra's exact bare-variable PS4 recipe leaks it on that one
-#      irreducible trace event (this script's own first statement, traced
-#      under whatever PS4/xtrace state the CALLER already had active,
-#      before this script has executed anything at all — no command this
-#      script runs, however early, can retroactively un-trace its own first
-#      statement). This script can verify its OWN code never reads the
-#      variable; it cannot verify, or control, what else in the environment
-#      sets it. Verified empirically: with PCC_ORACLE_KEY exported from
-#      outside (this script's code never reads it) and PS4 set to astra's
-#      exact bare-variable recipe, the value still appears in the trace of
-#      the `set +x` line itself.
-#   2. A PS4 that already knows the exact value of $PCC_ORACLE_KEY_FILE and
-#      runs `$(cat "$PCC_ORACLE_KEY_FILE" 2>/dev/null)` can read the key on
-#      that same one trace event, since the file's contents exist on disk
-#      before this script starts, independent of anything this script does.
-# Both residuals are the same shape: one irreducible trace event, closed
-# only by a process boundary this script cannot construct for itself
-# (something that holds the real key and is invoked only AFTER the caller's
-# own tracing/PS4 state and environment are known-clean — out of scope
-# here). The guarantee this script makes is "the trivial, undirected attack
-# astra reproduced no longer works when nothing upstream still exports
-# PCC_ORACLE_KEY," not "no PS4 payload, in any environment, can ever work."
-set +x
 set -euo pipefail
 
 # ── Configuration ───────────────────────────────────────────────────────────
@@ -69,21 +17,12 @@ BRANCH="digital-verifier/foundation"
 GW="https://capability.network"
 ORACLE_TUNNEL="https://refer-proxy-joint-cleaning.trycloudflare.com"
 ORACLE_DIRECT="${ORACLE_DIRECT:-http://localhost:4100}"
-# FC-8 round 4: read from a FILE, never an env var — see the threat-model
-# comment above. Keys are NEVER committed to this repository (WP-A fold F8:
-# the literal that used to sit here was exposed and is listed for
-# revocation in docs/security/WILDCARD_KEY_ROTATION.md).
-if [ -z "${PCC_ORACLE_KEY_FILE:-}" ]; then
-  echo "PCC_ORACLE_KEY_FILE is not set: export the path to a file containing the oracle's x-oracle-key before running this script (FC-8 round 4: the key itself is never read from an environment variable). Keys are never committed to this repository." >&2
-  exit 1
-fi
-if [ ! -r "$PCC_ORACLE_KEY_FILE" ]; then
-  echo "PCC_ORACLE_KEY_FILE ($PCC_ORACLE_KEY_FILE) does not exist or is not readable." >&2
-  exit 1
-fi
-ORACLE_KEY="$(cat "$PCC_ORACLE_KEY_FILE")"
+# The oracle key comes from the environment. Keys are NEVER committed to this
+# repository (WP-A fold F8: the literal that used to sit here was exposed and is
+# listed for revocation in docs/security/WILDCARD_KEY_ROTATION.md).
+ORACLE_KEY="${PCC_ORACLE_KEY:-}"
 if [ -z "$ORACLE_KEY" ]; then
-  echo "PCC_ORACLE_KEY_FILE ($PCC_ORACLE_KEY_FILE) is empty." >&2
+  echo "PCC_ORACLE_KEY is not set: export the oracle's x-oracle-key before running this script. Keys are never committed to this repository." >&2
   exit 1
 fi
 REPORT_FILE="ai/supervisor/smoke-test-report.json"
@@ -120,28 +59,6 @@ skip() {
 
 info() {
   echo -e "  ${CYAN}INFO${NC} $1"
-}
-
-# FC-8 round 3 (astra pack 61b census closure): a gateway/oracle-derived
-# string must be VALIDATED before it is printed or written to the report —
-# an allow-listed enum, or a literal boolean — never the raw response.
-# (Computed counts, e.g. `jq '.x | length'`, are not wrapped here: a jq
-# `length` is structurally always a non-negative integer or the `|| echo`
-# fallback, so there is no dynamic path for it to carry anything else.)
-safe_enum() {
-  # $1=value, $2..=allowed literals
-  local v="$1"; shift
-  for allowed in "$@"; do
-    if [ "$v" = "$allowed" ]; then echo "$v"; return; fi
-  done
-  echo "(unknown)"
-}
-
-safe_bool() {
-  case "$1" in
-    true|false) echo "$1" ;;
-    *) echo "(unknown)" ;;
-  esac
 }
 
 add_check() {
@@ -271,22 +188,19 @@ if [ "$HEALTH_RESP" = "CURL_ERROR" ]; then
   fail "Gateway unreachable at $GW"
   add_check "gateway-health" "FAIL" "Connection failed" "$DURATION"
 else
-  # FC-8 round 4 (finding 2): validate BEFORE any compare/print/add_check —
-  # round 3 printed this field after only swapping it for the extracted
-  # (but still unvalidated) value, not after actually validating it.
-  HEALTH_STATUS=$(safe_enum "$(echo "$HEALTH_RESP" | jq -r .status 2>/dev/null || echo "")" ok)
+  HEALTH_STATUS=$(echo "$HEALTH_RESP" | jq -r .status 2>/dev/null || echo "")
   if [ "$HEALTH_STATUS" = "ok" ]; then
-    pass "Gateway healthy: status=$HEALTH_STATUS"
-    add_check "gateway-health" "PASS" "status=$HEALTH_STATUS" "$DURATION"
+    pass "Gateway healthy: $HEALTH_RESP"
+    add_check "gateway-health" "PASS" "$HEALTH_RESP" "$DURATION"
   else
-    fail "Gateway unhealthy: status=$HEALTH_STATUS"
-    add_check "gateway-health" "FAIL" "status=$HEALTH_STATUS" "$DURATION"
+    fail "Gateway unhealthy: $HEALTH_RESP"
+    add_check "gateway-health" "FAIL" "$HEALTH_RESP" "$DURATION"
   fi
 
   # Also check setup status
   SETUP_RESP=$(curl -sS --max-time 15 "$GW/api/setup/status" 2>/dev/null || echo "")
   if [ -n "$SETUP_RESP" ]; then
-    OVERALL=$(safe_enum "$(echo "$SETUP_RESP" | jq -r .overall 2>/dev/null || echo "unknown")" ok incomplete error unknown)
+    OVERALL=$(echo "$SETUP_RESP" | jq -r .overall 2>/dev/null || echo "unknown")
     info "Setup status: overall=$OVERALL"
   fi
 fi
@@ -357,10 +271,9 @@ if [ -z "$ORACLE_HEALTH" ]; then
   fail "Oracle unreachable (tunnel + direct both failed)"
   add_check "oracle-responds" "FAIL" "Oracle unreachable via tunnel and direct" "$DURATION"
 else
-  # FC-8 round 4 (finding 2): same fix as HEALTH_STATUS above.
-  ORACLE_STATUS=$(safe_enum "$(echo "$ORACLE_HEALTH" | jq -r .status 2>/dev/null || echo "")" ok)
+  ORACLE_STATUS=$(echo "$ORACLE_HEALTH" | jq -r .status 2>/dev/null || echo "")
   if [ "$ORACLE_STATUS" = "ok" ]; then
-    pass "Oracle healthy via $ORACLE_URL_USED: status=$ORACLE_STATUS"
+    pass "Oracle healthy via $ORACLE_URL_USED: $ORACLE_HEALTH"
     add_check "oracle-responds" "PASS" "Oracle ok via $ORACLE_URL_USED" "$DURATION"
 
     # Smoke verify request
@@ -377,20 +290,15 @@ else
         "chainId": 84532
       }' 2>/dev/null || echo "")
     if [ -n "$VERIFY_RESP" ]; then
-      # FC-8 round 2: .result.reason is the oracle's free text and may
-      # reflect a secret (e.g. a header value echoed into an error message);
-      # only the validated boolean `verified` field is safe to log here.
-      # FC-8 round 4 (finding 2): "validated" means through safe_bool, not
-      # just "a different field than before" — round 3 printed this field
-      # raw.
-      VERIFIED=$(safe_bool "$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")")
-      info "Verify response: verified=$VERIFIED"
+      VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
+      REASON=$(echo "$VERIFY_RESP" | jq -r .result.reason 2>/dev/null || echo "")
+      info "Verify response: verified=$VERIFIED reason=$REASON"
     else
       info "Verify request returned empty (oracle may be processing)"
     fi
   else
-    fail "Oracle returned unexpected status: $ORACLE_STATUS"
-    add_check "oracle-responds" "FAIL" "Unexpected oracle status: $ORACLE_STATUS" "$DURATION"
+    fail "Oracle returned unexpected status: $ORACLE_HEALTH"
+    add_check "oracle-responds" "FAIL" "Unexpected oracle status: $ORACLE_HEALTH" "$DURATION"
   fi
 fi
 echo ""
@@ -414,7 +322,7 @@ if [ -z "$PROVISION_RESP" ]; then
 else
   API_KEY=$(echo "$PROVISION_RESP" | jq -r .api_key 2>/dev/null || echo "")
   if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-    fail "API key provision failed (response withheld: it contains the provisioned api_key)"
+    fail "API key provision failed: $PROVISION_RESP"
     E2E_OK=false
   else
     info "Got an API key (${#API_KEY} chars; not printed)"
@@ -443,15 +351,15 @@ if $E2E_OK; then
   STATUS_RESP=$(curl -sS --max-time 10 \
     -H "Authorization: Bearer $API_KEY" \
     "$GW/api/setup/status" 2>/dev/null || echo "")
-  OVERALL=$(safe_enum "$(echo "$STATUS_RESP" | jq -r .overall 2>/dev/null || echo "unknown")" ok incomplete error unknown)
+  OVERALL=$(echo "$STATUS_RESP" | jq -r .overall 2>/dev/null || echo "unknown")
   info "Overall setup status: $OVERALL"
 
   # Step 5: Check integrations
   info "Step 5: Integration status..."
   INT_RESP=$(curl -sS --max-time 10 "$GW/api/status/integrations" 2>/dev/null || echo "")
   if [ -n "$INT_RESP" ]; then
-    LIT_LIVE=$(safe_bool "$(echo "$INT_RESP" | jq -r '.litProtocol.configured' 2>/dev/null || echo "false")")
-    STARKNET_LIVE=$(safe_bool "$(echo "$INT_RESP" | jq -r '.starknet.configured' 2>/dev/null || echo "false")")
+    LIT_LIVE=$(echo "$INT_RESP" | jq -r '.litProtocol.configured' 2>/dev/null || echo "false")
+    STARKNET_LIVE=$(echo "$INT_RESP" | jq -r '.starknet.configured' 2>/dev/null || echo "false")
     info "Lit=$LIT_LIVE Starknet=$STARKNET_LIVE"
   fi
 
@@ -460,17 +368,12 @@ if $E2E_OK; then
   VALIDATE_RESP=$(curl -sS --max-time 10 \
     -H "Authorization: Bearer $API_KEY" \
     "$GW/api/auth/validate" 2>/dev/null || echo "")
-  # FC-8 round 4 (finding 2): validate via safe_bool before the compare, not
-  # just before the print — round 3 only fixed the print site.
-  IS_VALID=$(safe_bool "$(echo "$VALIDATE_RESP" | jq -r .valid 2>/dev/null || echo "false")")
+  IS_VALID=$(echo "$VALIDATE_RESP" | jq -r .valid 2>/dev/null || echo "false")
 
   if [ "$IS_VALID" = "true" ]; then
     info "API key validated successfully"
   else
-    # FC-8 round 2: $VALIDATE_RESP is the full raw response body, which can
-    # include the reflected Authorization header; only the validated
-    # boolean is safe to log here.
-    info "API key validation returned: valid=$IS_VALID"
+    info "API key validation returned: $VALIDATE_RESP"
   fi
 fi
 

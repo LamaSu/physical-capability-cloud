@@ -16,122 +16,93 @@
  *  10. escrow.release(0)
  *
  * Also drives the printer via PCC relay at each step so there's a physical artifact.
- *
- * FC-8 round 3 (astra pack 61b census closure): exported as `run(deps)` with
- * injected fetch/chain-clients/env (see fc8-round3-hp-full-chain.test.ts).
- * CLI behavior is preserved behind the entry guard at the bottom. Every
- * print site reaching a gateway- or oracle-derived value now logs a
- * VALIDATED projection, never a raw response body or object.
  */
 import {
   createWalletClient, createPublicClient, http,
   parseUnits, formatUnits, formatEther, keccak256, toBytes,
-  type Address, type Hex, type WalletClient, type PublicClient,
+  type Address, type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import {
-  safeLogJson, safeLogErrorName, safeLogId, safeLogBool, safeLogHex,
-  safeLogInt,
-} from "../packages/gateway/src/util/redact-log.js";
+import { readFileSync } from "node:fs";
 
-/** Thrown for a missing/malformed required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
-export class MissingEnvError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "MissingEnvError";
-  }
+const PK = process.env.PCC_GATEWAY_PRIVATE_KEY as Hex;
+if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
+  console.error("PCC_GATEWAY_PRIVATE_KEY missing or malformed");
+  process.exit(1);
 }
 
-const GATEWAY = "https://capability.network";
-const PROTOCOL = "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23" as Address;
-
-function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
-  const value = env[name]?.trim();
+/**
+ * Read a required secret from the environment and exit with a clear message
+ * when it is unset. Keys are NEVER committed to this repository (WP-A fold F8:
+ * the literals that used to sit here were exposed and are listed for
+ * revocation in docs/security/WILDCARD_KEY_ROTATION.md).
+ */
+function requireEnv(name: string, what: string): string {
+  const value = process.env[name]?.trim();
   if (!value) {
-    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+    console.error(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+    process.exit(1);
   }
   return value;
 }
 
-export interface RunDeps {
-  fetchImpl?: typeof fetch;
-  wallet?: WalletClient;
-  pub?: PublicClient;
-  env?: Record<string, string | undefined>;
-  contractsDir?: string;
-  reportPath?: string;
+const PCCAPIKEY = requireEnv("PCC_API_KEY", "a PCC API key (pcc_live_/pcc_test_)");
+const GATEWAY = "https://capability.network";
+const ORACLE_URL = "http://localhost:4100"; // oracle is on the same Spark host
+const ORACLE_KEY = requireEnv("PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+const KERNEL = "kernel-hp-printer";
+const PROTOCOL = "0x80aD204d2c4B659CBdAab11684AE1A9f0DC14b23" as Address;
+const REPO = "/home/ryangeorge/projects/physical-capability-cloud";
+
+// Load ABIs from compiled artifacts
+const usdcArt = JSON.parse(readFileSync(`${REPO}/packages/contracts/out/MockUSDC.sol/MockUSDC.json`, "utf8"));
+const protArt = JSON.parse(readFileSync(`${REPO}/packages/contracts/out/PCCProtocol.sol/PCCProtocol.json`, "utf8"));
+const escArt  = JSON.parse(readFileSync(`${REPO}/packages/contracts/out/MilestoneEscrow.sol/MilestoneEscrow.json`, "utf8"));
+
+const account = privateKeyToAccount(PK);
+const transport = http("https://sepolia.base.org");
+const wallet = createWalletClient({ account, chain: baseSepolia, transport });
+const pub = createPublicClient({ chain: baseSepolia, transport });
+
+const report: string[] = [];
+function L(s: string) { console.log(s); report.push(s); }
+function SEP() { L("─".repeat(72)); }
+
+async function writeC(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
+  L(`  [tx] ${label}`);
+  const nonce = await pub.getTransactionCount({ address: account.address });
+  const hash = await wallet.writeContract({ ...params, nonce });
+  L(`     submitted: ${hash}`);
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  L(`     mined: block ${receipt.blockNumber}, gas ${receipt.gasUsed}, status ${receipt.status}`);
+  await new Promise(r => setTimeout(r, 2000));
+  return { hash, receipt };
 }
 
-export interface RunResult {
-  report: string;
+async function deployC(label: string, abi: any, bytecode: Hex, args: any[]): Promise<{ hash: Hex; address: Address; receipt: any }> {
+  L(`  [deploy] ${label}`);
+  const nonce = await pub.getTransactionCount({ address: account.address });
+  const hash = await wallet.deployContract({ abi, bytecode, args, nonce });
+  L(`     submitted: ${hash}`);
+  const receipt = await pub.waitForTransactionReceipt({ hash });
+  L(`     mined: ${receipt.contractAddress} block ${receipt.blockNumber} gas ${receipt.gasUsed}`);
+  await new Promise(r => setTimeout(r, 2000));
+  return { hash, address: receipt.contractAddress as Address, receipt };
 }
 
-export async function run(deps: RunDeps = {}): Promise<RunResult> {
-  const env = deps.env ?? process.env;
-  const fetchImpl = deps.fetchImpl ?? fetch;
-  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
-  const reportPath = deps.reportPath ?? "/home/ryangeorge/hp-full-chain-report.txt";
+async function gwFetch(method: string, path: string, body?: any) {
+  const res = await fetch(`${GATEWAY}${path}`, {
+    method,
+    headers: { "Authorization": `Bearer ${PCCAPIKEY}`, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  try { return { status: res.status, data: JSON.parse(text) }; }
+  catch { return { status: res.status, data: text }; }
+}
 
-  const PK = env.PCC_GATEWAY_PRIVATE_KEY as Hex | undefined;
-  if (!PK || !PK.startsWith("0x") || PK.length !== 66) {
-    throw new MissingEnvError("PCC_GATEWAY_PRIVATE_KEY missing or malformed");
-  }
-  const PCCAPIKEY = requireEnv(env, "PCC_API_KEY", "a PCC API key (pcc_live_/pcc_test_)");
-  const ORACLE_URL = env.ORACLE_URL ?? "http://localhost:4100"; // oracle is on the same Spark host
-  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
-  const KERNEL = "kernel-hp-printer";
-
-  // Load ABIs from compiled artifacts
-  const usdcArt = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
-  const protArt = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
-  const escArt = JSON.parse(readFileSync(resolve(contractsDir, "out/MilestoneEscrow.sol/MilestoneEscrow.json"), "utf8"));
-
-  const account = privateKeyToAccount(PK);
-  const transport = http("https://sepolia.base.org");
-  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport });
-  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport });
-
-  const report: string[] = [];
-  function L(s: string) { console.log(s); report.push(s); }
-  function SEP() { L("─".repeat(72)); }
-
-  async function writeC(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
-    L(`  [tx] ${label}`);
-    const nonce = await pub.getTransactionCount({ address: account.address });
-    const hash = await wallet.writeContract({ ...params, nonce, account, chain: baseSepolia } as any);
-    L(`     submitted: ${hash}`);
-    const receipt: any = await pub.waitForTransactionReceipt({ hash });
-    L(`     mined: block ${receipt.blockNumber}, gas ${receipt.gasUsed}, status ${receipt.status}`);
-    await new Promise(r => setTimeout(r, 0));
-    return { hash, receipt };
-  }
-
-  async function deployC(label: string, abi: any, bytecode: Hex, args: any[]): Promise<{ hash: Hex; address: Address; receipt: any }> {
-    L(`  [deploy] ${label}`);
-    const nonce = await pub.getTransactionCount({ address: account.address });
-    const hash = await wallet.deployContract({ abi, bytecode, args, nonce, account, chain: baseSepolia } as any);
-    L(`     submitted: ${hash}`);
-    const receipt: any = await pub.waitForTransactionReceipt({ hash });
-    L(`     mined: ${receipt.contractAddress} block ${receipt.blockNumber} gas ${receipt.gasUsed}`);
-    await new Promise(r => setTimeout(r, 0));
-    return { hash, address: receipt.contractAddress as Address, receipt };
-  }
-
-  async function gwFetch(method: string, path: string, body?: any) {
-    const res = await fetchImpl(`${GATEWAY}${path}`, {
-      method,
-      headers: { "Authorization": `Bearer ${PCCAPIKEY}`, "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const text = await res.text();
-    try { return { status: res.status, data: JSON.parse(text) }; }
-    catch { return { status: res.status, data: text }; }
-  }
-
+async function main() {
   L("═".repeat(72));
   L("  kernel-hp-printer Full Chain E2E on Base Sepolia");
   L(`  ${new Date().toISOString()}`);
@@ -212,10 +183,8 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     maxCommands: 10,
     expiresInMinutes: 30,
   });
-  // FC-8 round 3: scopeId is server-returned; validate before logging (the
-  // real value, scopeIdRaw, is still what gets sent back to the gateway).
-  const scopeIdRaw = (scopeRes.data as any)?.id;
-  L(`     scope: ${safeLogId(scopeIdRaw)}`);
+  const scopeId = (scopeRes.data as any).id;
+  L(`     scope: ${scopeId}`);
 
   const printText = [
     "============================================",
@@ -238,16 +207,11 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   ].join("\n");
 
   const tcRes = await gwFetch("POST", `/api/relay/${KERNEL}/tool-call`, {
-    scopeId: scopeIdRaw,
+    scopeId,
     toolName: "printer_print_text",
     args: { text: printText, copies: 1 },
   });
-  const toolCallId = (tcRes.data as any)?.id;
-  // FC-8 round 4: status is not an id (finding 3 — safeLogId must never be
-  // used on a status/mode/network/type/fee/route/amount) and has no
-  // confidently-closed enum in this codebase, so it is omitted; only the
-  // id (fingerprinted) is logged.
-  L(`     tool call: ${safeLogId(toolCallId)}`);
+  L(`     tool call: ${(tcRes.data as any).id} status=${(tcRes.data as any).status}`);
   L("");
 
   SEP();
@@ -262,13 +226,10 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     timestamp: new Date().toISOString(),
     chain: "base-sepolia",
     chainId: 84532,
-    printResult: toolCallId,
+    printResult: (tcRes.data as any).id,
   };
   const evidenceHash = keccak256(toBytes(JSON.stringify(evidence)));
-  // FC-8 round 3: `evidence.printResult` is server-returned (the tool-call
-  // id); the HASH must cover the real value, but the LOGGED copy only shows
-  // it once validated, never raw.
-  L(`     evidence: ${JSON.stringify({ ...evidence, printResult: safeLogId(evidence.printResult) }, null, 2)}`);
+  L(`     evidence: ${JSON.stringify(evidence, null, 2)}`);
   L(`     hash: ${evidenceHash}`);
   await writeC("MilestoneEscrow.submitEvidence(0, hash)", {
     address: ESCROW, abi: escArt.abi, functionName: "submitEvidence",
@@ -287,17 +248,15 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     kernelId: KERNEL,
   };
   L(`     request: ${JSON.stringify(verifyBody)}`);
-  const oracleRes = await fetchImpl(`${ORACLE_URL}/verify`, {
+  const oracleRes = await fetch(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "x-oracle-key": ORACLE_KEY, "Content-Type": "application/json" },
     body: JSON.stringify(verifyBody),
   });
   const oracleText = await oracleRes.text();
+  L(`     HTTP ${oracleRes.status}: ${oracleText.slice(0, 600)}`);
   let oracleData: any = {};
   try { oracleData = JSON.parse(oracleText); } catch {}
-  // FC-8 round 2+3: never print the raw oracle body/object — only a
-  // validated boolean/presence summary.
-  L(`     HTTP ${safeLogInt(oracleRes.status)}: verified=${safeLogBool(oracleData?.verified)} hasAttestation=${safeLogBool(!!oracleData?.attestation)}`);
   L("");
 
   SEP();
@@ -316,9 +275,7 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
       : ("0x" as Hex),
   };
   L(`     attestation.evidenceHash: ${attestationStruct.evidenceHash}`);
-  // FC-8 round 3: the signature may be oracle-returned; validate it is
-  // actually hex-shaped before logging even a bounded prefix of it.
-  L(`     attestation.signature:    ${safeLogHex(attestationStruct.signature)}`);
+  L(`     attestation.signature:    ${attestationStruct.signature.slice(0, 20)}...`);
   await writeC("MilestoneEscrow.submitAttestation(0, attestation)", {
     address: ESCROW, abi: escArt.abi, functionName: "submitAttestation",
     args: [0n, attestationStruct],
@@ -359,12 +316,12 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
     "",
     "All steps verified on-chain, milestone released,",
     "printer driven via PCC relay. Full telemetry in",
-    `${reportPath}`,
+    "/home/ryangeorge/hp-full-chain-report.txt",
     "============================================",
     "",
   ].join("\n");
   await gwFetch("POST", `/api/relay/${KERNEL}/tool-call`, {
-    scopeId: scopeIdRaw, toolName: "printer_print_text",
+    scopeId, toolName: "printer_print_text",
     args: { text: finalText, copies: 1 },
   });
   L("     final page queued");
@@ -384,20 +341,8 @@ export async function run(deps: RunDeps = {}): Promise<RunResult> {
   L(`  Escrow:   ${ESCROW}`);
   L("");
 
-  const joined = report.join("\n");
-  writeFileSync(reportPath, joined);
-  return { report: joined };
+  const fs = await import("node:fs");
+  fs.writeFileSync("/home/ryangeorge/hp-full-chain-report.txt", report.join("\n"));
 }
 
-// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
-// of this module (as a test does) never executes main.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  run().catch(e => {
-    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; }
-    // FC-8 round 2: printing the whole error object serializes its message
-    // and stack (and any attached properties), which can carry a caught
-    // secret; only the bounded error-class name is safe to log here.
-    console.error("FAIL:", safeLogErrorName(e));
-    process.exitCode = 1;
-  });
-}
+main().catch(e => { console.error("FAIL:", e); process.exit(1); });
