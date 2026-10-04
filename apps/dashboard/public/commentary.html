@@ -94,6 +94,16 @@
     font-family: var(--font-mono);
     font-size: 11px;
   }
+  input.key {
+    background: var(--bg-3);
+    color: var(--text);
+    border: 1px solid var(--line-strong);
+    padding: 5px 10px;
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    width: 18ch;
+  }
   .toggle { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-family: var(--font-mono); font-size: 11px; color: var(--text-dim); }
   .toggle input { accent-color: var(--cyan); }
 
@@ -244,6 +254,9 @@
     </span>
   </div>
   <div class="controls">
+    <input type="password" id="api-key" class="key" placeholder="PCC API key" aria-label="PCC API key"
+      autocomplete="off" spellcheck="false"
+      title="Sent to this gateway as a bearer on the stream request. Kept in this field only: never stored." />
     <select id="topic" title="Event topic filter">
       <option value="all" selected>all</option>
       <option value="jobs">jobs</option>
@@ -278,6 +291,9 @@
         <div class="placeholder" id="placeholder">
           Press <strong>Start</strong> to subscribe to the live event stream and begin narration.
           <br /><br />
+          The stream needs your PCC API key: paste it in the key field. It is sent to this gateway only, and
+          kept in the field only (never stored), so a reload asks for it again.
+          <br /><br />
           This page consumes <code>POST /api/commentary/stream</code> as an SSE feed. Each event window
           is summarized by Claude into a sports-broadcaster-style line. If <code>ANTHROPIC_API_KEY</code>
           is not configured on the gateway, raw events still appear on the left and a friendly notice
@@ -303,6 +319,7 @@
     eventsPerMin: $("events-per-min"),
     liveIndicator: $("live-indicator"),
     liveText: $("live-text"),
+    apiKey: $("api-key"),
     topic: $("topic"),
     btnStart: $("btn-start"),
     btnPause: $("btn-pause"),
@@ -463,6 +480,18 @@
     els.narration.appendChild(div);
   }
 
+  function showNeedsAuth(status) {
+    ensurePlaceholderHidden();
+    const div = document.createElement("div");
+    div.className = "placeholder";
+    div.style.borderColor = "rgba(255, 170, 0, 0.5)";
+    div.innerHTML =
+      "<strong style='color: var(--amber);'>Not signed in.</strong><br/><br/>" +
+      "The gateway answered " + escapeHtml(status) + " to the stream request. " +
+      "Paste your PCC API key in the key field and press Start.";
+    els.narration.appendChild(div);
+  }
+
   function escapeHtml(s) {
     return String(s).replace(/[&<>\"']/g, (c) =>
       ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[c]
@@ -539,10 +568,18 @@
     const controller = new AbortController();
     state.controller = controller;
 
+    // The gateway honors a SIWE session cookie only beside the API key the
+    // session was verified under (N103), so the request carries the key. The
+    // key stays in its field: it is never stored, and the dashboard's own
+    // stored key is not read here (lib/authorized-fetch.ts owns that slot).
+    const headers = { "Content-Type": "application/json" };
+    const apiKey = els.apiKey.value.trim();
+    if (apiKey) headers.Authorization = "Bearer " + apiKey;
+
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ topic: els.topic.value, windowMs: 1500 }),
         credentials: "include",
         signal: controller.signal,
@@ -551,7 +588,8 @@
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         setLive("error", "http " + res.status);
-        showNeedsKey("Gateway returned " + res.status + ". " + text.slice(0, 300));
+        if (res.status === 401 || res.status === 403) showNeedsAuth(res.status);
+        else showNeedsKey("Gateway returned " + res.status + ". " + text.slice(0, 300));
         stopStream();
         return;
       }
