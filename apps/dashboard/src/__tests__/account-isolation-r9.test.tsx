@@ -18,12 +18,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { storedKey } from "./account-record.js";
 
 // Built at run time: a key-shaped literal in source trips the secret scanners (pack and push gates).
 const KEY_A = ["pcc", "test", "r9keyA0123456789abcdef"].join("_");
 const KEY_B = ["pcc", "test", "r9keyB0123456789abcdef"].join("_");
 
-const original = { setItem: Storage.prototype.setItem, removeItem: Storage.prototype.removeItem };
+const original = { setItem: Storage.prototype.setItem };
 const probe = { authorization: undefined as string | null | undefined };
 
 beforeEach(() => {
@@ -47,7 +48,6 @@ beforeEach(() => {
 
 afterEach(() => {
   Storage.prototype.setItem = original.setItem;
-  Storage.prototype.removeItem = original.removeItem;
   vi.unstubAllGlobals();
   localStorage.clear();
 });
@@ -90,69 +90,63 @@ function teardownConfirmed(generation: typeof import("../lib/account-generation.
   generation.confirmWalletSessionEnded(generation.accountGeneration() ?? "");
 }
 
-/** The browser refuses one kind of write to the key's slot only (a full quota, or a blocked write). */
-function refuseKeySlot(op: "setItem" | "removeItem", how: "throw" | "ignore" = "throw") {
-  if (op === "setItem") {
-    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-      if (key !== "pcc-api-key") return original.setItem.call(this, key, value);
-      if (how === "throw") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
-    };
-  } else {
-    Storage.prototype.removeItem = function (this: Storage, key: string) {
-      if (key !== "pcc-api-key") return original.removeItem.call(this, key);
-      if (how === "throw") throw new DOMException("The operation is insecure.", "SecurityError");
-    };
-  }
+/**
+ * The browser refuses writes to the key's slot only (a full quota, or a blocked write). Since
+ * DECISIONS 05:04 a sign-in and a sign-out are each one write of the slot's record.
+ */
+function refuseKeySlot(how: "throw" | "ignore" = "throw") {
+  Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+    if (key !== "pcc-api-key") return original.setItem.call(this, key, value);
+    if (how === "throw") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+  };
 }
 
 describe("19i HIGH: a key change the browser refused is not made", () => {
   // Since 19k a refused write is "unconfirmed", not "unchanged": a write can go through and then
   // throw, and a stale read looks like a dropped write. Every listener hears it, and the tab acts
-  // as the slot holds (DECISIONS 04:14), which here kept A.
+  // as the slot holds (DECISIONS 04:14), which here kept A. Since DECISIONS 05:04 the generation is
+  // in the same record, so a write that didn't land moved nothing: no change is pending.
   it("login(B) fails closed when the browser won't save B: this tab, the slot and the next load all stay A", async () => {
-    const { store, generation, sends } = await page();
+    const { store, sends } = await page();
     expect(sends()).toBe(KEY_A);
-    refuseKeySlot("setItem");
+    refuseKeySlot();
     const ok = await store.useAuthStore.getState().login(KEY_B);
     expect(ok, "login reports the refusal").toBe(false);
-    expect(sends(), "nothing while the change login began is pending").toBeNull();
-    teardownConfirmed(generation);
-    expect(sends(), "then A, which the slot kept").toBe(KEY_A);
-    expect(localStorage.getItem("pcc-api-key")).toBe(KEY_A);
+    expect(sends(), "this tab still acts as A, as the slot does").toBe(KEY_A);
+    expect(storedKey()).toBe(KEY_A);
     expect(store.useAuthStore.getState().error, "the reason, for the login page").toMatch(/couldn't confirm it saved your API key/);
     expect(await aFreshLoadSends()).toBe(KEY_A);
   });
 
   it("a silently dropped write fails too; it can't be told from a stale read (astra 19j), and the tab acts as the slot, which kept A", async () => {
-    const { store, generation, sends } = await page();
-    refuseKeySlot("setItem", "ignore");
+    const { store, sends } = await page();
+    refuseKeySlot("ignore");
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
-    expect(sends(), "not B: nothing while the change is pending").toBeNull();
-    teardownConfirmed(generation);
-    expect(sends(), "then the slot's A").toBe(KEY_A);
+    expect(sends(), "the slot's A, never B").toBe(KEY_A);
     expect(await aFreshLoadSends(), "the slot kept A").toBe(KEY_A);
   });
 
   it("logout() when the browser won't remove A: this tab stays signed in as A, as the slot is, and says why", async () => {
     const { store, generation, sends } = await page();
     const before = generation.accountGeneration();
-    refuseKeySlot("removeItem");
+    const epoch = store.useAuthStore.getState().keyEpoch;
+    refuseKeySlot();
     const result = store.useAuthStore.getState().logout();
     expect(store.useAuthStore.getState().isAuthenticated).toBe(true);
-    expect(localStorage.getItem("pcc-api-key")).toBe(KEY_A);
+    expect(storedKey()).toBe(KEY_A);
     expect(result).toEqual({ status: "unconfirmed", reason: expect.stringMatching(/couldn't confirm it removed your saved API key/) });
     expect(store.useAuthStore.getState().lastSignOut, "kept for the surfaces, above the account boundary").toEqual(result);
-    // A refusal can't be told from a removal that went through and then threw (astra 19k): every tab is told.
-    expect(generation.accountGeneration(), "every tab sees the change pending").not.toBe(before);
-    expect(sends(), "nothing while it is pending").toBeNull();
-    teardownConfirmed(generation);
-    expect(sends(), "then A, as the slot is").toBe(KEY_A);
+    // A refusal can't be told from a removal that went through and then threw (astra 19k), so every
+    // listener hears it and the boundary runs. Nothing landed here, generation included.
+    expect(store.useAuthStore.getState().keyEpoch, "the account boundary runs").not.toBe(epoch);
+    expect(generation.accountGeneration(), "the record, generation and all, is as it was").toBe(before);
+    expect(sends(), "this tab acts as A, as the slot does").toBe(KEY_A);
     expect(await aFreshLoadSends()).toBe(KEY_A);
   });
 
   it("a refusal's reason is cleared by the next attempt, so a later invalid key isn't blamed on storage", async () => {
     const { store } = await page();
-    refuseKeySlot("setItem");
+    refuseKeySlot();
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
     expect(store.useAuthStore.getState().error).toMatch(/couldn't confirm it saved your API key/);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "invalid key" }), { status: 401 })));
@@ -165,10 +159,10 @@ describe("19i HIGH: a key change the browser refused is not made", () => {
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(true);
     teardownConfirmed(generation);
     expect(sends()).toBe(KEY_B);
-    expect(localStorage.getItem("pcc-api-key")).toBe(KEY_B);
+    expect(storedKey()).toBe(KEY_B);
     expect(store.useAuthStore.getState().logout(), "logout reports success").toEqual({ status: "signed-out" });
     expect(sends()).toBeNull();
-    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(storedKey()).toBeNull();
     expect(await aFreshLoadSends()).toBeNull();
   });
 });

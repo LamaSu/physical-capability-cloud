@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { fetchWithKey } from "../lib/gateway-base.js";
 import { hasStoredApiKey, onStoredKeyChange, setStoredApiKey, type KeyWrite } from "../lib/authorized-fetch.js";
-import { beginAccountChange } from "../lib/account-generation.js";
 
 /**
  * How a sign-out came out (DECISIONS 2026-10-04 04:14). Every surface that
@@ -25,11 +24,7 @@ interface AuthState {
   // -- API Key auth (primary gate) --
   /** Whether the slot held a key at the last change. The key itself is never in the store. */
   isAuthenticated: boolean;
-  /**
-   * Bumped on every change of the stored key, whoever makes it
-   * (onStoredKeyChange), and when a login may have begun an account change
-   * it couldn't confirm (astra 19l). Never the key.
-   */
+  /** Bumped on every change of the stored key, whoever makes it (onStoredKeyChange). Never the key. */
   keyEpoch: number;
   login: (key: string) => Promise<boolean>;
   /** Signs out, and says how it came out. Also kept as lastSignOut. */
@@ -64,8 +59,6 @@ const KEY_UNCONFIRMED_SAVE =
 const KEY_UNCONFIRMED_REMOVAL =
   "This browser couldn't confirm it removed your saved API key, so you may still be signed in here or in another tab. Clear this site's data to sign out.";
 const KEY_CHANGE_BUSY = "Another sign-in or sign-out was under way, so this one didn't happen. Try again.";
-const SIGN_IN_NOT_SAVED =
-  "This browser couldn't save your sign-in, so you're not signed in as that account. Check that this site may store data, then sign in again.";
 
 export const useAuthStore = create<AuthState>((set) => ({
   // -- API Key auth --
@@ -79,22 +72,18 @@ export const useAuthStore = create<AuthState>((set) => ({
       // The candidate key goes to the configured gateway and nowhere else.
       const res = await fetchWithKey("/api/auth/validate", key);
       if (!res.ok) return false;
-      // The generation moves first, so a tab that sees this key sees the
-      // change pending (astra 19g). If storage doesn't show it moved, store
-      // nothing (fail closed). The move may have landed all the same (astra
-      // 19l): every request then waits for a teardown to confirm it, so this
-      // tab's account boundary runs, as for any change. This store can't tell
+      // The key and a new generation are ONE write (DECISIONS 05:04): a tab
+      // that sees the key sees the change pending with it, and every tab
+      // withholds the key until a teardown confirms the change (astra 19g,
+      // 19l). The slot is the account every tab, this one included, and the
+      // next load act as (DECISIONS 04:14). A save it didn't confirm is
+      // reported, never taken as made or as refused (astra 19i, 19j, 19k), and
+      // every listener hears it either way, so the account boundary runs and
+      // its teardown can confirm a change that did land. This store can't tell
       // the key from the one in the slot (N50 keeps the key out of its reach),
       // so every login is a change: a second login with the same key ends the
       // wallet session and remounts, which fails closed.
-      if (!beginAccountChange()) {
-        set((s) => ({ keyEpoch: s.keyEpoch + 1, error: SIGN_IN_NOT_SAVED }));
-        return false;
-      }
-      // The slot is the account every tab, this one included, and the next
-      // load act as (DECISIONS 04:14). A save it didn't confirm is reported,
-      // never taken as made or as refused (astra 19i, 19j, 19k).
-      const saved = adoptApiKey(key);
+      const saved = setStoredApiKey(key, { accountChange: true });
       if (saved === "committed") return true;
       set({ error: saved === "busy" ? KEY_CHANGE_BUSY : KEY_UNCONFIRMED_SAVE });
       return false;
@@ -104,23 +93,15 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: (): SignOutResult => {
-    // The key goes first, then the generation moves, so every tab ends the
-    // wallet session (astra 19e; the state between the two writes has no
-    // authenticated shell, 19h). The key change clears the wallet fields in the
-    // same set(), so the identity change is reported once (onIdentityChange).
-    // The teardown it starts reads the generation only after its first await,
-    // under the wallet-session lock (lib/wallet-session.ts), so it sees the move.
-    let removal: KeyWrite | undefined;
-    try {
-      removal = setStoredApiKey(null);
-    } finally {
-      // Unless nothing was done (another change was under way), the account
-      // may have changed: the key went, its removal wasn't confirmed, or a
-      // listener failed after it (removal unset; the error goes on). Every
-      // other tab must see it pending, whether or not a key was held before
-      // (astra 19i, 19j, 19k).
-      if (removal !== "busy") beginAccountChange();
-    }
+    // The key's removal and a new generation are ONE write (DECISIONS 05:04),
+    // so every tab ends the wallet session (astra 19e), with no state between
+    // two writes (19h), whether or not a key was held before (19k). The key
+    // change clears the wallet fields in the same set(), so the identity
+    // change is reported once (onIdentityChange). The teardown it starts reads
+    // the generation after its first await, under the wallet-session lock
+    // (lib/wallet-session.ts). A change refused as "busy" wrote nothing. A
+    // listener's error goes on after every listener heard (astra A03e N1).
+    const removal: KeyWrite = setStoredApiKey(null, { accountChange: true });
     const result: SignOutResult =
       removal === "committed"
         ? { status: "signed-out" }
@@ -164,10 +145,11 @@ onStoredKeyChange(() => {
 });
 
 /**
- * Store `key` as the signed-in key, or sign out with null. login() calls it
- * after the gateway accepts the key; tests call it directly. It is
- * write-only: writing a key cannot leak one. Says how the browser's slot took
- * the change (KeyWrite: astra 19i, 19j, 19k; DECISIONS 04:14).
+ * Store `key` as the signed-in key, or sign out with null, without moving the
+ * account generation: tests call it directly. login() and logout() store
+ * through setStoredApiKey with the account change. It is write-only: writing
+ * a key cannot leak one. Says how the browser's slot took the change
+ * (KeyWrite: astra 19i, 19j, 19k; DECISIONS 04:14).
  */
 export function adoptApiKey(key: string | null): KeyWrite {
   return setStoredApiKey(key);
@@ -189,8 +171,7 @@ export function onIdentityChange(onChange: () => void): () => void {
 /**
  * Calls `onChange` whenever the signed-in account may have changed: any change
  * of the stored key, here or in another tab, including login() with a key
- * while signed in, and a login whose generation move storage couldn't
- * confirm (astra 19l). App resets every account-scoped store on it and remounts
+ * while signed in. App resets every account-scoped store on it and remounts
  * the signed-in shell (astra 19c). The account follows the key, not
  * isAuthenticated: a key replaced while signed in is a different account. The
  * store can't tell one key from another (N50), so every key change counts as

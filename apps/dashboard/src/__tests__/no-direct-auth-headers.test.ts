@@ -621,7 +621,18 @@ describe("only lib/authorized-fetch.ts holds the API key, and only fetchWithKey 
   }
 
   it("the key's owner and the auth store export exactly the boundary's functions", () => {
-    expect(Object.keys(keyOwner).sort()).toEqual(["authorizedFetch", "hasStoredApiKey", "installGatewayKeyGuard", "onStoredKeyChange", "setStoredApiKey"]);
+    // The account generation lives in the key's record (DECISIONS 2026-10-04 05:04), so its readers are here too:
+    // a generation token, a boolean and a marker write. None returns the key.
+    expect(Object.keys(keyOwner).sort()).toEqual([
+      "accountGeneration",
+      "authorizedFetch",
+      "confirmWalletSessionEnded",
+      "hasStoredApiKey",
+      "installGatewayKeyGuard",
+      "onStoredKeyChange",
+      "setStoredApiKey",
+      "walletSessionEnding",
+    ]);
     // onAccountChange is #354's account boundary: it is told the key changed (keyEpoch), never what it is.
     expect(Object.keys(store).sort()).toEqual(["adoptApiKey", "onAccountChange", "onIdentityChange", "useAuthStore"]);
   });

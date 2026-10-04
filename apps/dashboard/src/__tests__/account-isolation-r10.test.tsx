@@ -18,6 +18,7 @@
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { storedKey } from "./account-record.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -107,20 +108,16 @@ async function aFreshLoadSends(): Promise<string | null> {
   return sentBy(owner.authorizedFetch);
 }
 
-/** The key slot's write goes through, then reading the slot fails: the outcome can't be confirmed. */
-function commitThenUnreadable(op: "setItem" | "removeItem") {
+/**
+ * The key slot's write goes through, then reading the slot fails: the outcome can't be confirmed.
+ * Since DECISIONS 05:04 a sign-in and a sign-out are each one write of the slot's record.
+ */
+function commitThenUnreadable() {
   let committed = false;
-  if (op === "setItem") {
-    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-      original.setItem.call(this, key, value);
-      if (key === "pcc-api-key") committed = true;
-    };
-  } else {
-    Storage.prototype.removeItem = function (this: Storage, key: string) {
-      original.removeItem.call(this, key);
-      if (key === "pcc-api-key") committed = true;
-    };
-  }
+  Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+    original.setItem.call(this, key, value);
+    if (key === "pcc-api-key") committed = true;
+  };
   Storage.prototype.getItem = function (this: Storage, key: string) {
     if (key === "pcc-api-key" && committed) throw new DOMException("The operation is insecure.", "SecurityError");
     return original.getItem.call(this, key);
@@ -130,7 +127,7 @@ function commitThenUnreadable(op: "setItem" | "removeItem") {
 describe("19j HIGH: a write that committed but can't be confirmed leaves no previous key live", () => {
   it("login(B): B is saved but can't be read back; this tab must not stay A", async () => {
     const { store, sends } = await page();
-    commitThenUnreadable("setItem");
+    commitThenUnreadable();
     const ok = await store.useAuthStore.getState().login(KEY_B);
     expect(sends(), "this tab no longer acts as A (it holds no key)").toBeNull();
     expect(ok, "login can't report success it couldn't confirm").toBe(false);
@@ -141,7 +138,7 @@ describe("19j HIGH: a write that committed but can't be confirmed leaves no prev
   it("logout(): A is removed but can't be confirmed; this tab must not stay A, and every tab is told", async () => {
     const { store, generation, sends } = await page();
     const before = generation.accountGeneration();
-    commitThenUnreadable("removeItem");
+    commitThenUnreadable();
     const result = store.useAuthStore.getState().logout();
     expect(sends(), "this tab no longer acts as A").toBeNull();
     expect(generation.accountGeneration(), "the change may have been made, so every tab sees it pending").not.toBe(before);
@@ -153,15 +150,14 @@ describe("19j HIGH: a write that committed but can't be confirmed leaves no prev
   });
 
   it("a write that doesn't throw but reads back the old value can't be told from a stale read: the tab acts as the slot", async () => {
-    const { store, generation, sends } = await page();
+    const { store, sends } = await page();
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-      if (key !== "pcc-api-key") original.setItem.call(this, key, value); // the key's write is silently dropped
+      if (key !== "pcc-api-key") original.setItem.call(this, key, value); // the record's write is silently dropped
     };
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
-    expect(sends(), "nothing while the change is pending").toBeNull();
     expect(store.useAuthStore.getState().error).toMatch(/couldn't confirm/i);
-    generation.confirmWalletSessionEnded(generation.accountGeneration() ?? "");
-    expect(sends(), "then the slot's A: no key kept here differs from it (DECISIONS 04:14)").toBe(KEY_A);
+    // The record, generation and all, is as it was (DECISIONS 05:04): no change is pending.
+    expect(sends(), "the slot's A: no key kept here differs from it (DECISIONS 04:14)").toBe(KEY_A);
   });
 });
 
@@ -183,9 +179,9 @@ describe("19j MEDIUM: the shell says why a sign-out didn't happen", () => {
     for (let i = 0; i < 10; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
     const disconnect = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Disconnect");
     expect(disconnect, "the shell's Disconnect button").toBeDefined();
-    Storage.prototype.removeItem = function (this: Storage, key: string) {
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
       if (key === "pcc-api-key") throw new DOMException("The operation is insecure.", "SecurityError");
-      return original.removeItem.call(this, key);
+      return original.setItem.call(this, key, value);
     };
     await act(async () => disconnect!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     for (let i = 0; i < 5; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
@@ -217,7 +213,7 @@ describe("19j: a sign-out that couldn't be confirmed lands on the login page, wh
     for (let i = 0; i < 10; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
     const disconnect = [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === "Disconnect");
     expect(disconnect).toBeDefined();
-    commitThenUnreadable("removeItem");
+    commitThenUnreadable();
     await act(async () => disconnect!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     for (let i = 0; i < 20; i++) await act(async () => new Promise((r) => setTimeout(r, 10)));
     restoreStorage();
@@ -258,7 +254,7 @@ describe("19j MEDIUM: a listener can't sign in again during logout", () => {
     });
     expect(() => store.useAuthStore.getState().logout()).toThrow("a listener failed");
     expect(sends()).toBeNull();
-    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(storedKey()).toBeNull();
     expect(generation.accountGeneration(), "every tab sees the change pending").not.toBe(before);
   });
 });

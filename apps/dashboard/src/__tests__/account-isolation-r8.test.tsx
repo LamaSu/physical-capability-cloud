@@ -25,6 +25,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { installFakeWebLocks } from "./fake-web-locks.js";
+import { storedKey } from "./account-record.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -307,8 +308,10 @@ async function everythingSettles() {
 
 
 // ---------------------------------------------------------------------------
-// Storage as another process sees it: the writes to the API key and the
-// generation, in order, and what storage held after the first of them.
+// Storage as another process sees it: the writes to the account's slots, in
+// order, and what storage held after the first of them. Since DECISIONS 05:04
+// the key and its generation are one record, so a login or logout is one
+// write; the generation's own slot is kept here to show nothing writes it.
 // ---------------------------------------------------------------------------
 
 const ACCOUNT_SLOTS = new Set(["pcc-api-key", "pcc-account-generation"]);
@@ -387,8 +390,8 @@ async function aSignedIn(): Promise<Tab> {
   return a;
 }
 
-describe("19g CRITICAL: the next account's key is stored only after the generation moved", () => {
-  it("a tab opened between the two writes doesn't mount beside the previous account's cookie, or adopt it", async () => {
+describe("19g CRITICAL: the next account's key is never stored apart from its generation", () => {
+  it("a tab opened right after the login's one write doesn't mount beside the previous account's cookie, or adopt it", async () => {
     await aSignedIn();
     const b = await openTab("B");
     gateway.logoutsToAnswer = 0; // B's teardown waits at the gateway: A's cookie stays live meanwhile
@@ -397,7 +400,7 @@ describe("19g CRITICAL: the next account's key is stored only after the generati
       expect(await b.store.getState().login(KEY_B)).toBe(true);
     });
     stopRecording();
-    expect(accountWrites.map((w) => w.key).sort(), "login wrote the key and the generation").toEqual(["pcc-account-generation", "pcc-api-key"]);
+    expect(accountWrites.map((w) => w.key), "login writes the key and its generation as ONE record: no tab can open between them").toEqual(["pcc-api-key"]);
     const c = await openTabSeeing("C", snapshot!);
     await settle();
     await deliver(accountWrites);
@@ -407,7 +410,7 @@ describe("19g CRITICAL: the next account's key is stored only after the generati
     expect(gateway.siweCookie, "A's cookie is gone in the end").toBe(false);
   }, 30_000);
 
-  it("a tab that hears of the generation's move before the key's holds its shell and drops the wallet session", async () => {
+  it("one storage event brings the key and its generation: a tab that hears it holds its shell and drops the wallet session", async () => {
     const a = await aSignedIn();
     const b = await openTab("B");
     gateway.logoutsToAnswer = 0;
@@ -416,38 +419,38 @@ describe("19g CRITICAL: the next account's key is stored only after the generati
       expect(await b.store.getState().login(KEY_B)).toBe(true);
     });
     stopRecording();
-    await deliver(accountWrites.filter((w) => w.key === "pcc-account-generation")); // the key's event hasn't reached A yet
+    expect(accountWrites.map((w) => w.key), "one write, so one event").toEqual(["pcc-api-key"]);
+    await deliver(accountWrites);
     expect(transitioning(a), "A holds its shell while the change is pending").toBe(true);
     expect(a.store.getState().sessionToken, "A dropped its SIWE session").toBeNull();
-    await deliver(accountWrites.filter((w) => w.key === "pcc-api-key"));
     await everythingSettles();
     expect([...new Set(violations)]).toEqual([]);
     expect(gateway.siweCookie).toBe(false);
   }, 30_000);
 
-  it("not reproduced for logout: a tab opened between its two writes shows the login page, with no shell or session", async () => {
+  it("logout is one write too: a tab opened right after it shows no shell or session, and the login page once the teardown confirms", async () => {
     await aSignedIn();
     const b = await openTab("B");
     gateway.logoutsToAnswer = 0;
     recordAccountWrites();
     await act(async () => b.store.getState().logout());
     stopRecording();
-    expect(accountWrites.map((w) => w.key), "logout removes the key, then moves the generation").toEqual(["pcc-api-key", "pcc-account-generation"]);
+    expect(accountWrites.map((w) => w.key), "logout removes the key and moves the generation in one write").toEqual(["pcc-api-key"]);
     const c = await openTabSeeing("C", snapshot!);
     await settle();
-    expect(c.container.querySelector("#api-key"), "C shows the login form").not.toBeNull();
     const buttons = [...c.container.querySelectorAll("button")].map((el) => (el.textContent ?? "").trim());
     expect(buttons.some((t) => t === "Connect Wallet" || t === "Sign In" || t === "Disconnect"), "C shows no shell").toBe(false);
     expect(c.store.getState().sessionToken, "C adopted no session").toBeNull();
     await deliver(accountWrites);
     await everythingSettles();
+    expect(c.container.querySelector("#api-key"), "C shows the login form once the change is confirmed").not.toBeNull();
     expect(gateway.siweCookie, "A's cookie is gone in the end").toBe(false);
   }, 30_000);
 
-  it("a login whose generation can't move stores no key: an interrupted change fails closed", async () => {
+  it("a login whose record can't be written stores nothing: an interrupted change fails closed", async () => {
     const b = await openTab("B");
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-      if (key === "pcc-account-generation") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+      if (key === "pcc-api-key") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
       storageOriginal.setItem.call(this, key, value);
     };
     let ok: boolean | undefined;
@@ -456,7 +459,7 @@ describe("19g CRITICAL: the next account's key is stored only after the generati
     });
     stopRecording();
     expect(ok, "the login reports failure").toBe(false);
-    expect(localStorage.getItem("pcc-api-key"), "the next account's key isn't stored").toBe(KEY_A);
+    expect(storedKey(), "the next account's key isn't stored").toBe(KEY_A);
     expect(sentKey(b)).toBe(KEY_A);
   });
 });

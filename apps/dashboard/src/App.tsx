@@ -7,7 +7,7 @@ import { useUIStore } from "./stores/ui-store.js";
 import { useAuthStore, onIdentityChange, onAccountChange } from "./stores/auth-store.js";
 import { resetAccountScopedState } from "./lib/account-scope.js";
 import { endWalletSession } from "./lib/wallet-session.js";
-import { onAccountChangePending, walletSessionEnding } from "./lib/account-generation.js";
+import { walletSessionEnding } from "./lib/account-generation.js";
 import { LoginPage } from "./pages/LoginPage.js";
 import { PageTransition } from "./components/PageTransition.js";
 import { NotificationToasts } from "./components/NotificationToasts.js";
@@ -140,7 +140,8 @@ onIdentityChange(() => queryClient.clear());
 //    can't confirm the cookie is gone, the next account doesn't load (fail
 //    closed), and the page offers a retry.
 // 4. Until a teardown confirms it, the account change is pending for the
-//    whole browser (astra 19e, 19f; lib/account-generation.ts). The next
+//    whole browser (astra 19e, 19f; lib/account-generation.ts), and no
+//    request carries a key (lib/authorized-fetch.ts). The next
 //    account's key is already stored, so a page reloaded or opened before
 //    then would otherwise mount the next account straight away, beside the
 //    previous account's cookie. A page that loads while it is pending
@@ -173,13 +174,6 @@ function accountChanged(): void {
 }
 
 onAccountChange(accountChanged);
-
-// Another tab's change can reach this tab as the generation's move alone, before
-// its key does (lib/account-generation.ts). It is a change all the same: end the
-// wallet session before this tab shows anything more (astra 19g).
-onAccountChangePending(() => {
-  if (account.transition === "settled") accountChanged();
-});
 
 /** The account boundary: its epoch keys the shell; while it is in transition the shell isn't mounted. */
 function useAccountBoundary(): typeof account {

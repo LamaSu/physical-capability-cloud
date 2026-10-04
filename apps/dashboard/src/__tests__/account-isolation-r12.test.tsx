@@ -11,12 +11,20 @@
  * change stayed pending in storage, every request was withheld, and no
  * teardown started to end it.
  *
+ * The steward's fix by construction (DECISIONS 05:04): the key and its
+ * generation are ONE record in one slot, written by one write and read by one
+ * read. These tests were reproduced at a7bb0c3a in the two-slot form, and are
+ * written here against the record. The interleaving test injects another
+ * tab's login at EVERY storage read one request makes, counted at run time,
+ * so it holds whatever reads the gate does.
+ *
  * @vitest-environment jsdom
  */
 
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { KEY_SLOT, storeRecord } from "./account-record.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -92,44 +100,62 @@ async function page() {
 }
 
 describe("19l HIGH: another tab's login landing between the gate's reads never sends B beside A's cookie", () => {
-  const READS = ["pcc-api-key", "pcc-account-generation", "pcc-wallet-session-confirmed"] as const;
-  const cases = READS.flatMap((at) => (["old", "new"] as const).map((returns) => ({ at, returns })));
+  /** A is signed in and settled: A's SIWE cookie may be live. */
+  function aSettled() {
+    storeRecord(KEY_A, "g0", original.setItem);
+    original.setItem.call(localStorage, "pcc-wallet-session-confirmed", "g0");
+  }
 
-  it.each(cases)("the login lands during the read of $at, which returns the $returns value", async ({ at, returns }) => {
-    // A is signed in and settled: A's SIWE cookie may be live.
-    localStorage.setItem("pcc-api-key", KEY_A);
-    localStorage.setItem("pcc-account-generation", "g0");
-    localStorage.setItem("pcc-wallet-session-confirmed", "g0");
+  it("at every storage read one request makes, whether the read returns the old value or the new", async () => {
+    aSettled();
     const { sends } = await page();
     expect(sends()).toBe(KEY_A);
-    let landed = false;
+    // Count the reads one request makes.
+    let reads = 0;
     Storage.prototype.getItem = function (this: Storage, key: string) {
-      if (key !== at || landed) return original.getItem.call(this, key);
-      const before = original.getItem.call(this, key);
-      // Another tab's login, in its order: the generation moves, then B is stored.
-      original.setItem.call(this, "pcc-account-generation", "g1");
-      original.setItem.call(this, "pcc-api-key", KEY_B);
-      landed = true;
-      return returns === "old" ? before : original.getItem.call(this, key);
+      reads += 1;
+      return original.getItem.call(this, key);
     };
-    const sent = sends();
-    expect(landed, "the login landed during the request").toBe(true);
-    expect(sent, "B never goes out while its change is pending: A's cookie may still be live").not.toBe(KEY_B);
+    sends();
+    restoreStorage();
+    expect(reads, "the request reads storage").toBeGreaterThan(0);
+    for (let at = 0; at < reads; at++) {
+      for (const returns of ["old", "new"] as const) {
+        restoreStorage();
+        localStorage.clear();
+        aSettled();
+        let n = 0;
+        let landed = false;
+        Storage.prototype.getItem = function (this: Storage, key: string) {
+          if (n++ !== at) return original.getItem.call(this, key);
+          const before = original.getItem.call(this, key);
+          // Another tab's login: B and a new generation, in one write of the record.
+          storeRecord(KEY_B, "g1", original.setItem);
+          landed = true;
+          return returns === "old" ? before : original.getItem.call(this, key);
+        };
+        const sent = sends();
+        restoreStorage();
+        expect(landed, `the login landed at read ${at}`).toBe(true);
+        expect(sent, `read ${at} returned the ${returns} value: B never goes out while its change is pending`).not.toBe(KEY_B);
+      }
+    }
   });
 });
 
-describe("19l MEDIUM: a generation write that lands and then throws doesn't leave a change pending with nothing to end it", () => {
-  function generationWriteLandsThenThrows() {
+describe("19l MEDIUM: an account change's write that lands and then throws doesn't leave a change pending with nothing to end it", () => {
+  /** The write that carries the account change (the record, since DECISIONS 05:04) lands, then throws. */
+  function changeWriteLandsThenThrows() {
     Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
       original.setItem.call(this, key, value);
-      if (key === "pcc-account-generation") throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+      if (key === KEY_SLOT) throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
     };
   }
 
   it("login(B): the account boundary runs, and once its teardown confirms, requests carry the slot's key", async () => {
     const { store, generation, sends } = await page();
     const epoch = store.useAuthStore.getState().keyEpoch;
-    generationWriteLandsThenThrows();
+    changeWriteLandsThenThrows();
     const ok = await store.useAuthStore.getState().login(KEY_B);
     restoreStorage();
     expect(generation.walletSessionEnding(), "the move landed: a change is pending").toBe(true);
@@ -139,19 +165,19 @@ describe("19l MEDIUM: a generation write that lands and then throws doesn't leav
     expect(sends()).toBe(KEY_B);
   });
 
-  it("a move storage can't confirm at all: login stores nothing and says why, and the boundary still runs, so a move that landed gets its teardown", async () => {
-    const { store } = await page();
+  it("a change storage can't confirm at all: login says so, and the boundary still runs, so a change that landed gets its teardown", async () => {
+    const { store, generation } = await page();
     const epoch = store.useAuthStore.getState().keyEpoch;
     Storage.prototype.getItem = function (this: Storage, key: string) {
-      if (key === "pcc-account-generation") throw new DOMException("The operation is insecure.", "SecurityError");
+      if (key === KEY_SLOT) throw new DOMException("The operation is insecure.", "SecurityError");
       return original.getItem.call(this, key);
     };
     const ok = await store.useAuthStore.getState().login(KEY_B);
+    expect(generation.walletSessionEnding(), "storage that can't be read may hold a change: pending").toBe(true);
     restoreStorage();
-    expect(ok).toBe(false);
-    expect(localStorage.getItem("pcc-api-key"), "the key isn't stored (fail closed)").toBeNull();
+    expect(ok, "login can't report a change it couldn't confirm").toBe(false);
+    expect(store.useAuthStore.getState().error).toMatch(/couldn't confirm it saved your API key/);
     expect(store.useAuthStore.getState().keyEpoch, "this tab's account boundary runs").not.toBe(epoch);
-    expect(store.useAuthStore.getState().error).toMatch(/couldn't save your sign-in/);
   });
 
   describe("on the login page", () => {
@@ -174,7 +200,7 @@ describe("19l MEDIUM: a generation write that lands and then throws doesn't leav
       const input = container.querySelector("input");
       const form = container.querySelector("form");
       expect(input && form, "the login form").toBeTruthy();
-      generationWriteLandsThenThrows();
+      changeWriteLandsThenThrows();
       await act(async () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, KEY_B);
         input!.dispatchEvent(new Event("input", { bubbles: true }));
@@ -187,5 +213,43 @@ describe("19l MEDIUM: a generation write that lands and then throws doesn't leav
       expect(gateway.logouts, "a teardown ran").toBeGreaterThan(0);
       expect(generation.walletSessionEnding(), "and confirmed the change, so requests aren't withheld for good").toBe(false);
     });
+  });
+});
+
+describe("DECISIONS 05:04: the slot holds the account record", () => {
+  it("a key stored before the record existed (a plain string) still signs in, under generation \"\"", async () => {
+    localStorage.setItem(KEY_SLOT, KEY_A);
+    const { owner, generation, sends } = await page();
+    expect(sends()).toBe(KEY_A);
+    expect(owner.hasStoredApiKey()).toBe(true);
+    expect(generation.accountGeneration()).toBe("");
+    expect(generation.walletSessionEnding(), "no change is pending").toBe(false);
+  });
+
+  it("a value this module didn't write is no key (fail closed)", async () => {
+    localStorage.setItem(KEY_SLOT, "{not a record");
+    const { owner, sends } = await page();
+    expect(sends()).toBeNull();
+    expect(owner.hasStoredApiKey()).toBe(false);
+  });
+
+  it("login and logout each write the key and a new generation in one write of the record", async () => {
+    localStorage.setItem(KEY_SLOT, KEY_A);
+    const { store, generation } = await page();
+    const writes: Array<{ key: string; value: string }> = [];
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+      writes.push({ key, value });
+      return original.setItem.call(this, key, value);
+    };
+    expect(await store.useAuthStore.getState().login(KEY_B)).toBe(true);
+    const afterLogin = generation.accountGeneration();
+    expect(store.useAuthStore.getState().logout()).toEqual({ status: "signed-out" });
+    restoreStorage();
+    const slotWrites = writes.filter((w) => w.key === KEY_SLOT).map((w) => JSON.parse(w.value) as { key: string | null; generation: string });
+    expect(writes.filter((w) => w.key !== KEY_SLOT), "nothing else is written for the change").toEqual([]);
+    expect(slotWrites).toHaveLength(2);
+    expect(slotWrites[0]).toEqual({ key: KEY_B, generation: afterLogin });
+    expect(slotWrites[1]!.key).toBeNull();
+    expect(new Set(["", afterLogin, slotWrites[1]!.generation]).size, "each moved the generation").toBe(3);
   });
 });

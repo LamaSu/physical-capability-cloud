@@ -1,7 +1,7 @@
 import { fetchWithKey, installKeyEgressGuard, type EgressGuardOptions } from "./gateway-base.js";
-import { walletSessionEnding } from "./account-generation.js";
 
 const STORAGE_KEY = "pcc-api-key";
+const CONFIRMED_KEY = "pcc-wallet-session-confirmed";
 
 /**
  * The signed-in API key's owner (N50; #354).
@@ -14,60 +14,134 @@ const STORAGE_KEY = "pcc-api-key";
  * Ten review rounds (astra 19 to 19j) each found another way a key held in
  * memory could part from the slot; with none held, nothing can.
  *
+ * The slot holds the ACCOUNT RECORD (DECISIONS 05:04): the key, and the
+ * account generation it was stored under, as one JSON value written by one
+ * setItem. A storage item reads as one value, so one read gives the key with
+ * its generation, and no other tab's write can fall between them (astra 19l).
+ * A key stored before the record existed (a plain string) reads as that key,
+ * with generation "".
+ *
  * The key leaves this module in two ways only, and no export returns it:
  * - fetchWithKey, which sends it to the configured gateway and nowhere else
  *   (authorizedFetch);
  * - the egress guard, which compares outgoing requests against it.
- * Other modules can change the slot (setStoredApiKey, used by the auth store)
- * and ask whether it holds a key (hasStoredApiKey). Neither reads it back out.
- * Every change is reported to onStoredKeyChange's listeners, without the key.
- * They drive the UI and the account teardown (the auth store, App); they hold
- * no authority. __tests__/no-direct-auth-headers.test.ts and
- * lib/__tests__/key-boundary-r4 hold this module to that.
+ * Other modules can change the slot (setStoredApiKey, used by the auth store),
+ * ask whether it holds a key (hasStoredApiKey), and read its generation
+ * (accountGeneration). None reads the key back out. Every change is reported
+ * to onStoredKeyChange's listeners, without the key. They drive the UI and the
+ * account teardown (the auth store, App); they hold no authority.
+ * __tests__/no-direct-auth-headers.test.ts and lib/__tests__/key-boundary-r4
+ * hold this module to that.
  *
  * Any script on this origin can still read the slot. Only an HttpOnly gateway
  * session would take the key out of JavaScript's reach, and that is a gateway
  * change awaiting the operator. Until then the ratchet keeps every other
  * module off this slot, and off storage it can't name.
  */
-function readKey(): string | null {
+interface AccountRecord {
+  key: string | null;
+  generation: string;
+}
+
+/** The slot's record, from one read; null when the slot can't be read. */
+function readRecord(): AccountRecord | null {
+  let raw: string | null;
   try {
-    return localStorage.getItem(STORAGE_KEY) || null;
+    raw = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return { key: null, generation: "" };
+  if (!raw.startsWith("{")) return { key: raw, generation: "" }; // stored before the record
+  try {
+    const value = JSON.parse(raw) as { key?: unknown; generation?: unknown };
+    return {
+      key: typeof value.key === "string" && value.key ? value.key : null,
+      generation: typeof value.generation === "string" ? value.generation : "",
+    };
+  } catch {
+    return { key: null, generation: "" }; // not a record this module wrote: no key (fail closed)
+  }
+}
+
+function readKey(): string | null {
+  return readRecord()?.key ?? null;
+}
+
+/** The last generation a teardown confirmed ("" before any), or null when it can't be read. */
+function confirmedGeneration(): string | null {
+  try {
+    return localStorage.getItem(CONFIRMED_KEY) ?? "";
   } catch {
     return null;
   }
 }
 
 /**
- * The key a request carries now: the slot's, unless an account change is
- * still pending for the browser (lib/account-generation.ts). A login moves the
- * generation before it stores the next key, and the change stays pending
- * until a teardown confirms the previous wallet session's SIWE cookie is gone.
- * Until then no tab sends a key, whether or not it has heard of the change, so
- * the next account's key never goes out beside the previous account's cookie
- * (astra 19f, 19g). Both are read from storage here, at use: the pending
- * change can only withhold the key, never choose one.
+ * The key a request carries now: the record's, once the teardown for the
+ * generation it was stored under is confirmed (DECISIONS 05:02, 05:04). Every
+ * login and logout moves the generation in the same write as the key, and the
+ * change stays pending until a teardown confirms the previous wallet session's
+ * SIWE cookie is gone. Until then no tab sends the key, whether or not it has
+ * heard of the change, so the next account's key never goes out beside the
+ * previous account's cookie (astra 19f, 19g).
  *
- * The key is read FIRST (astra 19l). A tab sees another tab's writes in the
- * order they were made, so if this read sees the next key, the generation's
- * move came before it, and the reads after it find the change pending. Read
- * the other way round, a login landing between the reads passed the gate on
- * the old markers and then sent the new key.
+ * The key and its generation come from ONE read, so another tab's login can't
+ * fall between them (astra 19l). The confirmed marker is a second read, and
+ * the order doesn't matter: the marker only ever names a generation whose
+ * teardown finished, so a change landing between the two reads can only make
+ * them differ, which withholds the key. Both reads are of storage, at use: the
+ * pending change can only withhold the key, never choose one.
  */
 function keyToSend(): string | null {
-  const key = readKey();
-  return walletSessionEnding() ? null : key;
+  const record = readRecord();
+  if (record === null || record.key === null) return null;
+  return confirmedGeneration() === record.generation ? record.key : null;
+}
+
+/** The account generation now ("" before the first change), or null when storage can't be read. Never the key. */
+export function accountGeneration(): string | null {
+  return readRecord()?.generation ?? null;
+}
+
+/** Whether a teardown is pending: the record's generation is past the last one confirmed. When storage can't be read, it may be (fail closed). */
+export function walletSessionEnding(): boolean {
+  const generation = accountGeneration();
+  const confirmed = confirmedGeneration();
+  return generation === null || confirmed === null || generation !== confirmed;
+}
+
+/**
+ * Records that the wallet session ended, as of `generation`. Only a teardown
+ * holding the wallet-session lock calls this, after the gateway confirmed its
+ * logout, with the generation it read before sending it. It is a slot of its
+ * own: a teardown never rewrites the account record, so it can't undo a login
+ * another tab makes meanwhile (localStorage has no compare-and-swap).
+ */
+export function confirmWalletSessionEnded(generation: string): void {
+  try {
+    localStorage.setItem(CONFIRMED_KEY, generation);
+  } catch {
+    // Unrecorded: the next page ends the session again.
+  }
+}
+
+function newGeneration(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 /**
  * How a change of the slot came out:
- * - "committed": the slot reads as the new value;
+ * - "committed": the slot reads back as the record written;
  * - "unconfirmed": it doesn't, so the change may or may not have been made.
  *   Neither a write that threw nor a read of the old value proves the slot is
  *   unchanged: a write can go through and then throw, and a stale read looks
  *   the same as a dropped write (astra 19j, 19k). The listeners are told all
- *   the same, and this tab acts as whatever the slot holds when it is next
- *   read;
+ *   the same, so the account boundary runs and its teardown can confirm a
+ *   change that did land (astra 19l). This tab acts as whatever the slot
+ *   holds when it is next read;
  * - "busy": another change was being told to the listeners, so this one was
  *   refused before anything was written (DECISIONS 04:14: transitions are
  *   serialized).
@@ -79,8 +153,14 @@ const keyListeners = new Set<() => void>();
 let delivering = 0;
 
 /**
- * Write `key` to the slot, or empty it with null, and say how it came out
+ * Write `key` to the record, or empty it with null, and say how it came out
  * (KeyWrite). Write-only: nothing reads the key back out.
+ *
+ * `accountChange` moves the generation in the same write. Login and logout
+ * pass it, so the next key and its generation land together, and every tab
+ * withholds the key until a teardown confirms the change. Without it the
+ * record keeps its generation: a write that doesn't change the account
+ * (tests).
  *
  * Every change that may have been made is told to every listener, even if one
  * of them throws (astra A03e N1); the first error is rethrown once all have
@@ -89,18 +169,21 @@ let delivering = 0;
  * so no listener can sign in again in the middle of a sign-out (astra 19j,
  * 19k).
  */
-export function setStoredApiKey(key: string | null): KeyWrite {
+export function setStoredApiKey(key: string | null, options: { accountChange?: boolean } = {}): KeyWrite {
   if (delivering > 0) return "busy";
-  const next = key || null;
+  const record: AccountRecord = {
+    key: key || null,
+    generation: options.accountChange ? newGeneration() : (readRecord()?.generation ?? ""),
+  };
+  const written = JSON.stringify(record);
   try {
-    if (next) localStorage.setItem(STORAGE_KEY, next);
-    else localStorage.removeItem(STORAGE_KEY);
+    localStorage.setItem(STORAGE_KEY, written);
   } catch {
     // Not proof that nothing changed: the read below decides.
   }
   let confirmed = false;
   try {
-    confirmed = localStorage.getItem(STORAGE_KEY) === next;
+    confirmed = localStorage.getItem(STORAGE_KEY) === written;
   } catch {
     // Unreadable: unconfirmed.
   }
@@ -134,11 +217,12 @@ function tellListeners(): void {
 // shares the gateway's SIWE cookie. When another tab signs in, out or as
 // someone else, this tab's next request already follows the slot (keyToSend);
 // its storage event tells the listeners, so the auth store moves keyEpoch and
-// this tab's account boundary runs (App.tsx; #354, astra 19d). Without a key
-// kept here there is nothing to compare an event with, so every event for the
-// slot counts as a change: at worst a spare teardown, which fails closed.
-// A page restored from the back/forward cache missed the events of its time
-// away, so it counts as a change too.
+// this tab's account boundary runs (App.tsx; #354, astra 19d). The record
+// carries the generation, so one event brings both. Without a key kept here
+// there is nothing to compare an event with, so every event for the slot
+// counts as a change: at worst a spare teardown, which fails closed. A page
+// restored from the back/forward cache missed the events of its time away, so
+// it counts as a change too.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (event.key !== STORAGE_KEY && event.key !== null) return; // null: another tab cleared storage

@@ -21,6 +21,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { storeRecord, storedKey } from "./account-record.js";
 
 // Built at run time: a key-shaped literal in source trips the secret scanners (pack and push gates).
 const KEY_A = ["pcc", "test", "r11keyA0123456789abcdef"].join("_");
@@ -105,24 +106,18 @@ function teardownConfirmed(generation: typeof import("../lib/account-generation.
   generation.confirmWalletSessionEnded(generation.accountGeneration() ?? "");
 }
 
-/** The key slot's write goes through and then throws, and the read right after it returns `stale` (astra 19k). */
-function commitThenThrowThenStale(op: "setItem" | "removeItem", stale: string | null) {
+/**
+ * The key slot's write goes through and then throws, and the read right after it returns `stale`
+ * (astra 19k). Since DECISIONS 05:04 a sign-in and a sign-out are each one write of the record.
+ */
+function commitThenThrowThenStale(stale: string | null) {
   let staleNext = false;
-  if (op === "setItem") {
-    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
-      original.setItem.call(this, key, value);
-      if (key !== "pcc-api-key") return;
-      staleNext = true;
-      throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
-    };
-  } else {
-    Storage.prototype.removeItem = function (this: Storage, key: string) {
-      original.removeItem.call(this, key);
-      if (key !== "pcc-api-key") return;
-      staleNext = true;
-      throw new DOMException("The operation is insecure.", "SecurityError");
-    };
-  }
+  Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
+    original.setItem.call(this, key, value);
+    if (key !== "pcc-api-key") return;
+    staleNext = true;
+    throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+  };
   Storage.prototype.getItem = function (this: Storage, key: string) {
     if (key === "pcc-api-key" && staleNext) {
       staleNext = false;
@@ -152,9 +147,8 @@ describe("DECISIONS 04:14: the slot is the one authority, read at each use", () 
 
   it("another tab signs in as B: this tab sends no key while the change is pending, then the slot's B, never A", async () => {
     const { generation, sends } = await page();
-    // That tab's login: the generation moves first, then B is stored. No event has reached this tab.
-    localStorage.setItem("pcc-account-generation", "another-tabs-change");
-    localStorage.setItem("pcc-api-key", KEY_B);
+    // That tab's login: B and a new generation, in one write of the record. No event has reached this tab.
+    storeRecord(KEY_B, "another-tabs-change");
     expect(sends(), "neither A nor B beside A's SIWE cookie, which may still be live").toBeNull();
     teardownConfirmed(generation);
     expect(sends(), "once a teardown confirmed it ended").toBe(KEY_B);
@@ -189,7 +183,7 @@ describe("19k HIGH: a write that went through and then threw can't be taken as r
   it("login(B): B is stored, the write throws, the read after it is a stale A; this tab acts as the slot, and every listener hears", async () => {
     const { store, generation, sends } = await page();
     const epoch = store.useAuthStore.getState().keyEpoch;
-    commitThenThrowThenStale("setItem", KEY_A);
+    commitThenThrowThenStale(KEY_A);
     const ok = await store.useAuthStore.getState().login(KEY_B);
     restoreStorage();
     expect(sends(), "never A: nothing while the change is pending").toBeNull();
@@ -204,7 +198,7 @@ describe("19k HIGH: a write that went through and then threw can't be taken as r
   it("logout(): A is removed, the removal throws, the read after it is a stale A; this tab sends nothing, and every tab is told", async () => {
     const { store, generation, sends } = await page();
     const before = generation.accountGeneration();
-    commitThenThrowThenStale("removeItem", KEY_A);
+    commitThenThrowThenStale(KEY_A);
     const result = store.useAuthStore.getState().logout();
     restoreStorage();
     expect(sends(), "the slot is empty, so this tab sends no key").toBeNull();
@@ -235,7 +229,7 @@ describe("19k MEDIUM and the ruling: one key change at a time", () => {
     const seen = signInDuringDelivery(owner);
     const result = store.useAuthStore.getState().logout();
     expect(sends(), "B was not adopted").toBeNull();
-    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(storedKey()).toBeNull();
     expect(seen.answer, "the listener was told why").toBe("busy");
     expect(result).toEqual({ status: "signed-out" });
   });
@@ -252,7 +246,7 @@ describe("19k MEDIUM and the ruling: one key change at a time", () => {
     );
     expect(() => store.useAuthStore.getState().logout()).toThrow("a listener failed");
     expect(sends()).toBeNull();
-    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(storedKey()).toBeNull();
     expect(generation.accountGeneration(), "every tab sees the change pending").not.toBe(before);
   });
 
@@ -261,7 +255,7 @@ describe("19k MEDIUM and the ruling: one key change at a time", () => {
     const seen = signInDuringDelivery(owner);
     const result = store.useAuthStore.getState().logout();
     expect(sends()).toBeNull();
-    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(storedKey()).toBeNull();
     expect(seen.answer).toBe("busy");
     expect(result).toEqual({ status: "signed-out" });
   });
@@ -279,7 +273,7 @@ describe("19k MEDIUM and the ruling: one key change at a time", () => {
     );
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(true);
     expect(seen.inner).toEqual({ status: "refused", reason: expect.stringMatching(/under way/) });
-    expect(localStorage.getItem("pcc-api-key")).toBe(KEY_B);
+    expect(storedKey()).toBe(KEY_B);
     teardownConfirmed(generation);
     expect(sends()).toBe(KEY_B);
   });
@@ -288,9 +282,9 @@ describe("19k MEDIUM and the ruling: one key change at a time", () => {
 describe("DECISIONS 04:14 (6): a sign-out's typed outcome is kept above the account boundary, until the key next changes", () => {
   it("an unconfirmed sign-out is kept for the surfaces, and the next change of the key, here or in another tab, clears it", async () => {
     const { store } = await page();
-    Storage.prototype.removeItem = function (this: Storage, key: string) {
+    Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
       if (key === "pcc-api-key") throw new DOMException("The operation is insecure.", "SecurityError");
-      return original.removeItem.call(this, key);
+      return original.setItem.call(this, key, value);
     };
     const result = store.useAuthStore.getState().logout();
     expect(result.status).toBe("unconfirmed");

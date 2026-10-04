@@ -26,7 +26,7 @@ vi.mock("wagmi", async (importOriginal) => ({
 
 // Built at run time: a key-shaped literal in source trips the secret scanners (pack and push gates).
 const KEY_A = ["pcc", "test", "signoutA0123456789abcdef"].join("_");
-const originalRemove = Storage.prototype.removeItem;
+const originalSet = Storage.prototype.setItem;
 
 let container: HTMLDivElement;
 let root: Root;
@@ -44,10 +44,10 @@ beforeEach(() => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }),
   );
-  // The browser refuses to remove the saved key.
-  Storage.prototype.removeItem = function (this: Storage, key: string) {
+  // The browser refuses to change the saved key's slot (since DECISIONS 05:04 a sign-out is one write of its record).
+  Storage.prototype.setItem = function (this: Storage, key: string, value: string) {
     if (key === "pcc-api-key") throw new DOMException("The operation is insecure.", "SecurityError");
-    return originalRemove.call(this, key);
+    return originalSet.call(this, key, value);
   };
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -57,7 +57,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
-  Storage.prototype.removeItem = originalRemove;
+  Storage.prototype.setItem = originalSet;
   vi.unstubAllGlobals();
   localStorage.clear();
 });

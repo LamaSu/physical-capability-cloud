@@ -23,6 +23,7 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { installFakeWebLocks } from "./fake-web-locks.js";
+import { storeRecord } from "./account-record.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -366,12 +367,12 @@ describe("19f, the parts of the protocol", () => {
     vi.resetModules();
     const generation = await import("../lib/account-generation.js");
     const { endWalletSession } = await import("../lib/wallet-session.js");
-    generation.beginAccountChange();
+    storeRecord(null, "g-first"); // an account change: a new generation in the key's record (DECISIONS 05:04)
     gateway.logoutsToAnswer = 0;
     const ending = endWalletSession();
     await settle(3);
     expect(gateway.logoutWaiting, "the teardown's logout is on the wire").toHaveLength(1);
-    generation.beginAccountChange(); // another tab changes the account meanwhile
+    storeRecord(null, "g-second"); // another tab changes the account meanwhile
     releaseLogouts();
     expect(await ending).toBe(true);
     expect(generation.walletSessionEnding(), "the later change is still pending").toBe(true);
