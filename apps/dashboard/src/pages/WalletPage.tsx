@@ -9,7 +9,7 @@ import {
   EmptyState,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import { CdpFundedKeyOnramp } from "../components/CdpFundedKeyOnramp.js";
 
 // ── Types ────────────────────────────────────────────────────────
@@ -250,9 +250,9 @@ function FundWalletTab() {
 
   const handleStripe = async () => {
     setStripeSubmitting(true);
-    await fetch("/api/fiat-ramp/stripe/onramp", {
+    await authorizedFetch("/api/fiat-ramp/stripe/onramp", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ amountUsd: stripeAmount }),
     }).catch(() => {});
     setTimeout(() => setStripeSubmitting(false), 1500);
@@ -260,9 +260,9 @@ function FundWalletTab() {
 
   const handleYellowcard = async () => {
     setYcSubmitting(true);
-    await fetch("/api/fiat-ramp/yellowcard/deposit", {
+    await authorizedFetch("/api/fiat-ramp/yellowcard/deposit", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         amountUsd: ycAmount,
         country: selectedCountry.code,
@@ -468,9 +468,9 @@ function WithdrawTab() {
 
   const handleSubmit = async () => {
     setSubmitting(true);
-    await fetch("/api/fiat-ramp/yellowcard/withdrawal", {
+    await authorizedFetch("/api/fiat-ramp/yellowcard/withdrawal", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         amountUsd: amount,
         country: selectedCountry.code,
@@ -690,9 +690,9 @@ function CreditsTab({ creditBalance }: { creditBalance: number }) {
 
   const handleBuy = async () => {
     setBuying(true);
-    await fetch("/api/credits/purchase", {
+    await authorizedFetch("/api/credits/purchase", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ amountUsd: buyAmount }),
     }).catch(() => {});
     setTimeout(() => setBuying(false), 1500);
@@ -907,7 +907,7 @@ export function WalletPage() {
   const [sessions, setSessions] = React.useState<FiatRampSession[]>(MOCK_SESSIONS);
 
   React.useEffect(() => {
-    fetch("/api/wallet/balance", { headers: { ...getAuthHeaders() } })
+    authorizedFetch("/api/wallet/balance")
       .then((r) => r.json())
       .then((d) => {
         if (d.balance) setWalletBalance(d.balance);
@@ -917,7 +917,7 @@ export function WalletPage() {
       })
       .catch(() => {}); // keep mock
 
-    fetch("/api/fiat-ramp/sessions", { headers: { ...getAuthHeaders() } })
+    authorizedFetch("/api/fiat-ramp/sessions")
       .then((r) => r.json())
       .then((d) => {
         if (Array.isArray(d.sessions) && d.sessions.length > 0) setSessions(d.sessions);

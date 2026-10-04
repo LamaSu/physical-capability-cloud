@@ -180,6 +180,12 @@ export interface BuildPayoutMapResult {
  * @throws Error when sum(bpsApplied) > 10000.
  * @throws Error when an entry has an unknown CompositionRole.
  */
+/**
+ * @deprecated for new deals. This emits basis points for MilestoneEscrow's optional payout map (the V3
+ * legacy path); a bps map cannot express the exact amounts the V-next escrow funds. New deals compile
+ * through `economics.compileEconomics` in @pcc/spec (for a manifest: `economics.clausesFromCompositionManifest`).
+ * It has no production callers; it is kept for the legacy path and fixed below so it cannot double-pay.
+ */
 export function buildPayoutMap(
   input: BuildPayoutMapInput,
 ): BuildPayoutMapResult {
@@ -205,7 +211,21 @@ export function buildPayoutMap(
 
   let sumApplied = 0;
 
-  for (const entry of compositionManifest.entries) {
+  // Co-authors WITHOUT groupBps who share (role, ipId, rateScheduleHash) share ONE role allocation, as
+  // CompositionEntry documents ("if absent, equal-split among same-(role, ipId)"). Before this, each was
+  // paid the full rate: two co-authors = 2x the allocation, and different recipients passed
+  // setPayoutMap's (recipient, roleTag) dedup (pcc-economics D2). The split is exact in bps: the
+  // floor share each, and the leftover bps to the earliest co-authors in manifest order.
+  const coAuthorKey = (e: CompositionManifest["entries"][number]) =>
+    `${compositionRoleToTagKey(e.role)}\u0000${e.ipId}\u0000${e.rateScheduleHash.toLowerCase()}`;
+  const coAuthors = new Map<string, number[]>();
+  compositionManifest.entries.forEach((e, i) => {
+    if (e.groupBps !== undefined) return;
+    const k = coAuthorKey(e);
+    coAuthors.set(k, [...(coAuthors.get(k) ?? []), i]);
+  });
+
+  for (const [entryIndex, entry] of compositionManifest.entries.entries()) {
     const tagKey = compositionRoleToTagKey(entry.role);
     const roleTag = ROLE_TAGS[tagKey];
     const recipient = entry.contributorAddress as `0x${string}`;
@@ -227,11 +247,17 @@ export function buildPayoutMap(
       rawBps = result.bps;
     }
 
-    // Apply optional groupBps weighting (matches LicensingEngine logic).
-    const effectiveBps =
-      entry.groupBps !== undefined && entry.groupBps !== 10000
-        ? Math.round((rawBps * entry.groupBps) / 10000)
-        : rawBps;
+    // Apply optional groupBps weighting (matches LicensingEngine logic), or the equal co-author split.
+    let effectiveBps: number;
+    if (entry.groupBps !== undefined) {
+      effectiveBps =
+        entry.groupBps !== 10000 ? Math.round((rawBps * entry.groupBps) / 10000) : rawBps;
+    } else {
+      const group = coAuthors.get(coAuthorKey(entry))!;
+      const share = Math.floor(rawBps / group.length);
+      const leftover = rawBps - share * group.length;
+      effectiveBps = share + (group.indexOf(entryIndex) < leftover ? 1 : 0);
+    }
 
     // The on-chain ipId for this Payout. Most contributors stamp their own
     // entry.ipId; if absent, fall back to the capability ipId so the row
