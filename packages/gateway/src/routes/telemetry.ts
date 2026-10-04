@@ -26,6 +26,7 @@ import { auditService } from "../services/audit-service.js";
 import type { TelemetryStatus, PipelinePhase } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
 import { asSent, gateJobRead, jobReadScopeOf, jobRecordFilterOf, keepAsSent, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
+import { JOB_READ_REFUSAL, jobReadCallerOf, precheckJobRead } from "../readmodels/job-execution.js";
 
 // Active SSE clients for the live log stream, each with the records it may see
 const logStreamClients = new Map<FastifyReply, (record: unknown) => boolean>();
@@ -103,8 +104,14 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
   // ── GET /api/telemetry/stats ───────────────────────────────────────────
 
-  app.get("/api/telemetry/stats", async () => {
-    const stats = pipelineTelemetry.getStats();
+  app.get("/api/telemetry/stats", async (req, reply) => {
+    // N122: the stats count only the jobs this caller may read, the same scope as /jobs and
+    // /active; they used to count every job's pipeline for anyone.
+    const scope = jobReadScopeOf(req);
+    if (!scope.ok) return refuseJobRead(reply, scope);
+    const stats = scope.jobIds === null
+      ? pipelineTelemetry.getStats()
+      : pipelineTelemetry.getStats((jobId) => scopeAllows(scope, jobId));
     return { stats, phases: PIPELINE_PHASES };
   });
 
@@ -234,8 +241,7 @@ export async function telemetryRoutes(app: FastifyInstance) {
 
   // ── GET /api/telemetry/audit ───────────────────────────────────────────
   //
-  // Returns recent audit log entries from the AuditService.
-  // Useful for hackathon judges to see all activity at a glance.
+  // Returns recent audit log entries from the AuditService, to the admin only (N122).
   //
   // Query params:
   //   limit    — max entries to return (default 50, max 500)
@@ -252,7 +258,17 @@ export async function telemetryRoutes(app: FastifyInstance) {
       actor?: string;
       since?: string;
     };
-  }>("/api/telemetry/audit", async (req) => {
+  }>("/api/telemetry/audit", async (req, reply) => {
+    // N122: the gateway-wide audit log is the admin's. Its records name actors and write
+    // metadata, not jobs, so under F3's mixed-record rule no other caller may read them.
+    const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+    if (!pre.proceed) {
+      const refusal = JOB_READ_REFUSAL[pre.reason];
+      return reply.code(refusal.status).send(refusal.body);
+    }
+    if (pre.as !== "admin") {
+      return reply.code(403).send({ error: "forbidden", message: "The gateway audit log is readable only with the admin key." });
+    }
     const q = req.query;
     const limit = Math.min(q.limit ? parseInt(q.limit, 10) : 50, 500);
 
@@ -301,18 +317,17 @@ export async function telemetryRoutes(app: FastifyInstance) {
       source?: string;
     };
   }>("/api/telemetry/emit", async (req, reply) => {
-    // Restrict to operators with API keys (HIGH-04 fix — prevents arbitrary telemetry injection)
-    const apiKeyId = (req as any).apiKeyId;
-    const operatorId = (req as any).operatorId;
-    if (!apiKeyId || !operatorId) {
-      return reply.code(403).send({ error: "forbidden", message: "Telemetry emit requires operator API key authentication" });
-    }
+    const { jobId, phase, status, duration_ms, metadata, level, source } = req.body ?? ({} as typeof req.body);
 
-    const { jobId, phase, status, duration_ms, metadata, level, source } = req.body;
-
-    if (!jobId || !phase || !status) {
+    if (!jobId || !phase || !status || typeof jobId !== "string") {
       return reply.code(400).send({ error: "jobId, phase, status are required" });
     }
+
+    // N122 (#6488): an emitted event becomes part of the pipeline the job's parties read, so only
+    // the admin or a PROVEN party of the job (its kernel's operator or its buyer: the job read
+    // gate) may emit for it. Any API key could, for any job id (HIGH-04 only required a key).
+    const gate = gateJobRead(req, jobId);
+    if (!gate.ok) return refuseJobRead(reply, gate, { error: "Job not found" });
 
     // Sanitize metadata to prevent prompt injection in telemetry (AI-02 fix)
     const sanitizedMetadata = metadata ? sanitizeTelemetryMetadata(metadata) : undefined;
