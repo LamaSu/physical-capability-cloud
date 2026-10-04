@@ -31,8 +31,19 @@ export * from "./signing-preimage.js";
 // verifyEvidenceSubjectBinding — LO-EV-9: a signed bundle digest must open to
 // events that commit the job, the accepting kernel and (when known) the output.
 export * from "./subject-binding.js";
+// evidenceLevelOfBundles / evidenceLevelsOfEvents / deriveContradictions /
+// inspectionVerdict — submitted / device_reported / inspected_output, the one
+// classification of how strongly evidence shows the work was done (must-close 5).
+// Takes authenticated bundles of ONE settlement unit and judges independence
+// between authenticated trust domains, never declared device ids.
+// evidenceLevelsOfEvents is the per-event level (bundle index, event index,
+// level); evidenceLevelOfBundles is the maximum over it.
+export * from "./evidence-level.js";
 export * from "./eligibility.js";
 export * from "./measurement-profile.js";
+// profileAdmitsBundle — does authenticated, bound evidence satisfy the committed
+// MeasurementProfile (level, device, version, window, samples, simulation)?
+export * from "./profile-admission.js";
 // Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),
 // device = ed25519:0x<key> (D2 signer, registry-held, never a compromised key).
 export * from "./principal-id.js";

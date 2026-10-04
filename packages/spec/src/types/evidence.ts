@@ -126,7 +126,17 @@ export interface EvidenceSource {
   deviceId: Id;
   deviceType: EvidenceDeviceType;
   kernelId: Id;
+  /** The device's own firmware version. */
   firmwareVersion?: string;
+  /**
+   * The adapter serving the device (e.g. "photo", "ipp") and its version.
+   * Separate from `firmwareVersion` so that a measurement profile's adapter
+   * pin and firmware pin are each checked against their own field
+   * (profile-admission.ts). Optional and additive: an event without them hashes
+   * exactly as before, but cannot satisfy a measurement profile.
+   */
+  adapterType?: string;
+  adapterVersion?: string;
   /**
    * True when the emitting adapter is a mock/simulated device or is running
    * in mock mode — i.e. every event from this source is fabricated-by-design

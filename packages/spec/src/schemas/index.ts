@@ -103,6 +103,10 @@ export const EvidenceSourceSchema = z.object({
   deviceType: z.enum(EVIDENCE_DEVICE_TYPES),
   kernelId: z.string(),
   firmwareVersion: z.string().optional(),
+  // Listed so a schema-validated round-trip keeps them: zod strips unknown
+  // keys, and a stripped field no longer hashes to the event's hash.
+  adapterType: z.string().optional(),
+  adapterVersion: z.string().optional(),
   // Fabricated-by-design marker (mock/simulated adapters). Kept in the schema
   // so schema-validated round-trips do not strip the honesty tag.
   simulated: z.boolean().optional(),
