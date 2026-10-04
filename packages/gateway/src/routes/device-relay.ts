@@ -737,9 +737,12 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     }
 
     const { db } = getStore();
-    // The guard admitted this caller as the operator or an active scope holder.
+    // The guard admitted this caller as the admin, the proven operator, or the proven holder of
+    // the scope it names (DECISIONS 00:53). The operator test here takes proof too: a key that
+    // merely claims the kernel's public operatorAddress, sent with another wallet's proof, must
+    // still be that scope's holder.
     const callerId = relayPrincipal(req) ?? "";
-    const isOperator = isRelayOperator(req, kernelId);
+    const isOperator = isProvenOperator(req, kernelId);
     const deviceType = resolveDeviceType(kernelId);
 
     // Non-safe tools require a scope, and anyone but the operator must name

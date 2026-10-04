@@ -199,6 +199,11 @@ describe("DECISIONS 00:42 (#6690): a PROVEN scope holder may make its scoped wri
     const mixed = await write({ ...asStranger(), "x-test-proven-wallet": BUYER }, scopeId);
     expect(mixed.statusCode).toBe(403);
     expect(mixed.json().error).toBe("scope_not_yours");
+    // A key merely CLAIMING the kernel's public operatorAddress, sent with the buyer's proof: the
+    // handler's operator test takes proof too, so the caller must still be the scope's holder.
+    const claimedOperator = await write({ ...asOperator(), "x-test-proven-wallet": BUYER }, scopeId);
+    expect(claimedOperator.statusCode).toBe(403);
+    expect(claimedOperator.json().error).toBe("scope_not_yours");
     // A proven buyer naming no scope.
     const scopeless = await write(asProvenBuyer());
     expect(scopeless.statusCode).toBe(403);
