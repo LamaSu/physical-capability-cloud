@@ -25,14 +25,32 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const ID_CANARY = "PCCOracleKey5f1e";
 const SPACE_CANARY = "SENTINEL ORACLE KEY 5f1e";
 const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const SHIM_DIR = fileURLToPath(new URL("./support/fc8-round4-bash-shim", import.meta.url));
 const REPORT_FILE = join(REPO_ROOT, "ai/supervisor/smoke-test-report.json");
+
+// FC-8 round 4: the script reads the oracle key from a FILE
+// (PCC_ORACLE_KEY_FILE), never the PCC_ORACLE_KEY env var (finding 4's
+// fix). A neutral, non-canary key file — this test's own concern (finding
+// 2's field census) is orthogonal to which credential-launch mechanism is
+// in play. Mutation testing this round caught this test file passing the
+// OLD env var here: the script exited at the "PCC_ORACLE_KEY_FILE is not
+// set" guard before Checks 3/5/6 (the mutated/fixed code) ever ran, so
+// the finding-2 assertions below were vacuously green regardless of the
+// source. The `toContain("Setup status:")` sanity check at the end of
+// each test exists specifically to make that failure mode loud.
+function makeOracleKeyFile(): string {
+  const dir = mkdtempSync(join(tmpdir(), "fc8-r4-keyfile-"));
+  const path = join(dir, "oracle.key");
+  writeFileSync(path, "test-oracle-key-not-a-secret");
+  return path;
+}
 
 function allEncodings(canary: string): string[] {
   return [
@@ -53,8 +71,9 @@ describe.each([
       ...process.env,
       PATH: `${SHIM_DIR}:${process.env.PATH}`,
       FC8_CANARY: canary,
-      PCC_ORACLE_KEY: "test-oracle-key-not-a-secret",
+      PCC_ORACLE_KEY_FILE: makeOracleKeyFile(),
     };
+    delete (env as Record<string, string | undefined>).PCC_ORACLE_KEY;
     const result = spawnSync("bash", ["scripts/smoke-digital-verifier.sh"], {
       cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000,
     });
@@ -64,6 +83,11 @@ describe.each([
     for (const encoded of allEncodings(canary)) {
       expect(all, `encoding "${encoded}" of canary leaked`).not.toContain(encoded.toLowerCase());
     }
+    // sanity: the run actually reached Checks 3/5/6 (the sites under test),
+    // not a no-op that exited early at the credential-file guard.
+    expect(result.stdout ?? "", "script exited before reaching the sites under test").toContain(
+      "Setup status:",
+    );
   }, 40_000);
 });
 
