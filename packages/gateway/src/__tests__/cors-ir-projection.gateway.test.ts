@@ -128,3 +128,21 @@ describe("projectIrRead (unit)", () => {
       .toEqual({ kernel: { status: "online", reputation: 5 }, asOf: "2026-10-03T00:00:00.000Z" });
   });
 });
+
+describe("#562 r2 reproduced (verify before fix)", () => {
+  it("F2: a wildcard list response carries no page metadata the browser IR never reads (only its rows and asOf)", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/capabilities?limit=1", headers: { origin: UNKNOWN } });
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+    for (const k of Object.keys(res.json())) expect(["items", "asOf"], k).toContain(k);
+  });
+  it("F3: an ordered alternative projects ONLY the first present key; an invalid first value never falls back to a later one", async () => {
+    const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
+    // The renderer reads the FIRST present key and fails the card if it is invalid; the projection must not turn that into a valid card.
+    const bad = projectIrRead("/api/jobs/j-1/status", { status: { secret: "x" }, job: { status: "completed" } });
+    expect(bad, JSON.stringify(bad)).not.toHaveProperty("job");
+    expect(bad).not.toHaveProperty("status");
+    // Positive controls: the first present key wins, and an absent first key falls through to the next.
+    expect(projectIrRead("/api/jobs/j-1/status", { status: "completed", job: { status: "failed" } })).toEqual({ status: "completed" });
+    expect(projectIrRead("/api/jobs/j-1/status", { job: { status: "completed", progress: 40 } })).toEqual({ job: { status: "completed", progress: 40 } });
+  });
+});
