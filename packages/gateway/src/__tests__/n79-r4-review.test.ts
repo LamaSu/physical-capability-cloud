@@ -399,6 +399,14 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     const address = pointEscrowAtChain(jobId, addr(0xe5c404), "v2");
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.submitEvidence).mockResolvedValue({ transactionHash: "0xr4evidence", status: "submitted" } as never);
+    // N79 round 7 (P2): processEvidence's fresh pre-submit verification reads the escrow's OWN version's
+    // reader — this row is "v2" (pointEscrowAtChain above), so getEscrowStateV2, per the lead's round-7
+    // addendum. Fixture only, same inline-construction pattern as "R4-H1 (default)" above (submitPaidJob gives
+    // the job a RANDOM stepId, not the "step-N" convention chainState() defaults to) — no assertion changed.
+    const r4h2JobStepId = getRepos().jobs.findById(jobId)!.stepId;
+    const r4h2ChainState = chainState(address, [chain.MilestoneStatusV2.Funded]) as unknown as { milestones: Array<{ stepId: string }> };
+    r4h2ChainState.milestones[0]!.stepId = keccak256(toBytes(r4h2JobStepId));
+    vi.mocked(chain.getEscrowStateV2).mockResolvedValue(r4h2ChainState as never);
 
     // Bundle A: the kernel path stores it and submits its hash on-chain; the job reads evidence_submitted.
     const bundleA = makeBundle(jobId);
@@ -527,6 +535,13 @@ describe("N79 round 4: the review's findings, reproduced", () => {
     const address = pointEscrowAtChain(jobId, addr(0xe5c405), "v2");
     vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
     vi.mocked(chain.submitEvidence).mockResolvedValue({ transactionHash: "0xr4evidence", status: "submitted" } as never);
+    // N79 round 7 (P2): the fresh pre-submit AND pre-auto-release verification both read this (the row is
+    // "v2", so getEscrowStateV2 per the lead's round-7 addendum) before Step 3's submit and before Step 4
+    // calls releaseMilestone (spied on below) — fixture only, no assertion changed.
+    const r4m3JobStepId = getRepos().jobs.findById(jobId)!.stepId;
+    const r4m3ChainState = chainState(address, [chain.MilestoneStatusV2.Funded]) as unknown as { milestones: Array<{ stepId: string }> };
+    r4m3ChainState.milestones[0]!.stepId = keccak256(toBytes(r4m3JobStepId));
+    vi.mocked(chain.getEscrowStateV2).mockResolvedValue(r4m3ChainState as never);
     const service = getSettlementService();
     // The release landed on-chain but its bookkeeping failed (F5): the service says so.
     vi.spyOn(service, "releaseMilestone").mockResolvedValue({

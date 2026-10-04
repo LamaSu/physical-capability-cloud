@@ -404,6 +404,13 @@ export interface ChainMappingCheck {
  * The count must be equal, and every index must satisfy `keccak256(toBytes(localRow.stepId)) === chain.stepIds[i]`
  * (compared case-insensitively, since stepId hex arrives in mixed case from different callers).
  *
+ * N79 round 7 (R7-M1, astra 126g MEDIUM): `chain.statuses.length` is part of the mapping's own cardinality, not
+ * only `chain.stepIds.length` against the local row count. Before this, a caller that passed a `statuses` array
+ * shorter or longer than `stepIds` (every production chain reader builds both from the SAME milestone array, so
+ * this was never exposed by real chain data — but the guarded writer itself must fail closed on malformed input,
+ * not rely on its callers) could pass this check (identity confirmed on whatever indices BOTH arrays happened to
+ * share) and let {@link recordChainSettlement} act on an out-of-bounds or truncated status read.
+ *
  * Takes `escrowId`, not pre-fetched rows: like every other write path in this module, it reads the GLOBAL
  * store itself (`getRepos()`), so a caller never needs its own repos access just to run this check — and a
  * test can replace this ONE function (mock) to exercise a caller's drift-handling with no real store at all.
@@ -412,8 +419,9 @@ export function checkChainMapping(escrowId: string, chain: ChainMapping): ChainM
   const localRows = getRepos().escrows.findMilestonesByEscrow(escrowId);
   const chainCount = chain.stepIds.length;
   const localCount = localRows.length;
-  if (chainCount !== localCount) {
-    return { ok: false, chainCount, localCount, firstMismatch: Math.min(chainCount, localCount) };
+  const statusesCount = chain.statuses.length;
+  if (chainCount !== localCount || statusesCount !== chainCount) {
+    return { ok: false, chainCount, localCount, firstMismatch: Math.min(chainCount, localCount, statusesCount) };
   }
   for (let i = 0; i < localCount; i++) {
     if (keccak256(toBytes(localRows[i]!.stepId)).toLowerCase() !== chain.stepIds[i]!.toLowerCase()) {
@@ -480,6 +488,18 @@ export interface ChainSettlementResult {
 export function recordChainSettlement(claim: SettlementClaim, chain: ChainSettlementInput): ChainSettlementResult {
   const repos = getRepos();
   const localRows = repos.escrows.findMilestonesByEscrow(claim.escrowId);
+  // N79 round 7 (P4, astra 126g MEDIUM): `releasedStatus` is the value every status in `chain.statuses` is
+  // compared against below — a non-integer (NaN, a float, a string that slipped through a loose caller) can
+  // never legitimately equal an on-chain enum value, so treat it as drift too: refuse before any write, exactly
+  // like a cardinality or identity mismatch.
+  if (!Number.isInteger(chain.releasedStatus)) {
+    console.error("[escrow] settlement_mapping_mismatch", {
+      escrowId: claim.escrowId,
+      error: "releasedStatus must be an integer",
+      releasedStatus: chain.releasedStatus,
+    });
+    return { ok: false, drifted: true };
+  }
   const mapping = checkChainMapping(claim.escrowId, chain);
   if (!mapping.ok) {
     console.error("[escrow] settlement_mapping_mismatch", {

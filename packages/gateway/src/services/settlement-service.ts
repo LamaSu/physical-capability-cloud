@@ -13,7 +13,7 @@
 
 import type { EvidenceBundle } from "@pcc/spec";
 import { isFabricated } from "@pcc/spec";
-import { isAddress, getAddress } from "viem";
+import { isAddress, getAddress, keccak256, toBytes } from "viem";
 import type { Address, Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos, getStore } from "../db.js";
@@ -29,6 +29,7 @@ import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
   getEscrowState as getEscrowStateV1,
+  getEscrowStateV2,
   isWriteEnabled,
   MilestoneStatus,
 } from "../contracts/escrow-client.js";
@@ -36,6 +37,111 @@ import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "./audit-service.js";
+
+// ---------------------------------------------------------------------------
+// P3 (N79 round 7, astra 126g HIGH): exact re-delivery comparison helpers
+// ---------------------------------------------------------------------------
+
+/** Recursively sorts object keys so two values differing only in key order still compare equal when stringified. */
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(obj).sort()) sorted[key] = canonicalize(obj[key]);
+    return sorted;
+  }
+  return value;
+}
+
+/** Deep equality by canonical JSON — used below for kernelSignature (header) and event source/payload. */
+function deepEqualCanonical(a: unknown, b: unknown): boolean {
+  return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
+}
+
+/** The event shape both a DB-read row and an incoming `EvidenceBundle` event satisfy, for comparison purposes. */
+interface ComparableEvent {
+  id: string;
+  type: string;
+  timestamp: string;
+  source: unknown;
+  payload: unknown;
+  hash: string;
+}
+
+/**
+ * P3 (N79 round 7, astra 126g HIGH): whether `incoming` is a true ONE-TO-ONE match against `existing` — every
+ * persisted event field (id, type, timestamp, source by canonical JSON, payload by canonical JSON, hash) equal,
+ * order-insensitive (a permuted delivery is still exact). NOT `length + every(...some(...))` (round 6's rule):
+ * that passes on a bijection but ALSO on non-bijective coincidences like stored [A,B] / incoming [A,A], where
+ * each incoming A independently matches stored A without the comparison ever being "consumed" — astra 126g
+ * H3b's exact reproduction. Duplicate ids WITHIN `incoming` can never be part of a bijection (there is nothing
+ * left for a second occurrence of the same id to match that the first one did not already claim), so they are
+ * rejected immediately, before any id-keyed map is even built.
+ */
+function eventsExactMatch(existing: readonly ComparableEvent[], incoming: readonly ComparableEvent[]): boolean {
+  const incomingIds = incoming.map((e) => e.id);
+  if (new Set(incomingIds).size !== incomingIds.length) return false;
+  if (existing.length !== incoming.length) return false;
+  const existingById = new Map(existing.map((e) => [e.id, e]));
+  if (existingById.size !== existing.length) return false; // defend against a stored set with its own duplicate ids
+  for (const ev of incoming) {
+    const match = existingById.get(ev.id);
+    if (
+      !match ||
+      match.type !== ev.type ||
+      match.timestamp !== ev.timestamp ||
+      match.hash !== ev.hash ||
+      !deepEqualCanonical(match.source, ev.source) ||
+      !deepEqualCanonical(match.payload, ev.payload)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// P2 (N79 round 7, astra 126g HIGH): milestone-index derivation helper
+// ---------------------------------------------------------------------------
+
+/**
+ * P2 (N79 round 7): fresh confirmation, right before a chain WRITE, that the chain milestone at `derivedIndex`
+ * still carries the step identity this call derived its target from. Dispatches to the reader that matches
+ * the escrow's OWN recorded version, not the ABI the eventual write happens to use:
+ *   - `escrowVersion === "v2"`: {@link getEscrowStateV2}, the proper V2 reader. Lead review (round 7
+ *     addendum): decoding a V2 clone's 12-field milestone struct through the V1 ABI's shorter 9-field tuple
+ *     is a PLAUSIBLE field-order-superset argument (`shapeMilestoneV2` appends exactly 3 fields after the
+ *     same 9 V1 ones), but it is unproven against a live contract — a wrong decode here would fail closed
+ *     every V2 job's evidence submit, silently, which is worse than the extra reader. Read with the reader
+ *     the escrow's OWN version names instead of inferring one from what the write call happens to use.
+ *   - `escrowVersion === "v3"`: refused outright, before any read — `getMilestoneMappingV3` needed its own
+ *     bespoke minimal reader because no existing reader was known to decode it, so neither V1 nor V2 is a
+ *     confirmed match.
+ *   - anything else (`"v1"`, `null`, `undefined` — the no-row env-default path never has a version to read
+ *     at all): {@link getEscrowStateV1}. The kernel's documented env-default fallback (kernel-service.ts:28-30)
+ *     is always a v1-style escrow, so V1 is unambiguously correct there too.
+ * A failed read refuses the same way: this never throws, and it adds no chain call on a path that was not
+ * already about to make one (callers only reach this once a chain WRITE is already decided).
+ */
+async function verifyDerivedMilestoneOnChain(
+  contractAddress: string,
+  derivedIndex: number,
+  expectedStepId: string,
+  escrowVersion: string | null | undefined,
+): Promise<boolean> {
+  if (escrowVersion === "v3") return false; // the matching reader cannot be determined — refuse.
+  try {
+    const expectedHash = keccak256(toBytes(expectedStepId)).toLowerCase();
+    const chainState =
+      escrowVersion === "v2" ? await getEscrowStateV2(contractAddress as Address) : await getEscrowStateV1(contractAddress as Address);
+    const m = chainState.milestones[derivedIndex];
+    if (!m) return false;
+    return m.stepId.toLowerCase() === expectedHash;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,7 +207,16 @@ export class SettlementService {
     jobId: string,
     options: ProcessEvidenceOptions = {},
   ): Promise<SettlementResult> {
-    const { milestoneIndex = 0, contractAddress, autoRelease = false, attestation } = options;
+    const { milestoneIndex: suppliedMilestoneIndex, contractAddress, autoRelease = false, attestation } = options;
+    // N79 round 7 (P2): the ONE authoritative milestone index, derived below from the job's own step — never
+    // taken on the caller's word alone. Starts at the supplied value (or 0) only for paths that derive nothing
+    // (no job-owned escrow AND no matched env-default target) — Step 3/4 never fire on those paths anyway (no
+    // contractAddress, or writes disabled), so nothing downstream ever acts on an undereived value.
+    let derivedMilestoneIndex = suppliedMilestoneIndex ?? 0;
+    // The escrow version this call's derived index was checked against, for the fresh pre-chain-write
+    // verification below (`verifyDerivedMilestoneOnChain`). `undefined` for the env-default (no-row) path — the
+    // kernel's documented fallback is always a v1-style escrow (kernel-service.ts:28-30).
+    let derivedMilestoneEscrowVersion: string | null | undefined;
 
     // N79 round 5 (R5-H1, astra 126e Q2 HIGH): true ONLY once this bundle's row is confirmed to hold exactly what
     // this call submits — inserted fresh, or found as an exact re-delivery. Any failure before that (a primary-key
@@ -140,22 +255,77 @@ export class SettlementService {
       ) {
         return { ...result, error: "evidence_job_mismatch" };
       }
+
+      // ── The escrow target (N79 round 7, P2, astra 126g HIGH) ──────────────
+      // Resolve the ONE allowed target BEFORE Step 1: the job's own escrow row's address when a row exists, else
+      // the normalized env default when one is set, else none. Round 6 only ran the comparison `if
+      // (jobOwnEscrow)` — a job with NO escrow row skipped the comparison entirely, letting ANY supplied
+      // contractAddress through (astra 126g H2: an unrelated address reached the chain for a job with no row).
+      const jobOwnEscrow = escrowForJob(jobId);
+      const envDefault = process.env.ESCROW_CONTRACT_ADDRESS;
+      const allowedTarget = jobOwnEscrow ? jobOwnEscrow.contractAddress : envDefault || undefined;
       if (contractAddress) {
-        const jobOwnEscrow = escrowForJob(jobId);
-        if (jobOwnEscrow) {
-          let targetIsJobsOwnEscrow = false;
-          try {
-            targetIsJobsOwnEscrow =
-              contractAddress === jobOwnEscrow.contractAddress ||
-              (isAddress(contractAddress) &&
-                isAddress(jobOwnEscrow.contractAddress) &&
-                getAddress(contractAddress) === getAddress(jobOwnEscrow.contractAddress));
-          } catch {
-            targetIsJobsOwnEscrow = false;
+        if (!allowedTarget) {
+          return { ...result, error: "escrow_mismatch" };
+        }
+        let targetIsAllowed = false;
+        try {
+          targetIsAllowed =
+            contractAddress === allowedTarget ||
+            (isAddress(contractAddress) &&
+              isAddress(allowedTarget) &&
+              getAddress(contractAddress) === getAddress(allowedTarget));
+        } catch {
+          targetIsAllowed = false;
+        }
+        if (!targetIsAllowed) {
+          return { ...result, error: "escrow_mismatch" };
+        }
+      }
+
+      // ── The milestone index (N79 round 7, P2, astra 126g HIGH) ────────────
+      // Derive the ONE authoritative index from the job's own step — round 6 passed the caller's milestoneIndex
+      // straight through with no check that it identifies THIS job's step at all (astra 126g H1: evidence
+      // correctly bound to job A's step, submitted at job B's index on a shared escrow).
+      if (jobOwnEscrow) {
+        // With a row: the UNIQUE local milestone whose stepId === job.stepId. Pure local read — no chain call,
+        // so this runs even when no contractAddress was supplied (Step 3/4 just never act on it then).
+        const localRows = getRepos().escrows.findMilestonesByEscrow(jobOwnEscrow.id);
+        const localMatches = localRows.reduce<number[]>((acc, row, i) => {
+          if (row.stepId === authoritativeJob.stepId) acc.push(i);
+          return acc;
+        }, []);
+        if (localMatches.length !== 1) {
+          return { ...result, error: "evidence_milestone_unbound" };
+        }
+        derivedMilestoneIndex = localMatches[0]!;
+        derivedMilestoneEscrowVersion = jobOwnEscrow.version;
+        if (suppliedMilestoneIndex !== undefined && suppliedMilestoneIndex !== derivedMilestoneIndex) {
+          return { ...result, error: "evidence_milestone_mismatch" };
+        }
+      } else if (allowedTarget && contractAddress && isWriteEnabled()) {
+        // Without a row (the env default): the unique ON-CHAIN milestone whose stepId equals
+        // keccak256(toBytes(job.stepId)) — derivation itself requires a chain read here, since there is no
+        // local row to consult. Skipped when writes are disabled or no target is supplied: Step 3/4 can never
+        // make a chain call on that path, and this derivation's own read must not be added where nothing else
+        // would ever read or write the chain.
+        try {
+          const chainState = await getEscrowStateV1(contractAddress as Address);
+          const expectedHash = keccak256(toBytes(authoritativeJob.stepId)).toLowerCase();
+          const chainMatches = chainState.milestones.reduce<number[]>((acc, m, i) => {
+            if (m.stepId.toLowerCase() === expectedHash) acc.push(i);
+            return acc;
+          }, []);
+          if (chainMatches.length !== 1) {
+            return { ...result, error: "evidence_milestone_unbound" };
           }
-          if (!targetIsJobsOwnEscrow) {
-            return { ...result, error: "escrow_mismatch" };
+          derivedMilestoneIndex = chainMatches[0]!;
+          derivedMilestoneEscrowVersion = undefined; // the env default is always v1-style.
+          if (suppliedMilestoneIndex !== undefined && suppliedMilestoneIndex !== derivedMilestoneIndex) {
+            return { ...result, error: "evidence_milestone_mismatch" };
           }
+        } catch {
+          return { ...result, error: "evidence_milestone_unbound" };
         }
       }
     } catch {
@@ -284,7 +454,28 @@ export class SettlementService {
                 // propagates to the SAME outer catch the original two-write version relied on, so it skips
                 // `bundlePersisted = true` AND the unconditional status marker below exactly as before — the
                 // outer catch's own fallback (`if (!bundlePersisted && !result.error) ...`) still applies.
+                let bundleRejectedAsInvalid = false; // N79 round 7 (P3): set only by the up-front reject below —
+                // must NOT count as persisted even though the transaction returns without throwing.
                 storeDb.transaction(() => {
+                  // N79 round 7 (P3, astra 126g HIGH): a FRESH delivery (no pre-existing row under this id) whose
+                  // OWN incoming events carry duplicate ids is malformed input, independent of anything stored —
+                  // reject it before any write, with its own error code, rather than let it either collide on the
+                  // events table's own id constraint (surfacing as a generic persistence failure) or — worse —
+                  // succeed and leave a row this same bijective check would never treat as internally consistent.
+                  // Checked via a READ (not the insert's PK collision below), since that collision only tells us
+                  // whether `bundle.id` pre-exists, not whether `bundle.events` is internally duplicate-free.
+                  const incomingEventIds = bundle.events.map((ev) => ev.id);
+                  const hasDuplicateIncomingEventIds = new Set(incomingEventIds).size !== incomingEventIds.length;
+                  const preExisting = repos.evidence.findById(bundle.id);
+                  if (!preExisting && hasDuplicateIncomingEventIds) {
+                    result.error = "evidence_bundle_invalid";
+                    bundleRejectedAsInvalid = true;
+                    console.warn(
+                      `[settlement] Evidence bundle ${bundle.id} is a fresh delivery with duplicate event ids in the same payload — refusing before any write.`,
+                    );
+                    return; // nothing written; the transaction commits as a no-op (bundlePersisted stays false below).
+                  }
+
                   try {
                     repos.evidence.insert({
                         id: bundle.id,
@@ -298,7 +489,13 @@ export class SettlementService {
                       });
                     } catch (insertErr) {
                       // A PRE-EXISTING row under this id (from a prior call, possibly a different bundle
-                      // entirely). Exact only when the header AND every stored event match this bundle's.
+                      // entirely). N79 round 7 (P3, astra 126g HIGH): exact ONLY when the header matches on
+                      // EVERY persisted column — kernelSignature by canonical deep equality, and createdAt, are
+                      // now both compared (round 6 omitted both: a re-delivery differing ONLY in kernelSignature
+                      // or createdAt used to read as identical) — AND the stored + incoming events are a true
+                      // one-to-one match via {@link eventsExactMatch} (round 6's `length + every(...some(...))`
+                      // is not a bijection: stored [A,B] wrongly accepted incoming [A,A], since each incoming A
+                      // independently matched stored A without the comparison ever consuming it).
                       const existing = repos.evidence.findById(bundle.id);
                       const existingEvents = existing ? repos.evidence.findEventsByBundle(bundle.id) : [];
                       const exactReDelivery =
@@ -308,8 +505,9 @@ export class SettlementService {
                         existing.kernelId === bundle.kernelId &&
                         existing.assuranceTier === bundle.assuranceTier &&
                         existing.bundleHash === bundle.bundleHash &&
-                        existingEvents.length === bundle.events.length &&
-                        bundle.events.every((ev) => existingEvents.some((e) => e.id === ev.id && e.hash === ev.hash));
+                        deepEqualCanonical(existing.kernelSignature, bundle.kernelSignature) &&
+                        existing.createdAt === bundle.createdAt &&
+                        eventsExactMatch(existingEvents, bundle.events);
                       if (exactReDelivery) {
                         console.warn(`[settlement] Evidence bundle ${bundle.id} already persisted identically — idempotent re-delivery, proceeding.`);
                         return; // nothing to write; the transaction commits as a no-op.
@@ -318,7 +516,7 @@ export class SettlementService {
                       console.warn(
                         `[settlement] DB persistence failed for bundle ${bundle.id}: ${
                           existing
-                            ? `an existing row under this id does not match this bundle (job/step/kernel/tier/hash/events) — refusing to settle on it`
+                            ? `an existing row under this id does not match this bundle (header column, or its events, differ) — refusing to settle on it`
                             : insertErr instanceof Error
                               ? insertErr.message
                               : String(insertErr)
@@ -355,7 +553,9 @@ export class SettlementService {
                       }
                     }
                 });
-                bundlePersisted = true; // reached only if the transaction committed (returned without throwing).
+                // Reached only if the transaction committed (returned without throwing) AND this call's own
+                // up-front validation did not reject it (N79 round 7, P3's `evidence_bundle_invalid` gate).
+                bundlePersisted = !bundleRejectedAsInvalid;
 
                 // This generic step marker is unconditional, as it always was: it commits the job to nothing
                 // (unlike Step 3's `evidence_submitted` + `evidenceBundleId`, which IS gated on `bundlePersisted`
@@ -410,7 +610,23 @@ export class SettlementService {
                     ? (bundle.bundleHash as `0x${string}`)
                     : (`0x${bundle.bundleHash}` as `0x${string}`);
 
-                  const writeResult = await onChainSubmitEvidence(milestoneIndex, bundleHashHex, addr);
+                  // N79 round 7 (P2): a fresh confirmation, right before THIS submit, that the chain milestone at
+                  // the derived index still carries the job's own step identity — defence against drift between
+                  // bind-first time and now, and the ONLY check for the env-default (no-row) path's derivation,
+                  // whose scan already ran but is re-confirmed here on the same footing as the with-row path.
+                  const onChainBindingOk = await verifyDerivedMilestoneOnChain(
+                    addr,
+                    derivedMilestoneIndex,
+                    bundle.stepId,
+                    derivedMilestoneEscrowVersion,
+                  );
+                  if (!onChainBindingOk) {
+                    result.error = "evidence_milestone_unbound";
+                    traceCollector.endSpan({ traceId: localTraceId, spanId: onchainSubmitSpanId, status: "error" });
+                    return;
+                  }
+
+                  const writeResult = await onChainSubmitEvidence(derivedMilestoneIndex, bundleHashHex, addr);
                   result.evidenceTxHash = writeResult.transactionHash;
 
                   try {
@@ -535,9 +751,24 @@ export class SettlementService {
               // THIS call's evidence, so it must not fire when that evidence was never confirmed persisted either.
               if (bundlePersisted && autoRelease && isWriteEnabled() && contractAddress && attestation && !fabricatedBlocksSettlement) {
                 try {
+                  // N79 round 7 (P2): the SAME derived index auto-release acts on, re-confirmed on-chain right
+                  // before this call — the brief's "before any auto-release" checkpoint, independent of whether
+                  // Step 3 already confirmed it (auto-release can, in principle, run without Step 3 having run
+                  // its own submit on this exact call if evidence submission is skipped for some other reason).
+                  const onChainBindingOk = await verifyDerivedMilestoneOnChain(
+                    contractAddress as Address,
+                    derivedMilestoneIndex,
+                    bundle.stepId,
+                    derivedMilestoneEscrowVersion,
+                  );
+                  if (!onChainBindingOk) {
+                    traceCollector.endSpan({ traceId: localTraceId, spanId: onchainReleaseSpanId, status: "error" });
+                    return;
+                  }
+
                   const releaseResult = await this.releaseMilestone(
                     jobId,
-                    milestoneIndex,
+                    derivedMilestoneIndex,
                     attestation,
                     contractAddress,
                   );

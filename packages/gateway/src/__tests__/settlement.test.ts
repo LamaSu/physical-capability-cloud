@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { keccak256, toBytes } from "viem";
 import Fastify, { type FastifyInstance } from "fastify";
 import { settlementRoutes } from "../routes/settlement.js";
 import { initStore, closeStore, getRepos } from "../db.js";
@@ -50,6 +51,11 @@ vi.mock("../contracts/escrow-client.js", () => ({
     transactionHash: "0xtest_release_tx456",
     status: "submitted",
   }),
+  // N79 round 7 (P2): processEvidence's fresh pre-submit/pre-auto-release verification reads this (the
+  // env-default path's reader — these tests have no escrow row, only ESCROW_CONTRACT_ADDRESS) right before
+  // Step 3/4. Fixture only; resolved per-describe-block below to a milestone matching job-004's own stepId —
+  // no assertion in this file changed.
+  getEscrowState: vi.fn(),
   isWriteEnabled: vi.fn().mockReturnValue(false), // default: no private key configured
   getSignerAddress: vi.fn().mockReturnValue(undefined),
   // Batch settlement re-exports from the same mock
@@ -193,6 +199,30 @@ describe("SettlementService", () => {
   });
 
   describe("processEvidence", () => {
+    // N79 round 7 (P2): processEvidence now resolves ONE allowed escrow target before Step 1 — the job's own
+    // escrow row, else the normalized ESCROW_CONTRACT_ADDRESS env default, else none — and refuses a supplied
+    // contractAddress that names neither. job-004 (this describe's shared fixture) has no escrow row, so the
+    // env default is what every test below needs to supply the address it already passes. Fixture only; no
+    // assertion in this file changed. Saves and restores whatever value was there before (not just deletes),
+    // per lead review.
+    let savedEscrowEnv: string | undefined;
+    beforeEach(async () => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      // The SAME round's fresh pre-submit/pre-auto-release chain verification (also P2) reads a milestone at
+      // the derived index through this env-default path's reader (getEscrowState, V1 — there is no escrow row
+      // here to carry a "v2" version, so V1 is the correct, unambiguous reader per that function's own doc
+      // comment). One matching milestone for job-004's own stepId.
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+        milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-004")!.stepId)) }],
+      } as never);
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+    });
+
     it("stores the bundle and persists to DB", async () => {
       const service = getSettlementService();
       const bundle = makeBundle();
@@ -696,6 +726,25 @@ describe("Full evidence-to-settlement flow", () => {
     closeStore();
     closeWorkflowStore();
     resetSettlementService();
+  });
+
+  // N79 round 7 (P2 + the fresh pre-submit/pre-auto-release chain verification): same fixture as the
+  // "processEvidence" describe above — job-004 has no escrow row, so these tests' own
+  // `contractAddress: "0xDeAdBeEf...0001"` needs the env default to resolve, and a matching V1 milestone for
+  // the verification read. Fixture only; no assertion in this file changed. Registered AFTER the existing
+  // beforeEach above so `buildApp()` (which calls `initStore`) has already run before `getRepos()` here.
+  let savedEscrowEnvFullFlow: string | undefined;
+  beforeEach(async () => {
+    savedEscrowEnvFullFlow = process.env.ESCROW_CONTRACT_ADDRESS;
+    process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+    const escrowMod = await import("../contracts/escrow-client.js");
+    vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+      milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-004")!.stepId)) }],
+    } as never);
+  });
+  afterEach(() => {
+    if (savedEscrowEnvFullFlow === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+    else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnvFullFlow;
   });
 
   it("processes evidence then settles (with write enabled)", async () => {

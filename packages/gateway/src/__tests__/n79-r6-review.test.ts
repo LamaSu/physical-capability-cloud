@@ -26,9 +26,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { getAddress, keccak256, toBytes, type Hex } from "viem";
 import type { EvidenceBundle } from "@pcc/spec";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({
   createEvidenceStorage: vi.fn().mockResolvedValue({
@@ -655,6 +656,106 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
     }
   });
 
+  it("P1 (T1, general AST scan): NO write to milestone-released or escrow-completed exists anywhere in gateway src outside recordChainSettlement/recordMockEscrowReleased", () => {
+    // astra 126h (MEDIUM, T1): the test above forbids only the 3 named legacy calls on 4 named files, and its
+    // module sweep recognizes only `export function NAME(` declarations. A direct `updateMilestoneStatus(...,
+    // "released")` written BESIDE a guarded call in any OTHER file (or inside an arrow function / aliased
+    // call anywhere) evades it entirely. This test instead parses every production .ts file under src/** (TS
+    // compiler API, not regex-on-braces) and attributes every matching write to its nearest NAMED enclosing
+    // function — the function a human would say "owns" that line — whatever kind it is: a function
+    // declaration, a class/object method, or an arrow/function expression bound to a name via `const x = ...`
+    // or `key: (...) => ...`. An anonymous callback (e.g. the arrow passed straight to `.transaction(() => {
+    // ... })` inside recordChainSettlement itself) is transparent: attribution walks up PAST it to the next
+    // named ancestor, so recordChainSettlement's own writes — nested inside that transaction callback — still
+    // correctly resolve to "recordChainSettlement", not "<anonymous>".
+    const here = dirname(fileURLToPath(import.meta.url));
+    const srcDir = resolve(here, "..");
+    const allowedWriters = new Set(["recordChainSettlement", "recordMockEscrowReleased"]);
+
+    function listTsFiles(dir: string): string[] {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        const st = statSync(full);
+        if (st.isDirectory()) {
+          if (entry === "__tests__" || entry === "node_modules") continue;
+          out.push(...listTsFiles(full));
+        } else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts") && !entry.endsWith(".d.ts")) {
+          out.push(full);
+        }
+      }
+      return out;
+    }
+
+    function enclosingFunctionName(node: ts.Node): string | null {
+      let cur: ts.Node | undefined = node.parent;
+      while (cur) {
+        if (ts.isFunctionDeclaration(cur) && cur.name) return cur.name.text;
+        if (ts.isMethodDeclaration(cur) && ts.isIdentifier(cur.name)) return cur.name.text;
+        if (ts.isArrowFunction(cur) || ts.isFunctionExpression(cur)) {
+          const parent: ts.Node | undefined = cur.parent;
+          if (parent && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
+          if (parent && ts.isPropertyAssignment(parent) && ts.isIdentifier(parent.name)) return parent.name.text;
+          // Anonymous (e.g. a bare callback argument) — keep walking up to the next NAMED ancestor; that is
+          // this write's real attribution.
+        }
+        cur = cur.parent;
+      }
+      return null; // top-level, no enclosing function at all.
+    }
+
+    const RELEASED_CALL = /\bupdateMilestoneStatus\s*\([^)]*"released"\s*\)/;
+    const COMPLETED_CALL = /\bcasEscrowStatus\s*\([^)]*"completed"\s*/;
+    // "a variable holding the method" (T1's own example): an alias assignment taken OUTSIDE the two allowed
+    // writers evades a call-site-text scan entirely once invoked through the alias — flagged directly, at the
+    // assignment itself, regardless of how (or whether) the alias is later called.
+    const METHOD_ALIAS_ASSIGNMENT = /=\s*[\w.]*\.(updateMilestoneStatus|casEscrowStatus)\b/;
+
+    interface SourceWrite { file: string; enclosingFunctionName: string | null; snippet: string }
+
+    function scanFile(filePath: string, source: string): SourceWrite[] {
+      const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
+      const writes: SourceWrite[] = [];
+      function visit(node: ts.Node) {
+        if (ts.isCallExpression(node)) {
+          const text = node.getText(sf);
+          if (RELEASED_CALL.test(text) || COMPLETED_CALL.test(text)) {
+            writes.push({ file: filePath, enclosingFunctionName: enclosingFunctionName(node), snippet: text.slice(0, 160) });
+          }
+        }
+        if (ts.isBinaryExpression(node) || ts.isVariableDeclaration(node)) {
+          const text = node.getText(sf);
+          if (METHOD_ALIAS_ASSIGNMENT.test(text)) {
+            writes.push({ file: filePath, enclosingFunctionName: enclosingFunctionName(node), snippet: text.slice(0, 160) });
+          }
+        }
+        ts.forEachChild(node, visit);
+      }
+      visit(sf);
+      return writes;
+    }
+
+    const files = listTsFiles(srcDir);
+    expect(files.length, "the file walk must actually find production source").toBeGreaterThan(20);
+    const violations: SourceWrite[] = [];
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      if (!/updateMilestoneStatus|casEscrowStatus/.test(source)) continue; // fast skip — most files touch neither.
+      for (const w of scanFile(file, source)) {
+        if (!w.enclosingFunctionName || !allowedWriters.has(w.enclosingFunctionName)) violations.push(w);
+      }
+    }
+    expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
+
+    // Sanity: the scan must actually find the two allowed writers' OWN writes, correctly attributed (not
+    // vacuously passing because the scan found nothing at all, or mis-attributed them to "<anonymous>" —
+    // recordChainSettlement's writes are nested inside an anonymous `.transaction(() => {...})` callback).
+    const refundPath = join(srcDir, "services/escrow-refund.ts");
+    const refundWrites = scanFile(refundPath, readFileSync(refundPath, "utf8"));
+    expect(refundWrites.filter((w) => w.enclosingFunctionName === "recordChainSettlement").length).toBeGreaterThan(0);
+    expect(refundWrites.filter((w) => w.enclosingFunctionName === "recordMockEscrowReleased").length).toBeGreaterThan(0);
+  });
+
   it("P2: a mismatch on ANY bound field (job, step, kernel, tier, escrow target) gives zero DB writes and zero chain calls", async () => {
     let n = 0;
     const cases: Array<{ name: string; setup: () => Promise<{ bundle: EvidenceBundle; targetJobId: string; contractAddress: string }> }> = [
@@ -719,6 +820,101 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
       expect(["evidence_job_mismatch", "escrow_mismatch"], name).toContain(result.error);
       expect(chain.submitEvidence, name).not.toHaveBeenCalled();
       expect(getRepos().evidence.findById(bundle.id), name).toBeUndefined();
+    }
+  });
+
+  it("P2 (T2, zero side effects): a mismatch leaves the job's status/pointer, evidence, archive, and every chain-write mock untouched — even with autoRelease on", async () => {
+    // astra 126h (MEDIUM, T2): the test above checks only that submitEvidence was not called and the evidence
+    // header is absent. A mutant that updates the job status, or calls releaseMilestone, INSIDE a mismatch
+    // branch (while leaving submitEvidence itself untouched) would stay green against it — reproduced and
+    // confirmed in isolation against today's P2 test before this one was written (T1/T2 mutant demonstration,
+    // reported alongside this round's text report). This test snapshots the job before and after, exposes the
+    // archive spy, enables autoRelease with a real attestation, and checks every chain-write mock.
+    let n = 0;
+    const cases: Array<{ name: string; setup: () => Promise<{ bundle: EvidenceBundle; targetJobId: string; contractAddress: string }> }> = [
+      {
+        name: "job",
+        setup: async () => {
+          n += 1;
+          const jobA = await submitPaidJob(app, `user-t2-job-A-${n}`);
+          const jobB = await submitPaidJob(app, `user-t2-job-B-${n}`);
+          pointEscrowAtChain(jobA, addr(0xfb0000 + n * 2), "v2");
+          const addressB = pointEscrowAtChain(jobB, addr(0xfb0000 + n * 2 + 1), "v2");
+          return { bundle: makeBundle(jobA, { id: `bundle-t2-job-${n}` }), targetJobId: jobB, contractAddress: addressB };
+        },
+      },
+      {
+        name: "step",
+        setup: async () => {
+          n += 1;
+          const jobId = await submitPaidJob(app, `user-t2-step-${n}`);
+          const address = pointEscrowAtChain(jobId, addr(0xfb0000 + n * 2), "v2");
+          return { bundle: makeBundle(jobId, { id: `bundle-t2-step-${n}`, stepId: "not-this-jobs-step" }), targetJobId: jobId, contractAddress: address };
+        },
+      },
+      {
+        name: "kernel",
+        setup: async () => {
+          n += 1;
+          const jobId = await submitPaidJob(app, `user-t2-kernel-${n}`);
+          const address = pointEscrowAtChain(jobId, addr(0xfb0000 + n * 2), "v2");
+          return { bundle: makeBundle(jobId, { id: `bundle-t2-kernel-${n}`, kernelId: "not-this-jobs-kernel" }), targetJobId: jobId, contractAddress: address };
+        },
+      },
+      {
+        name: "tier",
+        setup: async () => {
+          n += 1;
+          const jobId = await submitPaidJob(app, `user-t2-tier-${n}`);
+          const address = pointEscrowAtChain(jobId, addr(0xfb0000 + n * 2), "v2");
+          return { bundle: makeBundle(jobId, { id: `bundle-t2-tier-${n}`, assuranceTier: 2 }), targetJobId: jobId, contractAddress: address };
+        },
+      },
+      {
+        name: "escrow",
+        setup: async () => {
+          n += 1;
+          const jobA = await submitPaidJob(app, `user-t2-escrow-A-${n}`);
+          const jobB = await submitPaidJob(app, `user-t2-escrow-B-${n}`);
+          const addressA = pointEscrowAtChain(jobA, addr(0xfb0000 + n * 2), "v2");
+          pointEscrowAtChain(jobB, addr(0xfb0000 + n * 2 + 1), "v2");
+          return { bundle: makeBundle(jobB, { id: `bundle-t2-escrow-${n}` }), targetJobId: jobB, contractAddress: addressA };
+        },
+      },
+    ];
+
+    const storageMod = await import("@pcc/kernel/evidence-storage-factory");
+    const storage = await vi.mocked(storageMod.createEvidenceStorage)();
+    const archiveSpy = vi.mocked(storage.archiveBundle);
+    vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
+
+    for (const { name, setup } of cases) {
+      vi.mocked(chain.submitEvidence).mockClear().mockResolvedValue({ transactionHash: `0xt2-${name}`, status: "submitted" } as never);
+      vi.mocked(chain.releaseMilestone).mockClear().mockResolvedValue({ transactionHash: `0xt2-${name}-rel`, status: "submitted" } as never);
+      archiveSpy.mockClear();
+      const { bundle, targetJobId, contractAddress } = await setup();
+      const before = getRepos().jobs.findById(targetJobId)!;
+      const beforeSnapshot = { status: before.status, evidenceBundleId: before.evidenceBundleId };
+
+      const result = await getSettlementService().processEvidence(bundle, targetJobId, {
+        milestoneIndex: 0,
+        contractAddress,
+        autoRelease: true,
+        attestation: ATTESTATION(contractAddress),
+      });
+
+      expect(["evidence_job_mismatch", "escrow_mismatch"], name).toContain(result.error);
+      // Every chain-write mock untouched.
+      expect(chain.submitEvidence, name).not.toHaveBeenCalled();
+      expect(chain.releaseMilestone, name).not.toHaveBeenCalled();
+      // No evidence header AND no events.
+      expect(getRepos().evidence.findById(bundle.id), name).toBeUndefined();
+      expect(getRepos().evidence.findEventsByBundle(bundle.id), name).toHaveLength(0);
+      // No archive/storage attempt.
+      expect(archiveSpy, name).not.toHaveBeenCalled();
+      // The job's status and its pointer, byte-for-byte unchanged.
+      const after = getRepos().jobs.findById(targetJobId)!;
+      expect({ status: after.status, evidenceBundleId: after.evidenceBundleId }, name).toEqual(beforeSnapshot);
     }
   });
 
@@ -847,6 +1043,74 @@ describe("N79 round 6: Phase 2 — addendum 1 properties", () => {
     expect(driveSettlement).not.toHaveBeenCalled();
     expect(resumed.statusCode).toBe(409);
     expect(resumed.json()).toEqual(expect.objectContaining({ error: "escrow_mapping_drift" }));
+  });
+
+  it("T3 (resume, completion-side compare): a CLEAN pre-drive read followed by a DRIFTED completion-side read must quarantine, not complete", async () => {
+    // astra 126h (MEDIUM, T3): every existing resume drift case supplies drift on the FIRST (pre-drive) read, so
+    // the pre-drive gate above always catches it before driveSettlement runs at all — none of them would catch
+    // a regression in the SEPARATE fresh read `completeClaimedEscrowFromChain` takes after a successful drive.
+    // This case makes the first read clean, lets the crank report settled:true, and drifts ONLY the second
+    // (completion-side) read — isolating that the completion-side compare, not the pre-drive gate, is what
+    // must catch it.
+    const jobId = await submitPaidJob(app, "user-t3-resume-completion-drift");
+    const address = pointEscrowAtChain(jobId, addr(0xfd0002), "v2");
+    const repos = getRepos();
+    const job = repos.jobs.findById(jobId)!;
+    repos.evidence.insert({
+      id: "bundle-t3-resume",
+      jobId,
+      stepId: job.stepId,
+      kernelId: job.kernelId,
+      assuranceTier: 0,
+      bundleHash: HASH_A,
+      kernelSignature: { signer: "0x0", algorithm: "secp256k1", value: "sig" },
+      createdAt: new Date().toISOString(),
+    });
+    repos.jobs.update(jobId, { evidenceBundleId: "bundle-t3-resume", status: "evidence_submitted" });
+
+    process.env.PCC_USE_EAS_V2 = "true";
+    vi.mocked(chain.isWriteEnabled).mockReturnValue(true);
+    const escrowId = escrowForJob(jobId)!.id;
+    const milestonesBefore = rows(escrowId).milestones;
+    // FIRST read (resume's pre-drive gate): CLEAN — stepId overridden to match this job's own (submitPaidJob
+    // gives it a random stepId, not the "step-N" convention chainState() defaults to; built inline as the
+    // R4-H1/H2 tests above do).
+    const cleanState = chainState(address, [chain.MilestoneStatusV2.Attested], {
+      stepIdOverrides: { 0: keccak256(toBytes(job.stepId)) as Hex },
+    });
+    // SECOND read (completeClaimedEscrowFromChain's OWN fresh V2 read, taken after the crank reports settled):
+    // DRIFTED — a different stepId at the same index.
+    const driftedState = chainState(address, [chain.MilestoneStatusV2.Released], {
+      stepIdOverrides: { 0: keccak256(toBytes("completely-different-step")) as Hex },
+    });
+    vi.mocked(chain.getEscrowStateV2).mockResolvedValueOnce(cleanState).mockResolvedValueOnce(driftedState);
+    vi.mocked(driveSettlement).mockResolvedValue(SETTLED); // the crank reports settled:true off the clean read
+
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await app.inject({ method: "POST", url: `/api/jobs/${jobId}/resume-settlement` });
+      // `recordChainSettlement` (the completion-side's OWN writer) logs settlement_mapping_mismatch for ITS
+      // drift too — the pre-drive gate and the guarded writer deliberately share that log string — so what
+      // isolates "the SECOND read, not the first" is `getEscrowStateV2` only ever being called twice (asserted
+      // below) with the CLEAN value first: if the pre-drive gate had seen drift, it would have 409'd BEFORE
+      // driveSettlement / the completion read ever ran at all, and this call-site-specific error (which only
+      // completeClaimedEscrowFromChain emits, and only for the read it itself takes after a settled drive)
+      // would never fire.
+      expect(chain.getEscrowStateV2).toHaveBeenCalledTimes(2);
+      expect(driveSettlement).toHaveBeenCalledTimes(1); // proves the pre-drive gate let the clean read through
+      expect(errors).toHaveBeenCalledWith(
+        "[escrow] settlement_record_failed",
+        expect.objectContaining({ escrowId, jobId, error: "chain_mapping_drift" }),
+      );
+    } finally {
+      errors.mockRestore();
+    }
+
+    // Correct: no local row stamped, no completion, the escrow quarantined in `completing`, refund skipped.
+    expect(rows(escrowId)).toEqual({ escrow: "completing", milestones: milestonesBefore });
+    expect(setJobStatusWithRefund(jobId, "failed").escrowRefund).toEqual(
+      expect.objectContaining({ outcome: "skipped", reason: "settlement_in_progress" }),
+    );
   });
 
   // ── Lead addendum 2 (review of the source diff): two fail-closed gaps ───

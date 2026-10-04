@@ -277,6 +277,11 @@ describe("N79 round 5: the review's findings, reproduced", () => {
     vi.mocked(chain.submitEvidence).mockResolvedValue({ transactionHash: "0xr5evidence2", status: "submitted" } as never);
 
     const job = getRepos().jobs.findById(jobId)!;
+    // N79 round 7 (P2): the fresh pre-submit verification reads this — the row is "v2" (pointEscrowAtChain
+    // above), so getEscrowStateV2 per the lead's round-7 addendum. Fixture only; no assertion changed.
+    vi.mocked(chain.getEscrowStateV2).mockResolvedValue(
+      chainState(address, [chain.MilestoneStatusV2.Funded], { 0: keccak256(toBytes(job.stepId)) }),
+    );
     getRepos().evidence.insert({
       id: "bundle-r5-A",
       jobId,
@@ -337,6 +342,11 @@ describe("N79 round 5: the review's findings, reproduced", () => {
       return { transactionHash: "0xr5evidence4", status: "submitted" } as never;
     });
     vi.mocked(chain.releaseMilestone).mockResolvedValue({ transactionHash: "0xr5release4", status: "submitted" } as never);
+    // N79 round 7 (P2): the fresh pre-submit AND pre-auto-release verification both read this — the row is
+    // "v2", so getEscrowStateV2 per the lead's round-7 addendum. Fixture only; no assertion changed.
+    vi.mocked(chain.getEscrowStateV2).mockResolvedValue(
+      chainState(address, [chain.MilestoneStatusV2.Funded], { 0: keccak256(toBytes(getRepos().jobs.findById(jobId)!.stepId)) }),
+    );
     const before = getRepos().jobs.findById(jobId)!;
 
     const result = await getSettlementService().processEvidence(makeBundle(jobId), jobId, {
