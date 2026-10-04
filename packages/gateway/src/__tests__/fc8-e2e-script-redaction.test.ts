@@ -68,8 +68,12 @@ describe("FC-8 round 2 (astra pack 61b) — real-e2e-verbose.ts call sites", () 
   });
 
   it("imports the new helpers it now calls", () => {
+    // FC-8 round 4: real-e2e-verbose.ts no longer imports safeLogResponseText
+    // (the oracle body is now a validated boolean summary, not a
+    // parse-then-redact of the whole response — see the :383 guard above);
+    // safeLogId is the import that has stayed across every round.
     expect(src()).toMatch(
-      /import \{[^}]*safeLogResponseText[^}]*\} from "\.\.\/packages\/gateway\/src\/util\/redact-log\.js"/,
+      /import \{[^}]*safeLogId[^}]*\} from "\.\.\/packages\/gateway\/src\/util\/redact-log\.js"/,
     );
   });
 });
@@ -102,13 +106,25 @@ describe("FC-8 round 2 (astra pack 61b) — hp-full-chain-e2e.ts call sites", ()
 describe("FC-8 round 2 (astra pack 61b) — smoke-digital-verifier.sh", () => {
   const src = () => readScript("scripts/smoke-digital-verifier.sh");
 
-  it("disables inherited xtrace before PCC_ORACLE_KEY is ever read", () => {
+  it("disables inherited xtrace before the oracle credential is ever read", () => {
+    // FC-8 round 4 (finding 4): the script no longer reads PCC_ORACLE_KEY
+    // (a secret value) from the environment at all — only
+    // PCC_ORACLE_KEY_FILE (a path) — and `set +x` moved to the absolute
+    // first statement, before even `set -euo pipefail`. See this test's
+    // sibling coverage in fc8-round4-smoke-digital-verifier-launcher.test.ts
+    // for the dynamic PS4 proof.
     const text = src();
     const setMinusXIdx = text.indexOf("\nset +x");
-    const oracleKeyIdx = text.indexOf('ORACLE_KEY="${PCC_ORACLE_KEY:-}"');
-    expect(oracleKeyIdx).toBeGreaterThan(-1); // sanity: the script still reads this var
+    const fileCheckIdx = text.indexOf('PCC_ORACLE_KEY_FILE:-');
+    // The exact real assignment, not the threat-model comment's example
+    // (which mentions the same `cat` pattern, minus `2>/dev/null`, earlier).
+    const readIdx = text.indexOf('ORACLE_KEY="$(cat "$PCC_ORACLE_KEY_FILE")"');
+    expect(fileCheckIdx).toBeGreaterThan(-1); // sanity: the script still gates on this
+    expect(readIdx).toBeGreaterThan(-1); // sanity: the script still reads the file
+    expect(text).not.toMatch(/PCC_ORACLE_KEY:-/); // the direct-value env var is gone
     expect(setMinusXIdx).toBeGreaterThan(-1);
-    expect(setMinusXIdx).toBeLessThan(oracleKeyIdx);
+    expect(setMinusXIdx).toBeLessThan(fileCheckIdx);
+    expect(setMinusXIdx).toBeLessThan(readIdx);
   });
 
   it("no longer prints the oracle's raw free-text reason (was :295)", () => {
@@ -117,5 +133,66 @@ describe("FC-8 round 2 (astra pack 61b) — smoke-digital-verifier.sh", () => {
 
   it("no longer prints the entire raw /api/auth/validate response body (was :376)", () => {
     expect(src()).not.toMatch(/API key validation returned: \$VALIDATE_RESP/);
+  });
+});
+
+describe("FC-8 round 4 (astra pack 61c) — safeLogId call-site allowlist (finding 3)", () => {
+  // Mutation testing this round found a real gap: the generic canary test
+  // (fc8-round4-*.test.ts) cannot catch safeLogId being reintroduced on a
+  // banned non-ID field (status/mode/network/type/fee/route/amount) —
+  // fingerprinting hides the misuse exactly as well as it hides correct
+  // use, because a 12-hex fingerprint of a canary is just as absent from
+  // the output as a fingerprint of a real id would be. For a LOW-cardinality
+  // field (e.g. a 2-3 value mode/network enum) this is worse than it looks:
+  // the fingerprint's one-wayness is only as strong as the search space an
+  // attacker must brute-force, and a handful of candidate plaintexts
+  // inverts trivially. So finding 3's rule ("safeLogId may NOT be used on
+  // non-ID fields") needs its OWN guard, independent of the leak test: an
+  // explicit allowlist of every argument expression safeLogId is called
+  // with, per script, so any NEW call site (banned or merely unreviewed)
+  // fails loudly instead of fingerprinting its way past the canary test.
+  function callSiteArgs(text: string): string[] {
+    const out: string[] = [];
+    const re = /safeLogId\(([^()]*)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) out.push(m[1].trim());
+    return out;
+  }
+
+  it("real-e2e-verbose.ts: every safeLogId call site is a known, reviewed identifier field", () => {
+    const allowed = new Set([
+      "jobResult?.jobId",
+      "evidence.jobId",
+      "attestationStruct.jobId",
+      "archiveResult?.cid",
+      "archiveResult?.metadataCid",
+      "zkCommit?.commitment?.id",
+      "proofId",
+      "quoteId",
+      "intentId",
+    ]);
+    const found = callSiteArgs(readScript("scripts/real-e2e-verbose.ts"));
+    expect(found.length).toBeGreaterThan(0); // sanity: the helper is still used here
+    for (const arg of found) {
+      expect(allowed.has(arg), `unreviewed safeLogId call site: safeLogId(${arg})`).toBe(true);
+    }
+  });
+
+  it("hp-full-chain-e2e.ts: every safeLogId call site is a known, reviewed identifier field", () => {
+    const allowed = new Set(["scopeIdRaw", "toolCallId", "evidence.printResult"]);
+    const found = callSiteArgs(readScript("scripts/hp-full-chain-e2e.ts"));
+    expect(found.length).toBeGreaterThan(0);
+    for (const arg of found) {
+      expect(allowed.has(arg), `unreviewed safeLogId call site: safeLogId(${arg})`).toBe(true);
+    }
+  });
+
+  it("real-e2e.ts: every safeLogId call site is a known, reviewed identifier field", () => {
+    const allowed = new Set(["jobResult?.jobId", "printResult?.jobId"]);
+    const found = callSiteArgs(readScript("scripts/real-e2e.ts"));
+    expect(found.length).toBeGreaterThan(0);
+    for (const arg of found) {
+      expect(allowed.has(arg), `unreviewed safeLogId call site: safeLogId(${arg})`).toBe(true);
+    }
   });
 });

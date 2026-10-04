@@ -11,6 +11,7 @@
  * layer. Over-redaction in a log is safe, so the key match is deliberately broad.
  */
 import { redactSecrets } from "../redaction.js";
+import { createHash } from "node:crypto";
 
 const SENSITIVE_NEEDLES = [
   "secret",
@@ -89,15 +90,12 @@ export function safeLogJson(value: unknown, max = 800): string {
 // error object in a top-level catch. Regexes cannot make safeLogJson a sound
 // boundary for free text (see redact-log.test.ts's documented gaps), so these
 // three helpers instead replace each such site with a VALIDATED, ALLOW-LISTED
-// projection — an id-shaped string, a class-name-shaped error label, or a
+// projection — a fingerprinted id, a class-name-shaped error label, or a
 // parsed-and-redacted JSON body — and a static fallback otherwise. Never an
 // arbitrary body, error message, or stack.
 
 /** A short, class-name-shaped label (e.g. "TypeError", "HttpRequestError"). */
 const ERROR_NAME_RE = /^[A-Z][A-Za-z0-9]{0,63}$/;
-
-/** A short, bounded identifier: letters, digits, `_`, `.`, `-`. */
-const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
 /**
  * Parse `text` (an HTTP response body) as JSON and redact it with
@@ -128,29 +126,51 @@ export function safeLogErrorName(e: unknown): string {
   return typeof name === "string" && ERROR_NAME_RE.test(name) ? name : "Error";
 }
 
-/**
- * A value safe to log as an id: only when it already looks like one (short,
- * identifier-shaped). Anything else — including a free-text error message a
- * caller might otherwise have printed via `id ?? error` — becomes
- * `fallback`. Never throws.
- */
-export function safeLogId(value: unknown, fallback = "(none)"): string {
-  return typeof value === "string" && ID_RE.test(value) ? value : fallback;
+// ── FC-8 round 4 (astra pack 61c, FC-8's third failed round) ───────────────
+//
+// Rounds 2-3 validated each field's SHAPE before logging it (an id-shaped
+// string, a hex-shaped string, a URL-safe path) and printed the value
+// itself once it passed. The steward's round-4 ruling (bus #6482) rejects
+// that model outright: a SHAPE check is not a content check, so a
+// credential that happens to look like an id (or a hex string, or a
+// URL-safe path) still prints verbatim. The property this file now
+// enforces instead: a script's output may contain ONLY a fixed label the
+// script authors wrote, a value from a CLOSED set the caller explicitly
+// enumerates, a boolean, a locally-computed bounded number, or a FIXED-
+// LENGTH FINGERPRINT that reveals nothing about its input. Nothing else.
+// Concretely:
+//   - safeLogId no longer returns the value — it returns a short SHA-256
+//     fingerprint, so a reader can see "the same id reappeared" without the
+//     id (or anything shaped like it) ever appearing. Callers MUST only use
+//     this for genuine identifiers (job/scope/tool-call ids, CIDs, proof/
+//     commitment/quote/intent ids) — never for a status, mode, network,
+//     type, fee, route, or amount, which have no "it's just an opaque
+//     handle" excuse and belong in safeLogEnum (closed set) or nowhere.
+//   - safeLogHex is the same fingerprint treatment for hex/tx-hash-shaped
+//     values, since a hex-encoded secret satisfies a hex-shape check just
+//     as well as a real hash does.
+//   - safeLogUrlPath and safeLogIdList are REMOVED. A logged HTTP path must
+//     be a fixed ROUTE TEMPLATE the caller writes as a literal string (e.g.
+//     "GET /api/jobs/:id/status") — never built from a real path containing
+//     a response-derived segment, encoded or not. There is no helper for
+//     this because there is nothing to validate: the caller simply never
+//     constructs the logged string from untrusted input in the first place.
+
+/** Fixed-length output; never varies with input length, never reveals the input. */
+function fingerprint(value: string): string {
+  return `id:${createHash("sha256").update(value, "utf8").digest("hex").slice(0, 12)}`;
 }
 
-// ── FC-8 round 3 (astra pack 61b, census closure) ───────────────────────────
-//
-// Round 2 closed the three CRITICAL summary rows. Astra's full census lists
-// many more sites across the same scripts where a gateway/oracle-derived
-// value reaches a print statement unvalidated — not necessarily secret-shaped,
-// but also never checked, so the scripts "cannot support an ANY-value-ANY-path
-// confidentiality guarantee" (the verdict's own words). These five helpers
-// give every remaining site a VALIDATED, narrow type to log instead of the
-// raw value: an integer (status codes, sizes, counts, block numbers), a
-// boolean, a short allow-listed enum (job status, content-type), a bounded
-// hex string (tx hashes, signatures — a bounded prefix only), or a URL path
-// restricted to URL-safe identifier characters. Anything that doesn't fit
-// becomes a fixed fallback — never the raw value.
+/**
+ * A short SHA-256 fingerprint of `value`, safe to log for correlation
+ * ("this is the same id as three lines up") without ever printing the id
+ * (or anything that merely looks like one) itself. Only for genuine
+ * identifier fields — never a status/mode/network/type/fee/route/amount.
+ * Never throws.
+ */
+export function safeLogId(value: unknown, fallback = "(none)"): string {
+  return typeof value === "string" && value.length > 0 ? fingerprint(value) : fallback;
+}
 
 /** An integer (number or bigint) safe to log as-is; anything else → fallback. */
 export function safeLogInt(value: unknown, fallback = "(none)"): string {
@@ -164,8 +184,8 @@ export function safeLogBool(value: unknown, fallback = "(unknown)"): string {
   return typeof value === "boolean" ? String(value) : fallback;
 }
 
-/** A string safe to log only if it exactly matches one of `allowed`. */
-export function safeLogEnum(value: unknown, allowed: readonly string[], fallback = "(unknown)"): string {
+/** A string safe to log only if it exactly matches one of `allowed` (a closed, caller-supplied set). Anything else → fallback, e.g. "(unexpected)". */
+export function safeLogEnum(value: unknown, allowed: readonly string[], fallback = "(unexpected)"): string {
   return typeof value === "string" && allowed.includes(value) ? value : fallback;
 }
 
@@ -182,19 +202,14 @@ export function safeLogContentType(value: unknown, fallback = "(unknown)"): stri
   return base && (CONTENT_TYPES as readonly string[]).includes(base) ? base : fallback;
 }
 
-/** A `0x`-hex string (tx hash, signature) safe to log as a bounded prefix; anything else → fallback. */
-export function safeLogHex(value: unknown, maxChars = 20, fallback = "(none)"): string {
-  if (typeof value !== "string" || !/^0x[0-9a-fA-F]*$/.test(value)) return fallback;
-  return value.length > maxChars ? `${value.slice(0, maxChars)}…` : value;
-}
-
-/** A URL path safe to log: only URL-safe identifier characters, no spaces/quotes (where a secret would have to sit). */
-export function safeLogUrlPath(value: unknown, fallback = "(path withheld)"): string {
-  return typeof value === "string" && /^[A-Za-z0-9/_.\-?=&%:]{1,256}$/.test(value) ? value : fallback;
-}
-
-/** Each element of `value` run through safeLogId and comma-joined; non-arrays/non-strings → fallback. */
-export function safeLogIdList(value: unknown, fallback = "(unknown)"): string {
-  if (!Array.isArray(value)) return fallback;
-  return value.slice(0, 20).map((v) => safeLogId(v, "?")).join(", ");
+/**
+ * A short SHA-256 fingerprint of a `0x`-hex string (a tx hash, a
+ * signature), safe to log for correlation without printing the value — a
+ * hex-encoded secret satisfies the hex-shape check just as well as a real
+ * hash does, so the shape check alone (round 3's behavior) was not a
+ * content boundary. Anything not hex-shaped → fallback. Never throws.
+ */
+export function safeLogHex(value: unknown, fallback = "(none)"): string {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value)) return fallback;
+  return fingerprint(value);
 }

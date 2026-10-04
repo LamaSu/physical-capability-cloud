@@ -19,13 +19,28 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 const CANARY = "SENTINEL-ORACLE-KEY-5f1e";
 const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const SHIM_DIR = fileURLToPath(new URL("./support/fc8-round3-bash-shim", import.meta.url));
 const REPORT_FILE = join(REPO_ROOT, "ai/supervisor/smoke-test-report.json");
+
+// FC-8 round 4: the script now reads the oracle key from a FILE
+// (PCC_ORACLE_KEY_FILE), never the PCC_ORACLE_KEY env var — see
+// fc8-round4-smoke-digital-verifier-launcher.test.ts for the dedicated
+// PS4/credential-file coverage. This file's own concern (does the census
+// of gateway/oracle FIELDS leak under inherited xtrace) is orthogonal to
+// which credential-launch mechanism is in play, so a neutral, non-canary
+// key file is enough here.
+function makeOracleKeyFile(): string {
+  const dir = mkdtempSync(join(tmpdir(), "fc8-r3-keyfile-"));
+  const path = join(dir, "oracle.key");
+  writeFileSync(path, "test-oracle-key-not-a-secret");
+  return path;
+}
 
 function runShimmedSmokeScript(opts: { inheritXtrace: boolean }) {
   try { rmSync(REPORT_FILE); } catch {}
@@ -34,8 +49,9 @@ function runShimmedSmokeScript(opts: { inheritXtrace: boolean }) {
     ...process.env,
     PATH: `${SHIM_DIR}:${process.env.PATH}`,
     FC8_CANARY: CANARY,
-    PCC_ORACLE_KEY: CANARY, // also re-confirms round 2's xtrace fix end-to-end
+    PCC_ORACLE_KEY_FILE: makeOracleKeyFile(),
   };
+  delete (env as Record<string, string | undefined>).PCC_ORACLE_KEY;
 
   // Inherited xtrace is simulated the same way a real parent shell would
   // propagate it: `set -o xtrace; export SHELLOPTS` in a wrapper, then exec
@@ -71,8 +87,9 @@ describe("FC-8 round 3 — smoke-digital-verifier.sh — dynamic canary run (inh
       ...process.env,
       PATH: `${SHIM_DIR}:${process.env.PATH}`,
       FC8_CANARY: CANARY,
-      PCC_ORACLE_KEY: CANARY,
+      PCC_ORACLE_KEY_FILE: makeOracleKeyFile(),
     };
+    delete (env as Record<string, string | undefined>).PCC_ORACLE_KEY;
     const result = spawnSync("bash", ["-x", "scripts/smoke-digital-verifier.sh"], {
       cwd: REPO_ROOT, env, encoding: "utf8", timeout: 30_000,
     });
