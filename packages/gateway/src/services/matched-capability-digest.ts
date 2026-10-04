@@ -126,10 +126,24 @@ export interface MatchedCapabilitySnapshotV2 {
   csd: { url: string; contractDigest: string };
   /** R21's measurement profile, or null until R21 exists. */
   measurementProfile: { id: string; version: string } | null;
-  /** The KERNEL's registered location, never the capability row's. */
-  kernelLocation: { lat: number; lng: number };
+  /**
+   * The KERNEL's registered location, never the capability row's. `null`,
+   * absent, or the exact {lat:0,lng:0} origin all mean "no location" (board
+   * N20 round 2, agreed with gateway #3603) and encode identically as
+   * `kernelLocationGeohash6: null` — never a geohash, never omitted.
+   */
+  kernelLocation?: { lat: number; lng: number } | null;
 }
 
+// ── Acceptance limits NOT stated in the quoted N20 spec text (board N20
+// follow-up #440-C) ──────────────────────────────────────────────────────
+// MAX_TIER_ENTRIES and the per-component length caps inside CSD_URL_PATTERN
+// (64 for <class>, 32 for <version>) are DELIBERATE restrictions this
+// implementation adds on top of N20's text, to bound the cost of
+// validating/sorting/hashing a hostile input. They are kept, not removed —
+// a conforming re-implementation in another language should adopt them
+// explicitly as part of THIS module's contract, rather than infer them.
+// Flagged here for the spec owner to fold into N20's text.
 const MAX_PRICE_MINOR_UNITS = (1n << 128n) - 1n;
 const MAX_TIER_ENTRIES = 16;
 const CURRENCY_PATTERN = /^[A-Za-z0-9]{1,16}$/;
@@ -214,11 +228,36 @@ export function matchedCapabilityDigestV2PreImage(snap: MatchedCapabilitySnapsho
     refuse("priceMinorUnits", "must be a bigint from 1 to 2^128 - 1");
   }
 
-  if (!Array.isArray(assuranceTiers) || assuranceTiers.length === 0 || assuranceTiers.length > MAX_TIER_ENTRIES) {
+  if (!Array.isArray(assuranceTiers)) {
+    refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
+  }
+  // Reject a substituted iterator outright instead of trusting it: a
+  // caller-defined Symbol.iterator can serve fewer, different, or zero
+  // entries than bounded index access sees on the SAME object (board N20
+  // follow-up #440-A) — its mere presence makes the array's real content
+  // unknowable, so this refuses rather than tries to "see through" it.
+  if ((assuranceTiers as unknown as Record<symbol, unknown>)[Symbol.iterator] !== Array.prototype[Symbol.iterator]) {
+    refuse("assuranceTiers", "must be a plain array with the built-in iterator");
+  }
+  // `.length` is read exactly ONCE, right here, and never again — a Proxy
+  // that answers differently across repeated reads (e.g. one value during
+  // this check, another during iteration) cannot smuggle a different
+  // element count past this check, because there is no separate iteration
+  // step left for it to diverge on.
+  // At least one entry, so the loop below either pushes or throws at least once and the
+  // committed set is never empty (a Proxy can report a negative length; astra, #440 follow-up).
+  const tierCount = assuranceTiers.length;
+  if (!Number.isInteger(tierCount) || tierCount < 1 || tierCount > MAX_TIER_ENTRIES) {
     refuse("assuranceTiers", "must be a non-empty list of at most 16 entries");
   }
   const tiers: number[] = [];
-  for (const t of assuranceTiers as readonly unknown[]) {
+  for (let i = 0; i < tierCount; i++) {
+    // Bounded index scan via hasOwnProperty, never the iterable protocol: a
+    // sparse hole must throw here (Array#every silently skips holes instead).
+    if (!Object.prototype.hasOwnProperty.call(assuranceTiers, i)) {
+      refuse("assuranceTiers", "may only hold the tiers 0 to 3");
+    }
+    const t = (assuranceTiers as readonly unknown[])[i];
     if (typeof t !== "number" || !ASSURANCE_TIERS.has(t)) refuse("assuranceTiers", "may only hold the tiers 0 to 3");
     tiers.push(t);
   }
@@ -239,13 +278,31 @@ export function matchedCapabilityDigestV2PreImage(snap: MatchedCapabilitySnapsho
     profile = { id: idOf("measurementProfile.id", profileId), version: idOf("measurementProfile.version", version) };
   }
 
-  if (typeof kernelLocation !== "object" || kernelLocation === null) refuse("kernelLocation", "is required");
-  const { lat, lng } = kernelLocation;
-  let kernelLocationGeohash6: string;
-  try {
-    kernelLocationGeohash6 = geohash(lat, lng, 6);
-  } catch {
-    refuse("kernelLocation", "must be a finite latitude in [-90, 90] and longitude in [-180, 180]");
+  // `null`/absent, or the exact {lat:0,lng:0} origin, both mean "no
+  // location" (board N20 round 2, agreed with gateway #3603): {0,0} is not
+  // a real place any kernel is actually registered at, so it is treated
+  // the same as "we don't know" — and BOTH encode as an explicit `null`,
+  // never a geohash string and never an omitted key, so "no location" can
+  // never be misread as a real cell.
+  const isOrigin =
+    typeof kernelLocation === "object" &&
+    kernelLocation !== null &&
+    (kernelLocation as { lat?: unknown }).lat === 0 &&
+    (kernelLocation as { lng?: unknown }).lng === 0;
+  let kernelLocationGeohash6: string | null;
+  if (kernelLocation === null || kernelLocation === undefined || isOrigin) {
+    kernelLocationGeohash6 = null;
+  } else {
+    if (typeof kernelLocation !== "object") refuse("kernelLocation", "is required");
+    const { lat, lng } = kernelLocation;
+    try {
+      kernelLocationGeohash6 = geohash(lat, lng, 6);
+    } catch {
+      refuse(
+        "kernelLocation",
+        "must be null/absent, exactly {lat:0,lng:0}, or a finite latitude in [-90, 90] and longitude in [-180, 180]",
+      );
+    }
   }
 
   return canonicalize({
