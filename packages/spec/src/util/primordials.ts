@@ -342,3 +342,41 @@ export function fulfillsWithTrue(answer: unknown): boolean | Promise<boolean> {
     }),
   );
 }
+
+/**
+ * For a trusted callback whose answer is a value, not true: when `answer` is a
+ * native promise, a promise (awaited by this package, never handed out) of
+ * `read(value)` for the value it fulfills with, or of `failed` when it rejects
+ * or `read` throws. It is followed through Promise.prototype.then as it was at
+ * load, as `fulfillsWithTrue` follows one, and `read` runs inside the handler:
+ * what resolves is `read`'s result, which must be a primitive or an object with
+ * no prototype, so no `then` is ever looked up on the raw value (a `then`
+ * written on Object.prototype after load would otherwise run on an ordinary
+ * object answer). Null when `answer` is not a native promise (the captured
+ * `then` refuses it), and the caller reads it as a direct answer.
+ */
+export function followedPromise<R>(answer: unknown, read: (value: unknown) => R, failed: R): Promise<R> | null {
+  if (typeof answer !== "object" || answer === null) return null;
+  let followed = false;
+  const promise = new PromiseCtor<R>((resolve) => {
+    try {
+      PromisePrototypeThen(
+        answer as Promise<unknown>,
+        (value) => {
+          let out = failed;
+          try {
+            out = read(value);
+          } catch {
+            out = failed;
+          }
+          resolve(out);
+        },
+        () => resolve(failed),
+      );
+      followed = true;
+    } catch {
+      resolve(failed);
+    }
+  });
+  return followed ? awaitedHere(promise) : null;
+}

@@ -77,6 +77,11 @@ vi.mock("../services/kernel-service.js", async (importOriginal) => {
     listDevices: vi.fn().mockResolvedValue([]),
     checkDeviceHealth: vi.fn().mockResolvedValue({ healthy: true, details: "idle" }),
     refreshDeviceFromDb: vi.fn().mockReturnValue({ installed: true }),
+    // #450 (N59): the test-job route runs only on the gateway's own kernel, on a loaded
+    // device, and judges simulation on the adapter the job ran on.
+    kernelId: "kernel-nyc",
+    hasRunner: vi.fn().mockReturnValue(true),
+    jobRanSimulated: vi.fn().mockReturnValue(false),
   };
 
   return {
@@ -113,7 +118,7 @@ import { setupRoutes } from "../routes/setup.js";
 import { capabilityRoutes } from "../routes/capabilities.js";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { adminObservabilityRoutes } from "../routes/admin-observability.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { initKernelService, resetKernelService, _mockService } from "../services/kernel-service.js";
 
 function opFunnelRows(): Array<Record<string, unknown>> {
@@ -364,6 +369,11 @@ async function buildFullApp(): Promise<FastifyInstance> {
   });
   _mockService.getJobStatus.mockResolvedValue({ status: "completed", progress: 100 });
   _mockService.checkDeviceHealth.mockResolvedValue({ healthy: true, details: "idle" });
+  _mockService.hasRunner.mockReturnValue(true);
+  _mockService.jobRanSimulated.mockReturnValue(false);
+  // #450 (N59) owner-gates POST /api/setup/test-job: the authenticated caller ("op-test",
+  // below) must be the kernel's operator. Make it kernel-nyc's.
+  getRepos().kernels.update("kernel-nyc", { operatorAddress: "op-test" } as never);
 
   const app = Fastify({ logger: false });
   // An authenticated caller, as apiGate sets it in production. Tests that need an
@@ -518,37 +528,54 @@ describe("operator funnel call sites (Fastify inject)", () => {
       expect((rows[0].metadata as Record<string, unknown>).device_id).toBe("dev-of-machine");
     });
 
-    it("does NOT record for the deviceless self-attest branch", async () => {
+    it("does NOT record a deviceless test job (#450: it is refused, never a self-attested pass)", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/test-job",
-        // No deviceId + a kernel with zero registered devices => deviceless
-        // self-attest branch, which returns before the recorder can run.
-        payload: { kernelId: "kernel-la" },
+        payload: { kernelId: "kernel-nyc" },
       });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.deviceId).toBeNull();
-      expect(body.evidencePath).toBe("self-attested");
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "device_id_required", ran: false, passed: false });
       expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
     });
 
-    it("does NOT record when kernelId is omitted (falls back to kernel_dev_001)", async () => {
-      // Explicit deviceId so this exercises the REAL device path (not the
-      // deviceless branch) — isolating the "omitted kernelId" exclusion.
+    it("does NOT record when kernelId is omitted (#450: it is refused, never kernel_dev_001)", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/setup/test-job",
         payload: { deviceId: "dev-of-machine" },
       });
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: "kernel_id_required", ran: false, passed: false });
+      expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
+    });
+
+    it("does NOT record a completed run that was simulated (#450's passed rule governs the funnel)", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: { kernelId: "kernel-nyc", deviceId: "dev-of-machine", type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://192.168.1.50:5000", apiKey: "k" } },
+      });
+      _mockService.jobRanSimulated.mockReturnValue(true);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/setup/test-job",
+        payload: { kernelId: "kernel-nyc", deviceId: "dev-of-machine" },
+      });
       expect(res.statusCode).toBe(200);
-      expect(res.json().status).toBe("completed");
+      expect(res.json()).toMatchObject({ status: "completed", simulated: true, passed: false });
       expect(opFunnelRows().filter((r) => r.action === "test_job_passed")).toHaveLength(0);
     });
 
     it("does NOT record for a non-completed final status", async () => {
       // Two consecutive "unknown" polls make the route give up and return
-      // early with status "unknown" (never "completed").
+      // early with status "unknown" (never "completed"). #450 runs only a
+      // device registered on the kernel, so register it first.
+      await app.inject({
+        method: "POST",
+        url: "/api/setup/register-device",
+        payload: { kernelId: "kernel-nyc", deviceId: "dev-of-machine", type: "machine", model: "Real Printer", adapterType: "octoprint", adapterConfig: { url: "http://192.168.1.50:5000", apiKey: "k" } },
+      });
       _mockService.getJobStatus.mockResolvedValue({ status: "unknown", progress: 0 });
       const res = await app.inject({
         method: "POST",
@@ -775,6 +802,31 @@ describe("#469 round-1 fixes", () => {
   it("F1c: a test job never credits a kernel that does not exist", async () => {
     await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-b", ...OCTO_DEVICE } });
     await testJob("kernel-does-not-exist", "dev-b");
+    expect(passed()).toHaveLength(0);
+  });
+
+  // Each of the two tests below passes #450's route (passed:true), so only its
+  // own funnel condition keeps test_job_passed out: removing that condition
+  // from setup.ts fails exactly that test (merge-up review, MEDIUM).
+  it("F1d: a passed run whose job reports a device of ANOTHER kernel does not count", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-nyc-real", ...OCTO_DEVICE } });
+    getRepos().kernels.insertDevice({
+      id: "dev-la-foreign", kernelId: "kernel-la", type: "machine", model: "Real Printer", firmware: "unknown",
+      status: "idle", contributesToCapabilities: [], lastUpdated: new Date().toISOString(),
+      adapterType: "octoprint", capabilities: [], healthStatus: "healthy",
+    });
+    _mockService.submitJob.mockResolvedValue({ jobId: "j", deviceId: "dev-la-foreign", status: "accepted" });
+    const res = await app.inject({ method: "POST", url: "/api/setup/test-job", payload: { kernelId: "kernel-nyc", deviceId: "dev-nyc-real" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "completed", passed: true, deviceId: "dev-la-foreign" });
+    expect(passed()).toHaveLength(0);
+  });
+
+  it("F1e: a passed run on a generic-http (placeholder) device does not count", async () => {
+    await app.inject({ method: "POST", url: "/api/setup/register-device", payload: { kernelId: "kernel-nyc", deviceId: "dev-generic", type: "machine", model: "Generic", adapterType: "generic-http", adapterConfig: { url: "http://192.168.1.60:8080" } } });
+    const res = await testJob("kernel-nyc", "dev-generic");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "completed", passed: true, deviceId: "dev-generic" });
     expect(passed()).toHaveLength(0);
   });
 

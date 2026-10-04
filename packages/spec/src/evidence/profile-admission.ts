@@ -15,7 +15,12 @@
  *     `bundle-set-mismatch`, never admit, so a stored failure cannot be left out;
  *   - SIGNATURE: every bundle's `bundleHash` verifies under the node's
  *     registered key (`verifyBundleSignature`: gateway
- *     `verifyDeviceSignedEvidence`, the oracle's registered-key check);
+ *     `verifyDeviceSignedEvidence`, the oracle's registered-key check), and the
+ *     leg names the verified signer's operator principal in the pinned
+ *     registry: the bundle's TRUST DOMAIN, or null when the registry names
+ *     none. Levels judge independence between trust domains (evidence-level.ts,
+ *     #345's one rule), so a leg that cannot name the signer's operator caps
+ *     that bundle's inspections below inspected_output;
  *   - BINDING, run here (`verifyEvidenceSubjectBinding`, LO-EV-9): each digest
  *     opens to its events, and they commit the job and the kernel that
  *     accepted it;
@@ -86,10 +91,17 @@
  *
  * A QUALIFYING OBSERVATION is an event that:
  *   - is at the profile's `acceptanceLevel` (evidence-level.ts, the one
- *     classification), from the profiled `device.deviceId`;
- *   - if it is an inspection, carries its own positive verdict,
- *     `payload.passed === true`. A negative verdict is a failure (below), and
- *     an inspection with no verdict proves nothing about the output;
+ *     classification), from the profiled `device.deviceId`. Levels are judged
+ *     over the authenticated bundles, each with its signer's trust domain, and
+ *     the deal's `executorTrustDomains`: an inspection is inspected_output only
+ *     from a trust domain independent of every executor. An event present in
+ *     several bundles counts at the LOWEST level any of them gives it, so a copy
+ *     in a fabricated or executor's bundle never lifts it (steward #6478);
+ *   - if it is an inspection, carries its own positive verdict: evidence's
+ *     pinned verdict field (`inspectionVerdict` is pass: cv_inspection_result
+ *     `passed: true`, instrument_result `pass: true`, batch_sample_result
+ *     `status: "PASS"`). A negative or unreadable verdict is a failure (below),
+ *     and an inspection with no verdict proves nothing about the output;
  *   - comes from the profiled kind of device and adapter, and from pinned
  *     versions, each read from its own field: `source.deviceType` equals
  *     `device.kind`, `source.adapterType` equals `device.adapterType`,
@@ -168,8 +180,9 @@
  *     loads, plain loops and operators: never a method looked up on a prototype
  *     or a global at the time of the call, never the iterator protocol, never
  *     `in`, never a RegExp. Formats are checked code unit by code unit
- *     (`isDecimalValue`, `isTaggedSha256`): RegExp.prototype.compile rewrites
- *     a RegExp in place, frozen or not (pack 167).
+ *     (`isDecimalValue`, `isTaggedSha256`, `isOperatorPrincipalId`):
+ *     RegExp.prototype.compile rewrites a RegExp in place, frozen or not
+ *     (pack 167).
  *   - Its sets are null-prototype records built at load, the vocabulary's
  *     active primitives included (primitives.ts's defs are exported, mutable
  *     objects), and its exported data is frozen.
@@ -196,13 +209,19 @@
  *     its species is pinned, so every promise a caller derives from it is
  *     pinned too, at any depth (astra pack 187). The binding leg's promise is
  *     awaited through `awaitedHere`, so that `await` reads only its own
- *     `constructor` and looks nothing up on the answer. A leg's promise is
- *     followed through the `then` captured at load (`fulfillsWithTrue`). The
- *     result is a null-prototype object, so a `then` written on
+ *     `constructor` and looks nothing up on the answer. The primitive leg's
+ *     promise is followed through the `then` captured at load
+ *     (`fulfillsWithTrue`). So is the signature leg's (`followedPromise`), and
+ *     its answer is read inside the handler, from its own data, into a frozen
+ *     null-prototype record: a `then` written on Object.prototype never runs on
+ *     it. The result is a null-prototype object, so a `then` written on
  *     Object.prototype cannot take over its resolution.
  * The boundary, named honestly: the verification callbacks are the caller's
- * trusted code (a leg's answer must be true, false or a native promise; a
- * thenable is refused). A realm whose intrinsics were replaced BEFORE
+ * trusted code (the primitive leg's answer must be true, false or a native
+ * promise; the signature leg's must be a plain `{ trustDomain }` record, or a
+ * native promise of a record with no prototype, `signedBy`, since resolving an
+ * ordinary object looks `then` up on Object.prototype; any other thenable is
+ * refused). A realm whose intrinsics were replaced BEFORE
  * @pcc/spec loaded is out of scope: no in-process check can tell. Anything
  * replaced after load can make admission refuse, or, for a promise that never
  * settles, never answer; it cannot change an acceptance or a value.
@@ -212,13 +231,16 @@ import { createHash } from "node:crypto";
 
 import { isFabricated } from "./is-fabricated.js";
 import {
-  evidenceLevelOf,
-  evidenceLevelOfBundle,
-  executingDeviceIds,
+  evidenceLevelRank,
+  evidenceLevelsOfEvents,
   meetsEvidenceLevel,
   deriveContradictions,
   inspectionFailed,
+  inspectionVerdict,
   INSPECTION_EVENT_TYPES,
+  type AuthenticatedBundle,
+  type ContradictionKind,
+  type EventLevel,
   type EvidenceLevel,
 } from "./evidence-level.js";
 import { plainDataCopy, profileGoverns, type MeasurementProfileV1 } from "./measurement-profile.js";
@@ -239,6 +261,7 @@ import {
   deepFreeze,
   defineIndex,
   ErrorCtor,
+  followedPromise,
   fulfillsWithTrue,
   hasOwn,
   includesValue,
@@ -251,6 +274,7 @@ import {
   newList,
   NumberIsFinite,
   ObjectCreate,
+  ObjectFreeze,
   ObjectGetOwnPropertyDescriptor,
   ObjectGetPrototypeOf,
   ObjectKeys,
@@ -312,6 +336,49 @@ export function isDecimalValue(value: unknown): value is string {
   i++;
   if (i >= n) return false; // a fraction needs a digit
   for (; i < n; i++) if (!isDigit(charCodeAt(value, i))) return false;
+  return true;
+}
+
+const OPERATOR_PRINCIPAL_PREFIX = "eip155:";
+/** Number.MAX_SAFE_INTEGER as decimal digits. */
+const MAX_SAFE_INTEGER_DIGITS = "9007199254740991";
+
+/**
+ * An operator principal id, the operator form of pcc.evidence.principal-id.v1:
+ * exactly what principal-id.ts `parseOperatorPrincipalId` accepts
+ * (`^eip155:([1-9][0-9]*):0x([0-9a-f]{40})$` with a safe-integer chain id). A
+ * predicate checked code unit by code unit, not that RegExp (pack 167);
+ * evidence-level.ts keeps the same predicate privately, and a test holds this
+ * one equal to parseOperatorPrincipalId.
+ */
+export function isOperatorPrincipalId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const n = value.length;
+  const prefix = OPERATOR_PRINCIPAL_PREFIX.length;
+  if (n < prefix) return false;
+  for (let i = 0; i < prefix; i++) {
+    if (charCodeAt(value, i) !== charCodeAt(OPERATOR_PRINCIPAL_PREFIX, i)) return false;
+  }
+  let i = prefix;
+  if (i >= n) return false;
+  const first = charCodeAt(value, i);
+  if (first < 0x31 || first > 0x39) return false; // [1-9]: no leading zero
+  const chainStart = i;
+  while (i < n && isDigit(charCodeAt(value, i))) i++;
+  const chainDigits = i - chainStart;
+  if (i + 3 + 40 !== n) return false;
+  if (charCodeAt(value, i) !== 0x3a || charCodeAt(value, i + 1) !== 0x30 || charCodeAt(value, i + 2) !== 0x78) return false; // ":0x"
+  for (i += 3; i < n; i++) {
+    const unit = charCodeAt(value, i);
+    if (!(isDigit(unit) || (unit >= 0x61 && unit <= 0x66))) return false; // lowercase hex only
+  }
+  // A safe integer: fewer digits than 2^53 - 1 has, or as many and not above it.
+  if (chainDigits !== MAX_SAFE_INTEGER_DIGITS.length) return chainDigits < MAX_SAFE_INTEGER_DIGITS.length;
+  for (let k = 0; k < chainDigits; k++) {
+    const digit = charCodeAt(value, chainStart + k);
+    const bound = charCodeAt(MAX_SAFE_INTEGER_DIGITS, k);
+    if (digit !== bound) return digit < bound;
+  }
   return true;
 }
 
@@ -379,6 +446,23 @@ export interface ProfileAdmissionResult {
   reasons: ProfileAdmissionReason[];
 }
 
+/** The signature leg's answer: verified, naming the signer's trust domain, or not verified. */
+export type BundleSignatureAnswer = { readonly trustDomain: string | null } | false;
+
+/**
+ * The signature leg's answer for a verified bundle: a frozen record with no
+ * prototype naming the signer's trust domain (null when the registry names
+ * none). An asynchronous leg must resolve with one. Resolving an ordinary
+ * object looks `then` up on Object.prototype, where code running after load
+ * could substitute the answer, so admission refuses a promised answer that has
+ * a prototype. A synchronous leg may also answer a plain `{ trustDomain }`.
+ */
+export function signedBy(trustDomain: string | null): { readonly trustDomain: string | null } {
+  const answer = ObjectCreate(null) as { trustDomain: string | null };
+  answer.trustDomain = trustDomain;
+  return ObjectFreeze(answer);
+}
+
 /** The part of an EvidenceBundle admission reads. */
 export interface AdmissionBundle {
   bundleHash: string;
@@ -396,8 +480,23 @@ export interface ProfileAdmissionInput {
   bundles: readonly AdmissionBundle[];
   /** The pinned set's digest (`computeBundleSetDigest`), from where it was pinned (see the caller contract). A malformed pin rejects. */
   pinnedBundleSetDigest: string;
-  /** The registered-key signature leg. Its answer must be true, or a native promise of true; anything else fails. */
-  verifyBundleSignature: (bundle: AdmissionBundle) => boolean | Promise<boolean>;
+  /**
+   * The operator principals the job was ASSIGNED to (eip155:<chainId>:0x<40
+   * lowercase hex>), from the accepted deal, as `subject` comes from the job
+   * record: never from the evidence. Empty when the deal names none, and then no
+   * inspection can show independence (at most device_reported).
+   */
+  executorTrustDomains: readonly string[];
+  /**
+   * The registered-key signature leg. It answers `{ trustDomain }` when the
+   * bundle verifies: the verified signer's operator principal in the pinned
+   * registry, or null when the registry names none. The answer is a plain record,
+   * or a native promise of a record with no prototype (`signedBy`). Anything else
+   * fails the leg: false, a throw, a bare `true` (it names no signer), a thenable
+   * that is not a native promise, a promised record with a prototype, a proxy or
+   * an accessor, or a trustDomain that is not an operator principal id.
+   */
+  verifyBundleSignature: (bundle: AdmissionBundle) => BundleSignatureAnswer | Promise<BundleSignatureAnswer>;
   /**
    * The primitive leg: is `observation` an authentic instance of `primitiveId`
    * for this job, and is its `profileObservation` record TRUE of it? It must
@@ -451,11 +550,12 @@ const INPUT_FIELDS = deepFreeze([
   "bundles",
   "committedDigest",
   "profile",
+  "executorTrustDomains",
 ] as const);
 type InputField = (typeof INPUT_FIELDS)[number];
 
 /** The input fields that are data, walked for code before anything is copied. */
-const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles"] as const);
+const DATA_FIELDS = deepFreeze(["profile", "subject", "bundles", "executorTrustDomains"] as const);
 
 const VERSION_PIN_FIELDS = deepFreeze(["permittedAdapterVersions", "permittedFirmwareVersions"] as const);
 
@@ -808,6 +908,70 @@ function legAnswer(leg: () => unknown): boolean | Promise<boolean> {
   }
 }
 
+/** The verified signer the signature leg names: its trust domain, undefined when the registry names none. */
+interface Signer {
+  readonly trustDomain: string | undefined;
+}
+
+/**
+ * The signature leg's answer, read once from its own data (steward #6478): the
+ * signer, as a frozen null-prototype record, or null when the leg failed. A
+ * non-object, an array, a proxy, a record with its own `then` (a thenable is
+ * never followed), an absent or accessor trustDomain, and a trustDomain that is
+ * neither null nor an operator principal id all fail; so do false and a bare
+ * true, which name no signer.
+ */
+function signerOf(answer: unknown): Signer | null {
+  if (typeof answer !== "object" || answer === null || ArrayIsArray(answer)) return null;
+  if (isProxy === null || isProxy(answer) || hasOwn(answer, "then")) return null;
+  const descriptor = ObjectGetOwnPropertyDescriptor(answer, "trustDomain");
+  // The descriptor's OWN value: one written on Object.prototype must not pass an accessor off as data.
+  if (descriptor === undefined || !hasOwn(descriptor, "value")) return null;
+  const domain: unknown = descriptor.value;
+  const signer = ObjectCreate(null) as { trustDomain: string | undefined };
+  if (domain === null) signer.trustDomain = undefined;
+  else if (isOperatorPrincipalId(domain)) signer.trustDomain = domain;
+  else return null;
+  return ObjectFreeze(signer);
+}
+
+/**
+ * A promised answer is read only when it has no prototype (`signedBy`). The
+ * leg's promise resolved it, and resolving an ordinary object looks `then` up
+ * on Object.prototype, where code running after load can substitute any
+ * answer before admission sees it.
+ */
+function promisedSignerOf(value: unknown): Signer | null {
+  if (typeof value !== "object" || value === null || ObjectGetPrototypeOf(value) !== null) return null;
+  return signerOf(value);
+}
+
+/** The signature leg's answer, ready to await: a native promise is followed (`followedPromise`). A leg that throws fails. */
+function signerAnswer(leg: () => unknown): Signer | null | Promise<Signer | null> {
+  try {
+    const answer = leg();
+    const followed = followedPromise(answer, promisedSignerOf, null);
+    return followed === null ? signerOf(answer) : followed;
+  } catch {
+    return null;
+  }
+}
+
+/** The lower of two levels; null (no level) is the lowest. */
+function lowerLevel(a: EvidenceLevel | null, b: EvidenceLevel | null): EvidenceLevel | null {
+  if (a === null || b === null) return null;
+  return evidenceLevelRank(a) <= evidenceLevelRank(b) ? a : b;
+}
+
+/** A list of operator principal ids, every index its own (a plain-data copy has no holes). */
+function isOperatorList(value: unknown): value is readonly string[] {
+  if (!ArrayIsArray(value)) return false;
+  for (let i = 0; i < value.length; i++) {
+    if (!hasOwn(value, i) || !isOperatorPrincipalId(value[i])) return false;
+  }
+  return true;
+}
+
 interface Finding {
   decision: ProfileAdmissionDecision;
   reason: ProfileAdmissionReason;
@@ -864,9 +1028,11 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // Each read happens once, inside one guard, so a throw resolves to a reject, never to a rejected promise.
   let subjectCopy: ReturnType<typeof plainDataCopy>;
   let bundlesCopy: ReturnType<typeof plainDataCopy>;
+  let executorsCopy: ReturnType<typeof plainDataCopy>;
   try {
     subjectCopy = plainDataCopy(read.subject);
     bundlesCopy = plainDataCopy(read.bundles);
+    executorsCopy = plainDataCopy(read.executorTrustDomains);
   } catch {
     return reject("input-unreadable", "reading the admission input threw, so nothing was evaluated");
   }
@@ -882,6 +1048,16 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     return reject("unbound-bundle", "the subject (the job record's job and kernel) is not plain JSON data");
   }
   const subject = deepFreeze(subjectCopy.value) as unknown as EvidenceSubject;
+
+  // The deal's executors: a list of operator principal ids, possibly empty, never absent.
+  const executors: unknown = executorsCopy.ok ? executorsCopy.value : undefined;
+  if (!isOperatorList(executors)) {
+    return reject(
+      "input-unreadable",
+      "executorTrustDomains (the deal's assigned operators) must be a list of operator principal ids, eip155:<chainId>:0x<40 lowercase hex>",
+    );
+  }
+  const executorTrustDomains = deepFreeze(executors);
 
   const terms = unverifiableProfileTerms(profile);
   if (terms.length > 0) return reject("unverifiable-term", joinStrings(terms, "; "));
@@ -945,15 +1121,17 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
 
   const events = newList<EvidenceEvent>(0);
   const seen = ObjectCreate(null) as Record<string, true>;
+  // Each bundle as evidence-level reads it: its bound events and its signer's trust domain.
+  const authenticated = newList<AuthenticatedBundle>(0);
   for (let i = 0; i < bundles.length; i++) {
     const bundle = bundles[i]!;
-    let signed: boolean;
+    let signer: Signer | null;
     try {
-      signed = (await legAnswer(() => verifyBundleSignature(bundle))) === true;
+      signer = await signerAnswer(() => verifyBundleSignature(bundle));
     } catch {
-      signed = false;
+      signer = null;
     }
-    if (!signed) return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
+    if (signer === null) return rejectNow("unauthenticated-bundle", `bundle ${i}: signature leg failed`);
 
     let answer: unknown;
     try {
@@ -979,6 +1157,10 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
       return rejectNow("unbound-bundle", `bundle ${i}: the binding leg's answer does not re-verify with intrinsics captured at load: ${disagreement}`);
     }
     const verified = opened as readonly EvidenceEvent[];
+    const entry = ObjectCreate(null) as { events: readonly EvidenceEvent[]; trustDomain?: string };
+    entry.events = verified;
+    if (signer.trustDomain !== undefined) entry.trustDomain = signer.trustDomain;
+    append(authenticated, entry as AuthenticatedBundle);
     for (let k = 0; k < verified.length; k++) {
       const e = verified[k]!;
       if (hasOwn(seen, e.hash)) continue;
@@ -987,6 +1169,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
     }
   }
   deepFreeze(events);
+  deepFreeze(authenticated);
 
   let fabricatedCount = 0;
   for (let k = 0; k < events.length; k++) if (isFabricated(events[k]!)) fabricatedCount++;
@@ -1000,7 +1183,24 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   // Contradiction is evidence's one public rule, the same one the oracle signs
   // rejects on (evidence-level.ts deriveContradictions); a failure with no
   // completion is a device failure, judged here under onDeviceFailure.
-  const contradictions = deriveContradictions(events);
+  let contradictions: ContradictionKind[];
+  let eventLevels: readonly EventLevel[];
+  // The level of each distinct event: the LOWEST any of its copies gets (steward #6478).
+  const levelByHash = ObjectCreate(null) as Record<string, EvidenceLevel | null>;
+  try {
+    contradictions = deriveContradictions(authenticated);
+    const context = ObjectCreate(null) as { executorTrustDomains: readonly string[] };
+    context.executorTrustDomains = executorTrustDomains;
+    eventLevels = evidenceLevelsOfEvents(authenticated, context);
+    for (let x = 0; x < eventLevels.length; x++) {
+      const level = eventLevels[x]!;
+      const hash = authenticated[level.bundleIndex]!.events[level.eventIndex]!.hash;
+      levelByHash[hash] = hasOwn(levelByHash, hash) ? lowerLevel(levelByHash[hash] ?? null, level.level) : level.level;
+    }
+  } catch (err) {
+    return rejectNow("input-unreadable", `the evidence levels could not classify the bundles: ${messageOf(err)}`);
+  }
+  const levelOf = (e: EvidenceEvent): EvidenceLevel | null => (hasOwn(levelByHash, e.hash) ? (levelByHash[e.hash] ?? null) : null);
   let executionFailed = false;
   let failedInspections = 0;
   for (let k = 0; k < events.length; k++) {
@@ -1022,8 +1222,11 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   }
 
   const required = profile.interpretation.acceptanceLevel;
-  const reached = evidenceLevelOfBundle(events);
-  const executing = executingDeviceIds(events);
+  let reached: EvidenceLevel | null = null;
+  for (let k = 0; k < events.length; k++) {
+    const level = levelOf(events[k]!);
+    if (level !== null && (reached === null || evidenceLevelRank(level) > evidenceLevelRank(reached))) reached = level;
+  }
   const device = profile.device;
   const window = captureWindow(profile, events);
 
@@ -1051,7 +1254,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
   const legEvents = deepFreeze((StructuredClone as <T>(value: T) => T)(events));
   for (let k = 0; k < events.length; k++) {
     const e = events[k]!;
-    if (!meetsEvidenceLevel(evidenceLevelOf(e, executing), required)) continue;
+    if (!meetsEvidenceLevel(levelOf(e), required)) continue;
     if (e.source.deviceId !== device.deviceId) {
       otherDevices++;
       continue;
@@ -1061,7 +1264,7 @@ async function admit(input: unknown): Promise<ProfileAdmissionResult> {
       exclude("failed inspection(s)");
       continue;
     }
-    if (inSet(INSPECTION, e.type) && (e.payload as Record<string, unknown>).passed !== true) {
+    if (inSet(INSPECTION, e.type) && inspectionVerdict(e) !== "pass") {
       exclude("without a positive verdict");
       continue;
     }

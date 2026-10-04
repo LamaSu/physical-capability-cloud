@@ -29,6 +29,7 @@ import {
   NON_NUMERIC_UNIT,
   PROFILE_OBSERVATION_FIELD,
   profileAdmitsBundle,
+  signedBy,
   unverifiableProfileTerms,
   type AdmissionBundle,
   type ProfileAdmissionInput,
@@ -37,16 +38,9 @@ import {
 } from "../../evidence/profile-admission.js";
 import {
   DEVICE_REPORTED_EVENT_TYPES,
-  deriveContradictions,
   EVIDENCE_LEVELS,
-  evidenceLevelOf,
-  evidenceLevelOfBundle,
-  evidenceLevelRank,
   EXECUTION_EVENT_TYPES,
-  executingDeviceIds,
   INSPECTION_EVENT_TYPES,
-  inspectionFailed,
-  meetsEvidenceLevel,
   NO_OUTCOME_LEVEL_EVENT_TYPES,
   SUBMITTED_EVENT_TYPES,
 } from "../../evidence/evidence-level.js";
@@ -95,6 +89,15 @@ const SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL };
 const UNIT_SUBJECT: EvidenceSubject = { jobId: JOB, kernelId: KERNEL, settlementUnitId: UNIT, challengeNonce: NONCE };
 
 const key = generateKeyPairSync("ed25519");
+// Two operators with registered keys (#345's one rule, steward #6478): A runs the job (the deal assigns it),
+// B is an independent inspector. An inspection is inspected_output only from B's bundle.
+const keyB = generateKeyPairSync("ed25519");
+const OPERATOR_A = `eip155:84532:0x${"aa".repeat(20)}`;
+const OPERATOR_B = `eip155:84532:0x${"bb".repeat(20)}`;
+const SIGNER_A = "0x1111111111111111111111111111111111111111";
+const SIGNER_B = "0x2222222222222222222222222222222222222222";
+const KEYS: Record<string, ReturnType<typeof generateKeyPairSync>> = { [SIGNER_A]: key, [SIGNER_B]: keyB };
+const DOMAINS: Record<string, string> = { [SIGNER_A]: OPERATOR_A, [SIGNER_B]: OPERATOR_B };
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const at = (seconds: number) => new Date(T0 + seconds * 1000).toISOString();
 
@@ -151,7 +154,7 @@ async function toEvent(d: Draft): Promise<EvidenceEvent> {
   return { ...unsigned, id: `${d.type}-${d.t}-${d.device}`, hash } as unknown as EvidenceEvent;
 }
 
-async function toBundle(drafts: Draft[], profile: MeasurementProfileV1): Promise<AdmissionBundle> {
+async function toBundle(drafts: Draft[], profile: MeasurementProfileV1, signer: string = SIGNER_A): Promise<AdmissionBundle> {
   const events: EvidenceEvent[] = [];
   for (const d of drafts) {
     if (d.observation === null) {
@@ -165,12 +168,33 @@ async function toBundle(drafts: Draft[], profile: MeasurementProfileV1): Promise
     events.push(await toEvent({ ...d, payload: { ...(d.payload ?? {}), [PROFILE_OBSERVATION_FIELD]: merged } }));
   }
   const bundleHash = await hashBundle(events);
-  const value = sign(null, signingPreimage(bundleHash), key.privateKey).toString("hex");
-  return { bundleHash, events, kernelSignature: { signer: "0x1111111111111111111111111111111111111111", algorithm: "ed25519", value } };
+  const value = sign(null, signingPreimage(bundleHash), KEYS[signer]!.privateKey).toString("hex");
+  return { bundleHash, events, kernelSignature: { signer, algorithm: "ed25519", value } };
 }
 
-const verifySignature = (b: AdmissionBundle) =>
-  verify(null, signingPreimage(b.bundleHash), key.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+/** The two-operator world: the printer's events in the executor A's bundle, every other device's in the independent inspector B's. */
+async function toBundles(drafts: Draft[], profile: MeasurementProfileV1): Promise<AdmissionBundle[]> {
+  const executor: Draft[] = [];
+  const inspector: Draft[] = [];
+  for (const d of drafts) (d.device === PRINTER ? executor : inspector).push(d);
+  const out: AdmissionBundle[] = [];
+  if (executor.length > 0) out.push(await toBundle(executor, profile, SIGNER_A));
+  if (inspector.length > 0) out.push(await toBundle(inspector, profile, SIGNER_B));
+  return out;
+}
+
+/** The registered-key leg: verifies under the signer's key and names its operator, the bundle's trust domain. */
+const verifySignature = (b: AdmissionBundle) => {
+  const signer = (b.kernelSignature as { signer?: string }).signer ?? "";
+  const k = KEYS[signer];
+  const ok = k !== undefined && verify(null, signingPreimage(b.bundleHash), k.publicKey, Buffer.from((b.kernelSignature as { value: string }).value, "hex"));
+  return ok ? { trustDomain: DOMAINS[signer]! } : (false as const);
+};
+/** The same leg's answer as a record with no prototype (`signedBy`), the form an asynchronous leg must resolve with. */
+const signedAnswer = (b: AdmissionBundle) => {
+  const answer = verifySignature(b);
+  return answer === false ? answer : signedBy(answer.trustDomain);
+};
 
 const PILOT: Draft[] = [
   { type: "execution_started", t: 0, device: PRINTER },
@@ -182,7 +206,8 @@ const FAILURE: Draft[] = [{ type: "execution_failed", t: 11, device: PRINTER }];
 const MASS_PILOT: Draft[] = [
   { type: "execution_started", t: 0, device: PRINTER },
   { type: "execution_completed", t: 10, device: PRINTER },
-  { type: "instrument_result", t: 20, device: SCALE, payload: { passed: true } },
+  // instrument_result's verdict is `pass`, evidence's pinned field (#345), not `passed`.
+  { type: "instrument_result", t: 20, device: SCALE, payload: { pass: true } },
 ];
 
 function inspectedPageProfile(): MeasurementProfileV1 {
@@ -240,6 +265,7 @@ async function input(
     bundles,
     pinnedBundleSetDigest,
     verifyBundleSignature: verifySignature,
+    executorTrustDomains: [OPERATOR_A],
     verifyPrimitiveInstance: () => true,
     ...over,
   };
@@ -267,100 +293,7 @@ const capturesMatch = (_id: string, obs: EvidenceEvent): boolean => {
   return observation.sampleId === payload.captureHash;
 };
 
-// -- evidence-level items: ordinary-object events, as every other caller passes them --
-let seq = 0;
-function ev(type: string, deviceId: string | undefined, payload: Record<string, unknown> = {}, extraSource: Record<string, unknown> = {}): EvidenceEvent {
-  seq += 1;
-  return {
-    id: `ev-${seq}`,
-    type,
-    timestamp: "2026-09-24T12:00:00.000Z",
-    source: { ...(deviceId !== undefined ? { deviceId } : {}), deviceType: "controller", kernelId: KERNEL, ...extraSource },
-    payload,
-    hash: `sha256:${"0".repeat(64)}`,
-  } as unknown as EvidenceEvent;
-}
-const LV = {
-  started: ev("execution_started", PRINTER),
-  progress: ev("execution_progress", PRINTER, { level: "submitted" }),
-  completed: ev("execution_completed", PRINTER),
-  failed: ev("execution_failed", PRINTER),
-  cameraPassed: ev("cv_inspection_result", CAMERA, { passed: true }),
-  cameraFailed: ev("cv_inspection_result", CAMERA, { passed: false }),
-  cameraNoVerdict: ev("cv_inspection_result", CAMERA, { score: 0.9 }),
-  printerInspects: ev("cv_inspection_result", PRINTER, { passed: true }),
-  noDevice: ev("execution_completed", undefined),
-  mockCompletion: ev("execution_completed", PRINTER, { mock: true }),
-  simulatedCamera: ev("cv_inspection_result", CAMERA, { passed: true }, { simulated: true }),
-  fakeFailure: ev("execution_failed", PRINTER, { mock: true }),
-  verifiedLog: ev("printer_job_verified", PRINTER, { chainLength: 12 }),
-  tempLogFailed: ev("temperature_log", PRINTER, { passed: false }),
-  accessorVerdict: ev("cv_inspection_result", CAMERA, {}),
-  accessorSimulated: ev("cv_inspection_result", CAMERA, { passed: true }),
-};
-/** How many times an accessor in an evidence-level item ran: never, if only own data is read. */
-let ACCESSOR_RUNS = 0;
-Object.defineProperty(LV.accessorVerdict.payload, "passed", nullDescriptor({ get: () => (ACCESSOR_RUNS++, false), enumerable: true, configurable: true }));
-Object.defineProperty(LV.accessorSimulated.source, "simulated", nullDescriptor({ get: () => (ACCESSOR_RUNS++, true), enumerable: true, configurable: true }));
-const L = {
-  pilot: [LV.started, LV.completed, LV.cameraPassed],
-  selfInspect: [LV.completed, LV.printerInspects],
-  accepted: [LV.started, LV.progress],
-  failedJob: [LV.started, LV.failed],
-  noExecutor: [LV.cameraPassed],
-  fabricated: [LV.mockCompletion, LV.simulatedCamera],
-  verifiedLog: [LV.verifiedLog],
-  empty: [] as EvidenceEvent[],
-  printerDone: [LV.completed],
-  printerRan: [LV.started, LV.completed],
-  fakeExecutor: [LV.mockCompletion],
-  completionFailure: [LV.completed, LV.failed],
-  completionFailedInspection: [LV.completed, LV.cameraFailed],
-  both: [LV.cameraFailed, LV.failed, LV.completed],
-  failureAlone: [LV.failed],
-  fakeFailure: [LV.completed, LV.fakeFailure],
-  noVerdict: [LV.completed, LV.cameraNoVerdict],
-};
-const LEVEL_ITEMS: Array<[string, () => unknown]> = [
-  ["levels: printer completes, camera inspects", () => evidenceLevelOfBundle(L.pilot)],
-  ["levels: the printer inspecting itself", () => evidenceLevelOfBundle(L.selfInspect)],
-  ["levels: accepted only", () => evidenceLevelOfBundle(L.accepted)],
-  ["levels: a failed job", () => evidenceLevelOfBundle(L.failedJob)],
-  ["levels: an inspection with no executing device", () => evidenceLevelOfBundle(L.noExecutor)],
-  ["levels: fabricated completion and camera", () => evidenceLevelOfBundle(L.fabricated)],
-  ["levels: printer_job_verified alone", () => evidenceLevelOfBundle(L.verifiedLog)],
-  ["levels: an empty set", () => evidenceLevelOfBundle(L.empty)],
-  ["levelOf: no device attribution", () => evidenceLevelOf(LV.noDevice, executingDeviceIds(L.printerDone))],
-  ["levelOf: the camera, the printer executing", () => evidenceLevelOf(LV.cameraPassed, executingDeviceIds(L.printerRan))],
-  ["levelOf: the camera, nobody executing", () => evidenceLevelOf(LV.cameraPassed, executingDeviceIds(L.noExecutor))],
-  ["levelOf: a fabricated executor", () => evidenceLevelOf(LV.cameraPassed, executingDeviceIds(L.fakeExecutor))],
-  ["contradictions: completion and failure", () => deriveContradictions(L.completionFailure)],
-  ["contradictions: completion and a failed inspection", () => deriveContradictions(L.completionFailedInspection)],
-  ["contradictions: both, in order", () => deriveContradictions(L.both)],
-  ["contradictions: a failure alone", () => deriveContradictions(L.failureAlone)],
-  ["contradictions: a fabricated failure", () => deriveContradictions(L.fakeFailure)],
-  ["contradictions: a verdict-less inspection", () => deriveContradictions(L.noVerdict)],
-  ["inspectionFailed: passed false", () => inspectionFailed(LV.cameraFailed)],
-  ["inspectionFailed: no verdict", () => inspectionFailed(LV.cameraNoVerdict)],
-  ["inspectionFailed: a non-inspection with passed false", () => inspectionFailed(LV.tempLogFailed)],
-  ["meets: device_reported for inspected_output", () => meetsEvidenceLevel("device_reported", "inspected_output")],
-  ["meets: submitted for device_reported", () => meetsEvidenceLevel("submitted", "device_reported")],
-  ["meets: inspected_output for device_reported", () => meetsEvidenceLevel("inspected_output", "device_reported")],
-  ["meets: null for submitted", () => meetsEvidenceLevel(null, "submitted")],
-  ["rank: submitted", () => evidenceLevelRank("submitted")],
-  ["rank: device_reported", () => evidenceLevelRank("device_reported")],
-  ["rank: inspected_output", () => evidenceLevelRank("inspected_output")],
-  ["inspectionFailed: an accessor verdict, never run", () => {
-    ACCESSOR_RUNS = 0;
-    const failed = inspectionFailed(LV.accessorVerdict);
-    return [failed, ACCESSOR_RUNS];
-  }],
-  ["levelOf: an accessor simulated flag, never run", () => {
-    ACCESSOR_RUNS = 0;
-    const level = evidenceLevelOf(LV.accessorSimulated, executingDeviceIds(L.printerRan));
-    return [level, ACCESSOR_RUNS];
-  }],
-];
+// The evidence levels' own realm items live in #577's harness (evidence-level-realm.ts); this one runs admission's.
 
 // -- every item, built once --
 let CASES: Array<[string, ProfileAdmissionInput]> = [];
@@ -377,132 +310,145 @@ const RECIPE: Record<string, any> = {};
 
 async function buildCases(): Promise<void> {
   const p = inspectedPageProfile();
-  const pilot = await toBundle(PILOT, p);
+  // The pilot is two bundles: the printer's (the executor A's) and the camera's (the independent inspector B's).
+  const pilot = await toBundles(PILOT, p);
+  const pilotHashes = pilot.map((b) => b.bundleHash);
   const failure = await toBundle(FAILURE, p);
   const cases: Array<[string, ProfileAdmissionInput]> = [];
   const add = (label: string, value: ProfileAdmissionInput) => cases.push([label, value]);
 
   // admit
-  add("admit: the pilot, inspected_output", await input(p, [pilot]));
+  add("admit: the pilot, inspected_output", await input(p, pilot));
   const dr = deviceReportedProfile();
-  add("admit: device_reported on the printer's completion", await input(dr, [await toBundle(PILOT, dr)]));
+  add("admit: device_reported on the printer's completion", await input(dr, await toBundles(PILOT, dr)));
   const mass = massProfile();
-  add("admit: the mass profile, a decimal value", await input(mass, [await toBundle(MASS_PILOT, mass)]));
-  add("admit: two bundles of one job", await input(p, [await toBundle(PILOT.slice(0, 2), p), await toBundle(PILOT.slice(2), p)]));
+  add("admit: the mass profile, a decimal value", await input(mass, await toBundles(MASS_PILOT, mass)));
+  add("admit: three bundles of one job", await input(p, [await toBundle(PILOT.slice(0, 1), p), ...(await toBundles(PILOT.slice(1), p))]));
   const two = edit((x) => (x.measurement.sampling.minSamples = 2));
   add(
     "admit: two distinct samples for minSamples 2",
-    await input(two, [await toBundle([...PRINTED, { ...PILOT[2]! }, { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true } }], two)]),
+    await input(two, await toBundles([...PRINTED, { ...PILOT[2]! }, { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true } }], two)),
   );
   const unitDrafts = PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), settlementUnitId: UNIT, challengeNonce: NONCE } }));
-  add("admit: a unit-scoped job, unit and challenge committed", await input(p, [await toBundle(unitDrafts, p)], {}, UNIT_SUBJECT));
+  add("admit: a unit-scoped job, unit and challenge committed", await input(p, await toBundles(unitDrafts, p), {}, UNIT_SUBJECT));
   const captureHash = "sha256:" + "d".repeat(64);
-  const committedCapture = await toBundle([...PRINTED, { ...PILOT[2]!, payload: { passed: true, captureHash }, observation: { sampleId: captureHash } }], p);
-  add("admit: a leg that checks the capture, which matches", await input(p, [committedCapture], { verifyPrimitiveInstance: capturesMatch }));
+  const committedCapture = await toBundles([...PRINTED, { ...PILOT[2]!, payload: { passed: true, captureHash }, observation: { sampleId: captureHash } }], p);
+  add("admit: a leg that checks the capture, which matches", await input(p, committedCapture, { verifyPrimitiveInstance: capturesMatch }));
   // The window opens at the EARLIEST start event and closes at the LATEST end event: an observation between two
   // starts, or between two ends, is inside it.
   const fromStart = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started" }));
   add(
     "admit: an inspection between two starts (the window opens at the earliest)",
-    await input(fromStart, [
-      await toBundle(
+    await input(
+      fromStart,
+      await toBundles(
         [PILOT[0]!, { type: "execution_started", t: 15, device: PRINTER }, { type: "execution_completed", t: 16, device: PRINTER }, { ...PILOT[2]!, t: 10 }],
         fromStart,
       ),
-    ]),
+    ),
   );
   const startToEnd = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started", endCondition: "execution_completed" }));
   add(
     "admit: an inspection between two ends (the window closes at the latest)",
-    await input(startToEnd, [
-      await toBundle([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 30, device: PRINTER }, PILOT[2]!], startToEnd),
-    ]),
+    await input(startToEnd, await toBundles([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 30, device: PRINTER }, PILOT[2]!], startToEnd)),
   );
 
   // reject: the set, the signature, binding
-  const pin2 = await computeBundleSetDigest(SUBJECT, [pilot.bundleHash, failure.bundleHash]);
-  const omitted = await input(p, [pilot], { pinnedBundleSetDigest: pin2 });
+  const pin2 = await computeBundleSetDigest(SUBJECT, [...pilotHashes, failure.bundleHash]);
+  const omitted = await input(p, pilot, { pinnedBundleSetDigest: pin2 });
   add("reject: a stored failure bundle left out of the pinned set", omitted);
-  const presented = await computeBundleSetDigest(SUBJECT, [pilot.bundleHash]);
-  RECIPE.omitted = { input: omitted, presented, pin: pin2, pilotHash: pilot.bundleHash };
+  const presented = await computeBundleSetDigest(SUBJECT, pilotHashes);
+  RECIPE.omitted = { input: omitted, presented, pin: pin2, pilotHashes };
   RECIPE.notAPin = { ...omitted, pinnedBundleSetDigest: "not-a-pin" };
   FORGE_FROM.push(presented);
   FORGE_TO.push(pin2);
-  add("reject: a bundle outside the pinned set", await input(p, [pilot, failure], { pinnedBundleSetDigest: presented }));
-  add("reject: a malformed pin", await input(p, [pilot], { pinnedBundleSetDigest: "0x" + "a".repeat(64) }));
-  const signatureFails = await input(p, [pilot], { verifyBundleSignature: () => false });
+  add("reject: a bundle outside the pinned set", await input(p, [...pilot, failure], { pinnedBundleSetDigest: presented }));
+  add("reject: a malformed pin", await input(p, pilot, { pinnedBundleSetDigest: "0x" + "a".repeat(64) }));
+  const signatureFails = await input(p, pilot, { verifyBundleSignature: () => false });
   add("reject: the signature leg fails", signatureFails);
   RECIPE.signatureFails = signatureFails;
-  const asyncSignatureFails = await input(p, [pilot], { verifyBundleSignature: async () => false });
+  const asyncSignatureFails = await input(p, pilot, { verifyBundleSignature: async () => false });
   add("reject: an async signature leg answers false", asyncSignatureFails);
   RECIPE.asyncSignatureFails = asyncSignatureFails;
-  const asyncPrimitiveFails = await input(p, [pilot], { verifyPrimitiveInstance: async () => false });
+  const asyncPrimitiveFails = await input(p, pilot, { verifyPrimitiveInstance: async () => false });
   add("reject: an async primitive leg answers false", asyncPrimitiveFails);
   RECIPE.asyncPrimitiveFails = asyncPrimitiveFails;
-  add("admit: async legs that answer true", await input(p, [pilot], { verifyBundleSignature: async (b) => verifySignature(b), verifyPrimitiveInstance: async () => true }));
-  add("reject: a leg answering with a thenable", await input(p, [pilot], { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f(true) })) as unknown as () => boolean }));
-  add("reject: a leg answering 1, truthy but not true", await input(p, [pilot], { verifyPrimitiveInstance: (() => 1) as unknown as () => boolean }));
-  add("reject: an async leg answering \"true\", truthy but not true", await input(p, [pilot], { verifyPrimitiveInstance: (async () => "true") as unknown as () => Promise<boolean> }));
-  add("reject: evidence from another job", await input(p, [await toBundle(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)]));
-  add("reject: evidence from another kernel", await input(p, [await toBundle(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p)]));
-  const altered = await toBundle(PILOT, p);
-  (altered.events[2] as { payload: Record<string, unknown> }).payload.passed = false;
-  add("reject: an event altered after hashing", await input(p, [altered]));
-  add("reject: evidence for another settlement unit", await input(p, [await toBundle(unitDrafts, p)], {}, { ...UNIT_SUBJECT, settlementUnitId: OTHER_UNIT }));
+  add("admit: async legs that answer (a record with no prototype, and true)", await input(p, pilot, { verifyBundleSignature: async (b) => signedAnswer(b), verifyPrimitiveInstance: async () => true }));
+  add("reject: an async signature leg answering an ordinary record", await input(p, pilot, { verifyBundleSignature: async (b) => verifySignature(b) }));
+  add("reject: a signature leg answering bare true, naming no signer", await input(p, pilot, { verifyBundleSignature: (() => true) as unknown as () => false }));
+  add("admit: a signature leg naming no operator, for a device_reported profile", await input(dr, await toBundles(PILOT, dr), { verifyBundleSignature: () => ({ trustDomain: null }) }));
+  add("reject: the executor's own camera, every bundle signed by A", await input(p, pilot, { verifyBundleSignature: (b) => (verifySignature(b) === false ? false : { trustDomain: OPERATOR_A }) }));
+  add("reject: no executor assigned", await input(p, pilot, { executorTrustDomains: [] }));
+  add("reject: executorTrustDomains naming no operator principal", await input(p, pilot, { executorTrustDomains: ["not-a-principal"] }));
+  add("reject: a leg answering with a thenable", await input(p, pilot, { verifyBundleSignature: (() => ({ then: (f: (v: unknown) => void) => f({ trustDomain: OPERATOR_B }) })) as unknown as () => false }));
+  add("reject: a leg answering 1, truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (() => 1) as unknown as () => boolean }));
+  add("reject: an async leg answering \"true\", truthy but not true", await input(p, pilot, { verifyPrimitiveInstance: (async () => "true") as unknown as () => Promise<boolean> }));
+  add("reject: evidence from another job", await input(p, await toBundles(PILOT.map((d) => ({ ...d, jobId: "job-other" })), p)));
+  add("reject: evidence from another kernel", await input(p, await toBundles(PILOT.map((d) => ({ ...d, kernelId: "kernel-other" })), p)));
+  const altered = await toBundles(PILOT, p);
+  (altered[1]!.events[0] as { payload: Record<string, unknown> }).payload.passed = false;
+  add("reject: an event altered after hashing", await input(p, altered));
+  add("reject: evidence for another settlement unit", await input(p, await toBundles(unitDrafts, p), {}, { ...UNIT_SUBJECT, settlementUnitId: OTHER_UNIT }));
   const unitOnly = PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), settlementUnitId: UNIT } }));
-  add("reject: the challenge nonce not committed", await input(p, [await toBundle(unitOnly, p)], {}, UNIT_SUBJECT));
-  const kernelInPayload = await toBundle(PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), kernelId: "kernel-other" } })), p);
-  add("reject: a payload kernelId naming another kernel", await input(p, [kernelInPayload]));
+  add("reject: the challenge nonce not committed", await input(p, await toBundles(unitOnly, p), {}, UNIT_SUBJECT));
+  const kernelInPayload = await toBundles(PILOT.map((d) => ({ ...d, payload: { ...(d.payload ?? {}), kernelId: "kernel-other" } })), p);
+  add("reject: a payload kernelId naming another kernel", await input(p, kernelInPayload));
   const OUTPUT = "sha256:" + "a".repeat(64);
   const outputSubject: EvidenceSubject = { jobId: JOB, kernelId: KERNEL, outputHash: OUTPUT };
-  add("reject: the output not committed", await input(p, [pilot], {}, outputSubject));
-  const otherOutput = await toBundle(PILOT.map((d) => (d.type === "execution_completed" ? { ...d, payload: { outputHash: "sha256:" + "9".repeat(64) } } : d)), p);
-  add("reject: another output committed", await input(p, [otherOutput], {}, outputSubject));
-  const ownOutput = await toBundle(PILOT.map((d) => (d.type === "execution_completed" ? { ...d, payload: { outputHash: OUTPUT } } : d)), p);
-  add("admit: the output committed", await input(p, [ownOutput], {}, outputSubject));
+  add("reject: the output not committed", await input(p, pilot, {}, outputSubject));
+  const otherOutput = await toBundles(PILOT.map((d) => (d.type === "execution_completed" ? { ...d, payload: { outputHash: "sha256:" + "9".repeat(64) } } : d)), p);
+  add("reject: another output committed", await input(p, otherOutput, {}, outputSubject));
+  // Binding checks each bundle on its own (LO-EV-9 rule 7), so the inspector's bundle names the output it inspected too.
+  const ownOutput = await toBundles(
+    PILOT.map((d) => (d.type === "execution_completed" || d.device === CAMERA ? { ...d, payload: { ...(d.payload ?? {}), outputHash: OUTPUT } } : d)),
+    p,
+  );
+  add("admit: the output committed", await input(p, ownOutput, {}, outputSubject));
   // A score of its own, so flipping `passed` back cannot reproduce the pilot's inspection byte for byte.
-  const failedInspection = await toBundle([...PRINTED, { ...PILOT[2]!, payload: { passed: false, score: 0.2 } }], p);
-  const tampered = await rehashed(failedInspection, 2, (e) => (e.payload.passed = true));
-  const tamperedInput = await input(p, [tampered]);
+  const failedPair = await toBundles([...PRINTED, { ...PILOT[2]!, payload: { passed: false, score: 0.2 } }], p);
+  const failedInspection = failedPair[1]!;
+  const tampered = await rehashed(failedInspection, 0, (e) => (e.payload.passed = true));
+  const tamperedInput = await input(p, [failedPair[0]!, tampered]);
   add("reject: an inspection re-hashed after signing", tamperedInput);
   const realBundleHash = await hashBundle(tampered.events as unknown as EvidenceEvent[]);
   RECIPE.tampered = {
     input: tamperedInput,
-    tamperedHash: (tampered.events[2] as EvidenceEvent).hash,
-    originalHash: (failedInspection.events[2] as EvidenceEvent).hash,
+    tamperedHash: (tampered.events[0] as EvidenceEvent).hash,
+    originalHash: (failedInspection.events[0] as EvidenceEvent).hash,
   };
   FORGE_FROM.push(realBundleHash);
   FORGE_TO.push(failedInspection.bundleHash);
-  const genuineFailure = await input(p, [failedInspection]);
+  const genuineFailure = await input(p, failedPair);
   add("reject: a failed inspection (contradiction), genuine", genuineFailure);
-  RECIPE.genuineFailure = { input: genuineFailure, text: hashedText(failedInspection.events[2]) };
+  RECIPE.genuineFailure = { input: genuineFailure, text: hashedText(failedInspection.events[0]) };
 
   // reject: simulation, contradiction, failure, level
-  add("reject: a simulated source", await input(p, [await toBundle(PILOT.map((d) => (d.device === CAMERA ? { ...d, simulated: true } : d)), p)]));
-  add("reject: a payload.mock event", await input(p, [await toBundle([...PILOT, { type: "execution_progress", t: 5, device: PRINTER, payload: { mock: true } }], p)]));
-  add("reject: completion and execution_failed", await input(p, [await toBundle([...PILOT, FAILURE[0]!], p)]));
-  add("reject: a device failure", await input(p, [await toBundle([PILOT[0]!, { type: "execution_failed", t: 10, device: PRINTER }], p)]));
-  add("reject: the printer inspecting its own output", await input(p, [await toBundle(PILOT.map((d) => (d.device === CAMERA ? { ...d, device: PRINTER } : d)), p)]));
-  add("reject: printer_job_verified alone", await input(dr, [await toBundle([{ type: "printer_job_verified", t: 10, device: PRINTER }], dr)]));
+  add("reject: a simulated source", await input(p, await toBundles(PILOT.map((d) => (d.device === CAMERA ? { ...d, simulated: true } : d)), p)));
+  add("reject: a payload.mock event", await input(p, await toBundles([...PILOT, { type: "execution_progress", t: 5, device: PRINTER, payload: { mock: true } }], p)));
+  add("reject: completion and execution_failed", await input(p, await toBundles([...PILOT, FAILURE[0]!], p)));
+  add("reject: a device failure", await input(p, await toBundles([PILOT[0]!, { type: "execution_failed", t: 10, device: PRINTER }], p)));
+  add("reject: the printer inspecting its own output", await input(p, await toBundles(PILOT.map((d) => (d.device === CAMERA ? { ...d, device: PRINTER } : d)), p)));
+  add("reject: printer_job_verified alone", await input(dr, await toBundles([{ type: "printer_job_verified", t: 10, device: PRINTER }], dr)));
 
   // reject: missing measurements, one exclusion each
   const cam = (over: Partial<Draft>) => [...PRINTED, { ...PILOT[2]!, ...over }];
-  add("reject: an inspection from another camera", await input(p, [await toBundle(cam({ device: "dev-other-camera" }), p)]));
-  add("reject: an unpermitted version", await input(p, [await toBundle(cam({ source: { adapterVersion: "PhotoCameraAdapter-9.9.9" } }), p)]));
-  add("reject: no version at all", await input(p, [await toBundle(cam({ source: { adapterVersion: undefined, firmwareVersion: undefined } }), p)]));
-  add("reject: an inspection before the window opened", await input(p, [await toBundle(cam({ t: 5 }), p)]));
-  add("reject: an unparseable observation timestamp", await input(p, [await toBundle(cam({ timestamp: "not a date" }), p)]));
+  add("reject: an inspection from another camera", await input(p, await toBundles(cam({ device: "dev-other-camera" }), p)));
+  add("reject: an unpermitted version", await input(p, await toBundles(cam({ source: { adapterVersion: "PhotoCameraAdapter-9.9.9" } }), p)));
+  add("reject: no version at all", await input(p, await toBundles(cam({ source: { adapterVersion: undefined, firmwareVersion: undefined } }), p)));
+  add("reject: an inspection before the window opened", await input(p, await toBundles(cam({ t: 5 }), p)));
+  add("reject: an unparseable observation timestamp", await input(p, await toBundles(cam({ timestamp: "not a date" }), p)));
   // Two start events and two end events, so the window's earliest start and latest end are both computed.
   const windowed = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started", endCondition: "execution_completed" }));
   add(
     "reject: an inspection after the window closed",
-    await input(windowed, [await toBundle([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 12, device: PRINTER }, PILOT[2]!], windowed)]),
+    await input(windowed, await toBundles([PILOT[0]!, PILOT[1]!, { type: "execution_completed", t: 12, device: PRINTER }, PILOT[2]!], windowed)),
   );
   const earliest = edit((x) => (x.capture = { ...x.capture, startCondition: "execution_started" }));
   add(
     "reject: an inspection before the earliest start",
-    await input(earliest, [
-      await toBundle(
+    await input(
+      earliest,
+      await toBundles(
         [
           { type: "execution_started", t: 10, device: PRINTER },
           { type: "execution_started", t: 15, device: PRINTER },
@@ -511,60 +457,61 @@ async function buildCases(): Promise<void> {
         ],
         earliest,
       ),
-    ]),
+    ),
   );
-  add("reject: an inspection with no verdict", await input(p, [await toBundle(cam({ payload: { score: 0.97 } }), p)]));
-  add("reject: no profileObservation record", await input(p, [await toBundle(cam({ observation: null }), p)]));
-  add("reject: another object", await input(p, [await toBundle(cam({ observation: { object: { kind: "documentHash", value: "sha256:" + "c".repeat(64) } } }), p)]));
-  add("reject: another primitive", await input(p, [await toBundle(cam({ observation: { primitiveId: "artifact.hash" } }), p)]));
+  add("reject: an inspection with no verdict", await input(p, await toBundles(cam({ payload: { score: 0.97 } }), p)));
+  add("reject: no profileObservation record", await input(p, await toBundles(cam({ observation: null }), p)));
+  add("reject: another object", await input(p, await toBundles(cam({ observation: { object: { kind: "documentHash", value: "sha256:" + "c".repeat(64) } } }), p)));
+  add("reject: another primitive", await input(p, await toBundles(cam({ observation: { primitiveId: "artifact.hash" } }), p)));
   const scale = (observation: Partial<ProfileObservation>) => MASS_PILOT.map((d) => (d.device === SCALE ? { ...d, observation } : d));
   // The "value" in recipes run on the numeric profile: there, a value on an observation is expected, so
   // Object.prototype.value written cannot exclude the observation and mask what the input boundary read.
-  const massPilot = await toBundle(MASS_PILOT, mass);
+  const massPilot = await toBundles(MASS_PILOT, mass);
+  const massHashes = massPilot.map((b) => b.bundleHash);
   const massFailure = await toBundle(FAILURE, mass);
-  const massPin = await computeBundleSetDigest(SUBJECT, [massPilot.bundleHash, massFailure.bundleHash]);
-  const massPresented = await computeBundleSetDigest(SUBJECT, [massPilot.bundleHash]);
+  const massPin = await computeBundleSetDigest(SUBJECT, [...massHashes, massFailure.bundleHash]);
+  const massPresented = await computeBundleSetDigest(SUBJECT, massHashes);
   const forgedSignature = sign(null, signingPreimage("sha256:" + "f".repeat(64)), key.privateKey).toString("hex");
-  const badlySigned = { ...massPilot, kernelSignature: { ...(massPilot.kernelSignature as Record<string, unknown>), value: forgedSignature } };
-  RECIPE.massOmitted = { input: await input(mass, [massPilot], { pinnedBundleSetDigest: massPin }), presented: massPresented, pin: massPin };
-  RECIPE.badlySigned = await input(mass, [badlySigned]);
+  const badlySigned = { ...massPilot[0]!, kernelSignature: { ...(massPilot[0]!.kernelSignature as Record<string, unknown>), value: forgedSignature } };
+  RECIPE.massOmitted = { input: await input(mass, massPilot, { pinnedBundleSetDigest: massPin }), presented: massPresented, pin: massPin };
+  RECIPE.badlySigned = await input(mass, [badlySigned, massPilot[1]!]);
   add("reject: a bundle signed over another digest (mass)", RECIPE.badlySigned);
   add("reject: a stored failure bundle left out of the pinned set (mass)", RECIPE.massOmitted.input);
-  const exponent = await input(mass, [await toBundle(scale({ value: "1e-7" }), mass)]);
+  const exponent = await input(mass, await toBundles(scale({ value: "1e-7" }), mass));
   add("reject: an exponent value (1e-7)", exponent);
   RECIPE.exponent = exponent;
-  add("reject: a numeric observation with no value", await input(mass, [await toBundle(scale({ value: undefined }), mass)]));
-  add("reject: a value on a unit-none observation", await input(p, [await toBundle(cam({ observation: { value: "3" } }), p)]));
-  const frame = await input(p, [await toBundle(cam({ observation: { sampleId: "frame-7" } }), p)]);
+  add("reject: a numeric observation with no value", await input(mass, await toBundles(scale({ value: undefined }), mass)));
+  add("reject: a value on a unit-none observation", await input(p, await toBundles(cam({ observation: { value: "3" } }), p)));
+  const frame = await input(p, await toBundles(cam({ observation: { sampleId: "frame-7" } }), p));
   add("reject: a sampleId that is not a digest", frame);
   RECIPE.frame = frame;
   const reissue = "sha256:" + "c".repeat(64);
   add(
     "reject: one sample reissued, minSamples 2",
-    await input(two, [await toBundle([...PRINTED, { ...PILOT[2]!, observation: { sampleId: reissue } }, { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true }, observation: { sampleId: reissue } }], two)]),
+    await input(two, await toBundles([...PRINTED, { ...PILOT[2]!, observation: { sampleId: reissue } }, { type: "cv_inspection_result", t: 25, device: CAMERA, payload: { passed: true }, observation: { sampleId: reissue } }], two)),
   );
-  add("reject: the primitive leg fails", await input(p, [pilot], { verifyPrimitiveInstance: () => false }));
+  add("reject: the primitive leg fails", await input(p, pilot, { verifyPrimitiveInstance: () => false }));
   add(
     "reject: a leg that writes to its frozen observation",
-    await input(p, [pilot], {
+    await input(p, pilot, {
       verifyPrimitiveInstance: (_id, observation) => {
         (observation.payload as Record<string, unknown>).passed = false;
         return true;
       },
     }),
   );
-  const otherCapture = await toBundle(
+  const otherCapture = await toBundles(
     [...PRINTED, { ...PILOT[2]!, payload: { passed: true, captureHash: "sha256:" + "e".repeat(64) }, observation: { sampleId: captureHash } }],
     p,
   );
-  const otherCaptureInput = await input(p, [otherCapture], { verifyPrimitiveInstance: capturesMatch });
+  const otherCaptureInput = await input(p, otherCapture, { verifyPrimitiveInstance: capturesMatch });
   add("reject: a leg that checks the capture, which is another", otherCaptureInput);
   RECIPE.otherCapture = { input: otherCaptureInput, captureHash };
 
   // reject: terms, governance, the input boundary
   const term = async (label: string, change: (x: MeasurementProfileV1) => void) => {
     const q = edit(change);
-    add(`reject: unverifiable ${label}`, await input(q, [await toBundle(PILOT, q)]));
+    add(`reject: unverifiable ${label}`, await input(q, await toBundles(PILOT, q)));
   };
   await term("tolerance", (x) => (x.measurement.tolerance = { comparator: ">=", target: 0.9 }));
   await term("primitive id", (x) => (x.interpretation.evidenceTypeIds = ["capture.no_such_primitive"]));
@@ -572,12 +519,12 @@ async function buildCases(): Promise<void> {
   await term("start condition", (x) => (x.capture.startCondition = "printer_warm"));
   await term("wildcard pin", (x) => (x.device.permittedFirmwareVersions = ["*-unpinned-pilot"]));
   const loosened = edit((x) => (x.interpretation.acceptanceLevel = "device_reported"));
-  add("reject: a profile changed after acceptance", await input(loosened, [pilot], { committedDigest: computeMeasurementProfileDigest(p) }));
-  add("reject: a sha256:-family committed digest", await input(p, [pilot], { committedDigest: `sha256:${computeMeasurementProfileDigest(p).slice(2)}` }));
-  add("reject: a proxy profile", await input(p, [pilot], { profile: new Proxy({ ...p }, {}) as unknown as MeasurementProfileV1 }));
-  const accessorBundle = await toBundle(PILOT, p);
-  Object.defineProperty((accessorBundle.events[2] as { payload: object }).payload, "passed", nullDescriptor({ get: () => true, enumerable: true, configurable: true }));
-  const accessorDeep = await input(p, [accessorBundle], { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [accessorBundle.bundleHash]) });
+  add("reject: a profile changed after acceptance", await input(loosened, pilot, { committedDigest: computeMeasurementProfileDigest(p) }));
+  add("reject: a sha256:-family committed digest", await input(p, pilot, { committedDigest: `sha256:${computeMeasurementProfileDigest(p).slice(2)}` }));
+  add("reject: a proxy profile", await input(p, pilot, { profile: new Proxy({ ...p }, {}) as unknown as MeasurementProfileV1 }));
+  const accessorPair = await toBundles(PILOT, p);
+  Object.defineProperty((accessorPair[1]!.events[0] as { payload: object }).payload, "passed", nullDescriptor({ get: () => true, enumerable: true, configurable: true }));
+  const accessorDeep = await input(p, accessorPair, { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, accessorPair.map((b) => b.bundleHash)) });
   add("reject: an accessor inside the bundles", accessorDeep);
   RECIPE.accessorDeep = accessorDeep;
   add("reject: no bundles", await input(p, []));
@@ -585,16 +532,16 @@ async function buildCases(): Promise<void> {
   // hold
   const held = (change: (x: MeasurementProfileV1) => void) => edit((x) => { change(x); x.onMissingData = "hold"; });
   const hold2 = held((x) => (x.measurement.sampling.minSamples = 2));
-  add("hold: too few samples", await input(hold2, [await toBundle(PILOT, hold2)]));
+  add("hold: too few samples", await input(hold2, await toBundles(PILOT, hold2)));
   const holdC = edit((x) => (x.onContradiction = "hold"));
-  add("hold: a contradiction", await input(holdC, [await toBundle([...PILOT, FAILURE[0]!], holdC)]));
+  add("hold: a contradiction", await input(holdC, await toBundles([...PILOT, FAILURE[0]!], holdC)));
   const holdL = held(() => undefined);
-  add("hold: level not reached", await input(holdL, [await toBundle(PRINTED, holdL)]));
-  const holdPilot = await toBundle(PILOT, holdL);
-  add("hold: a bundle left out of the pin", await input(holdL, [holdPilot], { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [holdPilot.bundleHash, (await toBundle(FAILURE, holdL)).bundleHash]) }));
+  add("hold: level not reached", await input(holdL, await toBundles(PRINTED, holdL)));
+  const holdPilot = await toBundles(PILOT, holdL);
+  add("hold: a bundle left out of the pin", await input(holdL, holdPilot, { pinnedBundleSetDigest: await computeBundleSetDigest(SUBJECT, [...holdPilot.map((b) => b.bundleHash), (await toBundle(FAILURE, holdL)).bundleHash]) }));
   add("hold: no bundles", await input(holdL, []));
   // A malformed pin is invalid authority: it rejects even under onMissingData "hold" (a widened pin check would hold).
-  const notAPinHold = await input(holdL, [holdPilot], { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
+  const notAPinHold = await input(holdL, holdPilot, { pinnedBundleSetDigest: "0x" + "a".repeat(64) });
   add("reject: a malformed pin under onMissingData hold", notAPinHold);
   RECIPE.notAPinHold = notAPinHold;
   CASES = cases;
@@ -621,7 +568,7 @@ async function buildCases(): Promise<void> {
     ["digest: golden", { jobId: "job-golden-1", kernelId: "kernel-golden-1" }, [h2, h1, h2]],
     ["digest: golden with a unit", { jobId: "job-golden-1", kernelId: "kernel-golden-1", settlementUnitId: "0x" + "ab".repeat(32) }, [h1, h2]],
     ["digest: one hash", SUBJECT, [h1]],
-    ["digest: the pilot set", SUBJECT, [pilot.bundleHash, failure.bundleHash]],
+    ["digest: the pilot set", SUBJECT, [...pilotHashes, failure.bundleHash]],
     ["digest: empty", SUBJECT, []],
     ["digest: an entry that is not a digest", SUBJECT, [h1, "not-a-digest"]],
     ["digest: a hole", SUBJECT, holey],
@@ -637,7 +584,7 @@ async function buildCases(): Promise<void> {
     deliverAdmission("hold: too few samples"),
     deliverAdmission("reject: a stored failure bundle left out of the pinned set"),
     // The pilot bundle alone digests to a value in FORGE_FROM, so a forger has something to rewrite.
-    ["digest", "digest: the pilot bundle alone", () => computeBundleSetDigest(SUBJECT, [pilot.bundleHash])],
+    ["digest", "digest: the pilot bundles alone", () => computeBundleSetDigest(SUBJECT, pilotHashes)],
     ["digest", "digest: golden", () => computeBundleSetDigest({ jobId: "job-golden-1", kernelId: "kernel-golden-1" }, [h2, h1, h2])],
     ["digest", "digest: empty", () => computeBundleSetDigest(SUBJECT, [])],
   ];
@@ -761,15 +708,6 @@ async function results(): Promise<Row[]> {
       value = "threw";
     }
     rows[n++] = ["terms", TERM_CASES[i]![0], value];
-  }
-  for (let i = 0; i < LEVEL_ITEMS.length; i++) {
-    let value: unknown;
-    try {
-      value = copyList(LEVEL_ITEMS[i]![1]());
-    } catch {
-      value = "threw";
-    }
-    rows[n++] = ["levels", LEVEL_ITEMS[i]![0], value];
   }
   const delivered = await deliveredRows();
   for (let i = 0; i < delivered.length; i++) rows[n++] = delivered[i]!;
@@ -1086,7 +1024,7 @@ const RECIPES: Scenario[] = [
     items: async () => {
       let digest: unknown;
       try {
-        digest = await computeBundleSetDigest(SUBJECT, [RECIPE.omitted.pilotHash]);
+        digest = await computeBundleSetDigest(SUBJECT, RECIPE.omitted.pilotHashes);
       } catch {
         digest = "threw";
       }
@@ -1111,7 +1049,7 @@ const RECIPES: Scenario[] = [
     items: async () => {
       let digest: unknown;
       try {
-        digest = await computeBundleSetDigest(SUBJECT, [RECIPE.omitted.pilotHash]);
+        digest = await computeBundleSetDigest(SUBJECT, RECIPE.omitted.pilotHashes);
       } catch {
         digest = "threw";
       }
