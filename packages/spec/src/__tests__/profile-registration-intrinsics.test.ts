@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { closureReads, compilerOptions, type CheckOptions } from "./builtin-reads-check.js";
+import { closureReads, compilerOptions, trustedClosure, type CheckOptions } from "./builtin-reads-check.js";
 
 const SPEC_DIR = fileURLToPath(new URL("../../", import.meta.url));
 const REALM = fileURLToPath(new URL("./harness/registration-realm.ts", import.meta.url));
@@ -63,6 +63,96 @@ beforeAll(async () => {
   );
 }, 900_000);
 
+/**
+ * Every callable intrinsic captured at load by the files the registration closure reaches (astra pack
+ * 305: a hand-written inventory had already missed some). In a top-level const's initializer, each
+ * outermost property chain rooted at a global the default library or @types/node declares, whose
+ * value can be called or constructed: `Object.create`, `Array`, `Set.prototype.add`. Also each
+ * accessor captured through getOwnPropertyDescriptor(chain, "name"): `Set.prototype.size`.
+ *   - A root may be a top-level const that is itself such a chain (FunctionPrototype -> Function.prototype).
+ *   - `globalThis.X` is X.
+ *   - A trailing bind, call or apply on a captured method names that method
+ *     (Function.prototype.bind.bind is Function.prototype.bind).
+ *   - A function written there runs later and is not a capture, unless it is called where it is written.
+ */
+function capturedIntrinsics(): string[] {
+  const REPO = join(SPEC_DIR, "..", "..");
+  const REGISTRATION = join(SPEC_DIR, "src", "evidence", "profile-registration.ts");
+  const inRepo = (fileName: string): boolean =>
+    fileName.startsWith(join(REPO, "packages")) && !/[\\/]node_modules[\\/]/.test(fileName) && !fileName.endsWith(".d.ts");
+  const program = ts.createProgram([REGISTRATION], compilerOptions(SPEC_DIR));
+  const checker = program.getTypeChecker();
+  const roots = trustedClosure(program, [REGISTRATION], inRepo, { primordials: /^$/, awaitWrappers: new Set(), root: REPO });
+  const files = [...new Set(roots.map((root) => root.getSourceFile()))];
+  const isGlobal = (identifier: ts.Identifier): boolean =>
+    (checker.getSymbolAtLocation(identifier)?.declarations ?? []).some((d) => {
+      const file = d.getSourceFile();
+      return program.isSourceFileDefaultLibrary(file) || /[\\/]node_modules[\\/]@types[\\/]node[\\/]/.test(file.fileName);
+    });
+  const chainOf = (node: ts.Expression, seen: Set<ts.Node> = new Set()): string | undefined => {
+    if (ts.isParenthesizedExpression(node) || ts.isNonNullExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) return chainOf(node.expression, seen);
+    if (ts.isIdentifier(node)) {
+      if (isGlobal(node)) return node.text;
+      const declaration = checker.getSymbolAtLocation(node)?.declarations?.[0];
+      if (declaration !== undefined && !seen.has(declaration) && ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined &&
+        ts.isVariableStatement(declaration.parent.parent) && ts.isSourceFile(declaration.parent.parent.parent)) {
+        seen.add(declaration);
+        return chainOf(declaration.initializer, seen);
+      }
+      return undefined;
+    }
+    if (ts.isPropertyAccessExpression(node)) {
+      const base = chainOf(node.expression, seen);
+      return base === undefined ? undefined : `${base}.${node.name.text}`;
+    }
+    return undefined;
+  };
+  const normalize = (chain: string): string => {
+    let parts = chain.split(".");
+    if (parts[0] === "globalThis" && parts.length > 1) parts = parts.slice(1);
+    while (parts.length > 3 && ["bind", "call", "apply"].includes(parts[parts.length - 1]!)) parts = parts.slice(0, -1);
+    return parts.join(".");
+  };
+  const callable = (node: ts.Node): boolean => {
+    const type = checker.getNonNullableType(checker.getTypeAtLocation(node));
+    return type.getCallSignatures().length + type.getConstructSignatures().length > 0;
+  };
+  const found = new Set<string>();
+  for (const file of files) {
+    for (const statement of file.statements) {
+      if (!ts.isVariableStatement(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (declaration.initializer === undefined) continue;
+        const walk = (node: ts.Node): void => {
+          if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
+            let at: ts.Node = node;
+            while (ts.isParenthesizedExpression(at.parent)) at = at.parent;
+            if (!(ts.isCallExpression(at.parent) && at.parent.expression === at)) return; // runs later: not a capture
+          }
+          if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) {
+            const outermost = !(ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node);
+            const aName = ts.isPropertyAccessExpression(node.parent) && node.parent.name === node;
+            if (outermost && !aName) {
+              const chain = chainOf(node);
+              if (chain !== undefined && callable(node)) found.add(normalize(chain));
+            }
+          }
+          if (ts.isCallExpression(node) && node.arguments.length === 2 && ts.isStringLiteral(node.arguments[1]!)) {
+            const callee = chainOf(node.expression);
+            const target = chainOf(node.arguments[0]!);
+            if ((callee === "Object.getOwnPropertyDescriptor" || callee === "Reflect.getOwnPropertyDescriptor") && target !== undefined) {
+              found.add(normalize(`${target}.${(node.arguments[1] as ts.StringLiteral).text}`));
+            }
+          }
+          ts.forEachChild(node, walk);
+        };
+        walk(declaration.initializer);
+      }
+    }
+  }
+  return [...found].sort();
+}
+
 /** Each request whose result changed and is not a refusal. */
 function violations(clean: Row[], patched: Row[]): string[] {
   const out: string[] = [];
@@ -91,20 +181,13 @@ describe("registration: nothing changed after load makes a request registrable, 
     for (const id of SCENARIOS) expect(OUTCOMES.get(id)?.clean, id).toEqual(reference.clean);
   });
 
-  it("has a scenario for every intrinsic the registration path captures at load (astra pack 188's inventory)", () => {
-    // The callable captures of the files the registration closure reaches (DECISIONS 04:06): profile-registration,
-    // measurement-profile, profile-admission (unverifiableProfileTerms), canonical, plain-data, primordials,
-    // evidence-level, primitives and types/evidence. Pack 188 named the first six as missing.
-    const INVENTORY = [
-      "Number.isInteger", "Object.create", "Object.defineProperty", "Object.is", "Object.prototype.hasOwnProperty", "Reflect.apply",
-      "Array.isArray", "Date.parse", "JSON.stringify", "Number.isFinite", "Object.freeze", "Object.getOwnPropertyDescriptor",
-      "Object.getPrototypeOf", "Object.isFrozen", "Object.keys", "Reflect.ownKeys", "Set.prototype.add", "Set.prototype.has",
-      "String", "String.prototype.charAt", "String.prototype.charCodeAt", "String.prototype.trim",
-      "Function.prototype.call", "Function.prototype.bind", "Promise.prototype.then", "Promise.prototype.catch",
-      "Promise.prototype.finally", "Promise[Symbol.species]", "TypeError", "Error", "Proxy", "structuredClone",
-      "Uint8Array", "Map.prototype.get",
-    ];
-    expect(INVENTORY.filter((name) => !SCENARIOS.includes(`patch: ${name}`))).toEqual([]);
+  it("has a scenario for every intrinsic the registration path captures at load, computed from the program (astra packs 188 and 305)", () => {
+    const inventory = capturedIntrinsics();
+    // Not vacuous: the inventory holds what pack 188 named, and what pack 305 found the hand-written list without.
+    for (const name of ["Number.isInteger", "Object.create", "Object.defineProperty", "Object.is", "Object.prototype.hasOwnProperty", "Reflect.apply", "Array", "Promise", "Set", "Set.prototype.size"]) {
+      expect(inventory, name).toContain(name);
+    }
+    expect(inventory.filter((name) => !SCENARIOS.includes(`patch: ${name}`))).toEqual([]);
   });
 
   for (const id of SCENARIOS) {
@@ -213,18 +296,18 @@ describe("registration's trusted path passes the default-deny check, computed fr
     const REPO = join(SPEC_DIR, "..", "..");
     const inRepo = (fileName: string): boolean =>
       fileName.startsWith(join(REPO, "packages")) && !/[\\/]node_modules[\\/]/.test(fileName) && !fileName.endsWith(".d.ts");
-    const options: CheckOptions = { primordials: /[\\/]src[\\/]util[\\/](primordials|plain-data)\.ts$/, awaitWrappers: new Set(["awaitedHere", "legAnswer"]) };
+    const options: CheckOptions = { primordials: /[\\/]src[\\/]util[\\/](primordials|plain-data)\.ts$/, awaitWrappers: new Set(["awaitedHere", "legAnswer"]), root: REPO };
     const program = ts.createProgram([REGISTRATION], compilerOptions(SPEC_DIR));
     expect(program.getSemanticDiagnostics(program.getSourceFile(REGISTRATION)).map((d) => ts.flattenDiagnosticMessageText(d.messageText, " "))).toEqual([]);
     const { reached, found, collaboratorsUsed } = closureReads(program, [REGISTRATION], options, inRepo);
     // Not vacuous: the closure enters the copy, the validation, the term check, the digest and canonical JSON.
     expect(reached).toEqual(
       expect.arrayContaining([
-        "plain-data.ts:plainDataCopy",
-        "measurement-profile.ts:validateMeasurementProfile",
-        "profile-admission.ts:unverifiableProfileTerms",
-        "measurement-profile.ts:computeMeasurementProfileDigest",
-        "canonical.ts:canonicalize",
+        "packages/spec/src/util/plain-data.ts:plainDataCopy",
+        "packages/spec/src/evidence/measurement-profile.ts:validateMeasurementProfile",
+        "packages/spec/src/evidence/profile-admission.ts:unverifiableProfileTerms",
+        "packages/spec/src/evidence/measurement-profile.ts:computeMeasurementProfileDigest",
+        "packages/spec/src/util/canonical.ts:canonicalize",
       ]),
     );
     expect(collaboratorsUsed).toEqual([]);

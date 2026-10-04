@@ -225,6 +225,12 @@ const SCENARIOS: Array<[string, Apply]> = [
   ["patch: Proxy", replace(globalThis, "Proxy", () => function NotProxy(target: object) { return target; })],
   ["patch: structuredClone", replace(globalThis, "structuredClone", () => () => ({}))],
   ["patch: Uint8Array", replace(globalThis, "Uint8Array", () => function NotUint8Array() { return []; })],
+  // astra pack 305: the captured constructors and the Set size getter, found by the computed inventory.
+  ["patch: Array", replace(globalThis, "Array", () => function NotArray() { return []; })],
+  ["patch: Map", replace(globalThis, "Map", () => class NotMap { get(): undefined { return undefined; } set(): this { return this; } has(): boolean { return false; } })],
+  ["patch: Promise", replace(globalThis, "Promise", () => function NotPromise() {})],
+  ["patch: Set", replace(globalThis, "Set", () => class NotSet { has(): boolean { return true; } add(): this { return this; } })],
+  ["patch: Set.prototype.size", replaceGetter(Set.prototype, "size", () => () => 0)],
 ];
 
 // -- main --
