@@ -10,7 +10,7 @@
  * returns/pcc-gateway-work/61c-fc8-repro-85c9d5bf.log for the captured run).
  */
 import { describe, it, expect } from "vitest";
-import { safeLogResponseText, safeLogErrorName, safeLogId } from "../util/redact-log.js";
+import { safeLogResponseText, safeLogErrorName, safeLogId, safeLogHex } from "../util/redact-log.js";
 
 const SENTINEL = "SENTINEL-ORACLE-KEY-5f1e";
 
@@ -110,6 +110,47 @@ describe("FC-8 round 2 (astra pack 61b) — safeLogId", () => {
     expect(safeLogId(undefined)).toBe("(none)");
     expect(safeLogId(null)).toBe("(none)");
     expect(safeLogId(42)).toBe("(none)");
+  });
+});
+
+describe("FC-8 round 4 (astra pack 61c) — safeLogHex", () => {
+  // Found by mutation testing this round: the generic canary test fixture
+  // (fc8-round4-fakes.ts) deliberately uses a canary that is "not id/enum/
+  // hex/content-type-shaped anywhere" (see fc8-round3-hp-full-chain.test.ts),
+  // so it can never drive a value through safeLogHex's hex-shaped branch —
+  // a mutant that fingerprints safeLogId but leaves safeLogHex as a bare
+  // shape-check-then-pass-through survives every fc8-round4-*.test.ts file
+  // untouched. These direct unit tests close that gap.
+  it("fingerprints an ordinary 0x-hex value (e.g. a tx hash) — deterministic, never the value", () => {
+    const hash = "0x" + "a".repeat(64);
+    const out = safeLogHex(hash);
+    expect(out).not.toContain(hash);
+    expect(out).toMatch(/^id:[0-9a-f]{12}$/);
+    expect(safeLogHex(hash)).toBe(out); // deterministic: same input, same fingerprint
+    expect(safeLogHex("0x" + "b".repeat(64))).not.toBe(out); // different input, different fingerprint
+  });
+
+  it("a hex-encoded SECRET satisfies the hex-shape check just as well as a real hash — the fingerprint withholds it exactly the same way round 3's shape-only check did not", () => {
+    // round 3's safeLogHex (shape check, then pass through unchanged) would
+    // have printed this value verbatim, because it looks exactly like a
+    // real hash — the same shape-is-not-a-content-boundary gap as finding 3.
+    const hexEncodedSecret = "0x" + Buffer.from(SENTINEL, "utf8").toString("hex");
+    const out = safeLogHex(hexEncodedSecret);
+    expect(out).not.toContain(hexEncodedSecret);
+    expect(out).not.toContain(SENTINEL);
+    expect(out).toMatch(/^id:[0-9a-f]{12}$/);
+  });
+
+  it("[neg] falls back on a non-hex-shaped value instead of ever printing it raw", () => {
+    expect(safeLogHex(SENTINEL)).not.toContain(SENTINEL);
+    expect(safeLogHex(SENTINEL)).toBe("(none)");
+    expect(safeLogHex("not-hex-at-all")).toBe("(none)");
+  });
+
+  it("falls back on a non-string or missing value", () => {
+    expect(safeLogHex(undefined)).toBe("(none)");
+    expect(safeLogHex(null)).toBe("(none)");
+    expect(safeLogHex(42)).toBe("(none)");
   });
 });
 
