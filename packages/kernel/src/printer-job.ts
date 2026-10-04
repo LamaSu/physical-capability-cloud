@@ -72,7 +72,7 @@ import type { JobResult } from "./job-runner.js";
 import { isStepLeased, leaseStep } from "./step-lease.js";
 import { IppAdapter, type IppAdapterConfig } from "./adapters/ipp-adapter.js";
 import type { MachineAdapter } from "./adapters/types.js";
-import { failureText } from "./failure-text.js";
+import { eventType, failureText } from "./failure-text.js";
 
 // ---------------------------------------------------------------------------
 // Ed25519 kernel signer (the way this repo signs any device evidence)
@@ -263,9 +263,15 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   // the session's claim and the step lease are one synchronous block, as in JobRunner.
 
   // Fail closed: without its quiesceEvidence() an adapter cannot say when a print's
-  // evidence is complete (adapters/types.ts).
-  if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
-    return failure(`adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a print`);
+  // evidence is complete (adapters/types.ts). An adapter that throws while it is checked, or
+  // while the session opens (its onEvidence), fails the print with a result, never a
+  // rejection: nothing is held yet (astra pack 210, as in JobRunner).
+  try {
+    if (typeof (adapter as { quiesceEvidence?: unknown }).quiesceEvidence !== "function") {
+      return failure(`adapter ${adapter.id} has no quiesceEvidence(), so its evidence cannot be bound to a print`);
+    }
+  } catch (err) {
+    return failure(`the print's adapter could not be checked: ${failureText(err)}`);
   }
   if (isStepLeased(emitter, jobId, stepId)) {
     return failure(`step ${stepId} of job ${jobId} is already running`, { reason: "step", jobId, stepId });
@@ -309,7 +315,7 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
       try {
         await emitter.addEvent(jobId, stepId, event);
       } catch (err) {
-        unrecorded.first ??= { type: event.type, error: failureText(err) };
+        unrecorded.first ??= { type: eventType(event), error: failureText(err) };
         console.error(err);
       }
     });
@@ -367,10 +373,15 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   // per print could not be removed, so it went on recording later and overlapping prints'
   // events into this print's step (P1, P3). Nothing is recorded here: an event waits until
   // the device job is known, and is then admitted (bound, and recorded only if it is bound).
-  const opened = openEvidenceSession([adapter], { jobId, stepId }, (event) => {
-    if (deviceJob.id === undefined) deviceJob.early.push(event);
-    else admit(event);
-  });
+  let opened: ReturnType<typeof openEvidenceSession>;
+  try {
+    opened = openEvidenceSession([adapter], { jobId, stepId }, (event) => {
+      if (deviceJob.id === undefined) deviceJob.early.push(event);
+      else admit(event);
+    });
+  } catch (err) {
+    return failure(`the print's evidence session could not open: ${failureText(err)}`);
+  }
   if (!opened.ok) {
     const { reason, adapterId, jobId: holder } = opened.busy;
     return failure(
@@ -380,7 +391,15 @@ export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult
   }
   const session = opened.session;
   const releaseStep = leaseStep(emitter, jobId, stepId);
-  emitter.registerStep(jobId, stepId, assuranceTier);
+  try {
+    emitter.registerStep(jobId, stepId, assuranceTier);
+  } catch (err) {
+    // Nothing was sent to the printer: release what this print took, and fail with a result.
+    session.close();
+    emitter.cleanup(jobId, stepId);
+    releaseStep();
+    return failure(`the print's step could not be registered: ${failureText(err)}`);
+  }
 
   // Wait for the chain, but not forever: an addEvent may never settle.
   // Resolves false when the timeout comes first.

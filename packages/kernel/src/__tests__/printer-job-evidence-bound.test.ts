@@ -1203,3 +1203,113 @@ describe("a collaborator of the print that rejects with a reason that has no tex
     expect.soft(bundles, "bundles finalized").toEqual([]);
   });
 });
+
+describe("the print's setup, its latch's event label and the recovery log, whatever a collaborator throws (astra pack 210)", () => {
+  const REASONS = [
+    ["an object with no prototype", () => Object.create(null) as unknown],
+    ["an object whose toString throws", () => ({ toString: () => { throw new Error("no text"); } }) as unknown],
+    ["an Error whose message getter throws", () => Object.defineProperty(new Error("x"), "message", { get: () => { throw new Error("no message"); } }) as unknown],
+  ] as const;
+  const settled = <T,>(p: Promise<T>) => p.then((value) => ({ value }), (err: unknown) => ({ rejected: err instanceof Error ? "an Error" : "a reason with no text form" }));
+  /** Runs `body`, and collects every rejection Node reports as unhandled meanwhile. */
+  async function catchingUnhandled<T>(body: () => Promise<T>): Promise<{ result: T; unhandled: unknown[] }> {
+    const unhandled: unknown[] = [];
+    const on = (err: unknown) => void unhandled.push(err);
+    process.on("unhandledRejection", on);
+    try {
+      const result = await body();
+      await new Promise((r) => setImmediate(r));
+      return { result, unhandled };
+    } finally {
+      process.off("unhandledRejection", on);
+    }
+  }
+  /** A print on `printer` that completes normally. */
+  async function printOn(printer: TestPrinter, emitter: EvidenceEmitter, jobId: string) {
+    const run = runPrintJob({ adapter: printer, emitter, jobId, jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    printer.complete();
+    return drive(run);
+  }
+
+  it.each(REASONS)("an adapter whose onEvidence throws %s while the session opens: the print resolves with a failure, and the printer is not left claimed", async (what, reason) => {
+    const broken = testPrinter(`setup-ft-${what}`);
+    broken.onEvidence = () => {
+      throw reason();
+    };
+    const { emitter, bundles } = recordingEmitter();
+    const out = await drive(settled(runPrintJob({ adapter: broken, emitter, jobId: "print-setup", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toMatch(/^the print's evidence session could not open: .+/);
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    // The same printer, with an adapter that works, prints: the failed open claimed nothing.
+    expect.soft((await printOn(testPrinter(`setup-ft-${what}`), emitter, "print-setup-2")).success, "the next print on the printer").toBe(true);
+  });
+
+  it("an adapter whose quiesceEvidence cannot even be read: the print resolves with a failure", async () => {
+    const printer = testPrinter("hook-unreadable-ft");
+    Object.defineProperty(printer, "quiesceEvidence", {
+      get: () => {
+        throw Object.create(null);
+      },
+    });
+    const { emitter } = recordingEmitter();
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-hook", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.success : undefined, "the print").toBe(false);
+  });
+
+  it("registerStep throws: the print resolves with a failure, and releases the session and the step's lease", async () => {
+    const printer = testPrinter("register-ft");
+    const { emitter, bundles } = recordingEmitter();
+    vi.spyOn(emitter, "registerStep").mockImplementationOnce(() => {
+      throw Object.create(null);
+    });
+    const out = await drive(settled(runPrintJob({ adapter: printer, emitter, jobId: "print-reg", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("the print's step could not be registered: a reason with no text form");
+    expect.soft(printer.commands, "commands sent").toEqual([]);
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+    // The same step, on the same printer, prints: the session and the lease were released.
+    expect.soft((await printOn(printer, emitter, "print-reg")).success, "the same step, printed again").toBe(true);
+  });
+
+  it("addEvent rejects for an event whose type cannot be read again: the latch still names it, and the print resolves with a failure", async () => {
+    const printer = testPrinter("type-ft");
+    const { emitter, bundles } = recordingEmitter();
+    let odd: Emitted | null = null;
+    const record = emitter.addEvent.bind(emitter);
+    vi.spyOn(emitter, "addEvent").mockImplementation((jobId, stepId, event) => (event === odd ? Promise.reject(new Error("storage full")) : record(jobId, stepId, event)));
+    const run = runPrintJob({ adapter: printer, emitter, jobId: "print-type", jobName: "a.pdf", totalPages: 1 });
+    await drive(printer.started(1));
+    // Its type answers admit()'s read, and throws at every later one: the latch's.
+    const progress = printer.event("execution_progress", { ippJobId: printer.jobs[0], completedSheets: 1 }) as Record<string, unknown>;
+    let reads = 0;
+    Object.defineProperty(progress, "type", {
+      get: () => {
+        reads += 1;
+        if (reads > 1) throw new Error("no type");
+        return "execution_progress";
+      },
+    });
+    odd = progress as unknown as Emitted;
+    printer.emit(odd);
+    printer.complete();
+    const out = await drive(settled(run));
+    expect.soft("rejected" in out ? out.rejected : undefined, "the print rejected").toBeUndefined();
+    expect.soft("value" in out ? out.value.error : undefined, "why").toBe("a (unreadable) event of this job could not be recorded (storage full), so its evidence is incomplete");
+    expect.soft(bundles, "bundles finalized").toEqual([]);
+  });
+
+  it("a second print after the printer's hook rejected with no text form is refused, and its hook asked again leaves nothing unhandled", async () => {
+    const printer = testPrinter("relog-ft", { quiesceEvidence: () => Promise.reject(Object.create(null)) });
+    const { emitter } = recordingEmitter();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { result: first } = await catchingUnhandled(() => printOn(printer, emitter, "print-relog-1"));
+    const { result: second, unhandled } = await catchingUnhandled(() => drive(runPrintJob({ adapter: printer, emitter, jobId: "print-relog-2", jobName: "a.pdf", totalPages: 1 })));
+    expect.soft(first.success, "the first print").toBe(false);
+    expect.soft(second.busy?.reason, "the second print, refused").toBe("quiescing");
+    expect.soft(unhandled.length, "unhandled rejections").toBe(0);
+    expect.soft(console.error, "the hook's failure, logged").toHaveBeenCalledWith(expect.stringMatching(/could not confirm its evidence is complete: /));
+  });
+});
