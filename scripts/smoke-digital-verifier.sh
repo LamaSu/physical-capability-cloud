@@ -27,24 +27,39 @@
 # shrinks that window to a single, irreducible trace event (this line);
 # nothing placed before it inside this script could shrink it further.
 #
-# What reading the key from a FILE narrows: that one irreducible trace event
-# can still invoke an attacker's PS4 once, but PCC_ORACLE_KEY (the secret
-# itself) is never read into this process's environment — only
+# What reading the key from a FILE narrows: this script itself never reads
+# PCC_ORACLE_KEY (the secret value) into its own logic — only
 # PCC_ORACLE_KEY_FILE, a file PATH, which is not a secret. Astra's exact
 # recipe (`PS4='$PCC_ORACLE_KEY '`, a bare variable reference, no command
-# substitution) now expands to nothing, because that variable no longer
-# exists here.
+# substitution) expands to nothing IF PCC_ORACLE_KEY is not present in the
+# environment this script is invoked from.
 #
-# What is NOT covered (the narrowed claim): a PS4 that already knows the
-# exact value of $PCC_ORACLE_KEY_FILE and runs
-# `$(cat "$PCC_ORACLE_KEY_FILE" 2>/dev/null)` could still read the key on
-# that one trace event, since the file's contents exist on disk before this
-# script starts, independent of anything this script does. Closing that
-# residual needs a process boundary this script cannot construct for
-# itself (something that holds the real key and is invoked only AFTER the
-# caller's own tracing/PS4 state is known-clean — out of scope here). The
-# guarantee this script makes is "the trivial, undirected attack astra
-# reproduced no longer works," not "no PS4 payload can ever work."
+# What is NOT covered (the narrowed claim — two residuals, not one):
+#   1. If something ELSE upstream of this script (a sibling script, a
+#      Makefile, a CI job, a lingering shell export from before this fix
+#      rolled out) still sets PCC_ORACLE_KEY in the environment for its own
+#      reasons, astra's exact bare-variable PS4 recipe leaks it on that one
+#      irreducible trace event (this script's own first statement, traced
+#      under whatever PS4/xtrace state the CALLER already had active,
+#      before this script has executed anything at all — no command this
+#      script runs, however early, can retroactively un-trace its own first
+#      statement). This script can verify its OWN code never reads the
+#      variable; it cannot verify, or control, what else in the environment
+#      sets it. Verified empirically: with PCC_ORACLE_KEY exported from
+#      outside (this script's code never reads it) and PS4 set to astra's
+#      exact bare-variable recipe, the value still appears in the trace of
+#      the `set +x` line itself.
+#   2. A PS4 that already knows the exact value of $PCC_ORACLE_KEY_FILE and
+#      runs `$(cat "$PCC_ORACLE_KEY_FILE" 2>/dev/null)` can read the key on
+#      that same one trace event, since the file's contents exist on disk
+#      before this script starts, independent of anything this script does.
+# Both residuals are the same shape: one irreducible trace event, closed
+# only by a process boundary this script cannot construct for itself
+# (something that holds the real key and is invoked only AFTER the caller's
+# own tracing/PS4 state and environment are known-clean — out of scope
+# here). The guarantee this script makes is "the trivial, undirected attack
+# astra reproduced no longer works when nothing upstream still exports
+# PCC_ORACLE_KEY," not "no PS4 payload, in any environment, can ever work."
 set +x
 set -euo pipefail
 

@@ -74,4 +74,34 @@ describe("FC-8 round 4 — smoke-digital-verifier.sh — fixed credential-file l
       cleanup();
     }
   }, 15_000);
+
+  it("[repro, documented residual] PCC_ORACLE_KEY lingering in the environment from something OTHER than this script still leaks under astra's exact recipe", () => {
+    // Found while mutation testing this round: the first draft of the
+    // comment above claimed astra's bare-variable recipe "now expands to
+    // nothing, because that variable no longer exists here" — true of this
+    // script's OWN code, but not something this script can guarantee about
+    // its environment. If a sibling script, CI job, or pre-fix shell
+    // profile still exports PCC_ORACLE_KEY for unrelated reasons, this
+    // script's own refusal to read it does not stop bash's PS4 expansion,
+    // which operates on whatever is in the environment regardless of
+    // whether this script's source ever references it.
+    const CANARY = "FC8_LEGACY_INHERITED_CANARY_5f1e";
+    const { path: keyFile, cleanup } = withKeyFile("not-the-canary-this-is-the-file-based-key");
+    try {
+      const env = { ...process.env, PATH: `${SHIM_DIR}:${process.env.PATH}`, FC8_CANARY: "unused-in-this-test" };
+      env.PCC_ORACLE_KEY_FILE = keyFile;
+      env.PCC_ORACLE_KEY = CANARY; // lingering export this script never reads, but the CALLER still set
+      env.PS4 = "$PCC_ORACLE_KEY "; // astra's exact payload — now resolves via the inherited export, not this script
+      const result = spawnSync("bash", ["-x", "scripts/smoke-digital-verifier.sh"], {
+        cwd: REPO_ROOT, env, encoding: "utf8", timeout: 10_000,
+      });
+      // This DEMONSTRATES the residual leak, same as the file-path-aware
+      // PS4 test above — a passing assertion here confirms the threat-model
+      // comment's "IF PCC_ORACLE_KEY is not present in the environment"
+      // qualifier is accurate, not overclaimed.
+      expect(result.stderr ?? "").toContain(CANARY);
+    } finally {
+      cleanup();
+    }
+  }, 15_000);
 });
