@@ -394,10 +394,30 @@ describe("additive schema — CSD primitives[] and the primitive rule kind", () 
       kind: "and",
       children: [
         { kind: "primitive", id: "approval.payer" },
-        { kind: "primitive", id: "capture.photo_nonced" },
+        { kind: "primitive", id: "capture.photo_nonced", params: { media: "photo", minClass: "CC2" } },
       ],
     };
     expect(VerificationRuleSchema.safeParse(composed).success).toBe(true);
+  });
+
+  it("a primitive rule is closed like a CSD ref (N137), at any depth", () => {
+    const ok = (rule: unknown) => VerificationRuleSchema.safeParse(rule).success;
+    const photo = { kind: "primitive", id: "capture.photo_nonced", params: { media: "photo", minClass: "CC2" } };
+    expect(ok(photo)).toBe(true);
+    // Required params, an unknown param key, a free bind, an unknown rule key and an unregistered id are refused.
+    expect(ok({ kind: "primitive", id: "capture.photo_nonced" })).toBe(false);
+    expect(ok({ kind: "primitive", id: "decl.self_attested", params: { apiKey: "sk_live_x" } })).toBe(false);
+    expect(ok({ ...photo, bind: "secret_token" })).toBe(false);
+    expect(ok({ ...photo, note: "x" })).toBe(false);
+    expect(ok({ kind: "primitive", id: "made.up_primitive" })).toBe(false);
+    // Nested inside and/or/not.
+    expect(ok({ kind: "and", children: [photo, { kind: "primitive", id: "decl.self_attested", params: { apiKey: "x" } }] })).toBe(false);
+    expect(ok({ kind: "not", child: { kind: "or", children: [{ kind: "primitive", id: "measure.io_test_pair" }] } })).toBe(false);
+    // An accessor inside params is never called.
+    let called = false;
+    const params = Object.defineProperty({ media: "photo" }, "minClass", { enumerable: true, get: () => ((called = true), "CC2") });
+    expect(ok({ kind: "primitive", id: "capture.photo_nonced", params })).toBe(false);
+    expect(called).toBe(false);
   });
 });
 
