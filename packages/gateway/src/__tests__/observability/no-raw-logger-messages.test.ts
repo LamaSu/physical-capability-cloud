@@ -25,7 +25,8 @@
  *     signature) is refused;
  *   - a child logger's bindings must be an object literal the scan can read: literal keys (or
  *     computed ones that resolve to a literal), no spread, no key named like an Object.prototype
- *     member (pino runs that member as the binding's serializer); its options take no msgPrefix.
+ *     member (pino runs that member as the binding's serializer); its options take no msgPrefix;
+ *   - every argument is read as it is, not as a type assertion says it is (`raw as Declared`).
  * A probe file compiled in the same way pins that the check catches each of those forms.
  */
 import { describe, it, expect } from "vitest";
@@ -59,6 +60,15 @@ function compilerOptions(): ts.CompilerOptions {
 function rootNames(): string[] {
   const parsed = ts.getParsedCommandLineOfConfigFile(TSCONFIG, {}, { ...ts.sys, onUnRecoverableConfigFileDiagnostic: () => undefined })!;
   return parsed.fileNames;
+}
+
+/** An expression with its type assertions, parentheses and non-null marks taken off: what it is, not what a cast says it is. */
+function unwrap(node: ts.Expression): ts.Expression {
+  let inner = node;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner) || ts.isSatisfiesExpression(inner) || ts.isNonNullExpression(inner)) {
+    inner = inner.expression;
+  }
+  return inner;
 }
 
 /** A logger by its type: something with child(), a level and every level method. */
@@ -154,7 +164,8 @@ function scanProgram(program: ts.Program, include: (fileName: string) => boolean
       const args = call.arguments;
       const spread = args.find(ts.isSpreadElement);
       if (spread) return report(spread, "log(...spread): arguments the scan cannot read");
-      const [first, second] = args;
+      // Each argument as it is, not as a cast says it is.
+      const [first, second] = args.map(unwrap);
       if (!first) return;
       const firstType = checker.getTypeAtLocation(first);
       // A declared message first: the arguments after it are its format arguments, closed at run time.
@@ -170,7 +181,7 @@ function scanProgram(program: ts.Program, include: (fileName: string) => boolean
       if (second && !isDeclaredType(checker.getTypeAtLocation(second))) report(second, "log(obj, <raw>, ...): the message must be lit(...)");
     };
     const checkChildCall = (call: ts.CallExpression) => {
-      const [bindings, options] = call.arguments;
+      const [bindings, options] = call.arguments.map(unwrap);
       if (bindings === undefined) return;
       if (!ts.isObjectLiteralExpression(bindings)) return report(bindings, "child(<bindings>): bindings the scan cannot read");
       for (const property of bindings.properties) {
@@ -253,6 +264,9 @@ describe("N107b ratchet: no raw logger message escapes lit()", () => {
       'app.log.child({}, { msgPrefix: raw }).info(lit("x"));', // line 36: a message prefix
       'app.log.child({}, { level: "info" }).info(lit("x"));',
       'app.log.warn({ k: 1 });',
+      "app.log.info(raw as unknown as ReturnType<typeof lit>);", // line 39: a raw message cast to Declared
+      "app.log.info({ msg: raw } as object);", // line 40: a msg field a cast hides
+      'app.log.child({ ["__proto__"]: 1 } as object).info(lit("x"));', // line 41: bindings a cast hides
     ].join("\n");
     const host = ts.createCompilerHost(options);
     const getSourceFile = host.getSourceFile.bind(host);
@@ -264,7 +278,7 @@ describe("N107b ratchet: no raw logger message escapes lit()", () => {
     host.readFile = (fileName) => (fileName === probe ? source : readFile(fileName));
     const program = ts.createProgram({ rootNames: [probe], options, host });
     const lines = scanProgram(program, (fileName) => fileName === probe).map((v) => v.line);
-    expect(lines).toEqual([5, 7, 8, 9, 10, 15, 16, 17, 19, 21, 23, 24, 26, 29, 30, 31, 34, 35, 36]);
+    expect(lines).toEqual([5, 7, 8, 9, 10, 15, 16, 17, 19, 21, 23, 24, 26, 29, 30, 31, 34, 35, 36, 39, 40, 41]);
   }, 180_000);
 
   it("every Fastify/pino logger call in packages/gateway/src uses lit() for its message", () => {

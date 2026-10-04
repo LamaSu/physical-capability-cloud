@@ -24,7 +24,8 @@
  *   - a Sentry or OpenTelemetry function used as a value is followed: bound (its pre-bound
  *     arguments are its first), called through call or apply, named by a variable that keeps its
  *     type, or passed into a function of this program, where each use of that parameter must be a
- *     direct call, checked as a call of the function passed. Any other use is refused.
+ *     direct call, checked as a call of the function passed. Any other use is refused;
+ *   - every argument is read as it is, not as a type assertion says it is.
  * A probe compiled in the same way pins that the check catches each form.
  */
 import { describe, it, expect } from "vitest";
@@ -95,6 +96,15 @@ function calleeName(call: ts.CallExpression): string | undefined {
   return undefined;
 }
 
+/** An expression with its type assertions, parentheses and non-null marks taken off: what it is, not what a cast says it is. */
+function unwrap(node: ts.Expression): ts.Expression {
+  let inner = node;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner) || ts.isSatisfiesExpression(inner) || ts.isNonNullExpression(inner)) {
+    inner = inner.expression;
+  }
+  return inner;
+}
+
 /** A property's key as the program names it: a literal, or a computed key whose type is a literal; else undefined. */
 function propertyKey(name: ts.PropertyName, checker: ts.TypeChecker): string | undefined {
   if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name)) return name.text;
@@ -151,10 +161,12 @@ function scanProgram(program: ts.Program, include: (fileName: string) => boolean
     if (NO_ARGUMENT_METHODS.has(name) && args.length > 0) report(at, `${name}(<time>): a span's times are the SDK's clock`);
     const timeAt = TIME_ARGUMENTS.get(name);
     if (timeAt !== undefined && args.length > timeAt) report(args[timeAt]!, `${name}(..., <time>): a time is the SDK's clock`);
-    if (name === "addEvent" && args[1] !== undefined && !ts.isObjectLiteralExpression(args[1]) && isTimeLikeType(checker.getTypeAtLocation(args[1]), checker)) {
-      report(args[1], "addEvent(name, <time>): an event's time is the SDK's clock");
+    const second = args[1] === undefined ? undefined : unwrap(args[1]);
+    if (name === "addEvent" && second !== undefined && !ts.isObjectLiteralExpression(second) && isTimeLikeType(checker.getTypeAtLocation(second), checker)) {
+      report(second, "addEvent(name, <time>): an event's time is the SDK's clock");
     }
-    for (const argument of args) {
+    // Each argument as it is, not as a cast says it is.
+    for (const argument of args.map(unwrap)) {
       if (ts.isSpreadElement(argument)) {
         report(argument, `${name}(...spread): arguments the ratchet cannot read`);
       } else if (ts.isObjectLiteralExpression(argument)) {
@@ -314,6 +326,8 @@ describe("N107b round 4, C11: no gateway code passes a time to a Sentry or OpenT
       "wrapOk(Sentry.startInactiveSpan);",
       "void preBound;",
       "void typed;",
+      'Sentry.startSpan({ name: "x", startTime: t } as { name: string }, () => 1);', // line 52: a time a cast hides
+      'span.addEvent("y", t as unknown as Record<string, string>);', // line 53: an event time a cast hides
     ].join("\n");
     const host = ts.createCompilerHost(options);
     const getSourceFile = host.getSourceFile.bind(host);
@@ -325,7 +339,7 @@ describe("N107b round 4, C11: no gateway code passes a time to a Sentry or OpenT
     host.readFile = (fileName) => (fileName === probe ? source : readFile(fileName));
     const program = ts.createProgram({ rootNames: [probe], options, host });
     const lines = scanProgram(program, (fileName) => fileName === probe).map((v) => v.line);
-    expect([...new Set(lines)].sort((a, b) => a - b)).toEqual([5, 6, 7, 9, 11, 12, 18, 20, 21, 23, 25, 26, 27, 29, 31, 32, 33, 34, 35, 37, 43]);
+    expect([...new Set(lines)].sort((a, b) => a - b)).toEqual([5, 6, 7, 9, 11, 12, 18, 20, 21, 23, 25, 26, 27, 29, 31, 32, 33, 34, 35, 37, 43, 52, 53]);
   }, 180_000);
 
   it("packages/gateway/src passes no time to any Sentry or OpenTelemetry span API", () => {
