@@ -125,17 +125,12 @@ function seedCapability(id: string, kernelId: string): void {
  * device id.
  *
  * The "execution_completed" event (and the progress=100 flip) is scheduled
- * on a short setTimeout rather than fired synchronously inside execute().
- * JobRunner wires onEvidence() to a FIRE-AND-FORGET
- * `evidenceEmitter.addEvent(...).catch(...)` (job-runner.ts's handleEvidence
- * does not await it), and addEvent() itself awaits an async hashEvent()
- * before pushing the event into the step's event list. A synchronous
- * progress=100 races that — waitForCompletion() returns before either event
- * is actually recorded, and finalizeBundle() then throws "No evidence
- * events for ..." because the step has zero events, which turns the
- * "control" job into a failure instead of a pass. The delay below gives
- * that fire-and-forget chain time to land before progress is ever read as
- * complete.
+ * on a short setTimeout, as a real device's would be. The double implements
+ * the adapter evidence handshake (#502): JobRunner refuses an adapter without
+ * quiesceEvidence() ("has no quiesceEvidence(), so its evidence cannot be
+ * bound to a job"), and before it checks the tier and signs it waits for
+ * quiesceEvidence() to resolve, which here means the scheduled completion has
+ * been emitted. Without it, the control job failed instead of passing.
  */
 class NeutralBenchAdapter implements MachineAdapter {
   readonly id: string;
@@ -143,6 +138,8 @@ class NeutralBenchAdapter implements MachineAdapter {
   readonly source: EvidenceSource;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private progress = 0;
+  /** Resolves once the job's scheduled execution_completed has been emitted. */
+  private emitted: Promise<void> = Promise.resolve();
 
   constructor(id: string, kernelId: string) {
     this.id = id;
@@ -171,17 +168,25 @@ class NeutralBenchAdapter implements MachineAdapter {
         source: this.source,
         payload: {},
       });
-      setTimeout(() => {
-        this.progress = 100;
-        this.emit({
-          type: "execution_completed",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: {},
-        });
-      }, 150);
+      this.emitted = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          this.progress = 100;
+          this.emit({
+            type: "execution_completed",
+            timestamp: new Date().toISOString(),
+            source: this.source,
+            payload: {},
+          });
+          resolve();
+        }, 150);
+      });
     }
     return { success: true, message: `${command.type} ok` };
+  }
+
+  /** The evidence handshake (#502): every event of the job has been emitted. */
+  async quiesceEvidence(): Promise<void> {
+    await this.emitted;
   }
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
