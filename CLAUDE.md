@@ -999,7 +999,7 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Device updates | `GET /sse/stream/device/:deviceId` | Health changes, sensor readings |
 | Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
 | Notifications | `GET /sse/notifications` | Global notification stream |
-| Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
+| Camera stream | `GET /api/relay/:kernelId/camera/stream` | Frame notifications from a kernel's camera (kernel operator or active scope holder) |
 
 The job stream follows the job read rule above. The kernel, device and batch streams carry job-bound sensor readings, so only an admin or the kernel's operator (a SIWE-proven wallet) may subscribe; anyone else gets the 404 an unknown kernel, device or batch gets, and a caller with no credential gets 401.
 
