@@ -115,6 +115,10 @@ beforeEach(() => {
       const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0]!;
       const method = (init?.method ?? "GET").toUpperCase();
       gateway.calls.push(`${method} ${path}`);
+      if (path === "/api/_probe/sent-key") {
+        probe.authorization = new Headers(init?.headers).get("authorization");
+        return json({});
+      }
       if (path === "/api/auth/validate") return json({ valid: true });
       if (path === "/api/auth/me") return gateway.siweCookie ? json({ address: A_WALLET }) : json({ error: "Not authenticated" }, 401);
       if (path === "/api/auth/nonce") return json({ nonce: "nonce-1" });
@@ -192,9 +196,8 @@ async function settle(n = 20) {
 
 async function renderAt(path: string, before?: () => void) {
   window.history.replaceState(null, "", path);
-  const { useAuthStore } = await import("../stores/auth-store.js");
-  localStorage.setItem("pcc-api-key", "pcc_test_key"); // as login() keeps it: the store and the browser agree
-  useAuthStore.setState({ isAuthenticated: true, apiKey: "pcc_test_key" });
+  const { useAuthStore, adoptApiKey } = await import("../stores/auth-store.js");
+  adoptApiKey("pcc_test_key"); // as login() keeps it: the key's owner writes the browser's slot
   await settle(5);
   before?.();
   const { App } = await import("../App.js");
@@ -203,6 +206,24 @@ async function renderAt(path: string, before?: () => void) {
   });
   await settle();
   return useAuthStore;
+}
+
+/** The authorization header of the last probe request, as the gateway stub saw it. */
+const probe = { authorization: undefined as string | null | undefined };
+
+/**
+ * Which key this page would send: one request through its authorizedFetch,
+ * whose header the gateway stub captures. N50 keeps the key out of every other
+ * module's reach, so this is how a test asks which account the page acts as.
+ * fetchWithKey reaches fetch() before any await, so it is synchronous.
+ */
+async function sentKey(): Promise<string | null> {
+  const { authorizedFetch } = await import("../lib/authorized-fetch.js");
+  probe.authorization = undefined;
+  void authorizedFetch("/api/_probe/sent-key");
+  const seen = probe.authorization as string | null | undefined; // set by the gateway stub during the call above
+  if (seen === undefined) throw new Error("the probe didn't reach fetch synchronously");
+  return seen === null ? null : seen.replace(/^Bearer /, "");
 }
 
 function click(text: string) {
@@ -581,7 +602,7 @@ describe("self-found (19e's weakest link, another tab): the account follows the 
       window.dispatchEvent(new StorageEvent("storage", { key: "pcc-api-key", oldValue: "pcc_test_key", newValue: "pcc_test_key_b" }));
     });
     await settle(5);
-    expect(useAuthStore.getState().apiKey, "this tab no longer acts as A").toBe("pcc_test_key_b");
+    expect(await sentKey(), "this tab no longer acts as A").toBe("pcc_test_key_b");
     expect(useAuthStore.getState().sessionToken, "A's SIWE session left this tab").toBeNull();
     expect(container.textContent, "this tab runs its own account boundary").toContain("Signing out of the previous account");
     gateway.logoutMode = "ok";
@@ -601,7 +622,7 @@ describe("self-found (19e's weakest link, another tab): the account follows the 
       window.dispatchEvent(new StorageEvent("storage", { key: "pcc-api-key", oldValue: null, newValue: "pcc_test_key" }));
     });
     await settle(5);
-    expect(useAuthStore.getState().apiKey).toBe("pcc_test_key");
+    expect(await sentKey(), "this tab still acts as A").toBe("pcc_test_key");
     expect(container.textContent, "no account boundary here").not.toContain("Signing out of the previous account");
   }, 20_000);
 });

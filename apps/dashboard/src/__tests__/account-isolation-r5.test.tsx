@@ -143,8 +143,8 @@ async function waitForText(text: string, ms = 8_000): Promise<boolean> {
  */
 async function renderAt(path: string, before?: () => void) {
   window.history.replaceState(null, "", path);
-  const { useAuthStore } = await import("../stores/auth-store.js");
-  useAuthStore.setState({ isAuthenticated: true, apiKey: "pcc_test_key" });
+  const { adoptApiKey } = await import("../stores/auth-store.js");
+  adoptApiKey("pcc_test_key");
   await settle(5); // the account change, if this is one, ends the previous wallet session
   before?.();
   const { App } = await import("../App.js");

@@ -80,8 +80,8 @@ async function waitForText(text: string, ms = 8_000): Promise<boolean> {
 
 async function renderAt(path: string, { signedIn }: { signedIn: boolean }) {
   window.history.replaceState(null, "", path);
-  const { useAuthStore } = await import("../stores/auth-store.js");
-  useAuthStore.setState({ isAuthenticated: signedIn, apiKey: signedIn ? "pcc_test_key" : null });
+  const { adoptApiKey } = await import("../stores/auth-store.js");
+  adoptApiKey(signedIn ? "pcc_test_key" : null);
   const { App } = await import("../App.js");
   await act(async () => {
     root.render(<App />);
@@ -155,12 +155,12 @@ describe("one account's cached reads never reach the next (astra round 2, #354 f
     const r = await renderAt("/jobs", { signedIn: true });
     expect(await waitForText("job-first-account")).toBe(true);
 
-    const { useAuthStore } = await import("../stores/auth-store.js");
-    await act(async () => useAuthStore.setState({ isAuthenticated: false, apiKey: null }));
+    const { adoptApiKey } = await import("../stores/auth-store.js");
+    await act(async () => adoptApiKey(null));
     await settle();
     expect(r.text()).not.toContain("job-first-account");
 
-    await act(async () => useAuthStore.setState({ isAuthenticated: true, apiKey: "pcc_test_key_b" }));
+    await act(async () => adoptApiKey("pcc_test_key_b"));
     expect(await waitForText("job-second-account")).toBe(true);
     expect(r.text()).not.toContain("job-first-account");
   });

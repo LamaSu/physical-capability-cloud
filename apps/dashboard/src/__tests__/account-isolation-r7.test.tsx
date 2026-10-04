@@ -83,7 +83,9 @@ interface Tab {
   name: string;
   container: HTMLDivElement;
   root: Root;
-  store: { getState: () => { apiKey: string | null; sessionToken: string | null; login: (key: string) => Promise<boolean> } };
+  store: { getState: () => { sessionToken: string | null; login: (key: string) => Promise<boolean> } };
+  /** This tab's own authorizedFetch, from its module instance of lib/authorized-fetch.ts. */
+  authorizedFetch: (target: string, init?: RequestInit) => Promise<Response>;
 }
 let tabs: Tab[] = [];
 let violations: string[] = [];
@@ -121,6 +123,10 @@ beforeEach(() => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0]!;
       const method = (init?.method ?? "GET").toUpperCase();
+      if (path === "/api/_probe/sent-key") {
+        probe.authorization = new Headers(init?.headers).get("authorization");
+        return json({});
+      }
       if (path === "/api/auth/validate") return json({ valid: true });
       if (path === "/api/auth/me") return gateway.siweCookie ? json({ address: A_WALLET }) : json({ error: "Not authenticated" }, 401);
       if (path === "/api/auth/nonce") return json({ nonce: "nonce-1" });
@@ -167,6 +173,24 @@ afterEach(async () => {
 
 const transitioning = (tab: Tab) => /Signing out of the previous account|Couldn't confirm that the previous wallet session ended/.test(tab.container.textContent ?? "");
 
+/** The authorization header of the last probe request, as the gateway stub saw it. */
+const probe = { authorization: undefined as string | null | undefined };
+
+/**
+ * Which key this tab would send: one request through the tab's own
+ * authorizedFetch, whose header the gateway stub captures. N50 keeps the key
+ * out of reach of every other module, so this is how a test asks which account
+ * a tab acts as. fetchWithKey reaches fetch() before any await, so it is
+ * synchronous.
+ */
+function sentKey(tab: Tab): string | null {
+  probe.authorization = undefined;
+  void tab.authorizedFetch("/api/_probe/sent-key");
+  const seen = probe.authorization as string | null | undefined; // set by the gateway stub during the call above
+  if (seen === undefined) throw new Error(`${tab.name}'s probe didn't reach fetch synchronously`);
+  return seen === null ? null : seen.replace(/^Bearer /, "");
+}
+
 /**
  * A cookie of A's is live in this browser, and a tab that is no longer A's
  * shows its shell beside it, or holds A's session. (A tab still signed in as A
@@ -175,7 +199,7 @@ const transitioning = (tab: Tab) => /Signing out of the previous account|Couldn'
 function watch() {
   if (!gateway.siweCookie) return;
   for (const tab of tabs) {
-    if (tab.store.getState().apiKey === KEY_A) continue;
+    if (sentKey(tab) === KEY_A) continue;
     if (!transitioning(tab)) violations.push(`${tab.name} showed the next account's shell while A's SIWE cookie was live`);
     if (tab.store.getState().sessionToken !== null) violations.push(`${tab.name} adopted A's SIWE session`);
   }
@@ -194,11 +218,12 @@ async function settle(n = 20) {
 async function openTab(name: string): Promise<Tab> {
   vi.resetModules();
   const { useAuthStore } = await import("../stores/auth-store.js");
+  const { authorizedFetch } = await import("../lib/authorized-fetch.js");
   const { App } = await import("../App.js");
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const tab: Tab = { name, container, root, store: useAuthStore };
+  const tab: Tab = { name, container, root, store: useAuthStore, authorizedFetch };
   tabs.push(tab);
   await act(async () => root.render(<App />));
   await settle();
