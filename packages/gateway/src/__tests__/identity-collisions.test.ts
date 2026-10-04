@@ -6,7 +6,7 @@
  * the principals the new normalization would join.
  * scripts/identity-collision-audit.mjs runs it before deploy.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { generateApiKey } from "../auth/api-key-auth.js";
 import { findIdentityCollisions, collisionAuditExit } from "../auth/identity-collisions.js";
@@ -404,5 +404,158 @@ describe("AZ-9 round 4: the catalog check matches SQLite's own name resolution (
     const out = findIdentityCollisions(raw());
     expect(out.read).toContain("ui_artifacts.owner");
     expect(out.skipped).not.toContain("ui_artifacts.owner");
+  });
+});
+
+// AZ-9 round 5 (astra pack 95e, DO-NOT-SHIP at a25e0f4e): the audit judges MAIN-schema
+// state only, and the catalog read and the data read must always resolve the SAME
+// object. pragma_table_info silently omits generated columns and hidden virtual-table
+// columns even though a plain SELECT can read them (HIGH finding 1), and an unqualified
+// pragma/data query can be shadowed by a TEMP table of the same name, or resolve a
+// table that exists only in an attached schema, while the main catalog disagrees (HIGH
+// finding 2). Every case below uses the real better-sqlite3 driver, as the existing
+// AZ-9 round-4 tests do (this is the file's new last describe block: it leaves
+// ui_artifacts absent after every test, regardless of what the block above left behind).
+describe("AZ-9 round 5: the catalog and the data read must resolve the SAME main-schema object (astra pack 95e)", () => {
+  type Raw = { prepare(sql: string): { all(...p: unknown[]): unknown[] }; exec(sql: string): unknown };
+  const raw = () => (getStore().db as unknown as { $client: Raw }).$client;
+
+  // Resets to a known, empty main-schema slate before AND after every test in this
+  // block: drops ui_artifacts whether it is currently a table or a view (the block
+  // above leaves it a view), drops any TEMP shadow, and detaches `aux` if attached.
+  const reset = () => {
+    const client = raw();
+    // Schema-qualified (never bare): a bare DROP TABLE IF EXISTS is itself subject to
+    // the TEMP-shadow resolution this block tests for, so when both a temp and a main
+    // copy exist, an unqualified drop silently takes the TEMP one and leaves main's
+    // copy behind (confirmed empirically while writing these tests).
+    try { client.exec("DROP VIEW IF EXISTS main.ui_artifacts"); } catch { /* it's a table, not a view */ }
+    try { client.exec("DROP TABLE IF EXISTS main.ui_artifacts"); } catch { /* already gone */ }
+    try { client.exec("DROP TABLE IF EXISTS main.ui_base_view95e"); } catch { /* n/a */ }
+    try { client.exec("DROP TABLE IF EXISTS temp.ui_artifacts"); } catch { /* no temp shadow */ }
+    try { client.exec("DETACH DATABASE aux"); } catch { /* not attached */ }
+  };
+  beforeAll(reset);
+  afterEach(reset);
+
+  describe("case 1: a generated column holding colliding identities must be read, not skipped (finding 1)", () => {
+    it("a VIRTUAL generated column", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (raw_owner TEXT, owner TEXT GENERATED ALWAYS AS (raw_owner) VIRTUAL)");
+      client.prepare("INSERT INTO ui_artifacts (raw_owner) VALUES ('Gen95eVirtual@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (raw_owner) VALUES ('gen95evirtual@collide.test')").run();
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      expect(out.skipped).not.toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Gen95eVirtual@collide.test"));
+      expect(group?.spellings).toEqual(["Gen95eVirtual@collide.test", "gen95evirtual@collide.test"]);
+    });
+
+    it("a STORED generated column", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (raw_owner TEXT, owner TEXT GENERATED ALWAYS AS (raw_owner) STORED)");
+      client.prepare("INSERT INTO ui_artifacts (raw_owner) VALUES ('Gen95eStored@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (raw_owner) VALUES ('gen95estored@collide.test')").run();
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      expect(out.skipped).not.toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Gen95eStored@collide.test"));
+      expect(group?.spellings).toEqual(["Gen95eStored@collide.test", "gen95estored@collide.test"]);
+    });
+
+    it("a generated column added by ALTER TABLE", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (raw_owner TEXT)");
+      client.exec("ALTER TABLE ui_artifacts ADD COLUMN owner TEXT GENERATED ALWAYS AS (raw_owner) VIRTUAL");
+      client.prepare("INSERT INTO ui_artifacts (raw_owner) VALUES ('Gen95eAlter@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (raw_owner) VALUES ('gen95ealter@collide.test')").run();
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      expect(out.skipped).not.toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Gen95eAlter@collide.test"));
+      expect(group?.spellings).toEqual(["Gen95eAlter@collide.test", "gen95ealter@collide.test"]);
+    });
+  });
+
+  describe("case 2: a TEMP table shadowing main must not hide or misreport main's collisions (finding 2, TEMP shadow)", () => {
+    it("[misread] colliding identities in main.ui_artifacts are found even when an empty, SAME-shaped temp.ui_artifacts(owner) shadows the unqualified name", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (owner TEXT)"); // main
+      client.prepare("INSERT INTO ui_artifacts (owner) VALUES ('Temp95eShadow@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (owner) VALUES ('temp95eshadow@collide.test')").run();
+      client.exec("CREATE TEMP TABLE ui_artifacts (owner TEXT)"); // empty shadow, same column name
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Temp95eShadow@collide.test"));
+      expect(group?.spellings).toEqual(["Temp95eShadow@collide.test", "temp95eshadow@collide.test"]);
+    });
+
+    // Beyond the brief's literal fixture: a same-named empty TEMP shadow can still
+    // coincidentally agree with main on column presence (both happen to declare
+    // `owner`), which would not catch a column catalog check that resolves the
+    // PRAGMA to the wrong schema on its own. A temp shadow that LACKS the column
+    // pins that specifically: a temp shadow with a DIFFERENT shape, where "present"
+    // flips if the column check resolves against temp instead of main.
+    it("[skipped] colliding identities in main.ui_artifacts are still found when a DIFFERENTLY-shaped temp.ui_artifacts shadows the unqualified name", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (owner TEXT)"); // main
+      client.prepare("INSERT INTO ui_artifacts (owner) VALUES ('Temp95eDiffShadow@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (owner) VALUES ('temp95ediffshadow@collide.test')").run();
+      client.exec("CREATE TEMP TABLE ui_artifacts (unrelated_col TEXT)"); // shadow lacks `owner` entirely
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      expect(out.skipped).not.toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Temp95eDiffShadow@collide.test"));
+      expect(group?.spellings).toEqual(["Temp95eDiffShadow@collide.test", "temp95ediffshadow@collide.test"]);
+    });
+  });
+
+  describe("case 3: an optional table that exists ONLY in an attached schema must not be read as if it were main (finding 2, attached-only)", () => {
+    it("main-schema absence means skipped, and the attached copy is ignored — even though it holds colliding identities", () => {
+      const client = raw();
+      // main genuinely lacks ui_artifacts (the block's beforeAll/afterEach guarantee this); the ONLY copy lives in `aux`.
+      client.exec("ATTACH ':memory:' AS aux");
+      client.exec("CREATE TABLE aux.ui_artifacts (owner TEXT)");
+      client.prepare("INSERT INTO aux.ui_artifacts (owner) VALUES ('Aux95eOnly@collide.test')").run();
+      client.prepare("INSERT INTO aux.ui_artifacts (owner) VALUES ('aux95eonly@collide.test')").run();
+      const out = findIdentityCollisions(client);
+      expect(out.skipped).toContain("ui_artifacts.owner");
+      expect(out.read).not.toContain("ui_artifacts.owner");
+      expect(out.failed).not.toContain("ui_artifacts.owner");
+      expect(out.collisions.some((c) => c.spellings.includes("Aux95eOnly@collide.test"))).toBe(false);
+    });
+  });
+
+  describe("case 5 [control]: scenarios astra's Q3 list also asks for, expected to already pass before this fix", () => {
+    it("[control] WITHOUT ROWID is recognized as an ordinary table", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (owner TEXT PRIMARY KEY) WITHOUT ROWID");
+      client.prepare("INSERT INTO ui_artifacts (owner) VALUES ('Wr95eOwner@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (owner) VALUES ('wr95eowner@collide.test')").run();
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Wr95eOwner@collide.test"));
+      expect(group?.spellings).toEqual(["Wr95eOwner@collide.test", "wr95eowner@collide.test"]);
+    });
+
+    it("[control] an ordinary (non-generated) column added by ALTER TABLE ADD COLUMN is recognized", () => {
+      const client = raw();
+      client.exec("CREATE TABLE ui_artifacts (id INTEGER)");
+      client.exec("ALTER TABLE ui_artifacts ADD COLUMN owner TEXT");
+      client.prepare("INSERT INTO ui_artifacts (id, owner) VALUES (1, 'Alt95eAdd@collide.test')").run();
+      client.prepare("INSERT INTO ui_artifacts (id, owner) VALUES (2, 'alt95eadd@collide.test')").run();
+      const out = findIdentityCollisions(client);
+      expect(out.read).toContain("ui_artifacts.owner");
+      const group = out.collisions.find((c) => c.sources.includes("ui_artifacts.owner") && c.spellings.includes("Alt95eAdd@collide.test"));
+      expect(group?.spellings).toEqual(["Alt95eAdd@collide.test", "alt95eadd@collide.test"]);
+    });
+
+    it("[control] a catalog call returning a non-array fails every source; it never crashes the audit and never reports them skipped", () => {
+      const nonArrayCatalog: FakeReader = { prepare: () => ({ all: () => undefined as unknown as unknown[] }) };
+      const out = findIdentityCollisions(nonArrayCatalog);
+      expect(out.failed.length).toBe(7);
+      expect(out.skipped).toEqual([]);
+      expect(out.read).toEqual([]);
+    });
   });
 });
