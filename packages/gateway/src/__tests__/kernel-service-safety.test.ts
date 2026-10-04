@@ -249,3 +249,104 @@ describe("KernelService.listDevices — real health, not hardcoded", () => {
     });
   });
 });
+
+// ── checkDeviceHealth's console.warn must never carry the dependency's message ──
+//
+// N71 round 5 (astra pack 83d, CRITICAL #1): round 3 scrubbed err.message with
+// redactDiagnostic before logging it; round 4 fixed one scrubber bypass (an
+// underscore shielding the match from a \b boundary). Astra's round 5 verdict
+// found the NEXT one: a WHATWG-valid "scheme:userinfo@host" with no "//" at all
+// (e.g. "http:u:pw@host") is a real, parseable URL whose credentials a fetch-alike
+// would read — but redactUrlCredentials's "\b[a-z][a-z0-9+.-]*:\/\/\S+" matcher
+// requires the literal "://", so it never matched, and redactDiagnostic returned it
+// untouched. There is no fourth scrubber that closes this for good — the fix below
+// stops trying to scrub a dependency's message at all: the sink gets a fixed code,
+// never err.message in any form, scrubbed or not.
+
+const THROW_TYPE = "test-throw-ks-n71r5";
+
+/** Always throws from getStatus() with a caller-supplied message — for proving
+ *  checkDeviceHealth's console.warn never discloses it (N71 round 5). The factory
+ *  reads `failMessage` (a closure over the describe-scoped `let`) at CONSTRUCTION
+ *  time, so each `it.each` case gets its own message despite one `registerMachineAdapter`
+ *  call in `beforeAll`. */
+class ThrowingStatusAdapter implements MachineAdapter {
+  readonly id: string;
+  readonly type = "fdm" as const;
+  readonly source: MachineAdapter["source"];
+  constructor(id: string, kernelId: string, private readonly failMessage: string) {
+    this.id = id;
+    this.source = { deviceId: id, deviceType: "controller", kernelId };
+  }
+  async getStatus(): ReturnType<MachineAdapter["getStatus"]> {
+    throw new Error(this.failMessage);
+  }
+  async execute(): ReturnType<MachineAdapter["execute"]> {
+    return { success: false, message: "n/a" };
+  }
+  async getProgress(): Promise<number> {
+    return 0;
+  }
+  onEvidence(_cb: Parameters<MachineAdapter["onEvidence"]>[0]): void {}
+  async dispose(): Promise<void> {}
+}
+
+describe("KernelService.checkDeviceHealth — N71 round 5 (astra pack 83d, CRITICAL #1): console.warn never carries the dependency's message", () => {
+  const SENTINEL = "N71-SENTINEL";
+  let failMessage = "unset";
+
+  beforeAll(() => {
+    try { unregisterMachineAdapter(THROW_TYPE); } catch { /* not registered */ }
+    registerMachineAdapter(THROW_TYPE, (device, _cfg, kernelId) => new ThrowingStatusAdapter(device.id, kernelId, failMessage));
+  });
+
+  afterAll(() => {
+    try { unregisterMachineAdapter(THROW_TYPE); } catch { /* already gone */ }
+  });
+
+  it.each([
+    [
+      "an underscore shields the URL from a \\b boundary (round 3/4's own bypass)",
+      `endpoint_http://u:${SENTINEL}@h.invalid`,
+    ],
+    [
+      "a WHATWG-valid scheme:userinfo@host with no '//' at all (astra pack 83d CRITICAL #1)",
+      `http:u:${SENTINEL}@h.invalid`,
+    ],
+  ] as Array<[string, string]>)("[neg] %s: the sentinel never reaches console.warn", async (_what, message) => {
+    failMessage = message;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const svc = new KernelService({
+        kernelId: "kernel-ks-n71r5",
+        mockMode: false,
+        devices: [{ id: "dev-throw-n71r5", type: "machine", adapterType: THROW_TYPE, config: {} }],
+      });
+      const result = await svc.checkDeviceHealth("dev-throw-n71r5");
+      expect(result).toEqual({ healthy: false, details: "adapter_error" });
+      expect(warnSpy).toHaveBeenCalled();
+      const allArgsText = warnSpy.mock.calls
+        .map((call) => call.map((a) => String(a)).join(" "))
+        .join("\n");
+      expect(allArgsText).not.toContain(SENTINEL);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("control: a healthy device's console.warn is never called at all", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const svc = new KernelService({
+        kernelId: "kernel-ks-n71r5-ok",
+        mockMode: false,
+        devices: [{ id: "dev-ok-n71r5", type: "machine", adapterType: "mock", config: {} }],
+      });
+      const result = await svc.checkDeviceHealth("dev-ok-n71r5");
+      expect(result.healthy).toBe(true);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

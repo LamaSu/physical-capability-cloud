@@ -1105,6 +1105,14 @@ describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that car
     // (not just its query) can carry a credential-named key too.
     ["a vendor-key-shaped value in 'via', not a URL at all (astra pack 83c)", [{ id: "decl.self_attested", via: `sk-proj-${SENTINEL}-ABCDEFGHIJ` }]],
     ["a URL fragment (not the query) names a secret (astra pack 83c)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/#token=${SENTINEL}` } }]],
+    // N71 round 5 (astra pack 83d, CRITICAL #1): astra's own example — the query
+    // key is "session", not any of SECRET_KEY_NAME's fixed list, and the VALUE
+    // isn't vendor-key/JWT/hex/bearer-shaped either. Nothing about this value's
+    // SHAPE looks like a credential; round 3/4's valueCarriesCredential (shape
+    // signals) cannot catch it by construction. The round-5 fix refuses ANY
+    // query on a manifest URL, key name irrelevant — see findEmitterManifestFormIssue.
+    ["a URL QUERY with a non-credential-named key (astra pack 83d CRITICAL #1's own example)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/?session=${SENTINEL}` } }]],
+    ["a URL FRAGMENT with a non-credential-named key (round 5 — not 'token=', which round 4 already caught by key name)", [{ id: "decl.self_attested", params: { endpoint: `https://h.invalid/#session=${SENTINEL}` } }]],
   ];
 
   it.each(CREDENTIAL_MANIFESTS)("[neg] %s: 400 invalid_emitter_manifest, nothing written, nothing echoed", async (_what, emits) => {
@@ -1158,6 +1166,94 @@ describe("N71 round 3 (astra pack 83b, Q3): a device's emitter manifest that car
     const emits = [{ id: "decl.self_attested", params: { contact: "ops@example.com", profile: "https://medium.invalid/@user" } }];
     const res = await register(emits);
     expect(res.statusCode, res.body).toBe(201);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// N71 round 5 (astra pack 83d, HIGH #5 residual): the determinate part of F5.
+//
+// Round 3/4's valueCarriesCredential (above) is a SHAPE-based signal — it
+// catches a secret-NAMED key or a vendor-key/URL-userinfo-SHAPED value, but
+// astra's round-5 example has neither: {endpoint: "https://h.invalid/?session=
+// <secret>"} names no recognized key and isn't itself vendor-key-shaped. Round
+// 5 adds two INDEPENDENT, closed-form admission gates (findEmitterManifestFormIssue,
+// redaction.ts) alongside valueCarriesCredential, never replacing it:
+//   (a) any string anywhere in params (recursively)/bind/via that PARSES AS A
+//       URL may not carry userinfo, a query, or a fragment — a manifest string
+//       is for matching; scheme+host+path is enough, full stop;
+//   (b) bind and via must match a closed identifier grammar, derived from
+//       EVERY bind/via value that exists in this repo today (adapter-
+//       manifests.ts production defaults, the CSD fixture, every test) — see
+//       83e-n71-report.md for the inventory.
+//
+// Explicitly OUT of scope (escalated to the steward as a cross-lane row, per
+// the round-5 brief): per-primitive semantic param schemas. `params` stays
+// z.record(z.unknown()) at the spec-schema level; this gate is the GATEWAY's
+// own boundary check, independent of packages/spec (untouched this round).
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("N71 round 5 (astra pack 83d, HIGH #5 residual): bind/via identifier grammar", () => {
+  let grammarKernel: string;
+  let seq5 = 0;
+
+  beforeAll(async () => {
+    grammarKernel = `${kernelId}-grammar`;
+    const made = await inj("POST", "/api/kernels", keyA, { id: grammarKernel, name: "A's grammar workshop" });
+    expect(made.statusCode, made.body).toBeLessThan(300);
+  });
+
+  const registerG = (emits: unknown, deviceId = `dev-grammar-${++seq5}-${grammarKernel}`) =>
+    inj("POST", "/api/setup/register-device", keyA, { kernelId: grammarKernel, deviceId, type: "sensor", adapterType: "mock", emits });
+  const storedG = (deviceId: string) => getRepos().kernels.findDeviceById(deviceId);
+
+  it.each([
+    ["via with an embedded space — not an identifier, and not vendor-key-shaped either", [{ id: "decl.self_attested", via: "capture snapshot" }]],
+    ["bind with an embedded slash — not an identifier", [{ id: "decl.self_attested", bind: "cid/with/slash" }]],
+    ["via that is the empty string", [{ id: "decl.self_attested", via: "" }]],
+  ] as Array<[string, unknown]>)("[neg] %s: 400 invalid_emitter_manifest, nothing written", async (_what, emits) => {
+    const deviceId = `dev-grammar-refused-${++seq5}-${grammarKernel}`;
+    const res = await registerG(emits, deviceId);
+    expect(res.statusCode, res.body).toBe(400);
+    expect(bodyOf(res).error).toBe("invalid_emitter_manifest");
+    expect(storedG(deviceId)).toBeUndefined();
+  });
+
+  // Every bind/via value that exists anywhere in this repo as of round 5 (git
+  // grep across packages/*, kits, tests, docs — the 83e report's inventory),
+  // sent together through the SAME endpoint this gate guards. If the chosen
+  // grammar were too narrow, ANY one of these would 400 — none may.
+  const REAL_BIND_VIA_MANIFEST = [
+    { id: "decl.self_attested" },
+    { id: "ident.registered_key", via: "toKernelOutput" },
+    { id: "receipt.kernel_signed", via: "toKernelOutput" },
+    { id: "artifact.hash", bind: "outputArtifactCid", via: "gcode" },
+    { id: "artifact.hash", bind: "outputDocumentCid", via: "print" },
+    { id: "telemetry.envelope_conformance", via: "telemetry" },
+    { id: "telemetry.envelope_conformance", via: "opcua-node" },
+    { id: "telemetry.envelope_conformance", via: "sila-feature" },
+    { id: "confirm.target_system", params: { channel: "api" }, via: "http-response" },
+    { id: "capture.photo_nonced", bind: "capturePhotoCid", via: "captureSnapshot" },
+    { id: "artifact.hash", bind: "sensorLogCid", via: "stopRecording" },
+    { id: "artifact.hash", bind: "cid", via: "x" },
+    { id: "decl.self_attested", bind: "declaration" },
+    { id: "machine.execution_log", bind: "machineLogChainCid" },
+    { id: "telemetry.envelope_conformance", bind: "sensorSummaryCid" },
+    // From the document-print-and-mail CSD fixture (packages/spec/src/csds):
+    { id: "decl.self_attested", bind: "printer_log_captured" },
+    { id: "decl.self_attested", bind: "printer_job_verified" },
+    { id: "decl.self_attested", bind: "execution_completed" },
+    { id: "decl.self_attested", bind: "commitment.labelHash" },
+    { id: "decl.self_attested", bind: "photo_captured" },
+    { id: "decl.self_attested", bind: "photo_anti_spoof_check" },
+    { id: "decl.self_attested", bind: "courier_pickup_confirmed" },
+    { id: "decl.self_attested", bind: "courier_delivery_confirmed" },
+    { id: "decl.self_attested", bind: "recipientSignatureCid" },
+  ];
+
+  it("control: every bind/via value found anywhere in the repo today is still accepted", async () => {
+    const res = await registerG(REAL_BIND_VIA_MANIFEST);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(bodyOf(res).device.emits).toEqual(REAL_BIND_VIA_MANIFEST);
   });
 });
 
