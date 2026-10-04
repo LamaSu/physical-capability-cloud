@@ -1,4 +1,4 @@
-export { BountyService } from "./bounty-service.js";
+export { BountyService, type BountyServiceOptions } from "./bounty-service.js";
 export type {
   DemandSignal,
   CapabilityBounty,

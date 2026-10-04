@@ -498,6 +498,8 @@ describe("profile admission — evaluates only what was hashed (coord-watch rule
     const b = await toBundle([...PILOT.slice(0, 2), { ...PILOT[2]!, payload: { passed: false } }], p);
     const payload = (b.events[2] as { payload: Record<string, unknown> }).payload;
     // Measure how many times binding reads `passed`, so the lie starts exactly after binding.
+    // LO-EV-9's binding (#341) runs no caller code either: it refuses the accessor without
+    // running its getter, so binding reads it 0 times and the lie starts at the first read.
     let reads = 0;
     Object.defineProperty(payload, "passed", { get: () => (reads++, false), enumerable: true, configurable: true });
     const probe = await verifyEvidenceSubjectBinding({
@@ -505,7 +507,8 @@ describe("profile admission — evaluates only what was hashed (coord-watch rule
       events: b.events,
       subject: { jobId: JOB, kernelId: KERNEL },
     });
-    expect(probe.ok).toBe(true);
+    expect(probe, "binding refuses data that carries code, at the event that carries it").toMatchObject({ ok: false, reason: "malformed-event", eventIndex: 2 });
+    expect(reads, "reads of the getter during binding").toBe(0);
     const readsDuringBinding = reads;
     // Now: truthful (false, as hashed) for binding's reads, then true on every later read.
     reads = 0;
