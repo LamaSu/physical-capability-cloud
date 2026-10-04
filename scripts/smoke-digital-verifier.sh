@@ -11,6 +11,14 @@
 
 set -euo pipefail
 
+# FC-8 round 2 (astra pack 61b, CRITICAL): disable xtrace BEFORE any secret is
+# read or expanded, so an inherited `bash -x` or exported SHELLOPTS=xtrace
+# never prints PCC_ORACLE_KEY or the provisioned API key. `set +x` toggles a
+# shell OPTION, not an env var, so it takes effect immediately even when this
+# script was itself invoked as `bash -x smoke-digital-verifier.sh` — kept off
+# for the rest of the script since credentials are handled throughout.
+set +x
+
 # ── Configuration ───────────────────────────────────────────────────────────
 REPO="global-mysterysnailrevolution/physical-capability-cloud"
 BRANCH="digital-verifier/foundation"
@@ -59,6 +67,28 @@ skip() {
 
 info() {
   echo -e "  ${CYAN}INFO${NC} $1"
+}
+
+# FC-8 round 3 (astra pack 61b census closure): a gateway/oracle-derived
+# string must be VALIDATED before it is printed or written to the report —
+# an allow-listed enum, or a literal boolean — never the raw response.
+# (Computed counts, e.g. `jq '.x | length'`, are not wrapped here: a jq
+# `length` is structurally always a non-negative integer or the `|| echo`
+# fallback, so there is no dynamic path for it to carry anything else.)
+safe_enum() {
+  # $1=value, $2..=allowed literals
+  local v="$1"; shift
+  for allowed in "$@"; do
+    if [ "$v" = "$allowed" ]; then echo "$v"; return; fi
+  done
+  echo "(unknown)"
+}
+
+safe_bool() {
+  case "$1" in
+    true|false) echo "$1" ;;
+    *) echo "(unknown)" ;;
+  esac
 }
 
 add_check() {
@@ -190,17 +220,17 @@ if [ "$HEALTH_RESP" = "CURL_ERROR" ]; then
 else
   HEALTH_STATUS=$(echo "$HEALTH_RESP" | jq -r .status 2>/dev/null || echo "")
   if [ "$HEALTH_STATUS" = "ok" ]; then
-    pass "Gateway healthy: $HEALTH_RESP"
-    add_check "gateway-health" "PASS" "$HEALTH_RESP" "$DURATION"
+    pass "Gateway healthy: status=$HEALTH_STATUS"
+    add_check "gateway-health" "PASS" "status=$HEALTH_STATUS" "$DURATION"
   else
-    fail "Gateway unhealthy: $HEALTH_RESP"
-    add_check "gateway-health" "FAIL" "$HEALTH_RESP" "$DURATION"
+    fail "Gateway unhealthy: status=$HEALTH_STATUS"
+    add_check "gateway-health" "FAIL" "status=$HEALTH_STATUS" "$DURATION"
   fi
 
   # Also check setup status
   SETUP_RESP=$(curl -sS --max-time 15 "$GW/api/setup/status" 2>/dev/null || echo "")
   if [ -n "$SETUP_RESP" ]; then
-    OVERALL=$(echo "$SETUP_RESP" | jq -r .overall 2>/dev/null || echo "unknown")
+    OVERALL=$(safe_enum "$(echo "$SETUP_RESP" | jq -r .overall 2>/dev/null || echo "unknown")" ok incomplete error unknown)
     info "Setup status: overall=$OVERALL"
   fi
 fi
@@ -273,7 +303,7 @@ if [ -z "$ORACLE_HEALTH" ]; then
 else
   ORACLE_STATUS=$(echo "$ORACLE_HEALTH" | jq -r .status 2>/dev/null || echo "")
   if [ "$ORACLE_STATUS" = "ok" ]; then
-    pass "Oracle healthy via $ORACLE_URL_USED: $ORACLE_HEALTH"
+    pass "Oracle healthy via $ORACLE_URL_USED: status=$ORACLE_STATUS"
     add_check "oracle-responds" "PASS" "Oracle ok via $ORACLE_URL_USED" "$DURATION"
 
     # Smoke verify request
@@ -291,14 +321,16 @@ else
       }' 2>/dev/null || echo "")
     if [ -n "$VERIFY_RESP" ]; then
       VERIFIED=$(echo "$VERIFY_RESP" | jq -r .result.verified 2>/dev/null || echo "")
-      REASON=$(echo "$VERIFY_RESP" | jq -r .result.reason 2>/dev/null || echo "")
-      info "Verify response: verified=$VERIFIED reason=$REASON"
+      # FC-8 round 2: .result.reason is the oracle's free text and may
+      # reflect a secret (e.g. a header value echoed into an error message);
+      # only the validated boolean `verified` field is safe to log here.
+      info "Verify response: verified=$VERIFIED"
     else
       info "Verify request returned empty (oracle may be processing)"
     fi
   else
-    fail "Oracle returned unexpected status: $ORACLE_HEALTH"
-    add_check "oracle-responds" "FAIL" "Unexpected oracle status: $ORACLE_HEALTH" "$DURATION"
+    fail "Oracle returned unexpected status: $ORACLE_STATUS"
+    add_check "oracle-responds" "FAIL" "Unexpected oracle status: $ORACLE_STATUS" "$DURATION"
   fi
 fi
 echo ""
@@ -351,15 +383,15 @@ if $E2E_OK; then
   STATUS_RESP=$(curl -sS --max-time 10 \
     -H "Authorization: Bearer $API_KEY" \
     "$GW/api/setup/status" 2>/dev/null || echo "")
-  OVERALL=$(echo "$STATUS_RESP" | jq -r .overall 2>/dev/null || echo "unknown")
+  OVERALL=$(safe_enum "$(echo "$STATUS_RESP" | jq -r .overall 2>/dev/null || echo "unknown")" ok incomplete error unknown)
   info "Overall setup status: $OVERALL"
 
   # Step 5: Check integrations
   info "Step 5: Integration status..."
   INT_RESP=$(curl -sS --max-time 10 "$GW/api/status/integrations" 2>/dev/null || echo "")
   if [ -n "$INT_RESP" ]; then
-    LIT_LIVE=$(echo "$INT_RESP" | jq -r '.litProtocol.configured' 2>/dev/null || echo "false")
-    STARKNET_LIVE=$(echo "$INT_RESP" | jq -r '.starknet.configured' 2>/dev/null || echo "false")
+    LIT_LIVE=$(safe_bool "$(echo "$INT_RESP" | jq -r '.litProtocol.configured' 2>/dev/null || echo "false")")
+    STARKNET_LIVE=$(safe_bool "$(echo "$INT_RESP" | jq -r '.starknet.configured' 2>/dev/null || echo "false")")
     info "Lit=$LIT_LIVE Starknet=$STARKNET_LIVE"
   fi
 
@@ -373,7 +405,10 @@ if $E2E_OK; then
   if [ "$IS_VALID" = "true" ]; then
     info "API key validated successfully"
   else
-    info "API key validation returned: $VALIDATE_RESP"
+    # FC-8 round 2: $VALIDATE_RESP is the full raw response body, which can
+    # include the reflected Authorization header; only the validated
+    # boolean is safe to log here.
+    info "API key validation returned: valid=$IS_VALID"
   fi
 fi
 

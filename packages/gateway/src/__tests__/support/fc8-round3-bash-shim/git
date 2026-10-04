@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# FC-8 round 3 test fixture: passes rev-parse through to real git (needed
+# for COMMIT_SHA in the report); fails fast on ls-remote (no real network
+# in a test — matches this host having no "origin" remote anyway).
+if [ "$1" = "ls-remote" ]; then
+  echo "fatal: shimmed — no network in test" >&2
+  exit 128
+fi
+exec /usr/bin/git "$@"
