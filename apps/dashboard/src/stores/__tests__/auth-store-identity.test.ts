@@ -7,8 +7,14 @@
 import { describe, it, expect, vi, beforeAll } from "vitest";
 
 beforeAll(() => {
-  // The store reads the saved key at creation; tests run without a browser.
-  vi.stubGlobal("localStorage", { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  // The store reads the saved key at creation; tests run without a browser. The slot holds what is
+  // written to it: a key is held only once the browser's slot holds it (astra 19i).
+  const slots = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (k: string) => slots.get(k) ?? null,
+    setItem: (k: string, v: string) => void slots.set(k, String(v)),
+    removeItem: (k: string) => void slots.delete(k),
+  });
 });
 
 describe("onIdentityChange", () => {

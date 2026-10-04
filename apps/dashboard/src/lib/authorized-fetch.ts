@@ -16,8 +16,11 @@ const STORAGE_KEY = "pcc-api-key";
  * __tests__/no-direct-auth-headers.test.ts and lib/__tests__/key-boundary-r4
  * hold this module to that.
  *
- * It is persisted in localStorage so a reload keeps the user signed in. Any
- * script on this origin can still read that slot. Only an HttpOnly gateway
+ * It is persisted in localStorage so a reload keeps the user signed in, and
+ * that slot is the account every tab and every load act as (#354). A change
+ * the browser won't save is not made (astra 19i): the held key changes only
+ * after the slot holds the new value. Any script on this origin can still
+ * read that slot. Only an HttpOnly gateway
  * session would take the key out of JavaScript's reach, and that is a gateway
  * change awaiting the operator. Until then the ratchet keeps every other
  * module off this slot, and off storage it can't name.
@@ -32,13 +35,29 @@ function readStorage(): string | null {
   }
 }
 
-function writeStorage(key: string | null): void {
+/** Not a value the slot can hold: it couldn't be read. */
+const UNREADABLE = Symbol("unreadable");
+
+/**
+ * Write `key` to the slot (null removes it). True only when the slot then
+ * holds exactly `key`. What counts is what it holds afterwards, not whether a
+ * call threw: a full quota, blocked storage or a write that silently does
+ * nothing all answer false.
+ */
+function writeStorage(key: string | null): boolean {
   try {
     if (key) localStorage.setItem(STORAGE_KEY, key);
     else localStorage.removeItem(STORAGE_KEY);
   } catch {
-    // Storage unavailable (private mode, blocked): the key lives for this page only.
+    // Judged below, by what the slot holds now.
   }
+  let held: string | null | typeof UNREADABLE;
+  try {
+    held = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    held = UNREADABLE;
+  }
+  return held === key;
 }
 
 const keyListeners = new Set<() => void>();
@@ -59,9 +78,13 @@ let round = -1;
  * everyone in the next round. A change made in the last round is refused
  * before it touches the key (astra A03f N1), so the key never holds a value
  * its listeners weren't told of.
+ *
+ * Returns false, having changed nothing and told no one, when the browser
+ * won't save the change to the slot (astra 19i): this tab can't act as one
+ * account while every other tab and the next load act as another.
  */
-export function setStoredApiKey(key: string | null): void {
-  replaceStoredKey(key, true);
+export function setStoredApiKey(key: string | null): boolean {
+  return replaceStoredKey(key, true);
 }
 
 /**
@@ -69,14 +92,15 @@ export function setStoredApiKey(key: string | null): void {
  * writes it to the slot; a change another tab already wrote there is taken
  * without writing it back.
  */
-function replaceStoredKey(key: string | null, persist: boolean): void {
+function replaceStoredKey(key: string | null, persist: boolean): boolean {
   if (round >= MAX_KEY_CHANGE_ROUNDS - 1) {
     throw new Error("Key listeners kept changing the key; this change was refused.");
   }
-  storedApiKey = key || null;
-  if (persist) writeStorage(storedApiKey);
+  const next = key || null;
+  if (persist && !writeStorage(next)) return false; // refused before the held key changes or anyone is told
+  storedApiKey = next;
   undelivered += 1;
-  if (round >= 0) return; // a delivery is under way: the next round tells everyone
+  if (round >= 0) return true; // a delivery is under way: the next round tells everyone
   let failed = false;
   let failure: unknown;
   try {
@@ -97,6 +121,7 @@ function replaceStoredKey(key: string | null, persist: boolean): void {
     round = -1;
   }
   if (failed) throw failure;
+  return true;
 }
 
 // The key is the browser's, not one tab's: every tab reads the same slot, and

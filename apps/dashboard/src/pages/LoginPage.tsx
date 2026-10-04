@@ -19,7 +19,8 @@ export function LoginPage() {
     const success = await login(key.trim());
 
     if (!success) {
-      setError("Invalid API key. Check your key and try again.");
+      // A key the browser wouldn't save is not an invalid key: say which it was (astra 19i).
+      setError(useAuthStore.getState().error ?? "Invalid API key. Check your key and try again.");
     }
     setLoading(false);
   }

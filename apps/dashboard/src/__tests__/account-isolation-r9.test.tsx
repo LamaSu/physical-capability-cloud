@@ -126,12 +126,22 @@ describe("19i HIGH: a key change the browser refused is not made", () => {
     expect(await aFreshLoadSends()).toBe(KEY_A);
   });
 
+  it("a refusal's reason is cleared by the next attempt, so a later invalid key isn't blamed on storage", async () => {
+    const { store } = await page();
+    refuseKeySlot("setItem");
+    expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
+    expect(store.useAuthStore.getState().error).toMatch(/wouldn't save your API key/);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "invalid key" }), { status: 401 })));
+    expect(await store.useAuthStore.getState().login(KEY_B)).toBe(false);
+    expect(store.useAuthStore.getState().error, "the login page says 'Invalid API key' for this one").toBeNull();
+  });
+
   it("a key change the browser accepts still goes through (login B, then logout)", async () => {
     const { store, sends } = await page();
     expect(await store.useAuthStore.getState().login(KEY_B)).toBe(true);
     expect(sends()).toBe(KEY_B);
     expect(localStorage.getItem("pcc-api-key")).toBe(KEY_B);
-    store.useAuthStore.getState().logout();
+    expect(store.useAuthStore.getState().logout(), "logout reports success").toBe(true);
     expect(sends()).toBeNull();
     expect(localStorage.getItem("pcc-api-key")).toBeNull();
     expect(await aFreshLoadSends()).toBeNull();

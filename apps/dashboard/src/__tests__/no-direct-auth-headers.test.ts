@@ -60,7 +60,7 @@
  * for fetch and sendBeacon, not a boundary.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative, sep } from "node:path";
@@ -627,8 +627,15 @@ describe("only lib/authorized-fetch.ts holds the API key, and only fetchWithKey 
   });
 
   it("the auth store's state holds no key, even while one is held", () => {
+    // A key is held only once the browser's slot holds it (astra 19i); this suite runs without a browser.
+    const slots = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => slots.get(k) ?? null,
+      setItem: (k: string, v: string) => void slots.set(k, String(v)),
+      removeItem: (k: string) => void slots.delete(k),
+    });
     // Built at run time: a key-shaped literal in source trips the secret scanners (pack and push gates).
-    store.adoptApiKey(["pcc", "test", "ratchet0123456789abcdef"].join("_"));
+    expect(store.adoptApiKey(["pcc", "test", "ratchet0123456789abcdef"].join("_"))).toBe(true);
     try {
       const state = store.useAuthStore.getState();
       expect(state.isAuthenticated).toBe(true);
@@ -636,6 +643,7 @@ describe("only lib/authorized-fetch.ts holds the API key, and only fetchWithKey 
       expect(Object.values(state).some((v) => typeof v === "string" && /^pcc_/.test(v))).toBe(false);
     } finally {
       store.adoptApiKey(null);
+      vi.unstubAllGlobals();
     }
   });
 });

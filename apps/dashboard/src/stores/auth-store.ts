@@ -16,7 +16,8 @@ interface AuthState {
   /** Bumped on every change of the stored key, whoever makes it (onStoredKeyChange). Never the key. */
   keyEpoch: number;
   login: (key: string) => Promise<boolean>;
-  logout: () => void;
+  /** False, changing nothing, when the browser won't remove the saved key (astra 19i); `error` says so. */
+  logout: () => boolean;
 
   // -- Wallet/SIWE auth (secondary, for on-chain features) --
   /** Connected wallet address */
@@ -34,12 +35,17 @@ interface AuthState {
   setError: (e: string | null) => void;
 }
 
+/** Why a sign-in or sign-out the browser refused to save didn't happen (astra 19i). */
+const KEY_NOT_SAVED = "This browser wouldn't save your API key, so you're not signed in. Check that this site may store data, then try again.";
+const KEY_NOT_REMOVED = "This browser wouldn't remove your saved API key, so you're still signed in. Clear this site's data to sign out.";
+
 export const useAuthStore = create<AuthState>((set) => ({
   // -- API Key auth --
   isAuthenticated: hasStoredApiKey(),
   keyEpoch: 0,
 
   login: async (key: string): Promise<boolean> => {
+    set({ error: null }); // a reason left from before belongs to that attempt
     try {
       // The candidate key goes to the configured gateway and nowhere else.
       const res = await fetchWithKey("/api/auth/validate", key);
@@ -51,7 +57,12 @@ export const useAuthStore = create<AuthState>((set) => ({
       // second login with the same key ends the wallet session and remounts,
       // which fails closed.
       if (!beginAccountChange()) return false;
-      adoptApiKey(key);
+      // The browser's slot is the account every tab and the next load act as:
+      // if it won't save the key, nothing changes here either (astra 19i).
+      if (!adoptApiKey(key)) {
+        set({ error: KEY_NOT_SAVED });
+        return false;
+      }
       return true;
     } catch {
       return false;
@@ -66,8 +77,25 @@ export const useAuthStore = create<AuthState>((set) => ({
     // The teardown it starts reads the generation only after its first await,
     // under the wallet-session lock (lib/wallet-session.ts), so it sees the move.
     const hadKey = hasStoredApiKey();
-    setStoredApiKey(null);
+    let removed: boolean;
+    try {
+      removed = setStoredApiKey(null);
+    } catch (error) {
+      // A listener failed after the key was removed (every listener hears the
+      // change, then the first error is rethrown). The change stands, so every
+      // other tab must still see it pending before the error goes on.
+      if (hadKey && !hasStoredApiKey()) beginAccountChange();
+      throw error;
+    }
+    if (!removed) {
+      // The browser won't remove the saved key (astra 19i): nothing changed.
+      // This tab stays signed in, as every other tab and the next load would
+      // be, and no tab is told of a change.
+      set({ error: KEY_NOT_REMOVED });
+      return false;
+    }
     if (hadKey) beginAccountChange();
+    return true;
   },
 
   // -- Wallet/SIWE auth --
@@ -104,10 +132,11 @@ onStoredKeyChange(() => {
 /**
  * Hold `key` as the signed-in key, or sign out with null. login() calls it
  * after the gateway accepts the key; tests call it directly. It is
- * write-only: writing a key cannot leak one.
+ * write-only: writing a key cannot leak one. False, changing nothing, when the
+ * browser won't save the change (astra 19i).
  */
-export function adoptApiKey(key: string | null): void {
-  setStoredApiKey(key);
+export function adoptApiKey(key: string | null): boolean {
+  return setStoredApiKey(key);
 }
 
 /**
