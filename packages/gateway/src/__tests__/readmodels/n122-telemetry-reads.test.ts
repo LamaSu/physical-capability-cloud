@@ -11,7 +11,7 @@
  * Same stand-in gate as the F3 tests: x-test-principal is the claimed operatorId and
  * x-test-proven-wallet is req.provenWallet (WP-A's field).
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 
 vi.mock("../../services/posthog-service.js", () => ({ trackServerEvent: vi.fn(), shutdownPostHog: vi.fn() }));
@@ -174,6 +174,45 @@ describe("N122 POST /api/telemetry/emit: only the admin or a PROVEN party of the
     expect((await emit(NYC)).statusCode).toBe(200);
     expect((await emit(ADMIN_H)).statusCode).toBe(200);
     expect(await events()).toBe(before + 2);
+  });
+});
+
+describe("N122 r1 CRITICAL: another party's emission cannot change a caller's scoped stats", () => {
+  // astra's trace (rm-n122-580-r1, N122-1): the scoped events-per-minute window was anchored to
+  // the newest bucket of ANY job, so an emission on a job the caller cannot read moved the
+  // caller's window and changed its rate. The window is now anchored to the clock.
+  // Below the buffer's job capacity (MAX_JOBS): past it, a new job evicts the oldest, whoever's.
+  // The suite's own events were emitted at real time, a day before T0, outside every window here.
+  const T0 = (Math.floor(Date.now() / 60_000) + 24 * 60) * 60_000 + 5_000;
+  afterEach(() => vi.useRealTimers());
+
+  it("astra's trace: 11 quiet minutes after the caller's event, a stranger's emission changes nothing", async () => {
+    const { pipelineTelemetry, PIPELINE_PHASES } = await import("../../telemetry.js");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    pipelineTelemetry.emit("job-003", PIPELINE_PHASES[0]!, "started"); // kernel-nyc's job
+    vi.setSystemTime(T0 + 5 * 60_000);
+    expect((await stats(NYC)).json().stats.eventsPerMinute).toBe(1);
+    vi.setSystemTime(T0 + 11 * 60_000);
+    const before = (await stats(NYC)).json().stats;
+    expect(before.eventsPerMinute).toBe(0); // aged out by the clock, not by anyone's emission
+    pipelineTelemetry.emit("job-002", PIPELINE_PHASES[0]!, "started"); // kernel-sf's: NYC cannot read it
+    expect((await stats(NYC)).json().stats).toEqual(before);
+  });
+
+  it("at every minute of the window and past its edge, a stranger's emission leaves every scoped statistic unchanged", async () => {
+    const { pipelineTelemetry, PIPELINE_PHASES } = await import("../../telemetry.js");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t1 = T0 + 60 * 60_000;
+    vi.setSystemTime(t1);
+    pipelineTelemetry.emit("job-004", PIPELINE_PHASES[0]!, "started"); // kernel-nyc's job
+    for (const minutes of [0, 1, 5, 9, 10, 11, 12, 30]) {
+      vi.setSystemTime(t1 + minutes * 60_000 + 30_000);
+      const before = (await stats(NYC)).json().stats;
+      pipelineTelemetry.emit("job-002", PIPELINE_PHASES[1]!, "started"); // kernel-sf's
+      pipelineTelemetry.emit(`job-n122-other-${minutes}`, PIPELINE_PHASES[0]!, "started"); // nobody's job row
+      expect((await stats(NYC)).json().stats, `${minutes} min after NYC's event`).toEqual(before);
+    }
   });
 });
 

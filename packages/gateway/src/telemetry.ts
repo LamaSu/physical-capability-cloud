@@ -309,18 +309,19 @@ export class PipelineTelemetryService {
   // ── Private ────────────────────────────────────────────────────────────
 
   /**
-   * The minute buckets for the accepted jobs' stored events, over the same window the global
-   * buckets keep: within 10 minutes of the newest bucket.
+   * The minute buckets for the accepted jobs' stored events in the last 10 minutes by the clock.
+   * The window is anchored to the current minute, never to the global buckets, whose newest
+   * minute is whoever emitted last: a job `include` refuses must not move a caller's window
+   * (astra N122-1). The admin's unscoped view keeps the global buckets.
    */
   private _minuteBucketsOf(include: (jobId: string) => boolean): Map<number, number> {
-    const newest = Math.max(...this.minuteBuckets.keys());
+    const now = Math.floor(Date.now() / 60_000);
     const buckets = new Map<number, number>();
-    if (!Number.isFinite(newest)) return buckets;
     for (const [jobId, evts] of this.events) {
       if (!include(jobId)) continue;
       for (const evt of evts) {
         const bucket = Math.floor(Date.parse(evt.timestamp) / 60_000);
-        if (Number.isFinite(bucket) && newest - bucket <= 10) buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+        if (Number.isFinite(bucket) && now - bucket <= 10) buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
       }
     }
     return buckets;
