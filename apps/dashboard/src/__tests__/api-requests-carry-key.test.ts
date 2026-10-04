@@ -6,15 +6,17 @@
  * an API key or on a SIWE session cookie. N103 (gateway's ruling #6597) honors that cookie only
  * beside the key the session was verified under, so a request sent without the key stops working
  * unless the gate lets its route through without auth. Requests made through authorizedFetch carry
- * the key. This lists every other request in the shipped code (src/ and the static pages in
- * public/) and how it gets past the gate:
+ * the key. This lists every other request in the shipped code (src/, index.html, and
+ * everything runnable under public/ at any depth) and how it gets past the gate:
  * - "public": the gate admits the route without auth; `gate` is the rule, checked against the gate;
  * - "outside": not an /api route, so the gate never sees it (static files, /sse/* streams, other sites);
  * - "keyed": the request carries a key itself (a page's own key field or a key it provisioned);
  * - "logout": sends the cookie by design, since it ends whatever session the cookie names;
- * - "unused": the code that would send it has no caller;
- * - "residual": reaches a gated route without a key. It passes today only on a SIWE cookie, and
- *   after N103 not at all. Each one says whose row it is.
+ * - "unused": the code that would send it never runs (no caller, or a mode the page never enters);
+ * - "host": an embedding host's own fetch channel, which authenticates the request itself;
+ * - "example": a code sample shown on a page, not a script;
+ * - "residual": reaches a gated route without a key. It passes today only on a SIWE cookie, if at
+ *   all, and after N103 not at all. Each one says whose row it is.
  *
  * A new request fails this test until it is classified. That is the point: a request to a gated
  * route that relies on the cookie should go through authorizedFetch instead. This is an inventory
@@ -29,7 +31,7 @@ import { describe, expect, it } from "vitest";
 const APP = resolve(__dirname, "../..");
 const GATE = readFileSync(resolve(APP, "../../packages/gateway/src/middleware/api-gate.ts"), "utf8");
 
-type Kind = "public" | "outside" | "keyed" | "logout" | "unused" | "residual";
+type Kind = "public" | "outside" | "keyed" | "logout" | "unused" | "host" | "example" | "residual";
 interface Entry {
   kind: Kind;
   why: string;
@@ -139,6 +141,48 @@ const INVENTORY: Record<string, Entry> = {
     kind: "residual",
     why: "gateway: /api/operators/:slug/status is behind the gate (only /ratings is public) and the page has no key",
   },
+
+  // ── public/, nested, and its scripts (astra n103c-586-r1 F2) ───────────────
+  "public/visualizer.js :: fetch(`${origin}/api/visualizer/events.json?limit=1`": {
+    kind: "residual",
+    why: "visualizer: its probe of /api/visualizer (gated) sends no credentials at all, so against a gated gateway it falls back to offline mode, today and after N103",
+  },
+  "public/visualizer.js :: EventSource(url": {
+    kind: "residual",
+    why: "visualizer: the live stream on /api/visualizer/events (gated), opened only after the probe above passes",
+  },
+  "public/visualizer.js :: fetch(url": { kind: "residual", why: "visualizer: the replay read of /api/visualizer/events.json, no credentials, as the probe" },
+  "public/visualizer.js :: fetch(\"/visualizer-test-fixtures.json\"": { kind: "outside", why: "a static file" },
+  "public/ui-kit/v1/pcc-ir-kit.js :: fetch(url": {
+    kind: "residual",
+    why: "ui-kit: the closed-IR kit reads its bindings with no credentials and no key, so a binding on a gated route (/api/jobs) fails, today and after N103",
+  },
+  "public/ui-kit/v1/pcc-ui.js :: fetch(url": {
+    kind: "keyed",
+    why: "the kit's transport (getJSON, send, streamSSE): the viewer's key, pinned to the API origin, credentials omitted, redirects refused",
+    count: 3,
+  },
+  "public/ui-kit/v1/pcc-ui.js :: fetch(safe": {
+    kind: "host",
+    why: "window.__PCC_HOST_BRIDGE__.fetch, an embedding host's channel (MCP Apps); the host authenticates it",
+  },
+  "public/ui-kit/v1/example-manifests/demo-snapshot.html :: fetch(this.base + path + this.qs(query)": {
+    kind: "unused",
+    why: "the page bakes in its snapshot, so detectMode always answers 'snapshot' and the live transport never runs. That transport is an older copy of pcc-ui.js's, without the origin pin (latent; reported to the ui-kit owner)",
+  },
+  "public/ui-kit/v1/example-manifests/demo-snapshot.html :: fetch(this.base + path": {
+    kind: "unused",
+    why: "as the demo snapshot's getJSON: send and streamSSE never run in snapshot mode",
+    count: 2,
+  },
+  "public/docs/index.html :: fetch(\"https://YOUR_DEPLOYMENT/api/agent/tools.json\"": {
+    kind: "example",
+    why: "inside a <pre><code> sample; the page has no script",
+  },
+  "public/docs/index.html :: fetch(\"https://YOUR_DEPLOYMENT/api/kernels\"": {
+    kind: "example",
+    why: "inside a <pre><code> sample; the page has no script",
+  },
 };
 
 // ── The scan ─────────────────────────────────────────────────────────────────
@@ -198,12 +242,16 @@ function sitesIn(files: Array<{ rel: string; src: string }>): Map<string, number
   return sites;
 }
 
-/** The shipped code this scans: src/ (tests excluded) and the static pages in public/. */
+/** Files under public/ a browser can run: scripts, and pages with their inline scripts. */
+const RUNNABLE = /\.(m?js|cjs|html?)$/;
+
+/** The shipped code this scans: src/ (tests excluded), index.html, and everything runnable under public/, at any depth. */
 function shippedSources(): Array<{ rel: string; src: string }> {
   const files = [
     ...shippedFiles(join(APP, "src")),
-    ...readdirSync(join(APP, "public"))
-      .filter((n) => n.endsWith(".html"))
+    join(APP, "index.html"),
+    ...(readdirSync(join(APP, "public"), { recursive: true }) as string[])
+      .filter((n) => RUNNABLE.test(n))
       .map((n) => join(APP, "public", n)),
   ];
   return files.map((file) => ({ rel: relative(APP, file), src: readFileSync(file, "utf8") }));
@@ -213,8 +261,12 @@ function requestSites(): Map<string, number> {
   return sitesIn(shippedSources());
 }
 
-/** Requests that reach a gated route without a key. This only shrinks: a new one goes through authorizedFetch. */
-const MAX_RESIDUALS = 12;
+/**
+ * Requests that reach a gated route without a key. This only shrinks: a new one goes through
+ * authorizedFetch. It was 12 until the scan covered public/'s scripts (astra n103c-586-r1 F2), which
+ * found 4 more that predate this test: the visualizer's three and the closed-IR kit's.
+ */
+const MAX_RESIDUALS = 16;
 
 // ── The checks ───────────────────────────────────────────────────────────────
 
@@ -223,6 +275,7 @@ describe("every request sent without the API key is accounted for (N103)", () =>
 
   it("scans everything the app ships that can run: every script and page under public/, and index.html (astra n103c-586-r1 F2)", () => {
     const scanned = new Set(shippedSources().map((f) => f.rel));
+    // Listed here on its own, not through shippedSources, so a narrower scan can't pass by agreeing with itself.
     const runnable = (readdirSync(join(APP, "public"), { recursive: true }) as string[])
       .filter((n) => /\.(m?js|cjs|html?)$/.test(n))
       .map((n) => join("public", n));
