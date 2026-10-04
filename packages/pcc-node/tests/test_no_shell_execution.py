@@ -67,8 +67,13 @@ computed argv and ``/usr/bin/env sh``). The rules:
    (``map(eval, ...)``). ``ProcessPoolExecutor`` and ``CGIHTTPRequestHandler``
    start processes, so they are refused by name, anywhere, as are ``click.edit``
    and ``click.launch``. ``click`` is never passed as a value. No package
-   module re-exports a tracked module to another (``from .helper import
-   platform``, where helper.py did ``import os as platform``).
+   module re-exports a tracked module, or a name bound from one, to another
+   (``from .helper import platform``, where helper.py did ``import os as
+   platform``; ``from .bridge import run``, where bridge.py did ``from
+   subprocess import run``). No module is star-imported, the package's own
+   included (``from .bridge import *``): a star import binds names, a tracked
+   module or a starter among them, that none of these rules can see (#563 r2).
+   ``executables_started()`` resolves calls exactly as ``violations()`` does.
 
 The guard reads syntax. It tracks names bound by imports, flow-insensitively,
 and it is not a sandbox: rules 1 and 3 stay the first barriers.
@@ -216,6 +221,11 @@ def _tracked(tree):
             source = "." * node.level + (node.module or "")
             for alias in node.names:
                 imported.setdefault(alias.asname or alias.name, set()).add(f"{source}:{alias.name}")
+                if alias.name == "*":
+                    # From any module, the package's own included: a star import binds names, a tracked
+                    # module or starter among them, that no rule here can see (#563 r2).
+                    refusals.append((node, f"from {source} import *: a star import binds names out of sight"))
+                    continue
                 if alias.name in REFUSED_ANYWHERE or (node.module == "click" and alias.name in CLICK_REFUSED):
                     refusals.append((node, f"from {source} import {alias.name} starts a process"))
                 if node.level == 0 and alias.name.startswith("_") and not alias.name.startswith("__"):
@@ -235,8 +245,7 @@ def _tracked(tree):
                 refusals.append((node, f"from {node.module} import ..."))
             for alias in node.names:
                 if alias.name == "*":
-                    refusals.append((node, f"from {node.module} import *"))
-                    continue
+                    continue  # refused above, from any module
                 local = alias.asname or alias.name
                 if len(parts) == 1:
                     names[local] = (node.module, alias.name)
@@ -738,6 +747,27 @@ EVASIONS = {
     "click.launch": "import click\nclick.launch(url)",
     "from click import launch": "from click import launch\nlaunch(url)",
     "click as a value": "import click\ntool = click\ntool.edit(text)",
+    # #563 r1 (HIGH): a tracked module reached through a dotted import or a from import.
+    "from asyncio.subprocess import create_subprocess_shell":
+        "from asyncio.subprocess import create_subprocess_shell\nasync def launch(payload):\n"
+        "    await create_subprocess_shell(payload)",
+    "from asyncio.subprocess import create_subprocess_exec":
+        "from asyncio.subprocess import create_subprocess_exec\ncreate_subprocess_exec(remote_exe)",
+    "import asyncio.subprocess": "import asyncio.subprocess\nasyncio.subprocess.create_subprocess_shell(x)",
+    "import asyncio.subprocess as asp": "import asyncio.subprocess as asp\nasp.create_subprocess_shell(x)",
+    "from asyncio import subprocess": "from asyncio import subprocess as asp\nasp.create_subprocess_shell(x)",
+    "from os.path import os": "from os.path import os\nos.system('id')",
+    "import importlib.util binds importlib": "import importlib.util\nimportlib.import_module(name)",
+    "from importlib import util": "from importlib import util\nutil.spec_from_file_location(n, p)",
+    "from subprocess import os": "from subprocess import os\nos.system('id')",
+    "from os import sys": "from os import sys\nsys.modules['os'].system('id')",
+    # #563 r2 (HIGH): a tracked module re-exported by an untracked one, and star imports from anywhere.
+    "from pathlib import os": "from pathlib import os as host_os\nhost_os.system('id')",
+    "from shutil import os": "from shutil import os\nos.system('id')",
+    "pathlib.os by attribute": "import pathlib\npathlib.os.system('id')",
+    "a star import of a tracked module": "from os import *\nsystem('id')",
+    "a star import of an untracked module": "from shutil import *\nos.system('id')",
+    "a star import of the package's own module": "from .bridge import *\nrun(remote_argv, shell=True)",
 }
 # Rule 8 at the package level: modules outside ALLOWED_IMPORTS, each caught by import_violations().
 IMPORT_EVASIONS = {
@@ -746,6 +776,10 @@ IMPORT_EVASIONS = {
     "import runpy": "import runpy\nrunpy._run_code(payload, {})",
     "import pickle": "import pickle\npickle._loads(blob)",
     "a submodule not listed": "import concurrent.futures.process",
+    # #563 r2 / steward #6229: modules outside the census that run code or start a shell.
+    "import importlib": "import importlib\nimportlib.import_module(name)",
+    "import pydoc": "import pydoc\npydoc.pipepager(text, payload)",
+    "from pdb import run": "from pdb import run\nrun(payload)",
 }
 SAFE = {
     "fixed argv": "import subprocess\nsubprocess.run(['v4l2-ctl', '--device', dev, '--all'], capture_output=True)",
@@ -780,6 +814,8 @@ SAFE = {
     "click's options and output": "import click\n\n@click.option('--x')\ndef f(x):\n    click.echo(x)",
     "click's parameter source": "import click\nif source == click.core.ParameterSource.COMMANDLINE:\n    pass",
     "a package-private helper": "from .crypto import _refuse_legacy\n_refuse_legacy(path)",
+    # #563: a starter's own from import stays usable, judged at the call.
+    "an imported starter with a fixed argv": "from subprocess import run\nrun(['arp', '-a'], capture_output=True)",
 }
 
 
@@ -811,6 +847,16 @@ def test_a_module_reexported_across_files_is_caught():
     # A name that is not a tracked module may be shared.
     assert reexport_violations({"pcc_node.helper": ("VERSION = '1'\n", False),
                                 "pcc_node.consumer": ("from .helper import VERSION\n", False)}) == []
+
+
+def test_a_starter_reexported_across_files_is_caught():
+    # #563 r2: bridge.py imports a starter by name; consumer.py takes it from bridge, by name or as an attribute.
+    bridge = ("from subprocess import run\n", False)
+    for consumer in ("from .bridge import run\nrun(remote_argv, shell=True)\n",
+                     "from pcc_node.bridge import run as go\ngo(remote_argv, shell=True)\n",
+                     "from . import bridge\nbridge.run(remote_argv, shell=True)\n"):
+        sources = {"pcc_node.bridge": bridge, "pcc_node.consumer": (consumer, False)}
+        assert reexport_violations(sources), consumer
 
 
 @pytest.mark.parametrize("label", sorted(SAFE))
