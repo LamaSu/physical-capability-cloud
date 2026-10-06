@@ -639,7 +639,7 @@ describe("assertMintablePackage — only the frozen D1 + D2 signer set is minted
       await expect(
         assertMintablePackage(MINTABLE, [D1, D2], REGISTRY, CHALLENGES, undefined),
       ).rejects.toThrow(
-        /D1 cannot be verified until the FinalMilestonePackageV2 EIP-712 struct is pinned/,
+        /no operator signature verifier is injected, so D1 cannot be verified and the guard fails closed/,
       );
     });
 
