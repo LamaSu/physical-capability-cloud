@@ -11,6 +11,10 @@ const REFUSAL = {
   reason: "relay_disabled",
   message: "The device relay is closed on this deployment.",
 };
+const NON_CANONICAL_REFUSAL = {
+  error: "bad_request",
+  message: "The request target is not in canonical form.",
+};
 
 // Load inside each unit test so the tests-first run also exercises the real
 // server when this new middleware module has not been implemented yet.
@@ -314,6 +318,16 @@ describe.each(["inject", "socket"] as const)("relay admin gate through createGat
   const expectPastGate = (response: Awaited<ReturnType<typeof request>>) => {
     expect(response.status === 403 && response.body.reason === "relay_disabled").toBe(false);
   };
+
+  it.each(["anonymous", "non-admin bearer"] as const)("F2 (astra n105m): a non-canonical relay target gets the request-target guard's 400 before the relay gate (%s)", async (caller) => {
+    const response = await request("GET", "/api/relay/kernel-a/tool-call/%70ending", caller === "anonymous" ? {} : bearer());
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual(NON_CANONICAL_REFUSAL);
+  });
+
+  it.each(["anonymous", "non-admin bearer"] as const)("F2 control: the canonical relay target still meets the relay gate's 403 (%s)", async (caller) => {
+    expectRefused(await request("GET", "/api/relay/kernel-a/tool-call/pending", caller === "anonymous" ? {} : bearer()));
+  });
 
   it.each(endpoints)("refuses a fully scoped non-admin key on %s %s", async (method, path) => {
     expectRefused(await request(method, path, bearer()));

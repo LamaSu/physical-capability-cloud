@@ -190,9 +190,6 @@ export async function createGateway(port = 3200) {
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
 
-  // First onRequest hook: a refused relay request runs no later request-stage hook, parser or handler.
-  // Response hooks (onSend, onResponse, the write audit) still run; see middleware/relay-admin-gate.ts.
-  app.addHook("onRequest", rejectRelayWithoutAdminKey);
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
     : "[relay] The device relay is admin-only.");
@@ -294,9 +291,15 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  // The request-target guard (N105) is the FIRST onRequest hook: before CORS, the rate limiter, apiGate,
-  // scopeChecker and every other decision, so the path they judge is the path the router routes.
+  // The request-target guard (N105) is the FIRST onRequest hook: before the relay admin gate, CORS,
+  // the rate limiter, apiGate, scopeChecker and every other decision, so the path they judge is
+  // the path the router routes.
   app.addHook("onRequest", rejectNonCanonicalTarget);
+  // SECOND onRequest hook, directly after the request-target guard: non-canonical relay targets get
+  // the guard's 400 before any authorization decision. A refused relay request runs no later
+  // request-stage hook, parser or handler. Response hooks (onSend, onResponse, the write audit)
+  // still run; see middleware/relay-admin-gate.ts.
+  app.addHook("onRequest", rejectRelayWithoutAdminKey);
 
   // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
   // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
