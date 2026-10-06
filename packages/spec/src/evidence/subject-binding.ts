@@ -45,6 +45,20 @@
  * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`. The
  * output is different. It is content, not authorization scope, so evidence
  * may commit an output the subject does not name.
+ *  10. time, only when the subject names a window: EVERY event's `timestamp`
+ *      is RFC 3339 with an explicit offset and lies within the window, give
+ *      or take `EVIDENCE_CLOCK_SKEW_SECONDS` (`checkEventTimes`,
+ *      delegation-rules.ts, whose time path also uses only intrinsics captured
+ *      at load). The consumer sets the window to the delegation's `issuedAt` ..
+ *      the earlier of its `expiresAt` and the verified receipt's `receivedAt`.
+ *
+ * ONE BUNDLE PER SETTLEMENT UNIT. /settle judges exactly the one kernel-signed
+ * bundle the committed package names: EvidenceBlockV2 commits one events root.
+ * A unit's evidence is therefore one bundle that holds every outcome-bearing
+ * event, terminal events and inspections alike. A completion and a failed
+ * inspection are then co-signed and cannot be separated by leaving a bundle out.
+ * Evidence spread over several bundles does not settle as a whole. A kernel-
+ * sealed multi-bundle set is a parked design item (N56, bus #3543).
  *
  * ONE READ, AND NO CALLER CODE RUNS (E11 F2, F3). Every input value is read
  * exactly once, before any check:
@@ -116,6 +130,7 @@
 import { createHash } from "node:crypto";
 import { canonicalize } from "../util/canonical.js";
 import { isProxy, plainDataCopy } from "../util/plain-data.js";
+import { checkEventTimes, type EventTimeWindow } from "./delegation-rules.js";
 import {
   ArrayIsArray,
   ArrayPrototype,
@@ -124,6 +139,7 @@ import {
   ObjectGetOwnPropertyDescriptor,
   ObjectGetPrototypeOf,
   ObjectPrototype,
+  NumberIsInteger,
   deepFreeze,
   defineIndex,
   hasOwn,
@@ -153,6 +169,9 @@ export interface EvidenceSubject {
   /** The gateway-issued challenge nonce for that unit: `0x` + 64 lowercase
    *  hex. Omitted, evidence that commits a nonce is refused. */
   challengeNonce?: string;
+  /** The window every event must fall in (Unix seconds): the delegation's
+   *  `issuedAt` .. min(`expiresAt`, the verified receipt's `receivedAt`). */
+  eventTimeWindow?: EventTimeWindow;
 }
 
 export type EvidenceSubjectBindingErrorCode =
@@ -173,6 +192,8 @@ export type EvidenceSubjectBindingErrorCode =
   | "challenge-not-committed"
   | "challenge-mismatch"
   | "challenge-not-in-subject"
+  | "event-time-malformed"
+  | "event-time-outside-window"
   | "unsupported-runtime";
 
 export type EvidenceSubjectBindingResult =
@@ -237,6 +258,13 @@ function isTaggedSha256(value: unknown): value is string {
     if (!((unit >= 0x30 && unit <= 0x39) || (unit >= 0x61 && unit <= 0x66))) return false;
   }
   return true;
+}
+
+const MAX_SAFE = 9007199254740991;
+
+/** A safe integer, judged with `Number.isInteger` captured at load. */
+function isSafeIntegerValue(value: unknown): value is number {
+  return typeof value === "number" && NumberIsInteger(value) && value >= -MAX_SAFE && value <= MAX_SAFE;
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -361,6 +389,20 @@ export async function verifyEvidenceSubjectBinding(
     ) {
       return refuse("malformed-subject");
     }
+    // The window, when named: one plain-data copy of it, its bounds safe integers in order.
+    let eventTimeWindow: EventTimeWindow | undefined;
+    const windowField = ownField(subject, "eventTimeWindow");
+    if (windowField === ACCESSOR) return refuse("malformed-subject");
+    if (windowField !== ABSENT && windowField.value !== undefined) {
+      const windowCopy = plainDataCopy(windowField.value);
+      if (!windowCopy.ok || !isRecord(windowCopy.value)) return refuse("malformed-subject");
+      const notBefore = windowCopy.value.notBefore;
+      const notAfter = windowCopy.value.notAfter;
+      if (!isSafeIntegerValue(notBefore) || !isSafeIntegerValue(notAfter) || notBefore > notAfter) {
+        return refuse("malformed-subject");
+      }
+      eventTimeWindow = windowCopy.value as unknown as EventTimeWindow;
+    }
 
     // ── 2. The digest.
     reading = "malformed-bundle-hash";
@@ -470,6 +512,15 @@ export async function verifyEvidenceSubjectBinding(
       snapshots, "challengeNonce", challengeNonce, "challenge-not-committed", "challenge-mismatch", "challenge-not-in-subject",
     );
     if (challenge !== null) return challenge;
+
+    // ── 10. Time, only when the subject names a window, read from the verified copies.
+    if (eventTimeWindow !== undefined) {
+      const timed = checkEventTimes(snapshots, eventTimeWindow);
+      if (!timed.ok) {
+        const reason = timed.reason === "event-time-malformed" ? "event-time-malformed" : "event-time-outside-window";
+        return refuse(reason, hasOwn(timed, "eventIndex") ? timed.eventIndex : undefined);
+      }
+    }
 
     deepFreeze(snapshots);
     const verified = ObjectCreate(null) as { ok: true; events: EvidenceEvent[] };
