@@ -27,7 +27,10 @@
  *     time), read back through getRecentTraces and getTrace, GET /api/traces, /api/traces/:traceId
  *     and the stream's snapshot (N107b round 5).
  * The assertion, for each entry point: neither the marker string nor the marker number appears
- * anywhere in any output, and every input produced output (no sink passes by writing nothing).
+ * anywhere in any output, and every input produced output (no sink passes by writing nothing)
+ * unless the sink documents that refusal. N107c (tests pack): the oracle renders every type a
+ * marker can hide in, every generated kind's marker must be visible to it, and a trace read
+ * counts only when it shows the attempt's own witness.
  * Positive controls show that declared values and the server's own values stay readable.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
@@ -70,22 +73,93 @@ function markerIn(text: string): string[] {
   return out;
 }
 
-/** Any output as text, with nothing hidden: a bigint, symbol, function, Map or Set shows itself. */
+/**
+ * Any output as text, with nothing hidden (N107c, tests pack: a marker the oracle cannot see is no
+ * witness). Beyond what JSON shows: a bigint's digits, a symbol's description, a function's name,
+ * a Map's and a Set's entries, a Date's milliseconds, seconds and ISO time, a RegExp's source, a
+ * Buffer's text and a typed array's numbers, a URL's href, a boxed primitive's value, an error's
+ * name, message and stack, and for every object its non-enumerable and symbol-keyed own
+ * properties, its getters' values, its class's name and what its own toString, valueOf and toJSON
+ * return.
+ */
 function render(value: unknown): string {
   try {
-    return (
-      JSON.stringify(value, (_key, item: unknown) => {
-        if (typeof item === "bigint") return item.toString();
-        if (typeof item === "symbol") return String(item);
-        if (typeof item === "function") return `[function ${item.name}]`;
-        if (item instanceof Map) return { map: [...item.entries()] };
-        if (item instanceof Set) return { set: [...item.values()] };
-        return item;
-      }) ?? "<nothing>"
-    );
+    return JSON.stringify(expose(value, 0, new WeakSet<object>())) ?? "<nothing>";
   } catch (error) {
     return `<unrenderable ${String(error)}>`;
   }
+}
+
+const BUILTIN_CLASSES: ReadonlySet<string> = new Set(["Object", "Array"]);
+
+/** A value as plain JSON data that carries everything in it (see render). */
+function expose(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+  switch (typeof value) {
+    case "bigint":
+      return value.toString();
+    case "symbol":
+      return String(value);
+    case "function":
+      return `[function ${value.name}]`;
+    case "undefined":
+    case "string":
+    case "number":
+    case "boolean":
+      return value;
+  }
+  if (value === null) return null;
+  const object = value as object;
+  if (seen.has(object)) return "<seen>";
+  if (depth > 24) return "<deep>";
+  seen.add(object);
+  const out: Record<string, unknown> = {};
+  const add = (key: string, read: () => unknown) => {
+    try {
+      out[key] = expose(read(), depth + 1, seen);
+    } catch (error) {
+      out[key] = `<threw ${String(error)}>`;
+    }
+  };
+  if (object instanceof Date) {
+    add("<date ms>", () => object.getTime());
+    add("<date s>", () => object.getTime() / 1000);
+    add("<date iso>", () => (Number.isNaN(object.getTime()) ? "Invalid Date" : object.toISOString()));
+  }
+  if (object instanceof RegExp) add("<regexp>", () => `/${object.source}/${object.flags}`);
+  if (Buffer.isBuffer(object)) add("<buffer>", () => object.toString("utf8"));
+  if (ArrayBuffer.isView(object) && "length" in object) add("<items>", () => Array.from(object as unknown as ArrayLike<unknown>));
+  if (object instanceof URL) add("<url>", () => object.href);
+  if (object instanceof Map) add("<map>", () => [...object.entries()]);
+  if (object instanceof Set) add("<set>", () => [...object.values()]);
+  if (object instanceof String || object instanceof Number || object instanceof Boolean) add("<boxed>", () => object.valueOf());
+  if (object instanceof Error) {
+    add("<error name>", () => object.name);
+    add("<error message>", () => object.message);
+    add("<error stack>", () => object.stack);
+  }
+  add("<class>", () => {
+    const name = (Object.getPrototypeOf(object) as { constructor?: { name?: unknown } } | null)?.constructor?.name;
+    return typeof name === "string" && !BUILTIN_CLASSES.has(name) ? name : undefined;
+  });
+  for (const method of ["toString", "valueOf", "toJSON"]) {
+    const own = Object.getOwnPropertyDescriptor(object, method);
+    if (own && "value" in own && typeof own.value === "function") add(`<${method}()>`, () => (own.value as () => unknown).call(object));
+  }
+  const keys = Reflect.ownKeys(object).filter((key) => !(Array.isArray(object) && key === "length"));
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
+    if (!descriptor) continue;
+    const label = typeof key === "symbol" ? `[${String(key)}]` : key;
+    if ("value" in descriptor) add(label, () => descriptor.value);
+    else if (descriptor.get) add(label, () => descriptor.get!.call(object));
+  }
+  if (out["<class>"] === undefined) delete out["<class>"];
+  if (Array.isArray(object)) {
+    const items = Array.from({ length: object.length }, (_, i) => out[String(i)] ?? null);
+    const extra = Object.keys(out).filter((key) => !/^\d+$/.test(key));
+    return extra.length === 0 ? items : { "<array>": items, ...Object.fromEntries(extra.map((key) => [key, out[key]])) };
+  }
+  return out;
 }
 
 // ── The generator ─────────────────────────────────────────────────────────
@@ -296,16 +370,30 @@ const SDK_TIME_PATHS = [
 ];
 const SDK_TIME_POSITION = new RegExp(`^(${SDK_TIME_PATHS.map((path) => path.replace(/\./g, "\\.")).join("|")}) = `);
 
+/** An output that carries nothing: no output, an empty text, or render(undefined). */
+const isNoOutput = (text: string | undefined) => text === undefined || text.trim() === "" || text === "<nothing>";
+
 /**
  * The positions that leaked (or produced no output), summarized. Empty when the property holds.
- * With N107B_PROPERTY_DUMP set to a file path, every violation is appended to that file too.
+ * An attempt that produced no output is a violation (N107c: a sink must not pass by writing
+ * nothing) unless the sink documents that refusal, by its exact label with a reason, in
+ * `refusals`; a documented refusal that does produce output is a violation too, so the list stays
+ * exact. With N107B_PROPERTY_DUMP set to a file path, every violation is appended to that file too.
  */
-function violations(sink: string, results: Result[]): string {
+function violations(sink: string, results: Result[], refusals: ReadonlyMap<string, string> = new Map()): string {
+  const refused = new Set<string>();
   const bad = results.flatMap((r) => {
-    if (r.text === undefined) return [`${r.label}: NO OUTPUT`];
-    const found = markerIn(r.text);
+    if (isNoOutput(r.text)) {
+      if (refusals.has(r.label)) {
+        refused.add(r.label);
+        return [];
+      }
+      return [`${r.label}: NO OUTPUT`];
+    }
+    const found = markerIn(r.text!);
     return found.length > 0 ? [`${r.label}: ${found.join("+")}`] : [];
   });
+  for (const label of refusals.keys()) if (!refused.has(label)) bad.push(`${label}: a documented refusal that was not observed`);
   const dump = process.env.N107B_PROPERTY_DUMP;
   if (dump) appendFileSync(dump, `## ${sink}: ${bad.length} of ${results.length} position(s)\n${bad.map((line) => `  ${line}\n`).join("")}`);
   if (bad.length === 0) return "";
@@ -384,7 +472,16 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       closed(`closedMessage(${kind})`, () => schema.closedMessage(make()));
       closed(`closedMessage(lit, ${kind})`, () => schema.closedMessage(schema.lit("m %s %d %j %o"), make(), make(), make(), make()));
     }
-    expect(violations("closeValue and closedError", results), "positions that left the closed rules").toBe("");
+    // closeValue leaves out a value no sink keeps as data (closeField): its caller then leaves the
+    // field out. These top-level calls are the documented refusals; every other position writes.
+    const refusals = new Map([
+      ["closeValue(bigint)", "a bigint has no JSON form: closeField leaves it out"],
+      ["closeValue(symbol)", "a symbol has no JSON form: closeField leaves it out"],
+      ["closeValue(namedFunction)", "a function is not data: closeField leaves it out"],
+      ["closeValue(buffer)", "bytes are not data a sink keeps: closeField leaves them out"],
+      ["closeValue(typedArray)", "bytes are not data a sink keeps: closeField leaves them out"],
+    ]);
+    expect(violations("closeValue and closedError", results, refusals), "positions that left the closed rules").toBe("");
   });
 
   it("the real pino logger under gatewayLoggerOptions: fields, messages, errors, child bindings, own serializers, forged and real requests", async () => {
@@ -454,8 +551,9 @@ describe("N107b round 4, the property: a marker in every position of every sink 
     // Child bindings: the logger's own names, Fastify's, and any other; a grandchild; message-less lines.
     // Left out: a binding KEY named like an Object.prototype member (__proto__, constructor). pino
     // looks a binding's key up in a plain serializers object, so it runs that member as a serializer
-    // (for __proto__ it throws) while making the child, before any chokepoint; nothing is written, so
-    // nothing leaks, and no gateway code makes a child logger (Fastify's own binds only reqId).
+    // (for __proto__ it throws) while making the child, before any chokepoint. Each such key's real
+    // behavior is pinned in "the pino prototype-name exclusion is pinned" below, and the logger
+    // ratchet refuses such a binding key in gateway code (no gateway code makes a child logger).
     for (const { label, value } of namedFields(ALL_KINDS, SPECIAL_NAMES.filter((name) => !PROTOTYPE_NAMES.has(name)))) {
       log(`child binding ${label}`, () => logger.child(value as object).info!(schema.lit("child")));
       log(`child binding, no message ${label}`, () => logger.child(value as object).info!({ k: schema.declare.metric(1) }));
@@ -564,12 +662,26 @@ describe("N107b round 4, the property: a marker in every position of every sink 
     for (const { label, value } of positionsOf(breadcrumb, ALL_KINDS)) send(`breadcrumb ${label}`, () => sinks.closedBreadcrumb(value as object));
     // The one declared-by-construction source (C11): a transaction's and a span's start, end and
     // exclusive times leave as the Sentry SDK took them, because no producer can supply them: no
-    // gateway code passes a time to a Sentry or OpenTelemetry span API (sentry-timing-ratchet.test.ts).
-    // Fed a marker directly, they keep a number and nothing else; every other position keeps nothing.
+    // gateway code passes a time to a Sentry or OpenTelemetry span API (sentry-timing-ratchet.test.ts,
+    // closed against computed keys, element access, aliases and functions passed as values in N107c).
+    // Fed a marker directly, an SDK time keeps a finite number and nothing else: the four number
+    // kinds keep the numeric marker (by construction), and no other kind leaves any marker (a numeric
+    // string, a Date, a bigint, a boxed number: no number of the marker's).
+    const NUMBER_KINDS: ReadonlySet<string> = new Set(["number", "fraction", "float", "negative"]);
     const sdkTimes = results.filter((r) => SDK_TIME_POSITION.test(r.label));
     const leaked = violations("Sentry", results.filter((r) => !SDK_TIME_POSITION.test(r.label)));
     expect(new Set(sdkTimes.map((r) => r.label.replace(/ = .*$/, ""))), "the SDK-time positions").toEqual(new Set(SDK_TIME_PATHS));
-    expect(sdkTimes.filter((r) => r.text === undefined || markerIn(r.text).includes("string")).map((r) => r.label), "an SDK time keeps only a number").toEqual([]);
+    const sdkTimeKind = (r: Result) => r.label.replace(/^.* = /, "");
+    const sdkTimeLeaks = sdkTimes.flatMap((r) => {
+      if (isNoOutput(r.text)) return [`${r.label}: NO OUTPUT`];
+      const kept = markerIn(r.text!).filter((found) => !(found === "number" && NUMBER_KINDS.has(sdkTimeKind(r))));
+      return kept.length > 0 ? [`${r.label}: ${kept.join("+")}`] : [];
+    });
+    expect(sdkTimeLeaks, "an SDK time keeps a finite number and nothing else").toEqual([]);
+    expect(
+      sdkTimes.filter((r) => NUMBER_KINDS.has(sdkTimeKind(r)) && !markerIn(r.text ?? "").includes("number")).map((r) => r.label),
+      "the exclusion is exactly that: a finite number stays",
+    ).toEqual([]);
     expect(leaked, "positions that reached Sentry").toBe("");
   });
 
@@ -670,7 +782,8 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       const before = write.getRecent(1_000_000).length;
       const res = await app.inject({ method: "POST", url: "/api/telemetry/emit", payload: value as Record<string, unknown> });
       if (res.statusCode !== 200) {
-        results.push({ label: `emit ${label} (rejected ${res.statusCode}: nothing written)`, text: write.getRecent(1_000_000).length === before ? "" : undefined });
+        // A rejected body writes nothing: no output, so a violation unless documented (none is).
+        results.push({ label: `emit ${label} (rejected ${res.statusCode})`, text: undefined });
         continue;
       }
       const logs = await app.inject({ method: "GET", url: "/api/telemetry/logs?limit=1" });
@@ -745,7 +858,9 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       endTrace(traceId: unknown, spanId: unknown, status: unknown, endTime?: unknown): void;
     };
     const results: Result[] = [];
-    let pending: string[] = [];
+    /** Attempts whose record lies outside the stream's window, so the stream cannot show it (see readBack). */
+    const outsideStreamWindow: string[] = [];
+    let streamProven = 0;
 
     /** The stream's snapshot (the most recent traces), as its handler writes it before it holds the connection open. */
     const streamSnapshot = async () => {
@@ -761,25 +876,32 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       raw.emit("close");
       return written.join("");
     };
-    const flushStream = async () => {
-      if (pending.length === 0) return;
-      const text = await streamSnapshot();
-      const label = `the stream snapshot of: ${pending.join(" | ")}`;
-      results.push({ label, text });
-      if (!text.includes("event: connected")) results.push({ label: `${label} (the stream did not complete)`, text: undefined });
-      pending = [];
-    };
+    // N107c (tests pack): each attempt carries its own declared witness, and a read counts only when
+    // every read path shows it, so the record a read returns is this attempt's, never an earlier
+    // trace: an attempt that stored nothing reads as no output.
+    // N107c r1 (astra MEDIUM 2): the stream is one of those read paths. It used to be read once per
+    // 20 attempts and pass on its "event: connected" line alone, so a snapshot that dropped every
+    // trace still passed. Each attempt now reads it, and the stream must show the attempt's witness
+    // whenever the record lies in the stream's window (the STREAM_WINDOW most recent traces).
+    const ATTEMPT = "n107b.attempt";
+    /** routes/traces.ts sends the 20 most recent traces on connect (a smaller window there fails here, never passes). */
+    const STREAM_WINDOW = 20;
+    let attempt = 1_000_000;
+    const witnessed = (attributes: unknown, n: number): unknown =>
+      isContainer(attributes) && !Array.isArray(attributes) ? { ...attributes, [ATTEMPT]: schema.declare.metric(n) } : attributes;
     /** Reads the newest traces back through every read path (all 50 when a variant poisons the trace id itself). */
-    const readBack = async (label: string, all = false) => {
+    const readBack = async (label: string, n: number, all = false) => {
       const limit = all ? 50 : 1;
-      const texts: string[] = [];
+      const paths: Array<[string, string[]]> = [];
       try {
         const recent = collector.getRecentTraces(limit);
         if (recent.length === 0) {
           results.push({ label, text: undefined });
           return;
         }
-        texts.push(render(recent), (await app.inject({ method: "GET", url: `/api/traces?limit=${limit}` })).body);
+        paths.push(["getRecentTraces", [render(recent)]], ["GET /api/traces", [(await app.inject({ method: "GET", url: `/api/traces?limit=${limit}` })).body]]);
+        const byId: string[] = [];
+        const byRoute: string[] = [];
         for (const trace of recent) {
           let id: string;
           try {
@@ -787,16 +909,43 @@ describe("N107b round 4, the property: a marker in every position of every sink 
           } catch {
             id = "unprintable";
           }
-          texts.push(render(collector.getTrace(id)), (await app.inject({ method: "GET", url: `/api/traces/${encodeURIComponent(id)}` })).body);
+          byId.push(render(collector.getTrace(id)));
+          byRoute.push((await app.inject({ method: "GET", url: `/api/traces/${encodeURIComponent(id)}` })).body);
         }
+        paths.push(["getTrace", byId], ["GET /api/traces/:traceId", byRoute]);
       } catch (error) {
         // A read that throws (the collector cannot even list its traces) is a sink that broke.
         results.push({ label: `${label} (a read threw ${String(error)})`, text: undefined });
         return;
       }
-      results.push({ label, text: texts.join("\n") });
-      pending.push(label);
-      if (pending.length >= 20) await flushStream();
+      const witness = `"${ATTEMPT}":${n}`;
+      const unproven = paths.filter(([, texts]) => !texts.some((text) => text.includes(witness))).map(([path]) => path);
+      if (unproven.length > 0) {
+        results.push({ label: `${label} (no ${unproven.join(", ")} read shows this attempt's record)`, text: undefined });
+        return;
+      }
+      const stream = await streamSnapshot();
+      if (!stream.includes("event: connected")) {
+        results.push({ label: `${label} (the stream did not complete)`, text: undefined });
+        return;
+      }
+      // A record filed under a trace that is no longer among the most recent (a poisoned trace id
+      // the collector closes to an existing trace) is outside the stream's window by design.
+      let inStreamWindow: boolean;
+      try {
+        inStreamWindow = render(collector.getRecentTraces(STREAM_WINDOW)).includes(witness);
+      } catch (error) {
+        results.push({ label: `${label} (a read threw ${String(error)})`, text: undefined });
+        return;
+      }
+      if (inStreamWindow && !stream.includes(witness)) {
+        results.push({ label: `${label} (the stream snapshot does not show this attempt's record)`, text: undefined });
+        return;
+      }
+      if (inStreamWindow) streamProven += 1;
+      else outsideStreamWindow.push(label);
+      // The whole snapshot, whatever its window holds, is checked for markers too.
+      results.push({ label, text: [...paths.flatMap(([, texts]) => texts), stream].join("\n") });
     };
     const base = () => ({
       traceId: TraceCollector.newTraceId(),
@@ -807,14 +956,15 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       attributes: { count: schema.declare.metric(1) },
     });
     const span = async (label: string, opts: Record<string, unknown>, end: Record<string, unknown> = {}, all = false) => {
+      const n = ++attempt;
       try {
-        collector.startSpan(opts);
+        collector.startSpan({ ...opts, attributes: witnessed(opts.attributes, n) });
         collector.endSpan({ traceId: opts.traceId, spanId: opts.spanId, status: "ok", ...end });
       } catch (error) {
         results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
         return;
       }
-      await readBack(label, all);
+      await readBack(label, n, all);
     };
     // Every field a span stores: its ids, its parent's id, its operation, description and service.
     for (const field of ["traceId", "spanId", "parentSpanId", "operation", "description", "service"]) {
@@ -831,35 +981,53 @@ describe("N107b round 4, the property: a marker in every position of every sink 
       await span(`endSpan endTime = ${kind}`, base(), { endTime: make() });
     }
     // The producers' helpers (tracing.ts).
-    const viaStartTrace = async (label: string, start: () => { traceId: string; spanId: string }, status: unknown = "ok", endTime?: unknown) => {
+    const viaStartTrace = async (label: string, start: (attributes: unknown) => { traceId: string; spanId: string }, status: unknown = "ok", endTime?: unknown) => {
+      const n = ++attempt;
       try {
-        const { traceId, spanId } = start();
+        const { traceId, spanId } = start(witnessed({}, n));
         helpers.endTrace(traceId, spanId, status, endTime);
       } catch (error) {
         results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
         return;
       }
-      await readBack(label);
+      await readBack(label, n);
     };
     for (const [kind, make] of Object.entries(ALL_KINDS)) {
-      await viaStartTrace(`startTrace operation = ${kind}`, () => helpers.startTrace(make(), schema.lit("n107b")));
-      await viaStartTrace(`startTrace service = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), make()));
-      await viaStartTrace(`startTrace attributes = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b"), { [MARK]: make(), a: make() }));
-      await viaStartTrace(`endTrace status = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b")), make());
-      await viaStartTrace(`endTrace endTime = ${kind}`, () => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b")), "ok", make());
+      await viaStartTrace(`startTrace operation = ${kind}`, (attributes) => helpers.startTrace(make(), schema.lit("n107b"), attributes));
+      await viaStartTrace(`startTrace service = ${kind}`, (attributes) => helpers.startTrace(schema.lit("n107b.op"), make(), attributes));
+      await viaStartTrace(`startTrace attributes = ${kind}`, (attributes) =>
+        helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b"), { ...(attributes as object), [MARK]: make(), a: make() }));
+      await viaStartTrace(`endTrace status = ${kind}`, (attributes) => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b"), attributes), make());
+      await viaStartTrace(`endTrace endTime = ${kind}`, (attributes) => helpers.startTrace(schema.lit("n107b.op"), schema.lit("n107b"), attributes), "ok", make());
       for (const field of ["traceId", "parentSpanId", "operation", "service", "description", "attributes"]) {
         const label = `withSpanSync ${field} = ${kind}`;
+        const n = ++attempt;
         try {
-          const opts = { traceId: TraceCollector.newTraceId(), operation: schema.lit("n107b.op"), service: schema.lit("n107b"), [field]: field === "attributes" ? { [MARK]: make() } : make() };
+          const opts = {
+            traceId: TraceCollector.newTraceId(),
+            operation: schema.lit("n107b.op"),
+            service: schema.lit("n107b"),
+            attributes: witnessed({}, n),
+            [field]: field === "attributes" ? witnessed({ [MARK]: make() }, n) : make(),
+          };
           helpers.withSpanSync(opts, () => 1);
         } catch (error) {
           results.push({ label: `${label} (threw ${String(error)})`, text: undefined });
           continue;
         }
-        await readBack(label, field === "traceId");
+        await readBack(label, n, field === "traceId");
       }
     }
-    await flushStream();
+    // A read must prove that the attempted span made the record it returns: an attempt that
+    // started no span reads as no output, never as an earlier trace.
+    const before = results.length;
+    await readBack("a dropped startSpan (no span started)", ++attempt);
+    expect(results.splice(before).map((r) => r.text), "a dropped attempt's read").toEqual([undefined]);
+    // The stream proved nearly every attempt. Only an attempt that poisons the trace id itself may
+    // land outside its window, and each one that did is named here.
+    console.log(`stream snapshot: ${streamProven} attempts proven, ${outsideStreamWindow.length} outside its window`);
+    expect(outsideStreamWindow.filter((label) => !/traceId = /.test(label)), "attempts outside the stream's window").toEqual([]);
+    expect(streamProven, "attempts the stream snapshot proved").toBeGreaterThan(10 * Math.max(1, outsideStreamWindow.length));
     expect(violations("the trace collector", results), "positions that reached the trace collector").toBe("");
     await app.close();
   });
@@ -1177,6 +1345,70 @@ describe("#538 r3: a stored record stays as its chokepoint closed it, whatever a
     const text = render([traceCollector.getTrace(traceId), traceCollector.getRecentTraces(5)]) + body + seen.join("\n");
     expect(text).toContain("n107b.immutability");
     expect(markerIn(text), "a marker a reader wrote into what it read").toEqual([]);
+    await app.close();
+  });
+});
+
+// ── N107c (tests pack): the oracle itself ──────────────────────────────────
+
+describe("N107c: the property test's oracle", () => {
+  it("a dropped or empty output is a violation (unless the sink documents the refusal)", () => {
+    expect(violations("oracle probe", [{ label: "dropped", text: render(undefined) }]), "render(undefined)").not.toBe("");
+    expect(violations("oracle probe", [{ label: "empty", text: "" }]), "an empty text").not.toBe("");
+    expect(violations("oracle probe", [{ label: "no output", text: undefined }]), "no output").not.toBe("");
+    const documented = new Map([["refused", "a documented refusal"]]);
+    expect(violations("oracle probe", [{ label: "refused", text: undefined }], documented), "a documented refusal").toBe("");
+    expect(violations("oracle probe", [{ label: "refused", text: "{}" }], documented), "a documented refusal that wrote output").not.toBe("");
+    expect(violations("oracle probe", [{ label: "other", text: undefined }], documented), "an undocumented one").not.toBe("");
+  });
+
+  it("every generated kind's marker is visible in render(make()) before it counts as a witness", () => {
+    // A boolean and null carry no marker at all: they are positions for a sink's type handling.
+    const noMarker = new Set(["boolean", "null"]);
+    const kinds: Array<[string, Make]> = [...Object.entries(ALL_KINDS), ...Object.entries(JSON_KINDS).map(([kind, make]): [string, Make] => [`json ${kind}`, make])];
+    const invisible = kinds.filter(([kind]) => !noMarker.has(kind)).filter(([, make]) => markerIn(render(make())).length === 0).map(([kind]) => kind);
+    expect(invisible, "kinds whose marker the oracle cannot see").toEqual([]);
+  });
+
+  it("the pino prototype-name exclusion is pinned: each omitted binding key closes its value or throws a TypeError, never leaks", async () => {
+    const { lines, stream } = capture();
+    const app = closedApp(stream);
+    await app.ready();
+    const leaks: string[] = [];
+    const threw = new Map<string, string[]>();
+    for (const key of PROTOTYPE_NAMES) {
+      for (const [kind, make] of Object.entries(ALL_KINDS)) {
+        const before = lines.length;
+        try {
+          (app.log as unknown as { child(b: object): { info(m: unknown): void } }).child(Object.fromEntries([[key, make()]])).info(schema.lit("prototype key probe"));
+        } catch (error) {
+          if (!(error instanceof TypeError)) leaks.push(`${key} = ${kind}: threw ${String(error)}`);
+          threw.set(key, [...(threw.get(key) ?? []), kind]);
+          continue;
+        }
+        const text = lines.slice(before).join("");
+        if (lines.length === before) leaks.push(`${key} = ${kind}: NO OUTPUT`);
+        else if (markerIn(text).length > 0) leaks.push(`${key} = ${kind}: ${markerIn(text).join("+")}`);
+      }
+    }
+    expect(leaks, "an omitted key that leaked or wrote nothing").toEqual([]);
+    // pino looks a binding key up in a plain serializers object, so a key named like an
+    // Object.prototype member runs that member as the binding's serializer while it makes the child.
+    // Pinned as observed (pino 9.14): nine members throw a TypeError for every value, constructor
+    // (Object(value)) throws for a value it cannot stringify, and isPrototypeOf and toString return
+    // a value the line pass closes. Nothing leaks either way.
+    expect(Object.fromEntries([...threw.entries()].map(([key, kinds]) => [key, kinds.length === Object.keys(ALL_KINDS).length ? "every kind" : kinds.sort()]))).toEqual({
+      ["__proto__"]: "every kind",
+      __defineGetter__: "every kind",
+      __defineSetter__: "every kind",
+      __lookupGetter__: "every kind",
+      __lookupSetter__: "every kind",
+      hasOwnProperty: "every kind",
+      propertyIsEnumerable: "every kind",
+      toLocaleString: "every kind",
+      valueOf: "every kind",
+      constructor: ["nullPrototype", "symbol"],
+    });
     await app.close();
   });
 });
