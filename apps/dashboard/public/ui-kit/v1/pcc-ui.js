@@ -557,6 +557,8 @@
     COMPLETED:  ['st-waiting',  'completed - settlement not confirmed'],
     DISPUTED:   ['st-failed',   'disputed'],
     REFUNDED:   ['st-refunded', 'payer refunded - operator NOT paid'],
+    // Both vocabularies (N79): a chain escrow's refund is decided, but nothing has been refunded on-chain yet.
+    REFUND_PENDING: ['st-waiting', 'refund decided - payer not yet refunded'],
     // EscrowStatus (spec types/common.ts)
     UNFUNDED:  ['st-waiting',  'unfunded'],
     LOCKED:    ['st-running',  'funds locked - step in progress'],

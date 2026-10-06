@@ -97,6 +97,9 @@ const FLAT = {
   COMPLETED: entry("waiting", "completed - settlement not confirmed"),
   DISPUTED: entry("failed", "disputed"),
   REFUNDED: entry("refunded", "payer refunded - operator NOT paid"),
+  // In both vocabularies (N79): a chain escrow's refund is decided (ESCROW_REFUND_STATUS.PENDING), but nothing has
+  // been refunded on-chain yet. Not final, so not `refunded`; the same reading as V-next REFUND_ALLOCATED.
+  REFUND_PENDING: entry("waiting", "refund decided - payer not yet refunded"),
 
   // `EscrowStatus` (spec types/common.ts). Labels follow the type's own comments.
   UNFUNDED: entry("waiting", "unfunded"),
@@ -366,11 +369,11 @@ export function reportedText(raw: unknown, verified: boolean, money: boolean): s
 // the runtime coverage test (the dashboard DTO and context-pack vocabularies are listed there).
 const ESCROW_STATUS_COVERAGE: { readonly [K in EscrowStatus as Uppercase<K>]: true } = {
   UNFUNDED: true, FUNDED: true, LOCKED: true, RELEASING: true,
-  RELEASED: true, DISPUTED: true, REFUNDED: true, SLASHED: true,
+  RELEASED: true, DISPUTED: true, REFUNDED: true, REFUND_PENDING: true, SLASHED: true,
 };
 const ESCROW_RECORD_STATUS_COVERAGE: { readonly [K in Escrow["status"] as Uppercase<K>]: true } = {
   CREATED: true, FUNDED: true, ACTIVE: true, COMPLETING: true,
-  COMPLETED: true, DISPUTED: true, REFUNDED: true,
+  COMPLETED: true, DISPUTED: true, REFUNDED: true, REFUND_PENDING: true,
 };
 
 /** Every documented spec money status, normalized. Used by the coverage tests. */

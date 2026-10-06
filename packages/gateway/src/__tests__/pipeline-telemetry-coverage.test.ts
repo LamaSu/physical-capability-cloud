@@ -62,7 +62,16 @@ vi.mock("../db.js", () => ({
     jobs: {
       updateStatus: vi.fn(),
       update: vi.fn(),
-      findById: vi.fn().mockReturnValue(null),
+      // N79 round 6 (P2, bind-first): processEvidence now loads the authoritative job FIRST and requires its
+      // jobId/stepId/kernelId/assuranceTier to match the bundle's own (makeBundle() below). This stub returned
+      // null unconditionally; give it the SAME job makeBundle() already assumes. Fixture only — no assertion
+      // in this file changed.
+      findById: vi.fn().mockReturnValue({
+        id: "job-telemetry-001",
+        stepId: "step-1",
+        kernelId: "kernel-test",
+        assuranceTier: 0,
+      }),
     },
     evidence: {
       insert: vi.fn(),
@@ -82,6 +91,22 @@ vi.mock("../db.js", () => ({
   }),
   initStore: vi.fn(),
   closeStore: vi.fn(),
+  // N79 round 6 (P3, atomic evidence): processEvidence now writes the header + events inside
+  // `getStore().db.transaction(...)`. This mock had no `getStore` at all (every test still passed — nothing
+  // here asserts on the Step 2 DB-persist outcome — but it silently logged "DB persistence failed: no getStore
+  // export" on every run). A minimal synchronous stub, not a behavior change: the callback just runs inline.
+  // N79 round 7 (P2, lead review): bind-first's escrow-target resolution now calls `escrowForJob(jobId)`
+  // unconditionally, which queries `getStore().db.select(...).from(...).where(...).get()` — this stub had no
+  // `.select` at all, so that call threw, caught by the OUTER catch (`evidence_job_unverifiable`), short-
+  // circuiting Step 1 before it ever ran. Minimal chainable stub: no session row, so `escrowForJob` returns
+  // undefined cleanly — the same "no escrow" outcome a real empty store would give this job. Fixture only; no
+  // assertion in this file changed.
+  getStore: vi.fn().mockReturnValue({
+    db: {
+      transaction: (fn: () => unknown) => fn(),
+      select: () => ({ from: () => ({ where: () => ({ get: () => undefined, all: () => [] }) }) }),
+    },
+  }),
 }));
 
 vi.mock("@pcc/kernel/evidence-storage-factory", () => ({

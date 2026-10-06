@@ -16,9 +16,22 @@ import { OctoPrintAdapter, OPCUAAdapter, OpentronsMachineAdapter, SiLAAdapter } 
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
+import { escrowForJob, resolveRowlessDefaultTarget, setJobStatusWithRefund } from "./escrow-refund.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+
+/**
+ * The escrow a local-kernel auto-release targets: THIS job's own escrow when it has one, else the configured
+ * rowless default (N79 round 4, H1; round 8 P2, astra 126i MEDIUM-1: the rowless default is resolved through
+ * {@link resolveRowlessDefaultTarget}, not read directly — an address alone does not say which ABI answers at
+ * it, so a job with no escrow row gets a target only when `ESCROW_CONTRACT_VERSION` is explicitly configured).
+ * SettlementService.releaseMilestone refuses a release whose target is not the job's own escrow, so naming the
+ * global default for a job that has its own per-job escrow would only ever be refused.
+ */
+export function autoReleaseContractAddress(jobId: string): string | undefined {
+  return escrowForJob(jobId)?.contractAddress ?? resolveRowlessDefaultTarget()?.address;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -430,7 +443,7 @@ export class KernelService {
                     evidenceBundleId: result.bundleId,
                   });
                 } else {
-                  repos.jobs.updateStatus(jobId, "failed");
+                  setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
                 }
               } catch {
                 // DB update failure is non-fatal
@@ -444,7 +457,7 @@ export class KernelService {
                   // onPhase callback wired into runner.run() above.
                   try {
                     const settlementService = getSettlementService();
-                    const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+                    const contractAddress = autoReleaseContractAddress(jobId);
                     await settlementService.processEvidence(bundle, jobId, {
                       // For tier 0 jobs, auto-release immediately (no challenge window)
                       autoRelease: assuranceTier === 0,
@@ -471,8 +484,7 @@ export class KernelService {
               // A rejected runner.run() is a real device failure — record it.
               gateway.recordDeviceFailure(deviceId);
               try {
-                const repos = getRepos();
-                repos.jobs.updateStatus(jobId, "failed");
+                setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
               } catch {
                 // DB update failure is non-fatal
               }
@@ -517,7 +529,7 @@ export class KernelService {
                 evidenceBundleId: result.bundleId,
               });
             } else {
-              repos.jobs.updateStatus(jobId, "failed");
+              setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
             }
           } catch {
             // DB update failure is non-fatal
@@ -530,7 +542,7 @@ export class KernelService {
               // onPhase callback wired into runner.run() above.
               try {
                 const settlementService = getSettlementService();
-                const contractAddress = process.env.ESCROW_CONTRACT_ADDRESS;
+                const contractAddress = autoReleaseContractAddress(jobId);
                 await settlementService.processEvidence(bundle, jobId, {
                   autoRelease: assuranceTier === 0,
                   contractAddress,
@@ -552,8 +564,7 @@ export class KernelService {
           // A rejected runner.run() is a real device failure — record it (fallback path).
           gateway.recordDeviceFailure(deviceId);
           try {
-            const repos = getRepos();
-            repos.jobs.updateStatus(jobId, "failed");
+            setJobStatusWithRefund(jobId, "failed"); // N79: gives the escrow back in the same transaction
           } catch {
             // DB update failure is non-fatal
           }

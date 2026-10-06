@@ -242,20 +242,35 @@ describe("astra, round 1 of #475: jobs settled without a session or escrow link,
   });
 
   it("F1: a job the release route settled (no session, no escrow link) cannot be re-opened", async () => {
-    const { db } = getStore();
-    expect(db.select().from(schema.escrows).all().some((e) => e.cwmId === getRepos().jobs.findById("job-bio-42")!.cwmId)).toBe(false);
-    vi.mocked(isWriteEnabled).mockReturnValue(true);
-    const released = await app.inject({
-      method: "POST",
-      url: "/api/settlement/release",
-      payload: { jobId: "job-bio-42", milestoneIndex: 0, contractAddress: "0xDeAdBeEf00000000000000000000000000000001", attestation: attestation() },
-    });
-    vi.mocked(isWriteEnabled).mockReturnValue(false);
-    expect(released.statusCode).toBe(200);
-    expect(statusOf("job-bio-42")).toBe("settled");
-    expect((await patch("job-bio-42", "queued")).statusCode).toBe(409);
-    expect((await relay("job-bio-42", "in_progress")).statusCode).toBe(409);
-    expect(statusOf("job-bio-42")).toBe("settled");
+    // N79 round 8 (P2; fixture only, no assertion changed): a job with no escrow row of its own settles only
+    // through the CONFIGURED escrow contract (the module doc above: "through a configured escrow contract").
+    // releaseMilestone now requires that configuration to be explicit: ESCROW_CONTRACT_ADDRESS plus
+    // ESCROW_CONTRACT_VERSION="v1". This test releases against 0xDeAdBeEf...0001, so that is what it configures.
+    const savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+    const savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+    process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+    process.env.ESCROW_CONTRACT_VERSION = "v1";
+    try {
+      const { db } = getStore();
+      expect(db.select().from(schema.escrows).all().some((e) => e.cwmId === getRepos().jobs.findById("job-bio-42")!.cwmId)).toBe(false);
+      vi.mocked(isWriteEnabled).mockReturnValue(true);
+      const released = await app.inject({
+        method: "POST",
+        url: "/api/settlement/release",
+        payload: { jobId: "job-bio-42", milestoneIndex: 0, contractAddress: "0xDeAdBeEf00000000000000000000000000000001", attestation: attestation() },
+      });
+      vi.mocked(isWriteEnabled).mockReturnValue(false);
+      expect(released.statusCode).toBe(200);
+      expect(statusOf("job-bio-42")).toBe("settled");
+      expect((await patch("job-bio-42", "queued")).statusCode).toBe(409);
+      expect((await relay("job-bio-42", "in_progress")).statusCode).toBe(409);
+      expect(statusOf("job-bio-42")).toBe("settled");
+    } finally {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    }
   });
 
   it.each(["executing", "completing", "evidence_submitted", "settled"])(

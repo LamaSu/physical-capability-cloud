@@ -10,9 +10,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { keccak256, toBytes } from "viem";
 import Fastify, { type FastifyInstance } from "fastify";
 import { settlementRoutes } from "../routes/settlement.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { resetSettlementService, getSettlementService } from "../services/settlement-service.js";
 import { closeWorkflowStore } from "../workflow-store.js";
 import type { EvidenceBundle } from "@pcc/spec";
@@ -51,6 +52,11 @@ vi.mock("../contracts/escrow-client.js", () => ({
     transactionHash: "0xtest_release_tx456",
     status: "submitted",
   }),
+  // N79 round 7 (P2): processEvidence's fresh pre-submit/pre-auto-release verification reads this (the
+  // env-default path's reader — these tests have no escrow row, only ESCROW_CONTRACT_ADDRESS) right before
+  // Step 3/4. Fixture only; resolved per-describe-block below to a milestone matching job-004's own stepId —
+  // no assertion in this file changed.
+  getEscrowState: vi.fn(),
   isWriteEnabled: vi.fn().mockReturnValue(false), // default: no private key configured
   getSignerAddress: vi.fn().mockReturnValue(undefined),
   // Batch settlement re-exports from the same mock
@@ -196,6 +202,39 @@ describe("SettlementService", () => {
   });
 
   describe("processEvidence", () => {
+    // N79 round 7 (P2): processEvidence now resolves ONE allowed escrow target before Step 1 — the job's own
+    // escrow row, else the rowless configured default, else none — and refuses a supplied contractAddress that
+    // names neither. job-004 (this describe's shared fixture) has no escrow row, so the rowless default is what
+    // every test below needs to supply the address it already passes. Fixture only; no assertion in this file
+    // changed. Saves and restores whatever value was there before (not just deletes), per lead review.
+    //
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): the rowless default now resolves
+    // through ESCROW_CONTRACT_VERSION, not the address alone (an address proves nothing about which ABI answers
+    // at it) — also set and restore it here, in the SAME scoped hook, so this fixture's rowless target keeps
+    // resolving.
+    let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
+    beforeEach(async () => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+      // The SAME round's fresh pre-submit/pre-auto-release chain verification (also P2) reads a milestone at
+      // the derived index through this env-default path's reader (getEscrowState, V1 — there is no escrow row
+      // here to carry a "v2" version, so V1 is the correct, unambiguous reader per that function's own doc
+      // comment). One matching milestone for job-004's own stepId.
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+        milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-004")!.stepId)) }],
+      } as never);
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    });
+
     it("stores the bundle and persists to DB", async () => {
       const service = getSettlementService();
       const bundle = makeBundle();
@@ -348,6 +387,10 @@ describe("SettlementService", () => {
     it("refuses to settle a fabricated bundle at a paid tier (>=1): no on-chain submit or release", async () => {
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+      // N79 round 6 (P2, bind-first): the bundle's assuranceTier (1) must match the authoritative job's. The
+      // shared job-004 seed fixture has no tier set (reads as 0) — give it a real, matching tier for this
+      // test only (initStore reseeds fresh every test). Fixture only; no assertion below changed.
+      getRepos().jobs.update("job-004", { assuranceTier: 1 });
 
       const service = getSettlementService();
       const result = await service.processEvidence(makeFabricatedBundle(1), "job-004", {
@@ -366,6 +409,8 @@ describe("SettlementService", () => {
     it("still submits on-chain for an HONEST paid-tier bundle (real passes)", async () => {
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+      // N79 round 6 (P2, bind-first): fixture only — see the fabricated-bundle test above.
+      getRepos().jobs.update("job-004", { assuranceTier: 1 });
 
       const service = getSettlementService();
       const result = await service.processEvidence(
@@ -399,6 +444,27 @@ describe("SettlementService", () => {
   });
 
   describe("releaseMilestone", () => {
+    // N79 round 8, lead review iteration 2, item 4 (fixture-only, no assertion changed): releaseMilestone's
+    // rowless-target fix now compares a job-WITHOUT-its-own-escrow's supplied address against the configured
+    // rowless default, not just against nothing. "job-001" (this describe's shared fixture) has no escrow row,
+    // so the two tests below that supply "0xDeAdBeEf...0001" directly need that SAME address configured as the
+    // rowless default (plus ESCROW_CONTRACT_VERSION="v1") for it to keep resolving as allowed. Saves/restores
+    // whatever was there before.
+    let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
+    beforeEach(() => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    });
+
     it("returns failed with write_disabled when no private key", async () => {
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(false);
@@ -531,6 +597,25 @@ describe("Settlement Routes", () => {
   // ── POST /api/settlement/release ─────────────────────────────────────────
 
   describe("POST /api/settlement/release", () => {
+    // N79 round 8, lead review iteration 2, item 4 (fixture-only, no assertion changed): same fixture as the
+    // "releaseMilestone" unit describe above -- "job-001" has no escrow row, so the two tests below that
+    // supply "0xDeAdBeEf...0001" as `contractAddress` need it configured as the rowless default (plus
+    // ESCROW_CONTRACT_VERSION="v1").
+    let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
+    beforeEach(() => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    });
+
     it("returns 400 when jobId is missing", async () => {
       const res = await app.inject({
         method: "POST",
@@ -697,6 +782,32 @@ describe("Full evidence-to-settlement flow", () => {
     closeStore();
     closeWorkflowStore();
     resetSettlementService();
+  });
+
+  // N79 round 7 (P2 + the fresh pre-submit/pre-auto-release chain verification): same fixture as the
+  // "processEvidence" describe above — job-004 has no escrow row, so these tests' own
+  // `contractAddress: "0xDeAdBeEf...0001"` needs the env default to resolve, and a matching V1 milestone for
+  // the verification read. Fixture only; no assertion in this file changed. Registered AFTER the existing
+  // beforeEach above so `buildApp()` (which calls `initStore`) has already run before `getRepos()` here.
+  // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+  // ESCROW_CONTRACT_VERSION in this SAME scoped hook — see the "processEvidence" describe above.
+  let savedEscrowEnvFullFlow: string | undefined;
+  let savedEscrowVersionEnvFullFlow: string | undefined;
+  beforeEach(async () => {
+    savedEscrowEnvFullFlow = process.env.ESCROW_CONTRACT_ADDRESS;
+    process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+    savedEscrowVersionEnvFullFlow = process.env.ESCROW_CONTRACT_VERSION;
+    process.env.ESCROW_CONTRACT_VERSION = "v1";
+    const escrowMod = await import("../contracts/escrow-client.js");
+    vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+      milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-004")!.stepId)) }],
+    } as never);
+  });
+  afterEach(() => {
+    if (savedEscrowEnvFullFlow === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+    else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnvFullFlow;
+    if (savedEscrowVersionEnvFullFlow === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+    else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnvFullFlow;
   });
 
   it("processes evidence then settles (with write enabled)", async () => {

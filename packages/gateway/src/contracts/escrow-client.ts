@@ -1476,6 +1476,37 @@ export interface ReclaimStateV3 {
  * `blockTimestamp` is that block's time. The reclaim transaction lands in a later block, so a milestone due here is
  * due there too.
  */
+/**
+ * A minimal V3 chain-mapping reader (N79 round 6, H2-A / addendum 1 P4): just the ordered `stepId` + `status`
+ * every chain-backed writer's identity + cardinality compare needs (`checkChainMapping`/`recordChainSettlement`
+ * in escrow-refund.ts). Deliberately NOT the full `OnChainEscrowStateV2`-shaped struct (operator, amount,
+ * challenge window, …) — add a fuller V3 reader if a future caller needs those too; this one exists because no
+ * V3 reader returned even the stepId array before this round (`getReclaimStateV3` returns `{index, status,
+ * amount}`, no stepId).
+ */
+export async function getMilestoneMappingV3(
+  contractAddress: Address,
+): Promise<{ stepIds: Hex[]; statuses: number[] }> {
+  const client = getPublicClient();
+  const count = await client.readContract({
+    address: contractAddress,
+    abi: MilestoneEscrowV3ABI,
+    functionName: "getMilestoneCount",
+  });
+  const reads = Array.from({ length: Number(count) }, (_, i) =>
+    client.readContract({
+      address: contractAddress,
+      abi: MilestoneEscrowV3ABI,
+      functionName: "getMilestone",
+      args: [BigInt(i)],
+    }),
+  );
+  const raw = await Promise.all(reads);
+  const stepIds = raw.map((m) => (m as { stepId: Hex }).stepId);
+  const statuses = raw.map((m) => Number((m as { status: number }).status));
+  return { stepIds, statuses };
+}
+
 export async function getReclaimStateV3(contractAddress: Address): Promise<ReclaimStateV3> {
   const client = getPublicClient();
   const block = await client.getBlock();

@@ -16,11 +16,16 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { keccak256, toBytes } from "viem";
 
 // Controllable mocks must be hoisted (vi.mock factories are hoisted above imports).
 const h = vi.hoisted(() => ({
   isWriteEnabled: vi.fn().mockReturnValue(false),
   driveSettlement: vi.fn(),
+  // N79 round 6 (addendum 1 P4 / addendum 2): resume now reads the V2 mapping before its first drive. Fixture
+  // only — a default resolved value is set in beforeEach below; the 3 resume tests override it with a mapping
+  // matching the fixture escrow's own (newly added) milestone row.
+  getEscrowStateV2: vi.fn(),
   easUid: ("0x" + "ea".repeat(32)) as `0x${string}`,
 }));
 
@@ -39,10 +44,12 @@ vi.mock("../contracts/escrow-client.js", () => ({
   submitEvidence: vi.fn().mockResolvedValue({ transactionHash: "0xev", status: "submitted" }),
   releaseMilestone: vi.fn().mockResolvedValue({ transactionHash: "0xrel", status: "submitted" }),
   isWriteEnabled: h.isWriteEnabled,
+  getEscrowStateV2: h.getEscrowStateV2,
   getSignerAddress: vi.fn().mockReturnValue(undefined),
   isBatchEnabled: vi.fn().mockReturnValue(false),
   getSmartAccountAddress: vi.fn().mockReturnValue(undefined),
   MilestoneStatus: {},
+  MilestoneStatusV2: { Released: 5 },
   milestoneStatusName: vi.fn().mockReturnValue("unknown"),
   resolveMockUSDCAddress: vi.fn().mockReturnValue("0x18bef3dee9f4f97f7cec16db0c4a0a930f478470"),
 }));
@@ -101,7 +108,7 @@ async function buildApp(): Promise<FastifyInstance> {
 }
 
 /** A fast-track job (mock escrow, write disabled) with a session pointing at a REAL escrow. */
-async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> {
+async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string; escrowId: string; stepId: string }> {
   const ft = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
@@ -119,8 +126,9 @@ async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> 
     .set({ escrowAddress: REAL_ESCROW, cwmId, contractTerms: { assuranceTier: 0 } })
     .where(eq(schema.negotiationSessions.jobId, jobId))
     .run();
+  const escrowId = `esc-${agent}`;
   getRepos().escrows.insert({
-    id: `esc-${agent}`,
+    id: escrowId,
     cwmId,
     contractAddress: REAL_ESCROW,
     payer: agent,
@@ -130,7 +138,45 @@ async function makeJobWithRealEscrow(agent: string): Promise<{ jobId: string }> 
     createdAt: new Date().toISOString(),
     deadline: new Date(Date.now() + 86_400_000).toISOString(),
   } as any);
-  return { jobId };
+  // N79 round 6 (P4 / addendum 2): resume's pre-drive mapping read compares against this escrow's LOCAL
+  // milestone rows — this fixture escrow previously had none at all (a genuine gap: `escrows.insert` does not
+  // cascade a milestone). Give it the ONE milestone these single-index tests drive, keyed to the job's own
+  // (real, submit-from-discovery-assigned) stepId — fixture only.
+  const stepId = getRepos().jobs.findById(jobId)!.stepId;
+  getRepos().escrows.insertMilestone({ id: `ms-${agent}`, escrowId, stepId, amount: "10.00", status: "attested", bondAmount: "0" });
+  return { jobId, escrowId, stepId };
+}
+
+/** The V2 mapping resume's pre-drive (and post-drive completion) reads — ONE milestone, keyed to the fixture's
+ *  own stepId, at the on-chain status this test's scenario implies. Fixture only. */
+function v2Mapping(stepId: string, status: number) {
+  return {
+    address: REAL_ESCROW,
+    payer: REAL_ESCROW,
+    arbiter: REAL_ESCROW,
+    token: REAL_ESCROW,
+    cwmId: "0x" + "00".repeat(32),
+    funded: true,
+    totalAmount: "10",
+    milestoneCount: 1,
+    milestones: [
+      {
+        stepId: keccak256(toBytes(stepId)),
+        operator: REAL_ESCROW,
+        amount: "10",
+        operatorBond: "0",
+        status,
+        statusName: "",
+        evidenceBundleHash: "0x" + "00".repeat(32),
+        verifierAttestationHash: "0x" + "00".repeat(32),
+        challengeWindowEnd: 0,
+        challengeWindowSeconds: 0,
+        requiredTier: 0,
+        jobIdHash: "0x" + "00".repeat(32),
+        verifierAttestationUid: "0x" + "00".repeat(32),
+      },
+    ],
+  } as never;
 }
 
 /** Force the durable state a mid-completion failure leaves: evidence bundle + evidence_submitted. */
@@ -172,13 +218,17 @@ afterEach(async () => {
 
 describe("resume-settlement routes the chain re-drive through driveSettlement", () => {
   it("calls driveSettlement twice (evidence then attest) and reconciles to settled on release", async () => {
-    const { jobId } = await makeJobWithRealEscrow("wire-resume");
+    const { jobId, stepId } = await makeJobWithRealEscrow("wire-resume");
     trap(jobId, "wire-resume");
 
     // Turn on the V2 chain path for the resume call only.
     h.isWriteEnabled.mockReturnValue(true);
     process.env.PCC_USE_EAS_V2 = "true";
     process.env.MOCK_SETTLEMENT = "false"; // real-settlement branch → chain owns the verdict
+    // N79 round 6 (P4 / addendum 2): resume's pre-drive (and post-drive completion) mapping read — one
+    // milestone, this fixture's own stepId, Released (the scenario's end state). Fixture only; no assertion
+    // below changed.
+    h.getEscrowStateV2.mockResolvedValue(v2Mapping(stepId, 5 /* MilestoneStatusV2.Released */));
 
     // First pass advances to Evidenced and needs the UID; second pass releases.
     h.driveSettlement
@@ -215,12 +265,15 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
   });
 
   it("stays evidence_submitted (resumable) when the crank stops at awaiting_challenge_window", async () => {
-    const { jobId } = await makeJobWithRealEscrow("wire-resume-wait");
+    const { jobId, stepId } = await makeJobWithRealEscrow("wire-resume-wait");
     trap(jobId, "wire-resume-wait");
 
     h.isWriteEnabled.mockReturnValue(true);
     process.env.PCC_USE_EAS_V2 = "true";
     process.env.MOCK_SETTLEMENT = "false";
+    // N79 round 6 (P4 / addendum 2): pre-drive mapping read — one milestone, Attested (the scenario's end
+    // state: the window is still open). Fixture only; no assertion below changed.
+    h.getEscrowStateV2.mockResolvedValue(v2Mapping(stepId, 4 /* MilestoneStatusV2.Attested */));
 
     h.driveSettlement
       .mockResolvedValueOnce({
@@ -244,12 +297,15 @@ describe("resume-settlement routes the chain re-drive through driveSettlement", 
   });
 
   it("F4: reconciles to settled and short-circuits the oracle when the first pass already released", async () => {
-    const { jobId } = await makeJobWithRealEscrow("wire-f4");
+    const { jobId, stepId } = await makeJobWithRealEscrow("wire-f4");
     trap(jobId, "wire-f4");
 
     h.isWriteEnabled.mockReturnValue(true);
     process.env.PCC_USE_EAS_V2 = "true";
     process.env.MOCK_SETTLEMENT = "false"; // real-settlement branch — chain owns the verdict
+    // N79 round 6 (P4 / addendum 2): pre-drive mapping read — one milestone, Released (the first pass already
+    // read-confirmed the release). Fixture only; no assertion below changed.
+    h.getEscrowStateV2.mockResolvedValue(v2Mapping(stepId, 5 /* MilestoneStatusV2.Released */));
 
     // First pass ALREADY read-confirmed an on-chain release (settled:true).
     h.driveSettlement.mockResolvedValueOnce({

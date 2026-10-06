@@ -978,6 +978,7 @@ These are the operator-facing environment variables for configuring a PCC node o
 | `KERNEL_CONFIG_FILE` | Path to kernel config JSON file | none |
 | `PCC_NETWORK` | Blockchain network name | `base-sepolia` |
 | `ESCROW_CONTRACT_ADDRESS` | Deployed MilestoneEscrow address | none |
+| `ESCROW_CONTRACT_VERSION` | ABI version for the rowless default address above: only `"v1"` resolves it to a chain target; any other value (including unset) means a rowless job has none | none |
 | `EVIDENCE_STORAGE` | Evidence backend: `local`, `helia`, `storacha` | `local` |
 | `LIT_PROTOCOL_REAL` | Enable Lit Protocol encryption | `false` |
 | `SSE_AUTH_REQUIRED` | Enforce auth on SSE streams | `false` |

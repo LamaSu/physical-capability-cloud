@@ -9,8 +9,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { keccak256, toBytes } from "viem";
 import { SettlementService, resetSettlementService } from "../services/settlement-service.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
 
@@ -110,6 +111,11 @@ vi.mock("../contracts/escrow-client.js", () => ({
     transactionHash: "0xtest_release_tx_settle",
     status: "submitted",
   }),
+  // N79 round 7 (P2): processEvidence's fresh pre-submit/pre-auto-release verification reads this (the
+  // env-default path's reader — job-settle-telemetry-001 has no escrow row) right before Step 3/4. Fixture
+  // only; resolved per-describe-block below to a milestone matching the job's own stepId ("step-1") — no
+  // assertion in this file changed.
+  getEscrowState: vi.fn(),
   isWriteEnabled: vi.fn().mockReturnValue(false),
   getSignerAddress: vi.fn().mockReturnValue(undefined),
   isBatchEnabled: vi.fn().mockReturnValue(false),
@@ -169,6 +175,21 @@ describe("Settlement Pipeline Telemetry", () => {
     initStore({ seed: true });
     resetSettlementService();
     vi.clearAllMocks();
+    // N79 round 6 (P2, bind-first): processEvidence now requires an authoritative job matching the bundle's
+    // own jobId/stepId/kernelId/assuranceTier. This fixture used no real job row at all; give it one, with
+    // the SAME fields makeBundle() already uses. Fixture only — no assertion in this file changed.
+    const repos = getRepos();
+    const capability = repos.capabilities.findAll()[0]!;
+    repos.jobs.insert({
+      id: "job-settle-telemetry-001",
+      stepId: "step-1",
+      cwmId: "cwm-settle-telemetry-001",
+      capabilityId: capability.id,
+      kernelId: "kernel-test",
+      status: "in_progress",
+      assignedDevices: [],
+      assuranceTier: 0,
+    });
   });
 
   afterEach(() => {
@@ -210,6 +231,31 @@ describe("Settlement Pipeline Telemetry", () => {
   // ── settlement_complete phase ────────────────────────────────────────────
 
   describe("settlement_complete phase", () => {
+    // N79 round 7 (P2 + the fresh pre-submit/pre-auto-release chain verification): job-settle-telemetry-001
+    // has no escrow row, so the tests below that supply a contractAddress need the env default to resolve it,
+    // plus a matching V1 milestone for the verification read. Fixture only; no assertion in this file changed.
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+    // ESCROW_CONTRACT_VERSION in this SAME scoped hook — the rowless default now resolves through it, not the
+    // address alone (an address proves nothing about which ABI answers at it).
+    let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
+    beforeEach(async () => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+        milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-settle-telemetry-001")!.stepId)) }],
+      } as never);
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    });
+
     it("emits settlement_claim started via pipelineTelemetry in processEvidence", async () => {
       const { pipelineTelemetry } = await import("../telemetry.js");
 
@@ -264,6 +310,32 @@ describe("Settlement Pipeline Telemetry", () => {
   // ── contractAddress passthrough ──────────────────────────────────────────
 
   describe("contractAddress passthrough", () => {
+    // N79 round 7 (P2 + the fresh pre-submit verification): same fixture as "settlement_complete phase" above
+    // — only the FIRST test below supplies a contractAddress through processEvidence; the other two call
+    // releaseMilestone directly and manage ESCROW_CONTRACT_ADDRESS themselves (unaffected either way, since
+    // their own in-test set/delete runs after this beforeEach). Fixture only; no assertion changed.
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+    // ESCROW_CONTRACT_VERSION in this SAME scoped hook — the rowless default now resolves through it, not the
+    // address alone (an address proves nothing about which ABI answers at it).
+    let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
+    beforeEach(async () => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+        milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-settle-telemetry-001")!.stepId)) }],
+      } as never);
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    });
+
     it("passes contractAddress to on-chain submit when write is enabled", async () => {
       const escrowMod = await import("../contracts/escrow-client.js");
       vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
@@ -389,6 +461,31 @@ describe("Settlement Pipeline Telemetry", () => {
   // ── result structure ─────────────────────────────────────────────────────
 
   describe("result structure", () => {
+    // N79 round 7 (P2 + the fresh pre-submit/pre-auto-release chain verification): same fixture as
+    // "settlement_complete phase" above — only the THIRD test below supplies a contractAddress. Fixture only;
+    // no assertion in this file changed.
+    // N79 round 8 (P2, astra 126i MEDIUM-1, authorized test change class (b)): also set/restore
+    // ESCROW_CONTRACT_VERSION in this SAME scoped hook — the rowless default now resolves through it, not the
+    // address alone (an address proves nothing about which ABI answers at it).
+    let savedEscrowEnv: string | undefined;
+    let savedEscrowVersionEnv: string | undefined;
+    beforeEach(async () => {
+      savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+      process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+      savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+      process.env.ESCROW_CONTRACT_VERSION = "v1";
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.getEscrowState).mockResolvedValue({
+        milestones: [{ stepId: keccak256(toBytes(getRepos().jobs.findById("job-settle-telemetry-001")!.stepId)) }],
+      } as never);
+    });
+    afterEach(() => {
+      if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+      else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+      if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+      else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
+    });
+
     it("processEvidence always returns jobId and evidenceBundleId", async () => {
       const service = new SettlementService();
       const bundle = makeBundle();

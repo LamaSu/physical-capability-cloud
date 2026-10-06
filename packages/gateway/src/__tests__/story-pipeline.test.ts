@@ -447,16 +447,31 @@ describe("processEvidence → Auto Story Derivative IP", () => {
 // ---------------------------------------------------------------------------
 
 describe("releaseMilestone → Auto Story Royalty Payment", () => {
+  // N79 round 8 (P2; fixture only, no assertion changed): releaseMilestone refuses a supplied address for a job
+  // with no escrow row of its own unless it IS the configured rowless default (ESCROW_CONTRACT_ADDRESS with an
+  // explicit ESCROW_CONTRACT_VERSION="v1"). "job-001" has no escrow row, and every test below supplies
+  // "0xDeAdBeEf...0001", so that address is configured here as the rowless default. Saves and restores both.
+  let savedEscrowEnv: string | undefined;
+  let savedEscrowVersionEnv: string | undefined;
+
   beforeEach(() => {
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: true });
     resetSettlementService();
     vi.clearAllMocks();
+    savedEscrowEnv = process.env.ESCROW_CONTRACT_ADDRESS;
+    savedEscrowVersionEnv = process.env.ESCROW_CONTRACT_VERSION;
+    process.env.ESCROW_CONTRACT_ADDRESS = "0xDeAdBeEf00000000000000000000000000000001";
+    process.env.ESCROW_CONTRACT_VERSION = "v1";
   });
 
   afterEach(() => {
     closeStore();
     resetSettlementService();
+    if (savedEscrowEnv === undefined) delete process.env.ESCROW_CONTRACT_ADDRESS;
+    else process.env.ESCROW_CONTRACT_ADDRESS = savedEscrowEnv;
+    if (savedEscrowVersionEnv === undefined) delete process.env.ESCROW_CONTRACT_VERSION;
+    else process.env.ESCROW_CONTRACT_VERSION = savedEscrowVersionEnv;
   });
 
   it("calls payJobRoyalty when job has a derivative IP link", async () => {

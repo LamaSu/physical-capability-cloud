@@ -121,7 +121,7 @@ vi.mock("../sse/stream-hub.js", () => ({
 // Imports — after mocks
 // ---------------------------------------------------------------------------
 
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { SettlementService, resetSettlementService, getSettlementService } from "../services/settlement-service.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import { PipelineTelemetryService } from "../telemetry.js";
@@ -216,6 +216,21 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
     mockStartSpan.mockImplementation(
       async (_: unknown, callback: () => Promise<unknown>) => callback(),
     );
+    // N79 round 6 (P2, bind-first): processEvidence now requires an authoritative job matching the bundle's
+    // own jobId/stepId/kernelId/assuranceTier. This fixture used no real job row at all; give it one, with
+    // the SAME fields makeBundle() already uses. Fixture only — no assertion in this file changed.
+    const repos = getRepos();
+    const capability = repos.capabilities.findAll()[0]!;
+    repos.jobs.insert({
+      id: "job-tracing-001",
+      stepId: "step-tracing",
+      cwmId: "cwm-tracing-001",
+      capabilityId: capability.id,
+      kernelId: "kernel-nyc",
+      status: "in_progress",
+      assignedDevices: [],
+      assuranceTier: 0,
+    });
   });
 
   afterEach(() => {
@@ -226,7 +241,7 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
   it("creates a 'settlement.pipeline' parent span", async () => {
     const service = getSettlementService();
     const bundle = makeBundle();
-    await service.processEvidence(bundle, "job-004");
+    await service.processEvidence(bundle, "job-tracing-001");
 
     const names = capturedSpanNames();
     expect(names).toContain("settlement.pipeline");
@@ -235,7 +250,7 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
   it("creates 4 child spans inside the pipeline", async () => {
     const service = getSettlementService();
     const bundle = makeBundle();
-    await service.processEvidence(bundle, "job-004");
+    await service.processEvidence(bundle, "job-tracing-001");
 
     const names = capturedSpanNames();
 
@@ -249,7 +264,7 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
   it("spans are created with correct `op` attributes", async () => {
     const service = getSettlementService();
     const bundle = makeBundle();
-    await service.processEvidence(bundle, "job-004");
+    await service.processEvidence(bundle, "job-tracing-001");
 
     const spanOptions = mockStartSpan.mock.calls.map((args) => args[0] as { name: string; op: string });
 
@@ -271,7 +286,9 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
 
   it("spans include job.id in attributes", async () => {
     const service = getSettlementService();
-    const bundle = makeBundle();
+    // This test specifically wants "job-004" echoed into the span attributes — match the bundle to job-004's
+    // REAL seed fields (stepId "step-4", kernelId "kernel-nyc") rather than changing the expected value.
+    const bundle = makeBundle({ jobId: "job-004", stepId: "step-4", kernelId: "kernel-nyc" });
     await service.processEvidence(bundle, "job-004");
 
     const spanOptions = mockStartSpan.mock.calls.map(
@@ -286,7 +303,7 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
   it("total span count is 5 (1 parent + 4 children)", async () => {
     const service = getSettlementService();
     const bundle = makeBundle();
-    await service.processEvidence(bundle, "job-004");
+    await service.processEvidence(bundle, "job-tracing-001");
 
     // pipeline + ipfs_archive + db_persist + onchain_submit + onchain_release
     expect(mockStartSpan).toHaveBeenCalledTimes(5);
@@ -294,7 +311,9 @@ describe("SettlementService.processEvidence — Sentry spans", () => {
 
   it("still produces a valid settlement result even if spans are called", async () => {
     const service = getSettlementService();
-    const bundle = makeBundle();
+    // This test specifically wants "job-004" echoed into the result — match the bundle to job-004's REAL seed
+    // fields (stepId "step-4", kernelId "kernel-nyc") rather than changing the expected value.
+    const bundle = makeBundle({ jobId: "job-004", stepId: "step-4", kernelId: "kernel-nyc" });
     const result = await service.processEvidence(bundle, "job-004");
 
     expect(result.jobId).toBe("job-004");
@@ -481,6 +500,19 @@ describe("Full trace path: processEvidence spans + breadcrumbs", () => {
     mockStartSpan.mockImplementation(
       async (_: unknown, callback: () => Promise<unknown>) => callback(),
     );
+    // N79 round 6 (P2, bind-first): fixture only — see the same insert above.
+    const repos = getRepos();
+    const capability = repos.capabilities.findAll()[0]!;
+    repos.jobs.insert({
+      id: "job-tracing-001",
+      stepId: "step-tracing",
+      cwmId: "cwm-tracing-001",
+      capabilityId: capability.id,
+      kernelId: "kernel-nyc",
+      status: "in_progress",
+      assignedDevices: [],
+      assuranceTier: 0,
+    });
   });
 
   afterEach(() => {
@@ -493,7 +525,7 @@ describe("Full trace path: processEvidence spans + breadcrumbs", () => {
     // and — if telemetry were wired in — breadcrumbs)
     const service = getSettlementService();
     const bundle = makeBundle();
-    await service.processEvidence(bundle, "job-004");
+    await service.processEvidence(bundle, "job-tracing-001");
 
     // Spans: 5 total (1 parent + 4 children)
     expect(mockStartSpan).toHaveBeenCalledTimes(5);
@@ -529,7 +561,9 @@ describe("Full trace path: processEvidence spans + breadcrumbs", () => {
     mockStartSpan.mockRejectedValueOnce(new Error("Sentry unavailable"));
 
     const service = getSettlementService();
-    const bundle = makeBundle();
+    // This test specifically wants "job-004" echoed into the result — match the bundle to job-004's REAL seed
+    // fields (stepId "step-4", kernelId "kernel-nyc") rather than changing the expected value.
+    const bundle = makeBundle({ jobId: "job-004", stepId: "step-4", kernelId: "kernel-nyc" });
 
     // Should not throw
     const result = await service.processEvidence(bundle, "job-004");

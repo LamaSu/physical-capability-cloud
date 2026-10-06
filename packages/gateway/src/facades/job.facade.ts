@@ -23,10 +23,11 @@ import {
   populateJobList,
 } from "./populators/job.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { setJobStatusWithRefund, writeJobStatusGuardedWithRefund } from "../services/escrow-refund.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
-import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
+import { SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 /**
@@ -234,8 +235,10 @@ export class JobFacade extends BaseFacade {
     progress?: number,
   ): Promise<Result<JobDTO>> {
     return this.execute("updateStatus", async () => {
-      // N85(a): a generic writer may not finish, fail, cancel or re-open a paid job.
-      const outcome = writeJobStatusGuarded(jobId, status, progress);
+      // N79 x N85(a) merge-up composition: a terminal write this generic writer is still allowed to make (i.e.
+      // N85(a)'s guard reports "written") also gives the escrow back, in the SAME transaction as the status
+      // write (escrow-refund.ts's writeJobStatusGuardedWithRefund composes the two).
+      const { outcome } = writeJobStatusGuardedWithRefund(jobId, status, progress);
       if (outcome.kind === "not_found") {
         throw new NotFoundError("job", jobId);
       }
@@ -360,7 +363,7 @@ export class JobFacade extends BaseFacade {
       } catch (error) {
         // Roll back DB record
         try {
-          this.repos.jobs.updateStatus(jobId, "failed");
+          setJobStatusWithRefund(jobId, "failed");
         } catch {
           // best-effort rollback
         }
