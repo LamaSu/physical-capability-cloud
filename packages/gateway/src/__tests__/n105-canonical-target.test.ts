@@ -135,3 +135,39 @@ describe("N105: the gateway refuses a request target the router would route diff
     expect(json(res.body)).not.toEqual(CANONICAL_REFUSAL);
   });
 });
+
+describe("N105: nonCanonicalTargetReason, at every boundary", () => {
+  it("accepts canonical origin-form targets, including encoded RESERVED and non-ASCII characters and any query", async () => {
+    const { nonCanonicalTargetReason } = await import("../middleware/canonical-request-target.js");
+    for (const url of [
+      "/", "/api/kernels", "/a/slug-with.dots_and~tilde", "/api/x/a%40b", "/api/x/did%3Apkh%3A1", "/api/x/a%2Fb",
+      "/api/x/%C3%A9", "/api/x/%2C%5B%60%7B%7F%25", "/api/kernels?q=%61;b&c=%7e", "//not-a-route",
+    ]) {
+      expect(nonCanonicalTargetReason(url), url).toBeNull();
+    }
+  });
+
+  it("[neg] refuses every percent-escaped UNRESERVED character, in either hex case, and only those", async () => {
+    const { nonCanonicalTargetReason } = await import("../middleware/canonical-request-target.js");
+    const unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    for (let b = 0; b < 256; b++) {
+      const hex = b.toString(16).padStart(2, "0");
+      const expected = unreserved.includes(String.fromCharCode(b)) ? "encoded_unreserved" : null;
+      expect(nonCanonicalTargetReason(`/api/x/%${hex.toUpperCase()}`), `%${hex.toUpperCase()}`).toBe(expected);
+      expect(nonCanonicalTargetReason(`/api/x/%${hex.toLowerCase()}`), `%${hex.toLowerCase()}`).toBe(expected);
+    }
+  });
+
+  it("[neg] refuses absolute- and asterisk-form targets, a fragment anywhere, and ';' before the query", async () => {
+    const { nonCanonicalTargetReason } = await import("../middleware/canonical-request-target.js");
+    expect(nonCanonicalTargetReason("http://h/api/kernels")).toBe("not_origin_form");
+    expect(nonCanonicalTargetReason("https://h/api/kernels")).toBe("not_origin_form");
+    expect(nonCanonicalTargetReason("*")).toBe("not_origin_form");
+    expect(nonCanonicalTargetReason("h/api/kernels")).toBe("not_origin_form");
+    expect(nonCanonicalTargetReason("/api/kernels#x")).toBe("fragment");
+    expect(nonCanonicalTargetReason("/api/kernels?q=1#x")).toBe("fragment");
+    expect(nonCanonicalTargetReason("/api/contributors;/x")).toBe("semicolon");
+    expect(nonCanonicalTargetReason("/api;x/kernels")).toBe("semicolon");
+    expect(nonCanonicalTargetReason("/%61pi/kernels")).toBe("encoded_unreserved");
+  });
+});
