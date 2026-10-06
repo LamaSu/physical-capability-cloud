@@ -896,10 +896,9 @@ async function handlePccAttachChannel(p: PccAttachChannelParams): Promise<A2AArt
 }
 
 /**
- * N133 rule 1 (the steward's DECISIONS 01:01): a paid session's buyer is the caller's proven
- * identity (its SIWE session's wallet) or the admin acts for it; pcc-submit's commit mints the
- * buyer's write scope. A params object naming no buyer passes through: createPccQuote refuses it
- * as missing before it creates anything.
+ * N133 rule 1: a falsy buyer passes through for createPccQuote to refuse as missing before it
+ * creates anything. Every other value goes to bindBuyer as given, and the params use its bound
+ * buyer on success.
  */
 function bindA2ABuyer(
   skillParams: Record<string, unknown>,
@@ -907,7 +906,7 @@ function bindA2ABuyer(
   admin: boolean,
 ): { ok: true; params: Record<string, unknown> } | Extract<BuyerBinding, { ok: false }> {
   const named = skillParams.userAgentId;
-  if (typeof named !== "string" || named.length === 0) return { ok: true, params: skillParams };
+  if (!named) return { ok: true, params: skillParams };
   const binding = bindBuyer({ admin, provenWallet: principal.proven }, named);
   return binding.ok ? { ok: true, params: { ...skillParams, userAgentId: binding.buyer } } : binding;
 }

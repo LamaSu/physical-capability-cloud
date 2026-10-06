@@ -203,7 +203,37 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
       });
       return { authorization: `Bearer ${token}` };
     }
-    const params = (userAgentId: string) => ({ userAgentId, kernelId: LAB, capabilityType: "liquid-handler" });
+    const params = (userAgentId: unknown) => ({ userAgentId, kernelId: LAB, capabilityType: "liquid-handler" });
+
+    it("present non-string buyers are refused for claimed keys, SIWE sessions and the admin before anything is created", async () => {
+      // Keep capability fixtures, but start with no seeded escrows or jobs.
+      db().delete(schema.escrows).run();
+      db().delete(schema.jobs).run();
+      const key = provisionApiKey({ operatorId: "n133-claimed-buyer" }).rawKey;
+      const claimed = { authorization: `Bearer ${key}` };
+      const control = await send(claimed, "pcc-submit", params(BUYER));
+      expect(control.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_proof_required" } });
+
+      const nonStringBuyers: unknown[] = [12345, { id: BUYER }, [BUYER], true];
+      for (const buyer of nonStringBuyers) {
+        const refused = await send(claimed, "pcc-submit", params(buyer));
+        expect(refused.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_proof_required" } });
+      }
+
+      const auth = siweSession(BUYER);
+      for (const buyer of nonStringBuyers) {
+        const refused = await send(auth, "pcc-submit", params(buyer));
+        expect(refused.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_mismatch" } });
+      }
+
+      const admin = await send({ ...claimed, "x-admin-key": ADMIN }, "pcc-quote", params(12345));
+      expect(admin.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_proof_required" } });
+
+      expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
+      expect(db().select().from(schema.escrows).all()).toHaveLength(0);
+      expect(db().select().from(schema.jobs).all()).toHaveLength(0);
+      expect(db().select().from(schema.executionScopes).all()).toHaveLength(0);
+    });
 
     it("a SIWE session's wallet submits for itself; naming someone else is refused before anything is created", async () => {
       const auth = siweSession(BUYER);
