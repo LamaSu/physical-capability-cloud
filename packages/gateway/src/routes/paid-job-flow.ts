@@ -1925,8 +1925,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
-    if (loaded.kind === "refused") {
-      const refusal = JOB_READ_REFUSAL[loaded.reason];
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
       return reply.status(refusal.status).send(refusal.body);
     }
     if (loaded.kind === "unavailable") {

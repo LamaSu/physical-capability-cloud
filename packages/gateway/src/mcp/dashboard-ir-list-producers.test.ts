@@ -34,7 +34,11 @@ function isPresent(row: unknown, field: string): boolean {
 }
 
 let app: FastifyInstance;
+/** GET /api/jobs lists only what the caller may read (#403, F3): this test reads it as an admin. */
+const ADMIN = "ir-producers-admin";
+const headersFor = (path: string) => (path === "/api/jobs" ? { "x-admin-key": ADMIN } : {});
 beforeAll(async () => {
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   app = Fastify({ logger: false });
   await app.register(cookie);
@@ -43,12 +47,12 @@ beforeAll(async () => {
   await app.register(jobRoutes);
   await app.ready();
 });
-afterAll(async () => { await app.close(); closeStore(); });
+afterAll(async () => { await app.close(); closeStore(); delete process.env.PCC_ADMIN_KEY; });
 
 describe("#344 r5 typed list fields accept the REAL producers' rows (seeded store, route inject)", () => {
   for (const [path, prof] of Object.entries(LIST_PROFILES)) {
     it(`${path}: every profile field of every real row passes its kind (no row fails closed)`, async () => {
-      const res = await app.inject({ method: "GET", url: path });
+      const res = await app.inject({ method: "GET", url: path, headers: headersFor(path) });
       expect(res.statusCode).toBe(200);
       const data = res.json() as unknown;
       // The browser binder's own row extraction (dashboard-ir-browser-entry.ts uses listRowsOf).
@@ -73,7 +77,7 @@ describe("#344 r5 typed list fields accept the REAL producers' rows (seeded stor
     // updatedAt is present in only 1/5 real rows (only the one completed job has a completedAt);
     // every other declared field is present in every real row of its route.
     it(`${path}: every profile field is present, non-null, in at least one real row`, async () => {
-      const res = await app.inject({ method: "GET", url: path });
+      const res = await app.inject({ method: "GET", url: path, headers: headersFor(path) });
       expect(res.statusCode).toBe(200);
       const rows = listRowsOf(path, res.json() as unknown);
       expect(rows, `${path}: listRowsOf must find this route's own collection`).not.toBeNull(); // null = no collection, distinct from a real empty one (astra 28e H1)

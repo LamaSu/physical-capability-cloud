@@ -181,6 +181,27 @@ describe("resolveSSEAuth — SSE_AUTH_REQUIRED=true", () => {
     expect((req as any).userId).toBe("0xcafebabe");
   });
 
+  // F3 round 2: the per-job stream runs the job read gate, which trusts only a proven wallet.
+  it("a SIWE session (cookie or ?token=) sets req.provenWallet to its signed address, lowercased", async () => {
+    const address = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
+    mockSession.mockReturnValue({ address, token: "session-xyz" });
+    for (const req of [makeReq({ cookies: { pcc_session: "session-xyz" } }), makeReq({ query: { token: "session-xyz" } })]) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await resolveSSEAuth(req as any);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((req as any).provenWallet).toBe(address.toLowerCase());
+    }
+  });
+
+  it("an API key sets no req.provenWallet: its operatorId is self-declared", async () => {
+    const req = makeReq({ headers: { authorization: "Bearer pcc_live_mutationtest" } });
+    mockApiKey.mockReturnValue({ id: "key-3", operatorId: "0x1111111111111111111111111111111111111111" });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await resolveSSEAuth(req as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((req as any).provenWallet).toBeUndefined();
+  });
+
   it("returns authenticated:false when expired/invalid API key provided in header", async () => {
     const req = makeReq({ headers: { authorization: "Bearer pcc_live_expired" } });
     // Both resolvers return null = invalid/expired key
