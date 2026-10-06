@@ -5,11 +5,12 @@ export type AuditLogInsert = typeof auditLog.$inferInsert;
 
 export interface IAuditLogRepository {
   insert(entry: Omit<AuditLogInsert, "id">): AuditLogRow;
+  /** A filter given several values matches a row equal to any of them. */
   query(opts: {
-    eventType?: string;
-    actor?: string;
-    resourceType?: string;
-    resourceId?: string;
+    eventType?: string | readonly string[];
+    actor?: string | readonly string[];
+    resourceType?: string | readonly string[];
+    resourceId?: string | readonly string[];
     since?: string;
     limit?: number;
   }): AuditLogRow[];

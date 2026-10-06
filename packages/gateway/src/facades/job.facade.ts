@@ -26,6 +26,7 @@ import { getKernelService } from "../services/kernel-service.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 
@@ -58,6 +59,9 @@ export interface JobFilters {
    *  under TENANT_ENFORCE), filters rows to this tenant. Omitted = today's
    *  cross-tenant default. */
   tenantId?: string;
+  /** Only these jobs: the ids the caller may read (jobReadScopeOf). Applied before the
+   *  page is cut, so `total` and `hasMore` count only readable jobs. */
+  jobIds?: ReadonlySet<string>;
 }
 
 export interface SubmitJobInput {
@@ -183,6 +187,10 @@ export class JobFacade extends BaseFacade {
         jobs = this.repos.jobs.findByStatus(filters.status, opts);
       } else {
         jobs = this.repos.jobs.findAll(opts);
+      }
+      if (filters?.jobIds) {
+        const readable = filters.jobIds;
+        jobs = jobs.filter((job) => readable.has(job.id));
       }
 
       const total = jobs.length;
@@ -325,14 +333,23 @@ export class JobFacade extends BaseFacade {
         pipelineTelemetry.emit(jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, external: true },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true }, actorId);
+        trackServerEvent(
+          lit("job_submitted"),
+          { kernelId: declare.id(kernelId), capabilityType: declare.id(body.capabilityId), external: declare.flag(true) },
+          actorId,
+        );
         auditService.log({
-          eventType: "job.submitted",
+          eventType: lit("job.submitted"),
           actor: actorId,
-          resourceType: "job",
-          resourceId: jobId,
-          action: "create",
-          metadata: { kernelId, stepId, external: true, assuranceTier },
+          resourceType: lit("job"),
+          resourceId: declare.id(jobId),
+          action: lit("create"),
+          metadata: {
+            kernelId: declare.id(kernelId),
+            stepId: declare.id(stepId),
+            external: declare.flag(true),
+            assuranceTier: declare.id(assuranceTier),
+          },
           ip,
           userAgent,
         });
@@ -345,14 +362,19 @@ export class JobFacade extends BaseFacade {
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, deviceId: result.deviceId },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId }, actorId);
+        trackServerEvent(lit("job_submitted"), { kernelId: declare.id(kernelId), capabilityType: declare.id(body.capabilityId) }, actorId);
         auditService.log({
-          eventType: "job.submitted",
+          eventType: lit("job.submitted"),
           actor: actorId,
-          resourceType: "job",
-          resourceId: result.jobId,
-          action: "create",
-          metadata: { kernelId, stepId, deviceId: result.deviceId, assuranceTier },
+          resourceType: lit("job"),
+          resourceId: declare.id(result.jobId),
+          action: lit("create"),
+          metadata: {
+            kernelId: declare.id(kernelId),
+            stepId: declare.id(stepId),
+            deviceId: declare.id(result.deviceId),
+            assuranceTier: declare.id(assuranceTier),
+          },
           ip,
           userAgent,
         });

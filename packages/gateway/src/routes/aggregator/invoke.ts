@@ -49,6 +49,7 @@ import { getAggregatorRegistry, getX402GateConfig } from "./index.js";
 import { getRepos } from "../../db.js";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex } from "@noble/hashes/utils";
+import { lit } from "../../observability/closed-schema.js";
 
 interface InvokeBody {
   /** Args forwarded to the upstream tool. Forwarded as-is. */
@@ -375,10 +376,7 @@ export async function invokeRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       // Don't fail the call just because persistence isn't available
       // (e.g. tests without a DB initialised). Log via Fastify.
-      req.log?.warn?.(
-        { err: err instanceof Error ? err.message : String(err) },
-        "invocation_receipt_persist_failed",
-      );
+      req.log?.warn?.({ err }, lit("invocation_receipt_persist_failed"));
     }
 
     return reply.send({

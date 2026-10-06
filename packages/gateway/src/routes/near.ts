@@ -25,6 +25,7 @@ import {
 } from "../contracts/near-client.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Routes
@@ -111,11 +112,11 @@ export async function nearRoutes(app: FastifyInstance) {
         recipient: body.recipient,
       });
 
-      trackServerEvent("near_quote_requested", {
-        fromChain: body.fromChain,
-        toChain: body.toChain,
-        fromAsset: body.fromAsset,
-        toAsset: body.toAsset,
+      trackServerEvent(lit("near_quote_requested"), {
+        fromChain: declare.id(body.fromChain),
+        toChain: declare.id(body.toChain),
+        fromAsset: declare.id(body.fromAsset),
+        toAsset: declare.id(body.toAsset),
       }, (req as any).operatorId);
       return {
         quote,
@@ -165,18 +166,18 @@ export async function nearRoutes(app: FastifyInstance) {
         recipient: body.recipient,
       });
 
-      trackServerEvent("near_intent_submitted", {
-        quoteId: body.quoteId,
-        workflowId: body.workflowId,
-        intentId: intent.intentId,
+      trackServerEvent(lit("near_intent_submitted"), {
+        quoteId: declare.id(body.quoteId),
+        workflowId: declare.id(body.workflowId),
+        intentId: declare.id(intent.intentId),
       }, (req as any).operatorId);
       auditService.log({
-        eventType: "near.intent_submitted",
+        eventType: lit("near.intent_submitted"),
         actor: (req as any).operatorId ?? (req as any).apiKeyId,
-        resourceType: "near_intent",
-        resourceId: intent.intentId,
-        action: "create",
-        metadata: { quoteId: body.quoteId, workflowId: body.workflowId },
+        resourceType: lit("near_intent"),
+        resourceId: declare.id(intent.intentId),
+        action: lit("create"),
+        metadata: { quoteId: declare.id(body.quoteId), workflowId: declare.id(body.workflowId) },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
       });

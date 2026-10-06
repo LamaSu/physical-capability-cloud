@@ -3,14 +3,18 @@
  * and DELETE to the audit log, so each state-changing call is captured without
  * per-route boilerplate. Individual routes may also log richer events.
  *
- * Moved out of server.ts unchanged, with one exception (#458 rounds 1-3): for a
- * request that targets or imitates the public telemetry sink, the audit keeps
- * the route path only (the canonical sink path when no route matched) and never
- * the caller's IP, User-Agent or raw URL. See services/telemetry-privacy.ts.
+ * Moved out of server.ts (#458 rounds 1-3), and every field declared under the closed
+ * observability schema (N107b, #538): the route is its template (never a URL), the method and
+ * action come from closed vocabularies, and the status and duration are server metrics. For a
+ * request that targets or imitates the public telemetry sink, the audit also omits the caller's
+ * IP and User-Agent (#458). See services/telemetry-privacy.ts.
  */
 
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { auditableUrl, isTelemetrySinkRequest } from "./telemetry-privacy.js";
+import { isTelemetrySinkRequest } from "./telemetry-privacy.js";
+import { declare, declaredRoute, lit, METHODS } from "../observability/closed-schema.js";
+
+const HTTP_WRITE_ACTIONS = ["post", "put", "delete", "patch"] as const;
 
 export async function writeAuditHook(request: FastifyRequest, reply: FastifyReply): Promise<void> {
   const method = request.method;
@@ -20,21 +24,19 @@ export async function writeAuditHook(request: FastifyRequest, reply: FastifyRepl
     request.headers.authorization ? "authenticated" : "anonymous"
   );
   const omitClient = isTelemetrySinkRequest(request.url);
-  const routeUrl = request.routeOptions?.url || undefined;
 
   try {
     const { auditService: audit } = await import("./audit-service.js");
     audit.log({
-      eventType: "http.write",
+      eventType: lit("http.write"),
       actor,
-      resourceType: "http",
-      action: method.toLowerCase(),
+      resourceType: lit("http"),
+      action: declare.code(method.toLowerCase(), HTTP_WRITE_ACTIONS),
       metadata: {
-        method,
-        url: auditableUrl(request.url, routeUrl),
-        ...(omitClient && routeUrl === undefined ? { route_matched: false } : {}),
-        statusCode: reply.statusCode,
-        duration_ms: Math.round(reply.elapsedTime ?? 0),
+        method: declare.code(method, METHODS),
+        route: declaredRoute(request),
+        statusCode: declare.metric(reply.statusCode),
+        duration_ms: declare.metric(Math.round(reply.elapsedTime ?? 0)),
       },
       ip: omitClient ? undefined : request.ip,
       userAgent: omitClient ? undefined : request.headers["user-agent"],

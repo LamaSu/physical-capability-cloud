@@ -15,6 +15,9 @@ import { ConsoleSpanExporter } from "@opentelemetry/sdk-trace-node";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 import { trace, type Tracer } from "@opentelemetry/api";
+import type { SpanExporter } from "@opentelemetry/sdk-trace-node";
+import { lit, type Declared } from "./observability/closed-schema.js";
+import { ClosedSpanExporter, otelName } from "./observability/closed-otel.js";
 
 // ---------------------------------------------------------------------------
 // Exporter selection
@@ -23,25 +26,40 @@ import { trace, type Tracer } from "@opentelemetry/api";
 const otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 const isProd = !!otlpEndpoint;
 
-const traceExporter = isProd
-  ? new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` })
-  : new ConsoleSpanExporter();
-
 // ---------------------------------------------------------------------------
 // SDK
 // ---------------------------------------------------------------------------
 
-export const otelSdk = new NodeSDK({
-  resource: resourceFromAttributes({
-    [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? "pcc-gateway",
-    [ATTR_SERVICE_VERSION]: process.env.OTEL_SERVICE_VERSION ?? "2.0.0",
-  }),
-  traceExporter,
-  // No auto-instrumentations — manual spans only for facades and A2A messages.
-  // Auto-instrumentation requires the ESM loader hook which is incompatible with
-  // tsx watch mode and Railway's current deploy setup.
-  instrumentations: [],
+/** The server's own service name and version: the one resource every exported span carries. */
+const SERVER_RESOURCE = resourceFromAttributes({
+  [ATTR_SERVICE_NAME]: process.env.OTEL_SERVICE_NAME ?? "pcc-gateway",
+  [ATTR_SERVICE_VERSION]: process.env.OTEL_SERVICE_VERSION ?? "2.0.0",
 });
+
+/**
+ * The exporter the SDK sends every span through: the closed schema's exporter around `inner`
+ * (N107b, #538 round 3). It rebuilds each span from what its producer declared and keys the rest
+ * (observability/closed-otel.ts), so the OTLP collector and the console get no raw field.
+ */
+export function otelSpanExporter(inner: SpanExporter): SpanExporter {
+  return new ClosedSpanExporter(inner, SERVER_RESOURCE);
+}
+
+/** The SDK, exporting through otelSpanExporter(exporter). */
+export function createOtelSdk(exporter: SpanExporter): NodeSDK {
+  return new NodeSDK({
+    resource: SERVER_RESOURCE,
+    traceExporter: otelSpanExporter(exporter),
+    // No auto-instrumentations — manual spans only for facades and A2A messages.
+    // Auto-instrumentation requires the ESM loader hook which is incompatible with
+    // tsx watch mode and Railway's current deploy setup.
+    instrumentations: [],
+  });
+}
+
+export const otelSdk = createOtelSdk(
+  isProd ? new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` }) : new ConsoleSpanExporter(),
+);
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -87,7 +105,8 @@ export async function shutdownOtel(): Promise<void> {
 /**
  * Get a named tracer. Shorthand for trace.getTracer().
  * Safe to call before initOtel() — returns a NOOP tracer until the SDK starts.
+ * Its name and version are declared (a compile-time literal), so the exporter keeps them.
  */
-export function getTracer(name: string, version = "2.0.0"): Tracer {
-  return trace.getTracer(name, version);
+export function getTracer(name: Declared, version: Declared = lit("2.0.0")): Tracer {
+  return trace.getTracer(otelName(name), otelName(version));
 }

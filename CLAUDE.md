@@ -272,9 +272,9 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/kernels` | List all kernels (PUBLIC). Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. Each site's location is coarse (about 5 km) unless its operator opted in; see KernelDTO. |
-| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. |
+| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. Its `recentJobs` hold only the jobs you may read; `recentJobsScope` says so (`all`, `readable_by_caller` or `unavailable`). |
 | GET | `/api/kernels/:kernelId/devices` | List devices. Returns `{devices: DeviceStatusDTO[]}`. |
-| GET | `/api/kernels/:kernelId/jobs` | List jobs for kernel. Returns `{jobs: JobDTO[]}`. |
+| GET | `/api/kernels/:kernelId/jobs` | List the kernel's jobs you may read (its operator and an admin: all of them; a buyer: its own). Returns `{jobs: JobDTO[]}`. No credential: 401; no proven wallet: 403. |
 | POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. `locationVisibility: "exact"` publishes the exact site and street address (a public storefront); it needs `X-Admin-Key`, or a wallet you proved (SIWE) that is the kernel's operator, else 403. `"approximate"` (the default) needs only ownership; omitted on an update, the current choice stays. |
 | POST | `/api/kernels/:kernelId/heartbeat` | Send heartbeat. |
 | POST | `/api/kernels/:kernelId/announce` | Announce capabilities to the network. |
@@ -287,6 +287,8 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | GET | `/api/jobs/:jobId` | Get job with evidence and timeline. Returns `{job: JobDetailDTO, evidence}`. |
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
+
+**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401. A kernel's batches (`GET /api/batches`, `GET /api/batches/:batchId`) and its kernel, device and batch streams are readable only by an admin or the kernel's operator (a SIWE-proven wallet); a job's buyer reads its batches through `GET /api/batches/by-job/:jobId`, which shows only that job's slots. Log lines, sensor readings and what is derived from readings (anomalies, and channel aggregates, which are computed over the readings the caller may read) are filtered per record: a record is kept only when the caller may read every job that owns it (or, owned by no job, every kernel it names), and a record naming neither is an admin's. A record tied to a batch is owned by what the live batch holds, never by the names in its payload: a slot or sample by its slot's job, and each part of a record that names a batch but none of its slots (a batch-level event or reading, or one batch-level source of an anomaly) by every job of the batch; a job the record names only adds an owner. A record whose owners cannot be known (an unknown slot or batch, a malformed binding) is an unscoped admin's only. This holds under `TENANT_ENFORCE` too, so a tenant-scoped admin or an operator sees only its tenant's jobs there, and records are judged exactly as they are sent. A batch is sent as a typed projection of the live batch (the spec's fields only), so a slot shows only to a caller who may read its live job; a batch's `runConfig` shows only to a caller who sees every slot of the batch, and otherwise it is null and `runConfigWithheld` is true. Adding a slot (`POST /api/batches/:batchId/slots`) is an admin's or the batch kernel's operator's, for a job of that kernel they may read. A shared batch (`/api/batches/shared/*`) is a public opportunity: anyone sees its kernel, capability, price, timing and how many slots are taken; only an admin or the kernel's operator may open one or see its claims; a claim needs a proven wallet and is made for that wallet (an admin may name the claimant); and only an admin, the kernel's operator or the claimant a claim names may release it.
 
 ### Operator Work
 
@@ -998,6 +1000,8 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
 | Notifications | `GET /sse/notifications` | Global notification stream |
 | Camera stream | `GET /api/relay/:kernelId/camera/stream` | Frame notifications from a kernel's camera (kernel operator or active scope holder) |
+
+The job stream follows the job read rule above. The kernel, device and batch streams carry job-bound sensor readings, so only an admin or the kernel's operator (a SIWE-proven wallet) may subscribe; anyone else gets the 404 an unknown kernel, device or batch gets, and a caller with no credential gets 401.
 
 Example:
 ```bash

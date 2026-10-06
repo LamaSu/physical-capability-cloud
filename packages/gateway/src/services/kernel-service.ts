@@ -18,7 +18,9 @@ import { getRepos } from "../db.js";
 import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
+import { startDeclaredSpan } from "../observability/closed-otel.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -363,11 +365,13 @@ export class KernelService {
       metadata: { deviceId, kernelId: this.config.kernelId ?? "default" },
     });
 
-    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it
+    // Start a local trace (alongside Sentry) so the dashboard waterfall sees it. The local
+    // collector is a sink any key holder reads (GET /api/traces): the operation and service are
+    // declared, and the job's id, step and tier (a caller's values) leave keyed (N107b round 5).
     const { traceId, spanId: lifecycleLocalSpanId } = startTrace(
-      "job.lifecycle",
-      "kernel",
-      { "job.id": jobId, "job.type": stepId, "job.assurance_tier": assuranceTier },
+      lit("job.lifecycle"),
+      lit("kernel"),
+      { "job.id": declare.id(jobId), "job.type": declare.id(stepId), "job.assurance_tier": declare.id(assuranceTier) },
     );
     // Store traceId on the running job so we can reference it in callbacks
     (this.runningJobs.get(jobId) as unknown as { traceId: string }).traceId = traceId;
@@ -384,17 +388,14 @@ export class KernelService {
     // Fire-and-forget execution — wrapped in a Sentry lifecycle span so the
     // async chain is visible as a waterfall in the Sentry trace view.
     try {
-      Sentry.startSpanManual(
-        {
-          name: "job.lifecycle",
-          op: "job.lifecycle",
-          attributes: {
-            "job.id": jobId,
-            "job.type": stepId,
-            "job.assurance_tier": assuranceTier,
-          },
-        },
-        (lifecycleSpan) => {
+      // Its name, op and attributes are declared (N107b, #538 round 3): an exporter keeps them, and
+      // the job's id, step and tier (a caller's values) leave keyed, as in the local trace above.
+      startDeclaredSpan(
+        Sentry.startSpanManual,
+        lit("job.lifecycle"),
+        lit("job.lifecycle"),
+        { "job.id": declare.id(jobId), "job.type": declare.id(stepId), "job.assurance_tier": declare.id(assuranceTier) },
+        (lifecycleSpan: Sentry.Span) => {
           // Telemetry: job execution starting
           pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
           runner
@@ -452,7 +453,7 @@ export class KernelService {
                     });
                   } catch (err) {
                     // Settlement pipeline is non-fatal — the job itself succeeded
-                    console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                    console.warn(lit("[kernel-service] Settlement pipeline failed:"), err);
                   } finally {
                     // Clean up in-memory evidence data
                     this.emitter.cleanup(jobId, stepId);
@@ -536,7 +537,7 @@ export class KernelService {
                   contractAddress,
                 });
               } catch (err) {
-                console.warn("[kernel-service] Settlement pipeline failed:", err instanceof Error ? err.message : err);
+                console.warn(lit("[kernel-service] Settlement pipeline failed:"), err);
               } finally {
                 // Clean up in-memory evidence data
                 this.emitter.cleanup(jobId, stepId);

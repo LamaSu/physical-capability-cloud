@@ -10,6 +10,11 @@ import { SensorPipeline, BatchTracker, EncryptionService, createLitEncryptionSer
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
+import { declare, lit } from "./observability/closed-schema.js";
+import { batchOwnershipOf, registerBatchOwnership } from "./readmodels/batch-ownership.js";
+
+/** @pcc/kernel's evidence-storage-factory.ts backend selection (EVIDENCE_STORAGE env var). */
+const EVIDENCE_STORAGE_BACKENDS: readonly string[] = ["storacha", "helia"];
 
 // ── Sensor Pipeline ─────────────────────────────────────────────────
 
@@ -112,6 +117,10 @@ sensorPipeline.onAnomaly((anomaly) => {
 
 export const batchTracker = new BatchTracker();
 
+// Who owns a batch-tied record (a slot, a sample's reading, a batch event) is what this tracker
+// holds, never what the record's payload says (cross-family review r5 of #403).
+registerBatchOwnership(batchOwnershipOf(batchTracker));
+
 // Forward batch events to StreamHub
 batchTracker.onBatchEvent((event) => {
   streamHub.publish(
@@ -204,14 +213,14 @@ export async function getEvidenceStorage() {
     try {
       _evidenceStorage = await createEvidenceStorage();
       await _evidenceStorage.init();
-      console.log(`[services] Evidence storage initialized (backend: ${process.env["EVIDENCE_STORAGE"] ?? "helia"})`);
+      console.log(lit("[services] Evidence storage initialized"), declare.code(process.env["EVIDENCE_STORAGE"] ?? "helia", EVIDENCE_STORAGE_BACKENDS));
     } catch (err) {
       // Fall back to mock Storacha (generates valid deterministic CIDs, stored in-memory)
-      console.warn(`[services] Evidence storage init failed, falling back to mock:`, (err as Error).message);
+      console.warn(lit("[services] Evidence storage init failed, falling back to mock:"), err);
       const { StorachaStorageService } = await import("@pcc/kernel/storacha-storage");
       _evidenceStorage = new StorachaStorageService({ mock: true });
       await _evidenceStorage.init();
-      console.log(`[services] Evidence storage initialized (fallback: mock storacha)`);
+      console.log(lit("[services] Evidence storage initialized (fallback: mock storacha)"));
     }
   }
   return _evidenceStorage;
@@ -221,7 +230,7 @@ export async function stopEvidenceStorage() {
   if (_evidenceStorage) {
     await _evidenceStorage.stop();
     _evidenceStorage = null;
-    console.log("[services] IPFS evidence storage stopped");
+    console.log(lit("[services] IPFS evidence storage stopped"));
   }
 }
 

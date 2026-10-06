@@ -30,6 +30,7 @@ import {
 import { locationVisibilityOf, storedLocation } from "./populators/public-location.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ── Input interfaces ────────────────────────────────────────────────────────
 
@@ -120,6 +121,9 @@ export interface LocationOptInAuthority {
 
 export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null };
 
+/** The two location choices (N68), as a closed vocabulary for the audit record (N107b). */
+const LOCATION_VISIBILITIES: readonly string[] = ["exact", "approximate"];
+
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
 const ZERO_WALLET = "0x0000000000000000000000000000000000000000";
 
@@ -195,7 +199,11 @@ export function resolveKernelTtlHours(): number {
     parsed > KERNEL_TTL_UPPER_BOUND_HOURS
   ) {
     console.warn(
-      `[kernel-ttl] KERNEL_TTL_HOURS="${raw}" out of band [${KERNEL_TTL_LOWER_BOUND_HOURS},${KERNEL_TTL_UPPER_BOUND_HOURS}]; using ${KERNEL_TTL_DEFAULT_HOURS}`,
+      lit("[kernel-ttl] KERNEL_TTL_HOURS out of band; using default"),
+      declare.id(raw),
+      declare.metric(KERNEL_TTL_LOWER_BOUND_HOURS),
+      declare.metric(KERNEL_TTL_UPPER_BOUND_HOURS),
+      declare.metric(KERNEL_TTL_DEFAULT_HOURS),
     );
     return KERNEL_TTL_DEFAULT_HOURS;
   }
@@ -540,17 +548,17 @@ export class KernelFacade extends BaseFacade {
       const inserted = repos.kernels.insert(kernelData);
 
       trackServerEvent(
-        "kernel_registered",
-        { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
+        lit("kernel_registered"),
+        { kernelId: declare.id(id), name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress) },
         actorId,
       );
       auditService.log({
-        eventType: "kernel.created",
+        eventType: lit("kernel.created"),
         actor: actorId ?? kernelData.operatorAddress,
-        resourceType: "kernel",
-        resourceId: id,
-        action: "create",
-        metadata: { name: kernelData.name, operatorAddress: kernelData.operatorAddress, locationVisibility: visibility },
+        resourceType: lit("kernel"),
+        resourceId: declare.id(id),
+        action: lit("create"),
+        metadata: { name: declare.id(kernelData.name), operatorAddress: declare.id(kernelData.operatorAddress), locationVisibility: declare.code(visibility, LOCATION_VISIBILITIES) },
         ip,
         userAgent,
       });

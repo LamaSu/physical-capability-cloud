@@ -75,6 +75,7 @@ import type {
   AssuranceTier,
 } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY, SESSION_TTL_MS } from "@pcc/spec";
+import { declare, lit } from "../observability/closed-schema.js";
 
 const { negotiationSessions, operatorPolicies, executionScopes, toolCallRelay } = schema;
 
@@ -366,9 +367,7 @@ export async function createJobFromSession(
           cwmIdBytes,
           factoryAddrV3,
         );
-        console.log(
-          `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
-        );
+        console.log(lit("[paid-job] Created on-chain V3 (Mode A) escrow"), declare.id(addr), declare.id(tokenAddr));
 
         // Add each milestone (V2 ABI is byte-identical on V3). Operator payout
         // address prefers the per-operator EOA from option A (revenue routes to
@@ -401,7 +400,10 @@ export async function createJobFromSession(
             );
           }
           console.log(
-            `[paid-job] V3 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} (tx: ${addTx})`,
+            lit("[paid-job] V3 milestone added on-chain"),
+            declare.id(ms.stepId),
+            declare.id(ms.amount),
+            declare.id(addTx),
           );
         }
 
@@ -432,7 +434,13 @@ export async function createJobFromSession(
           throw new Error(`V3 fund reverted (tx=${fundTx}, escrow ${addr})`);
         }
         console.log(
-          `[paid-job] V3 escrow ${addr} funded upfront (${normalizedMilestones.length} milestone(s), ${totalFundAmount} base units)`,
+          lit("[paid-job] V3 escrow funded upfront"),
+          declare.id(addr),
+          // Milestone count reflects the caller's negotiated contract terms, not a
+          // server-measured quantity — declare.id, never declare.metric.
+          declare.id(normalizedMilestones.length),
+          // totalFundAmount is a bigint (keyedHash/JSON.stringify cannot take one) — String() it first.
+          declare.id(String(totalFundAmount)),
         );
 
         return addr;
@@ -484,7 +492,12 @@ export async function createJobFromSession(
         const addr = extractEscrowCreatedAddress(receipt.logs, factoryAbi as typeof PCCProtocolV2ABI);
         lastAddr = addr;
         console.log(
-          `[paid-job] Created on-chain ${v2 ? "V2 (EAS) " : ""}escrow: ${addr} (tx: ${txHash}, token: ${tokenAddr}, attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+          v2 ? lit("[paid-job] Created on-chain V2 (EAS) escrow") : lit("[paid-job] Created on-chain escrow"),
+          declare.id(addr),
+          declare.id(txHash),
+          declare.id(tokenAddr),
+          declare.metric(attempt),
+          declare.metric(MAX_CREATE_ATTEMPTS),
         );
 
         // V1 has no on-chain milestones to add — the escrow IS the result.
@@ -532,7 +545,13 @@ export async function createJobFromSession(
             );
           }
           console.log(
-            `[paid-job] V2 milestone added on-chain: stepId=${ms.stepId} amount=${ms.amount} tier=${assuranceTier} (tx: ${addTx})`,
+            lit("[paid-job] V2 milestone added on-chain"),
+            declare.id(ms.stepId),
+            declare.id(ms.amount),
+            // assuranceTier is read from the caller's negotiated contractTerms
+            // (line 269), not server-decided — declare.id, never declare.metric.
+            declare.id(assuranceTier),
+            declare.id(addTx),
           );
         }
 
@@ -545,7 +564,14 @@ export async function createJobFromSession(
           // moments later). The mined receipts are the authoritative confirmation;
           // read-lag is a consumer concern (/state + the smoke poll the count).
           console.log(
-            `[paid-job] V2 escrow ${addr}: ${normalizedMilestones.length} milestone(s) added, receipts confirmed (attempt ${attempt}/${MAX_CREATE_ATTEMPTS})`,
+            lit("[paid-job] V2 escrow milestones added, receipts confirmed"),
+            declare.id(addr),
+            // Milestone count reflects the caller's negotiated contract terms — declare.id.
+            declare.id(normalizedMilestones.length),
+            // attempt / MAX_CREATE_ATTEMPTS are this retry loop's own counters — server state,
+            // never caller-influenced — so declare.metric is correct here.
+            declare.metric(attempt),
+            declare.metric(MAX_CREATE_ATTEMPTS),
           );
           return addr;
         }
@@ -553,7 +579,10 @@ export async function createJobFromSession(
         // Only reached when an addMilestone tx was genuinely DROPPED (its receipt timed
         // out) -> that escrow is missing a milestone, so abandon it and mint a fresh one.
         console.warn(
-          `[paid-job] escrow ${addr} had a dropped addMilestone tx (attempt ${attempt}/${MAX_CREATE_ATTEMPTS}) — retrying with a fresh escrow`,
+          lit("[paid-job] escrow had a dropped addMilestone tx — retrying with a fresh escrow"),
+          declare.id(addr),
+          declare.metric(attempt),
+          declare.metric(MAX_CREATE_ATTEMPTS),
         );
       }
       throw new Error(
@@ -1212,7 +1241,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           metadata: { cid: ipfsCid, bundleId: anchorBundleId },
         });
       } catch (archiveErr) {
-        console.warn("[complete] Evidence IPFS archive failed, using mock CID:", archiveErr instanceof Error ? archiveErr.message : archiveErr);
+        console.warn(lit("[complete] Evidence IPFS archive failed, using mock CID"), archiveErr);
         // Generate a deterministic mock CID so the pipeline always returns one
         try {
           const { StorachaStorageService } = await import("@pcc/kernel/storacha-storage");
@@ -1248,7 +1277,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
           metadata: { txHash: starknetTxHash, proofId: proof.id, mode: starknetService.isMock() ? "mock" : "real" },
         });
       } catch (zkErr) {
-        console.warn("[complete] ZK/Starknet anchor failed (best-effort):", zkErr instanceof Error ? zkErr.message : zkErr);
+        console.warn(lit("[complete] ZK/Starknet anchor failed (best-effort)"), zkErr);
       }
 
       // ── 3. Execution scopes — left active (not revoked on completion) ──
@@ -1418,10 +1447,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
                 easBridge.evidenceTxHash = evV3.transactionHash;
                 await waitForReceipt(evV3.transactionHash as `0x${string}`);
               } catch (evErr) {
-                console.warn(
-                  "[complete] V3 on-chain evidence submit failed (attestation will likely revert):",
-                  evErr instanceof Error ? evErr.message : evErr,
-                );
+                console.warn(lit("[complete] V3 on-chain evidence submit failed (attestation will likely revert)"), evErr);
               }
               const submitted = await submitAttestationV3(0, easUid, escrowAddress as `0x${string}`);
               easBridge.submitted = true;
@@ -1456,7 +1482,7 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             },
           });
         } catch (easErr) {
-          console.warn("[complete] EAS attestation bridge failed (best-effort):", easErr instanceof Error ? easErr.message : easErr);
+          console.warn(lit("[complete] EAS attestation bridge failed (best-effort)"), easErr);
         }
       }
 
@@ -1919,8 +1945,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
-    if (loaded.kind === "refused") {
-      const refusal = JOB_READ_REFUSAL[loaded.reason];
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
       return reply.status(refusal.status).send(refusal.body);
     }
     if (loaded.kind === "unavailable") {

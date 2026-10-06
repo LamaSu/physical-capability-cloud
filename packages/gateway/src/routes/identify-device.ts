@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import Anthropic from "@anthropic-ai/sdk";
+import { lit } from "../observability/closed-schema.js";
 
 const MODEL_TEXT = "claude-haiku-4-5-20251001";
 const MODEL_VISION = "claude-sonnet-4-6";
@@ -120,7 +121,7 @@ export async function identifyDeviceRoutes(app: FastifyInstance) {
         messages: [{ role: "user", content: userContent }],
       });
     } catch (err) {
-      request.log.error({ err }, "identify-device anthropic call failed");
+      request.log.error({ err }, lit("identify-device anthropic call failed"));
       return reply.status(502).send({ error: "Identification model unavailable, try again" });
     }
 

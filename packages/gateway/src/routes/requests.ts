@@ -58,6 +58,7 @@ import {
   isUnmetCaptureEnabled,
 } from "../services/unmet-capture.js";
 import { schema } from "@pcc/store";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -339,7 +340,7 @@ export async function requestRoutes(app: FastifyInstance) {
   } catch (err) {
     // If repos aren't initialized yet in some test paths, skip silently.
     // The route handlers will fail loudly if the DB is truly missing.
-    app.log?.warn?.({ err }, "[requests] seed deferred");
+    app.log?.warn?.({ err }, lit("[requests] seed deferred"));
   }
 
   // ── POST /api/requests ────────────────────────────────────────────
@@ -834,12 +835,16 @@ export async function requestRoutes(app: FastifyInstance) {
       try {
         const { auditService } = await import("../services/audit-service.js");
         auditService.log({
-          eventType: "request.node.assigned",
+          eventType: lit("request.node.assigned"),
           actor: callerId,
-          resourceType: "request_node",
-          resourceId: node.id,
-          action: "assign",
-          metadata: { requestId: request.id, targetOperator, broker: callerId !== targetOperator },
+          resourceType: lit("request_node"),
+          resourceId: declare.id(node.id),
+          action: lit("assign"),
+          metadata: {
+            requestId: declare.id(request.id),
+            targetOperator: declare.id(targetOperator),
+            broker: declare.flag(callerId !== targetOperator),
+          },
           ip: req.ip,
         });
       } catch { /* non-fatal */ }

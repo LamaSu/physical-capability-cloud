@@ -39,6 +39,12 @@ import {
 } from "@pcc/spec";
 import { requireAuth } from "../auth/require-auth.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** GenesisAdapterError's known codes (defined + thrown in this file, below). */
+const GENESIS_ADAPTER_CODES: readonly string[] = [
+  "missing_artefact_path", "spawn_failed", "runner_exit_nonzero", "trace_not_written", "trace_json_invalid", "trace_schema_invalid",
+];
 
 // ---------------------------------------------------------------------------
 // Inline adapter — spawn the Python runner and validate its JSON output.
@@ -473,7 +479,7 @@ export async function captureSimRoutes(app: FastifyInstance): Promise<void> {
         return response;
       } catch (err) {
         if (err instanceof GenesisAdapterError) {
-          req.log.error({ err, code: err.code }, "capture_sim adapter failed");
+          req.log.error({ err, code: declare.code(err.code, GENESIS_ADAPTER_CODES) }, lit("capture_sim adapter failed"));
           pipelineTelemetry.emit(jobId ?? "capture-sim", "evidence_capture", "failed", {
             metadata: {
               subphase: "capture_sim",
@@ -491,7 +497,7 @@ export async function captureSimRoutes(app: FastifyInstance): Promise<void> {
             detail: err.detail,
           });
         }
-        req.log.error({ err }, "capture_sim threw");
+        req.log.error({ err }, lit("capture_sim threw"));
         return reply.status(500).send({
           error: "internal_error",
           message: (err as Error).message,

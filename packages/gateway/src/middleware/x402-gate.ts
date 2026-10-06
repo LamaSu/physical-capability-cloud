@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { X402Middleware, type RoutePaymentMap, type X402Config } from "@pcc/payments";
 import { MppMiddleware } from "@pcc/payments";
 import { hasValidAdminKey } from "../readmodels/job-execution.js";
+import { errorClassOf, lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Shared route pricing — single source of truth for both protocols
@@ -160,7 +161,7 @@ export async function paymentGate(app: FastifyInstance) {
   if (useMpp && enabled) {
     const secretKey = process.env.MPP_SECRET_KEY;
     if (!secretKey) {
-      app.log.warn("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning.");
+      app.log.warn(lit("[payment-gate] MPP is the default but MPP_SECRET_KEY is not set — falling back to x402. Set MPP_SECRET_KEY or use PCC_X402_LEGACY=true to silence this warning."));
     } else {
       mppMiddleware = new MppMiddleware({
         secretKey,
@@ -231,7 +232,12 @@ export async function paymentGate(app: FastifyInstance) {
         if (stats.recentPayments.length > 50) stats.recentPayments.pop();
       } catch (err) {
         // Fail CLOSED — payment verification errors block the request (HIGH-05 fix)
-        app.log.error({ err }, "[payment-gate] MPP payment check error — blocking request");
+        // A fixed code and the error's class only (#514 r2, MEDIUM 2): the payment library handled the
+        // request's URL and headers, and its message could echo them.
+        app.log.error(
+          { code: lit("mpp_check_failed"), errorClass: errorClassOf(err) },
+          lit("[payment-gate] MPP payment check error — blocking request"),
+        );
         stats.gatedRequests++;
         reply.status(402).headers({ "Content-Type": "application/json" }).send({
           error: "payment_verification_failed",
@@ -247,7 +253,7 @@ export async function paymentGate(app: FastifyInstance) {
   if (!mppMiddleware) {
     if (x402Legacy && enabled) {
       app.log.warn(
-        "[payment-gate] x402 is deprecated. Set MPP_SECRET_KEY and remove PCC_X402_LEGACY=true to upgrade to MPP.",
+        lit("[payment-gate] x402 is deprecated. Set MPP_SECRET_KEY and remove PCC_X402_LEGACY=true to upgrade to MPP."),
       );
     }
 

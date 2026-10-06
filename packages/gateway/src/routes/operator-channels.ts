@@ -35,7 +35,27 @@
 import type { FastifyInstance } from "fastify";
 import { randomBytes, createHmac } from "node:crypto";
 import { getEmailTransport } from "../services/email-transport.js";
-import { checkOutboundUrl, guardedFetch, OutboundError } from "../services/outbound-url-guard.js";
+import { checkOutboundUrl, guardedFetch, OutboundError, type OutboundErrorCode } from "../services/outbound-url-guard.js";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** OutboundErrorCode (services/outbound-url-guard.ts) — a type-enforced closed set. */
+/**
+ * Every OutboundErrorCode, complete by construction: a Record over the union fails to compile when
+ * a code is added without it. The #538 merge-up found master's dns_busy (N84) missing from the old
+ * list, so a saturated resolver's code was keyed out of the operator log N84 keeps it in.
+ */
+const OUTBOUND_ERROR_CODE_SET: Record<OutboundErrorCode, true> = {
+  invalid_url: true,
+  blocked_destination: true,
+  dns_failure: true,
+  dns_busy: true,
+  redirect_not_followed: true,
+  timeout: true,
+  request_failed: true,
+};
+const OUTBOUND_ERROR_CODES: readonly OutboundErrorCode[] = Object.keys(OUTBOUND_ERROR_CODE_SET) as OutboundErrorCode[];
+/** ChannelTransport (this file, above) — a type-enforced closed set. */
+const CHANNEL_TRANSPORTS: readonly string[] = ["webhook", "email", "sms", "voice", "push", "mqtt", "file", "manual"];
 
 /**
  * The transport is "what wire does the message go over." It stays small and
@@ -477,9 +497,12 @@ async function dispatchOne(
         // provider is a per-transport follow-on with the same shape as the
         // email path below.
         console.log(
-          `[op-channel] ${ch.transport} transport not implemented; would dispatch to ` +
-            `operator=${ch.operatorSlug} endpoint=${JSON.stringify(ch.endpoint)} ` +
-            `describe="${ch.describe.slice(0, 80)}" payload=${JSON.stringify(p)}`,
+          lit("[op-channel] transport not implemented; would dispatch"),
+          declare.code(ch.transport, CHANNEL_TRANSPORTS),
+          declare.id(ch.operatorSlug),
+          declare.id(ch.endpoint),
+          declare.id(ch.describe),
+          declare.id(p),
         );
         return {
           channelId: ch.id,
@@ -570,12 +593,11 @@ function emailBody(ch: ChannelRecord, p: ChannelDispatchPayload): string {
 function webhookFailure(ch: ChannelRecord, e: unknown): ChannelDispatchResult {
   if (!(e instanceof OutboundError)) throw e; // unexpected: dispatchOne reports send_failed
   console.warn(
-    `[op-channel] webhook not sent ${JSON.stringify({
-      operator: ch.operatorSlug,
-      channel: ch.id,
-      code: e.code,
-      reason: e.reason,
-    })}`,
+    lit("[op-channel] webhook not sent"),
+    declare.id(ch.operatorSlug),
+    declare.id(ch.id),
+    declare.code(e.code, OUTBOUND_ERROR_CODES),
+    declare.id(e.reason),
   );
   const base = { channelId: ch.id, transport: "webhook" as const, delivered: false };
   switch (e.code) {
@@ -650,11 +672,9 @@ async function sendWebhook(
 /** A stored channel's credentialRef is not usable: nothing was signed, nothing was sent. */
 function credentialRefRefused(ch: ChannelRecord): ChannelDispatchResult {
   console.warn(
-    `[op-channel] webhook not sent ${JSON.stringify({
-      operator: ch.operatorSlug,
-      channel: ch.id,
-      code: "credential_ref_not_allowed",
-    })}`,
+    lit("[op-channel] webhook not sent: credential_ref_not_allowed"),
+    declare.id(ch.operatorSlug),
+    declare.id(ch.id),
   );
   return {
     channelId: ch.id,

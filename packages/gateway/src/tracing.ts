@@ -3,25 +3,23 @@
  *
  * Usage:
  *
- *   const { traceId, spanId } = startTrace("job.lifecycle", "kernel");
+ *   const { traceId, spanId } = startTrace(lit("job.lifecycle"), lit("kernel"));
  *   // ... do work ...
- *   await withSpan({ traceId, parentSpanId: spanId, operation: "job.load_gcode", service: "kernel" }, async () => {
+ *   await withSpan({ traceId, parentSpanId: spanId, operation: lit("job.load_gcode"), service: lit("kernel") }, async () => {
  *     // ... child work ...
  *   });
  *   endTrace(traceId, spanId, "ok");
+ *
+ * The local collector is a sink under the closed observability schema (N107b round 5,
+ * trace-collector.ts): every id comes from the collector (so it stays readable), an operation,
+ * service or description is declared (lit, or declare.code from a closed vocabulary), every
+ * attribute a producer wants readable is declared (declare.id, declare.metric, declare.flag,
+ * declare.code), and the collector reads every time from the server's clock itself.
  */
 
-import { randomBytes } from "node:crypto";
 import { Sentry } from "./sentry.js";
-import { traceCollector } from "./trace-collector.js";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function newId(bytes: number): string {
-  return randomBytes(bytes).toString("hex");
-}
+import { traceCollector, TraceCollector } from "./trace-collector.js";
+import { closedText, type Declared } from "./observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -32,46 +30,48 @@ function newId(bytes: number): string {
  * Call endTrace() when the root operation is complete.
  */
 export function startTrace(
-  operation: string,
-  service: string,
-  attributes?: Record<string, string | number | boolean>,
+  operation: Declared,
+  service: Declared,
+  attributes?: Record<string, unknown>,
 ): { traceId: string; spanId: string } {
-  const traceId = newId(16);
-  const spanId = newId(8);
+  const traceId = TraceCollector.newTraceId();
+  const spanId = TraceCollector.newSpanId();
   traceCollector.startSpan({ traceId, spanId, operation, service, attributes: attributes ?? {} });
   return { traceId, spanId };
 }
 
 /**
- * End a span that was started with startTrace() or withSpan().
+ * End a span that was started with startTrace() or withSpan(). The collector takes its end time
+ * from the server's clock.
  */
 export function endTrace(
   traceId: string,
   spanId: string,
   status: "ok" | "error",
-  endTime?: number,
 ): void {
-  traceCollector.endSpan({ traceId, spanId, status, endTime });
+  traceCollector.endSpan({ traceId, spanId, status });
 }
 
 /**
  * Wrap an async function with a child span recorded to both Sentry and the local collector.
  *
- * The Sentry span is created with startSpan (auto-ended).
+ * The Sentry span is created with startSpan (auto-ended), named by the declared operation and
+ * service (an undeclared one by its keyed hash); its attributes stay in the local span (Sentry's
+ * own chokepoint keeps no span data outside its vocabulary).
  * The local span is created with traceCollector.startSpan / endSpan.
  */
 export async function withSpan<T>(
   opts: {
     traceId: string;
     parentSpanId?: string;
-    operation: string;
-    service: string;
-    description?: string;
-    attributes?: Record<string, string | number | boolean>;
+    operation: Declared;
+    service: Declared;
+    description?: Declared;
+    attributes?: Record<string, unknown>;
   },
   fn: () => Promise<T>,
 ): Promise<T> {
-  const spanId = newId(8);
+  const spanId = TraceCollector.newSpanId();
 
   traceCollector.startSpan({
     traceId: opts.traceId,
@@ -86,9 +86,8 @@ export async function withSpan<T>(
   try {
     const result = await Sentry.startSpan(
       {
-        name: opts.operation,
-        op: opts.service,
-        attributes: opts.attributes,
+        name: closedText(opts.operation),
+        op: closedText(opts.service),
       },
       fn,
     );
@@ -107,14 +106,14 @@ export function withSpanSync<T>(
   opts: {
     traceId: string;
     parentSpanId?: string;
-    operation: string;
-    service: string;
-    description?: string;
-    attributes?: Record<string, string | number | boolean>;
+    operation: Declared;
+    service: Declared;
+    description?: Declared;
+    attributes?: Record<string, unknown>;
   },
   fn: () => T,
 ): T {
-  const spanId = newId(8);
+  const spanId = TraceCollector.newSpanId();
 
   traceCollector.startSpan({
     traceId: opts.traceId,

@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { declare, keyedHash, lit, METHODS } from "../observability/closed-schema.js";
 import Fastify, { type FastifyInstance } from "fastify";
 import { initStore, closeStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
@@ -88,10 +89,12 @@ describe("GET /api/telemetry/audit", () => {
     expect(body.filters.limit).toBe(50);
   });
 
+  // Producers declare their codes (the closed observability schema, N107b round 2), as the
+  // gateway's own do; an undeclared code is stored as its keyed hash.
   it("filters by eventType", async () => {
-    auditService.log({ eventType: "job.submitted", action: "create", actor: "alice" });
-    auditService.log({ eventType: "escrow.funded", action: "fund", actor: "bob" });
-    auditService.log({ eventType: "job.submitted", action: "create", actor: "charlie" });
+    auditService.log({ eventType: lit("job.submitted"), action: lit("create"), actor: "alice" });
+    auditService.log({ eventType: lit("escrow.funded"), action: lit("fund"), actor: "bob" });
+    auditService.log({ eventType: lit("job.submitted"), action: lit("create"), actor: "charlie" });
 
     const res = await app.inject({
       method: "GET",
@@ -116,23 +119,24 @@ describe("GET /api/telemetry/audit", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.count).toBe(2);
-    expect(body.entries.every((e: { actor?: string }) => e.actor === "alice")).toBe(true);
+    // The actor is stored as its keyed hash (N107b); ?actor=alice is hashed the same way.
+    expect(body.entries.every((e: { actor?: string }) => e.actor === keyedHash("alice"))).toBe(true);
     expect(body.filters.actor).toBe("alice");
   });
 
   it("filters by method (http.write entries)", async () => {
     // http.write entries have metadata.method
     auditService.log({
-      eventType: "http.write",
-      action: "post",
-      metadata: { method: "POST", url: "/api/jobs/submit", statusCode: 201 },
+      eventType: lit("http.write"),
+      action: lit("post"),
+      metadata: { method: declare.code("POST", METHODS), url: "/api/jobs/submit", statusCode: declare.metric(201) },
     });
     auditService.log({
-      eventType: "http.write",
-      action: "delete",
-      metadata: { method: "DELETE", url: "/api/marketplace/listings/lst-1", statusCode: 200 },
+      eventType: lit("http.write"),
+      action: lit("delete"),
+      metadata: { method: declare.code("DELETE", METHODS), url: "/api/marketplace/listings/lst-1", statusCode: declare.metric(200) },
     });
-    auditService.log({ eventType: "job.submitted", action: "create" });
+    auditService.log({ eventType: lit("job.submitted"), action: lit("create") });
 
     const res = await app.inject({
       method: "GET",
@@ -158,11 +162,11 @@ describe("GET /api/telemetry/audit", () => {
 
   it("returns entries with correct shape", async () => {
     auditService.log({
-      eventType: "job.submitted",
+      eventType: lit("job.submitted"),
       actor: "alice",
-      resourceType: "job",
+      resourceType: lit("job"),
       resourceId: "job-123",
-      action: "create",
+      action: lit("create"),
       metadata: { kernelId: "k-1" },
     });
 
@@ -171,8 +175,9 @@ describe("GET /api/telemetry/audit", () => {
     const entry = body.entries[0];
     expect(typeof entry.eventType).toBe("string");
     expect(typeof entry.action).toBe("string");
-    expect(entry.actor).toBe("alice");
+    // Identifiers are stored as keyed hashes (N107b); the resource type is a closed name.
+    expect(entry.actor).toBe(keyedHash("alice"));
     expect(entry.resourceType).toBe("job");
-    expect(entry.resourceId).toBe("job-123");
+    expect(entry.resourceId).toBe(keyedHash("job-123"));
   });
 });

@@ -17,6 +17,7 @@ import {
 // V3 fee cap (1000 bps) — the single on-chain source of truth, mirrored here so
 // the v2 metadata builder can fail fast before minting an attestation V3 rejects.
 import { MAX_FEE_BPS_V3 } from "@pcc/contracts/abi";
+import { declare, lit } from "../observability/closed-schema.js";
 
 const ORACLE_URL = process.env.PCC_ORACLE_URL ?? "http://localhost:4100";
 const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
@@ -123,9 +124,7 @@ export async function verifyWithOracle(request: OracleVerifyRequest): Promise<Or
     // No real oracle configured — degraded dev/test fallback. mockVerification
     // fails CLOSED for paid tiers (>=1) and marks the response mode:"mock"/degraded,
     // so a fabricated verdict can never drive a paid job to "verified"/"settled".
-    console.warn(
-      "[oracle] No PCC_ORACLE_KEY set — using degraded mock verification (fails closed for paid tiers)",
-    );
+    console.warn(lit("[oracle] No PCC_ORACLE_KEY set — using degraded mock verification (fails closed for paid tiers)"));
     return mockVerification(request);
   }
 
@@ -204,8 +203,9 @@ function mockVerification(request: OracleVerifyRequest): OracleResponse {
 
   if (isPaidTier) {
     console.warn(
-      `[oracle] Mock verification REFUSED for paid tier ${request.assuranceTier} ` +
-        `(job ${request.jobId}) — no real oracle configured. Failing closed (verified:false).`,
+      lit("[oracle] Mock verification REFUSED for a paid tier — no real oracle configured. Failing closed (verified:false)."),
+      declare.id(request.assuranceTier),
+      declare.id(request.jobId),
     );
   }
 

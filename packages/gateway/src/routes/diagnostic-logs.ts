@@ -13,6 +13,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { declare, lit } from "../observability/closed-schema.js";
 
 // In-memory store (backed by audit log for persistence across restarts).
 // For a production system you'd use the DB, but this keeps it simple
@@ -139,9 +140,16 @@ export async function diagnosticLogRoutes(app: FastifyInstance) {
 
     uploads.push(upload);
 
+    // bundleSize/logLineCount are caller-reported (req.body), not server-measured —
+    // declare.metric would emit a caller-chosen number raw. declare.id hashes them.
     app.log.info(
-      `diagnostic-logs: received bundle ${uploadId} from kernel ${kernelId ?? "?"} ` +
-      `(${bundleSize ?? 0} bytes, ${logLineCount ?? 0} lines)`
+      {
+        uploadId: declare.id(uploadId),
+        kernelId: declare.id(kernelId ?? "?"),
+        bundleSize: declare.id(bundleSize ?? 0),
+        logLineCount: declare.id(logLineCount ?? 0),
+      },
+      lit("diagnostic-logs: received bundle"),
     );
 
     return {

@@ -1,6 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { SWFService } from "@pcc/payments";
 import type { SWFParticipantRole, SWFAccrualSource, SWFAllocationStrategy, SWFDemandForecast, SWFOperatorCostModel, SWFEquityTier } from "@pcc/spec";
+import { declare, lit } from "../observability/closed-schema.js";
+
+/** SWFEquityTier (@pcc/spec) — a type-enforced closed set, though this route casts the
+ * caller's body.equityTier to it without runtime validation — declare.code is safe either way. */
+const SWF_EQUITY_TIERS: readonly string[] = ["seed", "growth", "expansion"];
 
 // ---------------------------------------------------------------------------
 // Shared service instance (in-memory mock)
@@ -465,16 +470,16 @@ export async function swfRoutes(app: FastifyInstance) {
       try {
         const { auditService } = await import("../services/audit-service.js");
         auditService.log({
-          eventType: "swf.term_sheet.proposed",
+          eventType: lit("swf.term_sheet.proposed"),
           actor: proposerId,
-          resourceType: "swf_term_sheet",
-          resourceId: termSheet.id,
-          action: "propose",
+          resourceType: lit("swf_term_sheet"),
+          resourceId: declare.id(termSheet.id),
+          action: lit("propose"),
           metadata: {
-            targetOperator: body.operatorId,
-            capabilityType: body.capabilityType,
-            seedAmount: body.seedAmount,
-            equityTier: body.equityTier,
+            targetOperator: declare.id(body.operatorId),
+            capabilityType: declare.id(body.capabilityType),
+            seedAmount: declare.id(body.seedAmount),
+            equityTier: declare.code(body.equityTier, SWF_EQUITY_TIERS),
           },
           ip: req.ip,
         });

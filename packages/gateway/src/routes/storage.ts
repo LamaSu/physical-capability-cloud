@@ -35,6 +35,7 @@ import {
   isValidCid,
   detectMediaType,
 } from "../services/cid-blob-storage.js";
+import { lit } from "../observability/closed-schema.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -184,7 +185,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
       try {
         meta = await storage.put(bytes, { mediaType });
       } catch (err) {
-        req.log.error({ err }, "[storage] backend put failed");
+        req.log.error({ err }, lit("[storage] backend put failed"));
         return reply.code(500).send({ error: "storage_backend_error" });
       }
 
@@ -308,7 +309,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
           try {
             bytes = await storage.getRange(cid, start, end);
           } catch (err) {
-            req.log.error({ err }, "[storage] backend getRange failed");
+            req.log.error({ err }, lit("[storage] backend getRange failed"));
             return reply.code(500).send({ error: "storage_backend_error" });
           }
           reply
@@ -324,7 +325,7 @@ export async function storageRoutes(app: FastifyInstance): Promise<void> {
       try {
         bytes = await storage.get(cid);
       } catch (err) {
-        req.log.error({ err }, "[storage] backend get failed");
+        req.log.error({ err }, lit("[storage] backend get failed"));
         return reply.code(404).send({ error: "not_found_in_backend" });
       }
 

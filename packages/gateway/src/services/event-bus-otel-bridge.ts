@@ -15,8 +15,11 @@
 
 import { subscribe, type AppEvent } from "@pcc/orchestrator-sdk";
 import { getTracer } from "../otel.js";
+import { declare, lit } from "../observability/closed-schema.js";
+import { addClosedEvent, startClosedSpan } from "../observability/closed-otel.js";
 
 const TRACER_NAME = "orchestrator-sdk.event-bus";
+const LEVELS: readonly string[] = ["info", "ok", "warn", "err"];
 
 /**
  * Map an event-bus level to an OTel span status code. Errors flag the span
@@ -32,34 +35,35 @@ function statusForLevel(level?: AppEvent["level"]): "OK" | "ERROR" {
  * unsubscribe function the caller can hold for graceful shutdown.
  */
 export function startEventBusOtelBridge(): () => void {
-  const tracer = getTracer(TRACER_NAME);
+  const tracer = getTracer(lit(TRACER_NAME));
   return subscribe((e: AppEvent) => {
-    // Span name follows the existing facade convention: "<sponsor>.<kind>"
-    // so traces group naturally by integration in the UI.
-    const span = tracer.startSpan(`${e.sponsor}.${e.kind}`, {
-      startTime: e.t,
-      attributes: {
-        "event.kind": e.kind,
-        "event.sponsor": e.sponsor,
-        "event.level": e.level ?? "info",
-        ...(e.session_id ? { "event.session_id": e.session_id } : {}),
-        ...(e.duration_ms !== undefined ? { "event.duration_ms": e.duration_ms } : {}),
-        // Text lands as a span attribute rather than a span event so that
-        // OTel exporters (Honeycomb, Tempo, etc.) which index attributes
-        // can search on it. Already redacted by the bus per T1.6.
-        "event.text": e.text.length > 1024 ? `${e.text.slice(0, 1021)}...` : e.text,
-      },
+    // Every span has one declared name, and each event field leaves as the closed schema declares
+    // it (N107b, #538 round 3): an emitter's kind, sponsor, session, text and reported duration
+    // are its values, so they leave keyed (equal values still group and match); the level is from
+    // the bus's own vocabulary; t is the bus's clock (emit() sets it). The payload is not sent.
+    // No start or end time is passed: the tracing SDK's own clock times every span (N107b round 4,
+    // C11; sentry-timing-ratchet.test.ts).
+    const span = startClosedSpan(tracer, lit("event-bus.event"), {
+      "event.t": declare.serverTime(e.t),
+      "event.kind": declare.id(e.kind),
+      "event.sponsor": declare.id(e.sponsor),
+      "event.level": declare.code(e.level ?? "info", LEVELS),
+      ...(e.session_id ? { "event.session_id": declare.id(e.session_id) } : {}),
+      ...(e.duration_ms !== undefined ? { "event.duration_ms": declare.id(e.duration_ms) } : {}),
+      "event.text": declare.id(e.text),
     });
     if (statusForLevel(e.level) === "ERROR") {
-      // recordException accepts any thrown-shape; we synthesize a minimal
-      // error so tracing UIs render an error chip without us needing to
-      // attach the raw payload (which may be large or sensitive).
-      span.recordException({ name: `${e.sponsor}.${e.kind}`, message: e.text });
-      span.setStatus({ code: 2, message: e.text });
+      // The exception event tracing UIs render as an error chip, with declared fields (the
+      // emitter's text keyed); the status is its code alone.
+      addClosedEvent(span, lit("exception"), {
+        "exception.type": lit("EventBusError"),
+        "exception.message": declare.id(e.text),
+      });
+      span.setStatus({ code: 2 });
     }
     // End immediately — events are already-completed milestones. If a
     // future iteration wants to model a "begin → end" pair as one parent
     // span, that's the `tracked()` helper's job, not this bridge's.
-    span.end(e.duration_ms ? e.t + e.duration_ms : e.t);
+    span.end();
   });
 }

@@ -33,6 +33,7 @@ import { getSettlementService } from "../services/settlement-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
+import { declare, lit } from "../observability/closed-schema.js";
 import {
   readEscrow,
   getEscrowEvents,
@@ -319,13 +320,13 @@ export class SettlementFacade extends BaseFacade {
         ? await chainFundEscrowV2(address)
         : await chainFundEscrow(address);
       pipelineTelemetry.emit(address, "escrow_fund", "completed", { metadata: { escrow: address } });
-      trackServerEvent("escrow_funded", { amount: result?.toString?.() ?? address }, actorId);
+      trackServerEvent(lit("escrow_funded"), { amount: declare.id(result?.toString?.() ?? address) }, actorId);
       auditService.log({
-        eventType: "escrow.funded",
+        eventType: lit("escrow.funded"),
         actor: actorId,
-        resourceType: "escrow",
-        resourceId: address,
-        action: "fund",
+        resourceType: lit("escrow"),
+        resourceId: declare.id(address),
+        action: lit("fund"),
         ip,
         userAgent,
       });
@@ -379,12 +380,13 @@ export class SettlementFacade extends BaseFacade {
         metadata: { escrow: address, milestoneIndex, released: true },
       });
       auditService.log({
-        eventType: "escrow.released",
+        eventType: lit("escrow.released"),
         actor: actorId,
-        resourceType: "escrow",
-        resourceId: address,
-        action: "release",
-        metadata: { milestoneIndex, evidenceHash: attestation.evidenceHash },
+        resourceType: lit("escrow"),
+        resourceId: declare.id(address),
+        action: lit("release"),
+        // milestoneIndex is the caller's :milestoneIndex path param — declare.id, not metric.
+        metadata: { milestoneIndex: declare.id(milestoneIndex), evidenceHash: declare.id(attestation.evidenceHash) },
         ip,
         userAgent,
       });
@@ -433,12 +435,12 @@ export class SettlementFacade extends BaseFacade {
         metadata: { escrow: address, milestoneIndex, dispute: true, reason: body.reason },
       });
       auditService.log({
-        eventType: "escrow.disputed",
+        eventType: lit("escrow.disputed"),
         actor: actorId,
-        resourceType: "escrow",
-        resourceId: address,
-        action: "dispute",
-        metadata: { milestoneIndex, reason: body.reason },
+        resourceType: lit("escrow"),
+        resourceId: declare.id(address),
+        action: lit("dispute"),
+        metadata: { milestoneIndex: declare.id(milestoneIndex), reason: declare.id(body.reason) },
         ip,
         userAgent,
       });
@@ -468,12 +470,12 @@ export class SettlementFacade extends BaseFacade {
         metadata: { escrow: address, milestoneIndex, action: "depositBond" },
       });
       auditService.log({
-        eventType: "escrow.bond_deposited",
+        eventType: lit("escrow.bond_deposited"),
         actor: actorId,
-        resourceType: "escrow",
-        resourceId: address,
-        action: "deposit_bond",
-        metadata: { milestoneIndex },
+        resourceType: lit("escrow"),
+        resourceId: declare.id(address),
+        action: lit("deposit_bond"),
+        metadata: { milestoneIndex: declare.id(milestoneIndex) },
         ip,
         userAgent,
       });
@@ -509,12 +511,12 @@ export class SettlementFacade extends BaseFacade {
         metadata: { escrow: address, milestoneIndex, evidenceBundleHash },
       });
       auditService.log({
-        eventType: "escrow.evidence_submitted",
+        eventType: lit("escrow.evidence_submitted"),
         actor: actorId,
-        resourceType: "escrow",
-        resourceId: address,
-        action: "submit_evidence",
-        metadata: { milestoneIndex, evidenceBundleHash },
+        resourceType: lit("escrow"),
+        resourceId: declare.id(address),
+        action: lit("submit_evidence"),
+        metadata: { milestoneIndex: declare.id(milestoneIndex), evidenceBundleHash: declare.id(evidenceBundleHash) },
         ip,
         userAgent,
       });
@@ -560,16 +562,16 @@ export class SettlementFacade extends BaseFacade {
         },
       });
       auditService.log({
-        eventType: "escrow.attestation_submitted",
+        eventType: lit("escrow.attestation_submitted"),
         actor: actorId,
-        resourceType: "escrow",
-        resourceId: address,
-        action: "submit_attestation",
+        resourceType: lit("escrow"),
+        resourceId: declare.id(address),
+        action: lit("submit_attestation"),
         metadata: {
-          milestoneIndex,
-          evidenceHash: attestation.evidenceHash,
-          tier: attestation.tier,
-          jobId: attestation.jobId,
+          milestoneIndex: declare.id(milestoneIndex),
+          evidenceHash: declare.id(attestation.evidenceHash),
+          tier: declare.id(attestation.tier),
+          jobId: declare.id(attestation.jobId),
         },
         ip,
         userAgent,

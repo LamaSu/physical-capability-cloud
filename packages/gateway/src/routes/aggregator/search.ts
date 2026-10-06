@@ -32,6 +32,7 @@ import type {
 } from "@pcc/spec";
 import { isHybridActive, isHybridServed, readRankerMode } from "../../ranker-config.js";
 import { getAggregatorRegistry } from "./index.js";
+import { lit } from "../../observability/closed-schema.js";
 
 interface SearchQuery {
   q?: string;
@@ -133,11 +134,7 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
         });
         void appendShadowEvent(event, {
           onError: (e) =>
-            app.log.warn(
-              `[aggregator/search] shadow log append failed: ${
-                e instanceof Error ? e.message : String(e)
-              }`,
-            ),
+            app.log.warn({ err: e }, lit("[aggregator/search] shadow log append failed")),
         });
       }
 

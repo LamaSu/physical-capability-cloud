@@ -16,6 +16,7 @@ import {
   isIdentityWriteEnabled,
 } from "./erc8004-identity-write.js";
 import { getRepos } from "../db.js";
+import { declare } from "../observability/closed-schema.js";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_BATCH_SIZE = 5;
@@ -48,7 +49,9 @@ export function startIdentitySweeper(opts: StartOptions = {}): void {
   logger.info(`starting (every ${intervalMs}ms, batch ${batchSize})`);
   _timer = setInterval(() => {
     runSweep({ batchSize, gatewayUrl, logger }).catch((err) => {
-      logger.warn(`sweep error: ${err instanceof Error ? err.message : String(err)}`);
+      // N107b codemod: an error's message can echo external (RPC/identity-write) data, so it
+      // is never interpolated in the clear — only its keyed hash (declare.id, rule 2).
+      logger.warn(`sweep error: ${declare.id(err instanceof Error ? err.message : String(err))}`);
     });
   }, intervalMs);
   // Don't block process exit on this timer.
@@ -95,7 +98,8 @@ export async function runSweep(opts: {
       repo.recordOnchainSuccess(key.id, result);
       succeeded++;
       logger.info(
-        `wrote agent ${result.agentId} for key ${key.id} (tx ${result.txHash})`,
+        // result.agentId is a bigint (keyedHash/JSON.stringify cannot take one) — String() it first.
+        `wrote agent ${declare.id(String(result.agentId))} for key ${declare.id(key.id)} (tx ${declare.id(result.txHash)})`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -105,7 +109,8 @@ export async function runSweep(opts: {
         // non-fatal
       }
       failed++;
-      logger.warn(`retry failed for key ${key.id}: ${msg.slice(0, 160)}`);
+      // N107b codemod: ids and the error text leave as keyed hashes (declare.id) — never in the clear.
+      logger.warn(`retry failed for key ${declare.id(key.id)}: ${declare.id(msg)}`);
     }
   }
   return { attempted: pending.length, succeeded, failed };
