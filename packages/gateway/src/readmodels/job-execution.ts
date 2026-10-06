@@ -777,11 +777,12 @@ export type JobReadDecision =
   | { allow: false; reason: "not_a_party" };
 
 /**
- * True only when PCC_ADMIN_KEY is set and the header equals it (constant-time). There is
- * no development bypass: an unset key grants nothing.
+ * True only when PCC_ADMIN_KEY is set to a value that is not empty or whitespace-only
+ * and the header equals it exactly (constant-time; neither side is trimmed). There is
+ * no development bypass: an unset, empty or whitespace-only key grants nothing.
  */
 export function hasValidAdminKey(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
-  if (typeof expected !== "string" || expected.length === 0 || typeof provided !== "string") return false;
+  if (typeof expected !== "string" || expected.trim().length === 0 || typeof provided !== "string") return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);

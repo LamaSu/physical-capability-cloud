@@ -189,7 +189,8 @@ export async function createGateway(port = 3200) {
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
 
-  // First request hook: refuse closed relay requests before any plugin's hooks.
+  // First onRequest hook: a refused relay request runs no later request-stage hook, parser or handler.
+  // Response hooks (onSend, onResponse, the write audit) still run; see middleware/relay-admin-gate.ts.
   app.addHook("onRequest", rejectRelayWithoutAdminKey);
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
