@@ -3,9 +3,18 @@
  * Prefixed IDs for readability: cwm_xxx, step_xxx, kernel_xxx, etc.
  */
 
+import { uncurryThis } from "./primordials.js";
+
+// Captured when this module loads (steward DECISIONS 04:06): the kernel's evidence emitter calls
+// ids.evidence and ids.bundle, so a Date, Math or toString replaced after load is never consulted.
+const DateNow = Date.now;
+const MathRandom = Math.random;
+const NumberPrototypeToString = uncurryThis(Number.prototype.toString) as (n: number, radix?: number) => string;
+const StringPrototypeSubstring = uncurryThis(String.prototype.substring) as (s: string, start: number, end?: number) => string;
+
 export function generateId(prefix: string): string {
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substring(2, 10);
+  const timestamp = NumberPrototypeToString(DateNow(), 36);
+  const random = StringPrototypeSubstring(NumberPrototypeToString(MathRandom(), 36), 2, 10);
   return `${prefix}_${timestamp}${random}`;
 }
 

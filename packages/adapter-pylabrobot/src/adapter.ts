@@ -405,7 +405,9 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       const bufferedEvents = collector.stopRecording(jobId, {
         opCount: result.opCount,
         durationMs: result.durationMs,
-        summary: result.summary,
+        // Only when the sidecar sends one: evidence carries no undefined member, which neither its
+        // hash nor JSON keeps, and the kernel's emitter refuses one (astra pack 273).
+        ...(result.summary !== undefined ? { summary: result.summary } : {}),
       });
       this.currentCollector = null;
       this.currentJobId = null;
