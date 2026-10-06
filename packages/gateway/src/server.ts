@@ -137,6 +137,7 @@ import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
 import { corsDelegator, irCorsReadProjection, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
+import { isRelayGateOpen, rejectRelayWithoutAdminKey } from "./middleware/relay-admin-gate.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
 import { scopeChecker } from "./middleware/scope-checker.js";
 import { templateRoutes } from "./routes/templates.js";
@@ -187,6 +188,12 @@ export async function createGateway(port = 3200) {
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
+
+  // First request hook: refuse closed relay requests before any plugin's hooks.
+  app.addHook("onRequest", rejectRelayWithoutAdminKey);
+  app.log.info(isRelayGateOpen()
+    ? "[relay] The device relay is open."
+    : "[relay] The device relay is admin-only.");
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
