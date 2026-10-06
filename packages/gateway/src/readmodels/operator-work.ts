@@ -258,13 +258,13 @@ function kernelSite(kernel: KernelLite | undefined, kernelId: string): OperatorW
  * funds, uncontested, with nothing yet returned to the payer or paid out. RELEASE_ALLOCATED (the
  * release is decided, the payout outstanding) still holds the funds.
  */
-const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "RELEASE_ALLOCATED"]);
+export const ESCROW_HOLDS: ReadonlySet<string> = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "RELEASE_ALLOCATED"]);
 /**
  * Escrow-record words under which the escrow still holds the funds while the outcome is contested
  * (review r2 of #389, HIGH): the V-next contest and escalation states (canonical phases `contest`
  * and `escalation`), and a disputed escrow.
  */
-const ESCROW_CONTESTED = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
+export const ESCROW_CONTESTED: ReadonlySet<string> = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
 /** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
 const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
 /** Milestone words under which this job's milestone is held but contested. */

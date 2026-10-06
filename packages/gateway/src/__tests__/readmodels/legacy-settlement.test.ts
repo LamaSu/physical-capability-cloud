@@ -510,10 +510,12 @@ describe("the legacy settlement routes on a real store", () => {
     expect(s.settled).toBe(false);
   });
 
-  it("NEGATIVE: seeded job-004 (completed; its escrow has no milestone for its step) is unknown, not settled", async () => {
+  it("NEGATIVE: seeded job-004 (completed; its escrow is the seed's mock esc-001) is simulated, not settled", async () => {
+    // esc-001 sits at 0xESCROW_CONTRACT_001, no contract address, so it is mock data (#409 r1
+    // MEDIUM 1): simulated, never settled and never paid.
     const { jobs, settlement } = await both("job-004");
-    expect(jobs.json()).toMatchObject({ status: "unknown", settled: false, paidAmount: null, jobStatus: "completed" });
-    expect(settlement.json()).toMatchObject({ status: "unknown", settled: false, settledAt: null });
+    expect(jobs.json()).toMatchObject({ status: "simulated", settled: false, paidAmount: null, jobStatus: "completed" });
+    expect(settlement.json()).toMatchObject({ status: "simulated", settled: false, settledAt: null });
   });
 
   it("404s an unknown job on both routes with each route's own error body", async () => {
