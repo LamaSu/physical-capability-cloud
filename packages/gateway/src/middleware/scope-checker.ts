@@ -56,7 +56,8 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   // Verifier endpoints — attestations on specific jobs
   { method: "POST",   pattern: "/api/jobs/*/attestations/*",        scopes: ["verifier", "admin"] },
   // Admin endpoints — full access
-  { method: "*",      pattern: "/api/admin/*",                      scopes: ["admin"] },
+  // "**", so nested admin routes (/api/admin/observability/…) need admin too (#490).
+  { method: "*",      pattern: "/api/admin/**",                     scopes: ["admin"] },
   // Template author endpoints — publish templates
   { method: "POST",   pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin"] },
   { method: "PUT",    pattern: "/api/templates/*",                  scopes: ["template_author", "operator", "admin"] },
@@ -240,6 +241,20 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // Wildcard scope grants access to everything
     if (callerScopes.includes("*")) return;
 
+    // Admin routes always need the admin scope, whatever the scope table holds: an
+    // endpoint_scopes row can add a requirement to an admin route, never weaken this
+    // one, and when rows replace the default table there may be no admin rule at all
+    // (#490 rounds 1-2, gateway #4899). Every method, reads included.
+    if (req.url.split("?")[0].startsWith("/api/admin/") && !callerScopes.includes("admin")) {
+      return reply.status(403).send({
+        error: "insufficient_scope",
+        message: "Admin routes need the admin scope.",
+        required_scopes: ["admin"],
+        caller_scopes: callerScopes,
+        docs: "https://capability.network/whitepaper.md",
+      });
+    }
+
     const requirements =
       scopeCache.length > 0 ? scopeCache : DEFAULT_SCOPE_REQUIREMENTS;
 
@@ -267,10 +282,6 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     //     note on why the global flip is a separate, sweep-gated change).
     if (!matchedRequirement) {
       const path = req.url.split("?")[0];
-      // Default-deny covers MUTATING methods only. Money-path reads stay open
-      // (the dashboard does GET /api/escrow, and no GET requirement covers it),
-      // because the exposure being closed here is funds MOVEMENT. A read-side
-      // sweep is a separate change with its own compatibility surface.
       if (!isMoneyPath(path) || !MUTATING_METHODS.has(req.method.toUpperCase())) return;
 
       return reply.status(403).send({
