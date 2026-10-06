@@ -1,18 +1,16 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
-export type InterfaceMode = "agent" | "dashboard" | "spatial";
-
-const MODE_CYCLE: InterfaceMode[] = ["spatial", "agent", "dashboard"];
-
+/**
+ * Ephemeral shell chrome state. Which workspace is showing is not stored
+ * here: the URL decides that (lib/workspaces.ts).
+ */
 interface UIState {
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
   currentPageTitle: string;
   currentPageSubtitle: string;
   setPageMeta: (title: string, subtitle?: string) => void;
-  interfaceMode: InterfaceMode;
-  toggleMode: () => void;
-  setMode: (mode: InterfaceMode) => void;
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -21,12 +19,7 @@ export const useUIStore = create<UIState>((set) => ({
   currentPageTitle: "Dashboard",
   currentPageSubtitle: "",
   setPageMeta: (title, subtitle = "") => set({ currentPageTitle: title, currentPageSubtitle: subtitle }),
-  interfaceMode: "spatial",
-  toggleMode: () =>
-    set((s) => {
-      const idx = MODE_CYCLE.indexOf(s.interfaceMode);
-      const next = MODE_CYCLE[(idx + 1) % MODE_CYCLE.length];
-      return { interfaceMode: next };
-    }),
-  setMode: (mode) => set({ interfaceMode: mode }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useUIStore);

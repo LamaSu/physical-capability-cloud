@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type {
   CapabilityType,
   OnboardingDocument,
@@ -167,3 +168,6 @@ export const useOnboardWizardStore = create<OnboardWizardState>((set, get) => ({
     }
   },
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useOnboardWizardStore);

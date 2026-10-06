@@ -19,9 +19,9 @@
  *    resolves the final URL, refuses any other origin, refuses redirects, and
  *    only then sets Authorization.
  * 3. No other code can read the signed-in key.
- *    - lib/authorized-fetch.ts holds it in a module-private variable, and no
- *      export anywhere returns it (astra round 3: an exported reader could be
- *      reached by computed access).
+ *    - lib/authorized-fetch.ts reads it from the browser's slot at each use,
+ *      in a module-private function, and no export anywhere returns it (astra
+ *      round 3: an exported reader could be reached by computed access).
  *    - It leaves that module only through fetchWithKey and this guard.
  *    - __tests__/no-direct-auth-headers enforces the rest over every
  *      production module: nothing else touches its storage slot or reaches

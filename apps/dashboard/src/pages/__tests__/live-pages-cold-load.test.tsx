@@ -6,8 +6,10 @@
  * the whole shell down.
  *
  * Bug commit fa5871c4 (2026-04-14) is an ancestor of production. Fixed upstream
- * by #352 (large, still in review) — this test is the hotfix's proof that the
- * fast-path fix (moving the hooks above the early return) actually works.
+ * by #352 (merged into master via the shell-truth merge-up), which replaced the
+ * template-catalog reads this test originally mocked with the real, paginated
+ * useAllCapabilities() — this test still proves the same property: no hook runs
+ * conditionally between the loading and loaded renders.
  *
  * Adapted from pcc-design's verified repro:
  * pcc-reconciliation/returns/pcc-design-work/survey/repro-hook-order.test.tsx
@@ -39,14 +41,23 @@ const state: { loading: boolean; kernels: unknown[] } = {
 };
 
 vi.mock("../../api/hooks/use-pcc-data.js", () => ({
-  useCapabilityTemplates: () => ({
-    data: state.loading ? undefined : { templates: [] },
+  useAllCapabilities: () => ({
+    data: state.loading ? undefined : { items: [], total: 0, complete: true },
     isLoading: state.loading,
+    isSuccess: !state.loading,
+    isError: false,
+    error: null,
+    dataUpdatedAt: 0,
+    refetch: () => {},
   }),
-  useKernels: () => ({ data: state.kernels, isLoading: state.loading }),
-  useCapabilities: () => ({
-    data: state.loading ? undefined : { items: [], total: 0 },
+  useKernels: () => ({
+    data: state.kernels,
     isLoading: state.loading,
+    isSuccess: !state.loading,
+    isError: false,
+    error: null,
+    dataUpdatedAt: 0,
+    refetch: () => {},
   }),
 }));
 
@@ -102,7 +113,7 @@ describe("live pages survive a cold load (React #310)", () => {
     const { DiscoverPage } = await import("../DiscoverPage.js");
     const { error, text } = await coldLoad(DiscoverPage as React.ComponentType);
     expect(error).toBeNull();
-    expect(text).toContain("No capabilities available");
+    expect(text).toContain("No capabilities listed yet");
   });
 
   it("KernelLeaderboardPage renders through loading into loaded data without crashing", async () => {

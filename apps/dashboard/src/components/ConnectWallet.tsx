@@ -2,6 +2,8 @@ import React from "react";
 import { useAccount, useConnect, useDisconnect, useSignMessage } from "wagmi";
 import { GlassPanel } from "@pcc/ui";
 import { useAuthStore } from "../stores/auth-store.js";
+import { beginSignIn, signInCurrent, verifySignIn } from "../lib/wallet-session.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -41,6 +43,10 @@ export function ConnectWallet() {
   const { disconnect } = useDisconnect();
   const { signMessageAsync } = useSignMessage();
   const [showModal, setShowModal] = React.useState(false);
+  // Why the last sign-out didn't finish (astra 19j): logout()'s typed outcome, kept in the store so
+  // it survives the account boundary's remount (DECISIONS 04:14). Disconnecting the wallet can
+  // switch this component to its not-connected view, so each view shows it.
+  const signOutProblem = useAuthStore((s) => (s.lastSignOut && s.lastSignOut.status !== "signed-out" ? s.lastSignOut.reason : null));
 
   const {
     sessionToken,
@@ -63,21 +69,42 @@ export function ConnectWallet() {
     }
   }, [isConnected, address, setAddress, setSession]);
 
+  // This component unmounts when the API account changes (App's account
+  // boundary). An async result that arrives after that belongs to the previous
+  // account, so it is dropped rather than written into the next account's
+  // auth state (astra 19d).
+  const alive = React.useRef(true);
+  React.useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
   // Check for existing session on mount
   React.useEffect(() => {
-    fetch("/api/auth/me", { credentials: "include" })
+    let cancelled = false;
+    // With the API key: the gateway honors a session cookie only beside the key it was verified under (N103).
+    authorizedFetch("/api/auth/me", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data?.address) {
+        if (!cancelled && data?.address) {
           setSession("cookie"); // cookie-based session, token managed server-side
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [setSession]);
 
-  // SIWE sign-in after wallet connects
+  // SIWE sign-in after wallet connects. An account change aborts it
+  // (lib/wallet-session.ts): from then on it sends nothing and writes nothing,
+  // and the teardown waits for a verification already sent before it logs the
+  // gateway out (astra 19e).
   const handleSIWE = React.useCallback(async () => {
     if (!address || !chainId) return;
+    const signIn = beginSignIn();
     setVerifying(true);
     setError(null);
 
@@ -85,6 +112,7 @@ export function ConnectWallet() {
       // 1. Get nonce from gateway
       const nonceRes = await fetch("/api/auth/nonce", {
         credentials: "include",
+        signal: signIn.signal,
       });
       if (!nonceRes.ok) throw new Error("Failed to get nonce");
       const { nonce } = await nonceRes.json();
@@ -104,13 +132,10 @@ export function ConnectWallet() {
       // 3. Sign with wallet
       const signature = await signMessageAsync({ message });
 
-      // 4. Verify with gateway
-      const verifyRes = await fetch("/api/auth/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ message, signature }),
-      });
+      // 4. Verify with gateway (it sets the session cookie, bound to this
+      // account's API key, N103), unless the account changed while the wallet
+      // was signing
+      const verifyRes = await verifySignIn(JSON.stringify({ message, signature }), signIn);
 
       if (!verifyRes.ok) {
         const err = await verifyRes.json().catch(() => ({}));
@@ -118,10 +143,16 @@ export function ConnectWallet() {
       }
 
       const data = await verifyRes.json();
+      // The account changed after the gateway answered, here or in another
+      // tab: the teardown that waited for this verification destroys its
+      // cookie. Adopt nothing.
+      if (!signInCurrent(signIn)) return;
       // Session cookie is set automatically; also store the bearer token
       setSession(data.token ?? "cookie");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Sign-in failed");
+      if (!signIn.signal.aborted && alive.current) setError(err instanceof Error ? err.message : "Sign-in failed");
+    } finally {
+      signIn.finish();
     }
   }, [address, chainId, signMessageAsync, setVerifying, setError, setSession]);
 
@@ -132,9 +163,14 @@ export function ConnectWallet() {
       credentials: "include",
     }).catch(() => {});
     disconnect();
-    authLogout();
-    setShowModal(false);
+    if (authLogout().status === "signed-out") setShowModal(false);
   };
+
+  const signOutAlert = signOutProblem ? (
+    <p role="alert" className="text-[10px] leading-snug text-red-400/70">
+      {signOutProblem}
+    </p>
+  ) : null;
 
   // Connected + authenticated
   if (isConnected && address && sessionToken) {
@@ -162,6 +198,7 @@ export function ConnectWallet() {
               >
                 Disconnect
               </button>
+              {signOutAlert}
             </GlassPanel>
           </div>
         )}
@@ -192,6 +229,7 @@ export function ConnectWallet() {
       >
         Connect Wallet
       </button>
+      {signOutAlert}
       {showModal && (
         <div className="absolute right-0 top-full mt-2 z-50">
           <GlassPanel padding="md" className="min-w-[240px] space-y-2">

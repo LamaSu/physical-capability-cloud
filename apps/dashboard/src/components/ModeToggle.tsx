@@ -1,8 +1,9 @@
 import React from "react";
-import { useUIStore, type InterfaceMode } from "../stores/ui-store.js";
+import { useLocation, useNavigate } from "react-router-dom";
 import { cn } from "@pcc/ui";
+import { WORKSPACE_HOME, nextWorkspace, workspaceForPath, type Workspace } from "../lib/workspaces.js";
 
-const MODE_LABELS: Record<InterfaceMode, { label: string; icon: React.ReactNode; color: string }> = {
+const MODE_LABELS: Record<Workspace, { label: string; icon: React.ReactNode; color: string }> = {
   spatial: {
     label: "Spatial",
     icon: (
@@ -18,7 +19,7 @@ const MODE_LABELS: Record<InterfaceMode, { label: string; icon: React.ReactNode;
     color: "bg-violet-500/10 border-violet-500/20 text-violet-300 hover:bg-violet-500/15",
   },
   agent: {
-    label: "Agent Chat",
+    label: "Agent",
     icon: (
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
@@ -40,13 +41,24 @@ const MODE_LABELS: Record<InterfaceMode, { label: string; icon: React.ReactNode;
   },
 };
 
+/**
+ * Shows the workspace the URL is in; clicking goes to the next workspace's
+ * address. The workspace is never held in memory, so reloading or sharing a
+ * link keeps it.
+ */
 export function ModeToggle() {
-  const { interfaceMode, toggleMode } = useUIStore();
-  const mode = MODE_LABELS[interfaceMode];
+  const location = useLocation();
+  const navigate = useNavigate();
+  const current = workspaceForPath(location.pathname);
+  const next = nextWorkspace(current);
+  const mode = MODE_LABELS[current];
 
   return (
     <button
-      onClick={toggleMode}
+      type="button"
+      onClick={() => navigate(WORKSPACE_HOME[next])}
+      title={`Switch to ${MODE_LABELS[next].label}`}
+      data-workspace={current}
       className={cn(
         "flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all duration-200",
         mode.color,

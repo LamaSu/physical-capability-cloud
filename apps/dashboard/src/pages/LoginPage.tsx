@@ -6,7 +6,12 @@ import { ParticleBackground } from "@pcc/ui";
 export function LoginPage() {
   const login = useAuthStore((s) => s.login);
   const [key, setKey] = React.useState("");
-  const [error, setError] = React.useState<string | null>(null);
+  // Every account change remounts this page, and a sign-out or sign-in this
+  // browser couldn't confirm lands here: its reason shows on arrival (astra 19j).
+  const [error, setError] = React.useState<string | null>(() => {
+    const { lastSignOut, error: lastError } = useAuthStore.getState();
+    return lastSignOut && lastSignOut.status !== "signed-out" ? lastSignOut.reason : lastError;
+  });
   const [loading, setLoading] = React.useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -19,7 +24,8 @@ export function LoginPage() {
     const success = await login(key.trim());
 
     if (!success) {
-      setError("Invalid API key. Check your key and try again.");
+      // A key the browser wouldn't save is not an invalid key: say which it was (astra 19i).
+      setError(useAuthStore.getState().error ?? "Invalid API key. Check your key and try again.");
     }
     setLoading(false);
   }

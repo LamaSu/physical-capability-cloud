@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../../lib/account-scope.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,3 +55,6 @@ export const useSpatialChatStore = create<SpatialChatState>((set) => ({
 
   clearMessages: () => set({ messages: [WELCOME] }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useSpatialChatStore);

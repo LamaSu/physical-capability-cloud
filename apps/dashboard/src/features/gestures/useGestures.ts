@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { GestureEvent } from "./GestureRecognizer.js";
 import { usePanelStore } from "../spatial/PanelStore.js";
 import { useSpatialChatStore } from "../chat/ChatStore.js";
+import { currentAccountEpoch } from "../../lib/account-scope.js";
 
 // ---------------------------------------------------------------------------
 // useGestures — connects gesture events to panel actions
@@ -41,8 +42,15 @@ export function useGestures() {
   const lastGestureRef = useRef<string>("none");
   const dragPanelRef = useRef<string | null>(null);
   const dragOffsetRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  // The account this hook was mounted under. Gestures come from device
+  // callbacks that HandTracker builds once MediaPipe has loaded, and the store
+  // actions read here with getState() are always the current account's: a
+  // gesture that arrives after the account changed is dropped, not applied to
+  // the next account's panels and chat (astra 19e).
+  const accountRef = useRef(currentAccountEpoch());
 
   const handleGesture = useCallback((event: GestureEvent) => {
+    if (currentAccountEpoch() !== accountRef.current) return;
     const { type, x, y } = event;
     const store = usePanelStore.getState();
 

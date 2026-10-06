@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 
 interface SpaceFinderState {
   searchQuery: string;
@@ -35,3 +36,6 @@ export const useSpaceFinderStore = create<SpaceFinderState>((set) => ({
   setSortBy: (s) => set({ sortBy: s }),
   setSelectedSpace: (id) => set({ selectedSpaceId: id }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useSpaceFinderStore);

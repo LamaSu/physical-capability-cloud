@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { accountScoped } from "../lib/account-scope.js";
 import type { TransferGraph, Sample, InstrumentWorkflow, ResourceClaim } from "@pcc/spec";
 
 interface OrchestratorState {
@@ -36,3 +37,6 @@ export const useOrchestratorStore = create<OrchestratorState>((set) => ({
   selectSample: (id) => set({ selectedSampleId: id }),
   selectWorkflow: (id) => set({ selectedWorkflowId: id }),
 }));
+
+// The signed-in account's state: reset on every account change (lib/account-scope.ts).
+accountScoped(useOrchestratorStore);
