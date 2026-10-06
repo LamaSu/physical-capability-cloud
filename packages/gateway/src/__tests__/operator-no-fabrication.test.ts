@@ -16,6 +16,18 @@ import { schema, eq } from "@pcc/store";
 import { operatorRoutes } from "../routes/operator.js";
 import { initStore, closeStore, getStore } from "../db.js";
 
+// N31 (#6278): the operator write routes now need operator authority. These tests check body
+// validation, read honesty and decision semantics, not authority (n31-operator-route-ownership
+// does that), so the gateway admin secret stands in for the operator here.
+const N31_ADMIN = "n31-test-admin-secret";
+const ADMIN_HEADERS = { "x-admin-key": N31_ADMIN };
+const PREV_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_ADMIN_KEY;
+});
+
 const UNAVAILABLE = [
   "/api/operator/machines",
   "/api/operator/earnings",
@@ -123,6 +135,7 @@ describe("operator approvals: no silent substitution", () => {
   async function submit(payload: Record<string, unknown> = {}) {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-test", capabilityType: "fdm", ...payload },
     });
@@ -195,6 +208,7 @@ describe("operator approvals: no silent substitution", () => {
       // Only kernelId and agentId: the caller asserted no capability type.
       const res = await app.inject({
         method: "POST",
+        headers: ADMIN_HEADERS,
         url: "/api/operator/approvals",
         payload: { kernelId: KERNEL, agentId: "agent-no-type" },
       });
@@ -229,6 +243,7 @@ describe("operator approvals: no silent substitution", () => {
     const decide = (id: string, action: "approve" | "reject", payload?: Record<string, unknown>) =>
       app.inject({
         method: "POST",
+        headers: ADMIN_HEADERS,
         url: `/api/operator/approvals/${id}/${action}`,
         ...(payload ? { payload } : {}),
       });
