@@ -8,11 +8,19 @@
  * prefix or pattern decision then judged a different path than the handler that runs, so a request
  * could skip authentication or a scope rule.
  *
- * rejectNonCanonicalTarget is the FIRST onRequest hook. It refuses all four forms with 400 before any
- * decision is made, so for every request that goes on, the raw path and the routed path agree on
- * every character and segment boundary a decision reads. Standard clients never send any of them:
- * encodeURIComponent and its peers never escape an unreserved character (RFC 3986 section 2.3), and a
- * client sends origin-form targets without a fragment (RFC 9112 section 3.2). Percent-escapes of
+ * rejectNonCanonicalTarget is the FIRST onRequest hook. As gateway policy, it refuses with 400
+ * before any decision is made: any target that does not start with "/" (absolute-form
+ * "http://host/path", the "*" of server-wide OPTIONS, and authority-form); "#" anywhere; ";" in
+ * the path before the query; and a percent-escape of an unreserved character in the path. For every
+ * request that goes on, the raw path and the routed path agree on every character and segment
+ * boundary a decision reads. Some refused forms are legitimate HTTP: RFC 9112 section 3.2.2 requires
+ * servers to accept absolute-form (mostly sent by HTTP/1.1 clients to proxies), and section 3.2.4
+ * defines asterisk-form OPTIONS *. RFC 3986 section 3.3 permits ";" in a path, and section 2.3
+ * treats escaped unreserved characters as equivalent but says URI producers should not create
+ * them. A fragment is outside request-target syntax (RFC 9112 section 3.2). This policy therefore
+ * restricts client compatibility: clients sending any refused form get 400. Ordinary clients
+ * send origin-form targets without a fragment and do not escape unreserved characters (fetch,
+ * encodeURIComponent, Python's urllib.parse.quote), so they are unaffected. Percent-escapes of
  * RESERVED characters (%40, %3A, %2F, ...) stay allowed: the router does not let them change a
  * prefix or split a segment. The query is not a path decision and is left alone.
  *
