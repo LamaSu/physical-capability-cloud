@@ -12,6 +12,17 @@
  * Supports both HTTP-only cookie and Authorization Bearer token auth.
  * Uses viem for signature verification — no `siwe` package needed.
  *
+ * N103 (gateway's ruling #6597): a session is bound to the API key it was
+ * verified under. /verify with a valid key mints the token `<uuid>.<keyId>`;
+ * with no credential it mints an unbound `<uuid>` (a wallet proving itself
+ * before it has a key); with an invalid credential it refuses. The binding is
+ * part of the token, which is stored whole and HMAC-signed in the cookie, so
+ * no schema change and no client can alter it. resolveSession honors a COOKIE
+ * only beside the key it is bound to, so a cookie minted while the browser was
+ * signed in to account A names no one when the request carries B's key, or no
+ * key. The Bearer-session path (the token itself as the credential) is
+ * unchanged, and is how an unbound session is used.
+ *
  * ── KNOWN LIMITATIONS (cross-family review of PR #309) ────────────
  * Reported and deliberately NOT fixed in that PR, because each needs a config
  * or infrastructure decision rather than a code tweak. Recorded here so they
@@ -49,6 +60,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
 import { getRepos } from "../db.js";
 import { canSiweVerify, canSiweNonce } from "../middleware/security-hardening.js";
+import { presentedApiKeyId, resolveApiKey } from "./api-key-auth.js";
 
 // ---------------------------------------------------------------------------
 // In-memory nonce store (ephemeral, no DB persistence needed)
@@ -321,6 +333,21 @@ export function checkSiweOrigin(domain: string, uri: string, requestHost: string
   return match ? null : `SIWE message domain '${domain}' / uri '${uri}' is not a trusted origin for this gateway`;
 }
 
+/**
+ * A new session token, bound to `keyId` (N103): `<uuid>.<keyId>`, or a bare
+ * `<uuid>` when the session was verified without a key. A uuid has no ".", so
+ * the first "." always separates the two parts.
+ */
+function sessionTokenFor(keyId: string | null): string {
+  return keyId ? `${randomUUID()}.${keyId}` : randomUUID();
+}
+
+/** The API key id a session token is bound to; null for an unbound or pre-N103 token. */
+export function boundKeyIdOf(token: string): string | null {
+  const dot = token.indexOf(".");
+  return dot > 0 && dot < token.length - 1 ? token.slice(dot + 1) : null;
+}
+
 export function resolveSession(
   req: FastifyRequest,
 ): { address: `0x${string}`; token: string } | null {
@@ -356,9 +383,18 @@ export function resolveSession(
     if (cookieToken) {
       const session = repo.findByToken(cookieToken);
       if (session && new Date(session.expiresAt).getTime() > Date.now()) {
-        return { address: session.walletAddress as `0x${string}`, token: cookieToken };
+        // N103: a cookie session is honored only beside the API key it was
+        // verified under. With no key, another account's key, or a session
+        // verified without one (pre-N103 sessions included), the cookie names
+        // no one on this request. It is left in place: beside its own key it
+        // is valid again.
+        const boundKeyId = boundKeyIdOf(cookieToken);
+        if (boundKeyId !== null && boundKeyId === presentedApiKeyId(req)) {
+          return { address: session.walletAddress as `0x${string}`, token: cookieToken };
+        }
+      } else if (session) {
+        repo.deleteByToken(cookieToken);
       }
-      if (session) repo.deleteByToken(cookieToken);
     }
   }
 
@@ -450,6 +486,26 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         error: "rate_limited",
         message: "Too many verification attempts. Try again in a minute.",
       });
+    }
+
+    // N103: the session is bound to the API key this request authenticates
+    // with. A request that presents a credential must present a valid key; an
+    // invalid one is refused here, before the nonce is spent, rather than
+    // quietly downgraded to an unbound session. With no credential at all the
+    // session is unbound (the bootstrap case), and only the Bearer-session path
+    // accepts it.
+    let boundKeyId: string | null = null;
+    if (req.headers.authorization !== undefined) {
+      const key = resolveApiKey(req);
+      if (!key) {
+        return reply.status(401).send({
+          error: "invalid_api_key",
+          message:
+            "The Authorization header on this request is not a valid API key, so no session can be bound to it. " +
+            "Send a valid key, or no Authorization header for an unbound session.",
+        });
+      }
+      boundKeyId = key.id;
     }
 
     const body = (req.body ?? {}) as {
@@ -549,8 +605,8 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       return reply.status(401).send({ error: "Nonce already used" });
     }
 
-    // Create session
-    const token = randomUUID();
+    // Create session, bound to the request's API key (N103)
+    const token = sessionTokenFor(boundKeyId);
     const now = Date.now();
     const createdAt = new Date(now).toISOString();
     const expiresAt = new Date(now + SESSION_TTL_MS).toISOString();

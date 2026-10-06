@@ -8,9 +8,13 @@
  * SIWE-gated provisioning built on it, dead on arrival in production.
  *
  * These assert apiGate lets the two bootstrap endpoints through unauthenticated
- * — and that the exact-match intent holds: a sibling like /api/auth/logout
- * (which needs a session) stays gated, and a crafted /api/auth/verify-extra
+ * — and that the exact-match intent holds: a sibling like /api/auth/sessions
+ * (which needs a credential) stays gated, and a crafted /api/auth/verify-extra
  * does NOT leak public off a prefix match.
+ *
+ * /api/auth/logout is public too, by its own entry (N103): it ends the session
+ * its own cookie names and authenticates nothing, and under N103 a cookie alone
+ * no longer passes this gate, so a gated logout would leave the session alive.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
@@ -29,6 +33,7 @@ beforeAll(async () => {
   app.get("/api/auth/nonce", async () => ({ nonce: "x" }));
   app.post("/api/auth/verify", async () => ({ ok: true }));
   app.post("/api/auth/logout", async () => ({ ok: true }));
+  app.get("/api/auth/sessions", async () => ({ count: 0 }));
   app.post("/api/auth/verify-extra", async () => ({ ok: true }));
   await app.ready();
 });
@@ -53,9 +58,21 @@ describe("SIWE bootstrap endpoints are public", () => {
   });
 });
 
-describe("exact-match intent holds — siblings stay gated", () => {
-  it("POST /api/auth/logout still requires auth (401)", async () => {
+describe("logout is public by its own entry (N103)", () => {
+  it("POST /api/auth/logout passes the gate with no key", async () => {
     const r = await app.inject({ method: "POST", url: "/api/auth/logout", ...noKey });
+    expect(r.statusCode).toBe(200);
+  });
+
+  it("only POST: GET /api/auth/logout stays gated (401)", async () => {
+    const r = await app.inject({ method: "GET", url: "/api/auth/logout" });
+    expect(r.statusCode).toBe(401);
+  });
+});
+
+describe("exact-match intent holds — siblings stay gated", () => {
+  it("GET /api/auth/sessions still requires auth (401)", async () => {
+    const r = await app.inject({ method: "GET", url: "/api/auth/sessions" });
     expect(r.statusCode).toBe(401);
   });
 

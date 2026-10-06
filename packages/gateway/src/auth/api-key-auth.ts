@@ -55,23 +55,33 @@ export function generateApiKey(): { rawKey: string; keyHash: string; keyPrefix: 
  * token is used only as a hash input — it is NEVER logged, echoed, or forwarded.
  */
 export function resolveApiKeyFromToken(token: string | undefined | null) {
+  const keyRecord = findLiveApiKey(token);
+  if (!keyRecord) return null;
+
+  // Increment usage (fire-and-forget)
+  try { getRepos().apiKeys.incrementUsage(keyRecord.id); } catch { /* non-fatal */ }
+
+  return keyRecord;
+}
+
+/**
+ * The active, unexpired key record a bare token names, or null. The same
+ * validation as resolveApiKeyFromToken, without counting a use: for a check
+ * that only asks WHICH key a request carries, on a request whose use is
+ * already counted (N103's session binding, in resolveSession).
+ */
+function findLiveApiKey(token: string | undefined | null) {
   // Same prefix guard as resolveApiKey's "Bearer pcc_" check, applied to the
   // bare token. Accepts both pcc_live_ and pcc_test_ (the guard is just "pcc_").
   if (!token || !token.startsWith("pcc_")) return null;
 
-  const keyHash = hashApiKey(token);
-
-  const repo = getRepos().apiKeys;
-  const keyRecord = repo.findActiveByHash(keyHash);
+  const keyRecord = getRepos().apiKeys.findActiveByHash(hashApiKey(token));
   if (!keyRecord) return null;
 
   // Check expiry
   if (keyRecord.expiresAt && new Date(keyRecord.expiresAt).getTime() < Date.now()) {
     return null;
   }
-
-  // Increment usage (fire-and-forget)
-  try { repo.incrementUsage(keyRecord.id); } catch { /* non-fatal */ }
 
   return keyRecord;
 }
@@ -117,6 +127,17 @@ export function resolveApiKey(req: FastifyRequest) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith("Bearer pcc_")) return null;
   return resolveApiKeyFromToken(authHeader.slice(7)); // "Bearer " is 7 chars
+}
+
+/**
+ * The id of the valid API key this request carries (Authorization: Bearer
+ * pcc_...), or null. Unlike resolveApiKey it counts no use: N103 asks it which
+ * key a SIWE session cookie is presented beside, once per resolveSession call.
+ */
+export function presentedApiKeyId(req: FastifyRequest): string | null {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer pcc_")) return null;
+  return findLiveApiKey(authHeader.slice(7))?.id ?? null;
 }
 
 /**

@@ -140,8 +140,7 @@ export async function provisionRoutes(app: FastifyInstance) {
             "walletAddress must be proven with a SIWE (EIP-4361) session before it can " +
             "provision a key: 1) GET /api/auth/nonce  2) sign the returned SIWE message " +
             "with this wallet  3) POST /api/auth/verify {message, signature} and capture " +
-            "the returned token  4) retry this request with Authorization: Bearer <token> " +
-            "(or the pcc_session cookie).",
+            "the returned token  4) retry this request with Authorization: Bearer <token>.",
           siwe: { nonce_url: "/api/auth/nonce", verify_url: "/api/auth/verify" },
         });
       }

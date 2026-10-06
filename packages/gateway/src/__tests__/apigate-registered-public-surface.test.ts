@@ -224,6 +224,7 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "HEAD /api/operators/:id/ratings",
   "HEAD /api/orchestrator/templates",
   "HEAD /api/waitlist/count",
+  "POST /api/auth/logout",
   "POST /api/auth/provision",
   "POST /api/auth/verify",
   "POST /api/beta-apply",
@@ -246,9 +247,9 @@ describe("A3 — the REGISTERED /api/* surface the gate's allowlist actually ope
     expect(publicApi).toEqual(EXPECTED_PUBLIC_API_SURFACE);
   });
 
-  it("every public write (POST) registered here is also in the DECLARATION snapshot's 13 -- the two snapshots agree today", async () => {
+  it("every public write (POST) registered here is also in the DECLARATION snapshot's 14 -- the two snapshots agree today", async () => {
     const posts = EXPECTED_PUBLIC_API_SURFACE.filter((l) => l.startsWith("POST "));
-    expect(posts.length).toBe(13);
+    expect(posts.length).toBe(14);
   });
 
   it("drift check: a hypothetical new GET route under an existing public PREFIX is matched public today, is not registered, and is not pinned -- proving the SNAPSHOT test above would fail loudly if it were added without a reviewed edit here", async () => {
