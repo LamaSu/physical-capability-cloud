@@ -188,6 +188,26 @@ describe("N4b-gw behind the real apiGate: URL variants never reach a relay handl
     expect(res.statusCode).toBe(200);
   });
 
+  // %40 escapes a reserved character, so the target guard admits it. These tests pin ownership
+  // checks against the DECODED kernel id even for an admitted encoded id (astra n105m F1).
+  it("refuses a stranger's key on an admitted encoded kernel id with 403 relay_access_denied", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/relay/kernel%40a/tool-call/pending", headers: bearer(strangerKey) });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("relay_access_denied");
+  });
+
+  it("refuses a non-owner SIWE session on an admitted encoded kernel id with 403 relay_access_denied", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/relay/kernel%40a/tool-call/pending", headers: bearer(siweToken) });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("relay_access_denied");
+  });
+
+  it("refuses an anonymous admitted encoded kernel id with 401 api_key_required before the relay runs", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/relay/kernel%40a/tool-call/pending" });
+    expect(res.statusCode).toBe(401);
+    expect(res.json().error).toBe("api_key_required");
+  });
+
   it("an encoded unreserved parameter never reaches a relay handler, even for the operator", async () => {
     const res = await app.inject({ method: "GET", url: "/api/relay/kernel%2Da/tool-call/pending", headers: bearer(operatorKey) });
     expect(res.statusCode).toBe(400);
