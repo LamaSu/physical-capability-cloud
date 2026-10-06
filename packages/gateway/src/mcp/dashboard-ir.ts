@@ -21,6 +21,11 @@
  */
 import type { BoundSourceClass, DashboardManifest, RenderSourceClass } from "@pcc/spec";
 
+/** Display text minted by a typed IR helper; the brand has no runtime representation. */
+export type KitText = string & { readonly __kitText: unique symbol };
+/** The one constructor for PCC-owned copy. Server/manifest values use typed helpers below. */
+export function kitText(s: string): KitText { return s as KitText; }
+
 // Frozen catalog = the EXACT set of node types the adapter emits (nothing more).
 export const IR_NODE_TYPES = [
   "root", "section", "heading", "text", "stat", "card", "receipt", "list",
@@ -64,8 +69,8 @@ export const LIST_ROW_CAP = LIM.listRows;
 // English and other major languages. A claim may not be split across prose either: each section's
 // agent prose, then the whole dashboard's, is also checked as one text (see withholdSplitClaims).
 // It remains a backstop to the agent-authored marking, not a proof that prose is harmless.
-export const WITHHELD_PROSE =
-  "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+export const WITHHELD_PROSE = kitText(
+  "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.");
 // Case-aware: each capital maps to the Latin capital it imitates, before lowercasing.
 const LOOKALIKE: Readonly<Record<string, string>> = {
   // Cyrillic
@@ -219,12 +224,12 @@ const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_
 // money noun alone does not, because real lab types use them ("liquid-transfer", "analytical-balance").
 const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
 const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
-export function identifierText(field: string, value: string): string {
-  if (value === "") return value;
+export function identifierText(field: string, value: string): KitText {
+  if (value === "") return kitText("");
   const t = boundValueText(field, value);
   if (t === WITHHELD_FIELD) return t;
   for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
-  return REPORTED_PREFIX + value;
+  return (REPORTED_PREFIX + value) as KitText;
 }
 export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
 /** Does the text state an amount or a payment or verification status? */
@@ -243,13 +248,13 @@ export function isProseClaim(text: string): boolean {
 // sink (metric, run card, list badge and list meta). Narrower than CLAIM_RE on purpose ("verified",
 // "approved" are not money states). Look-alikes, zero-width characters, fullwidth forms and camel,
 // snake or kebab joins ("SETTLED_RELEASED", "payoutPending") are folded first.
-export const RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
+export const RECORD_STATUS_NOTE = kitText(" - reported by the record, not confirmed by a settlement read");
 const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
 export function isMoneyState(value: string): boolean {
   return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
 }
-export function recordValueText(field: string, value: string): string {
-  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+export function recordValueText(field: string, value: string): KitText {
+  return (value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value) as KitText;
 }
 
 // ── A CLOSED safe vocabulary for bound status values (astra r3 H1) ───────────────────────
@@ -285,8 +290,8 @@ function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.has
 // A non-status field is unchanged: a claim becomes WITHHELD_FIELD, using the stronger detector. Only
 // a PCC card's own money fields (the price and its currency) show money, and they never pass through
 // here — they are now type-validated instead (dashboard-ir-renderer.ts readField).
-export const RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
-export const WITHHELD_FIELD = "withheld: stated money or verification";
+export const RECORD_CLAIM_NOTE = kitText(" - reported by the record, not confirmed by PCC");
+export const WITHHELD_FIELD = kitText("withheld: stated money or verification");
 /** The CLOSED status treatment (4 cases, checked in order) — factored out of `boundValueText` so
  *  it can be applied BY ROLE (astra r4 finding 1): any value the caller already knows is a status
  *  WORD by its list field KIND (LIST_FIELD_KINDS below, "status"), wherever that field appears —
@@ -295,17 +300,17 @@ export const WITHHELD_FIELD = "withheld: stated money or verification";
  *  SAFE_STATUS_WORDS word is shown bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE;
  *  (4) ANY other value gets RECORD_CLAIM_NOTE — never shown bare just because it wasn't
  *  independently recognised as a claim. */
-export function boundStatusText(value: string): string {
-  if (value === "") return value;
+export function boundStatusText(value: string): KitText {
+  if (value === "") return kitText("");
   if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD; // 1
-  if (isSafeStatusWord(value)) return value; // 2
-  if (isMoneyState(value)) return value + RECORD_STATUS_NOTE; // 3
-  return value + RECORD_CLAIM_NOTE; // 4 - fail closed, not "bare unless recognised"
+  if (isSafeStatusWord(value)) return value as KitText; // 2
+  if (isMoneyState(value)) return (value + RECORD_STATUS_NOTE) as KitText; // 3
+  return (value + RECORD_CLAIM_NOTE) as KitText; // 4 - fail closed, not "bare unless recognised"
 }
-export function boundValueText(field: string, value: string): string {
-  if (value === "") return value;
+export function boundValueText(field: string, value: string): KitText {
+  if (value === "") return kitText("");
   if (/(^|\.)status$/.test(field)) return boundStatusText(value);
-  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
+  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value as KitText;
 }
 
 // ── Attributed free text (astra r5 F1; same rule astra accepted on #313's F12) ───────────
@@ -315,9 +320,9 @@ export function boundValueText(field: string, value: string): string {
 // TEXT-kind bound value is explicitly attributed to the record that reported it — structural,
 // not merely a backstop. A value the lexical detector DOES catch is still WITHHELD_FIELD (the
 // detector remains defense in depth underneath this, never replaced by it).
-export const REPORTED_PREFIX = "reported: ";
-export function reportedFieldText(field: string, value: string): string {
-  return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
+export const REPORTED_PREFIX = kitText("reported: ");
+export function reportedFieldText(field: string, value: string): KitText {
+  return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : (REPORTED_PREFIX + value) as KitText;
 }
 
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
@@ -387,7 +392,7 @@ function listProfileViolation(path: string, props: Record<string, unknown>): str
 }
 
 // The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
-const APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
+const APPROVAL_NOTICE = kitText("This action is confirmed only on the authenticated PCC surface.");
 
 // ── Governed bindings — EXACT, end-anchored routes pinned to the REAL route table ──
 // Deny-by-default. Each RegExp is a specific verified read endpoint.
@@ -596,19 +601,19 @@ function isCredentialName(k: string): boolean {
 //    computeUptimePercent, one of 0/50/100/undefined (percent); capabilityCount/
 //    totalJobsCompleted/activeJobCount are all non-negative integer counts.
 export type MetricFieldKind = "status" | "percent" | "count" | "bool" | "time" | "id" | "text" | "version";
-interface MetricField { label: string; source: string; kind: MetricFieldKind }
+interface MetricField { label: KitText; source: string; kind: MetricFieldKind }
 const METRIC_PROFILE: ReadonlyArray<{ route: RegExp; fields: Readonly<Record<string, MetricField>> }> = [
   { route: route("/api/jobs/:/status"), fields: { // top-level envelope
-    status: { label: "Status", source: "status", kind: "status" },
-    progress: { label: "Progress", source: "progress", kind: "percent" },
+    status: { label: kitText("Status"), source: "status", kind: "status" },
+    progress: { label: kitText("Progress"), source: "progress", kind: "percent" },
   } },
   { route: route("/api/kernels/:"), fields: { // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-    status: { label: "Status", source: "kernel.status", kind: "status" },
-    reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
-    uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
-    capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
-    totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
-    activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" },
+    status: { label: kitText("Status"), source: "kernel.status", kind: "status" },
+    reputation: { label: kitText("Reputation"), source: "kernel.reputation", kind: "count" },
+    uptimePercent: { label: kitText("Uptime"), source: "kernel.uptimePercent", kind: "percent" },
+    capabilityCount: { label: kitText("Capabilities"), source: "kernel.capabilityCount", kind: "count" },
+    totalJobsCompleted: { label: kitText("Jobs completed"), source: "kernel.totalJobsCompleted", kind: "count" },
+    activeJobCount: { label: kitText("Active jobs"), source: "kernel.activeJobCount", kind: "count" },
   } },
 ];
 /** Adapter side: (route, logical selector) → the field profile (label + real source + kind), or null. */
@@ -628,7 +633,7 @@ function metricFieldForSource(path: string, source: unknown): MetricField | null
   return null;
 }
 /** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
-function metricLabelForSource(path: string, source: unknown): string | null {
+function metricLabelForSource(path: string, source: unknown): KitText | null {
   return metricFieldForSource(path, source)?.label ?? null;
 }
 /** Renderer side (astra r5 F2): (route, SOURCE path already in bind.select) → the field's closed

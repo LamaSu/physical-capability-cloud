@@ -3,6 +3,9 @@
 "use strict";
 (() => {
   // src/mcp/dashboard-ir.ts
+  function kitText(s) {
+    return s;
+  }
   var IR_NODE_TYPES = [
     "root",
     "section",
@@ -47,7 +50,9 @@
     // deepClean traversal budget — >> any legit manifest/IR, kills wide-object DoS (sol R6)
   };
   var LIST_ROW_CAP = LIM.listRows;
-  var WITHHELD_PROSE = "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+  var WITHHELD_PROSE = kitText(
+    "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards."
+  );
   var LOOKALIKE = {
     // Cyrillic
     "\u0430": "a",
@@ -262,7 +267,7 @@
   var IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
   var IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
   function identifierText(field, value) {
-    if (value === "") return value;
+    if (value === "") return kitText("");
     const t = boundValueText(field, value);
     if (t === WITHHELD_FIELD) return t;
     for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
@@ -282,7 +287,7 @@
     const f = foldForClaims(text);
     return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
   }
-  var RECORD_STATUS_NOTE = " - reported by the record, not confirmed by a settlement read";
+  var RECORD_STATUS_NOTE = kitText(" - reported by the record, not confirmed by a settlement read");
   var MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
   function isMoneyState(value) {
     return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
@@ -357,21 +362,21 @@
   function isSafeStatusWord(value) {
     return SAFE_STATUS_WORDS.has(normalizeStatusWord(value));
   }
-  var RECORD_CLAIM_NOTE = " - reported by the record, not confirmed by PCC";
-  var WITHHELD_FIELD = "withheld: stated money or verification";
+  var RECORD_CLAIM_NOTE = kitText(" - reported by the record, not confirmed by PCC");
+  var WITHHELD_FIELD = kitText("withheld: stated money or verification");
   function boundStatusText(value) {
-    if (value === "") return value;
+    if (value === "") return kitText("");
     if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD;
     if (isSafeStatusWord(value)) return value;
     if (isMoneyState(value)) return value + RECORD_STATUS_NOTE;
     return value + RECORD_CLAIM_NOTE;
   }
   function boundValueText(field, value) {
-    if (value === "") return value;
+    if (value === "") return kitText("");
     if (/(^|\.)status$/.test(field)) return boundStatusText(value);
     return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
   }
-  var REPORTED_PREFIX = "reported: ";
+  var REPORTED_PREFIX = kitText("reported: ");
   function reportedFieldText(field, value) {
     return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : REPORTED_PREFIX + value;
   }
@@ -411,7 +416,7 @@
     if (props.statusFrom !== void 0 && (typeof props.statusFrom !== "string" || !prof.status.includes(props.statusFrom))) return `list status field not in the ${path} profile`;
     return null;
   }
-  var APPROVAL_NOTICE = "This action is confirmed only on the authenticated PCC surface.";
+  var APPROVAL_NOTICE = kitText("This action is confirmed only on the authenticated PCC surface.");
   var PATH_GRAMMAR = /^\/api\/[A-Za-z0-9._~\-/]+$/;
   var SSE_GRAMMAR = /^\/sse\/[A-Za-z0-9._~\-/]+$/;
   var SELECT_GRAMMAR = /^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/;
@@ -583,17 +588,17 @@
   var METRIC_PROFILE = [
     { route: route("/api/jobs/:/status"), fields: {
       // top-level envelope
-      status: { label: "Status", source: "status", kind: "status" },
-      progress: { label: "Progress", source: "progress", kind: "percent" }
+      status: { label: kitText("Status"), source: "status", kind: "status" },
+      progress: { label: kitText("Progress"), source: "progress", kind: "percent" }
     } },
     { route: route("/api/kernels/:"), fields: {
       // GET /api/kernels/:id → { kernel: KernelHealthSnapshot }
-      status: { label: "Status", source: "kernel.status", kind: "status" },
-      reputation: { label: "Reputation", source: "kernel.reputation", kind: "count" },
-      uptimePercent: { label: "Uptime", source: "kernel.uptimePercent", kind: "percent" },
-      capabilityCount: { label: "Capabilities", source: "kernel.capabilityCount", kind: "count" },
-      totalJobsCompleted: { label: "Jobs completed", source: "kernel.totalJobsCompleted", kind: "count" },
-      activeJobCount: { label: "Active jobs", source: "kernel.activeJobCount", kind: "count" }
+      status: { label: kitText("Status"), source: "kernel.status", kind: "status" },
+      reputation: { label: kitText("Reputation"), source: "kernel.reputation", kind: "count" },
+      uptimePercent: { label: kitText("Uptime"), source: "kernel.uptimePercent", kind: "percent" },
+      capabilityCount: { label: kitText("Capabilities"), source: "kernel.capabilityCount", kind: "count" },
+      totalJobsCompleted: { label: kitText("Jobs completed"), source: "kernel.totalJobsCompleted", kind: "count" },
+      activeJobCount: { label: kitText("Active jobs"), source: "kernel.activeJobCount", kind: "count" }
     } }
   ];
   function metricFieldForSelect(path, select) {
@@ -1118,7 +1123,7 @@
   }
   function stamp(iso) {
     const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(iso);
-    return m ? m[1] + " " + m[2] + "Z" : "unknown time";
+    return m ? m[1] + " " + m[2] + "Z" : kitText("unknown time");
   }
   function readOwnPath(obj, sel) {
     let cur = obj;
@@ -1130,39 +1135,42 @@
     }
     return cur;
   }
+  function setText(node, text) {
+    node.textContent = text;
+  }
   function el(doc, cls, text, untrusted) {
     const n = doc.createElement("div");
     n.className = untrusted ? cls + " " + CLS.untrusted : cls;
-    if (text !== void 0) n.textContent = text;
+    if (text !== void 0) setText(n, text);
     return n;
   }
-  var UNAVAILABLE = "\u2014";
+  var UNAVAILABLE = kitText("\u2014");
   var SCHEMA_FIELDS = Object.freeze({
     "capability-summary-v1": Object.freeze({
-      heading: "Capability",
+      heading: kitText("Capability"),
       fields: Object.freeze([
-        { label: "Name", key: "name", kind: "text", required: true },
-        { label: "Type", key: "type", kind: "capType", required: true },
-        { label: "Base cost", key: "pricing.baseCost", kind: "amount", money: true },
-        { label: "Currency", key: "pricing.currency", kind: "currency", money: true },
-        { label: "Assurance tiers", key: "assuranceTiers", kind: "tiers" },
-        { label: "Available", key: "available", kind: "bool" }
+        { label: kitText("Name"), key: "name", kind: "text", required: true },
+        { label: kitText("Type"), key: "type", kind: "capType", required: true },
+        { label: kitText("Base cost"), key: "pricing.baseCost", kind: "amount", money: true },
+        { label: kitText("Currency"), key: "pricing.currency", kind: "currency", money: true },
+        { label: kitText("Assurance tiers"), key: "assuranceTiers", kind: "tiers" },
+        { label: kitText("Available"), key: "available", kind: "bool" }
       ])
     }),
     "run-summary-v1": Object.freeze({
-      heading: "Run",
+      heading: kitText("Run"),
       // Dual-shape: the /status route returns top-level status/progress; the /jobs/:id detail
       // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
       // keys (NOT a manifest selector); first present wins.
       fields: Object.freeze([
-        { label: "Status", key: ["status", "job.status"], kind: "status", required: true },
-        { label: "Progress", key: ["progress", "job.progress"], kind: "percent" }
+        { label: kitText("Status"), key: ["status", "job.status"], kind: "status", required: true },
+        { label: kitText("Progress"), key: ["progress", "job.progress"], kind: "percent" }
       ])
     })
   });
   var SETTLEMENT_NOTICE = Object.freeze({
-    heading: "Settlement record (read-only)",
-    note: "Not proof of payment; verify on the authenticated PCC surface."
+    heading: kitText("Settlement record (read-only)"),
+    note: kitText("Not proof of payment; verify on the authenticated PCC surface.")
   });
   var CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
   var AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
@@ -1196,7 +1204,7 @@
       case "tiers":
         return Array.isArray(raw) && raw.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3) ? { ok: true, text: raw.join(", ") } : { ok: false };
       case "bool":
-        return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No" } : { ok: false };
+        return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No") } : { ok: false };
       case "percent":
         return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? { ok: true, text: String(raw) } : { ok: false };
       default:
@@ -1218,15 +1226,15 @@
     reads.forEach((x, i) => {
       const slot = slots[i];
       if (!slot) return;
-      slot.textContent = allOk && x.ok ? x.text : UNAVAILABLE;
+      setText(slot, allOk && x.ok ? x.text : UNAVAILABLE);
     });
     return allOk;
   }
   function schemaCardFailure(schema, data) {
     const r = readSchemaCard(schema, data);
-    if (!r) return "unknown schema";
-    if (r.missingRequired) return "missing required fields";
-    if (r.reads.some((x) => !x.ok)) return "mistyped field";
+    if (!r) return kitText("unknown schema");
+    if (r.missingRequired) return kitText("missing required fields");
+    if (r.reads.some((x) => !x.ok)) return kitText("mistyped field");
     return null;
   }
   function paintChildren(doc, node, into) {
@@ -1245,9 +1253,15 @@
     }
     return e;
   }
+  function manifestProseText(n, key) {
+    return String(n.props?.[key] ?? "");
+  }
+  function validatedIrConstantText(n, key) {
+    return String(n.props?.[key] ?? "");
+  }
   function paintProse(doc, cls, n, key) {
     if (n.props?.withheld === true) return el(doc, cls + " " + CLS.withheld, WITHHELD_PROSE);
-    return el(doc, cls + " " + CLS.agent, String(n.props?.[key] ?? ""), true);
+    return el(doc, cls + " " + CLS.agent, manifestProseText(n, key), true);
   }
   var PAINTERS = Object.freeze({
     root: (d, n) => {
@@ -1264,7 +1278,7 @@
     text: (d, n) => paintProse(d, CLS.text, n, "text"),
     stat: (d, n) => {
       const e = el(d, CLS.stat);
-      e.appendChild(el(d, CLS.heading, String(n.props?.label ?? "")));
+      e.appendChild(el(d, CLS.heading, validatedIrConstantText(n, "label")));
       e.appendChild(el(d, CLS.value, UNAVAILABLE, true));
       return e;
     },
@@ -1295,8 +1309,8 @@
       paintChildren(d, n, e);
       return e;
     },
-    "approval-notice": (d, n) => el(d, CLS["approval-notice"], String(n.props?.notice ?? "")),
-    plan: (d) => el(d, CLS.plan, "Composition (view-only)"),
+    "approval-notice": (d, n) => el(d, CLS["approval-notice"], validatedIrConstantText(n, "notice")),
+    plan: (d) => el(d, CLS.plan, kitText("Composition (view-only)")),
     "form-summary": (d, n) => {
       const e = el(d, CLS["form-summary"]);
       paintChildren(d, n, e);
@@ -1307,7 +1321,7 @@
   function paintNode(doc, node) {
     const p = PAINTERS[node.type];
     if (!p) {
-      return el(doc, CLS.invalid, "");
+      return el(doc, CLS.invalid, kitText(""));
     }
     const e = p(doc, node);
     const src = sourceClassOf(node);
@@ -1317,23 +1331,32 @@
     }
     return e;
   }
+  function freshnessText(asOf, stale) {
+    return "source read " + stamp(asOf) + (stale ? " \xB7 stale" : "");
+  }
   function applyFreshness(host, meta, asOf, stale) {
     host.setAttr("data-as-of", asOf);
     withState(host, stale ? CLS.stale : null);
     meta.className = CLS.fresh;
-    meta.textContent = "source read " + stamp(asOf) + (stale ? " \xB7 stale" : "");
+    setText(meta, freshnessText(asOf, stale));
+  }
+  function unknownTimeText(receivedIso) {
+    return "source time not reported \xB7 received " + stamp(receivedIso);
   }
   function applyUnknownTime(host, meta, receivedIso) {
     if (host.removeAttr) host.removeAttr("data-as-of");
     withState(host, CLS.timeUnknown);
     meta.className = CLS.fresh;
-    meta.textContent = "source time not reported \xB7 received " + stamp(receivedIso);
+    setText(meta, unknownTimeText(receivedIso));
+  }
+  function unavailableText(why) {
+    return "unavailable \xB7 " + why;
   }
   function applyUnavailable(host, meta, why) {
     if (host.removeAttr) host.removeAttr("data-as-of");
     withState(host, CLS.unavail);
     meta.className = CLS.fresh;
-    meta.textContent = "unavailable \xB7 " + why;
+    setText(meta, unavailableText(why));
   }
   function renderIrDoc(doc, mount, ir) {
     while (mount.children.length) mount.children.pop();
@@ -1341,20 +1364,23 @@
     mount.appendChild(paintNode(doc, ir.root));
   }
   var LIST_FIELD_LABELS = {
-    id: "ID",
-    name: "Name",
-    capabilityId: "Capability",
-    kernelId: "Kernel",
-    status: "Status",
-    createdAt: "Created",
-    updatedAt: "Updated",
-    version: "Version",
-    capabilityCount: "Capabilities",
-    type: "Type",
-    available: "Available"
+    id: kitText("ID"),
+    name: kitText("Name"),
+    capabilityId: kitText("Capability"),
+    kernelId: kitText("Kernel"),
+    status: kitText("Status"),
+    createdAt: kitText("Created"),
+    updatedAt: kitText("Updated"),
+    version: kitText("Version"),
+    capabilityCount: kitText("Capabilities"),
+    type: kitText("Type"),
+    available: kitText("Available")
   };
   function listFieldLabel(field) {
     return LIST_FIELD_LABELS[field] ?? field;
+  }
+  function listFieldHeadingText(field) {
+    return listFieldLabel(field) + ":";
   }
   var LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
   var LIST_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
@@ -1371,7 +1397,7 @@
   var LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
   function readListField(row, field) {
     const raw = readOwnPath(row, field);
-    if (raw === void 0 || raw === null) return { ok: true, text: "", raw };
+    if (raw === void 0 || raw === null) return { ok: true, text: kitText(""), raw };
     const kind = LIST_FIELD_KINDS[field];
     switch (kind) {
       case "id":
@@ -1381,7 +1407,7 @@
       case "status":
         return typeof raw === "string" && raw.length > 0 && raw.length <= 64 ? { ok: true, text: boundStatusText(raw), raw } : { ok: false };
       case "bool":
-        return typeof raw === "boolean" ? { ok: true, text: raw ? "Yes" : "No", raw } : { ok: false };
+        return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No"), raw } : { ok: false };
       case "time":
         return typeof raw === "string" && timeRoundTrips(raw) ? { ok: true, text: raw, raw } : { ok: false };
       case "version":
@@ -1413,7 +1439,11 @@
       const titleCell = { field: rowTitle, read: titleRead };
       const allCells = statusCell ? [titleCell, ...metaCells, statusCell] : [titleCell, ...metaCells];
       const rowOk = allCells.every((c) => c.read.ok);
-      const texts = new Map(allCells.map((c) => [c, rowOk && c.read.ok ? c.read.text : UNAVAILABLE]));
+      const withheldCells = /* @__PURE__ */ new Set();
+      const cellText = (c) => {
+        if (!rowOk || !c.read.ok) return UNAVAILABLE;
+        return withheldCells.has(c) ? WITHHELD_FIELD : c.read.text;
+      };
       if (rowOk) {
         const rawOf = (c) => {
           const r = c.read.ok ? c.read.raw : void 0;
@@ -1422,32 +1452,32 @@
         const present = allCells.filter((c) => !isAbsent(c));
         const nonStatusCells = present.filter((c) => !isStatusKind(c.field));
         const statusRaw = present.filter((c) => isStatusKind(c.field)).map(rawOf).filter((r) => r !== null);
-        const nonStatusDisplayed = nonStatusCells.filter((c) => texts.get(c) !== WITHHELD_FIELD);
+        const nonStatusDisplayed = nonStatusCells.filter((c) => cellText(c) !== WITHHELD_FIELD);
         const isAttributedKind = (field) => {
           const k = LIST_FIELD_KINDS[field];
           return k === "text" || k === "id" || k === "capType";
         };
-        const joinTextOf = (c) => isAttributedKind(c.field) ? rawOf(c) ?? texts.get(c) : texts.get(c);
+        const joinTextOf = (c) => isAttributedKind(c.field) ? rawOf(c) ?? cellText(c) : cellText(c);
         const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
         const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
         const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
-        if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) texts.set(c, WITHHELD_FIELD);
+        if (nonStatusClaim || crossClaim) for (const c of nonStatusCells) withheldCells.add(c);
       }
       const line = el(doc, CLS.row);
-      line.appendChild(el(doc, CLS.fieldname, listFieldLabel(rowTitle) + ":"));
-      line.appendChild(el(doc, CLS.heading, texts.get(titleCell), true));
+      line.appendChild(el(doc, CLS.fieldname, listFieldHeadingText(rowTitle)));
+      line.appendChild(el(doc, CLS.heading, cellText(titleCell), true));
       for (const c of metaCells) {
-        line.appendChild(el(doc, CLS.fieldname, listFieldLabel(c.field) + ":"));
-        line.appendChild(rowOk && isAbsent(c) ? el(doc, CLS.meta + " " + CLS.absent, "not reported") : el(doc, CLS.meta, texts.get(c), true));
+        line.appendChild(el(doc, CLS.fieldname, listFieldHeadingText(c.field)));
+        line.appendChild(rowOk && isAbsent(c) ? el(doc, CLS.meta + " " + CLS.absent, kitText("not reported")) : el(doc, CLS.meta, cellText(c), true));
       }
       if (statusCell) {
-        line.appendChild(el(doc, CLS.fieldname, listFieldLabel(statusFrom) + ":"));
-        line.appendChild(rowOk && isAbsent(statusCell) ? el(doc, CLS.badge + " " + CLS.absent, "not reported") : el(doc, CLS.badge, texts.get(statusCell), true));
+        line.appendChild(el(doc, CLS.fieldname, listFieldHeadingText(statusFrom)));
+        line.appendChild(rowOk && isAbsent(statusCell) ? el(doc, CLS.badge + " " + CLS.absent, kitText("not reported")) : el(doc, CLS.badge, cellText(statusCell), true));
       }
       listEl.appendChild(line);
       shown++;
     }
-    if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, "none"));
+    if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, kitText("none")));
     return shown;
   }
   function listRowsReadable(node, rows) {
@@ -1472,7 +1502,7 @@
       case "text":
         return typeof raw === "string" && raw.length > 0 && raw.length <= 200 ? reportedFieldText(sel, raw) : UNAVAILABLE;
       case "bool":
-        return typeof raw === "boolean" ? raw ? "Yes" : "No" : UNAVAILABLE;
+        return typeof raw === "boolean" ? kitText(raw ? "Yes" : "No") : UNAVAILABLE;
       case "percent":
         return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? String(raw) : UNAVAILABLE;
       case "count":
@@ -1490,7 +1520,7 @@
   function bootIrView(doc, mount, rawDoc, validate) {
     if (!validate(rawDoc).ok) {
       while (mount.children.length) mount.children.pop();
-      mount.appendChild(el(doc, CLS.invalid, "This dashboard could not be verified and was not rendered."));
+      mount.appendChild(el(doc, CLS.invalid, kitText("This dashboard could not be verified and was not rendered.")));
       return false;
     }
     renderIrDoc(doc, mount, rawDoc);
@@ -1523,6 +1553,9 @@
   function clampPoll(bind) {
     const ms = typeof bind.pollMs === "number" && Number.isFinite(bind.pollMs) ? bind.pollMs : BINDER_LIM.defaultPollMs;
     return Math.max(BINDER_LIM.minPollMs, Math.min(ms, BINDER_LIM.maxPollMs));
+  }
+  function httpStatusText(status) {
+    return "HTTP " + status;
   }
   var ASOF_MAX_SKEW_MS = 12e4;
   var ASOF_MIN_YEAR = 2020;
@@ -1588,14 +1621,14 @@
     sessionTimer = deps.setTimer(() => {
       if (stopped) return;
       stop();
-      if (onEnded) onEnded("updates stopped");
+      if (onEnded) onEnded(kitText("updates stopped"));
     }, BINDER_LIM.sessionMs);
     if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
       const sseUrl = deps.origin + bind.sse;
       sse = deps.openSse(sseUrl, (d) => {
         if (!stopped) onData(d);
       }, () => {
-        if (!stopped && onStale) onStale("stream error");
+        if (!stopped && onStale) onStale(kitText("stream error"));
         stop();
       });
     } else {
@@ -1611,13 +1644,13 @@
             onData(r.json);
           } else {
             fails++;
-            if (onStale) onStale(r.reason ?? (r.redirected ? "redirected" : r.bytesOver ? "response too large" : r.status !== 200 ? "HTTP " + r.status : "empty response"));
+            if (onStale) onStale(r.reason ?? (r.redirected ? kitText("redirected") : r.bytesOver ? kitText("response too large") : r.status !== 200 ? httpStatusText(r.status) : kitText("empty response")));
           }
           pollTimer = deps.setTimer(tick, nextDelay());
         }).catch(() => {
           if (stopped) return;
           fails++;
-          if (onStale) onStale("network error");
+          if (onStale) onStale(kitText("network error"));
           pollTimer = deps.setTimer(tick, nextDelay());
         });
       };
@@ -1649,6 +1682,9 @@
     const o = window.__PCC_IR_ORIGIN__;
     return typeof o === "string" && /^https:\/\/[a-z0-9.-]+$/i.test(o) ? o : null;
   }
+  function setText2(node, text) {
+    node.textContent = text;
+  }
   function wrapEl(real) {
     const children = [];
     const w = {
@@ -1658,7 +1694,7 @@
         return real.textContent ?? "";
       },
       set textContent(v) {
-        real.textContent = v;
+        setText2(real, v);
       },
       get className() {
         return real.className;
@@ -1667,7 +1703,17 @@
         real.className = v;
       },
       setAttr(n, v) {
-        real.setAttribute(n, v);
+        switch (n) {
+          case "data-tone":
+            real.setAttribute("data-tone", v);
+            break;
+          case "data-source":
+            real.setAttribute("data-source", v);
+            break;
+          case "data-as-of":
+            real.setAttribute("data-as-of", v);
+            break;
+        }
       },
       removeAttr(n) {
         real.removeAttribute(n);
@@ -1684,7 +1730,7 @@
   function inert(mount, msg) {
     const p = document.createElement("p");
     p.className = "pcc-invalid";
-    p.textContent = msg;
+    setText2(p, msg);
     mount.replaceChildren(p);
   }
   function tooLarge(root) {
@@ -1771,7 +1817,7 @@
         await resp.body?.cancel();
       } catch {
       }
-      const reason = resp.status !== 200 ? "HTTP " + resp.status : redirected ? "redirected" : "unexpected content type";
+      const reason = resp.status !== 200 ? httpStatusText(resp.status) : redirected ? kitText("redirected") : kitText("unexpected content type");
       return { status: resp.status, redirected, bytesOver: false, json: null, ok: false, reason };
     }
     const reader = resp.body ? resp.body.getReader() : null;
@@ -1788,7 +1834,7 @@
               await reader.cancel();
             } catch {
             }
-            return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: "response too large" };
+            return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: kitText("response too large") };
           }
           chunks.push(value);
         }
@@ -1798,9 +1844,9 @@
     try {
       json = JSON.parse(new TextDecoder().decode(concat(chunks, received)));
     } catch {
-      return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "unreadable response" };
+      return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("unreadable response") };
     }
-    if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "empty response" };
+    if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("empty response") };
     return { status: 200, redirected: false, bytesOver: false, json, ok: true };
   }
   var rendered = false;
@@ -1915,8 +1961,8 @@
       const els = (cls) => Array.from(root.querySelectorAll("." + cls));
       const mark = (nodes, cls) => nodes.forEach((node, i) => {
         const el2 = els(cls)[i];
-        if (el2) provenanced(node, el2, () => "no live data source", () => {
-        }, () => null).onStale("no live data source");
+        if (el2) provenanced(node, el2, () => kitText("no live data source"), () => {
+        }, () => null).onStale(kitText("no live data source"));
       });
       mark(stats2, "pcc-stat");
       mark(lists2, "pcc-list");
@@ -1962,14 +2008,14 @@
       const select = String(node.bind?.select ?? "");
       const pv = provenanced(node, el2, (data) => {
         const cur = selectPath(data, select);
-        if (cur === MISSING) return "missing field";
+        if (cur === MISSING) return kitText("missing field");
         const text = bindScalar(node, data);
-        if (text === UNAVAILABLE) return "mistyped field";
+        if (text === UNAVAILABLE) return kitText("mistyped field");
         return () => {
-          slot.textContent = text;
+          setText2(slot, text);
         };
       }, () => {
-        slot.textContent = "";
+        setText2(slot, kitText(""));
       }, (data) => {
         const cur = selectPath(data, select);
         if (cur === MISSING) return null;
@@ -1984,18 +2030,18 @@
       if (!schema) return;
       const slots = Array.from(el2.querySelectorAll(".pcc-value"));
       const pv = provenanced(node, el2, (data) => {
-        const staging = slots.map(() => ({ textContent: "" }));
-        if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? "payload does not match schema";
+        const staging = slots.map(() => ({ textContent: kitText("") }));
+        if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? kitText("payload does not match schema");
         return () => {
           staging.forEach((s, j) => {
             const sl = slots[j];
-            if (sl) sl.textContent = s.textContent;
+            if (sl) setText2(sl, s.textContent);
           });
         };
       }, () => {
-        for (const sl of slots) sl.textContent = "";
+        for (const sl of slots) setText2(sl, kitText(""));
       }, (data) => {
-        const staging = slots.map(() => ({ textContent: "" }));
+        const staging = slots.map(() => ({ textContent: kitText("") }));
         return bindSchemaCard(schema, data, staging) ? JSON.stringify(staging.map((s) => s.textContent)) : null;
       });
       push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
@@ -2005,9 +2051,9 @@
       if (!el2) return;
       const pv = provenanced(node, el2, (data, src) => {
         const rows = listRowsOf(String(node.bind?.path ?? ""), data);
-        if (rows === null) return "unexpected response shape";
-        if (!listRowsReadable(node, rows)) return "partial collection";
-        if (rows.length === 0 && src === null) return "empty result without a source time";
+        if (rows === null) return kitText("unexpected response shape");
+        if (!listRowsReadable(node, rows)) return kitText("partial collection");
+        if (rows.length === 0 && src === null) return kitText("empty result without a source time");
         const staging = document.createElement("div");
         bindListRows(rdoc, wrapEl(staging), node, rows);
         return () => el2.replaceChildren(...Array.from(staging.childNodes));
@@ -2038,7 +2084,7 @@
     if (!mount) return;
     if (tooLarge(manifest)) {
       rendered = true;
-      inert(mount, "This dashboard is too large and was not rendered.");
+      inert(mount, kitText("This dashboard is too large and was not rendered."));
       return;
     }
     let r;
@@ -2049,7 +2095,7 @@
     }
     if (!r.ok) {
       rendered = true;
-      inert(mount, "This dashboard could not be verified and was not rendered.");
+      inert(mount, kitText("This dashboard could not be verified and was not rendered."));
       return;
     }
     rendered = true;
@@ -2058,7 +2104,7 @@
     try {
       painted = bootIrView(rdoc, container, r.doc, validateIr);
     } catch {
-      inert(mount, "This dashboard could not be verified and was not rendered.");
+      inert(mount, kitText("This dashboard could not be verified and was not rendered."));
       return;
     }
     mount.replaceChildren(container._el);

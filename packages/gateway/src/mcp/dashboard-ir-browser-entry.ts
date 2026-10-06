@@ -23,11 +23,11 @@
  * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
  * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
  */
-import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf } from "./dashboard-ir.js";
-import type { IrDoc, IrNode } from "./dashboard-ir.js";
+import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf, kitText } from "./dashboard-ir.js";
+import type { IrDoc, IrNode, KitText } from "./dashboard-ir.js";
 import { bootIrView, bindScalar, bindListRows, listRowsReadable, bindSchemaCard, schemaCardFailure, applyFreshness, applyUnavailable, applyUnknownTime, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
-import { startBind, sourceAsOf, isStale, acceptsNewer } from "./dashboard-ir-binder.js";
+import { startBind, sourceAsOf, isStale, acceptsNewer, httpStatusText } from "./dashboard-ir-binder.js";
 import type { BinderDeps, GetResult } from "./dashboard-ir-binder.js";
 
 const CAP = {
@@ -53,26 +53,36 @@ function pccApiOrigin(): string | null {
 }
 
 // ── real DOM wrapped in the renderer's minimal RElement (fresh detached container per render) ──
+/** Browser text sink: all actual DOM text writes receive already-typed display text. */
+export function setText(node: { textContent: string | null }, text: KitText): void { node.textContent = text; }
 interface Wrapped extends RElement { _el: HTMLElement }
 function wrapEl(real: HTMLElement): Wrapped {
   const children: RElement[] = [];
   const w = {
     _el: real, children,
-    get textContent() { return real.textContent ?? ""; },
-    set textContent(v: string) { real.textContent = v; },
+    get textContent(): string { return real.textContent ?? ""; },
+    set textContent(v: KitText) { setText(real, v); },
     get className() { return real.className; },
     set className(v: string) { real.className = v; },
-    setAttr(n: string, v: string) { real.setAttribute(n, v); },
+    setAttr(n: string, v: string) {
+      // The renderer uses only these metadata attributes. Keep the DOM adapter closed so
+      // a dynamic attribute name cannot open a tooltip or screen-reader text sink.
+      switch (n) {
+        case "data-tone": real.setAttribute("data-tone", v); break;
+        case "data-source": real.setAttribute("data-source", v); break;
+        case "data-as-of": real.setAttribute("data-as-of", v); break;
+      }
+    },
     removeAttr(n: string) { real.removeAttribute(n); },
     appendChild(c: Wrapped) { real.appendChild(c._el); children.push(c); return c; },
   };
   return w as unknown as Wrapped;
 }
 const rdoc: RDocument = { createElement: (tag: string) => wrapEl(document.createElement(tag)) as unknown as RElement };
-function inert(mount: HTMLElement, msg: string): void {
+function inert(mount: HTMLElement, msg: KitText): void {
   const p = document.createElement("p");
   p.className = "pcc-invalid";
-  p.textContent = msg;
+  setText(p, msg);
   mount.replaceChildren(p);
 }
 
@@ -139,7 +149,7 @@ async function realGetJson(url: string, signal: AbortSignal): Promise<GetResult>
   const ct = (resp.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
   if (resp.status !== 200 || redirected || ct !== "application/json") {
     try { await resp.body?.cancel(); } catch { /* ignore */ }
-    const reason = resp.status !== 200 ? "HTTP " + resp.status : redirected ? "redirected" : "unexpected content type";
+    const reason = resp.status !== 200 ? httpStatusText(resp.status) : redirected ? kitText("redirected") : kitText("unexpected content type");
     return { status: resp.status, redirected, bytesOver: false, json: null, ok: false, reason };
   }
   const reader = resp.body ? resp.body.getReader() : null;
@@ -150,16 +160,16 @@ async function realGetJson(url: string, signal: AbortSignal): Promise<GetResult>
       if (done) break;
       if (value) {
         received += value.length;
-        if (received > CAP.respBytes) { try { await reader.cancel(); } catch { /* ignore */ } return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: "response too large" }; }
+        if (received > CAP.respBytes) { try { await reader.cancel(); } catch { /* ignore */ } return { status: 200, redirected: false, bytesOver: true, json: null, ok: false, reason: kitText("response too large") }; }
         chunks.push(value);
       }
     }
   }
   let json: unknown = null;
   try { json = JSON.parse(new TextDecoder().decode(concat(chunks, received))); } catch {
-    return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "unreadable response" };
+    return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("unreadable response") };
   }
-  if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: "empty response" };
+  if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("empty response") };
   return { status: 200, redirected: false, bytesOver: false, json, ok: true };
 }
 
@@ -240,7 +250,7 @@ function shapeOf(n: Node): unknown {
  *  `clear()` removes shown values. */
 interface ProvState { meta: HTMLElement; watermark: string | null; fingerprint: string | null; shown: boolean; timeKnown: boolean; expiry: ReturnType<typeof setTimeout> | null }
 const provStates = new Map<string, ProvState>();
-function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src: string | null) => string | (() => void), clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: string) => void; onEnded: (why: string) => void } {
+function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src: string | null) => KitText | (() => void), clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: KitText) => void; onEnded: (why: KitText) => void } {
   const prov = provenanceOf(node);
   const host = wrapEl(el) as unknown as RElement;
   let st = provStates.get(node.id);
@@ -264,7 +274,7 @@ function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src
       state.expiry = setTimeout(() => { state.expiry = null; if (state.shown && state.watermark) applyFreshness(host, meta, state.watermark, true); }, Math.max(0, left) + 1);
     }
   };
-  const failed = (why: string): void => {
+  const failed = (why: KitText): void => {
     disarm();
     clear();
     state.shown = false;
@@ -301,7 +311,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // rather than sit empty (absence is not evidence).
     const { stats, lists, schemaCards } = collectBound(doc);
     const els = (cls: string) => Array.from(root.querySelectorAll<HTMLElement>("." + cls));
-    const mark = (nodes: IrNode[], cls: string) => nodes.forEach((node, i) => { const el = els(cls)[i]; if (el) provenanced(node, el, () => "no live data source", () => {}, () => null).onStale("no live data source"); });
+    const mark = (nodes: IrNode[], cls: string) => nodes.forEach((node, i) => { const el = els(cls)[i]; if (el) provenanced(node, el, () => kitText("no live data source"), () => {}, () => null).onStale(kitText("no live data source")); });
     mark(stats, "pcc-stat"); mark(lists, "pcc-list"); mark(schemaCards, "pcc-schema-card");
     return;
   }
@@ -347,11 +357,11 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // reported reason text, which bindScalar's single UNAVAILABLE sentinel cannot.
     const pv = provenanced(node, el, (data) => {
       const cur = selectPath(data, select);
-      if (cur === MISSING) return "missing field";
+      if (cur === MISSING) return kitText("missing field");
       const text = bindScalar(node, data);
-      if (text === UNAVAILABLE) return "mistyped field";
-      return () => { slot.textContent = text; }; // commit: write only after validation AND ordering accept it (astra 28f H1)
-    }, () => { slot.textContent = ""; }, (data) => {
+      if (text === UNAVAILABLE) return kitText("mistyped field");
+      return () => { setText(slot, text); }; // commit: write only after validation AND ordering accept it (astra 28f H1)
+    }, () => { setText(slot, kitText("")); }, (data) => {
       // M3 fingerprint: the scalar itself — the one thing this sink shows.
       const cur = selectPath(data, select);
       if (cur === MISSING) return null;
@@ -370,13 +380,13 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
       // Validate into THROWAWAY staging slots first (never the real DOM) — same pattern the
       // fingerprint below already uses. Only a commit (after ordering also accepts) copies the
       // validated text into the real slots (astra 28f H1).
-      const staging = slots.map(() => ({ textContent: "" }));
-      if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? "payload does not match schema";
-      return () => { staging.forEach((s, j) => { const sl = slots[j]; if (sl) sl.textContent = s.textContent; }); };
-    }, () => { for (const sl of slots) sl.textContent = ""; }, (data) => {
+      const staging = slots.map(() => ({ textContent: kitText("") }));
+      if (!bindSchemaCard(schema, data, staging)) return schemaCardFailure(schema, data) ?? kitText("payload does not match schema");
+      return () => { staging.forEach((s, j) => { const sl = slots[j]; if (sl) setText(sl, s.textContent); }); };
+    }, () => { for (const sl of slots) setText(sl, kitText("")); }, (data) => {
       // M3 fingerprint: "the selected fields" — bindSchemaCard run into THROWAWAY slots
       // (never the real DOM), so fingerprinting a to-be-rejected duplicate never paints.
-      const staging = slots.map(() => ({ textContent: "" }));
+      const staging = slots.map(() => ({ textContent: kitText("") }));
       return bindSchemaCard(schema, data, staging) ? JSON.stringify(staging.map((s) => s.textContent)) : null;
     });
     push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded));
@@ -384,12 +394,12 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
   lists.forEach((node, i) => { const el = listEls[i]; if (!el) return; const pv = provenanced(node, el, (data, src) => {
     // #344's listRowsOf reads the route's own rows key; null (no collection at all) is rejected below, before listRowsReadable (astra 28e H1).
     const rows = listRowsOf(String(node.bind?.path ?? ""), data);
-    if (rows === null) return "unexpected response shape";
+    if (rows === null) return kitText("unexpected response shape");
     // A partial collection (any unreadable row) is not data.
-    if (!listRowsReadable(node, rows)) return "partial collection";
+    if (!listRowsReadable(node, rows)) return kitText("partial collection");
     // Empty-read policy: "none" is shown only when the SOURCE vouches for when it read the
     // empty set; an empty result without a source time is not evidence of absence.
-    if (rows.length === 0 && src === null) return "empty result without a source time";
+    if (rows.length === 0 && src === null) return kitText("empty result without a source time");
     const staging = document.createElement("div"); // stage off-DOM: committed only after ordering also accepts it (astra 28f H1)
     bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
     return () => el.replaceChildren(...Array.from(staging.childNodes));
@@ -416,16 +426,16 @@ function renderManifest(manifest: unknown): void {
   if (disposed || rendered) return; // render exactly once; never after teardown
   const mount = document.getElementById(MOUNT_ID);
   if (!mount) return;
-  if (tooLarge(manifest)) { rendered = true; inert(mount, "This dashboard is too large and was not rendered."); return; }
+  if (tooLarge(manifest)) { rendered = true; inert(mount, kitText("This dashboard is too large and was not rendered.")); return; }
   // Any exception while adapting or validating is the same inert failure, never a partial render.
   let r: ReturnType<typeof dashboardManifestToIr>;
   try { r = dashboardManifestToIr(manifest as never); } catch { r = { ok: false, reason: "adapter threw" }; }
-  if (!r.ok) { rendered = true; inert(mount, "This dashboard could not be verified and was not rendered."); return; }
+  if (!r.ok) { rendered = true; inert(mount, kitText("This dashboard could not be verified and was not rendered.")); return; }
   rendered = true;
   const container = wrapEl(document.createElement("div"));
   let painted = false;
   try { painted = bootIrView(rdoc, container as unknown as RElement, r.doc, validateIr); } // in-browser re-validate + paint
-  catch { inert(mount, "This dashboard could not be verified and was not rendered."); return; }
+  catch { inert(mount, kitText("This dashboard could not be verified and was not rendered.")); return; }
   mount.replaceChildren(container._el);
   if (painted) { liveDoc = r.doc; liveRoot = container._el; startBinds(r.doc, container._el); }
 }

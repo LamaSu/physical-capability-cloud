@@ -21,7 +21,8 @@
  * Dependency-injected (getJson/openSse/timers) → testable under --experimental-strip-types
  * and self-contained for `.toString()` inlining next to the renderer.
  */
-import type { IrBind, IrNode } from "./dashboard-ir.js";
+import type { IrBind, IrNode, KitText } from "./dashboard-ir.js";
+import { kitText } from "./dashboard-ir.js";
 
 export const BINDER_LIM = { maxBytes: 512 * 1024, maxRows: 200, minPollMs: 5000, maxPollMs: 3_600_000, defaultPollMs: 30_000, sessionMs: 30 * 60 * 1000 } as const;
 
@@ -64,7 +65,7 @@ export interface GetResult {
    *  empty JSON). A failure is never delivered as data (PX-4 review #2524). */
   ok?: boolean;
   /** Short fixed reason for a failed read ("unexpected content type", ...). */
-  reason?: string;
+  reason?: KitText;
 }
 export interface BinderDeps {
   origin: string;
@@ -81,6 +82,9 @@ export interface BinderDeps {
   clearTimer: (h: unknown) => void;
   makeSignal: () => unknown;
 }
+
+/** Transport-owned HTTP status copy, never a server response body. */
+export function httpStatusText(status: number): KitText { return ("HTTP " + status) as KitText; }
 
 // ── Provenance freshness (PX-4) ──────────────────────────────────────────────
 /** Max future skew tolerated on a source `asOf`. A timestamp further ahead than this is
@@ -158,7 +162,7 @@ export function acceptsNewer(currentAsOf: string | null, incomingAsOf: string, c
  * says the source is unavailable instead of implying it is current. `onEnded(why)` (optional)
  * fires once when the session cap ends the binding. Nothing is delivered after `stop()`.
  */
-export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: (why: string) => void, onEnded?: (why: string) => void): { stop: () => void } {
+export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown) => void, onStale?: (why: KitText) => void, onEnded?: (why: KitText) => void): { stop: () => void } {
   const bind = node.bind;
   let stopped = false;
   let pollTimer: unknown = null;
@@ -177,12 +181,12 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
   sessionTimer = deps.setTimer(() => { // whole-session teardown: the view must stop claiming currency
     if (stopped) return;
     stop();
-    if (onEnded) onEnded("updates stopped");
+    if (onEnded) onEnded(kitText("updates stopped"));
   }, BINDER_LIM.sessionMs);
 
   if (channelFor(bind) === "sse" && deps.openSse && bind.sse) {
     const sseUrl = deps.origin + bind.sse;                // sse path already policy-validated
-    sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => { if (!stopped && onStale) onStale("stream error"); stop(); });
+    sse = deps.openSse(sseUrl, (d) => { if (!stopped) onData(d); }, () => { if (!stopped && onStale) onStale(kitText("stream error")); stop(); });
   } else {
     // ONE in-flight request per bind (the next tick is scheduled only after this one
     // settles — a timer never overlaps its request). Failures back off exponentially
@@ -197,10 +201,10 @@ export function startBind(node: IrNode, deps: BinderDeps, onData: (json: unknown
         if (clean) { fails = 0; onData(r.json); } // consume ONLY a clean same-origin JSON object/array
         else { // the read failed: nothing current to show
           fails++;
-          if (onStale) onStale(r.reason ?? (r.redirected ? "redirected" : r.bytesOver ? "response too large" : r.status !== 200 ? "HTTP " + r.status : "empty response"));
+          if (onStale) onStale(r.reason ?? (r.redirected ? kitText("redirected") : r.bytesOver ? kitText("response too large") : r.status !== 200 ? httpStatusText(r.status) : kitText("empty response")));
         }
         pollTimer = deps.setTimer(tick, nextDelay());
-      }).catch(() => { if (stopped) return; fails++; if (onStale) onStale("network error"); pollTimer = deps.setTimer(tick, nextDelay()); });
+      }).catch(() => { if (stopped) return; fails++; if (onStale) onStale(kitText("network error")); pollTimer = deps.setTimer(tick, nextDelay()); });
     };
     tick();
   }
