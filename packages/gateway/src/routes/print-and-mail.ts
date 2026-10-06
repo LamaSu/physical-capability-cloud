@@ -3,9 +3,10 @@
  *
  * The gig worker IS a courier.dispatch driver. They:
  *   1. claim the handoff job through the EXISTING courier-jobs claim route
- *      (POST /api/courier-jobs/:id/claim) — no new identity/auth/wallet/custody
- *      code here; the driver authenticates exactly as courier drivers do today,
- *      by presenting the driverAgent that matches the claim;
+ *      (POST /api/courier-jobs/:id/claim), which binds the claim to the
+ *      authenticated principal; the handoff is accepted only from that same
+ *      authenticated principal (astra 142). The body's driverAgent is a label
+ *      that must name the claim, never authority;
  *   2. affix the pre-printed carrier label, photograph the printed first page +
  *      label together in ONE frame before sealing, seal, and drop at the post
  *      office;
@@ -25,6 +26,14 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { EvidenceEvent } from "@pcc/spec";
 import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import { authenticatedActor, sameIdentity } from "../auth/actor.js";
+import { kernelOwnerFromStore, offerClaimant, type KernelOwnerOf } from "../services/kernel-owner.js";
+
+export interface PrintAndMailRoutesOptions {
+  /** Resolve a kernel's owner (production: shop_kernels); tests inject a stub. */
+  kernelOwnerOf?: KernelOwnerOf;
+}
 import {
   buildHandoffEvidence,
   evaluateMailLeg,
@@ -72,10 +81,19 @@ function handoffDTO(record: HandoffRecord) {
   };
 }
 
-/** Reads the courier-jobs claim state without duplicating it. Returns the projected job or an error verdict. */
+/**
+ * Reads the courier-jobs claim state without duplicating it, and checks that the
+ * authenticated `actor` is the job's claimant (the principal recorded at claim
+ * time, or, for a pre-binding claim, the owner of the kernel its label names).
+ * The body's driverAgent must name the claim, but it grants nothing: copying the
+ * public claimedBy label is not the claim (astra 142). Returns the projected job
+ * or an error verdict.
+ */
 function loadClaimedJob(
   jobId: string,
   driverAgent: string,
+  actor: string,
+  kernelOwnerOf: KernelOwnerOf,
 ):
   | { ok: true; claimedBy: string; status: string }
   | { ok: false; code: number; error: string; message: string; details?: unknown } {
@@ -103,18 +121,30 @@ function loadClaimedJob(
       message: `Job ${jobId} is not claimed. Claim it first via POST /api/courier-jobs/${jobId}/claim.`,
     };
   }
-  if (claimedBy !== driverAgent) {
+  const offers = getJobOffersStore();
+  const offer = offers.get(jobId);
+  const claimant = offer ? offerClaimant((id) => offers.claimantOf(id), offer, kernelOwnerOf) : null;
+  if (!sameIdentity(actor, claimant)) {
     return {
       ok: false,
       code: 403,
       error: "not_claimant",
-      message: "Only the driver who claimed this job may submit its handoff evidence.",
+      message: "Only the authenticated operator who claimed this job may submit its handoff evidence.",
+    };
+  }
+  if (claimedBy !== driverAgent) {
+    return {
+      ok: false,
+      code: 400,
+      error: "driver_label_mismatch",
+      message: "driverAgent must name this job's claim (its claimedBy label). It is a label, not authority.",
     };
   }
   return { ok: true, claimedBy, status: job.status };
 }
 
-export async function printAndMailRoutes(app: FastifyInstance) {
+export async function printAndMailRoutes(app: FastifyInstance, opts: PrintAndMailRoutesOptions = {}) {
+  const kernelOwnerOf = opts.kernelOwnerOf ?? kernelOwnerFromStore;
   // ── GET /api/print-and-mail/healthz ─────────────────────────────────────
   app.get("/api/print-and-mail/healthz", async () => {
     const store = getPrintAndMailHandoffStore();
@@ -147,9 +177,16 @@ export async function printAndMailRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "missing_fields", details: errors });
       }
 
-      // 2) Reuse the EXISTING claim state — the driver authenticates by matching
-      //    the claim, exactly as courier drivers do today. No new auth code.
-      const claim = loadClaimedJob(jobId, b.driverAgent!);
+      // 2) Reuse the EXISTING claim state, and accept the handoff only from the
+      //    authenticated principal the claim is bound to (astra 142).
+      const actor = authenticatedActor(req);
+      if (!actor) {
+        return reply.code(401).send({
+          error: "missing_identity",
+          message: "Submitting handoff evidence requires an authenticated operator (API key or SIWE session): the job's claimant.",
+        });
+      }
+      const claim = loadClaimedJob(jobId, b.driverAgent!, actor, kernelOwnerOf);
       if (!claim.ok) {
         return reply.code(claim.code).send({ error: claim.error, message: claim.message });
       }

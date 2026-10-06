@@ -55,6 +55,12 @@ const now = () => new Date(mockNowMs);
 
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  // x-test-operator stands in for an authenticated API key: courier-jobs claims
+  // are bound to the authenticated principal (kits K0 slice 2).
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h !== "") (req as unknown as { operatorId?: string }).operatorId = h;
+  });
   await app.register(courierJobsRoutes);
   await app.register(printAndMailRoutes);
   await app.ready();
@@ -107,6 +113,7 @@ async function createAndClaimJob(
   const claim = await app.inject({
     method: "POST",
     url: `/api/courier-jobs/${opts.jobId}/claim`,
+    headers: { "x-test-operator": opts.driver ?? DRIVER },
     payload: { driverAgent: opts.driver ?? DRIVER },
   });
   if (claim.statusCode !== 200) {
@@ -217,6 +224,7 @@ describe("POST /api/print-and-mail/:jobId/handoff", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/print-and-mail/${jobId}/handoff`,
+        headers: { "x-test-operator": DRIVER },
         payload: validHandoffBody(),
       });
       expect(res.statusCode).toBe(201);
@@ -261,6 +269,7 @@ describe("POST /api/print-and-mail/:jobId/handoff", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/print-and-mail/${jobId}/handoff`,
+        headers: { "x-test-operator": DRIVER },
         payload: validHandoffBody({ printJobId: undefined, photo: { capturedAt: "2026-08-27T12:00:00.000Z" } }),
       });
       expect(res.statusCode).toBe(400);
@@ -277,8 +286,8 @@ describe("POST /api/print-and-mail/:jobId/handoff", () => {
     const app = await buildApp();
     try {
       const jobId = await createAndClaimJob(app, { jobId: "job-3" });
-      const first = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
-      const second = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
+      const first = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
+      const second = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
       expect(first.statusCode).toBe(201);
       expect(second.statusCode).toBe(409);
       expect(second.json().error).toBe("handoff_already_recorded");
@@ -294,7 +303,7 @@ describe("handoff reuses the courier-jobs claim state", () => {
   it("404s when the job was never posted", async () => {
     const app = await buildApp();
     try {
-      const res = await app.inject({ method: "POST", url: "/api/print-and-mail/ghost/handoff", payload: validHandoffBody() });
+      const res = await app.inject({ method: "POST", url: "/api/print-and-mail/ghost/handoff", headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
       expect(res.statusCode).toBe(404);
       expect(res.json().error).toBe("job_not_found");
     } finally {
@@ -312,7 +321,7 @@ describe("handoff reuses the courier-jobs claim state", () => {
         payload: { deliveryId: "job-open", pickup: { name: "a" }, dropoff: { name: "b" } },
         headers: { "x-posted-by": "did:pcc:operator" },
       });
-      const res = await app.inject({ method: "POST", url: "/api/print-and-mail/job-open/handoff", payload: validHandoffBody() });
+      const res = await app.inject({ method: "POST", url: "/api/print-and-mail/job-open/handoff", headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("job_not_claimed");
     } finally {
@@ -327,10 +336,58 @@ describe("handoff reuses the courier-jobs claim state", () => {
       const res = await app.inject({
         method: "POST",
         url: `/api/print-and-mail/${jobId}/handoff`,
+        headers: { "x-test-operator": "did:pcc:driver-impostor" },
         payload: validHandoffBody({ driverAgent: "did:pcc:driver-impostor" }),
       });
       expect(res.statusCode).toBe(403);
       expect(res.json().error).toBe("not_claimant");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("401s a handoff with no authenticated principal, even with the claimant's driverAgent", async () => {
+    const app = await buildApp();
+    try {
+      const jobId = await createAndClaimJob(app, { jobId: "job-anon", driver: DRIVER });
+      const res = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
+      expect(res.statusCode).toBe(401);
+      expect(res.json().error).toBe("missing_identity");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("astra 142: 403s a stranger who copies the claimant's public claimedBy label as driverAgent", async () => {
+    const app = await buildApp();
+    try {
+      const jobId = await createAndClaimJob(app, { jobId: "job-stranger", driver: DRIVER });
+      // claimedBy is public; copying it is not the claim.
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/print-and-mail/${jobId}/handoff`,
+        headers: { "x-test-operator": "did:pcc:stranger" },
+        payload: validHandoffBody({ driverAgent: DRIVER }),
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toBe("not_claimant");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("400s the authenticated claimant when driverAgent does not name the claim (a label, not authority)", async () => {
+    const app = await buildApp();
+    try {
+      const jobId = await createAndClaimJob(app, { jobId: "job-label", driver: DRIVER });
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/print-and-mail/${jobId}/handoff`,
+        headers: { "x-test-operator": DRIVER },
+        payload: validHandoffBody({ driverAgent: "did:pcc:some-other-label" }),
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe("driver_label_mismatch");
     } finally {
       await app.close();
     }
@@ -378,7 +435,7 @@ describe("NEGATIVE CONTROL: the photo can never close the mail leg", () => {
     const app = await buildApp();
     try {
       const jobId = await createAndClaimJob(app, { jobId: "job-5" });
-      await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
+      await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
       const res = await app.inject({ method: "GET", url: `/api/print-and-mail/${jobId}` });
       expect(res.statusCode).toBe(200);
       expect(res.json().mailLeg.closed).toBe(false);
@@ -449,7 +506,7 @@ describe("with the CarrierBridge wired (post-merge behaviour)", () => {
     try {
       const jobId = await createAndClaimJob(app, { jobId: "job-6" });
       wireBridge(jobId, []);
-      const res = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
+      const res = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
       expect(res.statusCode).toBe(201);
       expect(res.json().handoff.commitmentVerified).toBe(true);
     } finally {
@@ -462,7 +519,7 @@ describe("with the CarrierBridge wired (post-merge behaviour)", () => {
     try {
       const jobId = await createAndClaimJob(app, { jobId: "job-7" });
       wireBridge(jobId, [], { hash: "9".repeat(64), trackingCode: TRACKING });
-      const res = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
+      const res = await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("commitment_mismatch");
     } finally {
@@ -475,7 +532,7 @@ describe("with the CarrierBridge wired (post-merge behaviour)", () => {
     try {
       const jobId = await createAndClaimJob(app, { jobId: "job-8" });
       wireBridge(jobId, []);
-      await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, payload: validHandoffBody() });
+      await app.inject({ method: "POST", url: `/api/print-and-mail/${jobId}/handoff`, headers: { "x-test-operator": DRIVER }, payload: validHandoffBody() });
 
       // Now a real carrier scan arrives — rewire the bridge to return it.
       const carrier = await makeCarrierPickupEvent({ jobId });

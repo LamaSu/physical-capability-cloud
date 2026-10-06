@@ -48,6 +48,9 @@ export interface SqliteDatabaseLike {
   exec?(sql: string): unknown;
 }
 
+/** Persisted-row key for the private claimant; never part of the public JobOffer. */
+const CLAIMANT_FIELD = "_privateClaimantOperatorId" as const;
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
@@ -88,15 +91,51 @@ export interface EvidenceRequirements {
   [k: string]: unknown;
 }
 
-export type JobOfferStatus =
-  | "open"
-  | "claimed"
-  | "in_progress"
-  | "delivered"
-  | "settled"
-  | "cancelled"
-  | "expired"
-  | "disputed";
+/** Every status an offer can have: the one list the type below is made from. */
+export const JOB_OFFER_STATUSES = [
+  "open",
+  "claimed",
+  "in_progress",
+  "delivered",
+  "completed",
+  "settled",
+  "cancelled",
+  "expired",
+  "lapsed",
+  "disputed",
+] as const;
+
+export type JobOfferStatus = (typeof JOB_OFFER_STATUSES)[number];
+
+/** After 'delivered', the poster has this long to dispute; with no confirm or
+ * dispute by then, the sweeper lapses the offer (kits #3989). */
+export const REVIEW_WINDOW_MS = 72 * 60 * 60 * 1000;
+/** A kernel that released an offer cannot claim that offer again for this long (kits #3989). */
+export const RECLAIM_BLOCK_MS = 60 * 60 * 1000;
+
+/** The statuses from which each status-changing event may be recorded (N81;
+ * the rules are kits' #3989). An event not listed here changes no status and
+ * is always recorded. Who may post each event is authorization (#395).
+ *   - delivered is the claimant's assertion: never terminal, never success;
+ *   - confirmed (poster) ends it in 'completed' (success; no money moves);
+ *   - disputed (poster, within REVIEW_WINDOW_MS of delivery) ends it in 'disputed';
+ *   - release (claimant, before delivery) puts the offer back to 'open';
+ *   - settled comes only from the server (a linked job's settlement): posted, it is refused.
+ * A Map, not an object: an event name is caller data, and a plain object also
+ * answers for the names it inherits (toString, constructor, __proto__, ...). */
+export const EVENT_ALLOWED_FROM: ReadonlyMap<string, ReadonlySet<JobOfferStatus>> = new Map<
+  string,
+  ReadonlySet<JobOfferStatus>
+>([
+  ["in_progress", new Set<JobOfferStatus>(["claimed", "in_progress"])],
+  ["pickup", new Set<JobOfferStatus>(["claimed", "in_progress"])],
+  ["delivered", new Set<JobOfferStatus>(["claimed", "in_progress", "delivered"])],
+  ["release", new Set<JobOfferStatus>(["claimed", "in_progress"])],
+  ["cancelled", new Set<JobOfferStatus>(["open", "claimed", "in_progress", "cancelled"])],
+  ["confirmed", new Set<JobOfferStatus>(["delivered", "completed"])],
+  ["disputed", new Set<JobOfferStatus>(["delivered", "disputed"])],
+  ["settled", new Set<JobOfferStatus>()],
+]);
 
 export interface JobOffer {
   id: string;
@@ -131,6 +170,9 @@ export interface JobOffer {
   deliveredAt: string | null;
   cancelledAt: string | null;
   expiredAt: string | null;
+  completedAt?: string | null;
+  disputedAt?: string | null;
+  lapsedAt?: string | null;
 }
 
 export interface JobOfferEvent {
@@ -158,6 +200,13 @@ export interface CreateJobOfferInput {
 
 export interface ClaimInput {
   kernelId: string;
+  /**
+   * The AUTHENTICATED principal making the claim (API-key operatorId or SIWE
+   * userId). Kept privately by the store and never serialized on the offer:
+   * offers and their events are publicly readable, and an operatorId can be an
+   * email address.
+   */
+  operatorId?: string;
   claimSignature?: string;
   etaMin?: number;
   contact?: string;
@@ -354,7 +403,11 @@ export class JobOffersStore {
   private readonly offers = new Map<string, JobOffer>();
   private readonly events = new Map<string, JobOfferEvent[]>();
   private readonly claimLocks = new Map<string, Promise<void>>();
+  /** offerId -> the kernel that released it, and until when it may not re-claim it. */
+  private readonly releaseGuard = new Map<string, { kernelId: string; untilMs: number }>();
   private readonly idempotencyIndex = new Map<string, string>(); // key -> id
+  /** offerId -> authenticated claimant operatorId. Private: never on the public offer. */
+  private readonly claimants = new Map<string, string>();
   private readonly verify: VerifyFn;
   private readonly validateSchema: CapabilitySchemaValidator;
   private readonly nowFn: () => Date;
@@ -386,7 +439,11 @@ export class JobOffersStore {
         .all() as Array<{ id: string; data: string }>;
       for (const r of rows) {
         try {
-          const offer = JSON.parse(r.data) as JobOffer;
+          const stored = JSON.parse(r.data) as JobOffer & { [CLAIMANT_FIELD]?: string | null };
+          const claimant = stored[CLAIMANT_FIELD];
+          delete stored[CLAIMANT_FIELD];
+          const offer = stored as JobOffer;
+          if (typeof claimant === "string" && claimant !== "") this.claimants.set(offer.id, claimant);
           this.offers.set(offer.id, offer);
           if (offer.idempotencyKey) {
             this.idempotencyIndex.set(offer.idempotencyKey, offer.id);
@@ -406,6 +463,40 @@ export class JobOffersStore {
     } catch {
       // Tables may not exist yet on first boot — migrate.ts will create them.
     }
+    // The release guard is in-memory only; rebuild it from what just hydrated.
+    // Harmless no-op when the try block above threw (this.events is whatever
+    // it was left as, possibly empty).
+    this.rebuildReleaseGuards();
+  }
+
+  /**
+   * Rebuild the 1 h re-claim guard from the persisted event log (#455 r2 Q3
+   * MEDIUM: the guard used to live in memory only, so a restart lost it,
+   * silently re-opening the hour-long re-claim block it exists to enforce).
+   * No schema change: the releasing kernel id already travels inside each
+   * 'release' event's own JSON blob (see recordEvent's releasedKernelId).
+   *
+   * Only the LAST 'release' event per offer matters: a second release is
+   * reachable only via an intervening claim (the lifecycle table requires
+   * 'claimed' or 'in_progress' to release from), so each later release
+   * event is strictly more recent than, and supersedes, any earlier one —
+   * exactly as the live in-memory map already behaves (recordEvent
+   * overwrites, never merges, releaseGuard.set on each release).
+   */
+  private rebuildReleaseGuards(): void {
+    const now = this.nowMs();
+    for (const [offerId, evts] of this.events) {
+      for (let i = evts.length - 1; i >= 0; i--) {
+        const evt = evts[i]!;
+        if (evt.event !== "release") continue;
+        const kernelId = typeof evt.kernelId === "string" ? evt.kernelId : null;
+        const atMs = isoToMs(evt.at);
+        if (kernelId && atMs != null && now - atMs < RECLAIM_BLOCK_MS) {
+          this.releaseGuard.set(offerId, { kernelId, untilMs: atMs + RECLAIM_BLOCK_MS });
+        }
+        break; // only the most recent release event for this offer decides
+      }
+    }
   }
 
   private persistOffer(offer: JobOffer): void {
@@ -423,7 +514,9 @@ export class JobOffersStore {
           offer.id,
           offer.capabilityType,
           offer.status,
-          JSON.stringify(offer),
+          // The claimant rides in the persisted row so it survives a restart,
+          // but hydration strips it back out of the public offer object.
+          JSON.stringify({ ...offer, [CLAIMANT_FIELD]: this.claimants.get(offer.id) ?? null }),
           offer.postedAt,
           offer.posterDid,
           offer.validUntil,
@@ -457,6 +550,13 @@ export class JobOffersStore {
   getEvents(id: string): JobOfferEvent[] { return this.events.get(id) ?? []; }
 
   size(): number { return this.offers.size; }
+
+  /**
+   * The authenticated operatorId that claimed this offer, or null when it is
+   * unclaimed or was claimed before claimant binding existed. Private: routes
+   * use it to authorize progress events and never put it in a response.
+   */
+  claimantOf(id: string): string | null { return this.claimants.get(id) ?? null; }
 
   countByStatus(status: JobOfferStatus): number {
     let n = 0;
@@ -545,6 +645,9 @@ export class JobOffersStore {
       deliveredAt: null,
       cancelledAt: null,
       expiredAt: null,
+      completedAt: null,
+      disputedAt: null,
+      lapsedAt: null,
     };
 
     this.offers.set(offer.id, offer);
@@ -618,6 +721,7 @@ export class JobOffersStore {
     | { ok: true; offer: JobOffer }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: JobOfferStatus; claimedBy: string | null }
+    | { ok: false; reason: "recently_released"; retryAfterMs: number }
   > {
     const prev = this.claimLocks.get(id) ?? Promise.resolve();
     let release!: () => void;
@@ -635,10 +739,15 @@ export class JobOffersStore {
           claimedBy: o.claimedByKernelId,
         };
       }
+      const guard = this.releaseGuard.get(id);
+      if (guard && guard.kernelId === claim.kernelId && this.nowMs() < guard.untilMs) {
+        return { ok: false, reason: "recently_released", retryAfterMs: guard.untilMs - this.nowMs() };
+      }
       o.status = "claimed";
       o.claimedByKernelId = claim.kernelId;
       o.claimedAt = this.nowIso();
       o.claimSignature = claim.claimSignature ?? null;
+      if (claim.operatorId) this.claimants.set(o.id, claim.operatorId);
       o.driverEtaMin = claim.etaMin ?? null;
       o.driverContact = claim.contact ?? null;
       this.persistOffer(o);
@@ -667,6 +776,16 @@ export class JobOffersStore {
    * Courier-shim aliases pickup → in_progress and stays the convention
    * of v0.2 callers without leaking courier semantics into the generic
    * surface.
+   *
+   * An event that would move the offer outside its lifecycle is refused, and
+   * nothing is recorded (N81):
+   *   - in_progress / pickup: only on a claimed offer (a repeat is a no-op);
+   *   - delivered: only on a claimed or in-progress offer (a repeat is a no-op);
+   *   - cancelled: only before delivery;
+   *   - so nothing advances an unclaimed offer, and settled, cancelled and
+   *     expired offers stay as they are.
+   * Events that change no status (note, progress_update, error, ...) are
+   * always recorded.
    */
   recordEvent(
     id: string,
@@ -674,29 +793,76 @@ export class JobOffersStore {
     by: string | null,
     payload: unknown,
     note: string | null,
-  ): { ok: true; status: JobOfferStatus; event: JobOfferEvent } | { ok: false; reason: "not_found" } {
+  ):
+    | { ok: true; status: JobOfferStatus; event: JobOfferEvent }
+    | { ok: false; reason: "not_found" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus }
+    | { ok: false; reason: "review_window_closed"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
+    const allowedFrom = EVENT_ALLOWED_FROM.get(event);
+    if (allowedFrom && !allowedFrom.has(o.status)) {
+      return { ok: false, reason: "invalid_transition", currentStatus: o.status };
+    }
+    // confirmed and disputed are the two JUDGMENTS of a delivery (#455 r2 Q2
+    // MEDIUM): from 'delivered', each is allowed only inside the review
+    // window. A judgment already made (status no longer 'delivered') may be
+    // repeated at any age — the condition below only ever fires on the FIRST
+    // judgment of a given delivery.
+    if ((event === "confirmed" || event === "disputed") && o.status === "delivered") {
+      const deliveredMs = isoToMs(o.deliveredAt);
+      if (deliveredMs == null || this.nowMs() - deliveredMs > REVIEW_WINDOW_MS) {
+        return { ok: false, reason: "review_window_closed", currentStatus: o.status };
+      }
+    }
+    // 'release' hands the claim back to the pool. Capture which kernel held
+    // it BEFORE the event object is built, so the kernel id travels inside
+    // the event's own JSON blob (no schema change — same `data` column) and
+    // survives a restart: rebuildReleaseGuards() below reads it back out
+    // (#455 r2 Q3 MEDIUM).
+    const releasedKernelId = event === "release" ? o.claimedByKernelId : null;
     const evt: JobOfferEvent = {
       at: this.nowIso(),
       event,
       by,
       payload: payload ?? null,
       note: note ?? null,
+      ...(releasedKernelId ? { kernelId: releasedKernelId } : {}),
     };
     this.appendEvent(o.id, evt);
     // Status transitions — opt-in by event kind. Unknown event kinds leave
     // status alone (caller can post "progress_update" repeatedly).
     if (event === "in_progress" || event === "pickup") {
-      if (o.status === "claimed" || o.status === "open") o.status = "in_progress";
+      if (o.status === "claimed") o.status = "in_progress";
     }
-    if (event === "delivered") {
+    if (event === "delivered" && o.status !== "delivered") {
       o.status = "delivered";
       o.deliveredAt = evt.at;
     }
-    if (event === "cancelled") {
+    if (event === "cancelled" && o.status !== "cancelled") {
       o.status = "cancelled";
       o.cancelledAt = evt.at;
+    }
+    if (event === "release") {
+      const kernelId = releasedKernelId;
+      // The released operator stops being the claimant (astra 142): otherwise it could still post
+      // claimant-or-poster events on the open offer, and the persisted row would bring it back.
+      this.claimants.delete(o.id);
+      o.status = "open";
+      o.claimedByKernelId = null;
+      o.claimedAt = null;
+      o.claimSignature = null;
+      o.driverEtaMin = null;
+      o.driverContact = null;
+      if (kernelId) this.releaseGuard.set(o.id, { kernelId, untilMs: this.nowMs() + RECLAIM_BLOCK_MS });
+    }
+    if (event === "confirmed" && o.status !== "completed") {
+      o.status = "completed";
+      o.completedAt = evt.at;
+    }
+    if (event === "disputed" && o.status !== "disputed") {
+      o.status = "disputed";
+      o.disputedAt = evt.at;
     }
     this.persistOffer(o);
     return { ok: true, status: o.status, event: evt };
@@ -748,18 +914,34 @@ export class JobOffersStore {
     return { ok: true, offer: o };
   }
 
+  /**
+   * The poster's DELETE. It is a 'cancelled' event, so it follows the same
+   * rule: an open, claimed or in-progress offer is cancelled; one already
+   * cancelled stays as it is and keeps its first cancellation time (the repeat
+   * is logged, like a repeated 'cancelled' event); any other status is refused
+   * and nothing is recorded. Who may cancel is checked first, so a refusal
+   * never tells a stranger what state the offer is in.
+   */
   cancel(id: string, poster: string):
     | { ok: true; status: JobOfferStatus }
     | { ok: false; reason: "not_found" }
-    | { ok: false; reason: "forbidden" } {
+    | { ok: false; reason: "forbidden" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: JobOfferStatus } {
     const o = this.offers.get(id);
     if (!o) return { ok: false, reason: "not_found" };
     if (o.posterDid && o.posterDid !== poster) return { ok: false, reason: "forbidden" };
-    o.status = "cancelled";
-    o.cancelledAt = this.nowIso();
-    this.persistOffer(o);
+    // The 'cancelled' rule; with no such rule, nothing may be cancelled.
+    if (!(EVENT_ALLOWED_FROM.get("cancelled")?.has(o.status) ?? false)) {
+      return { ok: false, reason: "invalid_transition", currentStatus: o.status };
+    }
+    const at = this.nowIso();
+    if (o.status !== "cancelled") {
+      o.status = "cancelled";
+      o.cancelledAt = at;
+      this.persistOffer(o);
+    }
     this.appendEvent(o.id, {
-      at: o.cancelledAt,
+      at,
       event: "deleted_by_poster",
       by: poster,
     });
@@ -784,19 +966,52 @@ export class JobOffersStore {
   }
 
   /**
+   * True while `o` is still the offer a source check was started for: the same
+   * record, still open, with the claim it had then (none) and the same source
+   * address. Deliberately not a version of every field: a poster's heartbeat or
+   * edit does not make a source's answer stale, and must not be a way to keep
+   * a failed check from ever applying.
+   */
+  private stillAsked(
+    o: JobOffer,
+    asked: { url: string; claimedBy: string | null; claimedAt: string | null },
+  ): boolean {
+    return (
+      this.offers.get(o.id) === o &&
+      o.status === "open" &&
+      o.claimedByKernelId === asked.claimedBy &&
+      o.claimedAt === asked.claimedAt &&
+      o.sourceVerifyUrl === asked.url
+    );
+  }
+
+  /**
    * Run one sweep tick. Idempotent; safe to call from interval timers OR
    * directly in tests for deterministic state. Returns counts for observability.
    */
-  async sweep(): Promise<{ expired: number; reverified: number; autoCancelled: number }> {
+  async sweep(): Promise<{ expired: number; reverified: number; autoCancelled: number; lapsed: number }> {
     const now = this.nowMs();
     const HEARTBEAT_GRACE_MS = 5 * 60 * 1000;
     const REVERIFY_EARLY_INTERVAL_MS = 60 * 1000;
     const REVERIFY_LATE_INTERVAL_MS = 5 * 60 * 1000;
     const REVERIFY_EARLY_WINDOW_MS = 10 * 60 * 1000;
 
-    let expired = 0, reverified = 0, autoCancelled = 0;
+    let expired = 0, reverified = 0, autoCancelled = 0, lapsed = 0;
 
     for (const o of this.offers.values()) {
+      // 0) a delivery nobody confirmed or disputed within the review window
+      //    lapses: terminal, and never counted as success (kits #3989).
+      if (o.status === "delivered") {
+        const deliveredMs = isoToMs(o.deliveredAt);
+        if (deliveredMs != null && now - deliveredMs > REVIEW_WINDOW_MS) {
+          o.status = "lapsed";
+          o.lapsedAt = this.nowIso();
+          this.persistOffer(o);
+          this.appendEvent(o.id, { at: o.lapsedAt, event: "lapsed", reason: "delivery_unconfirmed" });
+          lapsed++;
+        }
+        continue;
+      }
       if (o.status !== "open") continue;
 
       // 1) TTL
@@ -835,7 +1050,12 @@ export class JobOffersStore {
         const inEarlyWindow = now - postedMs < REVERIFY_EARLY_WINDOW_MS;
         const interval = inEarlyWindow ? REVERIFY_EARLY_INTERVAL_MS : REVERIFY_LATE_INTERVAL_MS;
         if (now - lastVMs >= interval) {
-          const v = await this.verify(o.sourceVerifyUrl);
+          const asked = { url: o.sourceVerifyUrl, claimedBy: o.claimedByKernelId, claimedAt: o.claimedAt };
+          const v = await this.verify(asked.url);
+          // The await let other writers act: a claim, a delivery, the poster's
+          // cancel, another sweep. The answer applies only to the offer it was
+          // asked about; if that offer has moved on, the answer is discarded.
+          if (!this.stillAsked(o, asked)) continue;
           o.lastVerifyAt = this.nowIso();
           if (!v.ok) {
             o.status = "cancelled";
@@ -859,7 +1079,7 @@ export class JobOffersStore {
       }
     }
 
-    return { expired, reverified, autoCancelled };
+    return { expired, reverified, autoCancelled, lapsed };
   }
 }
 

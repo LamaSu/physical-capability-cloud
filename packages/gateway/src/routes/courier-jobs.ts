@@ -34,6 +34,15 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { getCourierJobsStore } from "../services/courier-jobs-store.js";
+import { getJobOffersStore } from "../services/job-offers-store.js";
+import { authenticatedActor } from "../auth/actor.js";
+import { authorizeOfferEvent } from "../services/job-offer-authz.js";
+import { kernelOwnerFromStore, offerClaimant, type KernelOwnerOf } from "../services/kernel-owner.js";
+
+export interface CourierJobsRoutesOptions {
+  /** Resolve a kernel's owner (production: shop_kernels); tests inject a stub. */
+  kernelOwnerOf?: KernelOwnerOf;
+}
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -166,7 +175,8 @@ async function handleGetById(req: FastifyRequest<{ Params: { id: string } }>, re
   return { job: j, events: store.getEvents(j.id) };
 }
 
-export async function courierJobsRoutes(app: FastifyInstance) {
+export async function courierJobsRoutes(app: FastifyInstance, opts: CourierJobsRoutesOptions = {}) {
+  const kernelOwnerOf = opts.kernelOwnerOf ?? kernelOwnerFromStore;
   const aliasCreate = "/api/courier-jobs/jobs";
   const aliasOpen = "/api/courier-jobs/jobs/open";
   const aliasDetail = "/api/courier-jobs/jobs/:id";
@@ -202,12 +212,22 @@ export async function courierJobsRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { driverAgent?: string; etaMin?: number; contact?: string };
   }>("/api/courier-jobs/:id/claim", async (req, reply) => {
+    // driverAgent is only a display label; the claim binds to the
+    // authenticated principal, which alone may later post pickup/delivered.
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Claiming requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const b = req.body || {};
     if (!b.driverAgent) {
       return reply.code(400).send({ error: "missing_field", required: ["driverAgent"] });
     }
     const store = getCourierJobsStore();
     const result = await store.claim(req.params.id, {
+      operatorId: actor,
       driverAgent: b.driverAgent,
       etaMin: b.etaMin,
       contact: b.contact,
@@ -221,8 +241,13 @@ export async function courierJobsRoutes(app: FastifyInstance) {
           claimedBy: result.claimedBy,
         });
       }
+      if (result.reason === "recently_released") {
+        return reply.code(409).send({ error: "recently_released", retryAfterMs: result.retryAfterMs });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "claim_refused" });
     }
-    return { ok: true, job: (result as { ok: true; job: unknown }).job };
+    return { ok: true, job: result.job };
   });
 
   // ── POST /api/courier-jobs/:id/events ───────────────────────────────────
@@ -237,15 +262,45 @@ export async function courierJobsRoutes(app: FastifyInstance) {
         valid: [...VALID_EVENT_TYPES],
       });
     }
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Posting a job event requires an authenticated operator (API key or SIWE session).",
+      });
+    }
+    const offer = getJobOffersStore().get(req.params.id);
+    if (!offer) return reply.code(404).send({ error: "not_found" });
+    // pickup/delivered: the authenticated claimant only. cancelled: the poster
+    // only (N81; a driver gives a job back with release on /api/job-offers).
+    // note: the claimant or the poster. A body driverAgent grants nothing. A job
+    // claimed before claimant binding falls back to the owner of the kernel its
+    // legacy driverAgent label names, as the generic route does (astra 142); a
+    // label that names no owned kernel resolves to nobody.
+    const offerStore = getJobOffersStore();
+    const decision = authorizeOfferEvent(
+      b.event,
+      actor,
+      offerClaimant((id) => offerStore.claimantOf(id), offer, kernelOwnerOf),
+      offer.posterDid,
+    );
+    if (!decision.ok) {
+      return reply.code(decision.reason === "server_only" ? 409 : 403).send({ error: "forbidden", reason: decision.reason });
+    }
     const store = getCourierJobsStore();
     const result = store.recordEvent(
       req.params.id,
       b.event as "pickup" | "delivered" | "cancelled" | "note",
-      b.driverAgent ?? null,
+      decision.role,
       b.proof ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: b.event, currentStatus: result.currentStatus });
+      }
+      return reply.code(404).send({ error: "not_found" });
+    }
     return { ok: true, status: result.status, event: result.event };
   });
 
@@ -295,8 +350,14 @@ export async function courierJobsRoutes(app: FastifyInstance) {
           message: "You can only cancel jobs you posted",
         });
       }
+      // DELETE is a 'cancelled' event: refused the same way, from the same statuses.
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: "cancelled", currentStatus: result.currentStatus });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "cancel_refused" });
     }
-    return { ok: true, status: (result as { ok: true; status: string }).status };
+    return { ok: true, status: result.status };
   });
 
   // ── POST /api/courier-jobs/:id/heartbeat ────────────────────────────────

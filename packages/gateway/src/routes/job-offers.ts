@@ -47,6 +47,17 @@ import {
   type GeoFence,
   type PricingSpec,
 } from "../services/job-offers-store.js";
+import { authenticatedActor, sameIdentity } from "../auth/actor.js";
+import { authorizeOfferEvent } from "../services/job-offer-authz.js";
+import { kernelOwnerFromStore, offerClaimant, type KernelOwnerOf } from "../services/kernel-owner.js";
+
+export interface JobOffersRoutesOptions {
+  /**
+   * Resolve a kernel's owner (its operatorAddress). Production reads
+   * shop_kernels; tests inject a stub so the routes stay hermetic.
+   */
+  kernelOwnerOf?: KernelOwnerOf;
+}
 
 // Posting identity helper — prefers API key operatorId, falls back to
 // SIWE-session userId, else X-Posted-By header (matches v0.2 surface for
@@ -120,7 +131,9 @@ function validatePricing(p: unknown): p is PricingSpec {
   return true;
 }
 
-export async function jobOffersRoutes(app: FastifyInstance) {
+export async function jobOffersRoutes(app: FastifyInstance, opts: JobOffersRoutesOptions = {}) {
+  const kernelOwnerOf = opts.kernelOwnerOf ?? kernelOwnerFromStore;
+
   // ── GET /api/job-offers/healthz ────────────────────────────────────────
   app.get("/api/job-offers/healthz", async () => {
     const store = getJobOffersStore();
@@ -265,12 +278,28 @@ export async function jobOffersRoutes(app: FastifyInstance) {
     Params: { id: string };
     Body: { kernelId?: string; claimSignature?: string; etaMin?: number; contact?: string };
   }>("/api/job-offers/:id/claim", async (req, reply) => {
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Claiming requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const b = req.body || {};
     if (!b.kernelId) {
       return reply.code(400).send({ error: "missing_field", required: ["kernelId"] });
     }
+    // The claiming kernel must be registered to the caller. The same answer for
+    // an unknown kernel and someone else's, so the check reveals neither.
+    if (!sameIdentity(kernelOwnerOf(b.kernelId), actor)) {
+      return reply.code(403).send({
+        error: "kernel_not_owned",
+        message: "You can only claim with a kernel registered to your own identity.",
+      });
+    }
     const store = getJobOffersStore();
     const claim: ClaimInput = {
+      operatorId: actor,
       kernelId: b.kernelId,
       claimSignature: b.claimSignature,
       etaMin: b.etaMin,
@@ -286,8 +315,13 @@ export async function jobOffersRoutes(app: FastifyInstance) {
           claimedBy: result.claimedBy,
         });
       }
+      if (result.reason === "recently_released") {
+        return reply.code(409).send({ error: "recently_released", retryAfterMs: result.retryAfterMs });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "claim_refused" });
     }
-    return { ok: true, offer: (result as { ok: true; offer: unknown }).offer };
+    return { ok: true, offer: result.offer };
   });
 
   // ── POST /api/job-offers/:id/events ────────────────────────────────────
@@ -304,15 +338,51 @@ export async function jobOffersRoutes(app: FastifyInstance) {
         message: "event (or kind) is required. Common values: acknowledged, in_progress, progress_update, delivered, error, cancelled, note.",
       });
     }
+    const actor = authenticatedActor(req);
+    if (!actor) {
+      return reply.code(401).send({
+        error: "missing_identity",
+        message: "Posting an offer event requires an authenticated operator (API key or SIWE session).",
+      });
+    }
     const store = getJobOffersStore();
+    const offer = store.get(req.params.id);
+    if (!offer) return reply.code(404).send({ error: "not_found" });
+    // The claimant is the authenticated principal recorded at claim time. An
+    // offer claimed before claimant binding falls back to its kernel's owner.
+    const claimant = offerClaimant((id) => store.claimantOf(id), offer, kernelOwnerOf);
+    const decision = authorizeOfferEvent(eventKind, actor, claimant, offer.posterDid);
+    if (!decision.ok && decision.reason === "server_only") {
+      return reply.code(409).send({
+        error: "server_only_event",
+        message: `"${eventKind}" is recorded only by the server (a linked job's settlement); no caller may post it.`,
+      });
+    }
+    if (!decision.ok) {
+      return reply.code(403).send({
+        error: "forbidden",
+        reason: decision.reason,
+        message:
+          decision.reason === "not_claimed"
+            ? "This event advances an offer and needs a claimant; the offer has none you can act as."
+            : "Only the offer's claimant may post in_progress, pickup, delivered or release; only its poster may post cancelled, confirmed or disputed.",
+      });
+    }
+    // `by` records the actor's role, never a caller-supplied label or an
+    // identity: the event log is publicly readable.
     const result = store.recordEvent(
-      req.params.id,
+      offer.id,
       eventKind,
-      b.by ?? null,
+      decision.role,
       b.payload ?? null,
       b.note ?? null,
     );
-    if (!result.ok) return reply.code(404).send({ error: "not_found" });
+    if (!result.ok) {
+      if (result.reason === "invalid_transition" || result.reason === "review_window_closed") {
+        return reply.code(409).send({ error: result.reason, event: eventKind, currentStatus: result.currentStatus });
+      }
+      return reply.code(404).send({ error: "not_found" });
+    }
     return { ok: true, status: result.status, event: result.event };
   });
 
@@ -371,8 +441,14 @@ export async function jobOffersRoutes(app: FastifyInstance) {
           message: "You can only cancel offers you posted",
         });
       }
+      // DELETE is a 'cancelled' event: refused the same way, from the same statuses.
+      if (result.reason === "invalid_transition") {
+        return reply.code(409).send({ error: "invalid_transition", event: "cancelled", currentStatus: result.currentStatus });
+      }
+      // A refusal this route does not know is never answered as a success.
+      return reply.code(500).send({ error: "cancel_refused" });
     }
-    return { ok: true, status: (result as { ok: true; status: string }).status };
+    return { ok: true, status: result.status };
   });
 
   // ── POST /api/job-offers/:id/heartbeat ─────────────────────────────────

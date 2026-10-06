@@ -127,6 +127,8 @@ export interface ClaimInput {
   driverAgent: string;
   etaMin?: number;
   contact?: string;
+  /** Authenticated claimant (see job-offers-store ClaimInput.operatorId); private. */
+  operatorId?: string;
 }
 
 // ── Shape translators ──────────────────────────────────────────────────────
@@ -205,8 +207,14 @@ function genericStatusToCourier(status: string): CourierJobStatus {
     case "cancelled": return "cancelled";
     case "expired": return "expired";
     case "settled": return "delivered";
+    case "completed": return "delivered";
     case "disputed": return "delivered";
-    default: return "open";
+    case "lapsed": return "expired";
+    // An unrecognized status (future enum value, corrupt/hydrated row) must
+    // never fail open as "open": that would make an unavailable, unclaimable
+    // offer look claimable (#455 r2 Q3 MEDIUM). "expired" is the fail-closed
+    // projection — unavailable, matching claim()'s own real refusal.
+    default: return "expired";
   }
 }
 
@@ -332,9 +340,11 @@ export class CourierJobsStore {
     | { ok: true; job: CourierJob }
     | { ok: false; reason: "not_found" }
     | { ok: false; reason: "not_open"; currentStatus: CourierJobStatus; claimedBy: string | null }
+    | { ok: false; reason: "recently_released"; retryAfterMs: number }
   > {
     const result = await getJobOffersStore().claim(id, {
       kernelId: claim.driverAgent,    // v0.2 names this driverAgent
+      operatorId: claim.operatorId,
       etaMin: claim.etaMin,
       contact: claim.contact,
     });
@@ -350,8 +360,9 @@ export class CourierJobsStore {
           claimedBy: result.claimedBy,
         };
       }
+      return { ok: false, reason: "recently_released", retryAfterMs: result.retryAfterMs };
     }
-    return { ok: true, job: offerToCourierJob((result as { ok: true; offer: JobOffer }).offer) };
+    return { ok: true, job: offerToCourierJob(result.offer) };
   }
 
   recordEvent(
@@ -360,9 +371,17 @@ export class CourierJobsStore {
     by: string | null,
     proof: unknown,
     note: string | null,
-  ): { ok: true; status: CourierJobStatus; event: CourierJobEvent } | { ok: false; reason: "not_found" } {
+  ):
+    | { ok: true; status: CourierJobStatus; event: CourierJobEvent }
+    | { ok: false; reason: "not_found" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: CourierJobStatus } {
     const result = getJobOffersStore().recordEvent(id, event, by, proof, note);
-    if (!result.ok) return { ok: false, reason: "not_found" };
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        return { ok: false, reason: "invalid_transition", currentStatus: genericStatusToCourier(result.currentStatus) };
+      }
+      return { ok: false, reason: "not_found" };
+    }
     // Re-project status: generic "in_progress" → v0.2 "in_transit"
     const o = getJobOffersStore().get(id)!;
     return { ok: true, status: offerToCourierJob(o).status, event: result.event };
@@ -409,9 +428,16 @@ export class CourierJobsStore {
   cancel(id: string, poster: string):
     | { ok: true; status: CourierJobStatus }
     | { ok: false; reason: "not_found" }
-    | { ok: false; reason: "forbidden" } {
+    | { ok: false; reason: "forbidden" }
+    | { ok: false; reason: "invalid_transition"; currentStatus: CourierJobStatus } {
     const result = getJobOffersStore().cancel(id, poster);
-    if (!result.ok) return result;
+    if (!result.ok) {
+      if (result.reason === "invalid_transition") {
+        // The refusal names the status in the shim's vocabulary (completed shows as delivered, lapsed as expired).
+        return { ok: false, reason: "invalid_transition", currentStatus: genericStatusToCourier(result.currentStatus) };
+      }
+      return result;
+    }
     const o = getJobOffersStore().get(id)!;
     return { ok: true, status: offerToCourierJob(o).status };
   }

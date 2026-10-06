@@ -31,12 +31,29 @@
 //   GET    /api/templates/suggest?machineModel=&capabilityType=&industry=
 //                                                     — onboarding suggestions
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import { getRepos } from "../db.js";
+import { authenticatedActor, sameIdentity } from "../auth/actor.js";
 import { TemplateSuggestionService } from "../services/template-suggestion-service.js";
 
 const suggestionService = new TemplateSuggestionService();
+
+/**
+ * Every template write is attributed to, and authorized by, the authenticated
+ * principal. A missing actor fails closed (board rule 7): no anonymous
+ * authors, no anonymous ratings.
+ */
+function requireActor(req: FastifyRequest, reply: FastifyReply): string | null {
+  const actor = authenticatedActor(req);
+  if (!actor) {
+    void reply.status(401).send({
+      error: "missing_identity",
+      message: "Template writes require an authenticated operator (API key or SIWE session).",
+    });
+  }
+  return actor;
+}
 
 export async function templateRoutes(app: FastifyInstance) {
   // ── Capability Templates ────────────────────────────────────────────────────
@@ -63,7 +80,8 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/capabilities",
     async (req, reply) => {
       const repos = getRepos();
-      const operatorId = (req as any).operatorId ?? (req as any).userId;
+      const operatorId = requireActor(req, reply);
+      if (!operatorId) return reply;
 
       const body = req.body ?? {};
       const capabilityType = body.capabilityType as string | undefined;
@@ -82,7 +100,7 @@ export async function templateRoutes(app: FastifyInstance) {
         version,
         description: body.description as string | undefined,
         templateData: (body.templateData as Record<string, unknown>) ?? {},
-        authorId: operatorId ?? null,
+        authorId: operatorId,
         status: "draft",
         tags: (body.tags as string[]) ?? null,
         usageCount: 0,
@@ -104,8 +122,22 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/capabilities/:id",
     async (req, reply) => {
       const repos = getRepos();
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
       const existing = repos.templateStore.findCapabilityTemplateById(req.params.id);
       if (!existing) return reply.status(404).send({ error: "not_found" });
+      // A template without a recorded author cannot prove who may edit it.
+      if (!sameIdentity(existing.authorId, actor)) {
+        return reply.status(403).send({ error: "forbidden", message: "Only the template's author can update it." });
+      }
+      // A published version is immutable: consumers pin it. Changes go into a
+      // new version (fork), never an in-place rewrite.
+      if (existing.status !== "draft") {
+        return reply.status(409).send({
+          error: "published_immutable",
+          message: "Published templates cannot be edited in place; fork this template to create a new version.",
+        });
+      }
 
       const body = req.body ?? {};
       const updated = repos.templateStore.updateCapabilityTemplate(req.params.id, {
@@ -126,11 +158,13 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/capabilities/:id/publish",
     async (req, reply) => {
       const repos = getRepos();
+      const operatorId = requireActor(req, reply);
+      if (!operatorId) return reply;
       const existing = repos.templateStore.findCapabilityTemplateById(req.params.id);
       if (!existing) return reply.status(404).send({ error: "not_found" });
 
-      const operatorId = (req as any).operatorId ?? (req as any).userId;
-      if (existing.authorId && existing.authorId !== operatorId) {
+      // No author recorded means nobody can prove authorship, so nobody publishes it.
+      if (!sameIdentity(existing.authorId, operatorId)) {
         return reply.status(403).send({ error: "forbidden", message: "Only the author can publish this template" });
       }
 
@@ -148,10 +182,11 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/capabilities/:id/fork",
     async (req, reply) => {
       const repos = getRepos();
+      const operatorId = requireActor(req, reply);
+      if (!operatorId) return reply;
       const source = repos.templateStore.findCapabilityTemplateById(req.params.id);
       if (!source) return reply.status(404).send({ error: "not_found" });
 
-      const operatorId = (req as any).operatorId ?? (req as any).userId;
       const body = req.body ?? {};
       const now = new Date().toISOString();
 
@@ -163,7 +198,7 @@ export async function templateRoutes(app: FastifyInstance) {
         version: "1.0.0",
         description: source.description ?? undefined,
         templateData: source.templateData as Record<string, unknown>,
-        authorId: operatorId ?? null,
+        authorId: operatorId,
         status: "draft",
         tags: source.tags ?? null,
         usageCount: 0,
@@ -191,13 +226,19 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/capabilities/:id/rate",
     async (req, reply) => {
       const repos = getRepos();
+      const operatorId = requireActor(req, reply);
+      if (!operatorId) return reply;
       const existing = repos.templateStore.findCapabilityTemplateById(req.params.id);
       if (!existing) return reply.status(404).send({ error: "not_found" });
 
-      const operatorId = (req as any).operatorId ?? (req as any).userId ?? "anonymous";
       const score = req.body?.score;
       if (!score || score < 1 || score > 5) {
         return reply.status(400).send({ error: "score must be between 1 and 5" });
+      }
+      // One rating per rater: repeated ratings from one identity must not move the average.
+      const priorRatings = repos.templateStore.findRatingsByTemplate(req.params.id, "capability");
+      if (priorRatings.some((r) => sameIdentity(r.raterId, operatorId))) {
+        return reply.status(409).send({ error: "already_rated", message: "You have already rated this template." });
       }
 
       // Insert rating record
@@ -249,7 +290,8 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/machines",
     async (req, reply) => {
       const repos = getRepos();
-      const operatorId = (req as any).operatorId ?? (req as any).userId;
+      const operatorId = requireActor(req, reply);
+      if (!operatorId) return reply;
 
       const body = req.body ?? {};
       const capabilityType = body.capabilityType as string | undefined;
@@ -266,7 +308,7 @@ export async function templateRoutes(app: FastifyInstance) {
         machineName,
         kernelId: (body.kernelId as string | undefined) ?? null,
         profileData: (body.profileData as Record<string, unknown>) ?? {},
-        authorId: operatorId ?? null,
+        authorId: operatorId,
         status: "draft",
         tags: (body.tags as string[]) ?? null,
         usageCount: 0,
@@ -286,8 +328,13 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/machines/:id",
     async (req, reply) => {
       const repos = getRepos();
+      const actor = requireActor(req, reply);
+      if (!actor) return reply;
       const existing = repos.templateStore.findMachineProfileById(req.params.id);
       if (!existing) return reply.status(404).send({ error: "not_found" });
+      if (!sameIdentity(existing.authorId, actor)) {
+        return reply.status(403).send({ error: "forbidden", message: "Only the machine profile's author can update it." });
+      }
 
       const body = req.body ?? {};
       const updated = repos.templateStore.updateMachineProfile(req.params.id, {
@@ -326,7 +373,8 @@ export async function templateRoutes(app: FastifyInstance) {
     "/api/templates/verification",
     async (req, reply) => {
       const repos = getRepos();
-      const operatorId = (req as any).operatorId ?? (req as any).userId;
+      const operatorId = requireActor(req, reply);
+      if (!operatorId) return reply;
 
       const body = req.body ?? {};
       const capabilityType = body.capabilityType as string | undefined;
@@ -345,7 +393,7 @@ export async function templateRoutes(app: FastifyInstance) {
         version,
         description: body.description as string | undefined,
         requirements: (body.requirements as Record<string, unknown>) ?? {},
-        authorId: operatorId ?? null,
+        authorId: operatorId,
         status: "draft",
         usageCount: 0,
         createdAt: now,

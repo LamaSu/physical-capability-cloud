@@ -18,7 +18,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { jobOffersRoutes } from "../routes/job-offers.js";
 import {
   initJobOffersStore,
+  getJobOffersStore,
   _resetJobOffersStoreForTests,
+  type SqliteDatabaseLike,
   type VerifyFn,
 } from "../services/job-offers-store.js";
 
@@ -47,12 +49,26 @@ const stubVerify: VerifyFn = async (url) => {
 
 // ── App ───────────────────────────────────────────────────────────────────
 
+/** kernelId -> owning operatorId, consulted by the claim route (tests stub shop_kernels). */
+let kernelOwners: Map<string, string> = new Map();
+
+/**
+ * x-test-operator sets req.operatorId, standing in for an authenticated API key.
+ * Without it there is no authenticated principal (the legacy X-Posted-By header
+ * still identifies posters for PATCH/DELETE/heartbeat, as before).
+ */
 async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
-  await app.register(jobOffersRoutes);
+  app.addHook("onRequest", async (req) => {
+    const h = req.headers["x-test-operator"];
+    if (typeof h === "string" && h !== "") (req as unknown as { operatorId?: string }).operatorId = h;
+  });
+  await app.register(jobOffersRoutes, { kernelOwnerOf: (id: string) => kernelOwners.get(id) ?? null });
   await app.ready();
   return app;
 }
+
+const as = (operatorId: string) => ({ "x-test-operator": operatorId });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -122,6 +138,11 @@ beforeEach(() => {
   _resetJobOffersStoreForTests();
   mockNowMs = Date.parse("2026-06-19T00:00:00.000Z");
   verifyResponses = new Map();
+  kernelOwners = new Map([
+    ["kernel-driver-7", "driver7@kits.test"],
+    ["kernel-lab-berkeley", "lab@kits.test"],
+    ["k1", "k1owner@kits.test"],
+  ]);
   initJobOffersStore({ verify: stubVerify, now });
 });
 
@@ -546,6 +567,7 @@ describe("POST /api/job-offers/:id/claim", () => {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-claim") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/c-claim/claim",
+        headers: as("driver7@kits.test"),
         payload: { kernelId: "kernel-driver-7" },
       });
       expect(res.statusCode).toBe(200);
@@ -564,6 +586,7 @@ describe("POST /api/job-offers/:id/claim", () => {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: hplcOffer("h-claim") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/h-claim/claim",
+        headers: as("lab@kits.test"),
         payload: { kernelId: "kernel-lab-berkeley" },
       });
       expect(res.statusCode).toBe(200);
@@ -579,7 +602,7 @@ describe("POST /api/job-offers/:id/claim", () => {
     try {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-mc") });
       const res = await app.inject({
-        method: "POST", url: "/api/job-offers/c-mc/claim", payload: {},
+        method: "POST", url: "/api/job-offers/c-mc/claim", headers: as("driver7@kits.test"), payload: {},
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
@@ -593,6 +616,7 @@ describe("POST /api/job-offers/:id/claim", () => {
     try {
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/missing/claim",
+        headers: as("k1owner@kits.test"),
         payload: { kernelId: "k1" },
       });
       expect(res.statusCode).toBe(404);
@@ -605,8 +629,10 @@ describe("POST /api/job-offers/:id/claim", () => {
     const app = await buildApp();
     try {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("race") });
+      for (let i = 0; i < 10; i++) kernelOwners.set(`kernel-${i}`, `racer${i}@kits.test`);
       const claims = Array.from({ length: 10 }, (_, i) => app.inject({
         method: "POST", url: "/api/job-offers/race/claim",
+        headers: as(`racer${i}@kits.test`),
         payload: { kernelId: `kernel-${i}` },
       }));
       const results = await Promise.all(claims);
@@ -630,18 +656,25 @@ describe("POST /api/job-offers/:id/claim", () => {
 // ── POST /api/job-offers/:id/events — generic event vocabulary ─────────────
 
 describe("POST /api/job-offers/:id/events", () => {
-  it("event=in_progress → status=in_progress; event=delivered → status=delivered", async () => {
+  it("event=in_progress → status=in_progress; event=delivered → status=delivered (by the claimant)", async () => {
     const app = await buildApp();
     try {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev") });
+      // N81: progress needs a claim first (an unclaimed offer is refused, 409).
+      await app.inject({
+        method: "POST", url: "/api/job-offers/c-ev/claim",
+        headers: as("driver7@kits.test"), payload: { kernelId: "kernel-driver-7" },
+      });
       const r1 = await app.inject({
         method: "POST", url: "/api/job-offers/c-ev/events",
+        headers: as("driver7@kits.test"),
         payload: { event: "in_progress", by: "kernel-driver-1" },
       });
       expect(r1.statusCode).toBe(200);
       expect(r1.json().status).toBe("in_progress");
       const r2 = await app.inject({
         method: "POST", url: "/api/job-offers/c-ev/events",
+        headers: as("driver7@kits.test"),
         payload: { event: "delivered", by: "kernel-driver-1" },
       });
       expect(r2.statusCode).toBe(200);
@@ -654,9 +687,12 @@ describe("POST /api/job-offers/:id/events", () => {
   it("free-form event 'progress_update' (no status change) is accepted with payload", async () => {
     const app = await buildApp();
     try {
-      await app.inject({ method: "POST", url: "/api/job-offers", payload: opentronsOffer("ot-ev") });
+      await app.inject({
+        method: "POST", url: "/api/job-offers", headers: as("poster@kits.test"), payload: opentronsOffer("ot-ev"),
+      });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/ot-ev/events",
+        headers: as("poster@kits.test"),
         payload: {
           event: "progress_update",
           payload: { step: 3, totalSteps: 12, instrument: "OT-2" },
@@ -676,12 +712,355 @@ describe("POST /api/job-offers/:id/events", () => {
       await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("c-ev2") });
       const res = await app.inject({
         method: "POST", url: "/api/job-offers/c-ev2/events",
+        headers: as("driver7@kits.test"),
         payload: { note: "missing event field" },
       });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe("missing_field");
     } finally {
       await app.close();
+    }
+  });
+});
+
+// ── Claimant binding (kits K0 slice 2; board rule 7) ───────────────────────
+
+describe("claimant binding: claims and progress events belong to authenticated principals", () => {
+  async function postAndClaim(app: FastifyInstance, id: string) {
+    await app.inject({
+      method: "POST", url: "/api/job-offers", headers: as("poster@kits.test"), payload: courierOffer(id),
+    });
+    const claim = await app.inject({
+      method: "POST", url: `/api/job-offers/${id}/claim`,
+      headers: as("driver7@kits.test"), payload: { kernelId: "kernel-driver-7" },
+    });
+    expect(claim.statusCode).toBe(200);
+  }
+
+  it("refuses an unauthenticated claim (401) and leaves the offer open", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("cb-anon") });
+      const res = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-anon/claim", payload: { kernelId: "kernel-driver-7" },
+      });
+      expect(res.statusCode).toBe(401);
+      expect(getJobOffersStore().get("cb-anon")!.status).toBe("open");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses a claim with someone else's kernel, and with an unknown kernel, alike (403)", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({ method: "POST", url: "/api/job-offers", payload: courierOffer("cb-steal") });
+      for (const kernelId of ["kernel-driver-7", "kernel-does-not-exist"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-steal/claim",
+          headers: as("attacker@kits.test"), payload: { kernelId },
+        });
+        expect(res.statusCode).toBe(403);
+        expect(res.json().error).toBe("kernel_not_owned");
+      }
+      expect(getJobOffersStore().get("cb-steal")!.status).toBe("open");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses 'delivered' from a stranger and from the poster; status is unchanged", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-deliver");
+      for (const who of ["attacker@kits.test", "poster@kits.test"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-deliver/events",
+          headers: as(who), payload: { event: "delivered", by: "driver7@kits.test" },
+        });
+        expect(res.statusCode).toBe(403);
+      }
+      expect(getJobOffersStore().get("cb-deliver")!.status).toBe("claimed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("refuses any event without an authenticated principal (401), whatever 'by' says", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-noauth");
+      const res = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-noauth/events",
+        headers: { "x-posted-by": "driver7@kits.test" },
+        payload: { event: "delivered", by: "driver7@kits.test" },
+      });
+      expect(res.statusCode).toBe(401);
+      expect(getJobOffersStore().get("cb-noauth")!.status).toBe("claimed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("an unclaimed offer accepts no status-advancing event from anyone, the poster included", async () => {
+    const app = await buildApp();
+    try {
+      await app.inject({
+        method: "POST", url: "/api/job-offers", headers: as("poster@kits.test"), payload: courierOffer("cb-open"),
+      });
+      const res = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-open/events",
+        headers: as("poster@kits.test"), payload: { event: "delivered" },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reason).toBe("not_claimed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("lets the poster cancel but not a stranger", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-cancel");
+      const stranger = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-cancel/events",
+        headers: as("attacker@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(stranger.statusCode).toBe(403);
+      const poster = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-cancel/events",
+        headers: as("poster@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(poster.statusCode).toBe(200);
+      expect(poster.json().status).toBe("cancelled");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("N81: the claimant cannot cancel the offer; it releases it instead (poster-only cancel)", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-n81-release");
+      const cancel = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(cancel.statusCode).toBe(403);
+      expect(getJobOffersStore().get("cb-n81-release")!.status).not.toBe("cancelled");
+      const release = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "release" },
+      });
+      expect(release.statusCode).toBe(200);
+      expect(release.json().event.by).toBe("claimant");
+      const posterRelease = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-release/events",
+        headers: as("poster@kits.test"), payload: { event: "release" },
+      });
+      expect(posterRelease.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("N81: only the poster may confirm or dispute a delivery", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-n81-judge");
+      // N81: a delivery is judged only once the claimant has delivered it.
+      const delivered = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+        headers: as("driver7@kits.test"), payload: { event: "delivered" },
+      });
+      expect(delivered.statusCode).toBe(200);
+      for (const event of ["confirmed", "disputed"]) {
+        const byClaimant = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+          headers: as("driver7@kits.test"), payload: { event },
+        });
+        expect(byClaimant.statusCode, event).toBe(403);
+        const byStranger = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+          headers: as("attacker@kits.test"), payload: { event },
+        });
+        expect(byStranger.statusCode, event).toBe(403);
+      }
+      const byPoster = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-n81-judge/events",
+        headers: as("poster@kits.test"), payload: { event: "confirmed" },
+      });
+      expect(byPoster.statusCode).toBe(200);
+      expect(byPoster.json().event.by).toBe("poster");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("N81: 'settled' is server-only; every caller gets 409, the poster and the claimant included", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-n81-settled");
+      for (const who of ["poster@kits.test", "driver7@kits.test", "attacker@kits.test"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-n81-settled/events",
+          headers: as(who), payload: { event: "settled" },
+        });
+        expect(res.statusCode, who).toBe(409);
+        expect(res.json().error).toBe("server_only_event");
+      }
+      expect(getJobOffersStore().get("cb-n81-settled")!.status).not.toBe("settled");
+    } finally {
+      await app.close();
+    }
+  });
+
+  // astra 142, required closure 2: the role checks sit on N81's lifecycle, so a cancel ends the
+  // claimant's authority and a release really returns the offer.
+  it("astra 142: after the poster cancels, the claimant cannot deliver; the offer stays cancelled", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-142-cancel");
+      const cancel = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-cancel/events",
+        headers: as("poster@kits.test"), payload: { event: "cancelled" },
+      });
+      expect(cancel.statusCode).toBe(200);
+      for (const event of ["delivered", "in_progress", "pickup"]) {
+        const res = await app.inject({
+          method: "POST", url: "/api/job-offers/cb-142-cancel/events",
+          headers: as("driver7@kits.test"), payload: { event },
+        });
+        expect(res.statusCode, event).toBe(409);
+        expect(res.json(), event).toMatchObject({ error: "invalid_transition", event, currentStatus: "cancelled" });
+      }
+      expect(getJobOffersStore().get("cb-142-cancel")!.status).toBe("cancelled");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("astra 142: a release returns the offer to open; the released claimant can no longer advance it, and another kernel claims it at once", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-142-release");
+      const release = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "release" },
+      });
+      expect(release.statusCode).toBe(200);
+      expect(release.json().status).toBe("open");
+      expect(getJobOffersStore().get("cb-142-release")!.claimedByKernelId).toBeNull();
+      const late = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "delivered" },
+      });
+      expect(late.statusCode).toBe(403);
+      expect(late.json().reason).toBe("not_claimed");
+      // Nor may it post the events a claimant or the poster may (note, progress_update, ...).
+      const progress = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "progress_update", note: "still on it" },
+      });
+      expect(progress.statusCode).toBe(403);
+      expect(progress.json().reason).toBe("not_participant");
+      expect(getJobOffersStore().get("cb-142-release")!.status).toBe("open");
+      kernelOwners.set("kernel-other-8", "other8@kits.test");
+      const reclaim = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/claim",
+        headers: as("other8@kits.test"), payload: { kernelId: "kernel-other-8" },
+      });
+      expect(reclaim.statusCode).toBe(200);
+      expect(reclaim.json().offer.claimedByKernelId).toBe("kernel-other-8");
+      const formerClaimant = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-142-release/events",
+        headers: as("driver7@kits.test"), payload: { event: "in_progress" },
+      });
+      expect(formerClaimant.statusCode).toBe(403);
+      expect(getJobOffersStore().get("cb-142-release")!.status).toBe("claimed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("records the actor's role as 'by', never the body label or the identity", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-by");
+      const res = await app.inject({
+        method: "POST", url: "/api/job-offers/cb-by/events",
+        headers: as("driver7@kits.test"), payload: { event: "in_progress", by: "someone-else" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().event.by).toBe("claimant");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("never exposes the claimant's operatorId in public reads", async () => {
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-private");
+      await app.inject({
+        method: "POST", url: "/api/job-offers/cb-private/events",
+        headers: as("driver7@kits.test"), payload: { event: "in_progress" },
+      });
+      const detail = await app.inject({ method: "GET", url: "/api/job-offers/cb-private" });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.body).not.toContain("driver7@kits.test");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("keeps the claimant across a restart, and hydration keeps it out of the public offer", async () => {
+    // Minimal in-memory stand-in for the two write-through tables.
+    const offers = new Map<string, string>();
+    const events: Array<{ offer_id: string; data: string }> = [];
+    const fakeSqlite: SqliteDatabaseLike = {
+      prepare(sql: string) {
+        return {
+          run: (...p: unknown[]) => {
+            if (sql.includes("INSERT INTO job_offers")) offers.set(p[0] as string, p[3] as string);
+            else if (sql.includes("INSERT INTO job_offer_events")) events.push({ offer_id: p[0] as string, data: p[2] as string });
+            return {};
+          },
+          all: () => (sql.includes("FROM job_offers")
+            ? [...offers].map(([id, data]) => ({ id, data }))
+            : events.map((e) => ({ offer_id: e.offer_id, data: e.data }))),
+          get: () => undefined,
+        };
+      },
+    };
+    _resetJobOffersStoreForTests();
+    initJobOffersStore({ verify: stubVerify, now, sqlite: fakeSqlite });
+    const app = await buildApp();
+    try {
+      await postAndClaim(app, "cb-restart");
+    } finally {
+      await app.close();
+    }
+    expect(offers.get("cb-restart")).toContain("driver7@kits.test"); // persisted privately
+
+    // "Restart": a fresh store hydrated from the same rows.
+    _resetJobOffersStoreForTests();
+    initJobOffersStore({ verify: stubVerify, now, sqlite: fakeSqlite });
+    const store = getJobOffersStore();
+    expect(store.claimantOf("cb-restart")).toBe("driver7@kits.test");
+    expect(JSON.stringify(store.get("cb-restart"))).not.toContain("driver7@kits.test");
+
+    const app2 = await buildApp();
+    try {
+      const res = await app2.inject({
+        method: "POST", url: "/api/job-offers/cb-restart/events",
+        headers: as("driver7@kits.test"), payload: { event: "delivered" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().status).toBe("delivered");
+    } finally {
+      await app2.close();
     }
   });
 });
