@@ -81,3 +81,4 @@ export * from "./capability-kit.js";
 export * from "./operator-binding.js";
 // Public opportunities: funded offers, kit-build requests, demand aggregates (PX-13)
 export * from "./opportunity.js";
+export * from "./render-provenance.js";
