@@ -23,8 +23,12 @@ import type { BoundSourceClass, DashboardManifest, RenderSourceClass } from "@pc
 
 /** Display text minted by a typed IR helper; the brand has no runtime representation. */
 export type KitText = string & { readonly __kitText: unique symbol };
+/** Manifest prose retains its authorship; only the agent-marking sink accepts it. */
+export type AgentText = string & { readonly __agentText: unique symbol };
 /** The one constructor for PCC-owned copy. Server/manifest values use typed helpers below. */
 export function kitText(s: string): KitText { return s as KitText; }
+/** Composition cannot introduce raw text: every part already carries the PCC text brand. */
+export function joinKitText(...parts: KitText[]): KitText { return parts.join("") as KitText; }
 
 // Frozen catalog = the EXACT set of node types the adapter emits (nothing more).
 export const IR_NODE_TYPES = [
@@ -385,14 +389,14 @@ function listProfileViolation(path: string, props: Record<string, unknown>): str
   const prof = LIST_PROFILES[path];
   if (!prof) return `no list field profile for ${path}`;
   if (typeof props.rowTitle !== "string" || !prof.title.includes(props.rowTitle)) return `list title field not in the ${path} profile`;
-  const meta = Array.isArray(props.rowMeta) ? props.rowMeta : [];
+  const meta: unknown[] = Array.isArray(props.rowMeta) ? props.rowMeta : [];
   for (const m of meta) if (typeof m !== "string" || !prof.meta.includes(m)) return `list meta field not in the ${path} profile`;
   if (props.statusFrom !== undefined && (typeof props.statusFrom !== "string" || !prof.status.includes(props.statusFrom))) return `list status field not in the ${path} profile`;
   return null;
 }
 
 // The ONE fixed PCC-owned approval sentence. B renders exactly this — never manifest prose.
-const APPROVAL_NOTICE = kitText("This action is confirmed only on the authenticated PCC surface.");
+export const APPROVAL_NOTICE = kitText("This action is confirmed only on the authenticated PCC surface.");
 
 // ── Governed bindings — EXACT, end-anchored routes pinned to the REAL route table ──
 // Deny-by-default. Each RegExp is a specific verified read endpoint.
@@ -507,7 +511,8 @@ const PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
  * Object.create(evil), poisoned prototypes, class instances). */
 function isPlain(v: unknown): v is Record<string, unknown> {
   if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-  const p = Object.getPrototypeOf(v);
+  const getPrototypeOf: (value: object) => unknown = Object.getPrototypeOf;
+  const p = getPrototypeOf(v);
   return p === Object.prototype || p === null;
 }
 function strictStr(v: unknown, max: number = LIM.str): string | null {
@@ -542,7 +547,7 @@ function deepClean(v: unknown, depth = 0, budget: { n: number } = { n: LIM.clean
       if (typeof k === "symbol") return false;
       if (k !== "length" && !INDEX_KEY.test(k)) return false;
     }
-    for (const e of v) if (!deepClean(e, depth + 1, budget)) return false;
+    for (const e of v as unknown[]) if (!deepClean(e, depth + 1, budget)) return false;
     return true;
   }
   if (!isPlain(v)) return false;
@@ -633,7 +638,7 @@ function metricFieldForSource(path: string, source: unknown): MetricField | null
   return null;
 }
 /** Validator side: (route, SOURCE path already in bind.select) → the expected PCC label, or null. */
-function metricLabelForSource(path: string, source: unknown): KitText | null {
+export function metricLabelForSource(path: string, source: unknown): KitText | null {
   return metricFieldForSource(path, source)?.label ?? null;
 }
 /** Renderer side (astra r5 F2): (route, SOURCE path already in bind.select) → the field's closed
@@ -830,7 +835,7 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
   const nextId = (() => { let n = 0; return () => `n${++n}`; })();
 
   const sectionNodes: IrNode[] = [];
-  for (const secRaw of mm.sections) {
+  for (const secRaw of mm.sections as unknown[]) {
     if (!isPlain(secRaw) || !onlyKeys(secRaw, ["heading", "windows"])) return { ok: false, reason: "bad section" };
     if (!Array.isArray(secRaw.windows)) return { ok: false, reason: "section.windows not array" };
     if (secRaw.windows.length > LIM.windowsPerSection) return { ok: false, reason: "too many windows" };
@@ -841,7 +846,7 @@ export function dashboardManifestToIr(m: DashboardManifest | null | undefined): 
       if (!budget()) return { ok: false, reason: "node budget" };
       children.push(proseNode("heading", nextId(), h, { level: 2 }));
     }
-    for (const w of secRaw.windows) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
+    for (const w of secRaw.windows as unknown[]) { const r = mapWindow(w, nextId, budget, bindBudget); if (!r.ok) return r; children.push(r.node); }
     if (!budget()) return { ok: false, reason: "node budget" };
     sectionNodes.push({ type: "section", id: nextId(), children });
   }
@@ -904,7 +909,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         const rowMeta: string[] = [];
         if (item.meta !== undefined) {
           if (!Array.isArray(item.meta) || item.meta.length > LIM.metaItems) return { ok: false, reason: "list.meta" };
-          for (const mi of item.meta) { if (!isSelector(mi)) return { ok: false, reason: "list.meta selector" }; rowMeta.push(mi); }
+          for (const mi of item.meta as unknown[]) { if (!isSelector(mi)) return { ok: false, reason: "list.meta selector" }; rowMeta.push(mi); }
         }
         const props: IrNode["props"] = { rowTitle: item.title, rowMeta };
         if (item.statusFrom !== undefined) { if (!isSelector(item.statusFrom)) return { ok: false, reason: "list.statusFrom selector" }; props.statusFrom = item.statusFrom; }
@@ -941,7 +946,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
       { const acts = w.actions;
         if (!Array.isArray(acts) || acts.length === 0 || acts.length > LIM.fields) return { ok: false, reason: "actions" };
         const children: IrNode[] = [];
-        for (const a of acts) {
+        for (const a of acts as unknown[]) {
           if (!budget()) return { ok: false, reason: "node budget" };
           if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
           const label = strictStr((a as Record<string, unknown>).label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
@@ -977,7 +982,7 @@ function mapBind(b: unknown, key: string, topSelect?: unknown): { ok: true; bind
 function fieldLabels(schema: unknown): { ok: true; labels: string[] } | { ok: false; reason: string } {
   if (!isPlain(schema) || !onlyKeys(schema, ["type", "properties", "required"])) return { ok: false, reason: "form.schema shape" };
   if (schema.type !== undefined && schema.type !== "object") return { ok: false, reason: "form.schema.type" };
-  if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((x) => typeof x === "string"))) return { ok: false, reason: "form.schema.required" };
+  if (schema.required !== undefined && (!Array.isArray(schema.required) || !schema.required.every((x: unknown) => typeof x === "string"))) return { ok: false, reason: "form.schema.required" };
   const props = schema.properties;
   if (!isPlain(props)) return { ok: false, reason: "form.schema.properties" };
   const keys = Object.keys(props);
@@ -1058,7 +1063,7 @@ function propType(v: unknown, t: PropT): boolean {
     case "number": return typeof v === "number" && Number.isFinite(v);
     case "limit": return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= LIM.listRows;
     case "boolean": return typeof v === "boolean";
-    case "string[]": return Array.isArray(v) && v.length <= LIM.metaItems && v.every((x) => isSelector(x));
+    case "string[]": return Array.isArray(v) && v.length <= LIM.metaItems && v.every((x: unknown) => isSelector(x));
     case "level": return v === 1 || v === 2 || v === 3;
     case "tone": return typeof v === "string" && TONE_SET.has(v);
     case "card-kind": return typeof v === "string" && CARD_KINDS.has(v);
@@ -1072,7 +1077,7 @@ const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnPropert
 export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: string } {
   if (!isPlain(doc) || doc.ir !== "pcc-dashboard-ir/v1" || !onlyKeys(doc, ["ir", "title", "root"])) return { ok: false, reason: "not an IR doc" };
   if (!deepClean(doc)) return { ok: false, reason: "proto/nonfinite/symbol in IR" };
-  if (!isPlain(doc.title) || (doc.title as Record<string, unknown>).type !== "heading" || (doc.title as any).props?.level !== 1) return { ok: false, reason: "doc.title not H1" };
+  if (!isPlain(doc.title) || (doc.title as Record<string, unknown>).type !== "heading" || (doc.title as { props?: { level?: unknown } }).props?.level !== 1) return { ok: false, reason: "doc.title not H1" };
   if (!isPlain(doc.root) || (doc.root as Record<string, unknown>).type !== "root") return { ok: false, reason: "doc.root not root" };
   const ids = new Set<string>();
   let count = 0;
@@ -1096,10 +1101,10 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     }
     for (const req of withheld ? Object.keys(pspec) : spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
     // approval-notice text is the ONE fixed PCC sentence — never manifest prose
-    if (n.type === "approval-notice" && (n.props as any)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
+    if (n.type === "approval-notice" && (n.props as { notice?: unknown } | undefined)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
     // card kind ⇒ exact companion props
     if (n.type === "card") {
-      const k = (n.props as any)?.kind;
+      const k = (n.props as { kind?: unknown } | undefined)?.kind;
       if (k === "run") { if (!hasOwn(n.props as object, "statusFrom") || !hasOwn(n.props as object, "latestFrom")) return "run card missing selectors"; }
       else if (hasOwn((n.props ?? {}) as object, "statusFrom") || hasOwn((n.props ?? {}) as object, "latestFrom")) return "capability card has run props";
     }
@@ -1148,11 +1153,11 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       if (spec.maxChildren !== undefined && n.children.length > spec.maxChildren) return `${n.type} too many children`;
       let windowKids = 0;
       for (let i = 0; i < n.children.length; i++) {
-        const c = n.children[i];
+        const c = (n.children as unknown[])[i];
         if (!isPlain(c) || !spec.parentOf || !spec.parentOf.includes((c as Record<string, unknown>).type as IrNodeType)) return `illegal child under ${n.type}`;
         if (n.type === "section") { // ≤1 heading, only at index 0, H2; the rest are windows (≤ cap)
           const ct = (c as Record<string, unknown>).type;
-          if (ct === "heading") { if (i !== 0) return "section heading must be first"; if ((c as any).props?.level !== 2) return "section heading must be H2"; }
+          if (ct === "heading") { if (i !== 0) return "section heading must be first"; if ((c as { props?: { level?: unknown } }).props?.level !== 2) return "section heading must be H2"; }
           else if (++windowKids > LIM.windowsPerSection) return "too many windows in section";
         }
         const e = walk(c, depth + 1); if (e) return e;

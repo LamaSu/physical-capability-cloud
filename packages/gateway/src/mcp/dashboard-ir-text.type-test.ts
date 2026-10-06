@@ -1,15 +1,15 @@
-/** Compile-only regression test, covered by both gateway typecheck configurations.
+/** Compile-only regression test, covered by the browser typecheck configuration.
  * Removing a sink's KitText constraint makes @ts-expect-error fail with TS2578.
  * The function is never called; there are no runtime checks or DOM writes here.
  */
 import { kitText, boundValueText, boundStatusText, identifierText, reportedFieldText, recordValueText } from "./dashboard-ir.js";
-import type { KitText, IrNode } from "./dashboard-ir.js";
-import { el, setText, bindScalar, bindSchemaCard, schemaCardFailure, listFieldLabel, UNAVAILABLE } from "./dashboard-ir-renderer.js";
+import type { KitText, AgentText, IrNode } from "./dashboard-ir.js";
+import { el, agentEl, setText, bindScalar, bindSchemaCard, schemaCardFailure, listFieldLabel, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 import { httpStatusText } from "./dashboard-ir-binder.js";
 import type { GetResult } from "./dashboard-ir-binder.js";
 
-function checkTextTypes(doc: RDocument, node: RElement, ir: IrNode, raw: string): void {
+function checkTextTypes(doc: RDocument, node: RElement, ir: IrNode, raw: string, agent: AgentText): void {
   const displayed: KitText[] = [
     kitText("PCC copy"), UNAVAILABLE, boundValueText("name", raw), boundStatusText(raw),
     identifierText("id", raw), reportedFieldText("name", raw), recordValueText("status", raw),
@@ -33,6 +33,19 @@ function checkTextTypes(doc: RDocument, node: RElement, ir: IrNode, raw: string)
   // @ts-expect-error Displayed transport reasons also require typed text.
   const response: GetResult = { status: 401, redirected: false, bytesOver: false, json: null, reason: raw };
   void response;
+
+  agentEl(doc, "pcc-text", agent);
+  // @ts-expect-error Agent prose cannot enter the PCC slot sink.
+  setText(node, agent);
+  // @ts-expect-error Agent prose cannot enter el without an agent-marking sink.
+  el(doc, "pcc-text", agent);
+  // @ts-expect-error Even an untrusted flag cannot give el the agent-authorship guarantee.
+  el(doc, "pcc-text", agent, true);
+  // @ts-expect-error Agent prose cannot be presented as PCC-authored text.
+  const pcc: KitText = agent;
+  // @ts-expect-error PCC copy cannot enter the agent-prose sink.
+  agentEl(doc, "pcc-text", displayed[0]);
+  void pcc;
 }
 
 void checkTextTypes;

@@ -6,6 +6,9 @@
   function kitText(s) {
     return s;
   }
+  function joinKitText(...parts) {
+    return parts.join("");
+  }
   var IR_NODE_TYPES = [
     "root",
     "section",
@@ -507,7 +510,8 @@
   var PROTO_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
   function isPlain(v) {
     if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-    const p = Object.getPrototypeOf(v);
+    const getPrototypeOf = Object.getPrototypeOf;
+    const p = getPrototypeOf(v);
     return p === Object.prototype || p === null;
   }
   function strictStr(v, max = LIM.str) {
@@ -1144,6 +1148,12 @@
     if (text !== void 0) setText(n, text);
     return n;
   }
+  function agentEl(doc, cls, text) {
+    const n = doc.createElement("div");
+    n.className = cls + " " + CLS.agent + " " + CLS.untrusted;
+    n.textContent = text;
+    return n;
+  }
   var UNAVAILABLE = kitText("\u2014");
   var SCHEMA_FIELDS = Object.freeze({
     "capability-summary-v1": Object.freeze({
@@ -1215,7 +1225,10 @@
     const spec = SCHEMA_FIELDS[schema];
     if (!spec) return null;
     const reads = spec.fields.map((f) => readField(data, f));
-    const missingRequired = spec.fields.some((f, i) => f.required && reads[i].ok && reads[i].text === UNAVAILABLE);
+    const missingRequired = spec.fields.some((f, i) => {
+      const read = reads[i];
+      return f.required && read.ok && read.text === UNAVAILABLE;
+    });
     return { reads, missingRequired };
   }
   function bindSchemaCard(schema, data, slots) {
@@ -1256,12 +1269,9 @@
   function manifestProseText(n, key) {
     return String(n.props?.[key] ?? "");
   }
-  function validatedIrConstantText(n, key) {
-    return String(n.props?.[key] ?? "");
-  }
   function paintProse(doc, cls, n, key) {
     if (n.props?.withheld === true) return el(doc, cls + " " + CLS.withheld, WITHHELD_PROSE);
-    return el(doc, cls + " " + CLS.agent, manifestProseText(n, key), true);
+    return agentEl(doc, cls, manifestProseText(n, key));
   }
   var PAINTERS = Object.freeze({
     root: (d, n) => {
@@ -1278,7 +1288,8 @@
     text: (d, n) => paintProse(d, CLS.text, n, "text"),
     stat: (d, n) => {
       const e = el(d, CLS.stat);
-      e.appendChild(el(d, CLS.heading, validatedIrConstantText(n, "label")));
+      const label = n.bind ? metricLabelForSource(n.bind.path, n.bind.select) : null;
+      e.appendChild(el(d, CLS.heading, label ?? UNAVAILABLE));
       e.appendChild(el(d, CLS.value, UNAVAILABLE, true));
       return e;
     },
@@ -1309,7 +1320,7 @@
       paintChildren(d, n, e);
       return e;
     },
-    "approval-notice": (d, n) => el(d, CLS["approval-notice"], validatedIrConstantText(n, "notice")),
+    "approval-notice": (d) => el(d, CLS["approval-notice"], APPROVAL_NOTICE),
     plan: (d) => el(d, CLS.plan, kitText("Composition (view-only)")),
     "form-summary": (d, n) => {
       const e = el(d, CLS["form-summary"]);
@@ -1332,7 +1343,7 @@
     return e;
   }
   function freshnessText(asOf, stale) {
-    return "source read " + stamp(asOf) + (stale ? " \xB7 stale" : "");
+    return joinKitText(kitText("source read "), stamp(asOf), kitText(stale ? " \xB7 stale" : ""));
   }
   function applyFreshness(host, meta, asOf, stale) {
     host.setAttr("data-as-of", asOf);
@@ -1341,7 +1352,7 @@
     setText(meta, freshnessText(asOf, stale));
   }
   function unknownTimeText(receivedIso) {
-    return "source time not reported \xB7 received " + stamp(receivedIso);
+    return joinKitText(kitText("source time not reported \xB7 received "), stamp(receivedIso));
   }
   function applyUnknownTime(host, meta, receivedIso) {
     if (host.removeAttr) host.removeAttr("data-as-of");
@@ -1350,7 +1361,7 @@
     setText(meta, unknownTimeText(receivedIso));
   }
   function unavailableText(why) {
-    return "unavailable \xB7 " + why;
+    return joinKitText(kitText("unavailable \xB7 "), why);
   }
   function applyUnavailable(host, meta, why) {
     if (host.removeAttr) host.removeAttr("data-as-of");
@@ -1377,10 +1388,10 @@
     available: kitText("Available")
   };
   function listFieldLabel(field) {
-    return LIST_FIELD_LABELS[field] ?? field;
+    return LIST_FIELD_LABELS[field] ?? UNAVAILABLE;
   }
   function listFieldHeadingText(field) {
-    return listFieldLabel(field) + ":";
+    return joinKitText(listFieldLabel(field), kitText(":"));
   }
   var LIST_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
   var LIST_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
@@ -1841,8 +1852,9 @@
       }
     }
     let json = null;
+    const parseJson = JSON.parse;
     try {
-      json = JSON.parse(new TextDecoder().decode(concat(chunks, received)));
+      json = parseJson(new TextDecoder().decode(concat(chunks, received)));
     } catch {
       return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("unreadable response") };
     }

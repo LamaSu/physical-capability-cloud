@@ -22,11 +22,12 @@
  * Written self-contained (siblings-by-name only) so it can be inlined into the view
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
-import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind, KitText } from "./dashboard-ir.js";
-import { kitText, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
+import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind, KitText, AgentText } from "./dashboard-ir.js";
+import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
 
-// Minimal structural DOM (the gateway tsconfig has no "dom" lib). The real browser
-// `document`/element are structurally compatible; tests pass a plain-object fake.
+// Minimal structural DOM: the renderer reaches the DOM only through RDocument/RElement,
+// so tests can pass a plain-object fake. ir-kit-text-brand.test.ts fails if the renderer
+// names a DOM symbol.
 // NOTE: intentionally NO innerHTML/insertAdjacentHTML member — a painter cannot set one.
 export interface RElement {
   textContent: string;
@@ -77,7 +78,7 @@ function readOwnPath(obj: unknown, sel: string): unknown {
   return cur;
 }
 
-/** The only direct DOM text write; callers must supply a typed helper's result. */
+/** PCC text slot sink; callers must supply a typed helper's result. */
 export function setText(node: { textContent: string }, text: KitText): void {
   node.textContent = text;
 }
@@ -86,6 +87,14 @@ export function el(doc: RDocument, cls: string, text?: KitText, untrusted?: bool
   const n = doc.createElement("div");
   n.className = untrusted ? cls + " " + CLS.untrusted : cls;
   if (text !== undefined) setText(n, text);
+  return n;
+}
+
+/** The sole agent-prose sink always marks the element untrusted and agent-authored. */
+export function agentEl(doc: RDocument, cls: string, text: AgentText): RElement {
+  const n = doc.createElement("div");
+  n.className = cls + " " + CLS.agent + " " + CLS.untrusted;
+  n.textContent = text;
   return n;
 }
 
@@ -112,7 +121,7 @@ interface SchemaSpec { heading: KitText; note?: KitText; fields: readonly Schema
 export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.freeze({
   "capability-summary-v1": Object.freeze({
     heading: kitText("Capability"),
-    fields: Object.freeze([
+    fields: Object.freeze<SchemaField[]>([
       { label: kitText("Name"), key: "name", kind: "text", required: true },
       { label: kitText("Type"), key: "type", kind: "capType", required: true },
       { label: kitText("Base cost"), key: "pricing.baseCost", kind: "amount", money: true },
@@ -126,12 +135,12 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
     // Dual-shape: the /status route returns top-level status/progress; the /jobs/:id detail
     // route returns them under `job`. Both are the KNOWN server shapes — PCC-owned fixed
     // keys (NOT a manifest selector); first present wins.
-    fields: Object.freeze([
+    fields: Object.freeze<SchemaField[]>([
       { label: kitText("Status"), key: ["status", "job.status"], kind: "status", required: true },
       { label: kitText("Progress"), key: ["progress", "job.progress"], kind: "percent" },
     ]),
   }),
-}) as Readonly<Record<BindSchema, SchemaSpec>>;
+});
 
 // The settlement record is a STATIC pointer — fixed PCC text, no fetch, no data labels.
 // The endpoint reports `settled` for a merely-completed job and exposes the PHYSICAL
@@ -161,7 +170,7 @@ type FieldRead = { ok: true; text: KitText } | { ok: false };
  * text/capType/status still pass through boundValueText (content-checked, same as any bound
  * value); amount/currency/tiers/bool/percent have no prose grammar, so they are shown as-is. */
 function readField(data: unknown, f: SchemaField): FieldRead {
-  const keys = Array.isArray(f.key) ? f.key : [f.key as string];
+  const keys: readonly string[] = Array.isArray(f.key) ? f.key : [f.key as string];
   let raw: unknown;
   let foundKey: string | null = null;
   for (const k of keys) {
@@ -194,7 +203,7 @@ function readField(data: unknown, f: SchemaField): FieldRead {
     case "currency":
       return typeof raw === "string" && CURRENCY_ENUM.has(raw) ? { ok: true, text: raw as KitText } : { ok: false };
     case "tiers":
-      return Array.isArray(raw) && raw.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3)
+      return Array.isArray(raw) && raw.every((x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3)
         ? { ok: true, text: raw.join(", ") as KitText } : { ok: false };
     case "bool":
       return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No") } : { ok: false };
@@ -217,7 +226,10 @@ function readSchemaCard(schema: BindSchema, data: unknown): { reads: FieldRead[]
   const spec = SCHEMA_FIELDS[schema];
   if (!spec) return null;
   const reads = spec.fields.map((f) => readField(data, f));
-  const missingRequired = spec.fields.some((f, i) => f.required && reads[i]!.ok && (reads[i] as { ok: true; text: KitText }).text === UNAVAILABLE);
+  const missingRequired = spec.fields.some((f, i) => {
+    const read = reads[i]!;
+    return f.required && read.ok && read.text === UNAVAILABLE;
+  });
   return { reads, missingRequired };
 }
 
@@ -282,18 +294,14 @@ function paintSchemaCard(doc: RDocument, rootCls: string, schema: BindSchema): R
 /** A prose slot. Agent words render as untrusted, visibly agent-authored text (`pcc-agent`). A
  *  withheld slot is PCC's notice: the renderer paints its OWN constant, so the notice never comes
  *  from IR or manifest text, and it is not marked untrusted or agent-authored (astra r2 F4). */
-function manifestProseText(n: IrNode, key: "text" | "label"): KitText {
+function manifestProseText(n: IrNode, key: "text" | "label"): AgentText {
   // The validated IR has already withheld claims. The caller preserves the agent/untrusted
   // attribution instead of presenting these unchanged words as a PCC-authored constant.
-  return String(n.props?.[key] ?? "") as KitText;
-}
-function validatedIrConstantText(n: IrNode, key: "label" | "notice"): KitText {
-  // validateIr checks metric labels and approval notices against PCC's fixed vocabulary.
-  return String(n.props?.[key] ?? "") as KitText;
+  return String(n.props?.[key] ?? "") as AgentText;
 }
 function paintProse(doc: RDocument, cls: string, n: IrNode, key: "text" | "label"): RElement {
   if (n.props?.withheld === true) return el(doc, cls + " " + CLS.withheld, WITHHELD_PROSE);
-  return el(doc, cls + " " + CLS.agent, manifestProseText(n, key), true);
+  return agentEl(doc, cls, manifestProseText(n, key));
 }
 const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   root: (d, n) => { const e = el(d, CLS.root); paintChildren(d, n, e); return e; },
@@ -302,7 +310,9 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   text: (d, n) => paintProse(d, CLS.text, n, "text"),
   stat: (d, n) => {
     const e = el(d, CLS.stat);
-    e.appendChild(el(d, CLS.heading, validatedIrConstantText(n, "label"))); // PCC-owned metric label (trusted)
+    // validateIr guarantees the lookup succeeds; a defensive null shows UNAVAILABLE.
+    const label = n.bind ? metricLabelForSource(n.bind.path, n.bind.select) : null;
+    e.appendChild(el(d, CLS.heading, label ?? UNAVAILABLE)); // PCC-owned metric label (trusted)
     e.appendChild(el(d, CLS.value, UNAVAILABLE, true)); // default "—" until a clean GET lands; bindScalar overwrites (fetched, untrusted)
     return e;
   },
@@ -321,7 +331,7 @@ const PAINTERS: Readonly<Record<IrNodeType, Painter>> = Object.freeze({
   list: (d) => { const e = el(d, CLS.list); return e; }, // rows appended by bindList
   badge: (d, n) => { const e = paintProse(d, CLS.badge, n, "text"); e.setAttr("data-tone", String(n.props?.tone ?? "neutral")); return e; },
   grid: (d, n) => { const e = el(d, CLS.grid); paintChildren(d, n, e); return e; },
-  "approval-notice": (d, n) => el(d, CLS["approval-notice"], validatedIrConstantText(n, "notice")),
+  "approval-notice": (d) => el(d, CLS["approval-notice"], APPROVAL_NOTICE),
   plan: (d) => el(d, CLS.plan, kitText("Composition (view-only)")),
   "form-summary": (d, n) => { const e = el(d, CLS["form-summary"]); paintChildren(d, n, e); return e; },
   "field-label": (d, n) => paintProse(d, CLS["field-label"], n, "label"),
@@ -342,7 +352,7 @@ function paintNode(doc: RDocument, node: IrNode): RElement {
  *  readable with no stylesheet): "source read 2026-09-24 10:12:33Z" or "... · stale". `asOf`
  *  is the source's own read time (sourceAsOf), never the receipt time. */
 function freshnessText(asOf: string, stale: boolean): KitText {
-  return ("source read " + stamp(asOf) + (stale ? " · stale" : "")) as KitText;
+  return joinKitText(kitText("source read "), stamp(asOf), kitText(stale ? " · stale" : ""));
 }
 export function applyFreshness(host: RElement, meta: RElement, asOf: string, stale: boolean): void {
   host.setAttr("data-as-of", asOf);
@@ -355,7 +365,7 @@ export function applyFreshness(host: RElement, meta: RElement, asOf: string, sta
  *  so the datum is never presented as fresh: the line says so and gives the receipt time
  *  separately. No `data-as-of` (no source time exists). */
 function unknownTimeText(receivedIso: string): KitText {
-  return ("source time not reported · received " + stamp(receivedIso)) as KitText;
+  return joinKitText(kitText("source time not reported · received "), stamp(receivedIso));
 }
 export function applyUnknownTime(host: RElement, meta: RElement, receivedIso: string): void {
   if (host.removeAttr) host.removeAttr("data-as-of");
@@ -370,7 +380,7 @@ export function applyUnknownTime(host: RElement, meta: RElement, receivedIso: st
  *  absence is not evidence. No `data-as-of`, because nothing was observed. `why` is a fixed
  *  reason from the binder or the painter, never response text. */
 function unavailableText(why: KitText): KitText {
-  return ("unavailable · " + why) as KitText;
+  return joinKitText(kitText("unavailable · "), why);
 }
 export function applyUnavailable(host: RElement, meta: RElement, why: KitText): void {
   if (host.removeAttr) host.removeAttr("data-as-of");
@@ -390,18 +400,18 @@ export function renderIrDoc(doc: RDocument, mount: RElement, ir: IrDoc): void {
 // A trusted, PCC-authored label precedes every bound list value ("Name:", "Status:", ...), so a
 // reader always sees which field a value came from instead of two untrusted values sitting bare
 // next to each other with no attribution at all — the structural half of the H2 fix (the row-level
-// backstop below is the content half). Closed map; an unknown field falls back to its own path.
+// backstop below is the content half). Closed map; an unknown field is unavailable.
 const LIST_FIELD_LABELS: Readonly<Record<string, KitText>> = {
   id: kitText("ID"), name: kitText("Name"), capabilityId: kitText("Capability"), kernelId: kitText("Kernel"), status: kitText("Status"),
   createdAt: kitText("Created"), updatedAt: kitText("Updated"), version: kitText("Version"), capabilityCount: kitText("Capabilities"),
   type: kitText("Type"), available: kitText("Available"),
 };
-/** The PCC-owned label for a list field; an unknown field falls back to the field path itself. */
+/** The PCC-owned label for a list field; every profiled field has a label. */
 export function listFieldLabel(field: string): KitText {
-  // The fallback is a declared own-property selector already grammar-checked by validateIr.
-  return LIST_FIELD_LABELS[field] ?? field as KitText;
+  // validateIr restricts fields to LIST_PROFILES; coverage is checked by the brand guard.
+  return LIST_FIELD_LABELS[field] ?? UNAVAILABLE;
 }
-function listFieldHeadingText(field: string): KitText { return (listFieldLabel(field) + ":") as KitText; }
+function listFieldHeadingText(field: string): KitText { return joinKitText(listFieldLabel(field), kitText(":")); }
 
 // Grammars for the list field kinds (astra r4 on #344, finding 1). Each is a closed identifier/
 // timestamp/version shape — none admits arbitrary prose, so a hostile "Your payment" can never

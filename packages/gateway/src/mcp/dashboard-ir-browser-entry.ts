@@ -104,7 +104,7 @@ function tooLarge(root: unknown): boolean {
     seen.add(v);
     if (Array.isArray(v)) {
       if (v.length > CAP.maxFanout || pending + v.length > CAP.maxPending) return true;
-      for (let i = 0; i < v.length; i++) { stack.push(v[i]); pending++; }
+      for (let i = 0; i < v.length; i++) { stack.push((v as unknown[])[i]); pending++; }
     } else {
       let kn = 0;
       for (const k in v) {
@@ -166,7 +166,8 @@ async function realGetJson(url: string, signal: AbortSignal): Promise<GetResult>
     }
   }
   let json: unknown = null;
-  try { json = JSON.parse(new TextDecoder().decode(concat(chunks, received))); } catch {
+  const parseJson: (s: string) => unknown = JSON.parse;
+  try { json = parseJson(new TextDecoder().decode(concat(chunks, received))); } catch {
     return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("unreadable response") };
   }
   if (json === null || typeof json !== "object") return { status: 200, redirected: false, bytesOver: false, json: null, ok: false, reason: kitText("empty response") };
@@ -429,7 +430,7 @@ function renderManifest(manifest: unknown): void {
   if (tooLarge(manifest)) { rendered = true; inert(mount, kitText("This dashboard is too large and was not rendered.")); return; }
   // Any exception while adapting or validating is the same inert failure, never a partial render.
   let r: ReturnType<typeof dashboardManifestToIr>;
-  try { r = dashboardManifestToIr(manifest as never); } catch { r = { ok: false, reason: "adapter threw" }; }
+  try { r = dashboardManifestToIr(manifest as Parameters<typeof dashboardManifestToIr>[0]); } catch { r = { ok: false, reason: "adapter threw" }; }
   if (!r.ok) { rendered = true; inert(mount, kitText("This dashboard could not be verified and was not rendered.")); return; }
   rendered = true;
   const container = wrapEl(document.createElement("div"));
@@ -444,7 +445,7 @@ function renderManifest(manifest: unknown): void {
 function boot(): void {
   const parent = window.parent;
   let state: "init" | "ready" = "init";
-  window.addEventListener("message", (ev: MessageEvent) => {
+  window.addEventListener("message", (ev: MessageEvent<unknown>) => {
     if (ev.source !== parent) return; // host parent only
     const d = ev.data as Record<string, unknown> | null;
     if (!d || typeof d !== "object" || (d as { jsonrpc?: unknown }).jsonrpc !== "2.0") return;
