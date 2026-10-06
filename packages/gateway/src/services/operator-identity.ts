@@ -55,5 +55,5 @@ export function ownsKernel(identity: OperatorIdentity, kernel: { operatorAddress
   if (owner === "" || /^0x0{40}$/i.test(owner)) return false;
   return identity.identityStatus === "proven"
     ? sameEvmAddress(identity.principal, owner)
-    : identity.principal.trim() === owner;
+    : identity.principal === kernel.operatorAddress;
 }

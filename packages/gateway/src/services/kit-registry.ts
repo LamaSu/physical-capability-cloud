@@ -265,6 +265,7 @@ export class KitRegistry {
   private linksChecked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private lastSkipped: string[] = [];
+  private lastSkippedBindings: string[] = [];
 
   constructor(options: KitRegistryOptions = {}) {
     this.rootDir = options.rootDir ?? resolveKitRegistryRoot();
@@ -276,9 +277,14 @@ export class KitRegistry {
     this.noFollow = options.noFollowFlag ?? fsConstants.O_NOFOLLOW ?? 0;
   }
 
-  /** Record ids or shards the latest listing skipped because they failed verification. */
+  /** Digests the latest listing skipped because they failed verification. */
   get skipped(): readonly string[] {
     return this.lastSkipped;
+  }
+
+  /** Binding ids or shards the latest binding scan skipped because they failed verification. */
+  get skippedBindings(): readonly string[] {
+    return this.lastSkippedBindings;
   }
 
   /** The registry's clock, shared by binding records and their projections. */
@@ -347,28 +353,43 @@ export class KitRegistry {
       && (kernels === null || kernels.has(binding.target.kernelId)));
   }
 
-  /** Create an immutable binding; a supplied id that already exists is refused. */
-  createBinding(input: CreateBindingInput): Promise<KitBindingRecord> {
+  /** Check the active tuple, claim quota and create on one write queue entry. */
+  createBindingIfAbsent(input: CreateBindingInput, principal: string, now: Date): Promise<{ binding: KitBindingRecord; created: boolean }> {
     const run = this.queue.then(async () => {
+      const existing = (await this.listBindings({ kitDigest: input.kitDigest, kernelIds: [input.target.kernelId] }))
+        .filter(({ binding, withdrawal }) => withdrawal === null && binding.csdUrl === input.csdUrl
+          && binding.target.capabilityId === input.target.capabilityId)
+        .map(({ binding }) => binding)
+        .sort((a, b) => Date.parse(a.boundAt) - Date.parse(b.boundAt)
+          || (a.bindingId < b.bindingId ? -1 : a.bindingId > b.bindingId ? 1 : 0))[0];
+      if (existing) return { binding: existing, created: false };
       await this.ensureBindingWritesSupported();
-      const parsed = BindingRecordSchema.safeParse({
-        schema: BINDING_SCHEMA,
-        bindingId: `kb_${randomUUID().replaceAll("-", "")}`,
-        boundAt: this.now().toISOString(),
-        ...input,
-      });
-      if (!parsed.success) throw new KitRegistryError("invalid_binding", 400, "the binding record is invalid");
-      const record = parsed.data;
-      const dir = (await this.dirFor("bindings", record.bindingId.slice(3, 5), true))!;
-      if (!(await this.createOnce(dir, `${record.bindingId}.json`, canonicalize(record)))) {
-        throw new KitRegistryError("binding_exists", 409, "a binding with that id already exists");
-      }
-      const stored = await this.readBindingRecord("bindings", record.bindingId, BindingRecordSchema);
-      if (!stored) throw new KitIntegrityError(record.bindingId, "the binding record vanished after it was written");
-      return stored;
+      await this.claimQuota(principal, input.kitDigest, now, "binding-quota", this.bindDailyLimit,
+        () => new KitRegistryError("bind_quota", 429, `at most ${this.bindDailyLimit} new bindings per principal per 24 hours`));
+      return { binding: await this.createBinding(input), created: true };
     });
     this.queue = run.catch(() => undefined);
     return run;
+  }
+
+  /** Unqueued immutable create; production calls it only inside createBindingIfAbsent's queue entry. */
+  private async createBinding(input: CreateBindingInput): Promise<KitBindingRecord> {
+    await this.ensureBindingWritesSupported();
+    const parsed = BindingRecordSchema.safeParse({
+      schema: BINDING_SCHEMA,
+      bindingId: `kb_${randomUUID().replaceAll("-", "")}`,
+      boundAt: this.now().toISOString(),
+      ...input,
+    });
+    if (!parsed.success) throw new KitRegistryError("invalid_binding", 400, "the binding record is invalid");
+    const record = parsed.data;
+    const dir = (await this.dirFor("bindings", record.bindingId.slice(3, 5), true))!;
+    if (!(await this.createOnce(dir, `${record.bindingId}.json`, canonicalize(record)))) {
+      throw new KitRegistryError("binding_exists", 409, "a binding with that id already exists");
+    }
+    const stored = await this.readBindingRecord("bindings", record.bindingId, BindingRecordSchema);
+    if (!stored) throw new KitIntegrityError(record.bindingId, "the binding record vanished after it was written");
+    return stored;
   }
 
   /** The first immutable withdrawal wins; subsequent calls return its original time. */
@@ -387,18 +408,6 @@ export class KitRegistry {
       const stored = await this.readBindingRecord("binding-withdrawals", record.bindingId, BindingWithdrawalRecordSchema);
       if (!stored) throw new KitIntegrityError(record.bindingId, "the withdrawal record vanished after it was written");
       return { record: stored, created };
-    });
-    this.queue = run.catch(() => undefined);
-    return run;
-  }
-
-  /** Claim one binding slot on the same write queue and volume as publications. */
-  claimBindQuota(principal: string, now: Date): Promise<void> {
-    const run = this.queue.then(async () => {
-      await this.ensureBindingWritesSupported();
-      // A quota claim is independent of a kit version; retain the existing claim format.
-      await this.claimQuota(principal, `sha256:${"0".repeat(64)}`, now, "binding-quota", this.bindDailyLimit,
-        () => new KitRegistryError("bind_quota", 429, `at most ${this.bindDailyLimit} new bindings per principal per 24 hours`));
     });
     this.queue = run.catch(() => undefined);
     return run;
@@ -680,7 +689,7 @@ export class KitRegistry {
       st = await fs.lstat(area);
     } catch (err) {
       if (errnoOf(err) === "ENOENT") {
-        this.lastSkipped = skipped;
+        this.lastSkippedBindings = skipped;
         return entries;
       }
       throw err;
@@ -708,7 +717,7 @@ export class KitRegistry {
         }
       }
     }
-    this.lastSkipped = skipped;
+    this.lastSkippedBindings = skipped;
     return entries;
   }
 

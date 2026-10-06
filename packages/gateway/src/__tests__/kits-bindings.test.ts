@@ -99,6 +99,12 @@ function record(kitDigest: string, overrides: Partial<KitBindingRecord> = {}): K
 }
 function file(root: string, area: string, id: string) { return path.join(root, area, id.slice(3, 5), `${id}.json`); }
 
+// Test-only access to the private raw create: seed historical duplicates and explicit ids
+// without applying the production path's tuple idempotency or quota.
+function seedBinding(registry: KitRegistry, binding: KitBindingRecord) {
+  return registry["createBinding"](binding);
+}
+
 describe("kit binding writes", () => {
   it("accepts a manifest CSD longer than the kernel and capability id bounds", async () => {
     const csdUrl = `pcc://capabilities/${"a".repeat(201)}/v1`;
@@ -133,6 +139,26 @@ describe("kit binding writes", () => {
     expect(second.json()).toEqual({ ...first.json(), created: false });
     expect(await fs.readdir(path.join(f.rootDir, "binding-quota", hash(OWNER)))).toEqual(["0.json"]);
     expect(f.audit.mock.calls.filter(([entry]) => entry.eventType === "kit.bound")).toHaveLength(1);
+  });
+
+  it("serializes concurrent identical binds without spending a second quota claim", async () => {
+    const f = await fixture(); const app = await appFor(f.registry);
+    const responses = await Promise.all([bind(app, f.kitDigest), bind(app, f.kitDigest)]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 201]);
+    const results = responses.map((response) => response.json());
+    expect(results.filter((result) => result.created)).toHaveLength(1);
+    expect(results[0].binding.bindingId).toBe(results[1].binding.bindingId);
+    expect(await fs.readdir(path.join(f.rootDir, "binding-quota", hash(OWNER)))).toEqual(["0.json"]);
+    expect(f.audit.mock.calls.filter(([entry]) => entry.eventType === "kit.bound")).toHaveLength(1);
+    expect((await withdraw(app, f.kitDigest, results[1].binding.bindingId)).statusCode).toBe(200);
+    expect((await hosts(app, f.kitDigest)).json()).toMatchObject({ total: 0, hosts: [] });
+  });
+
+  it("records the bound kit digest in the quota claim", async () => {
+    const f = await fixture(); const app = await appFor(f.registry);
+    expect((await bind(app, f.kitDigest)).statusCode).toBe(201);
+    const claim = JSON.parse(await fs.readFile(path.join(f.rootDir, "binding-quota", hash(OWNER), "0.json"), "utf8"));
+    expect(claim.kitDigest).toBe(f.kitDigest);
   });
 
   it("checks identity before a bad digest and bad body", async () => {
@@ -231,7 +257,7 @@ describe("withdrawal", () => {
   it("refuses a missing current kernel", async () => {
     const f = await fixture(); const app = await appFor(f.registry);
     const r = record(f.kitDigest, { target: { kind: "kernel", kernelId: "missing", capabilityId: "missing" } });
-    await f.registry.createBinding(r);
+    await seedBinding(f.registry, r);
     const res = await withdraw(app, f.kitDigest, r.bindingId);
     expect(res.statusCode).toBe(403); expect(res.json().error).toBe("not_kernel_owner");
   });
@@ -295,9 +321,9 @@ describe("kit hosts", () => {
     for (const [i, status, heartbeat] of [[0, "online", now.toISOString()], [1, "online", new Date(now.getTime() - STALE_HEARTBEAT_MS - 1).toISOString()], [2, "online", ""], [3, "offline", now.toISOString()]] as const) {
       kernel(`host-${i}`, OWNER, { status, lastHeartbeat: heartbeat });
       capability(`host-cap-${i}`, `host-${i}`, { availability: { mode: "always", agentEndpoint: "https://agent.test" } });
-      await f.registry.createBinding(record(f.kitDigest, { bindingId: ids[i], target: { kind: "kernel", kernelId: `host-${i}`, capabilityId: `host-cap-${i}` } }));
+      await seedBinding(f.registry, record(f.kitDigest, { bindingId: ids[i], target: { kind: "kernel", kernelId: `host-${i}`, capabilityId: `host-cap-${i}` } }));
     }
-    await f.registry.createBinding(record(f.kitDigest, { bindingId: "kb_" + "a".repeat(32), target: { kind: "kernel", kernelId: "host-0", capabilityId: "host-cap-0" }, boundAt: new Date(now.getTime() + 1).toISOString() }));
+    await seedBinding(f.registry, record(f.kitDigest, { bindingId: "kb_" + "a".repeat(32), target: { kind: "kernel", kernelId: "host-0", capabilityId: "host-cap-0" }, boundAt: new Date(now.getTime() + 1).toISOString() }));
     const response = (await hosts(app, f.kitDigest)).json();
     expect(response).toMatchObject({ kitDigest: f.kitDigest, asOf: now.toISOString(), total: 4 });
     expect(response.hosts.map((h: { bindingId: string }) => h.bindingId)).toEqual(ids);
@@ -314,10 +340,10 @@ describe("kit hosts", () => {
   it("breaks boundAt and lastSeenAt ties by bindingId", async () => {
     const f = await fixture(); const app = await appFor(f.registry);
     const low = record(f.kitDigest, { bindingId: "kb_" + "0".repeat(32) });
-    await f.registry.createBinding(record(f.kitDigest, { bindingId: "kb_" + "f".repeat(32) }));
-    await f.registry.createBinding(low);
+    await seedBinding(f.registry, record(f.kitDigest, { bindingId: "kb_" + "f".repeat(32) }));
+    await seedBinding(f.registry, low);
     capability("cap-b", "kernel-a");
-    await f.registry.createBinding(record(f.kitDigest, { bindingId: "kb_" + "1".repeat(32), target: { kind: "kernel", kernelId: "kernel-a", capabilityId: "cap-b" } }));
+    await seedBinding(f.registry, record(f.kitDigest, { bindingId: "kb_" + "1".repeat(32), target: { kind: "kernel", kernelId: "kernel-a", capabilityId: "cap-b" } }));
     expect((await hosts(app, f.kitDigest)).json().hosts.map((h: { bindingId: string }) => h.bindingId)).toEqual([low.bindingId, "kb_" + "1".repeat(32)]);
     expect((await me(app)).json().bindings).toHaveLength(2);
   });
@@ -325,14 +351,14 @@ describe("kit hosts", () => {
     const f = await fixture(); const app = await appFor(f.registry);
     for (const [id, age] of [["a", 2000], ["b", 1000]] as const) {
       kernel(id, OWNER, { lastHeartbeat: new Date(now.getTime() - age).toISOString() }); capability(id, id);
-      await f.registry.createBinding(record(f.kitDigest, { target: { kind: "kernel", kernelId: id, capabilityId: id } }));
+      await seedBinding(f.registry, record(f.kitDigest, { target: { kind: "kernel", kernelId: id, capabilityId: id } }));
     }
     expect((await hosts(app, f.kitDigest)).json().hosts.map((h: { kernelId: string }) => h.kernelId)).toEqual(["b", "a"]);
   });
   it("omits absent and moved targets from both views", async () => {
     const f = await fixture(); const app = await appFor(f.registry);
     for (const [kernelId, capabilityId] of [["missing", "cap-a"], ["kernel-a", "missing"], ["kernel-a", "cap-moved"]]) {
-      await f.registry.createBinding(record(f.kitDigest, { target: { kind: "kernel", kernelId, capabilityId } }));
+      await seedBinding(f.registry, record(f.kitDigest, { target: { kind: "kernel", kernelId, capabilityId } }));
     }
     kernel("kernel-b"); capability("cap-moved", "kernel-b");
     expect((await hosts(app, f.kitDigest)).json().hosts).toEqual([]);
@@ -356,6 +382,18 @@ describe("kit hosts", () => {
 });
 
 describe("operator binding projection", () => {
+  it.each([
+    ["empty", ""],
+    ["overlong", "x".repeat(121)],
+  ])("omits an unbound capability with an %s type from the DTO", async (_label, type) => {
+    const f = await fixture(); const app = await appFor(f.registry);
+    capability("invalid-type", "kernel-a", { type });
+    const r = await me(app);
+    expect(r.statusCode).toBe(200);
+    expect(r.json().unmappedCapacity).toEqual([{ kind: "kernel", id: "kernel-a", legacyType: "lab.liquid-handling" }]);
+    expect(OperatorBindingDTOSchema.safeParse(r.json()).success).toBe(true);
+  });
+
   it("validates the DTO and derives claim rights and unbound capacity", async () => {
     const f = await fixture(); const app = await appFor(f.registry, { apiKeyId: "key", operatorId: OWNER });
     capability("unbound", "kernel-a"); kernel("someone-else", OTHER); capability("other-cap", "someone-else");
@@ -383,7 +421,7 @@ describe("operator binding projection", () => {
   });
   it("fails invalid projections with only the error code", async () => {
     const f = await fixture(); const app = await appFor(f.registry);
-    getRepos().capabilities.update("cap-a", { type: "" });
+    now = new Date(Date.now() + MAX_AS_OF_SKEW_MS + 60_000);
     const r = await me(app); expect(r.statusCode).toBe(500); expect(r.json()).toEqual({ error: "binding_projection_invalid" });
   });
   it("bind and withdrawal leave financial and availability records unchanged", async () => {
@@ -403,32 +441,44 @@ describe("operator binding projection", () => {
 });
 
 describe("binding file integrity and append-only storage", () => {
+  it("keeps kit listing skips separate from binding scan skips", async () => {
+    const f = await fixture(); const r = record(f.kitDigest);
+    await seedBinding(f.registry, r);
+    await fs.appendFile(path.join(f.rootDir, "publications", f.kitDigest.slice(7, 9), `${f.kitDigest.slice(7)}.json`), "\n");
+    await fs.appendFile(file(f.rootDir, "bindings", r.bindingId), "\n");
+    expect((await f.registry.list()).kits).toEqual([]);
+    expect(f.registry.skipped).toEqual([f.kitDigest]);
+    expect(await f.registry.listBindings()).toEqual([]);
+    expect(f.registry.skipped).toEqual([f.kitDigest]);
+    expect(f.registry.skippedBindings).toEqual([r.bindingId]);
+  });
+
   it("refuses a second create of the same bindingId", async () => {
     const f = await fixture(); const r = record(f.kitDigest);
-    await f.registry.createBinding(r);
-    await expect(f.registry.createBinding(r)).rejects.toMatchObject({ status: 409, code: "binding_exists" });
+    await seedBinding(f.registry, r);
+    await expect(seedBinding(f.registry, r)).rejects.toMatchObject({ status: 409, code: "binding_exists" });
     expect((await f.registry.readBinding(r.bindingId))?.binding).toEqual(r);
   });
   it.each(["noncanonical", "wrong-id", "invalid-utf8", "unknown-key", "bom"])("skips and reports a corrupt record: %s", async (corruption) => {
-    const f = await fixture(); const r = record(f.kitDigest); await f.registry.createBinding(r);
+    const f = await fixture(); const r = record(f.kitDigest); await seedBinding(f.registry, r);
     const text = corruption === "noncanonical" ? JSON.stringify(r, null, 2) : corruption === "wrong-id" ? canonicalize({ ...r, bindingId: `kb_${"0".repeat(32)}` }) : corruption === "unknown-key" ? canonicalize({ ...r, payTo: OWNER }) : corruption === "bom" ? `\uFEFF${canonicalize(r)}` : Buffer.from([0xff]);
     await fs.writeFile(file(f.rootDir, "bindings", r.bindingId), text);
-    expect(await f.registry.listBindings()).toEqual([]); expect(f.registry.skipped).toContain(r.bindingId);
+    expect(await f.registry.listBindings()).toEqual([]); expect(f.registry.skippedBindings).toContain(r.bindingId);
     await expect(f.registry.readBinding(r.bindingId)).rejects.toBeInstanceOf(KitIntegrityError);
     const app = await appFor(f.registry); const res = await withdraw(app, f.kitDigest, r.bindingId);
     expect(res.statusCode).toBe(500); expect(res.json().error).toBe("kit_integrity_failure");
   });
   it("verifies withdrawal records on scans and individual reads", async () => {
-    const f = await fixture(); const r = record(f.kitDigest); await f.registry.createBinding(r);
+    const f = await fixture(); const r = record(f.kitDigest); await seedBinding(f.registry, r);
     await f.registry.withdrawBinding({ bindingId: r.bindingId, identityStatus: "proven", withdrawnBy: hash(OWNER) });
     await fs.appendFile(file(f.rootDir, "binding-withdrawals", r.bindingId), "\n");
-    expect(await f.registry.listBindings()).toEqual([]); expect(f.registry.skipped).toContain(r.bindingId);
+    expect(await f.registry.listBindings()).toEqual([]); expect(f.registry.skippedBindings).toContain(r.bindingId);
     await expect(f.registry.readBinding(r.bindingId)).rejects.toBeInstanceOf(KitIntegrityError);
   });
   it("reads fresh records and filters by kit digest and kernel ids", async () => {
     const f = await fixture(); const second = new KitRegistry({ rootDir: f.rootDir, durable: () => true });
     expect(await second.listBindings()).toEqual([]);
-    const r = record(f.kitDigest); await f.registry.createBinding(r);
+    const r = record(f.kitDigest); await seedBinding(f.registry, r);
     expect(await second.listBindings({ kitDigest: f.kitDigest, kernelIds: ["kernel-a"] })).toEqual([{ binding: r, withdrawal: null }]);
     expect(await second.listBindings({ kitDigest: H("f") })).toEqual([]);
     expect(await second.listBindings({ kernelIds: [] })).toEqual([]);
@@ -436,19 +486,19 @@ describe("binding file integrity and append-only storage", () => {
   it("refuses a symlinked bindings directory", async () => {
     const f = await fixture(); const outside = await fs.mkdtemp(path.join(os.tmpdir(), "kit-bindings-outside-")); roots.push(outside);
     await fs.symlink(outside, path.join(f.rootDir, "bindings"));
-    await expect(f.registry.createBinding(record(f.kitDigest))).rejects.toBeInstanceOf(KitIntegrityError);
+    await expect(seedBinding(f.registry, record(f.kitDigest))).rejects.toBeInstanceOf(KitIntegrityError);
     expect(await fs.readdir(outside)).toEqual([]);
   });
   it("applies durability and filesystem guards to every binding write", async () => {
     const f = await fixture(); const r = record(f.kitDigest);
-    await f.registry.createBinding(r);
+    await seedBinding(f.registry, r);
     const guarded = new KitRegistry({ rootDir: f.rootDir, durable: () => false });
-    await expect(guarded.createBinding(record(f.kitDigest))).rejects.toMatchObject({ status: 503 });
-    await expect(guarded.claimBindQuota(OWNER, now)).rejects.toMatchObject({ status: 503 });
+    await expect(seedBinding(guarded, record(f.kitDigest))).rejects.toMatchObject({ status: 503 });
+    await expect(guarded.createBindingIfAbsent(record(f.kitDigest, { csdUrl: "pcc://capabilities/other/v1" }), OWNER, now)).rejects.toMatchObject({ status: 503 });
     await expect(guarded.withdrawBinding({ bindingId: r.bindingId, identityStatus: "proven", withdrawnBy: hash(OWNER) })).rejects.toMatchObject({ status: 503 });
     const unsupported = new KitRegistry({ rootDir: f.rootDir, durable: () => true, noFollowFlag: 0 });
-    await expect(unsupported.createBinding(record(f.kitDigest))).rejects.toMatchObject({ status: 503 });
-    await expect(unsupported.claimBindQuota(OWNER, now)).rejects.toMatchObject({ status: 503 });
+    await expect(seedBinding(unsupported, record(f.kitDigest))).rejects.toMatchObject({ status: 503 });
+    await expect(unsupported.createBindingIfAbsent(record(f.kitDigest, { csdUrl: "pcc://capabilities/other/v1" }), OWNER, now)).rejects.toMatchObject({ status: 503 });
     await expect(unsupported.withdrawBinding({ bindingId: r.bindingId, identityStatus: "proven", withdrawnBy: hash(OWNER) })).rejects.toMatchObject({ status: 503 });
   });
 });

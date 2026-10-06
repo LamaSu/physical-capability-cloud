@@ -154,22 +154,20 @@ export class KitBindings {
     if (!capability || capability.kernelId !== kernelId) {
       throw new KitRegistryError("capability_not_on_kernel", 422, "the capability does not belong to this kernel");
     }
-    const existing = deduplicateBindings(await this.registry.listBindings({ kitDigest: digest, kernelIds: [kernelId] }))
-      .find((binding) => binding.csdUrl === csdUrl && binding.target.capabilityId === capabilityId);
-    if (existing) return { binding: publicBinding(existing), created: false };
-    await this.registry.claimBindQuota(identity.principal, this.now());
-    const binding = await this.registry.createBinding({
+    const { binding, created } = await this.registry.createBindingIfAbsent({
       kitDigest: digest,
       csdUrl,
       target: { kind: "kernel", kernelId, capabilityId },
       identityStatus: identity.identityStatus,
       boundBy: principalHash(identity),
-    });
-    this.registry.auditBinding({
-      eventType: "kit.bound", actor: identity.principal, resourceType: "kit-binding", resourceId: binding.bindingId,
-      action: "bind", metadata: { kitDigest: digest, kernelId, capabilityId, csdUrl, identityStatus: identity.identityStatus },
-    });
-    return { binding: publicBinding(binding), created: true };
+    }, identity.principal, this.now());
+    if (created) {
+      this.registry.auditBinding({
+        eventType: "kit.bound", actor: identity.principal, resourceType: "kit-binding", resourceId: binding.bindingId,
+        action: "bind", metadata: { kitDigest: digest, kernelId, capabilityId, csdUrl, identityStatus: identity.identityStatus },
+      });
+    }
+    return { binding: publicBinding(binding), created };
   }
 
   /** Withdrawal uses current kernel ownership and preserves the first withdrawal time. */
@@ -249,7 +247,8 @@ export class KitBindings {
     }));
     const mapped = new Set(active.map(({ capability }) => capability.id));
     const unmappedCapacity = kernels.flatMap((kernel) => repos.capabilities.findByKernel(kernel.id)
-      .filter((capability) => !mapped.has(capability.id))
+      .filter((capability) => !mapped.has(capability.id) && typeof capability.type === "string"
+        && capability.type.length >= 1 && capability.type.length <= 120)
       .map((capability) => ({ kind: "kernel" as const, id: kernel.id, legacyType: capability.type }))).slice(0, 500);
     const result = OperatorBindingDTOSchema.safeParse({
       schema: OPERATOR_BINDING_SCHEMA,

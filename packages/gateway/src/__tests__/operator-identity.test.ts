@@ -71,10 +71,21 @@ describe("ownsKernel", () => {
     expect(ownsKernel(proven(WALLET), { operatorAddress: UPPER_WALLET })).toBe(true);
   });
 
-  it("compares self_asserted principals exactly after trimming", () => {
-    expect(ownsKernel(asserted(" operator@example.test "), { operatorAddress: " operator@example.test " })).toBe(true);
+  it("compares self_asserted principals exactly without trimming", () => {
     expect(ownsKernel(asserted("Operator@example.test"), { operatorAddress: "operator@example.test" })).toBe(false);
     expect(ownsKernel(asserted(UPPER_WALLET), { operatorAddress: WALLET })).toBe(false);
+  });
+
+  it("refuses a self_asserted principal when only the stored owner has surrounding whitespace", () => {
+    expect(ownsKernel(asserted("alice@x.test"), { operatorAddress: " alice@x.test" })).toBe(false);
+  });
+
+  it("refuses a self_asserted principal when only the principal has surrounding whitespace", () => {
+    expect(ownsKernel(asserted(" alice@x.test"), { operatorAddress: "alice@x.test" })).toBe(false);
+  });
+
+  it("accepts identical self_asserted principal and owner strings with surrounding whitespace", () => {
+    expect(ownsKernel(asserted(" alice@x.test "), { operatorAddress: " alice@x.test " })).toBe(true);
   });
 
   it("refuses a SIWE lookalike with one changed hex digit", () => {
