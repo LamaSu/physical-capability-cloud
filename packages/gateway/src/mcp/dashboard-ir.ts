@@ -764,8 +764,10 @@ export function isIrBindablePath(path: string): boolean {
  *  - the metric profile's source paths;
  *  - the bind schemas whose fixed card fields apply (ordered alternatives, resolved by the
  *    projection exactly as the renderer resolves them);
- *  - `asOf`, always.
- *  No page metadata (total, offset, limit, hasMore): no closed-IR sink reads it (astra #562 r2 F2).
+ *  - `asOf`, always;
+ *  - the list profile's declared `paged.total` key, which N110's window note reads.
+ *  No other page metadata (offset, limit, hasMore, or an undeclared total): no closed-IR sink
+ *  reads it (astra #562 r2 F2).
  *  Returns null for a path the IR cannot bind. A cross-origin (CORS wildcard) response carries
  *  ONLY these fields, never the raw body. Client-side projection is not a confidentiality
  *  boundary (astra #562 r1 F1). */
@@ -773,6 +775,7 @@ export function irReadShape(path: string): { rowsKey: string | null; rowFields: 
   if (!isIrBindablePath(path)) return null;
   const lp = Object.prototype.hasOwnProperty.call(LIST_PROFILES, path) ? LIST_PROFILES[path]! : null;
   const fields = new Set<string>(["asOf"]);
+  if (lp?.paged?.total !== undefined) fields.add(lp.paged.total);
   for (const m of METRIC_PROFILE) if (m.route.test(path)) for (const f of Object.values(m.fields)) fields.add(f.source);
   const schemas = new Set<BindSchema>();
   for (const policy of Object.values(BIND_POLICY)) if (policy.schema && policy.routes.some((re) => re.test(path))) schemas.add(policy.schema);

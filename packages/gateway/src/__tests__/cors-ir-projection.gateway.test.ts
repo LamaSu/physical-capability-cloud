@@ -52,7 +52,8 @@ describe("#562 r1 F1 reproduced (verify before fix): a wildcard response is the 
     expect(dlpHits(body)).toEqual([]);
     expect(Array.isArray(body.items) && body.items.length).toBeGreaterThan(0);
     for (const k of keysOf(body.items)) expect(["name", "id", "type", "kernelId", "available"]).toContain(k);
-    for (const k of Object.keys(body)) expect(["items", "asOf"]).toContain(k); // no page metadata: no IR sink reads it (#562 r2 F2)
+    // Page metadata: only the profile's declared paged.total, which N110's window note reads; never offset, limit or hasMore (#562 r2 F2).
+    for (const k of Object.keys(body)) expect(["items", "asOf", "total"]).toContain(k);
   });
 });
 
@@ -114,7 +115,7 @@ describe("projectIrRead (unit)", () => {
       items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true, location: { lat: 1.2345, lng: 2.3456 }, operatorAddress: "0x1" }, inherited, 7],
       total: 3, offset: 0, limit: 50, hasMore: false, asOf: "2026-10-03T00:00:00.000Z", secret: "x", __proto__: { polluted: 1 },
     } as any);
-    expect(out).toEqual({ items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true }, {}, {}], asOf: "2026-10-03T00:00:00.000Z" });
+    expect(out).toEqual({ items: [{ name: "A", id: "cap-1", type: "t", kernelId: "k-1", available: true }, {}, {}], total: 3, asOf: "2026-10-03T00:00:00.000Z" });
   });
   it("a PROFILE field whose value is an object is dropped whole (it could carry fields the IR never reads)", async () => {
     const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
@@ -130,10 +131,10 @@ describe("projectIrRead (unit)", () => {
 });
 
 describe("#562 r2 reproduced (verify before fix)", () => {
-  it("F2: a wildcard list response carries no page metadata the browser IR never reads (only its rows and asOf)", async () => {
+  it("F2: a wildcard list response carries no page metadata the browser IR never reads (only its rows, asOf and the profile's declared total, which N110 reads)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/capabilities?limit=1", headers: { origin: UNKNOWN } });
     expect(res.headers["access-control-allow-origin"]).toBe("*");
-    for (const k of Object.keys(res.json())) expect(["items", "asOf"], k).toContain(k);
+    for (const k of Object.keys(res.json())) expect(["items", "asOf", "total"], k).toContain(k);
   });
   it("F3: an ordered alternative projects ONLY the first present key; an invalid first value never falls back to a later one", async () => {
     const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
@@ -144,5 +145,47 @@ describe("#562 r2 reproduced (verify before fix)", () => {
     // Positive controls: the first present key wins, and an absent first key falls through to the next.
     expect(projectIrRead("/api/jobs/j-1/status", { status: "completed", job: { status: "failed" } })).toEqual({ status: "completed" });
     expect(projectIrRead("/api/jobs/j-1/status", { job: { status: "completed", progress: 40 } })).toEqual({ job: { status: "completed", progress: 40 } });
+  });
+});
+
+describe("N110 x #562 (the merge-up): a cross-origin list keeps the ONE page field the IR reads, its profile's declared paged.total", () => {
+  // N110's window note (dashboard-ir-renderer.ts listWindow) reads the route's own `paged.total`
+  // from the fetched body. The governed view fetches cross-origin, so it sees the projection, not
+  // the raw body: the projection must carry that one declared field, or the note can never say
+  // "N of M returned" in a real host.
+  const listNode = (path: string, query?: Record<string, unknown>) =>
+    ({ type: "list", id: "n1", props: {}, bind: { path, ...(query ? { query } : {}) } }) as any;
+
+  it("GET /api/capabilities?limit=5 from an unknown origin: the window note reports the server's real total", async () => {
+    const { listWindow } = await import("../mcp/dashboard-ir-renderer.js");
+    const raw = (await app.inject({ method: "GET", url: "/api/capabilities" })).json();
+    expect(Number.isSafeInteger(raw.total) && raw.total > 5).toBe(true);
+    const res = await app.inject({ method: "GET", url: "/api/capabilities?limit=5", headers: { origin: UNKNOWN } });
+    expect(res.headers["access-control-allow-origin"]).toBe("*");
+    const body = res.json();
+    expect(body.items).toHaveLength(5);
+    expect(listWindow(listNode("/api/capabilities", { limit: 5 }), body, 5).note).toBe(`5 of ${raw.total} returned`);
+  });
+
+  it("GET /api/capabilities from an unknown origin: a window holding the whole collection needs no note (the total vouches for it)", async () => {
+    const { listWindow } = await import("../mcp/dashboard-ir-renderer.js");
+    const raw = (await app.inject({ method: "GET", url: "/api/capabilities" })).json();
+    const res = await app.inject({ method: "GET", url: "/api/capabilities", headers: { origin: UNKNOWN } });
+    const body = res.json();
+    expect(body.items).toHaveLength(raw.total);
+    // Before this merge-up the projection dropped `total`, so this note was "total not shown".
+    expect(listWindow(listNode("/api/capabilities"), body, body.items.length).note).toBeNull();
+  });
+
+  it("the projection's page fields are EXACTLY the declared paged.total keys: never offset, limit or hasMore; none for a profile that declares no total", async () => {
+    const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
+    const { LIST_PROFILES } = await import("../mcp/dashboard-ir.js");
+    expect(LIST_PROFILES["/api/capabilities"]!.paged?.total).toBe("total");
+    expect(LIST_PROFILES["/api/jobs"]!.paged?.total).toBeUndefined();
+    const page = { total: 3, offset: 0, limit: 50, hasMore: false };
+    expect(projectIrRead("/api/capabilities", { items: [], ...page })).toEqual({ items: [], total: 3 });
+    expect(projectIrRead("/api/jobs", { jobs: [], ...page })).toEqual({ jobs: [] });
+    // A declared total that is not a primitive is dropped whole, like any other projected leaf.
+    expect(projectIrRead("/api/capabilities", { items: [], total: { n: 3, secret: "x" } })).toEqual({ items: [] });
   });
 });
