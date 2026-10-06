@@ -1,0 +1,713 @@
+{
+  "vector": "pcc.evidence.finalmilestonepackage-v2-d1-eip712/mirror",
+  "note": "Public test data. D1 (operator) EIP-712 golden vectors for FinalMilestonePackageV2, per d1-eip712-struct-proposal.md, RATIFIED by the oracle (bus #5773) and escrow (bus #5785), 2026-10-03. Escrow's ratification added two decisions -- (1) ERC-1271 operators cannot mint under v1, D1 fails closed for them; (2) the escrow clone is bound through fundedEscrowOf before operator() is trusted -- neither of which changes the struct/domain/digest bytes here. These vectors cover the ECDSA recovery path only. Sample body is finalmilestonepackage-v2-preview-mirror.cjs's body object, copied verbatim; packageBodyHash is re-implemented (same framing) and pinned equal to that file's own EXPECT value.",
+  "contract": {
+    "doc": "returns/pcc-evidence-work/d1-eip712-struct-proposal.md",
+    "status": "RATIFIED by the oracle (bus #5773) and escrow (bus #5785), 2026-10-03",
+    "escrowRatificationDecisions": [
+      "ERC-1271 (contract) operators cannot mint under v1 -- D1 fails closed for them; the ratified rule is 65-byte ECDSA recovery only.",
+      "The escrow clone must be bound through fundedEscrowOf(policyKey(payer, operator, jobIdHash)) before operator() is trusted."
+    ],
+    "scopeNote": "Neither escrow decision changes these struct/domain/digest bytes. These vectors cover the ECDSA recovery path only."
+  },
+  "typeString": "FinalMilestonePackageV2(uint256 chainId,address escrow,bytes32 settlementUnitId,bytes32 jobIdHash,uint256 milestoneIndex,bytes32 stepId,bytes32 compositionRoot,bytes32 acceptedEnvelopeHash,bytes32 packageBodyHash)",
+  "typeHash": "0xef0c7b427b0bc8bccb92bee3167647cbdc90d212dc89106860e5789621424df8",
+  "domain": {
+    "name": "PCC FinalMilestonePackage",
+    "version": "2",
+    "chainId": "8453",
+    "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+  },
+  "domainSeparator": "0x3462aada2adc062b930810acf1e3c9036070b3c49f726d271c3a32b523e78181",
+  "sampleBody": {
+    "source": "finalmilestonepackage-v2-preview-mirror.cjs (read-only; body object + framing copied verbatim, re-implemented here, not required as a module)",
+    "body": {
+      "packageSchemaVersion": "FinalMilestonePackageV2",
+      "packageFormat": "1",
+      "compositionSchemaVersion": "1",
+      "unitBinding": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b"
+      },
+      "producer": {
+        "operatorPrincipalId": "op-golden",
+        "kernelId": "kernel-golden-01",
+        "devicePrincipalId": "dev-golden"
+      },
+      "challengeBinding": {
+        "nonce": "0xdcf34d3be8a102a533f4f7102c3c56ccae8612b618cc453ef303ad9246ba08c5",
+        "tChallengeRef": "1699999000"
+      },
+      "evidence": {
+        "events": [
+          {
+            "type": "execution_completed",
+            "at": "1700000000"
+          }
+        ],
+        "payloadRoot": "0x0333ba8c3c428076c60adcc070d9a4b0e7e4f319899e434149a8a993a9736315"
+      },
+      "evidenceTimeBounds": {
+        "start": "1699999500",
+        "end": "1700000000"
+      }
+    },
+    "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d",
+    "packageBodyHashPinnedBy": "finalmilestonepackage-v2-preview-mirror.cjs EXPECT.packageBodyHash",
+    "packageBodyHashMatchesPreviewMirror": true
+  },
+  "keys": {
+    "operator": {
+      "privateKeyPreimage": "pcc-d1-golden-operator",
+      "privateKey": "0x8beaf5cd04cc980189027ae526e33e9788d376b1bde4ee4263e402111b00f2e4",
+      "address": "0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8",
+      "note": "PUBLIC TEST DATA -- deterministic, never use for anything but these vectors"
+    },
+    "nonOperator": {
+      "privateKeyPreimage": "pcc-d1-golden-not-operator",
+      "privateKey": "0x27dcd5f7552135e2549f9f27432db1388712b71bd9e639a150960c38ebb22bc8",
+      "address": "0x3CfC62676B06d45394A72c3aC61856a4B2127EB2",
+      "note": "PUBLIC TEST DATA"
+    }
+  },
+  "positive": {
+    "message": {
+      "chainId": "8453",
+      "escrow": "0x00000000000000000000000000000000000e5c0f",
+      "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+      "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+      "milestoneIndex": "3",
+      "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+      "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+      "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+    },
+    "structHash": "0xedcf05ee611245614b585109ba1c39fe7f6ecf9f1f66625627cec976deb1fbe6",
+    "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+    "signature": {
+      "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+      "byteLength": 65,
+      "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+      "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+      "v": 28
+    },
+    "recovered": "0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8",
+    "operatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+    "signerLabel": "0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8",
+    "result": {
+      "accepted": true,
+      "reason": null,
+      "recovered": "0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8"
+    },
+    "expected": {
+      "accepted": true
+    }
+  },
+  "negatives": [
+    {
+      "name": "high-s",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590ccc6f00fcd09108a4543df30b3b20868289203564ee63aaa9e20227b394ee6f5c51b",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0xc6f00fcd09108a4543df30b3b20868289203564ee63aaa9e20227b394ee6f5c5",
+        "v": 27
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "high_s",
+        "recovered": null
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "high_s"
+      },
+      "note": "r unchanged, s -> n-s, v flipped. Mathematically the same key (ECDSA malleable twin); refused purely for non-canonical s. ethers.recoverAddress itself throws \"non-canonical s; use ._s\" if asked to recover this — the Python cross-check demonstrates the same-address fact with its own unconstrained recovery."
+    },
+    {
+      "name": "v-29",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1d",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 29
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "v_not_27_or_28",
+        "recovered": null
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "v_not_27_or_28"
+      },
+      "note": "v byte set to 29 (0x1d); refused before any recovery attempt. ethers.recoverAddress independently throws \"invalid v\" for this value."
+    },
+    {
+      "name": "v-raw-recid-0",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c00",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 0
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "v_not_27_or_28",
+        "recovered": null
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "v_not_27_or_28"
+      },
+      "note": "v byte set to 0 (raw yParity 0, the OPPOSITE parity from this run's real accepted signature, v=28). Refused by the same v in {27,28} rule; ungated recovery yields 0xE2518C8F61bbac2F8D6c6f617829358d316e9c87 -- an unrelated address, not the operator."
+    },
+    {
+      "name": "v-raw-recid-1",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c01",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 1
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "v_not_27_or_28",
+        "recovered": null
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "v_not_27_or_28"
+      },
+      "note": "v byte set to 1 (raw yParity 1, the SAME parity as this run's real accepted signature, v=28). WITHOUT the explicit v-range gate, ethers.recoverAddress recovers this to 0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8 -- the operator's own address. This vector proves the v in {27,28} rule is load-bearing, not redundant with signer-mismatch."
+    },
+    {
+      "name": "eip2098-compact-64-byte",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590ccb90ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "byteLength": 64
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "bad_length",
+        "recovered": null,
+        "detail": "sig is 64 bytes, need exactly 65"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "bad_length"
+      },
+      "note": "64-byte EIP-2098 compact serialization of the SAME valid signature (r || yParityAndS, no v byte). Refused purely for wire form (65 bytes required); expanded back via ethers it recovers 0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8 (the operator), proving the signature itself is legitimate -- only the FORM is refused."
+    },
+    {
+      "name": "r-zero",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x0000000000000000000000000000000000000000000000000000000000000000390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "r_zero",
+        "recovered": null
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "r_zero"
+      },
+      "note": "r forced to 32 zero bytes. Refused outright as a structurally invalid signature component -- never attempted as a recovery, so never \"recovers to the zero address\"; the refusal reason says exactly what is wrong (r_zero), not zero_address."
+    },
+    {
+      "name": "s-zero",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc00000000000000000000000000000000000000000000000000000000000000001c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "s_zero",
+        "recovered": null
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "s_zero"
+      },
+      "note": "s forced to 32 zero bytes. Same treatment as r=0: refused outright, reason is s_zero, never zero_address."
+    },
+    {
+      "name": "wrong-domain-chainId",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8454",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x0c53be6bf455d7c4209064d31172734a6a208fbd48237fe1689a5918d2e55796",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0xBDc678361368497CE61b34E347098799257F2675"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "The valid operator signature verified against a digest recomputed under domain.chainId+1 (message unchanged). Recovery succeeds but yields an unrelated address, not the operator."
+    },
+    {
+      "name": "wrong-verifyingContract",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0xabababababababababababababababababababab"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8c096979422de0a872f437f03d7502908ea3c3921656dfdc1d0e6442c0971be5",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0x831e0D8aC5de7AEe17FFA294C0E0a9402Bea76BD"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "The valid operator signature verified against a digest recomputed under a different verifyingContract (message unchanged, including message.escrow). Cross-escrow replay rejected."
+    },
+    {
+      "name": "mutated-milestoneIndex",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "4",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x2cfc353d0e6469ab76bfb052425ce9f992410a2885715d7c5fad3bfde1351041",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0xA2a31d819E6a5d4aF16C3A646e528e2a9c551724"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "milestoneIndex bumped from 3 to 4; struct hash changes, the original signature no longer recovers the operator."
+    },
+    {
+      "name": "mutated-stepId",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0x33b983e8fbf0e76714b9907ab818b4e1ed7ba940588cec911c5d0cd2215438e7",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0xac289211a8b3cbd964253870a246dc85dfc8672a166d938d54823c3e4501e072",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0x8b15125BA17C6E37486Fb8CD86aF89959A4aDB9E"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "stepId replaced with an unrelated bytes32; struct hash changes, original signature no longer recovers the operator."
+    },
+    {
+      "name": "mutated-packageBodyHash",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x906e62f16f75490add5b5336087e5eadc03bfcef31d658c305dd91d778fd3793"
+      },
+      "digest": "0x21ec9372cc95f21f86066fa5dae4a99644b1eebd06cac5478d839e3698809e2e",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0x117ed618DB3777D8f7098526cA9b7a52d876EAF4"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "packageBodyHash field replaced with an unrelated bytes32 (simulating a post-hoc struct tamper, independent of body re-framing); struct hash changes, original signature no longer recovers the operator."
+    },
+    {
+      "name": "valid-signature-non-operator-key",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x5d24ce1a9c64fb1d3afb88a19f3964f6cfa906e8406c8a9f2755ebfc8b6c06550e430ba51e512245e031c5f5eef477f78aaadc95ca2ed983aa9aee871085ff0f1c",
+        "byteLength": 65,
+        "r": "0x5d24ce1a9c64fb1d3afb88a19f3964f6cfa906e8406c8a9f2755ebfc8b6c0655",
+        "s": "0x0e430ba51e512245e031c5f5eef477f78aaadc95ca2ed983aa9aee871085ff0f",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0x3CfC62676B06d45394A72c3aC61856a4B2127EB2"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "A well-formed, canonical, correctly-recovering signature -- just from the wrong key. Recovers exactly to the non-operator wallet (0x3CfC62676B06d45394A72c3aC61856a4B2127EB2), which is not the authoritative operator."
+    },
+    {
+      "name": "eip191-personal-sign-over-same-digest",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0xb63aa68368e3c98b1f6d6aebf686e40abfdd00978ad91551ad82cf89695eaee2737c01232baf0f6bb4c233a7184b7bf1f04f601a88ad96840d2530d190f3fa681c",
+        "byteLength": 65,
+        "r": "0xb63aa68368e3c98b1f6d6aebf686e40abfdd00978ad91551ad82cf89695eaee2",
+        "s": "0x737c01232baf0f6bb4c233a7184b7bf1f04f601a88ad96840d2530d190f3fa68",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9ec58e30b62f9d071ff462a9ca3a657d5f2167b8",
+      "result": {
+        "accepted": false,
+        "reason": "signer_mismatch",
+        "recovered": "0x384F7a50262a034E357eC582fB2A2b2D5e268D06"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "signer_mismatch"
+      },
+      "note": "Same operator key, same 32-byte digest, but signed as EIP-191 personal_sign (\"\\x19Ethereum Signed Message:\\n32\" || digest) instead of EIP-712. The verifier only ever recovers against the raw digest (never re-wraps with the EIP-191 prefix), so this signature recovers to a different, unrelated address. No EIP-712/EIP-191 downgrade path exists."
+    },
+    {
+      "name": "operatorPrincipalId-checksummed-case",
+      "domain": {
+        "name": "PCC FinalMilestonePackage",
+        "version": "2",
+        "chainId": "8453",
+        "verifyingContract": "0x00000000000000000000000000000000000e5c0f"
+      },
+      "message": {
+        "chainId": "8453",
+        "escrow": "0x00000000000000000000000000000000000e5c0f",
+        "settlementUnitId": "0x4453a3d232c24342539bc5ae06089f1cf7ccf93f737cffd67cf0a6ea76904ef1",
+        "jobIdHash": "0xbd3e925d85926d56eeb490485bfc63b88b28ddfb844807226da638cb46e6e5f0",
+        "milestoneIndex": "3",
+        "stepId": "0xd84e1f1dce698b3ddaa7e120bb89a540f9bcdd632420311802ac242b3d1d0e67",
+        "compositionRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "acceptedEnvelopeHash": "0x6c9d648202876fc97ccd737339de87151dc0863c5628f72ca78b134571c6634b",
+        "packageBodyHash": "0x21cdcf9056f2478d880827ebaf99c5dc022bdf362af3be795a6d92a61f54f70d"
+      },
+      "digest": "0x8dabd87c3bb09f5ba0bcda7af9b6518f88e0901a3e69990c4bf91e0fd205dbcc",
+      "signature": {
+        "full": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c1c",
+        "byteLength": 65,
+        "r": "0x41bd5631a61cd0d7e231f997cc1492888a71ccdc5820be9a45d8734278f590cc",
+        "s": "0x390ff032f6ef75babc20cf4c4df797d628ab8697c90df59d9fafe353814f4b7c",
+        "v": 28
+      },
+      "claimedOperatorPrincipalId": "eip155:8453:0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8",
+      "result": {
+        "accepted": false,
+        "reason": "operatorPrincipalId_not_lowercase",
+        "recovered": "0x9EC58E30B62F9d071fF462a9ca3a657D5f2167B8"
+      },
+      "expected": {
+        "accepted": false,
+        "reason": "operatorPrincipalId_not_lowercase"
+      },
+      "note": "The EIP-712 signature is fully valid and recovers the operator; only the operatorPrincipalId string is wrong (EIP-55 checksummed/mixed-case address instead of all-lowercase). Compared byte-exact per the contract's pin #2, not case-insensitively; the same regex (^eip155:[0-9]+:0x[0-9a-f]{40}$) also rejects a fully-uppercase address."
+    }
+  ],
+  "verification": {
+    "rules": [
+      "signature must be exactly 65 bytes (r || s || v); any other length (including the 64-byte EIP-2098 compact form) is refused",
+      "0 < r < secp256k1n; r == 0 is refused outright, never treated as a zero-address recovery",
+      "0 < s <= secp256k1n/2 (low-s/canonical only); s == 0 is refused outright; s > n/2 is refused as high-s even though (r, n-s, v flipped) recovers the identical address",
+      "v must be exactly 27 or 28; 0/1 (raw recovery id) and any other value are refused even where the underlying math would otherwise recover -- whichever of {0,1} shares yParity with the actual accepted signature's v would recover the operator if not gated (which one that is depends on the signature, not fixed in advance; see the v-raw-recid-* vectors, which compute and assert this at generation time rather than assuming it)",
+      "the recovered address must be non-zero and equal the authoritative operator (the escrow clone's operator(), never the funded policy's operatorSettlementAddress -- out of scope for these byte-level vectors, see the contract doc)",
+      "producer.operatorPrincipalId must equal eip155:<decimal chainId>:<lowercase address>, compared as a byte-exact string (not case-insensitively)",
+      "the D1 entry's signer label must equal the recovered address"
+    ],
+    "constants": {
+      "secp256k1n": "0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141",
+      "secp256k1n_div2": "0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0",
+      "secp256k1n_div2_matches_house_constant": true
+    }
+  }
+}

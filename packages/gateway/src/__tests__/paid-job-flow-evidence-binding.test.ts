@@ -82,7 +82,32 @@ async function buildApp(): Promise<FastifyInstance> {
 
 const toHex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
+/**
+ * N98 (#498): a discovery quote is the kernel's REGISTERED capability price, never a template hint. So each
+ * kernel these tests submit to carries exactly one USDC-priced liquid-handler capability, registered once.
+ * No test here asserts an amount; the price only has to be a valid registered one.
+ */
+function ensurePricedLiquidHandler(kernelId: string): void {
+  const capabilities = getRepos().capabilities;
+  if (capabilities.findByKernel(kernelId).some((c: { type: string }) => c.type === "liquid-handler")) return;
+  capabilities.insert({
+    id: `cap-liquid-handler-${kernelId}`,
+    kernelId,
+    type: "liquid-handler",
+    name: "liquid-handler test capability",
+    description: "test",
+    materials: [],
+    tolerances: {},
+    envelope: { x: 1, y: 1, z: 1, unit: "mm" as const },
+    assuranceTiers: [0, 1, 2, 3],
+    pricing: { currency: "USDC", baseCost: "10.00", minimum: "0.01" } as never,
+    availability: {},
+    location: { lat: 40.7, lng: -74 },
+  } as never);
+}
+
 async function createJob(app: FastifyInstance, kernelId: string, userAgentId: string) {
+  ensurePricedLiquidHandler(kernelId);
   const res = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",

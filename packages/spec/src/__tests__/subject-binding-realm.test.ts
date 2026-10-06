@@ -78,6 +78,9 @@ beforeAll(async () => {
     ["U3/N3 evidence at the legacy subject (E11 F1)", { ...M3, subject: subjectA }],
     ["U3/N3 evidence for unit U4/N4", { ...M3, subject: { ...subjectA, settlementUnitId: U4, challengeNonce: N4 } }],
     ["U3/N3 evidence for its own unit", { ...M3, subject: { ...subjectA, settlementUnitId: U3, challengeNonce: N3 } }],
+    // #438's step 10: the events are at 2026-09-24T10:00:00Z (1790244000) .. +5 s.
+    ["a window that covers the events", { ...A, subject: { ...subjectA, eventTimeWindow: { notBefore: 1790244000, notAfter: 1790244005 } } }],
+    ["a window that ends before them", { ...A, subject: { ...subjectA, eventTimeWindow: { notBefore: 1790200000, notAfter: 1790240000 } } }],
   ];
   BASELINE = [];
   for (const [, input] of CASES) BASELINE.push(await verifyEvidenceSubjectBinding(input));
@@ -97,6 +100,8 @@ it("the baseline is what LO-EV-9 says", () => {
     "unit-not-in-subject@0",
     "unit-mismatch@0",
     "ok",
+    "ok",
+    "event-time-outside-window@0",
   ]);
 });
 
@@ -133,6 +138,12 @@ const PATCHES: Array<[string, object, PropertyKey, unknown]> = [
   ["RegExp.prototype.test", RegExp.prototype, "test", () => true],
   ["RegExp.prototype.exec", RegExp.prototype, "exec", () => null],
   ["Number.isFinite", Number, "isFinite", () => false],
+  ["Number.isSafeInteger", Number, "isSafeInteger", () => true],
+  ["Number.isInteger", Number, "isInteger", () => true],
+  ["Date.UTC", Date, "UTC", () => 0],
+  ["Date.prototype.getUTCFullYear", Date.prototype, "getUTCFullYear", () => 1970],
+  ["Math.floor", Math, "floor", () => 0],
+  ["Number", globalThis, "Number", () => 0],
   ["Promise.prototype.then (forges ok)", Promise.prototype, "then", function (onFulfilled: (v: unknown) => unknown) { return onFulfilled(forgedOk); }],
   ["Promise.prototype.constructor", Promise.prototype, "constructor", function () {}],
   ["Object.prototype.then (turns a refusal into ok)", Object.prototype, "then", function (resolve: (v: unknown) => void) { resolve(forgedOk); }],
@@ -302,6 +313,27 @@ describe("source scan: subject-binding.ts calls only what was captured at load",
         if (atLoad(line)) return;
         for (const [pattern, what] of AMBIENT) if (pattern.test(line)) found.push(`subject-binding.ts:${n + 1} ${what}: ${line.trim()}`);
       });
+    expect(found).toEqual([]);
+  });
+
+  it("the time path in delegation-rules.ts (which the binding leg calls) has no ambient method, RegExp or Date either", () => {
+    const source = readFileSync(fileURLToPath(new URL("../evidence/delegation-rules.ts", import.meta.url)), "utf8");
+    const pieces = [
+      [source.indexOf("function digitsAt("), source.indexOf("export type DelegationScopeRuleCode")],
+      [source.indexOf("function ownData("), source.indexOf("/**", source.indexOf("function ownData("))],
+      [source.indexOf("export function parseEvidenceTimeBound("), source.length],
+    ];
+    const found: string[] = [];
+    for (const [from, to] of pieces) {
+      expect(from).toBeGreaterThan(0);
+      codeOnly(source.slice(from, to))
+        .split("\n")
+        .forEach((line, n) => {
+          for (const [pattern, what] of [...AMBIENT, [/\bDate\b/, "Date"] as [RegExp, string]]) {
+            if (pattern.test(line)) found.push(`delegation-rules.ts (from ${from}) +${n} ${what}: ${line.trim()}`);
+          }
+        });
+    }
     expect(found).toEqual([]);
   });
 });

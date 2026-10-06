@@ -39,6 +39,7 @@ export * from "./subject-binding.js";
 // evidenceLevelsOfEvents is the per-event level (bundle index, event index,
 // level); evidenceLevelOfBundles is the maximum over it.
 export * from "./evidence-level.js";
+export * from "./delegation-rules.js";
 export * from "./eligibility.js";
 export * from "./measurement-profile.js";
 // Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),

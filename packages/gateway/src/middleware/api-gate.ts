@@ -6,6 +6,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
@@ -157,6 +158,9 @@ function isPublicRoute(url: string, method?: string): boolean {
 
 async function apiGateImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // A target the router would route differently is never judged (N105; the server-level guard
+    // refuses it first, and this keeps apiGate closed even without that guard).
+    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
 

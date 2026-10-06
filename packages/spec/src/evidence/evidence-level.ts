@@ -113,31 +113,63 @@
  * Every member of EVIDENCE_EVENT_TYPES is ruled on below, including the ones
  * that prove no outcome level, so a new event type cannot join the vocabulary
  * without someone deciding its level (a test enforces the partition).
+ *
+ * 8. Nothing that runs after this module loads can change a level, a verdict or
+ *    a contradiction it returns (steward #5186, evidence #6440; the realm-
+ *    mutation class of astra packs 162-171). It calls only intrinsics captured
+ *    at load (util/primordials.ts), plain index loops and operators: never a
+ *    method looked up on a prototype or a global at the time of the call, never
+ *    the iterator protocol, spread, `in` or a RegExp. Its exported lists are
+ *    frozen where they are defined, and its sets and the pinned-verdict table are
+ *    frozen null-prototype records built from them at load. Rule 7's reads stay
+ *    one read each, but of OWN properties only: an event's type, source and
+ *    payload, source.deviceId and source.simulated, a bundle's events and
+ *    trustDomain, payload.mock, the context's executorTrustDomains and every
+ *    list element. A value or getter written on Object.prototype or
+ *    Array.prototype is never taken for the input's (an own accessor still runs
+ *    once), and a primitive source or payload is read as having no fields, never
+ *    boxed. The boundary: a realm whose intrinsics were replaced before
+ *    @pcc/spec loaded is out of scope, since no in-process check can tell.
  */
 
 import type { EvidenceEvent, EvidenceEventType } from "../types/evidence.js";
 import { isFabricated } from "./is-fabricated.js";
+import {
+  append,
+  ArrayIsArray,
+  charCodeAt,
+  hasOwn,
+  inSet,
+  NumberIsInteger,
+  ObjectCreate,
+  ObjectFreeze,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectGetPrototypeOf,
+  ObjectPrototype,
+  ReflectOwnKeys,
+  stringSet,
+} from "../util/primordials.js";
 
-export const EVIDENCE_LEVELS = ["submitted", "device_reported", "inspected_output"] as const;
+export const EVIDENCE_LEVELS = ObjectFreeze(["submitted", "device_reported", "inspected_output"] as const);
 
 export type EvidenceLevel = (typeof EVIDENCE_LEVELS)[number];
 
 /** The device took the work; its outcome is not observed. */
-export const SUBMITTED_EVENT_TYPES = [
+export const SUBMITTED_EVENT_TYPES = ObjectFreeze([
   "gcode_received",
   "gcode_loaded",
   "method_loaded",
   "execution_progress",
   "courier_pickup_confirmed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /** The device that did the work reports it finished. */
-export const DEVICE_REPORTED_EVENT_TYPES = [
+export const DEVICE_REPORTED_EVENT_TYPES = ObjectFreeze([
   "execution_completed",
   "digital_task_completed",
   "batch_session_completed",
   "courier_delivery_confirmed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * An observation or measurement of the output. It proves a level only when its
@@ -147,12 +179,12 @@ export const DEVICE_REPORTED_EVENT_TYPES = [
  * reporting, and so is an observation whose independence cannot be shown (no
  * assigned executor, an unknown executor, no trust domain): all device_reported.
  */
-export const INSPECTION_EVENT_TYPES = [
+export const INSPECTION_EVENT_TYPES = ObjectFreeze([
   "cv_inspection_result",
   "photo_comparison_result",
   "instrument_result",
   "batch_sample_result",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * Event types that prove no outcome level on their own: input commitments,
@@ -165,7 +197,7 @@ export const INSPECTION_EVENT_TYPES = [
  * The custody, capture-protocol and touchstone events are here until a CSD
  * needs one of them as outcome evidence and composition rules on its level.
  */
-export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
+export const NO_OUTCOME_LEVEL_EVENT_TYPES = ObjectFreeze([
   "gcode_hash_verified",
   "execution_started",
   "execution_failed",
@@ -209,7 +241,7 @@ export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
   "capture_liveness_result",
   "capture_multi_sensor_fusion",
   "capture_anchor_committed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * Event types that show a party is executing the job. A bundle that holds any
@@ -231,7 +263,7 @@ export const NO_OUTCOME_LEVEL_EVENT_TYPES = [
  * (`NON_EXECUTOR_EVENT_TYPES`). Every vocabulary member is in exactly one of
  * the two lists, and a test fails if a new type is not ruled on.
  */
-export const EXECUTION_EVENT_TYPES = [
+export const EXECUTION_EVENT_TYPES = ObjectFreeze([
   "gcode_received",
   "gcode_hash_verified",
   "gcode_loaded",
@@ -256,7 +288,7 @@ export const EXECUTION_EVENT_TYPES = [
   "custody_handoff_initiated",
   "custody_handoff_confirmed",
   "photo_captured",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
 /**
  * Event types that do not identify an executing party: inspections, and the
@@ -278,7 +310,7 @@ export const EXECUTION_EVENT_TYPES = [
  *     photo_anti_spoof_check, touchstone_*, capture_*). A new producer of any of
  *     them must re-check this ruling.
  */
-export const NON_EXECUTOR_EVENT_TYPES = [
+export const NON_EXECUTOR_EVENT_TYPES = ObjectFreeze([
   "cv_inspection_result",
   "photo_comparison_result",
   "instrument_result",
@@ -311,18 +343,28 @@ export const NON_EXECUTOR_EVENT_TYPES = [
   "capture_liveness_result",
   "capture_multi_sensor_fusion",
   "capture_anchor_committed",
-] as const satisfies readonly EvidenceEventType[];
+] as const satisfies readonly EvidenceEventType[]);
 
-const SUBMITTED = new Set<string>(SUBMITTED_EVENT_TYPES);
-const DEVICE_REPORTED = new Set<string>(DEVICE_REPORTED_EVENT_TYPES);
-const INSPECTION = new Set<string>(INSPECTION_EVENT_TYPES);
+/** The members of three lists, in order, as one new list. */
+function unionOf(a: readonly string[], b: readonly string[], c: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < a.length; i += 1) append(out, a[i]!);
+  for (let i = 0; i < b.length; i += 1) append(out, b[i]!);
+  for (let i = 0; i < c.length; i += 1) append(out, c[i]!);
+  return out;
+}
+
+const SUBMITTED = stringSet(SUBMITTED_EVENT_TYPES);
+const DEVICE_REPORTED = stringSet(DEVICE_REPORTED_EVENT_TYPES);
+const INSPECTION = stringSet(INSPECTION_EVENT_TYPES);
 // The union makes "took or finished the work identifies an executor" hold even if
 // a list above is edited carelessly; a test also keeps EXECUTION_EVENT_TYPES complete.
-const EXECUTION = new Set<string>([...EXECUTION_EVENT_TYPES, ...SUBMITTED_EVENT_TYPES, ...DEVICE_REPORTED_EVENT_TYPES]);
+const EXECUTION = stringSet(unionOf(EXECUTION_EVENT_TYPES, SUBMITTED_EVENT_TYPES, DEVICE_REPORTED_EVENT_TYPES));
 
-/** Position in EVIDENCE_LEVELS; higher is stronger. */
+/** Position in EVIDENCE_LEVELS; higher is stronger. -1 for anything else, as indexOf answered. */
 export function evidenceLevelRank(level: EvidenceLevel): number {
-  return EVIDENCE_LEVELS.indexOf(level);
+  for (let i = 0; i < EVIDENCE_LEVELS.length; i += 1) if (EVIDENCE_LEVELS[i] === level) return i;
+  return -1;
 }
 
 /** True when `reached` is at least as strong as `required`. Null meets nothing. */
@@ -398,16 +440,20 @@ function isAsciiSpace(code: number): boolean {
 function asciiFold(text: string, maxLength: number): string | null {
   let start = 0;
   let end = text.length;
-  while (start < end && isAsciiSpace(text.charCodeAt(start))) start += 1;
-  while (end > start && isAsciiSpace(text.charCodeAt(end - 1))) end -= 1;
+  while (start < end && isAsciiSpace(charCodeAt(text, start))) start += 1;
+  while (end > start && isAsciiSpace(charCodeAt(text, end - 1))) end -= 1;
   if (end - start > maxLength) return null;
   let folded = "";
   for (let i = start; i < end; i += 1) {
-    const code = text.charCodeAt(i);
-    folded += code >= 0x41 && code <= 0x5a ? String.fromCharCode(code + 0x20) : text.charAt(i);
+    const code = charCodeAt(text, i);
+    // A string's own index reads its code unit; no String method is looked up.
+    folded += code >= 0x41 && code <= 0x5a ? ASCII_LOWERCASE[code - 0x41]! : text[i]!;
   }
   return folded;
 }
+
+/** a-z, indexed by an uppercase letter's offset from "A". */
+const ASCII_LOWERCASE = "abcdefghijklmnopqrstuvwxyz";
 
 function isGatewayStamp(deviceId: string): boolean {
   return asciiFold(deviceId, GATEWAY_STAMPED_DEVICE_ID.length) === GATEWAY_STAMPED_DEVICE_ID;
@@ -461,11 +507,21 @@ function readPassFailVerdict(value: unknown): "pass" | "fail" | "malformed" {
  * produces or reads it, so there is no verdict field to pin. Its verdict is
  * `none` (or `malformed` when the payload carries a verdict-looking key).
  */
-const PINNED_VERDICTS: ReadonlyMap<string, PinnedVerdict> = new Map<string, PinnedVerdict>([
-  ["instrument_result", { field: "pass", read: readBooleanVerdict }],
-  ["cv_inspection_result", { field: "passed", read: readBooleanVerdict }],
-  ["batch_sample_result", { field: "status", read: readPassFailVerdict }],
-]);
+const PINNED_VERDICTS: Readonly<Record<string, PinnedVerdict>> = pinnedVerdicts();
+
+/** The table above, as a frozen null-prototype record of frozen entries. */
+function pinnedVerdicts(): Readonly<Record<string, PinnedVerdict>> {
+  const table = ObjectCreate(null) as Record<string, PinnedVerdict>;
+  table.instrument_result = ObjectFreeze({ field: "pass", read: readBooleanVerdict });
+  table.cv_inspection_result = ObjectFreeze({ field: "passed", read: readBooleanVerdict });
+  table.batch_sample_result = ObjectFreeze({ field: "status", read: readPassFailVerdict });
+  return ObjectFreeze(table);
+}
+
+/** The pinned verdict of an inspection type, if it has one. */
+function pinnedVerdictOf(type: string): PinnedVerdict | undefined {
+  return hasOwn(PINNED_VERDICTS, type) ? PINNED_VERDICTS[type] : undefined;
+}
 
 /**
  * Names that look like a verdict. A payload key is matched against them (and
@@ -475,19 +531,29 @@ const PINNED_VERDICTS: ReadonlyMap<string, PinnedVerdict> = new Map<string, Pinn
  * still carries one of these, it is claiming something this module cannot read,
  * so the verdict is `malformed`.
  */
-const VERDICT_LOOKING_KEYS = ["pass", "passed", "status", "result", "verdict", "ok", "success"] as const;
-const VERDICT_LOOKING = new Set<string>(VERDICT_LOOKING_KEYS);
+const VERDICT_LOOKING_KEYS = ObjectFreeze(["pass", "passed", "status", "result", "verdict", "ok", "success"] as const);
+const VERDICT_LOOKING = stringSet(VERDICT_LOOKING_KEYS);
 
 /** No folded key longer than this can be a verdict-looking name or a pinned field. */
-const LONGEST_VERDICT_NAME = Math.max(
-  ...VERDICT_LOOKING_KEYS.map((name) => name.length),
-  ...[...PINNED_VERDICTS.values()].map((pinned) => pinned.field.length),
-);
+const LONGEST_VERDICT_NAME = longestVerdictName();
+
+function longestVerdictName(): number {
+  let longest = 0;
+  for (let i = 0; i < VERDICT_LOOKING_KEYS.length; i += 1) {
+    if (VERDICT_LOOKING_KEYS[i]!.length > longest) longest = VERDICT_LOOKING_KEYS[i]!.length;
+  }
+  const types = ReflectOwnKeys(PINNED_VERDICTS);
+  for (let i = 0; i < types.length; i += 1) {
+    const field = PINNED_VERDICTS[types[i] as string]!.field;
+    if (field.length > longest) longest = field.length;
+  }
+  return longest;
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  if (typeof value !== "object" || value === null || ArrayIsArray(value)) return false;
+  const prototype: unknown = ObjectGetPrototypeOf(value);
+  return prototype === ObjectPrototype || prototype === null;
 }
 
 /**
@@ -509,15 +575,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
   if (!isPlainObject(payload)) return "malformed";
-  const pinned = PINNED_VERDICTS.get(type);
+  const pinned = pinnedVerdictOf(type);
   let exactPinned = false;
   let pinnedSpelling = false;
   let verdictLooking = false;
   let otherVerdict = false;
-  for (const key of Object.getOwnPropertyNames(payload)) {
+  // Its own string keys, enumerable or not (what Object.getOwnPropertyNames listed).
+  const keys = ReflectOwnKeys(payload);
+  for (let k = 0; k < keys.length; k += 1) {
+    const key = keys[k];
+    if (typeof key !== "string") continue;
     const folded = asciiFold(key, LONGEST_VERDICT_NAME);
     if (folded === null) continue;
-    if (VERDICT_LOOKING.has(folded)) {
+    if (inSet(VERDICT_LOOKING, folded)) {
       verdictLooking = true;
       if (pinned === undefined || folded !== pinned.field) otherVerdict = true;
     }
@@ -531,9 +601,11 @@ function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
     // A second verdict-looking key is a conflicting claim: a reader of that key
     // (types/dpp.ts reads `pass` for cv) would answer differently. Fail closed.
     if (otherVerdict) return "malformed";
-    const descriptor = Object.getOwnPropertyDescriptor(payload, pinned.field);
-    if (descriptor === undefined || !("value" in descriptor)) return "malformed";
-    return pinned.read(descriptor.value);
+    const descriptor = ObjectGetOwnPropertyDescriptor(payload, pinned.field);
+    // An own "value" only: a value written on Object.prototype never makes an accessor read as data.
+    if (descriptor === undefined || !hasOwn(descriptor, "value")) return "malformed";
+    const read = pinned.read;
+    return read(descriptor.value);
   }
   return verdictLooking ? "malformed" : "none";
 }
@@ -546,9 +618,9 @@ function verdictOfPayload(type: string, payload: unknown): InspectionVerdict {
  * It reads `event.type` and `event.payload` once each.
  */
 export function inspectionVerdict(event: EvidenceEvent): InspectionVerdict {
-  const type: unknown = event.type;
-  if (typeof type !== "string" || !INSPECTION.has(type)) return "none";
-  return verdictOfPayload(type, event.payload);
+  const type: unknown = own(event, "type");
+  if (typeof type !== "string" || !inSet(INSPECTION, type)) return "none";
+  return verdictOfPayload(type, own(event, "payload"));
 }
 
 /**
@@ -566,25 +638,59 @@ export function inspectionFailed(event: EvidenceEvent): boolean {
 // ---------------------------------------------------------------------------
 
 // Mirrors #399's OPERATOR_PRINCIPAL_ID_PATTERN (the pcc.evidence.principal-id.v1
-// operator form). Kept local so this branch does not depend on #399. The chain
-// id has no leading zero and is at least 1; the safe-integer bound is checked
-// separately. Lowercase hex only, so equal principals are equal strings.
-const OPERATOR_PRINCIPAL_ID_PATTERN = /^eip155:([1-9][0-9]*):0x[0-9a-f]{40}$/;
+// operator form), /^eip155:([1-9][0-9]*):0x[0-9a-f]{40}$/, as a code-unit
+// predicate (no RegExp, see rule 8; a test holds it equal to the pattern). Kept
+// local so this branch does not depend on #399. The chain id has no leading zero,
+// is at least 1 and is a safe integer. Lowercase hex only, so equal principals
+// are equal strings.
+const OPERATOR_PRINCIPAL_PREFIX = "eip155:";
+/** Number.MAX_SAFE_INTEGER as decimal digits: a longer chain id, or a 16-digit one above it, is not safe. */
+const MAX_SAFE_INTEGER_DIGITS = "9007199254740991";
 
 function isOperatorPrincipalId(value: unknown): value is string {
   if (typeof value !== "string") return false;
-  const match = OPERATOR_PRINCIPAL_ID_PATTERN.exec(value);
-  return match !== null && Number.isSafeInteger(Number(match[1]));
+  const length = value.length;
+  let i = 0;
+  for (; i < OPERATOR_PRINCIPAL_PREFIX.length; i += 1) {
+    if (i >= length || value[i] !== OPERATOR_PRINCIPAL_PREFIX[i]) return false;
+  }
+  // The chain id: [1-9][0-9]*, collected as it is read.
+  if (i >= length || !(value[i]! >= "1" && value[i]! <= "9")) return false;
+  let chainId = "";
+  while (i < length && value[i]! >= "0" && value[i]! <= "9") {
+    chainId += value[i]!;
+    i += 1;
+  }
+  if (i + 3 + 40 !== length || value[i] !== ":" || value[i + 1] !== "0" || value[i + 2] !== "x") return false;
+  for (i += 3; i < length; i += 1) {
+    const c = value[i]!;
+    if (!((c >= "0" && c <= "9") || (c >= "a" && c <= "f"))) return false;
+  }
+  // Number.isSafeInteger(Number(chainId)), without either: equal-length digit strings compare as numbers.
+  return (
+    chainId.length < MAX_SAFE_INTEGER_DIGITS.length ||
+    (chainId.length === MAX_SAFE_INTEGER_DIGITS.length && chainId <= MAX_SAFE_INTEGER_DIGITS)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !ArrayIsArray(value);
+}
+
+/**
+ * `object[key]` when `key` is the object's OWN property, read once (an own accessor
+ * runs once, rule 7); undefined when it is inherited or absent, so nothing written
+ * on Object.prototype or Array.prototype is taken for the input's (rule 8).
+ */
+function own(object: object, key: PropertyKey): unknown {
+  return hasOwn(object, key) ? (object as Record<PropertyKey, unknown>)[key] : undefined;
 }
 
 /** `list.length`, read once, which must be a non-negative safe integer. */
 function readLength(list: readonly unknown[], what: string): number {
   const length: unknown = list.length;
-  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+  // Number.isSafeInteger(length) && length >= 0, from the captured NumberIsInteger.
+  if (typeof length !== "number" || !NumberIsInteger(length) || length < 0 || length > 9007199254740991) {
     throw new EvidenceLevelInputError(`${what} has no valid length`);
   }
   return length;
@@ -615,25 +721,42 @@ interface PreparedBundle {
 }
 
 /**
+ * A null-prototype snapshot holding only `key`, read once as an OWN property of `value`, and
+ * undefined when `value` is not an object or `key` is inherited or absent. isFabricated reads
+ * these, so no inherited value or getter and no boxed primitive can answer (astra pack 267).
+ */
+function ownFieldView(value: unknown, key: string): Record<string, unknown> {
+  const view = ObjectCreate(null) as Record<string, unknown>;
+  view[key] = typeof value === "object" && value !== null ? own(value, key) : undefined;
+  return view;
+}
+
+/**
  * Read one event, once, into its frozen facts: `type`, `source` and `payload`
  * each once, then `source.deviceId`, `source.simulated`, `payload.mock` and the
  * payload's verdict material each once, all from those locals.
  */
 function readEventFacts(event: Record<string, unknown>): EventFacts {
-  const rawType: unknown = event.type;
-  const source: unknown = event.source;
-  const payload: unknown = event.payload;
+  const rawType: unknown = own(event, "type");
+  const source: unknown = own(event, "source");
+  const payload: unknown = own(event, "payload");
   const type = typeof rawType === "string" ? rawType : null;
-  // The canonical predicate, over a snapshot of the values read: it reads
-  // source.simulated and payload.mock once each, so this cannot drift from it.
-  const fabricated = isFabricated({ type, source, payload } as unknown as EvidenceEvent);
+  // The canonical predicate, over null-prototype snapshots of the two values it reads, each
+  // read once as an OWN property: source.simulated and payload.mock. An inherited mock getter
+  // could otherwise write source.deviceId before it is read, and a primitive source or
+  // payload would box and consult its prototypes (astra pack 267).
+  const fabricated = isFabricated({
+    type,
+    source: ownFieldView(source, "simulated"),
+    payload: ownFieldView(payload, "mock"),
+  } as unknown as EvidenceEvent);
   let deviceAttributed = false;
   if (typeof source === "object" && source !== null) {
-    const deviceId: unknown = (source as { deviceId?: unknown }).deviceId;
+    const deviceId: unknown = own(source, "deviceId");
     deviceAttributed = typeof deviceId === "string" && deviceId.length > 0 && !isGatewayStamp(deviceId);
   }
-  const verdict: InspectionVerdict = type !== null && INSPECTION.has(type) ? verdictOfPayload(type, payload) : "none";
-  return Object.freeze({ type, deviceAttributed, fabricated, verdict });
+  const verdict: InspectionVerdict = type !== null && inSet(INSPECTION, type) ? verdictOfPayload(type, payload) : "none";
+  return ObjectFreeze({ type, deviceAttributed, fabricated, verdict });
 }
 
 /**
@@ -645,34 +768,34 @@ function readEventFacts(event: Record<string, unknown>): EventFacts {
  * disagree: the one read decides.
  */
 function prepareBundles(bundles: unknown): readonly PreparedBundle[] {
-  if (!Array.isArray(bundles)) {
+  if (!ArrayIsArray(bundles)) {
     throw new EvidenceLevelInputError("bundles must be an array of AuthenticatedBundle");
   }
   const bundleCount = readLength(bundles, "bundles");
   const prepared: PreparedBundle[] = [];
   for (let i = 0; i < bundleCount; i += 1) {
-    const bundle: unknown = bundles[i];
+    const bundle: unknown = own(bundles, i);
     if (!isRecord(bundle)) {
       throw new EvidenceLevelInputError(`bundles[${i}] must be an object`);
     }
-    const events: unknown = bundle.events;
-    if (!Array.isArray(events)) {
+    const events: unknown = own(bundle, "events");
+    if (!ArrayIsArray(events)) {
       throw new EvidenceLevelInputError(`bundles[${i}].events must be an array`);
     }
-    const declared: unknown = bundle.trustDomain;
+    const declared: unknown = own(bundle, "trustDomain");
     const eventCount = readLength(events, `bundles[${i}].events`);
     const facts: EventFacts[] = [];
     let fabricated = false;
     let holdsExecutionEvent = false;
     for (let j = 0; j < eventCount; j += 1) {
-      const event: unknown = events[j];
+      const event: unknown = own(events, j);
       if (!isRecord(event)) {
         throw new EvidenceLevelInputError(`bundles[${i}].events[${j}] must be an object`);
       }
       const eventFacts = readEventFacts(event);
-      facts.push(eventFacts);
+      append(facts, eventFacts);
       if (eventFacts.fabricated) fabricated = true;
-      if (eventFacts.type !== null && EXECUTION.has(eventFacts.type)) holdsExecutionEvent = true;
+      if (eventFacts.type !== null && inSet(EXECUTION, eventFacts.type)) holdsExecutionEvent = true;
     }
     let trustDomain: string | null = null;
     if (declared !== undefined) {
@@ -683,9 +806,9 @@ function prepareBundles(bundles: unknown): readonly PreparedBundle[] {
       }
       trustDomain = declared;
     }
-    prepared.push(Object.freeze({ trustDomain, fabricated, holdsExecutionEvent, events: Object.freeze(facts) }));
+    append(prepared, ObjectFreeze({ trustDomain, fabricated, holdsExecutionEvent, events: ObjectFreeze(facts) }));
   }
-  return Object.freeze(prepared);
+  return ObjectFreeze(prepared);
 }
 
 function assignedExecutorDomains(context: unknown): readonly string[] {
@@ -693,21 +816,21 @@ function assignedExecutorDomains(context: unknown): readonly string[] {
   if (!isRecord(context)) {
     throw new EvidenceLevelInputError("context must be an object");
   }
-  const assigned: unknown = context.executorTrustDomains;
+  const assigned: unknown = own(context, "executorTrustDomains");
   if (assigned === undefined) return [];
-  if (!Array.isArray(assigned)) {
+  if (!ArrayIsArray(assigned)) {
     throw new EvidenceLevelInputError("context.executorTrustDomains must be an array of operator principal ids");
   }
   const count = readLength(assigned, "context.executorTrustDomains");
   const domains: string[] = [];
   for (let i = 0; i < count; i += 1) {
-    const domain: unknown = assigned[i];
+    const domain: unknown = own(assigned, i);
     if (!isOperatorPrincipalId(domain)) {
       throw new EvidenceLevelInputError(
         `context.executorTrustDomains[${i}] is not an operator principal id (eip155:<chainId>:0x<40 lowercase hex>)`,
       );
     }
-    domains.push(domain);
+    append(domains, domain);
   }
   return domains;
 }
@@ -720,9 +843,9 @@ function assignedExecutorDomains(context: unknown): readonly string[] {
 function eventLevel(facts: EventFacts, inspectorIndependent: boolean): EvidenceLevel | null {
   if (!facts.deviceAttributed || facts.type === null) return null;
   const type = facts.type;
-  if (SUBMITTED.has(type)) return "submitted";
-  if (DEVICE_REPORTED.has(type)) return "device_reported";
-  if (INSPECTION.has(type)) {
+  if (inSet(SUBMITTED, type)) return "submitted";
+  if (inSet(DEVICE_REPORTED, type)) return "device_reported";
+  if (inSet(INSPECTION, type)) {
     if (facts.verdict !== "pass" && facts.verdict !== "fail") return null;
     return inspectorIndependent ? "inspected_output" : "device_reported";
   }
@@ -764,12 +887,16 @@ export function evidenceLevelsOfEvents(
   const assigned = assignedExecutorDomains(context);
   const prepared = prepareBundles(bundles);
 
-  const executors = new Set<string>(assigned);
+  // The executor domains, as a null-prototype record: the assigned ones, then every
+  // bundle's that holds an execution event.
+  const executors = ObjectCreate(null) as Record<string, true>;
+  for (let i = 0; i < assigned.length; i += 1) executors[assigned[i]!] = true;
   let executorsUnknown = false;
-  for (const bundle of prepared) {
+  for (let b = 0; b < prepared.length; b += 1) {
+    const bundle = prepared[b]!;
     if (!bundle.holdsExecutionEvent) continue;
     if (bundle.trustDomain === null) executorsUnknown = true;
-    else executors.add(bundle.trustDomain);
+    else executors[bundle.trustDomain] = true;
   }
   const independenceProvable = assigned.length > 0 && !executorsUnknown;
 
@@ -777,13 +904,13 @@ export function evidenceLevelsOfEvents(
   for (let bundleIndex = 0; bundleIndex < prepared.length; bundleIndex += 1) {
     const bundle = prepared[bundleIndex]!;
     const inspectorIndependent =
-      independenceProvable && bundle.trustDomain !== null && !executors.has(bundle.trustDomain);
+      independenceProvable && bundle.trustDomain !== null && !hasOwn(executors, bundle.trustDomain);
     for (let eventIndex = 0; eventIndex < bundle.events.length; eventIndex += 1) {
       const level = bundle.fabricated ? null : eventLevel(bundle.events[eventIndex]!, inspectorIndependent);
-      levels.push(Object.freeze({ bundleIndex, eventIndex, level }));
+      append(levels, ObjectFreeze({ bundleIndex, eventIndex, level }));
     }
   }
-  return Object.freeze(levels);
+  return ObjectFreeze(levels);
 }
 
 /**
@@ -797,7 +924,9 @@ export function evidenceLevelOfBundles(
   context?: EvidenceLevelContext,
 ): EvidenceLevel | null {
   let best: EvidenceLevel | null = null;
-  for (const { level } of evidenceLevelsOfEvents(bundles, context)) {
+  const levels = evidenceLevelsOfEvents(bundles, context);
+  for (let i = 0; i < levels.length; i += 1) {
+    const level = levels[i]!.level;
     if (level !== null && (best === null || evidenceLevelRank(level) > evidenceLevelRank(best))) {
       best = level;
     }
@@ -841,17 +970,20 @@ export function deriveContradictions(bundles: readonly AuthenticatedBundle[]): C
   let completed = false;
   let failed = false;
   let failedInspection = false;
-  for (const bundle of prepareBundles(bundles)) {
+  const prepared = prepareBundles(bundles);
+  for (let b = 0; b < prepared.length; b += 1) {
+    const bundle = prepared[b]!;
     if (bundle.fabricated) continue;
-    for (const facts of bundle.events) {
-      if (facts.type !== null && DEVICE_REPORTED.has(facts.type)) completed = true;
+    for (let e = 0; e < bundle.events.length; e += 1) {
+      const facts = bundle.events[e]!;
+      if (facts.type !== null && inSet(DEVICE_REPORTED, facts.type)) completed = true;
       if (facts.type === "execution_failed") failed = true;
       if (facts.verdict === "fail" || facts.verdict === "malformed") failedInspection = true;
     }
   }
   if (!completed) return [];
   const kinds: ContradictionKind[] = [];
-  if (failed) kinds.push("completion-and-failure");
-  if (failedInspection) kinds.push("completion-and-failed-inspection");
+  if (failed) append(kinds, "completion-and-failure");
+  if (failedInspection) append(kinds, "completion-and-failed-inspection");
   return kinds;
 }
