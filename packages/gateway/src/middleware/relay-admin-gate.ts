@@ -31,7 +31,8 @@ function countAdminKeyFields(req: FastifyRequest): number {
 }
 
 /**
- * Root onRequest hook, registered first in createGateway. Unless PCC_RELAY_GATE is
+ * Root onRequest hook, registered second in createGateway, directly after the
+ * request-target guard (rejectNonCanonicalTarget). Unless PCC_RELAY_GATE is
  * exactly "open", a request whose matched route or raw path is in the relay family
  * (/api/relay, /api/ot2) is refused with the fixed 403 unless it carries exactly one
  * X-Admin-Key field, counted case-insensitively from the raw header list, equal to
