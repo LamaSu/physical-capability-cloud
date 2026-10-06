@@ -20,6 +20,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { getCallerScopes } from "../middleware/scope-checker.js";
 import { getKitRegistry, KitIntegrityError, KitRegistryError, type KitRegistry } from "../services/kit-registry.js";
+import { KitBindings } from "../services/kit-bindings.js";
+import { operatorIdentity } from "../services/operator-identity.js";
 
 /** The API-key scopes that may publish or fork a kit (as for template authoring). */
 export const KIT_PUBLISH_SCOPES: readonly string[] = ["*", "template_author", "operator", "admin"];
@@ -125,6 +127,38 @@ export async function kitRoutes(
     try {
       const result = await registry().publish(req.body, principal, { forkOf: req.params.digest });
       return reply.status(result.created ? 201 : 200).send(result);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  /** POST /api/kits/:digest/bindings — the current kernel owner binds a capability to a kit version. */
+  app.post<{ Params: { digest: string } }>("/api/kits/:digest/bindings", async (req, reply) => {
+    const identity = operatorIdentity(req);
+    if (!identity) return reply.status(401).send({ error: "authentication_required" });
+    try {
+      const result = await new KitBindings(registry()).bind(req.params.digest, req.body, identity);
+      return reply.status(result.created ? 201 : 200).send(result);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  /** POST /api/kits/:digest/bindings/:bindingId/withdraw — the current owner withdraws a binding once. */
+  app.post<{ Params: { digest: string; bindingId: string } }>("/api/kits/:digest/bindings/:bindingId/withdraw", async (req, reply) => {
+    const identity = operatorIdentity(req);
+    if (!identity) return reply.status(401).send({ error: "authentication_required" });
+    try {
+      return await new KitBindings(registry()).withdraw(req.params.digest, req.params.bindingId, req.body, identity);
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  /** GET /api/kits/:digest/operators — listPrice is the operator's recorded price on the bound capability; a job's quote is authoritative. */
+  app.get<{ Params: { digest: string } }>("/api/kits/:digest/operators", async (req, reply) => {
+    try {
+      return await new KitBindings(registry()).hosts(req.params.digest, req.query);
     } catch (err) {
       return sendError(reply, err);
     }
