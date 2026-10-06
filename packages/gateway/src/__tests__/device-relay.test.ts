@@ -8,6 +8,16 @@ import { operatorRoutes } from "../routes/operator.js";
 import { getSafetyGateway } from "@pcc/kernel";
 import { schema, sql, eq } from "@pcc/store";
 
+// N31 (#575): the operator e-stop and resume routes need operator authority; the admin key
+// stands in for it in this suite's stop and resume calls.
+const N31_ADMIN = "n31-device-relay-admin";
+const PREV_N31_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_N31_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N31_ADMIN;
+});
+
 const { shopKernels, kernelDevices, toolCallRelay, executionScopes, ot2CameraFrames, ot2ChatMessages } = schema;
 
 let app: FastifyInstance;
@@ -1796,8 +1806,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
   const mint = (payload: Record<string, unknown> = { createdBy: HOLDER, allowedTools: ["run_create"] }) =>
     app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: op, payload });
+  // N31 (#575): the stop and the resume now need operator authority (a resume is a decision:
+  // the admin or the proven operator wallet), so this suite sends the admin key.
   const stopRoute = (path: "emergency-stop" | "emergency-resume") =>
-    app.inject({ method: "POST", url: `/api/operator/${path}`, payload: { kernelId: KERNEL, reason: "r6 test" } });
+    app.inject({ method: "POST", url: `/api/operator/${path}`, headers: { "x-admin-key": N31_ADMIN }, payload: { kernelId: KERNEL, reason: "r6 test" } });
 
   const relayRows = () => getStore().db.select().from(toolCallRelay).all();
   const scopeRows = () => getStore().db.select().from(executionScopes).all();

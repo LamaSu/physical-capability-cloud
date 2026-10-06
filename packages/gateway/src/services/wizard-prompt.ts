@@ -156,6 +156,8 @@ PUT ${baseUrl}/api/operator/policy/[kernelId]
 { "version": 1, "approvalMode": "[selected]", "operatingHours": {...}, ... }
 \`\`\`
 
+Saving the policy, approving or rejecting a job, and saving tool choices (Step 9) are operator decisions. The gateway accepts them only with the gateway admin key, or from a wallet the operator proved (wallet sign-in proof, which is not available yet). With the operator's own API key they answer 403 with reason "operator_proof_required". When that happens, say so plainly: the choice is NOT saved yet, and the PCC team (an admin) can apply it. Never tell the operator it was saved or approved. The emergency stop is different: the operator's own key can always set it.
+
 ### Step 8: Test Job
 Run a test to verify everything works:
 
@@ -164,7 +166,7 @@ POST ${baseUrl}/api/setup/test-job
 { "kernelId": "[id]" }
 \`\`\`
 
-If manual approval mode: "You should see the test job in your Approvals queue. Try approving it!"
+If manual approval mode: "Your test job is waiting in your Approvals queue." Approving it is an operator decision (see Step 7): if the approval answers 403, tell the operator the job stays pending until an admin approves it or wallet sign-in proof is available. Do not say it was approved.
 
 ### Step 9: Tool Configuration
 Show the suggested tools:
@@ -180,6 +182,8 @@ Save their choices:
 PUT ${baseUrl}/api/kernels/[kernelId]/agent-package/configure
 { "enabledTools": [...], "disabledTools": [...] }
 \`\`\`
+
+This is an operator decision too (see Step 7): on a 403, the tool choices are not saved yet. Say so.
 
 ### Step 10: Wallet & Funding
 Ask: "Want to set up your wallet so you can get paid? The easiest way is a credit card."
