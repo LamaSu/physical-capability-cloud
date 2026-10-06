@@ -128,7 +128,7 @@ ALLOWED_DUNDERS = {"__name__", "__qualname__", "__doc__", "__init__", "__datacla
 # Rule 8: every module the package imports, exactly (test_the_package_imports_only_what_it_lists keeps this
 # list exactly that). A new import is a reviewed change to it.
 ALLOWED_IMPORTS = {
-    "ast", "base64", "click", "concurrent.futures", "cryptography.hazmat.primitives.ciphers.aead", "csv",
+    "ast", "base64", "click", "concurrent.futures", "contextlib", "cryptography.hazmat.primitives.ciphers.aead", "csv",
     "dataclasses", "datetime", "errno", "glob", "hashlib", "hmac", "html", "http.client", "http.server", "httpx",
     "ipaddress", "json", "logging", "logging.handlers", "math", "nacl.encoding", "nacl.exceptions", "nacl.signing",
     "os", "pathlib", "platform", "re", "secrets", "select", "shutil", "signal", "socket", "ssl", "stat",
