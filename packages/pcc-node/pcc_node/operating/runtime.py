@@ -469,9 +469,13 @@ def _now() -> str:
 
 
 def _claim_ok(claim: Any) -> bool:
-    return (all(isinstance(getattr(claim, name, None), str) and getattr(claim, name)
-                for name in ("job_id", "kernel_id", "claim_token"))
-            and callable(getattr(claim, "lease_alive", None)))
+    # Attributes by name only: the no-shell guard refuses a computed getattr (its rule 7).
+    try:
+        fields = (claim.job_id, claim.kernel_id, claim.claim_token)
+        lease_alive = claim.lease_alive
+    except AttributeError:
+        return False
+    return all(isinstance(f, str) and f for f in fields) and callable(lease_alive)
 
 
 class AdapterRuntime:

@@ -16,6 +16,7 @@
 import { describe, expect, it } from "vitest";
 import {
   decodeFunctionData,
+  encodeErrorResult,
   encodeFunctionResult,
   getAddress,
   keccak256,
@@ -138,6 +139,13 @@ interface StubOpts {
   /** Make every raw `request` call throw, simulating a node that cannot serve EIP-1898 pinned calls at all. */
   pinUnsupported?: boolean;
   getBlockFails?: boolean;
+  /**
+   * When supplied and it returns an `Error` for a given (functionName, decoded callArgs), the stub's raw
+   * `eth_call` throws THAT error instead of serving a value — simulating a real on-chain revert (a generic
+   * message, or one additionally carrying encoded revert `data`) for exactly that one call. Returning
+   * `undefined` serves the call normally.
+   */
+  rejectCall?: (functionName: string, callArgs: readonly unknown[]) => Error | undefined;
 }
 
 type Call = { method: string; blockHash?: Hex; requireCanonical?: boolean };
@@ -223,7 +231,10 @@ function makeStub(o: StubOpts): Stub {
       if (args.method !== "eth_call") throw new Error(`stub: unsupported method ${args.method}`);
       const tx = args.params[0] as { to: Address; data: Hex };
       const { functionName, args: callArgs } = decodeFunctionData({ abi: STUB_ABI, data: tx.data });
-      const result = serve(functionName, (callArgs ?? []) as readonly unknown[], o);
+      const decodedArgs = (callArgs ?? []) as readonly unknown[];
+      const rejection = o.rejectCall?.(functionName, decodedArgs);
+      if (rejection) throw rejection;
+      const result = serve(functionName, decodedArgs, o);
       return encodeFunctionResult({ abi: STUB_ABI, functionName, result: result as never });
     },
   };
@@ -309,6 +320,35 @@ describe("readUnitConfigs", () => {
     expect(r.ok).toBe(false);
     expect(failed(r)).toEqual(["prePolicyRoot"]);
     expect(r.units[0]!.config.compositionRoot).toBe(wrongRoot); // reported honestly, just flagged as unproven
+  });
+
+  it("unit 1's payoutAt rejecting AFTER unit 0 fully reconstructed fails closed: ok:false, 'units[1] read' failed, 'prePolicyRoot' failed, only unit 0 returned (astra #536 MEDIUM)", async () => {
+    const stub = makeStub({
+      ...base(),
+      rejectCall: (functionName, callArgs) =>
+        functionName === "payoutAt" && (callArgs[0] as Hex).toLowerCase() === compiled.unitIds[1]!.toLowerCase()
+          ? new Error("execution reverted: generic failure")
+          : undefined,
+    });
+    const r = await readUnitConfigs({ client: stub, escrow: compiled.escrow });
+    expect(r.ok).toBe(false);
+    expect(failed(r)).toEqual(["units[1] read", "prePolicyRoot"]);
+    expect(r.units).toEqual([{ unitId: compiled.unitIds[0], config: compiled.configs[0] }]);
+  });
+
+  it("names UnitNotFound in the failure detail when a per-unit read rejects with its encoded selector — read.ts's OWN local fragment, never the frozen escrow ABI alone (astra #536 LOW)", async () => {
+    const unitNotFoundData = encodeErrorResult({ abi: parseAbi(["error UnitNotFound()"]), errorName: "UnitNotFound" });
+    const stub = makeStub({
+      ...base(),
+      rejectCall: (functionName, callArgs) =>
+        functionName === "requiredTierOf" && (callArgs[0] as Hex).toLowerCase() === compiled.unitIds[0]!.toLowerCase()
+          ? Object.assign(new Error("execution reverted"), { data: unitNotFoundData })
+          : undefined,
+    });
+    const r = await readUnitConfigs({ client: stub, escrow: compiled.escrow });
+    expect(r.ok).toBe(false);
+    const detail = r.checks.find((c) => c.name === "units[0] read")?.detail;
+    expect(detail).toContain("UnitNotFound");
   });
 
   it("fails closed when the node cannot serve calls pinned by block hash (EIP-1898), and does not throw", async () => {

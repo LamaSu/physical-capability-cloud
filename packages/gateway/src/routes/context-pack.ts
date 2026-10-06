@@ -124,6 +124,8 @@ All endpoints are relative to the base URL above. Most return JSON.
 | GET | /api/operator/earnings | Not available yet (501): per-job payment state is at /api/jobs/:jobId/execution |
 | GET | /api/operator/certifications | Not available yet (501): no certification store |
 | GET | /api/operator/maintenance | Not available yet (501): nothing records maintenance events |
+| GET | /api/operator/work | Your work: job offers for your capability types, your kernels' jobs and approvals (OperatorWorkDTO: server-assigned phase, pay with its funding, actions with routes) |
+| GET | /api/operator/income | What the escrow records show for your kernels' jobs (OperatorIncomeDTO); totals are sums of rows; no payout history yet |
 | GET | /api/operator/approvals | Pending operator approvals |
 | POST | /api/operator/emergency-stop | Emergency stop a machine |
 | POST | /api/operator/emergency-resume | Resume after emergency stop |
