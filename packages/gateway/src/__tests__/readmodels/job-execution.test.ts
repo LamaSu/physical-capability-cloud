@@ -241,12 +241,13 @@ describe("settlement axis", () => {
     const ok = (payout: string) => ({ payout, unknownReason: null });
     const conflict = { payout: "unknown", unknownReason: "records_conflict" };
     expect(reconcilePayout(released, active)).toEqual(ok("reported_released"));
-    expect(reconcilePayout(settledReleased, active)).toEqual(ok("reported_released"));
+    // An escrow-only word in the milestone field is not a milestone status (review r1 of #515).
+    expect(reconcilePayout(settledReleased, active)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
     expect(reconcilePayout(released, completed)).toEqual(ok("reported_released"));
     expect(reconcilePayout(released, refundedE)).toEqual(conflict);
     expect(reconcilePayout(released, disputed)).toEqual(conflict);
     expect(reconcilePayout(refundedM, active)).toEqual(ok("refunded"));
-    expect(reconcilePayout(v("SETTLED_REFUNDED", "escrow_milestone"), active)).toEqual(ok("refunded"));
+    expect(reconcilePayout(v("SETTLED_REFUNDED", "escrow_milestone"), active)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
     expect(reconcilePayout(released, v("SETTLED_REFUNDED", "escrow_record"))).toEqual(conflict);
     expect(reconcilePayout(released, v("slashed", "escrow_record"))).toEqual(conflict);
     expect(reconcilePayout(released, v("expired", "escrow_record"))).toEqual(conflict);
@@ -298,9 +299,10 @@ describe("settlement axis", () => {
     expect(alone.settlement.payoutUnknownReason).toBeNull();
   });
 
-  it("a V-next word on the milestone record is read the same way: settled_released is reported_released", () => {
+  it("an escrow-only word on the milestone record decides nothing: settled_released is unknown (review r1 of #515)", () => {
     const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "SETTLED_RELEASED" })]) } });
-    expect(dto.settlement.payout).toBe("reported_released");
+    expect(dto.settlement.payout).toBe("unknown");
+    expect(dto.settlement.payoutUnknownReason).toBe("status_unrecognized");
   });
 
   it("NEGATIVE: a refund is refunded (or unknown), never paid", () => {
