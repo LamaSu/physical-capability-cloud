@@ -9,8 +9,9 @@
  * mode; live the moment its snapshot block is dropped.
  *
  * The properties:
- *  1. NO DRIFT: the page's one executable script IS the shipped pcc-ui.js, byte for byte, so the
- *     demo can never again carry an older transport than the kit it demonstrates.
+ *  1. INVENTORY AND NO DRIFT: exactly two identified JSON blocks and one classic inline script,
+ *     with no event handlers or javascript: URLs. That script IS the shipped pcc-ui.js, byte for
+ *     byte, so the demo can never again carry an older transport than the kit it demonstrates.
  *  2. AS SHIPPED: the page renders fully offline, in snapshot mode, with no request at all.
  *  3. SNAPSHOT DROPPED: with ?api= naming another origin and a #pcc_key fragment, every request
  *     goes to the fixed API origin, and nothing is persisted to localStorage['pcc.apiBase'].
@@ -37,6 +38,103 @@ const KEY = ["pcc", "test", "n140".repeat(8)].join("_");
 
 const page = new DOMParser().parseFromString(pageSrc, "text/html");
 const executable = [...page.querySelectorAll("script")].filter((s) => !s.hasAttribute("type") && !s.hasAttribute("src"));
+
+function pageInventoryProblems(parsedPage: Document): string[] {
+  const problems: string[] = [];
+  const dataBlocks = new Map([["pcc-manifest", 0], ["pcc-snapshot", 0]]);
+  let classicScripts = 0;
+
+  for (const script of parsedPage.querySelectorAll("script")) {
+    const label = script.id ? `script#${script.id}` : "script";
+    if (script.hasAttribute("src")) problems.push(`${label} has a src attribute`);
+    if (dataBlocks.has(script.id)) {
+      dataBlocks.set(script.id, dataBlocks.get(script.id)! + 1);
+      if (script.getAttribute("type") !== "application/json") {
+        problems.push(`${label} must have type="application/json"`);
+      }
+    } else if (script.hasAttribute("type")) {
+      problems.push(`${label} has unexpected type ${JSON.stringify(script.getAttribute("type"))}`);
+    } else if (!script.hasAttribute("src")) {
+      classicScripts++;
+    }
+  }
+  for (const [id, count] of dataBlocks) {
+    if (count !== 1) problems.push(`expected exactly one #${id} data block; found ${count}`);
+  }
+  if (classicScripts !== 1) problems.push(`expected exactly one classic inline script; found ${classicScripts}`);
+
+  for (const element of parsedPage.querySelectorAll("*")) {
+    const label = element.id ? `${element.localName}#${element.id}` : element.localName;
+    for (const attribute of element.attributes) {
+      if (attribute.name.toLowerCase().startsWith("on")) {
+        problems.push(`${label} has forbidden event-handler attribute ${attribute.name}`);
+      }
+      // URL parsing removes TAB/LF/CR throughout, then trims C0 controls and spaces.
+      const normalized = attribute.value.replace(/[\t\n\r]/g, "").replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+      if (/^javascript:/i.test(normalized)) {
+        problems.push(`${label} has a javascript: URL in ${attribute.name}`);
+      }
+    }
+  }
+  return problems;
+}
+
+function injectBeforeBodyEnd(injection: string): (source: string) => string {
+  return (source) => source.replace("</body>", `${injection}\n</body>`);
+}
+
+const inventoryMutations = [
+  {
+    name: "external script",
+    mutate: injectBeforeBodyEnd('<script src="https://attacker.example/x.js"></script>'),
+    problem: "script has a src attribute",
+  },
+  {
+    name: "module script",
+    mutate: injectBeforeBodyEnd('<script type="module">x()</script>'),
+    problem: 'script has unexpected type "module"',
+  },
+  {
+    name: "JavaScript-typed script",
+    mutate: injectBeforeBodyEnd('<script type="text/javascript">x()</script>'),
+    problem: 'script has unexpected type "text/javascript"',
+  },
+  {
+    name: "second classic script",
+    mutate: injectBeforeBodyEnd("<script>x()</script>"),
+    problem: "expected exactly one classic inline script; found 2",
+  },
+  {
+    name: "extra JSON block",
+    mutate: injectBeforeBodyEnd('<script type="application/json" id="other">{}</script>'),
+    problem: 'script#other has unexpected type "application/json"',
+  },
+  {
+    name: "missing snapshot block",
+    mutate: (source: string) => source.replace(/<script type="application\/json" id="pcc-snapshot">[\s\S]*?<\/script>/, ""),
+    problem: "expected exactly one #pcc-snapshot data block; found 0",
+  },
+  {
+    name: "onclick attribute",
+    mutate: injectBeforeBodyEnd('<div onclick="x()"></div>'),
+    problem: "div has forbidden event-handler attribute onclick",
+  },
+  {
+    name: "uppercase ONLOAD attribute on body",
+    mutate: (source: string) => source.replace("<body>", '<body ONLOAD="x()">'),
+    problem: "body has forbidden event-handler attribute onload",
+  },
+  {
+    name: "javascript URL",
+    mutate: injectBeforeBodyEnd('<a href="javascript:x()">link</a>'),
+    problem: "a has a javascript: URL in href",
+  },
+  {
+    name: "mixed-case javascript URL with a leading space and embedded tab",
+    mutate: injectBeforeBodyEnd('<a href=" JaVa\tScRiPt:x()">link</a>'),
+    problem: "a has a javascript: URL in href",
+  },
+];
 
 type Call = { url: string; auth: string | null };
 let calls: Call[] = [];
@@ -90,7 +188,7 @@ afterEach(() => {
 
 describe("N140: demo-snapshot.html inlines the shipped kit, never an older transport", () => {
   it("the page has exactly one executable script, and it is pcc-ui.js byte for byte", () => {
-    expect(executable).toHaveLength(1);
+    expect(pageInventoryProblems(page)).toEqual([]);
     // To re-bake: put ../pcc-ui.js, verbatim, between the page's executable <script> tags.
     expect(executable[0]!.textContent!.trim() === kitSrc.trim(), "demo-snapshot.html's inlined kit differs from pcc-ui.js").toBe(true);
   });
@@ -113,4 +211,11 @@ describe("N140: demo-snapshot.html inlines the shipped kit, never an older trans
     expect(localStorage.getItem("pcc.apiBase")).toBeNull();
     expect(location.hash).not.toContain(KEY);
   });
+
+  for (const { name, mutate, problem } of inventoryMutations) {
+    it(`inventory rejects ${name}: ${problem}`, () => {
+      const mutatedPage = new DOMParser().parseFromString(mutate(pageSrc), "text/html");
+      expect(pageInventoryProblems(mutatedPage)).toContain(problem);
+    });
+  }
 });
