@@ -160,6 +160,7 @@ import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-a
 import { commentaryRoutes } from "./routes/commentary.js";
 import { visualizerEvents } from "./routes/visualizer-events.js";
 import { apiGate } from "./middleware/api-gate.js";
+import { rejectNonCanonicalTarget } from "./middleware/canonical-request-target.js";
 import { tenantContext } from "./middleware/tenant-context.js";
 import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
@@ -288,6 +289,10 @@ export async function createGateway(port = 3200) {
     // Flush PostHog queue before exit
     await shutdownPostHog();
   });
+
+  // The request-target guard (N105) is the FIRST onRequest hook: before CORS, the rate limiter, apiGate,
+  // scopeChecker and every other decision, so the path they judge is the path the router routes.
+  app.addHook("onRequest", rejectNonCanonicalTarget);
 
   // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
   // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less

@@ -50,6 +50,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { getRepos } from "../db.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
@@ -313,6 +314,9 @@ function denyMatchedRule(
 
 async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // A target the router would route differently is never judged (N105): scope rules match the raw
+    // url, so it must equal the routed path. The server-level guard refuses it first; this is the backstop.
+    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
     if (!req.url.startsWith("/api/")) return;
 
     const rowsReady = ensureScopeCacheReady();
