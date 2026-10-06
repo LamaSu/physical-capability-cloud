@@ -2,18 +2,32 @@
  * Scope Checker middleware — API key scope validation against endpoint requirements.
  *
  * Attaches an `onRequest` hook that validates the caller's scopes after api-gate
- * has already set req.apiKeyId. Endpoint scope requirements come from the
- * endpointScopes table (cached 5 minutes) with hardcoded defaults as fallback.
+ * has already resolved the principal: either req.apiKeyId (an API key), or just
+ * req.userId with no req.apiKeyId (a SIWE wallet session, which proves identity
+ * but carries no scopes). Endpoint scope requirements come from TWO sources that
+ * both ALWAYS apply:
+ *
+ *   - DEFAULT_SCOPE_REQUIREMENTS, the hardcoded built-in rules. These are a
+ *     floor: nothing in the endpointScopes table can remove or weaken one.
+ *   - The endpointScopes table (cached 5 minutes) — rows ADD requirements on
+ *     top of the defaults; they never replace them.
+ *
+ * For a request, the most-specific matching default rule and the most-specific
+ * matching table-row rule are found independently (same matcher, same
+ * specificity ordering as before: fewer wildcards = more specific). The caller
+ * must satisfy EACH rule that matched — not just one of them.
  *
  * Behaviour:
- *   - Wildcard scope ("*") grants access to all endpoints.
+ *   - Requests without an API key are not checked by this layer (unchanged).
+ *   - Wildcard scope ("*") grants access to all endpoints. Unchanged.
  *   - MONEY-PATH routes (MONEY_PATH_PREFIXES) are DEFAULT-DENY for MUTATING
- *     methods (POST/PUT/PATCH/DELETE): if no requirement matches, access is
- *     REFUSED. A new money-moving route is therefore closed the moment it is
- *     added, rather than silently open until someone remembers a rule.
- *     Money-path READS stay open — the dashboard does GET /api/escrow and no GET
- *     requirement covers it; the exposure closed here is funds MOVEMENT.
- *   - All other routes remain open-by-default when no requirement matches
+ *     methods (POST/PUT/PATCH/DELETE): if NEITHER a default NOR a row rule
+ *     matches, access is REFUSED. A new money-moving route is therefore closed
+ *     the moment it is added, rather than silently open until someone
+ *     remembers a rule. Money-path READS stay open — the dashboard does GET
+ *     /api/escrow and no GET requirement covers it; the exposure closed here
+ *     is funds MOVEMENT.
+ *   - All other routes remain open-by-default when NEITHER layer matches
  *     (backwards compatibility — see the note below on why this is not yet global).
  *   - If a requirement exists and the caller lacks all required scopes → 403.
  *
@@ -102,35 +116,61 @@ interface ScopeRequirement {
   scopes: string[];
 }
 
+/**
+ * Rows loaded from the endpointScopes table. These ADD to
+ * DEFAULT_SCOPE_REQUIREMENTS — they never replace it. Empty until the DB has
+ * rows (or is not ready yet), in which case only the defaults apply.
+ */
 let scopeCache: ScopeRequirement[] = [];
-let lastScopeCacheRefresh = 0;
+/** When the governance rows were last loaded SUCCESSFULLY; 0 means never. A failed read never sets it. */
+let lastScopeCacheLoad = 0;
 const SCOPE_CACHE_TTL = 300_000; // 5 minutes
 
-function refreshScopeCache(): void {
+/**
+ * Refreshes `scopeCache` from the governance table.
+ *
+ * `scopeCache` holds ONLY the table's rows — never the hardcoded defaults.
+ * DEFAULT_SCOPE_REQUIREMENTS is consulted unconditionally in the request hook
+ * below, so a row can only ADD a requirement, never remove or weaken one.
+ * The previous version swapped the defaults out entirely the moment the table
+ * had any row — and the governance seed always writes some — which silently
+ * dropped every built-in rule (kernels, evidence, negotiate, jobs, build,
+ * admin, templates, audit, compliance) the moment that seed ran.
+ */
+function refreshScopeCache(): boolean {
   try {
     const rows = getRepos().governance.findAllEndpointScopes();
-    if (rows.length > 0) {
-      scopeCache = rows.map((r) => ({
-        method: r.method,
-        pattern: r.routePattern,
-        scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
-      }));
-    } else {
-      scopeCache = DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r }));
-    }
+    scopeCache = rows.map((r) => ({
+      method: r.method,
+      pattern: r.routePattern,
+      scopes: Array.isArray(r.requiredScopes) ? r.requiredScopes : [],
+    }));
+    lastScopeCacheLoad = Date.now();
+    return true;
   } catch {
-    // DB not ready — use defaults
-    if (scopeCache.length === 0) {
-      scopeCache = DEFAULT_SCOPE_REQUIREMENTS.map((r) => ({ ...r }));
-    }
+    // A failed read is never "fresh": the next request retries, and until a read succeeds the hook
+    // refuses scoped keys (it cannot know which table rows apply), instead of treating the routes those
+    // rows cover as unmatched. Neither an empty cache nor an old snapshot is served as current.
+    return false;
   }
-  lastScopeCacheRefresh = Date.now();
 }
 
-function ensureScopeCacheReady(): void {
-  if (Date.now() - lastScopeCacheRefresh > SCOPE_CACHE_TTL) {
-    refreshScopeCache();
-  }
+/** True when the governance rows are loaded and within the TTL (reloading them first if needed). */
+function ensureScopeCacheReady(): boolean {
+  if (lastScopeCacheLoad !== 0 && Date.now() - lastScopeCacheLoad <= SCOPE_CACHE_TTL) return true;
+  return refreshScopeCache();
+}
+
+/**
+ * Test-only: drop the cached rows so the next request re-reads them.
+ *
+ * The cache is module-level with a 5-minute TTL, so a suite that changes
+ * what the governance table returns would otherwise assert against rows
+ * loaded by an earlier test in the same file.
+ */
+export function __resetScopeCacheForTests(): void {
+  scopeCache = [];
+  lastScopeCacheLoad = 0;
 }
 
 // ── Route Matching ───────────────────────────────────────────────
@@ -173,6 +213,28 @@ function matchRoute(
   if (!methodMatches) return false;
 
   return patternToRegex(rulePattern).test(path);
+}
+
+/**
+ * Most-specific matching rule in `rules` for this request, or undefined.
+ * Specificity ranks by wildcard count — fewer wildcards = more specific —
+ * the same ordering the single merged list used before defaults and table
+ * rows were split into two lists checked independently (see the header).
+ */
+function firstMatch(
+  rules: ScopeRequirement[],
+  reqMethod: string,
+  reqUrl: string,
+): ScopeRequirement | undefined {
+  const sorted = [...rules].sort((a, b) => {
+    const wildA = (a.pattern.match(/\*/g) ?? []).length;
+    const wildB = (b.pattern.match(/\*/g) ?? []).length;
+    return wildA - wildB;
+  });
+  for (const rule of sorted) {
+    if (matchRoute(reqMethod, reqUrl, rule.method, rule.pattern)) return rule;
+  }
+  return undefined;
 }
 
 // ── Scope Extraction ─────────────────────────────────────────────
@@ -227,60 +289,86 @@ export function hasAdminScope(req: FastifyRequest): boolean {
 
 // ── Fastify Plugin ───────────────────────────────────────────────
 
+const DOCS_URL = "https://capability.network/whitepaper.md";
+
+/** Sends the 403 insufficient_scope refusal for a matched rule the caller fails. */
+function denyMatchedRule(
+  reply: FastifyReply,
+  required: string[],
+  callerScopes: string[],
+  hasApiKey: boolean,
+) {
+  const base = `This endpoint requires one of the following scopes: ${required.join(", ")}.`;
+  const message = hasApiKey
+    ? `${base} Your API key has: ${callerScopes.join(", ") || "none"}.`
+    : `${base} This route needs an API key — a wallet session alone carries no scopes.`;
+  return reply.status(403).send({
+    error: "insufficient_scope",
+    message,
+    required_scopes: required,
+    caller_scopes: callerScopes,
+    docs: DOCS_URL,
+  });
+}
+
 async function scopeCheckerImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     if (!req.url.startsWith("/api/")) return;
 
-    // Only check scopes for API key callers (api-gate handles unauthenticated reqs)
+    const rowsReady = ensureScopeCacheReady();
+
+    // Scopes live on API keys; a request without one is not checked here (unchanged).
     if (!req.apiKeyId) return;
-
-    ensureScopeCacheReady();
-
+    const hasApiKey = true;
     const callerScopes = getCallerScopes(req);
 
-    // Wildcard scope grants access to everything
+    // Wildcard scope grants access to everything. Unchanged.
     if (callerScopes.includes("*")) return;
 
-    // Admin routes always need the admin scope, whatever the scope table holds: an
-    // endpoint_scopes row can add a requirement to an admin route, never weaken this
-    // one, and when rows replace the default table there may be no admin rule at all
-    // (#490 rounds 1-2, gateway #4899). Every method, reads included.
+    // Admin routes always need the admin scope, whatever the scope table holds (#490): an
+    // endpoint_scopes row can add a requirement to an admin route, never weaken this one. Every
+    // method, reads included. It needs no table, so it runs before the governance-load check below.
     if (req.url.split("?")[0].startsWith("/api/admin/") && !callerScopes.includes("admin")) {
       return reply.status(403).send({
         error: "insufficient_scope",
         message: "Admin routes need the admin scope.",
         required_scopes: ["admin"],
         caller_scopes: callerScopes,
-        docs: "https://capability.network/whitepaper.md",
+        docs: DOCS_URL,
       });
     }
 
-    const requirements =
-      scopeCache.length > 0 ? scopeCache : DEFAULT_SCOPE_REQUIREMENTS;
-
-    // Find the most-specific matching requirement for this request.
-    // We rank by specificity: fewer wildcards = more specific = checked first.
-    const sorted = [...requirements].sort((a, b) => {
-      const wildA = (a.pattern.match(/\*/g) ?? []).length;
-      const wildB = (b.pattern.match(/\*/g) ?? []).length;
-      return wildA - wildB;
-    });
-
-    let matchedRequirement: ScopeRequirement | undefined;
-    for (const req_ of sorted) {
-      if (matchRoute(req.method, req.url, req_.method, req_.pattern)) {
-        matchedRequirement = req_;
-        break;
-      }
+    // Fail closed: without the governance rows the checker cannot know which requirements apply to a
+    // scoped key, so it refuses rather than judging against the defaults alone.
+    if (!rowsReady) {
+      return reply.status(503).send({
+        error: "scope_requirements_unavailable",
+        message: "Endpoint scope requirements could not be loaded. Try again shortly.",
+      });
     }
 
-    // No scope requirement matched.
+    // DEFAULT_SCOPE_REQUIREMENTS is consulted UNCONDITIONALLY, and a table
+    // row is matched separately against scopeCache — so a row can only ADD a
+    // requirement (via matchedRow below) and never remove or weaken the one
+    // in matchedDefault.
+    const matchedDefault = firstMatch(DEFAULT_SCOPE_REQUIREMENTS, req.method, req.url);
+    const matchedRow = firstMatch(scopeCache, req.method, req.url);
+
+    // The caller must satisfy EACH rule that matched — not just one of them.
+    for (const matched of [matchedDefault, matchedRow]) {
+      if (!matched) continue;
+      const hasScope = matched.scopes.some((s) => callerScopes.includes(s));
+      if (hasScope) continue;
+      return denyMatchedRule(reply, matched.scopes, callerScopes, hasApiKey);
+    }
+
+    // Neither a default nor a row rule matched.
     //   - Money path → DENY. An unlisted route under /api/escrow, /api/fiat-ramp
     //     or /api/settlement is an oversight, and defaulting it open is how funds
     //     movement ended up reachable by any authenticated key.
     //   - Everything else → allow, preserving existing behaviour (see the header
     //     note on why the global flip is a separate, sweep-gated change).
-    if (!matchedRequirement) {
+    if (!matchedDefault && !matchedRow) {
       const path = req.url.split("?")[0];
       if (!isMoneyPath(path) || !MUTATING_METHODS.has(req.method.toUpperCase())) return;
 
@@ -292,21 +380,12 @@ async function scopeCheckerImpl(app: FastifyInstance) {
           "explicit requirement for it.",
         required_scopes: ["operator", "admin"],
         caller_scopes: callerScopes,
-        docs: "https://capability.network/whitepaper.md",
+        docs: DOCS_URL,
       });
     }
 
-    // Check if caller has any of the required scopes
-    const hasScope = matchedRequirement.scopes.some((s) => callerScopes.includes(s));
-    if (hasScope) return;
-
-    return reply.status(403).send({
-      error: "insufficient_scope",
-      message: `This endpoint requires one of the following scopes: ${matchedRequirement.scopes.join(", ")}. Your API key has: ${callerScopes.join(", ") || "none"}.`,
-      required_scopes: matchedRequirement.scopes,
-      caller_scopes: callerScopes,
-      docs: "https://capability.network/whitepaper.md",
-    });
+    // At least one rule matched and the caller satisfied every one of them.
+    return;
   });
 }
 
