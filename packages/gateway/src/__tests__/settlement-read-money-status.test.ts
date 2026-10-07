@@ -17,13 +17,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import vm from "node:vm";
-import { classifySettlementRecord, classifySettlementRead } from "@pcc/spec";
+import { classifySettlementRecord, classifySettlementRead, chainPin } from "@pcc/spec";
 import { settlementReadRoutes, setSettlementUnitReader, type SettlementUnitReader } from "../routes/settlement-read.js";
 import { UnitState } from "../settlement/unit-state-mapper.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitSrc = readFileSync(path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js"), "utf8");
 const SNAP_HASH = "0x" + "cd".repeat(32);
+// R12: a well-formed escrow address, so the real bodies carry a valid pin (a placeholder such as "0xEsCrOw" is pending).
+const ESCROW = "0x" + "e5".repeat(20);
 const UNIT = "0x" + "ab".repeat(32);
 
 function kitClassifier(): (r: unknown) => [string, string | null, string] {
@@ -39,7 +41,7 @@ function reader(state: UnitState): SettlementUnitReader {
   // A consistent same-block read: terminal -> no claims left; allocated -> one claim outstanding.
   const remainingClaimCount = state >= UnitState.SETTLED_RELEASED ? 0n : state >= UnitState.RELEASE_ALLOCATED ? 1n : undefined;
   return {
-    binding: () => ({ chainId: 84532, escrow: "0xEsCrOw" }),
+    binding: () => ({ chainId: 84532, escrow: ESCROW }),
     windows: () => ({ challengeWindow: 3600n, appealWindow: 7200n }),
     pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized" as const, logCompleteness: "complete" as const }),
     readAnchors: async () => ({ state, remainingClaimCount }),
@@ -114,11 +116,15 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
       const b = await bodies(s);
       for (const [leaf, body] of [["lifecycle", b.lifecycle], ["receipt", b.receipt]] as const) {
         const path = `/api/settlement/units/${UNIT}/${leaf}`;
+        const final = s === UnitState.SETTLED_RELEASED || s === UnitState.SETTLED_REFUNDED;
         const live = classifySettlementRead(body, { path, live: true });
         expect(live.tone, `${leaf} ${s} live`).toBe(classifySettlementRecord(body).tone);
+        // R12: the route's REAL DTO carries a valid pin (chainId, escrow, unitId, a decimal-string asOfBlock,
+        // asOfBlockHash, finality "finalized"), and the same body with a malformed escrow is only pending.
+        expect(chainPin(body, path), `${leaf} ${s} pin`).toMatchObject({ chainId: 84532, network: "Base Sepolia", escrow: ESCROW, unitId: UNIT, asOfBlock: "100", asOfBlockHash: SNAP_HASH, finality: "finalized" });
+        if (final) expect(classifySettlementRead({ ...(body as object), escrow: "0xEsCrOw" }, { path, live: true }).tone, `${leaf} ${s} bad pin`).toBe("waiting");
         const offline = classifySettlementRead(body, { path, live: false });
         const elsewhere = classifySettlementRead(body, { path: "/api/jobs/j1", live: true });
-        const final = s === UnitState.SETTLED_RELEASED || s === UnitState.SETTLED_REFUNDED;
         expect(offline.tone, `${leaf} ${s} snapshot`).toBe(final ? "unknown" : live.tone);
         expect(elsewhere.tone, `${leaf} ${s} other route`).toBe(final ? "unknown" : live.tone);
       }

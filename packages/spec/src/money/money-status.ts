@@ -266,13 +266,72 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
 
 /** The only routes whose LIVE reads may present a FINAL settlement state (settlement-read.ts UNIT_ID_RE). */
 export const SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+const SETTLEMENT_ROUTE_UNIT_RE = /^\/api\/settlement\/units\/(0x[0-9a-fA-F]{64})\/(?:receipt|lifecycle)$/;
+
+// ── R12: a money fact renders only from a pinned, finalized chain read (spec R12, operator 10/06) ──
+/** The networks a money fact may come from. A chain outside this CLOSED table is not a money fact
+ *  (read-surface contract rule 11: the network is chainId-derived, never a free-form name). */
+export const SETTLEMENT_NETWORKS: Readonly<Record<number, string>> = Object.freeze({ 8453: "Base", 84532: "Base Sepolia" });
+
+/** Where a settlement read was taken: the finalized block every value in the response is read at
+ *  (contract rules 16 and 22). It is what the kit shows under a money fact, and what a reader re-checks. */
+export interface SettlementPin {
+  readonly chainId: number;
+  /** SETTLEMENT_NETWORKS' name for chainId. */
+  readonly network: string;
+  readonly escrow: string;
+  readonly unitId: string;
+  /** The block number as the route sends it: a decimal string. */
+  readonly asOfBlock: string;
+  readonly asOfBlockHash: string;
+  readonly finality: "finalized";
+}
+
+const PIN_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+const PIN_WORD_RE = /^0x[0-9a-fA-F]{64}$/;
+const PIN_BLOCK_RE = /^(?:0|[1-9][0-9]{0,15})$/;
+
+/**
+ * The pin of a settlement read, or null. Valid only when ALL hold: `chainId` is in SETTLEMENT_NETWORKS
+ * (and equals `network.chainId` when the body carries one); `escrow` is an address; `unitId` is a 32-byte
+ * word equal (ignoring case) to the unit in `routePath`, which must match SETTLEMENT_READ_ROUTE exactly,
+ * so a body for another unit is never this binding's fact; `asOfBlock` is a canonical decimal string
+ * that is a safe integer; `asOfBlockHash` is a 32-byte word; and `finality === "finalized"` (the route
+ * already refuses other heads, settlement-read.ts; the kit checks again). This checks shape only;
+ * provenance (a LIVE read of that route) is the caller's to establish.
+ */
+export function chainPin(read: unknown, routePath: unknown): SettlementPin | null {
+  if (read === null || typeof read !== "object" || Array.isArray(read)) return null;
+  const o = read as Record<string, unknown>;
+  const path = typeof routePath === "string" ? routePath.split("?")[0]! : "";
+  const routeUnit = SETTLEMENT_ROUTE_UNIT_RE.exec(path)?.[1];
+  if (routeUnit === undefined) return null;
+  const { chainId, escrow, unitId, asOfBlock, asOfBlockHash, finality } = o;
+  if (typeof chainId !== "number" || !Number.isSafeInteger(chainId) || !has(SETTLEMENT_NETWORKS as Record<string, unknown>, String(chainId))) return null;
+  if (has(o, "network")) {
+    const n = o.network;
+    if (n === null || typeof n !== "object" || Array.isArray(n) || (n as Record<string, unknown>).chainId !== chainId) return null;
+  }
+  if (typeof escrow !== "string" || !PIN_ADDRESS_RE.test(escrow)) return null;
+  if (typeof unitId !== "string" || !PIN_WORD_RE.test(unitId) || unitId.toLowerCase() !== routeUnit.toLowerCase()) return null;
+  if (typeof asOfBlock !== "string" || !PIN_BLOCK_RE.test(asOfBlock) || !Number.isSafeInteger(Number(asOfBlock))) return null;
+  if (typeof asOfBlockHash !== "string" || !PIN_WORD_RE.test(asOfBlockHash)) return null;
+  if (finality !== "finalized") return null;
+  return Object.freeze({ chainId, network: SETTLEMENT_NETWORKS[chainId]!, escrow, unitId, asOfBlock, asOfBlockHash, finality: "finalized" as const });
+}
+
+/** A settled- or refunded-shaped LIVE read whose pin is missing, malformed, for another unit or chain,
+ *  or not finalized: R12 "pending before finality", never green. */
+const PENDING_FINALITY = (): MoneyStatusClassification =>
+  Object.freeze({ key: "PENDING_FINALITY", tone: "waiting" as const, label: "pending - not confirmed at a finalized block", known: true });
 
 /**
  * Display classification of a settlement record, given WHERE it came from (astra r2 on #313, F1: field
  * shape is not provenance). A FINAL V-next presentation (settled 8, refunded 9) is shown only for a LIVE
- * read of an exact per-unit settlement route. A baked snapshot, a fallback, a stream event, or a
- * settled-shaped body from any other route is unknown. Every other classification passes through
- * unchanged: non-final states claim nothing final, and the flat table has no green.
+ * read of an exact per-unit settlement route WHOSE BODY CARRIES A VALID PIN (chainPin, R12); a live read
+ * without one is pending. A baked snapshot, a fallback, a stream event, or a settled-shaped body from any
+ * other route is unknown. Every other classification passes through unchanged: non-final states claim
+ * nothing final, and the flat table has no green.
  */
 export function classifySettlementRead(
   record: unknown,
@@ -281,10 +340,18 @@ export function classifySettlementRead(
   const c = classifySettlementRecord(record);
   const vnext = record !== null && typeof record === "object" && !Array.isArray(record)
     && (has(record as Record<string, unknown>, "unitState") || has(record as Record<string, unknown>, "finalState"));
-  if (!vnext || (c.tone !== "settled" && c.tone !== "refunded")) return c;
+  if (c.tone !== "settled" && c.tone !== "refunded") return c;
+  // R12 rule 4: a legacy escrow record's word (the flat table's "refunded") is the PCC escrow service's
+  // report, not a chain read, so it never takes a final tone. classifySettlementRecord gives a final tone
+  // to nothing else that lacks unitState/finalState.
+  if (!vnext) {
+    return Object.freeze({ key: c.key, tone: "waiting" as const, label: "PCC escrow service reports: " + (c.label ?? c.key) + " (not confirmed on chain)", known: true });
+  }
   const path = source && typeof source.path === "string" ? source.path.split("?")[0]! : "";
-  if (source && source.live === true && SETTLEMENT_READ_ROUTE.test(path)) return c;
-  return UNKNOWN("", "final state not shown - not a live read of a settlement route");
+  if (!(source && source.live === true && SETTLEMENT_READ_ROUTE.test(path))) {
+    return UNKNOWN("", "final state not shown - not a live read of a settlement route");
+  }
+  return chainPin(record, path) === null ? PENDING_FINALITY() : c;
 }
 
 // ── Pill text (astra r4 on #313, F6; astra r5 on #313, F7-F9) ───────────────

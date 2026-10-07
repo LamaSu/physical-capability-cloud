@@ -22,12 +22,17 @@ import path from "node:path";
 import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
-  classifySettlementRead, SETTLEMENT_READ_ROUTE, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
+  classifySettlementRead, SETTLEMENT_READ_ROUTE, chainPin, SETTLEMENT_NETWORKS, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
   idText, hexText, timeText, traceText, nameText, fieldDefaultText,
 } from "../money/money-status.js";
 import { foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD } from "../money/plain-text-claims.js";
 import { PLAIN_TEXT_CASES, PLAIN_TIME_ACCEPTED, PLAIN_TIME_REJECTED, FIELD_DEFAULT_CASES, PLAIN_CLAIM_CASES } from "./plain-text-fixtures.js";
 import { assertKitTextBeforeBoot, assertKitTextViolations, flushKitText, checkKitClicks } from "./ui-kit-text-counter.js";
+
+// R12 (operator 10/06): a final tone needs a valid pin for the read's own unit. The canonical settled
+// fixtures carry one, so the liveness, exact-route and polling tests below keep testing what they test.
+const PIN_FIELDS = Object.freeze({ chainId: 84532, escrow: "0x" + "12".repeat(20), unitId: "0x" + "ab".repeat(32),
+  asOfBlock: "12345678", asOfBlockHash: "0x" + "cd".repeat(32), finality: "finalized" });
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitPath = path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js");
@@ -73,7 +78,7 @@ function extractRegion(): KitRegion {
   // Only the final boot dispatch is replaced; every helper uses the shipped bytes.
   const helperSrc = kitSrc.replace(/  if \(document\.readyState === 'loading'\)[\s\S]*?\n\}\)\(\);\s*$/, "\n" +
       "window.kitRegion = { MONEY_STATUS, GENERIC_STATES, statusClass, moneyStatusClass, settlementLabel, isMoneyData, dataStatusClass," +
-      " VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE, settlementRecordClass, settlementReadClass, SETTLEMENT_READ_ROUTE," +
+      " VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE, settlementRecordClass, settlementReadClass, SETTLEMENT_READ_ROUTE, chainPin, SETTLEMENT_NETWORKS," +
       " SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText, idText, hexText, timeText, traceText, nameText, fieldDefaultText, foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD };\n})();");
   if (helperSrc === kitSrc) throw new Error("plain kit's final boot dispatch not found");
   vm.runInNewContext(
@@ -271,8 +276,8 @@ async function renderedPill(escrow: Record<string, unknown>) {
 
 describe("shipped kit renders money state honestly (full jsdom boot, receipt window)", () => {
   const NOT_SETTLED: Array<[Record<string, unknown>, string]> = [
-    [{ status: "refunded" }, "st-refunded"],
-    [{ status: "SETTLED_REFUNDED" }, "st-refunded"],
+    [{ status: "refunded" }, "st-waiting"] /* R12: a legacy word is the escrow service's report, never a final tone */,
+    [{ status: "SETTLED_REFUNDED" }, "st-waiting"] /* R12: a legacy word is the escrow service's report, never a final tone */,
     [{ status: "REFUND_ALLOCATED" }, "st-waiting"],
     [{ status: "RELEASE_ALLOCATED" }, "st-waiting"],
     [{ status: "underfunded" }, "st-unknown"],
@@ -309,7 +314,8 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
   it("the pill text is the raw server value when the surface's safe vocabulary covers it", async () => {
     // EXPIRED is on SAFE_MONEY_STATUS_WORDS (astra r5): a word the safe list affirms is shown as-is.
     const r = await renderedPill({ status: "EXPIRED" });
-    expect(r.text).toBe("EXPIRED");
+    // R12 rule 4: a legacy escrow record's status is attributed to the service that reported it.
+    expect(r.text).toBe("PCC escrow service reports: EXPIRED");
   });
 
   it("astra r5 (#313): a decided-but-not-final money word is qualified on the receipt pill, not rewritten to look final either", async () => {
@@ -317,7 +323,7 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
     // raw value directly (it does not consult the honest-label table that dataStatusText does), so a
     // closed safe vocabulary qualifies it. The honest label is still shown alongside, unaffected.
     const r = await renderedPill({ status: "REFUND_ALLOCATED" });
-    expect(r.text).toBe("reported status: REFUND_ALLOCATED - settlement unconfirmed");
+    expect(r.text).toBe("PCC escrow service reports: REFUND_ALLOCATED"); // R12 rule 4: attributed, never bare
     expect(r.rail).toContain("refund decided - payer not yet refunded");
   });
 });
@@ -467,32 +473,27 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
   const ECON = { amount: "1000000", feeAmount: "23500", recipient: "0xRecipient", token: "0xUSDC", assuranceTier: 1 };
   const settledReceipt = (economics: unknown) => ({ chainId: 84532, escrow: "0xE", unitId: "u1", finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", network: { chainId: 84532 }, economics });
 
-  it("a real V-next receipt's economics.amount (base units, no decimals) is never shown as a sum", async () => {
+  it("R12: a V-next receipt in a SNAPSHOT never shows its amount (a money fact needs a live, pinned read)", async () => {
     const r = await receiptOf(RC, settledReceipt(ECON));
     expect(r.cls).toContain("st-unknown"); // a snapshot is never shown as final
-    expect(r.body).toContain("1000000 base units (decimals not reported)");
+    expect(r.body).toContain("amount pending - not confirmed at a finalized block");
+    expect(r.body).not.toContain("1000000");
     expect(r.body).not.toContain("1,000,000");
     expect(r.body).not.toContain("USDC");
+    expect(r.body).toContain("payee pending");
+    expect(document.querySelector(".pcc-pin-ref")).toBeNull();
   });
 
-  it("with the record's own tokenDecimals the base units become the exact display amount", async () => {
-    for (const [amount, d, shown] of [["1000000", 6, "1"], ["1234567", 6, "1.234567"], ["25", 6, "0.000025"], ["1500000000000", 6, "1,500,000"], ["7", 0, "7"]] as Array<[string, number, string]>) {
-      const r = await receiptOf(RC, settledReceipt({ ...ECON, amount, tokenDecimals: d }));
-      expect(r.body, amount + "/" + d).toContain(shown);
-    }
-  });
+  // (The base-unit formatting checks moved to the live, pinned R12 block below: in a snapshot the amount is pending.)
 
-  it("a malformed base-unit amount is 'amount not reported', never a guess", async () => {
-    for (const amount of ["1e6", "-5", "1,000", "0x10", "", { v: 1 }]) {
-      const r = await receiptOf(RC, settledReceipt({ ...ECON, amount }));
-      expect(r.body, JSON.stringify(amount)).toContain("amount not reported");
-    }
-  });
-
-  it("an amount without a currency shows no invented currency", async () => {
-    const r = await receiptOf(RC, { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", totalAmount: "10.00", payer: "0xP", payee: "0xQ" });
-    expect(r.body).toContain("10.00");
-    expect(r.body).not.toContain("USDC");
+  it("an amount without a currency shows no invented currency (a V-next amount comes only from economics; a legacy amount is attributed)", async () => {
+    const v = await receiptOf(RC, { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", totalAmount: "10.00", payer: "0xP", payee: "0xQ" });
+    expect(v.body).toContain("amount not reported"); // R12: a V-next amount is economics.amount only
+    expect(v.body).not.toContain("USDC");
+    const l = await receiptOf("/api/escrow/e1", { status: "funded", contractAddress: "0x1", totalAmount: "10.00" });
+    expect(l.body).toContain("reported amount: 10.00");
+    expect(l.body).toContain("(currency not reported) (PCC escrow service)");
+    expect(l.body).not.toContain("USDC");
   });
 
   it("a /lifecycle read with a numeric unitState renders by its ordinal; a disagreement is unknown", async () => {
@@ -538,8 +539,8 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
   const UNIT = "0x" + "ab".repeat(32);
   const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
   const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
-  const SETTLED_RECEIPT = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" };
-  const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+  const SETTLED_RECEIPT = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", ...PIN_FIELDS };
+  const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", ...PIN_FIELDS };
   const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
   type Reply = { status: number; body?: unknown } | "reject";
   function bootLive(manifest: string, reply: (url: string, n: number) => Reply) {
@@ -563,6 +564,113 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
   }
   const receiptPill = () => (document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className;
   const receiptWin = (path: string) => man([{ kind: "receipt", binding: { path } }]);
+
+  // ── R12 (operator 10/06): money facts only from a live, pinned, finalized read of the unit's own route ──
+  const PAYEE = "0x" + "34".repeat(20);
+  const pinnedReceipt = (extra: Record<string, unknown> = {}) => ({ ...SETTLED_RECEIPT, economics: { amount: "1000000", feeAmount: "23500", recipient: PAYEE, token: "0x" + "56".repeat(20), assuranceTier: 1 }, ...extra });
+  async function liveReceipt(body: unknown) {
+    bootLive(receiptWin(RC_LIVE), () => ({ status: 200, body }));
+    await flush();
+    const rail = document.querySelector(".pcc-receipt-rail")!;
+    return { cls: receiptPill(), body: rail.parentElement!.textContent!, ref: document.querySelector(".pcc-pin-ref")?.textContent ?? null };
+  }
+
+  it("R12: a live, pinned, finalized receipt shows its money facts and the visible reference", async () => {
+    const r = await liveReceipt(pinnedReceipt({ assetReality: { value: "real", source: "registry" } }));
+    expect(r.cls).toContain("st-settled");
+    expect(r.body).toContain("1000000 base units (decimals not reported)"); // base units, never a sum, never an invented currency
+    expect(r.body).not.toContain("1,000,000");
+    expect(r.body).toContain(PAYEE);
+    expect(r.ref).toBe("Base Sepolia · escrow 0x1212…1212 · unit 0xabab…abab · block 12,345,678 (0xcdcd…cdcd) · finalized");
+    const details = document.querySelector(".pcc-pin-details")!;
+    expect(details.querySelectorAll(".pcc-pin-row")).toHaveLength(6);
+    expect(details.textContent).toContain("0x" + "cd".repeat(32));
+    expect(document.querySelector(".pcc-asset-badge")).toBeNull(); // a registry-confirmed real asset is unmarked
+  });
+
+  it("R12: with the record's own tokenDecimals the base units become the exact display amount (pinned)", async () => {
+    for (const [amount, d, shown] of [["1000000", 6, "1"], ["1234567", 6, "1.234567"], ["25", 6, "0.000025"], ["1500000000000", 6, "1,500,000"], ["7", 0, "7"]] as Array<[string, number, string]>) {
+      const r = await liveReceipt(pinnedReceipt({ economics: { amount, tokenDecimals: d, recipient: PAYEE } }));
+      expect(r.body, amount + "/" + d).toContain(shown);
+    }
+  });
+
+  it("R12: a malformed base-unit amount is 'amount not reported', never a guess (pinned)", async () => {
+    for (const amount of ["1e6", "-5", "1,000", "0x10", "", { v: 1 }]) {
+      const r = await liveReceipt(pinnedReceipt({ economics: { amount, recipient: PAYEE } }));
+      expect(r.body, JSON.stringify(amount)).toContain("amount not reported");
+    }
+  });
+
+  it("R12: a test or unverified asset is marked, so a test-USDC settlement never looks real", async () => {
+    for (const [ar, badge] of [[{ value: "test" }, "TEST ASSET"], [{ value: "unknown" }, "ASSET NOT VERIFIED"], [null, "ASSET NOT VERIFIED"], [undefined, "ASSET NOT VERIFIED"]] as Array<[unknown, string]>) {
+      await liveReceipt(pinnedReceipt({ assetReality: ar }));
+      expect(document.querySelector(".pcc-asset-badge")?.textContent, JSON.stringify(ar)).toBe(badge);
+    }
+  });
+
+  it("R12: log-derived fields say so, and UNKNOWN is 'not reported' (contract rule 21)", async () => {
+    const r = await liveReceipt(pinnedReceipt({ refundReason: { value: "TIMEOUT", source: "log" }, finalizedBlock: "12345679" }));
+    expect(r.body).toContain("refund reason: TIMEOUT (from event logs)");
+    expect(r.body).toContain("finalized at block 12,345,679 (from event logs)");
+    const u = await liveReceipt(pinnedReceipt({ refundReason: "UNKNOWN", finalizedBlock: { value: "UNKNOWN", source: "log" } }));
+    expect(u.body).toContain("refund reason: not reported (from event logs)");
+    expect(u.body).toContain("finalized at block not reported (from event logs)");
+  });
+
+  // R12's reproduction: on the pre-R12 kit every one of these LIVE settled-shaped reads rendered green.
+  const BAD_PINS: Array<[string, Record<string, unknown>]> = [
+    ["no pin at all", { chainId: undefined, escrow: undefined, unitId: undefined, asOfBlock: undefined, asOfBlockHash: undefined, finality: undefined }],
+    ["unknown chain", { chainId: 1 }], ["chainId as a string", { chainId: "84532" }], ["network disagrees", { network: { chainId: 8453 } }],
+    ["network not an object", { network: "base-sepolia" }], ["escrow malformed", { escrow: "0xE" }],
+    ["another unit", { unitId: "0x" + "ef".repeat(32) }], ["unitId malformed", { unitId: "u1" }],
+    ["asOfBlock a number", { asOfBlock: 12345678 }], ["asOfBlock with a leading zero", { asOfBlock: "012" }], ["asOfBlock negative", { asOfBlock: "-1" }],
+    ["asOfBlock past a safe integer", { asOfBlock: "9007199254740993" }], ["block hash malformed", { asOfBlockHash: "0x12" }],
+    ["finality safe", { finality: "safe" }], ["finality latest", { finality: "latest" }], ["finality missing", { finality: undefined }],
+  ];
+  it.each(BAD_PINS)("R12: a live settled read with %s is pending, never green", async (_name, bad) => {
+    const body: Record<string, unknown> = { ...pinnedReceipt(), ...bad };
+    for (const k of Object.keys(bad)) if (bad[k] === undefined) delete body[k];
+    const r = await liveReceipt(body);
+    expect(r.cls).toContain("st-waiting");
+    expect(r.cls).not.toContain("st-settled");
+    expect(r.body).toContain("pending - not confirmed at a finalized block");
+    expect(r.body).toContain("amount pending - not confirmed at a finalized block");
+    expect(r.body).toContain("payee pending");
+    expect(r.ref).toBeNull();
+  });
+
+  it("R12 (DOM property): no window shows a final tone without a pinned live read; the same windows go green once pinned", async () => {
+    const UNPINNED_LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+    const UNPINNED_RC = { finalState: "SETTLED_REFUNDED", isAllocated: false, phase: "settled" };
+    const runWin = man([{ kind: "run", binding: { path: LC_LIVE }, statusFrom: "finalState", latestFrom: "phase" }]);
+    const finals = () => document.querySelectorAll(".st-settled, .st-refunded").length;
+    for (const [manifest, body] of [[runWin, UNPINNED_LC8], [receiptWin(RC_LIVE), UNPINNED_RC], [receiptWin("/api/escrow/e1"), { status: "REFUNDED", contractAddress: "0x1" }]] as Array<[string, unknown]>) {
+      bootLive(manifest, () => ({ status: 200, body }));
+      await flush();
+      expect(finals(), manifest + " " + JSON.stringify(body)).toBe(0);
+    }
+    for (const [manifest, body] of [[runWin, { ...UNPINNED_LC8, ...PIN_FIELDS }], [receiptWin(RC_LIVE), { ...UNPINNED_RC, ...PIN_FIELDS }]] as Array<[string, unknown]>) {
+      bootLive(manifest, () => ({ status: 200, body }));
+      await flush();
+      expect(finals(), "pinned " + manifest).toBe(1);
+    }
+  });
+
+  it("R12: the route's unit matches the body's unit regardless of hex case", async () => {
+    const r = await liveReceipt(pinnedReceipt({ unitId: ("0x" + "ab".repeat(32)).toUpperCase().replace("0X", "0x") }));
+    expect(r.cls).toContain("st-settled");
+  });
+
+  it("R12: kit chainPin == spec chainPin over valid and broken pins (parity)", () => {
+    const kit = extractRegion() as unknown as { chainPin: (o: unknown, p: unknown) => unknown; SETTLEMENT_NETWORKS: unknown };
+    expect(JSON.stringify(kit.SETTLEMENT_NETWORKS)).toBe(JSON.stringify(SETTLEMENT_NETWORKS));
+    const bodies: unknown[] = [pinnedReceipt(), ...BAD_PINS.map(([, bad]) => ({ ...pinnedReceipt(), ...bad })), null, [], "x", { ...pinnedReceipt(), network: null }];
+    const paths: unknown[] = [RC_LIVE, LC_LIVE, RC_LIVE + "?asOf=x", "/api/settlement/units/" + "0x" + "ef".repeat(32) + "/receipt", "/api/jobs/j1", undefined];
+    for (const b of bodies) for (const p of paths) {
+      expect(JSON.stringify(kit.chainPin(b, p)), JSON.stringify(b) + " @ " + String(p)).toBe(JSON.stringify(chainPin(b, p)));
+    }
+  });
 
   it("F1 (HIGH): a settled-SHAPED body bound to a job route is never green", async () => {
     bootLive(receiptWin("/api/jobs/j1"), () => ({ status: 200, body: SETTLED_RECEIPT }));
@@ -705,7 +813,7 @@ describe("astra r3 (#313 @9250c578): F5, generic request success is never green 
 describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as a bare status (verify before fix)", () => {
   const UNIT = "0x" + "ab".repeat(32);
   const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
-  const SETTLED_RECEIPT = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" };
+  const SETTLED_RECEIPT = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", ...PIN_FIELDS };
   const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
   // Answers only the requests a test expects (null = not this test's), and only its FIRST read of each:
   // a later poll never settles, so no window keeps polling after the test.
@@ -790,7 +898,7 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
 
   it("F6: a run window names a gated-out final by the classifier's label, a verified one by its plain name", async () => {
     const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
-    const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+    const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", ...PIN_FIELDS };
     const run = (p: string) => man([{ kind: "run", binding: { path: p }, statusFrom: "status", latestFrom: "message" }]);
     boot({}, run(LC_LIVE), { _ts: "2026-09-24T00:00:00Z", [LC_LIVE]: LC8 }); // a baked snapshot: gated out
     await flush();
@@ -1056,14 +1164,14 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
 
   it("F8 residual positive control: a VERIFIED final keeps its plain latest line and timeline (no contradiction with the green pill)", async () => {
     bootRead(man([{ kind: "run", binding: { path: LC_LIVE }, statusFrom: "finalState", latestFrom: "phase" }]),
-      (u) => (new URL(u).pathname === LC_LIVE ? { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" } : null));
+      (u) => (new URL(u).pathname === LC_LIVE ? { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", ...PIN_FIELDS } : null));
     await flush();
     expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-settled");
     expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("settled");
 
     bootRead(man([{ kind: "receipt", binding: { path: RC_LIVE } }]),
       (u) => (new URL(u).pathname === RC_LIVE
-        ? { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", events: [{ type: "SETTLED_RELEASED" }] }
+        ? { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", events: [{ type: "SETTLED_RELEASED" }], ...PIN_FIELDS }
         : null));
     await flush();
     expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-settled");
@@ -1075,19 +1183,21 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
     bootRead(man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status", latestFrom: "status" }]),
       (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "REFUNDED" } : null));
     await flush();
-    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-refunded");
+    // R12: a bare money word is a report, never a final tone (it was the flat table's st-refunded before).
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-waiting");
     expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("reported status: REFUNDED - settlement unconfirmed");
 
     bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
       (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "REFUNDED", ...LEGACY, events: [{ type: "REFUNDED" }] } : null));
     await flush();
-    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-refunded");
+    // R12: the legacy record's REFUNDED is the escrow service's report, so it takes no final tone.
+    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-waiting");
     expect(timelineRows()).toEqual(["reported status: REFUNDED - settlement unconfirmed"]);
   });
 
   // astra r6 (#313 @3b2e6e38): F10-F12, verify before fix. X1-X3 are the same class, found by a
   // sink inventory (every kit line that renders bound server text), not by astra.
-  const LC9 = { unitState: 9, finalState: "SETTLED_REFUNDED", isTerminal: true, isAllocated: false, phase: "settled" };
+  const LC9 = { unitState: 9, finalState: "SETTLED_REFUNDED", isTerminal: true, isAllocated: false, phase: "settled", ...PIN_FIELDS };
   const latestText = () => (document.querySelector(".pcc-run-latest") as HTMLElement).textContent;
 
   it("r6 F10 (HIGH): a VERIFIED refund vouches for no payment claim (run latest line)", async () => {
@@ -1101,7 +1211,7 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
   it("r6 F10 (HIGH): a VERIFIED refund vouches for no payment claim (receipt timeline)", async () => {
     bootRead(man([{ kind: "receipt", binding: { path: RC_LIVE } }]),
       (u) => (new URL(u).pathname === RC_LIVE
-        ? { finalState: "SETTLED_REFUNDED", isAllocated: false, phase: "settled", events: [{ type: "PAID" }] }
+        ? { finalState: "SETTLED_REFUNDED", isAllocated: false, phase: "settled", events: [{ type: "PAID" }], ...PIN_FIELDS }
         : null));
     await flush();
     expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-refunded");
@@ -1125,7 +1235,7 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
   });
 
   it("r6 F11 positive control: a VERIFIED payee payment's live poll timeline stays plain (no contradiction with the green pill)", async () => {
-    const LC8T = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", timeline: [{ type: "SETTLED_RELEASED" }] };
+    const LC8T = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", timeline: [{ type: "SETTLED_RELEASED" }], ...PIN_FIELDS };
     bootRead(man([{ kind: "run", binding: { path: LC_LIVE }, statusFrom: "finalState", latestFrom: "phase" }]),
       (u) => (new URL(u).pathname === LC_LIVE ? LC8T : null));
     await flush();
@@ -1197,8 +1307,8 @@ describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify be
   const UNIT = "0x" + "ab".repeat(32);
   const RC_LIVE = `/api/settlement/units/${UNIT}/receipt`;
   const LC_LIVE = `/api/settlement/units/${UNIT}/lifecycle`;
-  const SETTLED = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" };
-  const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled" };
+  const SETTLED = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", ...PIN_FIELDS };
+  const LC8 = { unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled", ...PIN_FIELDS };
   const LC1 = { unitState: 1, finalState: null, isTerminal: false, isAllocated: false, phase: "active" };
   const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
   type Reply = { status: number; body?: unknown } | "reject";
