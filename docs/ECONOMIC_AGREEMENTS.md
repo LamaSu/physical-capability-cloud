@@ -549,6 +549,11 @@ At accept time the accepted-plan compiler asks economics to split each unit's ne
 
 On success it returns each unit's payouts in plan order, with `agreementHash` and both terms hashes.
 
+**Where the server's facts come from.** The gateway assembles them in `serverEconomicsFacts` (packages/gateway/src/services/server-economics-facts.ts), and `economicsBindingFor` binds both halves of the seam's `economics` dependency to one copy of the agreement. The agreement only names which registry rows to read.
+- From server sources today: the fee and its recipient (`PCC_PROTOCOL_FEE_BPS`, `PCC_PROTOCOL_FEE_RECIPIENT`), the currency's decimals (the compiler's `SETTLEMENT_TOKEN_DECIMALS`), the request's clock reading, the forbidden recipients (`PCC_FORBIDDEN_RECIPIENTS`), and the sealed rate schedules in the contributors registry.
+- Refused by name, with no stand-in, until a source exists: the license registry's copies and the parties' registered payout addresses (operator item 27), the intended use, what runs in each unit, and any schedule whose rate depends on a unit's capture class or jobs per day.
+- Unset or malformed configuration is refused, never defaulted.
+
 ## 10. What is out of scope in v1
 
 - Cross-job metering and downstream revenue participation (refused, OD-4).
