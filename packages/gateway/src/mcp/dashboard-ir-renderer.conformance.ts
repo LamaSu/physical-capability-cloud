@@ -74,7 +74,12 @@ bindListRows(doc, listEl, listNode, [
 const rowTexts = flat(listEl).map((x: any) => x.textContent).filter(Boolean);
 // ids are attributed (steward #5149: an identifier's grammar cannot exclude prose, so it reads "reported: ...")
 ok("valid rows rendered (j1 with meta+status, j2 title-only)", rowTexts.includes("reported: j1") && rowTexts.includes("reported: k9") && rowTexts.includes("done") && rowTexts.includes("reported: j2"));
-ok("malformed rows dropped (no phantom output)", listEl.children.length === 2);
+// N110: a window-disclosure sibling (the client cap: 3 shown of 6 returned) is now expected
+// alongside the 2 valid rows — select rows by class so this still proves exactly "no phantom
+// ROW output" rather than assuming the row count IS the total child count.
+const rowEls = (listEl.children as any[]).filter((c) => c.className === "pcc-row");
+ok("malformed rows dropped (no phantom output)", rowEls.length === 2);
+ok("nothing else but the one window note (exact child count)", (listEl.children as any[]).length === 3 && (listEl.children as any[])[2].className === "pcc-window");
 ok("non-selector field ('secret') NEVER rendered", !rowTexts.includes("LEAK"));
 
 // scalar bind: own-property read, proto-safe, type-validated by the field's closed kind (astra

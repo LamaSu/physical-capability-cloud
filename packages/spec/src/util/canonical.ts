@@ -2,70 +2,420 @@
  * Canonical serialization and hashing for evidence events and bundles.
  *
  * Rules:
- * 1. JSON keys are sorted lexicographically at all depths.
+ * 1. JSON keys are sorted lexicographically (UTF-16 code units) at all depths.
  * 2. No whitespace.
  * 3. Numbers are not quoted.
- * 4. Null values are included; undefined values are omitted.
+ * 4. Null values are included; undefined object members are omitted.
  * 5. SHA-256 of the canonical JSON produces the content hash.
  *
  * This ensures that identical data always produces the same hash,
  * regardless of key insertion order or formatting.
+ *
+ * EVALUATE ONLY WHAT YOU HASHED. canonicalize hashes exactly the own,
+ * enumerable, string-keyed data properties it reads. It reads each one once,
+ * from its own descriptor, and never runs a getter. It refuses what a plain
+ * JSON tree cannot hold: a non-enumerable, symbol-keyed or accessor property,
+ * or a named property on an array. What it cannot do is make an arbitrary
+ * JavaScript object answer a LATER read the same way:
+ *   - a Proxy can answer [[Get]] differently from its descriptors;
+ *   - an inherited (polluted) property is readable but never hashed.
+ * So a consumer that must evaluate what it hashed takes a canonicalSnapshot:
+ * canonicalize FIRST, parse the canonical text back ONCE, and validate and
+ * execute that parsed snapshot, as LO-EV-9's verifyEvidenceSubjectBinding does.
+ * It never re-reads the object it was handed, and it hashes the snapshot's own
+ * text, so what ran is exactly what was hashed.
+ *
+ * SNAPSHOT OBJECTS HAVE NO PROTOTYPE. Every plain object in a snapshot, at every
+ * depth, is created with a null prototype and holds only own enumerable data
+ * properties (an own "__proto__" key stays an ordinary own key). A key the input
+ * did not own therefore reads as undefined, never as a value inherited from a
+ * polluted Object.prototype that was never hashed, and `in` and for...in see only
+ * the own keys. The price is that a consumer must not call Object.prototype
+ * methods on a snapshot object (obj.hasOwnProperty(k), obj.toString(), String(obj)
+ * and `${obj}` are not there or throw): use Object.keys, Object.entries, `in` or
+ * Object.hasOwn, and JSON.stringify. Arrays stay ordinary arrays: every index below
+ * their length is an own element, but an index past the end and every Array method
+ * still resolve through Array.prototype, so read arrays within their length.
  */
 
 import type { EvidenceEvent, EvidenceBundle } from "../types/evidence.js";
 import type { SHA256 } from "../types/common.js";
-import { ArrayIsArray, hasOwn, JSONStringify, ObjectKeys, sortedStrings, StringCtor } from "./primordials.js";
+
+// Everything the encoder uses at call time is captured here, when the module
+// loads, and the code below calls only these captured functions. A prototype or
+// global that is polluted or replaced AFTER this point (an indexed setter on
+// Array.prototype, Array.prototype.push, JSON.stringify, the String global,
+// WeakSet.prototype.has ...) cannot change a byte of the output.
+//
+// Two rules keep Array.prototype out of it. The encoder never looks up a method
+// on an array or on its input (no push / sort / join / for...of, no spread, no
+// array destructuring: each of those reaches Array.prototype), and it never
+// writes an array index that has no own property (an inherited indexed setter
+// would run). The only arrays it touches are the ones Reflect.ownKeys returns,
+// which the engine creates with every index an own data property; it writes to
+// them only at indices that already exist. The text is built by concatenation.
+const getOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+const getPrototypeOf = Reflect.getPrototypeOf;
+const ownKeys = Reflect.ownKeys;
+const isArray = Array.isArray;
+const isFiniteNumber = Number.isFinite;
+const isIntegerNumber = Number.isInteger;
+const isSafeIntegerNumber = Number.isSafeInteger;
+const toNumber = Number;
+const toText = String;
+const quote = JSON.stringify; // string escaping, byte-for-byte what JSON transport writes
+const parseJson = JSON.parse;
+// canonicalSnapshot builds its prototype-less tree with these two (and nothing looked up at call time).
+const createObject = Object.create;
+const defineProperty = Reflect.defineProperty;
+const OBJECT_PROTOTYPE = Object.prototype;
+const ARRAY_PROTOTYPE = Array.prototype;
+const WeakSetConstructor = WeakSet;
+// `set.has(v)` looks the method up on the set at call time; these do not.
+const call = Function.prototype.call;
+const weakSetAdd = call.bind(WeakSet.prototype.add) as unknown as (set: WeakSet<object>, value: object) => void;
+const weakSetHas = call.bind(WeakSet.prototype.has) as unknown as (set: WeakSet<object>, value: unknown) => boolean;
+const weakSetDelete = call.bind(WeakSet.prototype.delete) as unknown as (set: WeakSet<object>, value: object) => void;
+
+/** What dataValueOf returns for a descriptor that does not describe a data property. Module-private, so it never equals a value read from input. */
+const NOT_DATA = Symbol("canonicalize: not a data property");
+
+/**
+ * A descriptor describes a data property only when it OWNS `value` and has no
+ * own `get` or `set`. Ownership is judged by asking the captured reflection for
+ * the descriptor's OWN property, never with `in` (which also finds an inherited
+ * `value`, `get`, `set` or `enumerable` on a polluted Object.prototype) and never
+ * with a method taken from Object.prototype (hasOwnProperty captured before a
+ * pre-load pollution is the polluter's function, not the engine's). A field is
+ * read only from the own descriptor that proved it exists.
+ *
+ * Returns the property's value, or NOT_DATA for an accessor.
+ */
+function dataValueOf(descriptor: object): unknown {
+  const value = getOwnPropertyDescriptor(descriptor, "value");
+  if (value === undefined) return NOT_DATA;
+  if (getOwnPropertyDescriptor(descriptor, "get") !== undefined) return NOT_DATA;
+  if (getOwnPropertyDescriptor(descriptor, "set") !== undefined) return NOT_DATA;
+  return value.value;
+}
+
+/** Whether a descriptor OWNS `enumerable: true` (a complete descriptor always owns it). */
+function isEnumerable(descriptor: object): boolean {
+  const enumerable = getOwnPropertyDescriptor(descriptor, "enumerable");
+  return enumerable !== undefined && enumerable.value === true;
+}
+
+/**
+ * Every NonCanonicalValueError is registered here as it is constructed, and the
+ * boundary in canonicalize recognises its own errors ONLY by membership. A thrown
+ * value is never inspected: `instanceof` would run a hostile Proxy's
+ * getPrototypeOf trap and any property read its get trap, and a trap that throws
+ * from inside the check would let a plain Error out past the typed boundary.
+ */
+const CANONICAL_ERRORS = new WeakSetConstructor<object>();
+
+/**
+ * Raised when a value has no JSON form. Its canonical text could not survive
+ * JSON transport or be reproduced by a non-JavaScript consumer, so a hash over
+ * it could never be verified anywhere else.
+ */
+export class NonCanonicalValueError extends Error {
+  // Type-only: no class field is emitted, so the property exists only because the constructor DEFINES it.
+  declare readonly path: string;
+  constructor(path: string, what: string) {
+    super(`canonicalize: ${what} at ${path} has no JSON form; refusing to hash it`);
+    // `name` and `path` are DEFINED as own data properties with the Reflect.defineProperty captured at
+    // load, never assigned. An assignment to a property the instance does not own (`name`: it lives on
+    // Error.prototype) walks the prototype chain, so a setter installed on Error.prototype after this
+    // module loaded would run here and throw before the error is registered below, and the boundary in
+    // canonicalize, which builds another one, would throw the same way: a plain Error would escape.
+    defineProperty(this, "name", dataDescriptor("NonCanonicalValueError"));
+    defineProperty(this, "path", dataDescriptor(path));
+    weakSetAdd(CANONICAL_ERRORS, this);
+  }
+}
 
 /**
  * Canonicalize any value to a deterministic JSON string.
  * Keys sorted lexicographically at all depths.
  *
- * It calls only intrinsics captured when `./primordials.ts` loads (astra pack
- * 170). A method or global replaced afterwards cannot change what it writes,
- * so it cannot make two different values serialize, and hash, alike. For JSON
- * data its output is byte-identical to the implementation it replaces
- * (`value.map(canonicalize).join(",")` and `Object.keys(value).sort()`
- * filtered and mapped), including the edge cases:
- *   - a hole in an array is written as nothing;
- *   - `undefined` in an array is written as null;
- *   - an object member whose value is undefined is omitted;
- *   - a number is written as String() writes it.
- * For a value that is not data, two things differ. An index or member is read
- * once, so a getter runs once, not twice. An array index is read only when it
- * is the array's own, never one a prototype serves.
+ * Only a plain JSON tree is accepted: strings, finite numbers, booleans, null,
+ * arrays and plain objects, where
+ *   - an object has prototype Object.prototype or null and holds only own,
+ *     enumerable, string-keyed DATA properties (no getters or setters, no
+ *     non-enumerable or symbol-keyed properties). An undefined member is
+ *     omitted, as JSON.stringify omits it;
+ *   - an array is an ordinary Array (no subclass, no substituted prototype)
+ *     whose every index is an own data property (a hole, or an index that
+ *     exists only on a prototype, is refused) and which carries no named
+ *     properties.
+ * `undefined` as the whole value or as an array element is refused: JSON has
+ * no form for it (JSON.stringify would silently write null). Anything else —
+ * NaN, Infinity, a bigint, a function, a symbol, a Date, a Map or any other
+ * non-plain object — throws NonCanonicalValueError too, instead of producing
+ * text only this function could reproduce. Reading each value once, from its
+ * own data descriptor, also means no getter of the input ever runs here.
+ * canonicalize interacts with the input only through reflection operations
+ * (getPrototypeOf, ownKeys, getOwnPropertyDescriptor): it never performs a
+ * [[Get]] on the input (an array's length is read from its descriptor too),
+ * never calls a toJSON / toString / valueOf and never runs a constructor. That is
+ * not a promise that no input code runs. A hostile Proxy's reflection traps are
+ * code, and so are the objects they return (a descriptor that is itself a Proxy,
+ * or that carries accessors, runs its has / get traps and getters while the
+ * engine converts it), so they may themselves run arbitrary code. Whatever they
+ * report is what is hashed, which is why a consumer that must evaluate what was
+ * hashed takes a canonicalSnapshot and does not re-read the input.
+ *
+ * Numbers follow the evidence number policy D5 (evidence commitment profile v1
+ * §1), which the oracle and VCR enforce too: an integer outside the safe range
+ * (|n| > 2^53 - 1) has already lost precision and must travel as a decimal
+ * string, so it is refused. A sparse-array hole and a cyclic reference are
+ * refused as well; JSON has no form for either.
+ *
+ * A `toJSON` on Object.prototype or Array.prototype (a polluted prototype) is
+ * refused too: JSON.stringify would then transport something other than the
+ * canonical text. Every failure, including one thrown by a Proxy trap or a too
+ * deeply nested value, surfaces as NonCanonicalValueError.
  */
 export function canonicalize(value: unknown): string {
-  if (value === null || value === undefined) {
+  try {
+    if (getOwnPropertyDescriptor(OBJECT_PROTOTYPE, "toJSON") !== undefined ||
+      getOwnPropertyDescriptor(ARRAY_PROTOTYPE, "toJSON") !== undefined) {
+      throw new NonCanonicalValueError("$", "a value under a prototype that defines toJSON (JSON transport would differ)");
+    }
+    return canonicalizeAt(value, "$", new WeakSetConstructor());
+  } catch (err) {
+    if (weakSetHas(CANONICAL_ERRORS, err)) throw err; // ours: classified by identity, never inspected
+    // A Proxy trap threw (whatever it threw), or the value nests too deeply to walk: not a plain JSON tree.
+    throw new NonCanonicalValueError("$", "a value that could not be read as a plain JSON tree");
+  }
+}
+
+/** The canonical text of a value together with the value parsed back from that very text. */
+export interface CanonicalSnapshot<T = unknown> {
+  /** The canonical JSON text: hash this. */
+  readonly text: string;
+  /**
+   * Parsed once from `text`: validate, read and execute this, never the object that was handed in.
+   *
+   * Every plain object in it, at every depth, has NO prototype and only own enumerable data
+   * properties: a key the input did not own reads as undefined, never as a value inherited from a
+   * polluted Object.prototype. Do not call Object.prototype methods on it (obj.hasOwnProperty(k),
+   * obj.toString(), String(obj)): use Object.keys, `in`, Object.hasOwn or JSON.stringify. Arrays
+   * are ordinary arrays; read them within their length.
+   */
+  readonly value: T;
+}
+
+/**
+ * A data-property descriptor that is itself prototype-less. An ordinary { value, ... } literal
+ * inherits Object.prototype, and a polluted `get` or `set` there turns it into an invalid
+ * accessor-and-value descriptor: this one answers only its own four fields.
+ */
+function dataDescriptor(value: unknown): PropertyDescriptor {
+  return { __proto__: null, value, writable: true, enumerable: true, configurable: true } as PropertyDescriptor;
+}
+
+/**
+ * The JSON.parse reviver canonicalSnapshot uses: rebuild every plain object as a prototype-less
+ * object holding the same own members in the same order, and leave primitives and arrays alone.
+ * JSON.parse revives children before their parent, so an array's elements and an object's members
+ * have already been replaced by the time this sees them. Members are DEFINED (never assigned) as
+ * own enumerable, writable, configurable data properties, so an own "__proto__" key stays a plain
+ * own key. `value` is a fresh JSON.parse product: every property of it is an own data property.
+ */
+function toPrototypeLess(_key: string, value: unknown): unknown {
+  if (value === null || typeof value !== "object" || isArray(value)) return value;
+  const copy: object = createObject(null);
+  const keys = ownKeys(value);
+  const count = keys.length;
+  for (let i = 0; i < count; i++) {
+    const key = keys[i];
+    const own = getOwnPropertyDescriptor(value, key) as PropertyDescriptor;
+    // Unreachable (`copy` is fresh and extensible): a member that failed to land must never be dropped silently.
+    if (!defineProperty(copy, key, dataDescriptor(own.value))) throw new NonCanonicalValueError("$", "a member that could not be copied");
+  }
+  return copy;
+}
+
+/**
+ * Canonicalize `value`, then parse the canonical text once (with the JSON.parse
+ * captured at load), and return both. A consumer that validates or executes what
+ * it hashes does so on `value` and hashes `text`: unlike the object it was handed
+ * (a Proxy may answer a later [[Get]] differently from the descriptors that were
+ * hashed; any caller may mutate it between the hash and the use), the snapshot is
+ * a fresh JSON tree that nothing but the consumer holds.
+ *
+ * The tree has no prototypes: every plain object in it is prototype-less (see the
+ * header), so evaluating it can never read a member that was not hashed, whatever
+ * Object.prototype has been polluted with. Arrays stay ordinary arrays.
+ *
+ * Refuses what canonicalize refuses, with the same NonCanonicalValueError, so a
+ * caller refuses a non-JSON input BEFORE it runs anything on it; it also refuses a
+ * value nested so deeply that the engine cannot revive it (about 2,500 levels on a
+ * default stack, which canonicalize alone may accept in a warmed-up process). `T` is
+ * the caller's claim about the shape; nothing here checks it.
+ */
+export function canonicalSnapshot<T = unknown>(value: unknown): CanonicalSnapshot<T> {
+  const text = canonicalize(value);
+  let parsed: unknown;
+  try {
+    parsed = parseJson(text, toPrototypeLess);
+  } catch {
+    // Unreachable for ordinary values (the text is valid JSON that this module wrote); a value nested
+    // beyond the engine's recursion limit lands here. Either way the boundary stays typed.
+    throw new NonCanonicalValueError("$", "canonical text that could not be parsed back");
+  }
+  return { text, value: parsed as T };
+}
+
+function canonicalizeAt(value: unknown, path: string, ancestors: WeakSet<object>): string {
+  if (value === null) {
     return "null";
   }
+  if (value === undefined) {
+    throw new NonCanonicalValueError(path, "undefined (JSON has no undefined; omit the member instead)");
+  }
   if (typeof value === "string") {
-    return JSONStringify(value);
+    return quote(value);
   }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return `${value}`;
+  if (typeof value === "boolean") {
+    return toText(value);
   }
-  if (ArrayIsArray(value)) {
-    let out = "[";
-    for (let i = 0; i < value.length; i++) {
-      if (i > 0) out += ",";
-      // `map` skips a hole, and `join` writes the hole as nothing.
-      if (hasOwn(value, i)) out += canonicalize(value[i]);
+  if (typeof value === "number") {
+    if (!isFiniteNumber(value)) throw new NonCanonicalValueError(path, toText(value));
+    if (isIntegerNumber(value) && !isSafeIntegerNumber(value)) {
+      throw new NonCanonicalValueError(
+        path,
+        `the integer ${toText(value)}, outside the safe range (send it as a decimal string)`,
+      );
     }
-    return `${out}]`;
+    return toText(value);
   }
   if (typeof value === "object") {
-    const keys = sortedStrings(ObjectKeys(value as Record<string, unknown>));
-    let out = "{";
-    let first = true;
-    for (let i = 0; i < keys.length; i++) {
-      const member = (value as Record<string, unknown>)[keys[i]!];
-      if (member === undefined) continue;
-      out += `${first ? "" : ","}${JSONStringify(keys[i]!)}:${canonicalize(member)}`;
-      first = false;
+    if (weakSetHas(ancestors, value)) throw new NonCanonicalValueError(path, "a cyclic reference");
+    weakSetAdd(ancestors, value);
+    try {
+      return isArray(value)
+        ? canonicalArray(value, path, ancestors)
+        : canonicalObject(value, path, ancestors);
+    } finally {
+      weakSetDelete(ancestors, value);
     }
-    return `${out}}`;
   }
-  return StringCtor(value);
+  throw new NonCanonicalValueError(path, `a ${typeof value}`);
+}
+
+function canonicalArray(arr: unknown[], path: string, ancestors: WeakSet<object>): string {
+  if (getPrototypeOf(arr) !== ARRAY_PROTOTYPE) {
+    throw new NonCanonicalValueError(path, "an array with a substituted prototype or an Array subclass");
+  }
+  const length = arrayLength(arr, path); // read once
+  let out = "[";
+  for (let i = 0; i < length; i++) {
+    const at = `${path}[${i}]`;
+    const d = getOwnPropertyDescriptor(arr, i);
+    if (d === undefined) throw new NonCanonicalValueError(at, "a hole in a sparse array (or an inherited index)");
+    const element = dataValueOf(d);
+    if (element === NOT_DATA) throw new NonCanonicalValueError(at, "an accessor element");
+    if (i !== 0) out += ",";
+    out += canonicalizeAt(element, at, ancestors);
+  }
+  const keys = ownKeys(arr);
+  const count = keys.length;
+  for (let k = 0; k < count; k++) {
+    const key = keys[k];
+    if (key === "length") continue;
+    if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${toText(key)}]`, "a symbol-keyed property");
+    const index = toNumber(key);
+    if (!(isIntegerNumber(index) && index >= 0 && index < length && toText(index) === key)) {
+      throw new NonCanonicalValueError(`${path}.${key}`, "a named property on an array");
+    }
+  }
+  return out + "]";
+}
+
+/**
+ * An array's length, read from its OWN `length` data descriptor through the
+ * captured reflection. `arr.length` is a [[Get]]: on a Proxy it runs the `get`
+ * trap, which is not a reflection operation. A Proxy's
+ * getOwnPropertyDescriptor trap is a reflection trap, but the engine only
+ * insists that `length` stays a compatible non-configurable data property, so the
+ * reported value can be anything: it must be a non-negative safe integer, or the
+ * array is refused. (The element loop and the own-key check in canonicalArray
+ * then refuse a length that disagrees with the elements the array really has.)
+ */
+function arrayLength(arr: unknown[], path: string): number {
+  const descriptor = getOwnPropertyDescriptor(arr, "length");
+  const length = descriptor === undefined ? NOT_DATA : dataValueOf(descriptor);
+  if (typeof length !== "number" || !isSafeIntegerNumber(length) || length < 0) {
+    throw new NonCanonicalValueError(path, "an array whose length is not an own data property holding a non-negative safe integer");
+  }
+  return length;
+}
+
+function canonicalObject(obj: object, path: string, ancestors: WeakSet<object>): string {
+  const proto = getPrototypeOf(obj);
+  if (proto !== OBJECT_PROTOTYPE && proto !== null) {
+    // A constant reason: reading the value's constructor could run its code.
+    throw new NonCanonicalValueError(path, "a non-plain object (its prototype is not Object.prototype or null)");
+  }
+  const keys = ownKeys(obj);
+  const count = keys.length;
+  for (let i = 0; i < count; i++) {
+    const key = keys[i];
+    if (typeof key === "symbol") throw new NonCanonicalValueError(`${path}[${toText(key)}]`, "a symbol-keyed property");
+  }
+  sortByCodeUnits(keys as string[], count);
+  let out = "{";
+  let first = true;
+  for (let i = 0; i < count; i++) {
+    const key = keys[i] as string;
+    const at = `${path}.${key}`;
+    const d = getOwnPropertyDescriptor(obj, key);
+    if (d === undefined) throw new NonCanonicalValueError(at, "a property that vanished while it was read");
+    const member = dataValueOf(d);
+    if (member === NOT_DATA) throw new NonCanonicalValueError(at, "an accessor property");
+    if (!isEnumerable(d)) throw new NonCanonicalValueError(at, "a non-enumerable property");
+    if (member === undefined) continue; // omitted, as JSON.stringify omits it
+    if (first) first = false;
+    else out += ",";
+    out += quote(key) + ":" + canonicalizeAt(member, at, ancestors);
+  }
+  return out + "}";
+}
+
+/**
+ * Sort `keys[0 .. count)` ascending by UTF-16 code units, which is what `<` does
+ * on strings and what the default Array.prototype.sort did. Heapsort: in place,
+ * O(n log n) however the keys arrive (a quadratic sort would let a wide object
+ * stall a hash), and it only reads and assigns indices that already exist as
+ * own properties of the engine-made key array, so neither a replaced
+ * Array.prototype.sort nor an inherited indexed setter can be reached. Keys are
+ * unique (a Proxy's ownKeys result cannot repeat a key), so stability is moot.
+ */
+function sortByCodeUnits(keys: string[], count: number): void {
+  for (let root = (count >> 1) - 1; root >= 0; root--) siftDown(keys, root, count);
+  for (let end = count - 1; end > 0; end--) {
+    const largest = keys[0];
+    keys[0] = keys[end];
+    keys[end] = largest;
+    siftDown(keys, 0, end);
+  }
+}
+
+function siftDown(keys: string[], start: number, end: number): void {
+  let root = start;
+  for (;;) {
+    let child = 2 * root + 1;
+    if (child >= end) return;
+    if (child + 1 < end && keys[child] < keys[child + 1]) child++;
+    if (!(keys[root] < keys[child])) return;
+    const moved = keys[root];
+    keys[root] = keys[child];
+    keys[child] = moved;
+    root = child;
+  }
 }
 
 /**

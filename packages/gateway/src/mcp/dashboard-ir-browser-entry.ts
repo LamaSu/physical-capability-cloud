@@ -402,18 +402,21 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // empty set; an empty result without a source time is not evidence of absence.
     if (rows.length === 0 && src === null) return kitText("empty result without a source time");
     const staging = document.createElement("div"); // stage off-DOM: committed only after ordering also accepts it (astra 28f H1)
-    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
+    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, data);
     return () => el.replaceChildren(...Array.from(staging.childNodes));
   }, () => { el.replaceChildren(); }, (data) => {
     // M3 fingerprint: shapeOf(staging) — a framed structural shape of the same rows, staged
     // off-DOM (never touching `el`), not raw concatenated text (astra 28e M3: row/cell
     // boundaries, field labels, kinds and values are then all part of the fingerprint, so a
-    // structurally different payload can never collide with what is shown).
+    // structurally different payload can never collide with what is shown). N110: the window
+    // note is part of the staged content too, so it is committed with the rows and covered by
+    // this fingerprint — a poll that changes only the disclosed total (same rows, same asOf)
+    // must not silently replace what's shown without going through the ordering gate.
     const rows = listRowsOf(String(node.bind?.path ?? ""), data);
     if (rows === null) return null;
     if (!listRowsReadable(node, rows)) return null;
     const staging = document.createElement("div");
-    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows);
+    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, data);
     return JSON.stringify(shapeOf(staging));
   }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });
 }

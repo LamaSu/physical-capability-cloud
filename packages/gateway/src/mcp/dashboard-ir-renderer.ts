@@ -23,7 +23,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind, KitText, AgentText } from "./dashboard-ir.js";
-import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource } from "./dashboard-ir.js";
+import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES } from "./dashboard-ir.js";
 
 // Minimal structural DOM: the renderer reaches the DOM only through RDocument/RElement,
 // so tests can pass a plain-object fake. ir-kit-text-brand.test.ts fails if the renderer
@@ -40,7 +40,7 @@ export interface RElement {
 }
 export interface RDocument { createElement(tag: string): RElement; }
 
-const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fieldname" | "fresh" | "stale" | "unavail" | "empty" | "timeUnknown" | "absent", string> = {
+const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | "value" | "row" | "meta" | "note" | "schemaCard" | "field" | "fieldname" | "fresh" | "stale" | "unavail" | "empty" | "timeUnknown" | "absent" | "window", string> = {
   root: "pcc-ir", section: "pcc-section", heading: "pcc-heading", text: "pcc-text",
   stat: "pcc-stat", card: "pcc-card", receipt: "pcc-receipt", list: "pcc-list",
   badge: "pcc-badge", grid: "pcc-grid", "approval-notice": "pcc-approval",
@@ -50,7 +50,7 @@ const CLS: Record<IrNodeType | "untrusted" | "agent" | "withheld" | "invalid" | 
   invalid: "pcc-invalid", value: "pcc-value", row: "pcc-row", meta: "pcc-meta",
   note: "pcc-note", schemaCard: "pcc-schema-card", field: "pcc-fieldlabel",
   fresh: "pcc-fresh", stale: "pcc-stale", unavail: "pcc-unavail", empty: "pcc-empty",
-  timeUnknown: "pcc-time-unknown", absent: "pcc-absent",
+  timeUnknown: "pcc-time-unknown", absent: "pcc-absent", window: "pcc-window",
 };
 const STATE_CLASSES: readonly string[] = ["pcc-stale", "pcc-unavail", "pcc-time-unknown"];
 function withState(host: RElement, cls: string | null): void {
@@ -483,6 +483,125 @@ function readListField(row: unknown, field: string): ListFieldRead {
   }
 }
 
+// ── The list WINDOW disclosure (N110) ────────────────────────────────────────────────────
+// A list never implies completeness it cannot vouch for: today a list renders "none", or a
+// subset, while hiding the window it shows — manifest-chosen filters, an offset, the server's
+// page, the client row cap. `listWindow` is the pure, DOM-free derivation of what the view can
+// HONESTLY say about that window; `bindListRows` below paints it. Filter VALUES are manifest
+// (agent) chosen, so they are never printed verbatim: each passes the same closed grammar as a
+// listed scalar (no spaces, so never prose) or is replaced by PCC's own "(value not shown)".
+const WINDOW_FILTER_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+const WINDOW_OFFSET_STR_RE = /^(0|[1-9]\d{0,8})$/;
+const WINDOW_LIMIT_STR_RE = /^[1-9]\d{0,8}$/;
+const isSafeIntValue = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v);
+
+/** One `key=value` filter term. A string outside the identifier grammar, a non-safe-integer
+ *  number, or any other JS value (object, array, NaN, …) is never printed raw. */
+function filterTerm(key: string, v: unknown): KitText {
+  // `key` passed validateIr's bind policy: the selector grammar AND the route's PCC-owned query allowlist.
+  if (typeof v === "string" && WINDOW_FILTER_VALUE_RE.test(v)) return (key + "=" + v) as KitText;
+  if (isSafeIntValue(v)) return (key + "=" + String(v)) as KitText;
+  if (typeof v === "boolean") return (key + "=" + (v ? "true" : "false")) as KitText;
+  return (key + "=(value not shown)") as KitText;
+}
+/** A count or row position: the decimal digits of a non-negative safe integer, else UNAVAILABLE. */
+function countText(n: number): KitText {
+  return Number.isSafeInteger(n) && n >= 0 ? String(n) as KitText : UNAVAILABLE;
+}
+/** KitText parts joined by a KitText separator; composition only, so no brand is minted here. */
+function joinKitTextWith(sep: KitText, parts: readonly KitText[]): KitText {
+  return parts.reduce<KitText | null>((acc, part) => (acc === null ? part : joinKitText(acc, sep, part)), null) ?? kitText("");
+}
+/** The offset a manifest query states: absent is 0; a safe non-negative integer or its canonical
+ *  string form is that value; anything else (negative, float, "01", prose, …) is "unknown" — an
+ *  unknown offset is never treated as 0. */
+function windowOffset(q: Record<string, unknown> | undefined): number | "unknown" {
+  if (!q || !Object.prototype.hasOwnProperty.call(q, "offset")) return 0;
+  const v = q.offset;
+  if (isSafeIntValue(v) && v >= 0) return v;
+  if (typeof v === "string" && WINDOW_OFFSET_STR_RE.test(v)) return Number(v);
+  return "unknown";
+}
+/** The limit a manifest query states: absent is null (no client-requested limit); a safe
+ *  positive integer or its canonical string form is that value; anything else is "unknown". */
+function windowLimit(q: Record<string, unknown> | undefined): number | "unknown" | null {
+  if (!q || !Object.prototype.hasOwnProperty.call(q, "limit")) return null;
+  const v = q.limit;
+  if (isSafeIntValue(v) && v >= 1) return v;
+  if (typeof v === "string" && WINDOW_LIMIT_STR_RE.test(v)) return Number(v);
+  return "unknown";
+}
+
+export interface ListWindow { empty: KitText; note: KitText | null }
+
+/** What the view can honestly disclose about a list's window — derived ONLY from the node's own
+ *  `bind.query`/`bind.path`/`props.limit`, the route's PCC-owned `paged` profile (LIST_PROFILES,
+ *  dashboard-ir.ts), and `returned` (the source's row count, i.e. `rows.length`: what the window
+ *  promises, whether or not a given row later fails closed in `bindListRows`). `data` is the
+ *  fetched envelope, read ONLY for the route's own `paged.total` property when one is declared;
+ *  omitting it (a 4-argument `bindListRows` caller) still derives a correct window from the query
+ *  and the client cap alone — the server-page part degrades honestly to "total not shown" rather
+ *  than guessing. `empty` is "none" ONLY when there are no filters and the offset is exactly 0
+ *  (an unknown offset is never 0); every other empty read says so: "no rows in this window". */
+export function listWindow(node: IrNode, data: unknown, returned: number): ListWindow {
+  const rawQuery = node.bind?.query;
+  const q: Record<string, unknown> | undefined =
+    rawQuery !== null && typeof rawQuery === "object" && !Array.isArray(rawQuery) ? (rawQuery as Record<string, unknown>) : undefined;
+  const path = typeof node.bind?.path === "string" ? node.bind.path : undefined;
+
+  const filterKeys = q ? Object.keys(q).filter((k) => k !== "offset" && k !== "limit").sort() : [];
+  const offset = windowOffset(q);
+  const limit = windowLimit(q);
+  const prof = path !== undefined ? LIST_PROFILES[path] : undefined;
+  // "none" is decided by the SAME paging evidence the note uses (astra n110 r1). It is claimed only
+  // when the window vouches for the WHOLE collection:
+  // - no filters, an offset of exactly 0, and an absent or valid positive limit; AND
+  // - the route's own paging evidence: it is unpaginated; or it reports a total that is a valid 0;
+  //   or it is paged without a total, where an empty FIRST page of a positive limit can only come
+  //   from an empty collection.
+  // Missing, mistyped, inconsistent or off-grammar paging evidence gives "no rows in this window".
+  let vouches = filterKeys.length === 0 && offset === 0 && limit !== "unknown";
+  if (vouches && prof?.paged?.total !== undefined) {
+    const t = readOwnPath(data, prof.paged.total);
+    vouches = isSafeIntValue(t) && t === 0;
+  }
+  const empty: KitText = vouches ? kitText("none") : kitText("no rows in this window");
+
+  const parts: KitText[] = [];
+  if (filterKeys.length > 0) {
+    const qq = q as Record<string, unknown>;
+    parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
+  }
+  if (offset === "unknown") parts.push(kitText("offset not shown"));
+  else if (offset > 0) parts.push(joinKitText(kitText("from row "), countText(offset + 1)));
+
+  if (prof?.paged) {
+    const paged = prof.paged;
+    if (paged.total !== undefined) {
+      // own-property read, never inherited — same discipline as every other fetched value here.
+      const totalRaw = readOwnPath(data, paged.total);
+      if (offset !== "unknown" && isSafeIntValue(totalRaw) && totalRaw >= offset + returned) {
+        // "returned", not "showing": the client cap below may show fewer rows than the source returned.
+        if (totalRaw > offset + returned) parts.push(joinKitText(countText(returned), kitText(" of "), countText(totalRaw), kitText(" returned")));
+        // totalRaw === offset + returned: the window shows everything the source claims exists — no note.
+      } else {
+        parts.push(kitText("total not shown")); // absent, mistyped, or inconsistent (claims fewer rows than shown)
+      }
+    } else {
+      const eff: number | "unknown" = typeof limit === "number" ? limit : limit === null ? paged.defaultLimit : "unknown";
+      if (eff === "unknown" ? returned > 0 : returned >= eff) parts.push(joinKitText(countText(returned), kitText(" returned; more may exist")));
+    }
+  }
+
+  // The client's own DOM-node row cap (LIST_ROW_CAP, whatever the manifest's `limit` prop says) —
+  // mirrors the same min() bindListRows enforces below, so the disclosure never drifts from it.
+  const capLimit = Math.min(typeof node.props?.limit === "number" ? node.props.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+  const shown = Math.min(returned, capLimit);
+  if (shown < returned) parts.push(joinKitText(kitText("showing first "), countText(shown), kitText(" of "), countText(returned), kitText(" returned")));
+
+  return { empty, note: parts.length > 0 ? joinKitTextWith(kitText(" · "), parts) : null };
+}
+
 /** Schema-validated dynamic ROW rendering for a list node: every field a list profile allows has
  * exactly ONE closed KIND (LIST_FIELD_KINDS, dashboard-ir.ts), read and type-validated by
  * `readListField`, never by the selector's name or its role (title/meta/statusFrom — astra r4
@@ -501,15 +620,19 @@ function readListField(row: unknown, field: string): ListFieldRead {
  * on its own, so one individually-withheld value never disables the check for the rest of the row.
  * This is the structural boundary; the lexical claim/pair detectors it calls (isMoneyClaim,
  * boundStatusText's SAFE_STATUS_WORDS) remain defense in depth, not the only gate. (#348:
- * returns the count of rows actually painted, and appends a `CLS.empty` "none" node when the
- * route's collection is genuinely empty — the browser entry's provenance gate relies on this to
- * tell a real empty collection from a withheld/unavailable one.) */
-export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[]): number {
+ * returns the count of rows actually painted, and appends a `CLS.empty` node when the route's
+ * collection is genuinely empty — the browser entry's provenance gate relies on this to tell a
+ * real empty collection from a withheld/unavailable one. N110: the empty marker's own text, and
+ * a trailing `CLS.window` disclosure note, both come from the pure `listWindow` helper above —
+ * the optional 5th `data` argument feeds its server-page check; a 4-argument call still gets a
+ * correct window from the query and the client cap alone.) */
+export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, rows: unknown[], data?: unknown): number {
   const rowTitle = String(node.props?.rowTitle ?? "");
   const rowMeta = Array.isArray(node.props?.rowMeta) ? (node.props!.rowMeta as string[]) : [];
   const statusFrom = typeof node.props?.statusFrom === "string" ? node.props!.statusFrom : "";
   // Hard DOM-node cap whatever the manifest says: omitting `limit` must not lift it.
   const limit = Math.min(typeof node.props?.limit === "number" ? node.props!.limit : LIST_ROW_CAP, LIST_ROW_CAP);
+  const win = listWindow(node, data, rows.length);
   const isStatusKind = (field: string): boolean => LIST_FIELD_KINDS[field] === "status";
   type Cell = { field: string; read: ListFieldRead };
   let shown = 0;
@@ -583,7 +706,8 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     listEl.appendChild(line);
     shown++;
   }
-  if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, kitText("none"))); // a real empty collection says so
+  if (rows.length === 0) listEl.appendChild(el(doc, CLS.empty, win.empty)); // a real empty collection says so (or discloses why it isn't "none")
+  if (win.note !== null) listEl.appendChild(el(doc, CLS.window, win.note)); // N110: the window this list cannot vouch past
   return shown;
 }
 

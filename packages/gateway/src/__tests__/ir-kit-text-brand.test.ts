@@ -38,6 +38,8 @@ const MINTS: readonly MintAllowance[] = [
   { file: "dashboard-ir-renderer.ts", function: "stamp", reason: "The anchored ISO timestamp grammar extracts only date/time digits and separators." },
   { file: "dashboard-ir-renderer.ts", function: "readField", reason: "Schema-specific amount, currency, assurance-tier, boolean, count, identifier and text checks precede display." },
   { file: "dashboard-ir-renderer.ts", function: "readListField", reason: "Profile field kinds enforce round-tripping timestamps, versions and bounded counts; free values are attributed." },
+  { file: "dashboard-ir-renderer.ts", function: "filterTerm", reason: "N110 window note: the key passed validateIr's bind policy (selector grammar plus the route's PCC-owned query allowlist); the value shows only inside WINDOW_FILTER_VALUE_RE, as a safe integer or a boolean, else '(value not shown)'." },
+  { file: "dashboard-ir-renderer.ts", function: "countText", reason: "N110 window note: only a non-negative safe integer's decimal digits; anything else is UNAVAILABLE." },
   { file: "dashboard-ir-renderer.ts", function: "bindScalar", reason: "Allowlisted route/source kinds enforce status, numeric, timestamp and version grammars before display." },
   { file: "dashboard-ir-renderer.ts", function: "manifestProseText", reason: "validateIr checks prose provenance/content; AgentText is accepted only by the agent-authored untrusted sink." },
 ];

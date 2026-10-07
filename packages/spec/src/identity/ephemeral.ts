@@ -78,7 +78,8 @@ export type SessionAction =
 export interface SessionScope {
   /** Allowed action types (e.g., ['evidence_submit', 'workflow_step_complete']) */
   allowedActions: SessionAction[];
-  /** Contract or job IDs this session is bound to (empty = any contract) */
+  /** Contract or job IDs this session is bound to. Must be non-empty and name the job being
+   *  settled: an empty list is refused, never "any contract" (checkDelegationScope). */
   contractIds: string[];
   /** Maximum number of signatures this session key may produce */
   maxSignatures: number;
