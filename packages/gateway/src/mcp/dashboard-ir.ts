@@ -106,7 +106,7 @@ const INVISIBLE_RE = /[\p{M}\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
 const MONEY_EMOJI_RE = /[\u{1F4B0}-\u{1F4B8}\u{1F911}\u{1FA99}]/gu;
 /** The one fold every check uses: lowercase Latin skeleton of what a reader sees. Whitespace runs
  *  collapse to one space, as HTML renders them; that also keeps every match below linear-time. */
-function foldForClaims(text: string): string {
+export function foldForClaims(text: string): string {
   let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
   t = t.replace(/\u2800/g, " ").replace(MONEY_EMOJI_RE, " $ ");
   t = t.replace(/[^\x00-\x7f]/g, (c) => LOOKALIKE[c] ?? c);

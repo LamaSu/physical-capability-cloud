@@ -28,12 +28,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { assertKitTextBeforeBoot, assertKitTextViolations, flushKitText, checkKitClicks } from "./ui-kit-text-counter.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitSrc = readFileSync(path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js"), "utf8");
 const PCC = "https://capability.network";
 
 function boot(manifest: unknown, snapshot?: unknown) {
+  assertKitTextBeforeBoot();
   document.documentElement.removeAttribute("data-theme");
   document.head.innerHTML = "";
   document.body.innerHTML = "";
@@ -55,8 +57,9 @@ function boot(manifest: unknown, snapshot?: unknown) {
   }
   // eslint-disable-next-line no-eval
   (0, eval)(kitSrc); // no snapshot node -> LIVE mode
+  assertKitTextViolations();
 }
-const flush = () => new Promise((r) => setTimeout(r, 0));
+const flush = flushKitText;
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: Record<string, unknown> | null };
 function installFetch(responder: (c: Call) => { status: number; body?: unknown; trace?: string }): Call[] {
@@ -96,9 +99,14 @@ const approvalWin = {
 const okGetsAnd = (post: { status: number; body?: unknown; trace?: string }) => (c: Call) =>
   c.method === "GET" ? { status: 200, body: { summary: "Pizza", amount: 21.99, currency: "USDC" } } : post;
 
+let clickCheck: ReturnType<typeof checkKitClicks>;
 beforeEach(() => {
+  clickCheck = checkKitClicks();
   try { window.sessionStorage.clear(); window.localStorage.clear(); } catch { /* jsdom has both */ }
   delete (window as unknown as { fetch?: unknown }).fetch;
+});
+afterEach(async () => {
+  try { await flush(); } finally { clickCheck.mockRestore(); }
 });
 
 describe("approval window (live)", () => {
@@ -111,7 +119,7 @@ describe("approval window (live)", () => {
   });
 
   it("keeps the action bar even when a trace footer is rendered (x-pcc-trace-id present)", async () => {
-    installFetch((c) => (c.method === "GET" ? { status: 200, body: { amount: 1 }, trace: "t-get" } : { status: 200 }));
+    installFetch((c) => (c.method === "GET" ? { status: 200, body: { amount: 1 }, trace: "t-get-01" } : { status: 200 }));
     boot(man([approvalWin]));
     await flush();
     expect(document.querySelector(".pcc-foot-meta")).not.toBeNull(); // the trace footer exists
@@ -195,6 +203,36 @@ describe("approval window (live)", () => {
     btn("Approve").click();
     await flush();
     expect(document.body.textContent!.toLowerCase()).toContain("no longer available");
+  });
+
+  it("#342 31g: a 503 money POST keeps approval-window Approve disabled and asks to reload and check", async () => {
+    const calls = installFetch(okGetsAnd({ status: 503 }));
+    boot(man([approvalWin]));
+    await flush();
+    const approve = btn("Approve");
+    approve.click();
+    await flush();
+    expect(approve.disabled).toBe(true);
+    expect(btn("Deny").disabled).toBe(true);
+    expect(document.querySelector(".pcc-action-status")!.textContent).toContain("Reload and check it before sending another");
+    approve.click();
+    await flush();
+    expect(posts(calls).length).toBe(1);
+  });
+
+  it("#342 31g: a thrown money POST keeps approval-window Approve disabled", async () => {
+    const calls = installFetch((call) => {
+      if (call.method === "GET") return { status: 200, body: { summary: "Pizza" } };
+      throw new Error("unknown transport outcome");
+    });
+    boot(man([approvalWin]));
+    await flush();
+    const approve = btn("Approve");
+    approve.click();
+    await flush();
+    expect(approve.disabled).toBe(true);
+    expect(document.querySelector(".pcc-action-status")!.textContent).toContain("Reload and check it before sending another");
+    expect(posts(calls).length).toBe(1);
   });
 });
 
@@ -580,6 +618,7 @@ describe("F10 + gate lifecycle", () => {
     btn("Go").click();
     gateApproveBtn()!.click();
     await new Promise((r) => setTimeout(r, 1300)); // longer than the old fixed 1.2 s auto-close
+    assertKitTextViolations();
     expect(document.querySelector(".pcc-overlay")).not.toBeNull(); // still open: request unsettled
     // close it by hand, then click again while the request is still in flight
     (Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).find((b) => b.textContent === "Cancel") as HTMLButtonElement).click();
@@ -623,7 +662,7 @@ describe("A (ruling 4): Approve/Deny are kit-owned; a manifest label never label
     expect(winButtons().map((b) => b.textContent)).toEqual(["Approve", "Deny"]);
     // The manifest's approve label survives only as quoted, attributed text, outside every control.
     const quoted = Array.from(document.querySelectorAll(".pcc-win .pcc-untrusted-label")).map((n) => n.textContent);
-    expect(quoted).toEqual(["The dashboard calls this: “Deny”"]);
+    expect(quoted).toEqual(["The dashboard calls this: “Deny”", "The dashboard calls this: “Pizza”"]);
     expect(winButtons().some((b) => b.querySelector(".pcc-untrusted-label") !== null)).toBe(false);
   });
 
@@ -689,6 +728,7 @@ describe("A (ruling 4): Approve/Deny are kit-owned; a manifest label never label
     expect(btn("Deny").disabled).toBe(true);
     // Even invoking Deny's handler directly (bypassing the disabled attribute) claims nothing.
     (btn("Deny") as unknown as { onclick: () => void }).onclick();
+    assertKitTextViolations();
     expect(document.body.textContent).not.toContain("nothing was sent");
     f.release();
     await flush();
@@ -697,7 +737,7 @@ describe("A (ruling 4): Approve/Deny are kit-owned; a manifest label never label
     expect(document.body.textContent).not.toContain("nothing was sent");
   });
 
-  it("after a FAILED approval, a retry is refused and Deny stays locked (a request was sent)", async () => {
+  it("after a FAILED approval, Approve and Deny stay locked with reload guidance", async () => {
     // astra r5 F1/F2 on #342: once a money request was sent and not accepted, every further money
     // request from the view is refused, an identical retry included (no status proves "no effect", and
     // no money route is durably idempotent): the user reloads and checks the outcome first.
@@ -712,7 +752,8 @@ describe("A (ruling 4): Approve/Deny are kit-owned; a manifest label never label
     btn("Approve").click();
     await flush();
     expect(posts(calls).length).toBe(1);
-    expect(document.body.textContent).toContain("already sent and its outcome is not confirmed");
+    expect(btn("Approve").disabled).toBe(true);
+    expect(document.body.textContent).toContain("Reload and check it before sending another");
   });
 });
 
@@ -1044,7 +1085,7 @@ describe("D: a hosted typed operation has a per-action re-entrancy guard", () =>
     installFetch(() => ({ status: 200 }));
     hostBoot(callOperation);
     btn("Cancel job").click();
-    expect(barStatus().textContent).toBe("bridge down");
+    expect(barStatus().textContent).toBe("reported: bridge down");
     btn("Cancel job").click();
     expect(callOperation).toHaveBeenCalledTimes(2);
   });
@@ -1161,6 +1202,7 @@ describe("F: Approval-gate cleanup is instance-specific", () => {
     btn("Go").click(); // gate 2
     expect(overlays()).toBe(1);
     await new Promise((r) => setTimeout(r, 1300)); // gate 1's stale timer fires now
+    assertKitTextViolations();
     btn("Go").click(); // must NOT stack a third gate on gate 2
     expect(overlays()).toBe(1);
     // gate 2 still works: its Approve runs, and refuses (nothing more is sent)
@@ -1337,7 +1379,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     await flush();
     expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["Amount 21.99 (no currency in the request)"]);
     expect(all(".pcc-win .pcc-realreq-ref")).toEqual(["ref esc-1"]);
-    expect(bodyRows(".pcc-win")).toEqual([["payee", '"0xevil"'], ["split", '{"a":1}'], ["note", '"5"'], ["idempotencyKey", "set by the kit when sent"]]);
+    expect(bodyRows(".pcc-win")).toEqual([["payee", 'reported: "0xevil"'], ["split", 'reported: {"a":1}'], ["note", 'reported: "5"'], ["idempotencyKey", "set by the kit when sent"]]);
     btn("Approve").click();
     await flush();
     const { idempotencyKey, ...wire } = posts(calls)[0]!.body!;
@@ -1352,7 +1394,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     btn("Go").click();
     expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["Amount 3.00 USDC"]); // amount + its currency
     expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId j1", "offerId o1"]);
-    expect(bodyRows(".pcc-overlay")).toEqual([["asset", '"ETH"'], ["memo", '"m"'], ["n", "null"], ["deep", '{"x":[1,2]}'], ["idempotencyKey", "set by the kit when sent"]]);
+    expect(bodyRows(".pcc-overlay")).toEqual([["asset", 'reported: "ETH"'], ["memo", 'reported: "m"'], ["n", "reported: null"], ["deep", 'reported: {"x":[1,2]}'], ["idempotencyKey", "set by the kit when sent"]]);
     gateApproveBtn()!.click();
     await flush();
     expect(Object.keys(posts(calls)[0]!.body!).sort()).toEqual([...Object.keys(body), "idempotencyKey"].sort());
@@ -1451,7 +1493,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     boot(act({ path: FUND, body: { amount: 5, currency: "" } }));
     btn("Go").click();
     expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("Amount 5.00 (no currency in the request)");
-    expect(rows(".pcc-overlay")).toContainEqual(["currency", '""']);
+    expect(rows(".pcc-overlay")).toContainEqual(["currency", 'reported: ""']);
   });
 
   it("F4: a POST's idempotencyKey is shown as the kit's (what the wire carries), never the body's value", async () => {
@@ -1471,7 +1513,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     const calls = installFetch(() => ({ status: 200 }));
     boot(act({ kind: "patch", path: "/api/jobs/j1/status", body: { status: "done", idempotencyKey: "m" } }));
     btn("Go").click();
-    expect(rows(".pcc-overlay")).toContainEqual(["idempotencyKey", '"m"']);
+    expect(rows(".pcc-overlay")).toContainEqual(["idempotencyKey", 'reported: "m"']);
     expect(all(".pcc-overlay .pcc-args-kit")).toEqual([]);
     gateApproveBtn()!.click();
     await flush();
@@ -1486,7 +1528,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
       btn("Refresh").click();
       expect(overlays()).toBe(1);
       expect(posts(calls).length).toBe(0);
-      expect(rows(".pcc-overlay")).toContainEqual(["visibility", '"public"']);
+      expect(rows(".pcc-overlay")).toContainEqual(["visibility", 'reported: "public"']);
       gateApproveBtn()!.click();
       await flush();
       expect(posts(calls).map((c) => c.url)).toEqual([`${PCC}${p}`]);

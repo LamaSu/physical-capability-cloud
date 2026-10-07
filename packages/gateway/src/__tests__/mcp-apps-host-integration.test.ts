@@ -49,6 +49,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DASHBOARD_CSD_URL } from "@pcc/spec";
 import { runDashboardViewBoot, MCP_APP_TOOL_RESULT_METHOD } from "../mcp/mcp-app-view.js";
+import { expectNoPccUiTextViolations, expectSettledPccUiText } from "./helpers/pcc-ui-text.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PCC_UI_SRC = readFileSync(
@@ -401,6 +402,7 @@ describe("R4 PR1 — full pcc-ui boot: host mode read-only, non-host unchanged",
     // Run the REAL kit IIFE — mount() executes synchronously (readyState complete).
     // eslint-disable-next-line @typescript-eslint/no-implied-eval
     new Function(PCC_UI_SRC)();
+    expectNoPccUiTextViolations("full kit boot");
     return calls;
   }
 
@@ -430,6 +432,7 @@ describe("R4 PR1 — full pcc-ui boot: host mode read-only, non-host unchanged",
     // Invoke the click handler directly (bypassing the disabled attribute) — the
     // dispatch + transport backstops still issue NO request.
     (btn as unknown as { onclick?: () => void })?.onclick?.();
+    expectNoPccUiTextViolations("disabled host action invocation");
     expect(calls).toHaveLength(0);
   });
 
@@ -441,7 +444,7 @@ describe("R4 PR1 — full pcc-ui boot: host mode read-only, non-host unchanged",
     expect(document.querySelector(".pcc-connect")).toBeNull(); // no key-entry prompt in host mode
   });
 
-  it("host mode: a read binding STILL fetches (forced PCC origin, no Authorization header)", () => {
+  it("host mode: a read binding STILL fetches (forced PCC origin, no Authorization header)", async () => {
     const readManifest = {
       csd: DASHBOARD_CSD_URL,
       title: "Status",
@@ -452,23 +455,27 @@ describe("R4 PR1 — full pcc-ui boot: host mode read-only, non-host unchanged",
     expect(calls[0].url).toBe(`${PCC_ORIGIN}/api/status`);
     const headers = (calls[0].init?.headers || {}) as Record<string, string>;
     expect(headers.Authorization).toBeUndefined(); // host mode holds no key
+    await expectSettledPccUiText("live host read binding");
   });
 
-  it("non-host mode: the SAME mutating action is enabled and DOES issue a request (through the Approval gate)", () => {
+  it("non-host mode: the SAME mutating action is enabled and DOES issue a request (through the Approval gate)", async () => {
     const calls = bootRealKit(false, actionsManifest);
     const btn = buttonByText("Cancel job");
     expect(btn, "action button rendered").toBeDefined();
     expect(btn?.disabled).toBe(false);
     expect(document.querySelector(".pcc-host-note")).toBeNull();
     (btn as unknown as { onclick?: () => void })?.onclick?.();
+    expectNoPccUiTextViolations("non-host action opens approval");
     // A write that is not on the kit's short non-money allowlist is money until proven otherwise
     // (cancelling a paid job can refund): it opens the Approval gate, and nothing is sent yet.
     expect(calls).toHaveLength(0);
     const approve = Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).find((b) => b.textContent === "Approve") as unknown as { onclick?: () => void } | undefined;
     expect(approve, "approval gate opened").toBeDefined();
     approve?.onclick?.();
+    expectNoPccUiTextViolations("approval click");
     expect(calls).toHaveLength(1);
     expect(calls[0].url.endsWith("/api/jobs/j1/cancel")).toBe(true);
     expect(calls[0].init?.method).toBe("POST");
+    await expectSettledPccUiText("approval POST response");
   });
 });

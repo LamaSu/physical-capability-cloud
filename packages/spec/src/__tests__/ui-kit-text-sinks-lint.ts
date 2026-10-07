@@ -19,6 +19,34 @@ export interface TextSinkArgumentAllowance {
   matches(call: ts.CallExpression, argument: ts.Expression): boolean;
 }
 
+export interface TextMintHelper {
+  name: string;
+  /** Explain the grammar or trusted source that permits this helper to mint text. */
+  reason: string;
+}
+
+export interface TextMintConfig {
+  /** The module-private function that creates and registers runtime brands. */
+  mint: string;
+  /** The PCC-copy helper, whose callers outside helpers must supply literals. */
+  kitText: string;
+  helpers: readonly TextMintHelper[];
+}
+
+export interface TextComputedWriteAllowance {
+  /** Only this named function may write computed keys to this exact binding. */
+  function: string;
+  target: string;
+  reason: string;
+}
+
+export interface AgentTextConfig {
+  /** The sole claim-checking agent brand mint and sole marked agent sink. */
+  mint: string;
+  sink: string;
+  reason: string;
+}
+
 export interface TextSinkConfig {
   file: string;
   scriptKind: ts.ScriptKind;
@@ -29,6 +57,10 @@ export interface TextSinkConfig {
   allowedAttributes?: readonly string[];
   allowedNodeCalls?: readonly TextSinkCallAllowance[];
   allowedNameArguments?: readonly TextSinkArgumentAllowance[];
+  /** JS runtime brands need a syntactically closed mint boundary too. */
+  textMints?: TextMintConfig;
+  agentText?: AgentTextConfig;
+  allowedComputedWrites?: readonly TextComputedWriteAllowance[];
 }
 
 const TEXT_PROPERTIES = new Set(["textContent", "innerText", "outerText", "nodeValue", "data", "innerHTML", "outerHTML", "srcdoc", "value", "defaultValue", "label"]);
@@ -117,6 +149,26 @@ function isBuiltinReference(node: ts.Node, name: string): boolean {
   return isIdentifier(node, name) || memberName(node) === name;
 }
 
+/** A strict comparison with a literal produces a boolean, never an alias or a
+ * callable reference. Manifest action.confirm is data used this way. */
+function isLiteralComparison(node: ts.Node): boolean {
+  let expression = node;
+  for (;;) {
+    const parent = expression.parent;
+    if (!parent || !(ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isTypeAssertionExpression(parent) || ts.isNonNullExpression(parent) || ts.isSatisfiesExpression(parent)) || parent.expression !== expression) break;
+    expression = parent;
+  }
+  const parent = expression.parent;
+  if (!ts.isBinaryExpression(parent) || (parent.operatorToken.kind !== ts.SyntaxKind.EqualsEqualsEqualsToken && parent.operatorToken.kind !== ts.SyntaxKind.ExclamationEqualsEqualsToken)) return false;
+  return ts.isStringLiteral(unwrap(parent.left === expression ? parent.right : parent.left));
+}
+
+function isLiteralOnlyText(node: ts.Node | undefined): boolean {
+  if (!node) return false;
+  node = unwrap(node);
+  return ts.isStringLiteral(node) || (ts.isConditionalExpression(node) && isLiteralOnlyText(node.whenTrue) && isLiteralOnlyText(node.whenFalse));
+}
+
 function isLiteralKey(node: ts.Node | undefined): boolean {
   if (!node) return false;
   node = unwrap(node);
@@ -155,6 +207,72 @@ function functionName(node: ts.Node): string | undefined {
 function nearestFunction(node: ts.Node): ts.Node | undefined {
   for (let p = node.parent; p; p = p.parent) if (ts.isFunctionLike(p)) return p;
   return undefined;
+}
+
+function variableScope(node: ts.VariableDeclaration): ts.Node {
+  const lexical = ts.isVariableDeclarationList(node.parent) && !!(node.parent.flags & ts.NodeFlags.BlockScoped);
+  for (let p = node.parent; p; p = p.parent) {
+    if (ts.isSourceFile(p) || ts.isFunctionLike(p) || (lexical && ts.isBlock(p))) return p;
+  }
+  return node.getSourceFile();
+}
+
+/** Bindings are resolved by scope, rather than by matching a variable spelling.
+ * A var is function-scoped; a let/const, catch parameter, or function parameter
+ * that shadows it cannot borrow the reviewed object's allowance. */
+function bindingResolver(file: ts.SourceFile): (node: ts.Node, name: string) => ts.Node[] | undefined {
+  const scopes = new Map<ts.Node, Map<string, ts.Node[]>>();
+  const add = (scope: ts.Node, name: string, declaration: ts.Node) => {
+    let bindings = scopes.get(scope);
+    if (!bindings) scopes.set(scope, bindings = new Map());
+    const declarations = bindings.get(name) ?? [];
+    declarations.push(declaration);
+    bindings.set(name, declarations);
+  };
+  const addName = (scope: ts.Node, name: ts.BindingName, declaration: ts.Node) => {
+    if (ts.isIdentifier(name)) add(scope, name.text, declaration);
+    else for (const element of name.elements) if (ts.isBindingElement(element)) addName(scope, element.name, declaration);
+  };
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)) {
+      const scope = ts.isCatchClause(node.parent) ? node.parent : variableScope(node);
+      addName(scope, node.name, node);
+    }
+    if (ts.isFunctionLike(node)) for (const parameter of node.parameters) addName(node, parameter.name, parameter);
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      const scope = nearestFunction(node) ?? file;
+      add(scope, node.name.text, node);
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(file);
+  return (node, name) => {
+    for (let p = node.parent; p; p = p.parent) {
+      const declarations = scopes.get(p)?.get(name);
+      if (declarations) return declarations;
+    }
+    return undefined;
+  };
+}
+
+function isFreshObject(node: ts.Node | undefined): boolean {
+  if (!node) return false;
+  node = unwrap(node);
+  return (ts.isObjectLiteralExpression(node) && node.properties.length === 0) ||
+    (ts.isCallExpression(node) && isMember(node.expression, "Object", "create") && node.arguments.length === 1 && node.arguments[0].kind === ts.SyntaxKind.NullKeyword);
+}
+
+function isReassignmentIdentifier(node: ts.Identifier): boolean {
+  let target: ts.Node = node;
+  for (;;) {
+    const parent = target.parent;
+    if (ts.isParenthesizedExpression(parent) || ts.isAsExpression(parent) || ts.isTypeAssertionExpression(parent) || ts.isNonNullExpression(parent) || ts.isSatisfiesExpression(parent)) { target = parent; continue; }
+    // Destructuring writes can be nested, but a member's receiver/key is a read.
+    if ((ts.isPropertyAssignment(parent) && parent.initializer === target) || ts.isShorthandPropertyAssignment(parent) || ts.isArrayLiteralExpression(parent) || ts.isObjectLiteralExpression(parent) || ts.isSpreadElement(parent) || ts.isSpreadAssignment(parent)) { target = parent; continue; }
+    if (ts.isBinaryExpression(parent) && parent.left === target && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) return true;
+    if ((ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) && (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken)) return true;
+    return (ts.isForInStatement(parent) || ts.isForOfStatement(parent)) && parent.initializer === target;
+  }
 }
 
 export function enclosingNamedFunction(node: ts.Node): string | undefined {
@@ -196,6 +314,13 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
   const file = ts.createSourceFile(config.file, source, ts.ScriptTarget.Latest, true, config.scriptKind);
   const issues: TextSinkIssue[] = [];
   const definitions = new Map(config.sinks.map((name) => [name, [] as ts.Node[]]));
+  const mintConfig = config.textMints;
+  const agentConfig = config.agentText;
+  const agentTargets = new Set(agentConfig ? [agentConfig.mint, agentConfig.sink] : []);
+  const agentDefinitions = new Map([...agentTargets].map((name) => [name, [] as ts.Node[]]));
+  const allFunctions = new Map<string, ts.Node[]>();
+  const mintTargets = new Set(mintConfig ? [mintConfig.mint, mintConfig.kitText] : []);
+  const mintDefinitions = new Map((mintConfig ? [mintConfig.mint, mintConfig.kitText, ...mintConfig.helpers.map((helper) => helper.name)] : []).map((name) => [name, [] as ts.Node[]]));
   const report = (node: ts.Node, rule: string) => {
     const { line, character } = file.getLineAndCharacterOfPosition(node.getStart(file));
     issues.push({ file: config.file, line: line + 1, column: character + 1, rule });
@@ -204,6 +329,13 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     if (ts.isFunctionLike(node)) {
       const name = functionName(node);
       if (name) definitions.get(name)?.push(node);
+      if (name) mintDefinitions.get(name)?.push(node);
+      if (name) agentDefinitions.get(name)?.push(node);
+      if (name) {
+        const named = allFunctions.get(name) ?? [];
+        named.push(node);
+        allFunctions.set(name, named);
+      }
     }
     ts.forEachChild(node, collect);
   };
@@ -213,12 +345,66 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     if (nodes.length === 1) sinks.add(nodes[0]);
     else report(nodes[1] ?? file, `sink ${name} must have exactly one definition (found ${nodes.length})`);
   }
+  const mintHelpers = new Map<string, ts.Node>();
+  const usedMintHelpers = new Set<string>();
+  if (mintConfig) {
+    for (const [name, nodes] of mintDefinitions) {
+      if (nodes.length !== 1) report(nodes[1] ?? file, `text mint function ${name} must have exactly one definition (found ${nodes.length})`);
+    }
+    for (const helper of mintConfig.helpers) {
+      if (!helper.reason.trim()) report(file, `text mint helper ${helper.name} requires a reason`);
+      const nodes = mintDefinitions.get(helper.name);
+      if (nodes?.length === 1 && helper.reason.trim()) mintHelpers.set(helper.name, nodes[0]);
+    }
+    if (new Set(mintConfig.helpers.map((helper) => helper.name)).size !== mintConfig.helpers.length) report(file, "duplicate text mint helper allowance");
+  }
+  if (agentConfig) {
+    if (!agentConfig.reason.trim()) report(file, "agent text boundary requires a reason");
+    if (!config.sinks.includes(agentConfig.sink)) report(file, `agent text sink must be a designated sink: ${agentConfig.sink}`);
+    for (const [name, nodes] of agentDefinitions) if (nodes.length !== 1) report(nodes[1] ?? file, `agent text function ${name} must have exactly one definition (found ${nodes.length})`);
+  }
+  const resolveBinding = bindingResolver(file);
+  const reassignedBindings = new Set<ts.Node>();
+  const findReassignments = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && isReassignmentIdentifier(node)) {
+      const declarations = resolveBinding(node, node.text);
+      for (const declaration of declarations ?? []) reassignedBindings.add(declaration);
+    }
+    ts.forEachChild(node, findReassignments);
+  };
+  findReassignments(file);
+  const usedComputedAllowances = new Set<TextComputedWriteAllowance>();
+  const computedAllowances = config.allowedComputedWrites ?? [];
+  const allowanceKeys = new Set<string>();
+  for (const allowance of computedAllowances) {
+    if (!allowance.reason.trim()) report(file, `computed write allowance ${allowance.function}.${allowance.target} requires a reason`);
+    if (allFunctions.get(allowance.function)?.length !== 1) report(file, `computed write allowance function must have exactly one definition: ${allowance.function}`);
+    const key = `${allowance.function}.${allowance.target}`;
+    if (allowanceKeys.has(key)) report(file, `duplicate computed write allowance: ${key}`);
+    allowanceKeys.add(key);
+  }
+  const isAllowedComputedWrite = (node: ts.ElementAccessExpression): boolean => {
+    const receiver = unwrap(node.expression);
+    if (!ts.isIdentifier(receiver)) return false;
+    const owner = nearestFunction(node);
+    const name = owner && functionName(owner);
+    const allowance = computedAllowances.find((entry) => entry.function === name && entry.target === receiver.text && entry.reason.trim());
+    if (!allowance) return false;
+    usedComputedAllowances.add(allowance);
+    const declarations = resolveBinding(receiver, receiver.text);
+    if (allFunctions.get(allowance.function)?.length !== 1 || declarations?.length !== 1 || !ts.isVariableDeclaration(declarations[0]) || declarations[0].pos >= node.pos || !isFreshObject(declarations[0].initializer) || reassignedBindings.has(declarations[0])) {
+      report(node, `computed write target must be a fresh unreassigned object: ${allowance.function}.${allowance.target}`);
+      return false;
+    }
+    return true;
+  };
   const attributeMethods = new Set(["setAttribute", "setAttributeNS", "toggleAttribute", ...(config.attributeMethods ?? [])]);
   const allowedAttributes = new Set(config.allowedAttributes ?? []);
   const forbiddenMethods = new Set([...FORBIDDEN_METHODS, ...attributeMethods]);
   const isForbiddenName = (name: string) => isTextProperty(name) || forbiddenMethods.has(name) || OBJECT_REFLECTION_METHODS.has(name) || SETTER_METHODS.has(name);
   const checkTarget = (node: ts.Node): void => {
     node = unwrap(node);
+    if (ts.isElementAccessExpression(node) && isAllowedComputedWrite(node)) return;
     if (ts.isElementAccessExpression(node) && !isLiteralKey(node.argumentExpression)) report(node, "dynamic computed property write");
     else if (isTextProperty(memberName(node))) report(node, `text property write: ${memberName(node)}`);
     else if (ts.isObjectLiteralExpression(node)) {
@@ -238,6 +424,50 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
   const visit = (node: ts.Node): void => {
     // Types describe a surface but cannot read a method or render a byte.
     if (ts.isTypeNode(node)) return;
+    if (agentConfig) {
+      if (ts.isIdentifier(node) && agentTargets.has(node.text) && isValueIdentifier(node) && !isDirectCallTarget(node)) report(node, `agent text reference must be a direct call: ${node.text}`);
+      if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && agentTargets.has(memberName(node) ?? "")) report(node, `agent text cannot be reached through a member: ${memberName(node)}`);
+      if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
+        const name = literalName(node.propertyName ?? node.name);
+        if (name && agentTargets.has(name)) report(node, `agent text destructuring: ${name}`);
+      }
+      if (ts.isPropertyAssignment(node)) {
+        const name = literalName(node.name);
+        if (name && agentTargets.has(name) && ts.isObjectLiteralExpression(node.parent) && ts.isBinaryExpression(node.parent.parent) && node.parent.parent.left === node.parent) report(node, `agent text destructuring: ${name}`);
+      }
+      if (ts.isCallExpression(node)) {
+        const name = calledName(node.expression);
+        if (name && agentTargets.has(name) && !isIdentifier(unwrap(node.expression), name)) report(node, `indirect agent text call: ${name}`);
+      }
+    }
+    // Mint checks apply even in sink bodies: a text sink cannot mint arbitrary
+    // input. References are closed rather than trying to chase mutable aliases.
+    if (mintConfig) {
+      if (ts.isIdentifier(node) && mintTargets.has(node.text) && isValueIdentifier(node) && !isDirectCallTarget(node)) report(node, `text mint reference must be a direct call: ${node.text}`);
+      if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && mintTargets.has(memberName(node) ?? "")) report(node, `text mint cannot be reached through a member: ${memberName(node)}`);
+      if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
+        const name = literalName(node.propertyName ?? node.name);
+        if (name && mintTargets.has(name)) report(node, `text mint destructuring: ${name}`);
+      }
+      if (ts.isPropertyAssignment(node)) {
+        const name = literalName(node.name);
+        if (name && mintTargets.has(name) && ts.isObjectLiteralExpression(node.parent) && ts.isBinaryExpression(node.parent.parent) && node.parent.parent.left === node.parent) report(node, `text mint destructuring: ${name}`);
+      }
+      if (ts.isCallExpression(node)) {
+        const name = calledName(node.expression);
+        if (name && mintTargets.has(name)) {
+          const direct = unwrap(node.expression);
+          const caller = nearestFunction(node);
+          const helper = caller && functionName(caller);
+          const approved = !!helper && mintHelpers.get(helper) === caller;
+          if (!(ts.isIdentifier(direct) && direct.text === name)) report(node, `indirect text mint call: ${name}`);
+          if (name === mintConfig.mint && !approved) report(node, `text mint call outside approved helpers: ${name}`);
+          const literalCopy = node.arguments.length === 1 && isLiteralOnlyText(node.arguments[0]);
+          if (name === mintConfig.kitText && !approved && !literalCopy) report(node, `kit text requires a literal-only argument: ${name}`);
+          if (approved && helper && (name === mintConfig.mint || !literalCopy)) usedMintHelpers.add(helper);
+        }
+      }
+    }
     // A nested callback in a sink is not the sink itself and receives no exemption.
     if (!sinks.has(nearestFunction(node) as ts.Node)) {
       if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) checkTarget(node.left);
@@ -259,7 +489,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         if (method === "Proxy" || method === "eval" || method === "Function") report(node, `forbidden reflection reference: ${method}`);
         if (method === "Object" && !isMemberReceiver(node)) report(node, "Object used as a value may hide reflection");
         if (method && TEXT_CONSTRUCTORS.has(method)) report(node, `text-carrying constructor reference: ${method}`);
-        if (method && DIALOGS.has(method) && !isDirectCallTarget(node)) report(node, `text dialog reference: ${method}`);
+        if (method && DIALOGS.has(method) && !isDirectCallTarget(node) && !isLiteralComparison(node)) report(node, `text dialog reference: ${method}`);
         if (isBuiltinReference(node.expression, "Object")) {
           if (method === undefined || (method && OBJECT_REFLECTION_METHODS.has(method))) report(node, `forbidden Object reflection: ${method ?? "dynamic member"}`);
           if (method === "assign" && !isDirectCallTarget(node)) report(node, "Object.assign used as a value may write text properties");
@@ -300,20 +530,19 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         const isObjectAssign = (expression: ts.Node) => (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) && isBuiltinReference(expression.expression, "Object") && memberName(expression) === "assign";
         if (isObjectAssign(called) && !isObjectAssign(direct)) report(node, "indirect Object.assign may write text properties");
         if (isObjectAssign(direct)) {
-          for (const argument of node.arguments.slice(1)) {
-            const value = unwrap(argument);
-            if (!ts.isObjectLiteralExpression(value)) report(argument, "Object.assign source may contain text properties");
-            else for (const property of value.properties) {
-              const name = "name" in property ? literalName(property.name) : undefined;
-              if (ts.isSpreadAssignment(property) || name === undefined) report(property, "Object.assign source may contain text properties");
-              else if (isTextProperty(name)) report(property, `Object.assign text property: ${name}`);
-            }
-          }
+          // The first argument is the sole write target. An inline object literal
+          // is fresh and cannot be a DOM node; every other target fails closed.
+          const target = node.arguments[0];
+          if (!target || !ts.isObjectLiteralExpression(unwrap(target))) report(node, "Object.assign target must be a fresh object literal");
         }
       }
     }
     ts.forEachChild(node, visit);
   };
   visit(file);
+  if (mintConfig) for (const helper of mintConfig.helpers) {
+    if (!usedMintHelpers.has(helper.name)) report(mintHelpers.get(helper.name) ?? file, `stale text mint helper allowance: ${helper.name}`);
+  }
+  for (const allowance of computedAllowances) if (!usedComputedAllowances.has(allowance)) report(file, `stale computed write allowance: ${allowance.function}.${allowance.target}`);
   return issues;
 }

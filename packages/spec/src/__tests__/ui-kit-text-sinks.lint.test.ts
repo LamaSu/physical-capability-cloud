@@ -39,6 +39,71 @@ const browserConfig: TextSinkConfig = {
     },
   ],
 };
+const plainConfig: TextSinkConfig = {
+  file: fileURLToPath(new URL("../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js", import.meta.url)),
+  scriptKind: ts.ScriptKind.JS,
+  sinks: ["el", "setText", "setAttrText", "setValue", "agentEl"],
+  attributeMethods: ["setAttribute", "setAttr"],
+  allowedAttributes: [
+    "aria-disabled", // Boolean accessibility state, never displayed prose.
+    "for", // Associates a label with its generated input id.
+    "data-theme", // Selects the closed dark/light theme.
+    "data-mode", // Records the kit's transport mode for styling.
+  ],
+  // appendChild is Node-only; this kit has no string-capable insertion allowance.
+  allowedNodeCalls: [],
+  allowedComputedWrites: [
+    { function: "plainBody", target: "out", reason: "Copies request data into its fresh plain object after rejecting __proto__; preserves the baseline body semantics" },
+    { function: "collectForm", target: "out", reason: "Collects form data into its fresh plain object; preserves the baseline field and __proto__ semantics" },
+    { function: "intentState", target: "INTENT_STATE", reason: "Stores per-request state in the module's fresh null-prototype dictionary; no DOM receiver is reachable" },
+  ],
+  agentText: { mint: "agentText", sink: "agentEl", reason: "One claim-checking agent mint and one sink that adds the IR's agent and untrusted classes; agent brands cannot enter kit sinks" },
+  allowedNameArguments: [
+    {
+      reason: 'el("label", ...) selects the HTML label element, rather than writing its label property',
+      matches: (call, argument) => isIdentifier(call.expression, "el") && call.arguments[0] === argument && ts.isStringLiteral(argument) && argument.text === "label",
+    },
+    {
+      reason: 'setAttrText\'s second argument selects one of its two guarded display attributes, title or placeholder',
+      matches: (call, argument) => isIdentifier(call.expression, "setAttrText") && call.arguments.length === 3 && call.arguments[1] === argument && ts.isStringLiteral(argument) && ["title", "placeholder"].includes(argument.text),
+    },
+    {
+      reason: 'setAttribute("aria-disabled", ...) writes only a boolean accessibility state from the reviewed metadata list',
+      matches: (call, argument) => memberName(call.expression) === "setAttribute" && call.arguments.length === 2 && call.arguments[0] === argument && ts.isStringLiteral(argument) && argument.text === "aria-disabled",
+    },
+  ],
+  textMints: {
+    mint: "mintText",
+    kitText: "kitText",
+    helpers: [
+      { name: "kitText", reason: "PCC copy; all external calls require literal-only arguments" },
+      { name: "joinText", reason: "Composes only WeakSet-branded parts; any other part becomes the closed marker" },
+      { name: "enumValueText", reason: "Preserves the original enum option's wire value while untrustedLabel attributes its visible text" },
+      { name: "requestValueText", reason: "Preserves existing wire-formatted offer, approval, and exact request terms without presenting them as settlement facts" },
+      { name: "requestDestinationText", reason: "Displays only the validated canonical request URL pinned to the PCC origin" },
+      { name: "requestReasonText", reason: "Displays the descriptor's kit-owned refusal reason" },
+      { name: "apiBaseText", reason: "Displays the resolved pinned API origin in the PCC footer" },
+      { name: "numberText", reason: "Admits only finite numbers; it cannot carry arbitrary server prose" },
+      { name: "settlementCaptionText", reason: "Admits only the closed classifier's settlement captions" },
+      { name: "baseUnitsText", reason: "Formats only decimal base units with checked decimal precision" },
+      { name: "fmtUsd", reason: "Preserves the existing amount formatter, including invalid-input String bytes required by the task" },
+      { name: "fmtTs", reason: "Preserves the existing timestamp formatter; timeText separately checks the canonical UTC grammar" },
+      { name: "fmtVal", reason: "Preserves locale grouping for finite numeric metrics; other values use typed helpers" },
+      { name: "statusPillText", reason: "Applies the surface's closed status vocabulary and attributes every other status" },
+      { name: "reportedText", reason: "Attributes server prose as reported and qualifies unconfirmed money surfaces" },
+      { name: "dataStatusText", reason: "Applies the binding's settlement classifier or closed status vocabulary" },
+      { name: "untrustedLabel", reason: "Quotes and attributes manifest-authored labels using the existing presentation" },
+      { name: "amountText", reason: "Preserves the existing exact sum formatter or wire JSON request term" },
+      { name: "idText", reason: "Admits the canonical identifier grammar, otherwise uses reportedText" },
+      { name: "hexText", reason: "Admits only 40- or 64-digit hexadecimal values with a 0x prefix" },
+      { name: "timeText", reason: "Admits canonical UTC timestamps through fmtTs, otherwise states time not reported" },
+      { name: "traceText", reason: "Admits only the closed 8–64-character trace identifier grammar" },
+      { name: "nameText", reason: "Frames names with the PCC name label and withholds embedded claims" },
+      { name: "fieldDefaultText", reason: "Admits the field kind's finite-number or string grammar and withholds claims" },
+      { name: "injectStyles", reason: "The CSS stylesheet is composed entirely of immutable PCC string literals" },
+    ],
+  },
+};
 const kits: TextSinkConfig[] = [
   {
     file: fileURLToPath(new URL("dashboard-ir-renderer.ts", gatewayMcp)),
@@ -52,9 +117,10 @@ const kits: TextSinkConfig[] = [
     }],
   },
   browserConfig,
+  plainConfig,
 ];
 
-// The same lint accepts ScriptKind.JS and a different sink list for task 2.
+// Run the same bypass corpus over both TS sources and the shipped JS source.
 const bypasses = [
   "n.textContent = raw;",
   'n["innerText"] = raw;',
@@ -259,6 +325,20 @@ describe("generic lint guard", () => {
   it("does not mistake reads or non-text attributes for bypasses", () => {
     expect(lintTextSinks('const t = n.textContent; n.setAttribute("data-tone", t); n.appendChild(child); Reflect.ownKeys(n);', { file: "kit", scriptKind: ts.ScriptKind.JS, sinks: [], allowedAttributes: ["data-tone"] })).toEqual([]);
   });
+  it("allows Object.assign only when its first argument is a fresh object literal", () => {
+    const config: TextSinkConfig = { file: "kit", scriptKind: ts.ScriptKind.JS, sinks: [] };
+    expect(lintTextSinks('Object.assign({}, payload, { textContent: raw }); Object["assign"](({ seed: 1 }), payload);', config)).toEqual([]);
+    // Mutating either the first argument or its position removes the allowance.
+    for (const source of ['Object.assign(n, payload, { textContent: raw });', 'Object.assign(payload, {});', 'Object.assign(out, { safe: true });', 'Object.assign();']) {
+      expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ rule: "Object.assign target must be a fresh object literal" }));
+    }
+    expect(lintTextSinks('Object.assign.call(Object, {}, payload);', config)).toContainEqual(expect.objectContaining({ rule: "indirect Object.assign may write text properties" }));
+  });
+  it("does not mistake manifest confirmation data for the global confirm dialog", () => {
+    expect(lintTextSinks('const confirmation = action.confirm === "inline";', { file: "kit", scriptKind: ts.ScriptKind.JS, sinks: [] })).toEqual([]);
+    expect(lintTextSinks('const confirmation = window.confirm;', { file: "kit", scriptKind: ts.ScriptKind.JS, sinks: [] })).toContainEqual(expect.objectContaining({ rule: "text dialog reference: confirm" }));
+    expect(lintTextSinks('const receiver = window; const confirmation = receiver.confirm; confirmation(raw);', { file: "kit", scriptKind: ts.ScriptKind.JS, sinks: [] })).toContainEqual(expect.objectContaining({ rule: "text dialog reference: confirm" }));
+  });
   it("permits numeric and other literal computed keys that cannot name text properties", () => {
     expect(lintTextSinks('n[1] = raw; n[-1] = raw; n[0n] = raw; n[true] = raw; n[null] = raw;', { file: "kit", scriptKind: ts.ScriptKind.JS, sinks: [] })).toEqual([]);
   });
@@ -286,5 +366,186 @@ describe("generic lint guard", () => {
       const line = file.getLineAndCharacterOfPosition(call.getStart(file)).line + 1;
       expect(lintTextSinks(mutated, browserConfig)).toContainEqual(expect.objectContaining({ line, rule: "string-capable insertion call: replaceChildren" }));
     }
+  });
+});
+
+describe("closed computed data writes", () => {
+  const config: TextSinkConfig = {
+    file: "kit.js", scriptKind: ts.ScriptKind.JS, sinks: [],
+    allowedComputedWrites: [{ function: "collect", target: "out", reason: "Fresh data object; no DOM receiver is reachable" }],
+  };
+  const fresh = 'function collect(k, raw) { var out = {}; out[k] = raw; return out; }';
+  it("accepts a fresh plain object and a fresh null-prototype object", () => {
+    expect(lintTextSinks(fresh, config)).toEqual([]);
+    expect(lintTextSinks(fresh.replace('var out = {}', 'var out = Object.create(null)'), config)).toEqual([]);
+    expect(lintTextSinks('var out = Object.create(null); function collect(k, raw) { out[k] = raw; }', config)).toEqual([]);
+  });
+  it("reports the same write on another target", () => {
+    expect(lintTextSinks(fresh.replace('out[k]', 'other[k]'), config)).toContainEqual(expect.objectContaining({ rule: "dynamic computed property write" }));
+  });
+  it.each([
+    fresh.replace('var out = {}', 'var out = n'),
+    fresh.replace('var out = {}', 'var out = Object.create(proto)'),
+    fresh.replace('var out = {}', 'var out = { existing: true }'),
+    fresh.replace('out[k] = raw;', 'out = n; out[k] = raw;'),
+    fresh.replace('return out;', 'out = n; return out;'),
+    fresh.replace('return out;', 'var out = n; return out;'),
+    fresh.replace('out[k] = raw;', '({ data: out } = payload); out[k] = raw;'),
+    fresh.replace('out[k] = raw;', '[out] = payload; out[k] = raw;'),
+    fresh.replace('out[k] = raw;', 'for (out in payload) {} out[k] = raw;'),
+    fresh.replace('var out = {};', ''),
+    'var out = {}; function collect(out, k, raw) { out[k] = raw; }',
+    'var out = {}; function collect(k, raw) { let out = n; out[k] = raw; }',
+  ])("rejects a target whose binding is absent, shadowed, nonfresh or reassigned: %s", (source) => {
+    expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ rule: "computed write target must be a fresh unreassigned object: collect.out" }));
+  });
+  it("does not transfer permission into another function or nested callback", () => {
+    expect(lintTextSinks(fresh + ' function other(k, raw) { var out = {}; out[k] = raw; }', config)).toContainEqual(expect.objectContaining({ rule: "dynamic computed property write" }));
+    expect(lintTextSinks(fresh + ' function nested(k, raw) { var out = {}; (function () { out[k] = raw; })(); }', config)).toContainEqual(expect.objectContaining({ rule: "dynamic computed property write" }));
+  });
+  it("requires a reason, rejects duplicate allowances, and detects stale entries", () => {
+    const allowance = config.allowedComputedWrites![0];
+    expect(lintTextSinks(fresh, { ...config, allowedComputedWrites: [{ ...allowance, reason: "" }] })).toContainEqual(expect.objectContaining({ rule: "computed write allowance collect.out requires a reason" }));
+    expect(lintTextSinks(fresh, { ...config, allowedComputedWrites: [allowance, allowance] })).toContainEqual(expect.objectContaining({ rule: "duplicate computed write allowance: collect.out" }));
+    expect(lintTextSinks('function collect() { var out = {}; }', config)).toContainEqual(expect.objectContaining({ rule: "stale computed write allowance: collect.out" }));
+  });
+  it("mutates every shipped computed-write allowance's exact receiver", () => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const file = ts.createSourceFile(plainConfig.file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const targets: ts.ElementAccessExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isElementAccessExpression(node.left) && plainConfig.allowedComputedWrites!.some((allowance) => enclosingNamedFunction(node) === allowance.function && isIdentifier(node.left.expression, allowance.target))) targets.push(node.left);
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    expect(targets).toHaveLength(6); // plainBody 1, collectForm 4, intentState 1.
+    for (const target of targets) {
+      const receiver = target.expression;
+      const mutated = source.slice(0, receiver.getStart(file)) + 'other' + source.slice(receiver.end);
+      const line = file.getLineAndCharacterOfPosition(target.getStart(file)).line + 1;
+      expect(lintTextSinks(mutated, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: "dynamic computed property write" }));
+    }
+  });
+  it("mutates the first argument of all three shipped Object.assign calls", () => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const file = ts.createSourceFile(plainConfig.file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && isMember(node.expression, "Object", "assign")) calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      const target = call.arguments[0];
+      expect(ts.isObjectLiteralExpression(target)).toBe(true);
+      const mutated = source.slice(0, target.getStart(file)) + 'other' + source.slice(target.end);
+      const line = file.getLineAndCharacterOfPosition(call.getStart(file)).line + 1;
+      expect(lintTextSinks(mutated, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: "Object.assign target must be a fresh object literal" }));
+    }
+  });
+});
+
+describe("closed agent text boundary", () => {
+  const config: TextSinkConfig = {
+    file: "kit.js", scriptKind: ts.ScriptKind.JS, sinks: ["agentEl"],
+    agentText: { mint: "agentText", sink: "agentEl", reason: "One checked mint and one marked sink" },
+  };
+  const fixture = 'function agentText(raw) { return raw; }\nfunction agentEl(tag, cls, text) { n.textContent = text; }\n';
+  it("allows only direct calls to the sole mint and sink", () => {
+    expect(lintTextSinks(fixture + 'agentEl("span", "", agentText(raw));', config)).toEqual([]);
+  });
+  it.each([
+    'var f = agentText; f(raw);', 'var f = agentEl; f(raw);',
+    'agentText.call(null, raw);', 'agentEl.apply(null, args);',
+    'agentText.bind(null)(raw);', 'agentEl.bind(null)(raw);',
+    'source.agentText(raw);', 'source["agentEl"](raw);',
+    'var { agentText: f } = source;', '({ agentEl: f } = source);',
+    'agentText = foreignMint;', 'agentEl = foreignSink;',
+  ])("reports the boundary mutation on its own line: %s", (source) => {
+    expect(lintTextSinks(fixture + source, config)).toContainEqual(expect.objectContaining({ line: 3 }));
+  });
+  it.each(["agentText", "agentEl"])("requires exactly one %s definition", (name) => {
+    expect(lintTextSinks(fixture + `function ${name}() {}`, config)).toContainEqual(expect.objectContaining({ rule: `agent text function ${name} must have exactly one definition (found 2)` }));
+    const omitted = fixture.replace(new RegExp(`function ${name}[^\\n]*\\n`), "");
+    expect(lintTextSinks(omitted, config)).toContainEqual(expect.objectContaining({ rule: `agent text function ${name} must have exactly one definition (found 0)` }));
+  });
+  it("requires a reason and registers only the one designated agent sink", () => {
+    expect(lintTextSinks(fixture, { ...config, agentText: { ...config.agentText!, reason: "" } })).toContainEqual(expect.objectContaining({ rule: "agent text boundary requires a reason" }));
+    expect(lintTextSinks(fixture, { ...config, sinks: [] })).toContainEqual(expect.objectContaining({ rule: "agent text sink must be a designated sink: agentEl" }));
+  });
+  it.each(['var f = agentText;', 'var f = agentEl;', 'agentText.call(null, raw);', 'agentEl.call(null, raw);'])("closes a shipped-kit agent boundary mutation: %s", (source) => {
+    const kit = readFileSync(plainConfig.file, "utf8");
+    const prefix = kit + '\nfunction injectedAgentBoundary(raw) {\n';
+    expect(lintTextSinks(prefix + source + '\n}', plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split('\n').length }));
+  });
+});
+
+describe("syntactic runtime text mint boundary", () => {
+  const config: TextSinkConfig = {
+    file: "runtime-kit.js",
+    scriptKind: ts.ScriptKind.JS,
+    sinks: [],
+    textMints: {
+      mint: "mintText",
+      kitText: "kitText",
+      helpers: [
+        { name: "kitText", reason: "External PCC copy calls are restricted to literals" },
+        { name: "safeText", reason: "This fixture models a helper that checks a closed grammar" },
+      ],
+    },
+  };
+  const fixture = 'function mintText(t) { return t; }\nfunction kitText(t) { return mintText(t); }\nfunction safeText(t) { return mintText(t); }\n';
+  it("allows direct helper mints and literal-only PCC copy calls", () => {
+    expect(lintTextSinks(fixture + 'kitText("Copy"); kitText(ok ? "Yes" : (other ? "Maybe" : "No"));', config)).toEqual([]);
+    expect(lintTextSinks(fixture.replace('function safeText(t) { return mintText(t); }', 'function safeText(t) { return kitText(t); }'), config)).toEqual([]);
+  });
+  it.each([
+    'mintText(raw);',
+    'kitText(raw);',
+    'kitText("reported: " + raw);',
+    'kitText(ok ? "Safe" : raw);',
+    'kitText(`Copy`);',
+    'kitText();',
+    'kitText("Copy", raw);',
+    'const mint = mintText; mint(raw);',
+    'const copy = kitText; copy(raw);',
+    'mintText.call(null, raw);',
+    'mintText.apply(null, [raw]);',
+    'mintText.bind(null)(raw);',
+    'kitText.call(null, "Copy");',
+    'kitText.apply(null, ["Copy"]);',
+    'kitText.bind(null)("Copy");',
+    'const { kitText: copy } = source; copy(raw);',
+    '({ mintText: mint } = source); mint(raw);',
+    'const source = { kitText };',
+    'source["kitText"](raw);',
+    'mintText = foreignMint;',
+  ])("reports mint bypass on the injected line: %s", (bypass) => {
+    expect(lintTextSinks(fixture + bypass, config)).toContainEqual(expect.objectContaining({ line: 4 }));
+  });
+  it("does not extend a helper's permission into a nested callback", () => {
+    const source = fixture.replace('function safeText(t) { return mintText(t); }', 'function safeText(t) { mintText(t); (() => mintText(t))(); }');
+    expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ line: 3, rule: "text mint call outside approved helpers: mintText" }));
+  });
+  it("does not permit a sink to mint its input", () => {
+    expect(lintTextSinks(fixture + 'function setText(n, t) { n.textContent = kitText(t); }', { ...config, sinks: ["setText"] })).toContainEqual(expect.objectContaining({ line: 4, rule: "kit text requires a literal-only argument: kitText" }));
+  });
+  it.each([
+    fixture.replace('function safeText(t) { return mintText(t); }', ''),
+    fixture.replace('function safeText(t) { return mintText(t); }', 'function safeText(t) { return t; }'),
+    fixture.replace('function safeText(t) { return mintText(t); }', 'function safeText(t) { return kitText("fixed"); }'),
+  ])("rejects stale mint helper entries", (source) => {
+    expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ rule: "stale text mint helper allowance: safeText" }));
+  });
+  it("requires one definition and a reason for each helper", () => {
+    expect(lintTextSinks(fixture + 'function safeText(t) { return mintText(t); }', config)).toContainEqual(expect.objectContaining({ rule: "text mint function safeText must have exactly one definition (found 2)" }));
+    const invalid = { ...config, textMints: { ...config.textMints!, helpers: [{ name: "kitText", reason: "" }] } };
+    expect(lintTextSinks(fixture, invalid)).toContainEqual(expect.objectContaining({ rule: "text mint helper kitText requires a reason" }));
+  });
+  it.each(['kitText(raw);', 'mintText(raw);', 'const copy = kitText; copy(raw);', 'kitText.call(null, raw);'])('closes a shipped-kit mint bypass: %s', (bypass) => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const prefix = source + "\nfunction injectedMintBypass(raw) {\n";
+    expect(lintTextSinks(prefix + bypass + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length }));
   });
 });
