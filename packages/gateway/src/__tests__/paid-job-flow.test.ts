@@ -155,6 +155,22 @@ describe("Paid Job Flow", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     app = await buildApp();
+    // The discovery quote is the registered capability's price (N98), so the kernel these tests submit
+    // to registers the liquid-handler capability they order, at a flat price.
+    getRepos().capabilities.insert({
+      id: "cap-nyc-liquid-handler",
+      kernelId: "kernel-nyc",
+      type: "liquid-handler",
+      name: "Liquid handler (test)",
+      description: "test fixture",
+      materials: [],
+      tolerances: {},
+      envelope: { x: 1, y: 1, z: 1, unit: "mm" as const },
+      assuranceTiers: [0],
+      pricing: { currency: "USDC", baseCost: "15.00", minimum: "15.00" },
+      availability: {},
+      location: { lat: 40.7, lng: -74 },
+    } as never);
   });
 
   afterEach(async () => {

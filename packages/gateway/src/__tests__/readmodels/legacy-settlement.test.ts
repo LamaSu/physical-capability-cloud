@@ -186,7 +186,11 @@ describe("legacySettlementStatus: money states come only from the settlement rec
   it("places a job whose money is held or unrecorded in its stage", () => {
     expect(statusOf({ job: job({ status: "pending" }) })).toBe("pending");
     expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked()) })).toBe("funded");
-    expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked(escrow({ status: "created" }), [milestone({ status: "created" })])) })).toBe("pending");
+    // The V2 chain path records an unfunded escrow as "created" and its milestone as "pending"
+    // (paid-job-flow.ts:595); no writer puts "created" in a milestone row.
+    expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked(escrow({ status: "created" }), [milestone({ status: "pending" })])) })).toBe("pending");
+    // A milestone word no writer produces is not a stage (#515: MILESTONE_WORDS).
+    expect(statusOf({ job: job({ status: "pending" }), settlement: ok(linked(escrow({ status: "created" }), [milestone({ status: "created" })])) })).toBe("unknown");
     for (const status of ["queued", "active", "preparing", "executing"]) {
       expect(statusOf({ job: job({ status }) }), status).toBe("executing");
     }
@@ -338,6 +342,25 @@ describe("the legacy settlement routes on a real store", () => {
     getStore = db.getStore;
     closeStore = db.closeStore;
     db.initStore({ seed: true });
+    // N98 (#498): a discovery quote is the kernel's REGISTERED capability price, so the kernel the F1 test
+    // submits to carries one USDC-priced liquid-handler capability. No test here asserts that amount.
+    const kernelId = "kernel-nyc";
+    if (!db.getRepos().capabilities.findByKernel(kernelId).some((c: { type: string }) => c.type === "liquid-handler")) {
+      db.getRepos().capabilities.insert({
+        id: `cap-liquid-handler-${kernelId}`,
+        kernelId,
+        type: "liquid-handler",
+        name: "liquid-handler test capability",
+        description: "test",
+        materials: [],
+        tolerances: {},
+        envelope: { x: 1, y: 1, z: 1, unit: "mm" as const },
+        assuranceTiers: [0, 1, 2, 3],
+        pricing: { currency: "USDC", baseCost: "10.00", minimum: "0.01" } as never,
+        availability: {},
+        location: { lat: 40.7, lng: -74 },
+      } as never);
+    }
     const { paidJobFlowRoutes } = await import("../../routes/paid-job-flow.js");
     const { negotiationRoutes } = await import("../../routes/negotiation.js");
     const { settlementRoutes } = await import("../../routes/settlement.js");
@@ -416,6 +439,34 @@ describe("the legacy settlement routes on a real store", () => {
         delete process.env.PCC_ADMIN_KEY;
       }
     });
+
+    it("NEGATIVE (astra r2 on #382, MEDIUM): a failed job or authorization read is the generic 503 on both routes, for a party, a stranger and a missing job alike", async () => {
+      const GENERIC = { error: "read_model_unavailable", message: "The job record could not be read. Try again shortly." };
+      const cases: Array<[string, string]> = [
+        ["job-004", OPERATOR_NYC],
+        ["job-004", STRANGER],
+        ["no-such-job-f1", STRANGER],
+      ];
+      const repos = getStore().repos;
+      for (const [target, method] of [
+        [repos.kernels, "findAll"],
+        [repos.jobs, "findById"],
+      ] as const) {
+        const spy = vi.spyOn(target as any, method).mockImplementation(() => {
+          throw new Error("store unreadable: internal detail");
+        });
+        try {
+          for (const [jobId, wallet] of cases) {
+            const { jobs, settlement } = await both(jobId, { "x-test-principal": wallet, "x-test-proven-wallet": wallet });
+            expect([jobs.statusCode, settlement.statusCode], `${method} ${jobId} ${wallet}`).toEqual([503, 503]);
+            expect(jobs.json()).toEqual(GENERIC);
+            expect(settlement.json()).toEqual(GENERIC);
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      }
+    });
   });
 
   it("NEGATIVE (F1, the reproduced lie): a mock-settled job is simulated on both routes, never settled or paid", async () => {
@@ -482,10 +533,12 @@ describe("the legacy settlement routes on a real store", () => {
     expect(s.settled).toBe(false);
   });
 
-  it("NEGATIVE: seeded job-004 (completed; its escrow has no milestone for its step) is unknown, not settled", async () => {
+  it("NEGATIVE: seeded job-004 (completed; its escrow is the seed's mock esc-001) is simulated, not settled", async () => {
+    // esc-001 sits at 0xESCROW_CONTRACT_001, no contract address, so it is mock data (#409 r1
+    // MEDIUM 1): simulated, never settled and never paid.
     const { jobs, settlement } = await both("job-004");
-    expect(jobs.json()).toMatchObject({ status: "unknown", settled: false, paidAmount: null, jobStatus: "completed" });
-    expect(settlement.json()).toMatchObject({ status: "unknown", settled: false, settledAt: null });
+    expect(jobs.json()).toMatchObject({ status: "simulated", settled: false, paidAmount: null, jobStatus: "completed" });
+    expect(settlement.json()).toMatchObject({ status: "simulated", settled: false, settledAt: null });
   });
 
   it("404s an unknown job on both routes with each route's own error body", async () => {
