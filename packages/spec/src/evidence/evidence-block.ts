@@ -1188,6 +1188,13 @@ function checkedSchemeId(field: string, value: unknown): number {
  */
 export interface SessionKeyAuthDigestContext {
   readonly parentPublicKey: Bytes32Hex;
+  /**
+   * The parent key's version in the funded principal's pinned registration, the same record that
+   * gives `parentPublicKey`; never read from the transported authorization (evidence ruling, bus
+   * #6776). An integer in [1, 2^32 - 1]: versions start at 1, and 0 is reserved and refused, the
+   * shared rule the oracle's /settle check also enforces (Evidence Commitment Profile v1 §3,
+   * amended 10/06 from the Opus 5.5 review of oracle D3, finding F3).
+   */
   readonly keyVersion: number;
   readonly scheme: SessionKeyScheme;
 }
@@ -1367,7 +1374,8 @@ export function computeSessionKeyAuthDigest(auth: SessionKeyAuthorization, conte
   }
   admit(context, "context");
   const parentPublicKey = requireBytes32Hex("context.parentPublicKey", fieldOf(context, "parentPublicKey"));
-  const keyVersion = boundedInt("context.keyVersion", fieldOf(context, "keyVersion"), 0, UINT32_MAX);
+  // [1, 2^32 - 1]: a key version is never 0 (see SessionKeyAuthDigestContext.keyVersion).
+  const keyVersion = boundedInt("context.keyVersion", fieldOf(context, "keyVersion"), 1, UINT32_MAX);
   const scheme = checkedSchemeId("context.scheme", fieldOf(context, "scheme"));
 
   const signatureByteLength = SESSION_PARENT_SIGNATURE_HEX_LENGTH / 2;

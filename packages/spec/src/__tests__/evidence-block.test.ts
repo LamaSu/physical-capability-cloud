@@ -412,6 +412,25 @@ describe("E7 D3 — computeSessionKeyGrantHash and computeSessionKeyAuthDigest m
     );
   });
 
+  // Goldens for key versions other than 1 (the Opus 5.5 review of oracle D3, #23 @2cb5095f, finding F1).
+  // At keyVersion 1 the uint8 scheme slot and the uint32 keyVersion slot both hold 1, so the golden above
+  // can't tell a correct encoder from one that swaps those two slots. These values were computed OUTSIDE
+  // this module, by two encoders that share no code with it or with each other (bus #7155):
+  // - ethers 6.16.0's AbiCoder (the evidence lane's sessionkey-grant-golden-vector.cjs on #270 @ 973fdeb8
+  //   computes the v2 value as `authV2`);
+  // - a pure-Python Keccak-256 over a hand-written 288-byte layout (offset 192, length 64).
+  // With the two slots swapped, keyVersion 2 would give
+  // 0xefbcc8512d3c725ecbda597ee35b574b7170fff96e85bbe1b28cb2c45f7f8b2c instead. 2^32 - 1, the top of the
+  // range, pins the uint32 word at its widest.
+  it("keyVersion 2 and 2^32 - 1 match goldens computed outside this module (pins the scheme/keyVersion slot order)", () => {
+    expect(computeSessionKeyAuthDigest(d3Auth, { ...d3Context, keyVersion: 2 })).toBe(
+      "0x82c74db8afe5a84db7e5c5a55eaa7f7426e9a7dff662b80fd04c442a9ca2026f",
+    );
+    expect(computeSessionKeyAuthDigest(d3Auth, { ...d3Context, keyVersion: 2 ** 32 - 1 })).toBe(
+      "0x7afa19ea046c240cb9b309d2e69a07c4b86b8dd92a67cbb54ea47c000e7d2a4a",
+    );
+  });
+
   it("negatives (D3): a mutated parentSignature, a different keyVersion or a mutated session body each give a different digest", () => {
     const base = computeSessionKeyAuthDigest(d3Auth, d3Context);
     // parentSignature mutated: EXCLUDED from the grant (the grant hash is unchanged) but BOUND in
@@ -428,12 +447,14 @@ describe("E7 D3 — computeSessionKeyGrantHash and computeSessionKeyAuthDigest m
     expect(computeSessionKeyAuthDigest({ ...d3Auth, sessionId: "sess-EVIL" }, d3Context)).not.toBe(base);
   });
 
-  it("refuses malformed context: a non-raw32 parentPublicKey, a keyVersion outside uint32, or an unknown scheme", () => {
+  it("refuses malformed context: a non-raw32 parentPublicKey, a keyVersion outside [1, 2^32 - 1], or an unknown scheme", () => {
     for (const bad of ["0xabcd", `0x${"ab".repeat(31)}`, `0X${"ab".repeat(32)}`, "ab".repeat(32), 7, null]) {
       const err = refusalOf(() => computeSessionKeyAuthDigest(d3Auth, { ...d3Context, parentPublicKey: bad as never }));
       expect(err.field, String(bad)).toBe("context.parentPublicKey");
     }
-    for (const bad of [-1, 1.5, NaN, Infinity, -0, 2 ** 32, "1"]) {
+    // 0 is reserved: key versions start at 1 (Evidence Commitment Profile v1 §3; the oracle's /settle
+    // check refuses 0 too, as delegation_principal_key_version_invalid; oracle D3 review F3).
+    for (const bad of [0, -1, 1.5, NaN, Infinity, -0, 2 ** 32, "1"]) {
       const err = refusalOf(() => computeSessionKeyAuthDigest(d3Auth, { ...d3Context, keyVersion: bad as never }));
       expect(err.field, String(bad)).toBe("context.keyVersion");
     }
