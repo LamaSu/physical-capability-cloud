@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 import { configFromEnv } from "@pcc/verifier";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
+import { locationVisibilityOf, publicLocation } from "../facades/populators/public-location.js";
 import { isAgentBridgeReady, getConversations, getRecentMessages } from "../agent-bridge.js";
 import { litEncryptionService } from "../services.js";
 import { auditService } from "../services/audit-service.js";
@@ -95,7 +96,15 @@ export async function statusRoutes(app: FastifyInstance) {
       const repos = getRepos();
       evidence = repos.evidence.findAll();
       registrations = repos.registrations?.findAll?.() ?? [];
-      capabilities = repos.capabilities?.findAll?.() ?? [];
+      // N68: a capability row's location reads as every other read shows it (coarse unless
+      // its kernel's operator opted in), never as stored.
+      const visibilityByKernel = new Map(
+        repos.kernels.findAll().map((k) => [k.id, locationVisibilityOf(k.location)] as const),
+      );
+      capabilities = (repos.capabilities?.findAll?.() ?? []).map((c) => ({
+        ...c,
+        ...publicLocation(c.location, visibilityByKernel.get(c.kernelId) ?? "approximate"),
+      }));
     } catch {
       // DB not ready
     }

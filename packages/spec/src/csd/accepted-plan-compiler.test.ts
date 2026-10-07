@@ -514,7 +514,10 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     if (!r.ok) throw new Error("x");
     return r.units;
   };
-  const fee235 = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+  // Royalties on top (economics option b): each operator quoted 9 USDC and the gross is 10 USDC. The
+  // operator's floor is its quote's net, 9,000,000 - 211,500 = 8,788,500, which is exactly what tenPercent
+  // leaves it. An omitted quote is the GROSS and leaves no room for a royalty (astra round 6, F).
+  const fee235 = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: plan().nodes.map((n) => ({ ...n, quoteBaseUnits: 9n * USDC })) });
 
   it("splits each unit's net exactly, seals both terms hashes, and receives units in canonical order", () => {
     const seen: string[][] = [];
@@ -535,7 +538,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     expect(r.plan.agreementHash).toBe(DIG("a1")); // lowercased
     expect(r.plan.economicTermsHash).toBe(DIG("e1")); // lowercased
     expect(r.plan.rightsTermsHash).toBe(DIG("f1"));
-    const plainDeal = compileAcceptedPlan(fee235);
+    const plainDeal = compileAcceptedPlan(plan({ feeBps: 235, feeRecipient: ADDR("fe") })); // no quote, no agreement
     expect(plainDeal.ok).toBe(true);
     if (plainDeal.ok) {
       expect([plainDeal.plan.agreementHash, plainDeal.plan.economicTermsHash, plainDeal.plan.rightsTermsHash]).toEqual([null, null, null]);
@@ -862,7 +865,9 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     const rightsOnly: NetSplitter = (u) => ({ ...(tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>), rightsTermsHash: DIG("f2") });
     const agreementOnly: NetSplitter = (u) => ({ ...(tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>), agreementHash: DIG("b2") });
     const recipientOnly = tweak((u) => ({ payouts: [u.payouts[0]!, { ...u.payouts[1]!, recipient: ADDR("c2") }] }));
-    const amountOnly = tweak((u) => ({ payouts: [{ ...u.payouts[0]!, amount: (BigInt(u.payouts[0]!.amount) - 1n).toString() }, { ...u.payouts[1]!, amount: (BigInt(u.payouts[1]!.amount) + 1n).toString() }] }));
+    // One base unit moves from the licensor TO the operator: tenPercent leaves the operator exactly its floor,
+    // so moving it the other way would be refused as operator-below-quote (astra round 6, F).
+    const amountOnly = tweak((u) => ({ payouts: [{ ...u.payouts[0]!, amount: (BigInt(u.payouts[0]!.amount) + 1n).toString() }, { ...u.payouts[1]!, amount: (BigInt(u.payouts[1]!.amount) - 1n).toString() }] }));
     const orderOnly = tweak((u) => ({ payouts: [u.payouts[1]!, u.payouts[0]!] }));
     const unitsReversed: NetSplitter = (u) => {
       const r = tenPercent(u) as Extract<ReturnType<NetSplitter>, { ok: true }>;
@@ -871,7 +876,9 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
     for (const s of [rightsOnly, agreementOnly, recipientOnly, amountOnly, orderOnly]) expect(digestOf(s)).not.toBe(base.plan.acceptedDealDigest);
     expect(digestOf(unitsReversed)).toBe(base.plan.acceptedDealDigest);
     // with UNEQUAL units, a positional (not by-reference) match would put print's legs on mail
-    const uneven = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print" }), node({ nodeId: "mail", capabilityType: "mail.drop", grossBaseUnits: 3n * USDC })] });
+    // Quotes leave room for the 10% royalty: 9 USDC nets 8,788,500 and 2.7 USDC nets 2,636,550 at 235 bps,
+    // exactly what tenPercent leaves each operator.
+    const uneven = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: [node({ nodeId: "print", quoteBaseUnits: 9n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop", grossBaseUnits: 3n * USDC, quoteBaseUnits: 2_700_000n })] });
     const inOrder = withSplit(uneven, tenPercent);
     const reversed = withSplit(uneven, unitsReversed);
     expect(inOrder.ok && reversed.ok).toBe(true);
@@ -946,7 +953,7 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
   });
 
   it("astra: an answer getter that mutates the CALLER's input cannot change the compiled deal or make it throw", () => {
-    const p = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+    const p = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: fee235.nodes });
     const mutate = (mutation: () => void): NetSplitter => (units) =>
       Object.defineProperty({ ...(tenPercent(units) as object) }, "economicTermsHash", {
         enumerable: true,
@@ -955,11 +962,11 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
           return DIG("e1");
         },
       }) as ReturnType<NetSplitter>;
-    const baseline = compileAcceptedPlan(plan({ feeBps: 235, feeRecipient: ADDR("fe") }), { splitNet: tenPercent });
+    const baseline = compileAcceptedPlan(plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: fee235.nodes }), { splitNet: tenPercent });
     expect(baseline.ok).toBe(true); // so two identical refusals cannot satisfy the equality below
     const swapped = compileAcceptedPlan(p, { splitNet: mutate(() => (p.feeRecipient = LICENSOR)) });
     expect(swapped).toEqual(baseline); // the WHOLE plan, digest included, is the untouched baseline
-    const q = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+    const q = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: fee235.nodes });
     const late = compileAcceptedPlan(q, {
       splitNet: mutate(() =>
         Object.defineProperty(q, "feeRecipient", {
@@ -986,13 +993,35 @@ describe("economics split (R15): economics splits each unit's net; the compiler 
         payouts: Array.from({ length: 16 }, (_, i) => ({ recipient: i % 2 ? LICENSOR : u.payoutAddress, amount: (i === 0 ? u.n - 15n : 1n).toString() })),
       })),
     });
-    const many = Array.from({ length: MAX_UNITS_PER_JOB }, (_, i) => node({ nodeId: `n${String(i).padStart(2, "0")}`, grossBaseUnits: USDC }));
+    // The operator's eight legs total n - 8 (fee 0), so it quoted gross - 8: its floor is exactly met.
+    const many = Array.from({ length: MAX_UNITS_PER_JOB }, (_, i) => node({ nodeId: `n${String(i).padStart(2, "0")}`, grossBaseUnits: USDC, quoteBaseUnits: USDC - 8n }));
     const r = withSplit(plan({ nodes: many, edges: [] }), sixteen);
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.plan.jobs).toHaveLength(1);
       expect(r.plan.jobs[0]!.units.reduce((a, u) => a + u.payouts.length, 0)).toBe(256);
     }
+  });
+
+  it("astra round 6 (F): an omitted quote is held to the gross, exactly like an explicit quote equal to the gross", () => {
+    const omitted = plan({ feeBps: 235, feeRecipient: ADDR("fe") });
+    const explicit = plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: plan().nodes.map((n) => ({ ...n, quoteBaseUnits: n.grossBaseUnits })) });
+    // astra's numbers: gross 10,000,000 at 235 bps nets 9,765,000; ten percent to a licensor leaves the operator 8,788,500.
+    const refused = { ok: false, violations: [{ code: "operator-below-quote", nodeId: "mail" }, { code: "operator-below-quote", nodeId: "print" }] };
+    expect(withSplit(omitted, tenPercent)).toEqual(refused);
+    expect(withSplit(explicit, tenPercent)).toEqual(refused);
+    // The whole net to the operator passes both, with the same money.
+    const wholeNet: NetSplitter = (units) => ({
+      ok: true,
+      agreementHash: DIG("a1"),
+      economicTermsHash: DIG("e1"),
+      rightsTermsHash: DIG("f1"),
+      units: units.map((u) => ({ unitRef: u.nodeId, gross: u.g.toString(), fee: u.f.toString(), net: u.n.toString(), payouts: [{ recipient: u.payoutAddress, amount: u.n.toString() }] })),
+    });
+    const a = withSplit(omitted, wholeNet);
+    const b = withSplit(explicit, wholeNet);
+    expect(a.ok && b.ok).toBe(true);
+    if (a.ok && b.ok) expect(b.plan.jobs.map((j) => j.units.map((u) => u.payouts))).toEqual(a.plan.jobs.map((j) => j.units.map((u) => u.payouts)));
   });
 
   function unitsOf(): Parameters<NetSplitter>[0] {
@@ -1239,5 +1268,15 @@ describe("round 4 (astra review of 0571c00c): dependencies are read once; the an
       violations: [{ code: "invalid-plan-field", field: "evidenceRequirements" }],
     });
     expect(reads).toBe(0);
+  });
+});
+
+describe("astra round 6 (D): edges are required", () => {
+  it("a non-array edges is refused as an invalid plan field, never read as 'no dependencies'", () => {
+    for (const edges of [undefined, null, "print->mail", 5, {}, { from: "print", to: "mail" }]) {
+      const r = compileAcceptedPlan({ ...plan(), edges: edges as unknown as AcceptedPlanInput["edges"] });
+      expect([edges, r]).toEqual([edges, { ok: false, violations: [{ code: "invalid-plan-field", field: "edges" }] }]);
+    }
+    expect(compileAcceptedPlan({ ...plan(), edges: [] }).ok).toBe(true); // an EMPTY list is "no dependencies"
   });
 });

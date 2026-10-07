@@ -6,6 +6,7 @@ export { MockChromatograph } from "./mock-chromatograph.js";
 
 // Real camera adapter (uses PhotoCaptureService + GeminiComparisonService)
 export { PhotoCameraAdapter } from "./photo-camera-adapter.js";
+export { PullCameraAdapter, ffmpegFrameGrabber, type CameraDeviceSpec, type FrameGrabber } from "./pull-camera-adapter.js";
 
 // Real device adapters (with built-in mock mode)
 export { OctoPrintAdapter, type OctoPrintConfig } from "./octoprint-adapter.js";
@@ -43,5 +44,7 @@ export type { PrinterLogAdapterConfig, LogProvider } from "./printer-log-adapter
 
 // Interfaces
 export type { MachineAdapter, SensorAdapter, CameraAdapter, MachineCommand, MachineCommandResult } from "./types.js";
+// What an adapter has outstanding, for its quiesceEvidence()
+export { OutstandingWork } from "./outstanding-work.js";
 export type { UniversalSensorAdapter } from "./universal-sensor-adapter.js";
 export { isUniversalSensor } from "./universal-sensor-adapter.js";

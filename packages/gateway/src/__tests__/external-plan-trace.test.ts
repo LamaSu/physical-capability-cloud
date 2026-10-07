@@ -19,9 +19,11 @@ import {
   planHashOf,
   payoutsConserve,
   stepIdBytes32,
+  type CanonicalPlan,
   type CompiledAcceptedPlan,
   type ComposeResponse,
   type EvidenceRequirement,
+  type NodeUnitBinding,
 } from "@pcc/spec";
 import {
   acceptExternalPlan,
@@ -588,12 +590,12 @@ describe("PlanPresentation: the product read model, built only from server truth
     expect(() => {
       p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
     }).not.toThrow();
-    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [] });
+    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [], unknowns: ["time-estimate"] });
   });
 });
 
 describe("seam read-once (the review pattern of #351/#355): every input is read once into owned data", () => {
-  it("a node getter is read once: the program cross-check uses the value that was read", () => {
+  it("a node getter never runs: the program cross-check cannot be shown one value and use another (round 3: refused)", () => {
     let reads = 0;
     const dag = agentDag();
     dag.nodes[1] = Object.defineProperty({ ...dag.nodes[1]! }, "committedProgramHash", {
@@ -601,8 +603,8 @@ describe("seam read-once (the review pattern of #351/#355): every input is read 
       get: () => (reads++ === 0 ? PROGRAM : `0x${"66".repeat(32)}`),
     });
     const r = acceptExternalPlan(dag, CTX, world().deps);
-    expect(reads).toBe(1);
-    expect(r.ok).toBe(true);
+    expect(reads).toBe(0);
+    expect(refusal(r)).toMatchObject({ stage: "submission", reason: "malformed-submission" });
   });
 
   it("a callback that mutates the caller's submission cannot change the outcome", () => {
@@ -784,6 +786,218 @@ describe("PlanPresentation hardening (astra review of #357): bound, intact, vali
   });
 });
 
+describe("PlanPresentation (astra review of #357, round 2b): the contract is bound to its hash and its unit; verdicts cover the nodes exactly", () => {
+  const ASOF = "2026-09-30T12:00:00.000Z";
+  type Unsealed = Omit<CompiledAcceptedPlan, "acceptedDealDigest">;
+  const unsealed = (p: CompiledAcceptedPlan): Unsealed => {
+    const { acceptedDealDigest: _d, ...rest } = p;
+    return rest;
+  };
+  const reseal = (p: Unsealed): CompiledAcceptedPlan => ({ ...p, acceptedDealDigest: acceptedDealDigest(p) });
+  const accepted = () => {
+    const { store, deps } = world();
+    const outcome = acceptExternalPlan(agentDag(), CTX, deps);
+    if (!outcome.ok) throw new Error("setup");
+    return { store, outcome };
+  };
+  /** The deal with one node's binding rewritten and its digest recomputed, so only a binding check can refuse it. */
+  const rebind = (plan: CompiledAcceptedPlan, nodeId: string, edit: (b: NodeUnitBinding) => NodeUnitBinding): CompiledAcceptedPlan =>
+    reseal({ ...unsealed(plan), nodeToUnit: plan.nodeToUnit.map((b) => (b.nodeId === nodeId ? edit(b) : b)) });
+  /** A binding whose contract was edited AND whose carried planHash was recomputed: only the field under test disagrees. */
+  const recut = (edit: (cp: CanonicalPlan) => CanonicalPlan) => (b: NodeUnitBinding): NodeUnitBinding => {
+    const canonicalPlan = edit(b.canonicalPlan);
+    return { ...b, canonicalPlan, planHash: planHashOf(canonicalPlan) };
+  };
+  const printUnitEdit = (plan: CompiledAcceptedPlan, edit: (u: CompiledAcceptedPlan["jobs"][number]["units"][number]) => CompiledAcceptedPlan["jobs"][number]["units"][number]): CompiledAcceptedPlan =>
+    reseal({ ...unsealed(plan), jobs: plan.jobs.map((j) => (j.nodeIds.includes("print") ? { ...j, units: j.units.map(edit) } : j)) });
+  /** Presents `plan` as if the reservation store had sealed exactly that deal's digest. */
+  const sealedAs = (outcome: Extract<SeamResult, { ok: true }>, plan: CompiledAcceptedPlan) =>
+    presentPlan({ submission: agentDag(), outcome: { ...outcome, plan }, sealed: { reservationId: "resv-1", acceptedDealDigest: plan.acceptedDealDigest }, asOf: ASOF });
+  /** The four facts that matter, compact: layer, state, the invalid reason and how many nodes are shown. */
+  const shape = (p: ReturnType<typeof presentPlan>) => [p.layer, p.state, p.invalid?.reason ?? null, p.nodes.length];
+  const refusedAsBinding = (p: ReturnType<typeof presentPlan>) => expect(shape(p)).toEqual(["C", "invalid", "plan-binding", 0]);
+  const refusedAsMalformed = (p: ReturnType<typeof presentPlan>, why?: string) => expect(shape(p), why).toEqual(["C", "invalid", "malformed-outcome", 0]);
+  const cpOf = (plan: CompiledAcceptedPlan, nodeId: string) => plan.nodeToUnit.find((b) => b.nodeId === nodeId)!;
+
+  it("control: a deal resealed unchanged is still sealed, so each case below can fail only on its own field", () => {
+    const { outcome } = accepted();
+    const same = rebind(outcome.plan, "print", (b) => b);
+    expect(same.acceptedDealDigest).toBe(outcome.plan.acceptedDealDigest);
+    expect(shape(sealedAs(outcome, same))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("M1 planHash: the hash shown with a unit is the hash of the contract shown with it, never an older one", () => {
+    const { store, outcome } = accepted();
+    const old = cpOf(outcome.plan, "print").planHash;
+    // The contract's inputs are edited, the old planHash is kept and the deal digest is recomputed and sealed.
+    const plan = rebind(outcome.plan, "print", (b) => ({ ...b, canonicalPlan: { ...b.canonicalPlan, inputs: { pages: 3 } } }));
+    expect(cpOf(plan, "print").planHash).toBe(old);
+    expect(store.consume("resv-1", CTX.principal, plan, NOW)).toEqual({ ok: true }); // a recomputed digest satisfies the store
+    const sealed = presentPlan({ submission: agentDag(), outcome: { ...outcome, plan }, sealed: { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! }, asOf: ASOF });
+    refusedAsBinding(sealed);
+    // Unsealed, the same deal is refused too; and so is a carried hash that no contract hashes to.
+    refusedAsBinding(presentPlan({ submission: agentDag(), outcome: { ...outcome, plan }, asOf: ASOF }));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, planHash: `sha256:${"00".repeat(32)}` }))));
+  });
+
+  it("M1 step: the contract's step is the binding's step", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, job: { ...cp.job, stepId: "mail" } })))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, stepId: "mail" }))));
+  });
+
+  it("M1 operator: the contract's operator is the binding's operator, in whatever hex case", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, operator: OP_MAIL })))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, operator: OP_MAIL }))));
+    // Hex case carries no meaning: the compiler lowercases the contract and keeps the binding's own case.
+    const upper = rebind(outcome.plan, "print", (b) => ({ ...b, operator: `0x${OP_PRINT.slice(2).toUpperCase()}` as typeof b.operator }));
+    expect(upper.acceptedDealDigest).toBe(outcome.plan.acceptedDealDigest);
+    expect(shape(sealedAs(outcome, upper))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("M1 tier: the contract's tier is the binding's tier", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, assurance: { ...cp.assurance, tier: 1 } })))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, tier: 1 }))));
+  });
+
+  it("M1 program: the contract's committed program is the binding's, in whatever hex case, and null only for null", () => {
+    const { outcome } = accepted();
+    const other = `0x${"e3".repeat(32)}`;
+    const withProgram = (committedProgramHash: string | null) => recut((cp) => ({ ...cp, assurance: { ...cp.assurance, committedProgramHash } }));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", withProgram(other))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", withProgram(null))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", (b) => ({ ...b, committedProgramHash: other }))));
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "mail", withProgram(PROGRAM)))); // the mail binding commits no program
+    const upper = rebind(outcome.plan, "print", (b) => ({ ...b, committedProgramHash: `0x${PROGRAM.slice(2).toUpperCase()}` }));
+    expect(upper.acceptedDealDigest).toBe(outcome.plan.acceptedDealDigest);
+    expect(shape(sealedAs(outcome, upper))).toEqual(["B", "sealed", null, 2]);
+  });
+
+  it("M1 amount: the contract's amount is the unit's gross, as the exact canonical base-unit string", () => {
+    const { outcome } = accepted();
+    expect(cpOf(outcome.plan, "print").canonicalPlan.amount.baseUnits).toBe("6500000");
+    for (const baseUnits of ["6500001", "0", "06500000", "6500000.0", "6.5e6", " 6500000"]) {
+      refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, baseUnits } })))));
+    }
+    // The other direction: the unit's gross moves and the contract stays.
+    refusedAsBinding(sealedAs(outcome, printUnitEdit(outcome.plan, (u) => ({ ...u, g: u.g + 1n }))));
+  });
+
+  it("M1 amount under an economics agreement: the contract's amount is the unit's gross (the agreement's), not the operator's quote", () => {
+    const LICENSOR = A("c1");
+    const HASH = (b: string) => `0x${b.repeat(32)}`;
+    const split: EconomicsBinding["splitNet"] = (units) => ({
+      ok: true,
+      agreementHash: HASH("a1"),
+      economicTermsHash: HASH("e1"),
+      rightsTermsHash: HASH("f1"),
+      units: units.map((u) => {
+        const royalty = (u.g - u.quote) / 2n;
+        const legs = royalty > 0n ? [{ recipient: u.payoutAddress, amount: (u.n - royalty).toString() }, { recipient: LICENSOR, amount: royalty.toString() }] : [{ recipient: u.payoutAddress, amount: u.n.toString() }];
+        return { unitRef: u.nodeId, gross: u.g.toString(), fee: u.f.toString(), net: u.n.toString(), payouts: legs };
+      }),
+    });
+    const economics: EconomicsBinding = { unitGross: () => ({ ok: true, gross: { print: 7_000_000n, mail: 3_250_000n } }), splitNet: split };
+    const outcome = acceptExternalPlan(agentDag(), CTX, { ...world().deps, economics });
+    if (!outcome.ok) throw new Error("setup");
+    expect(cpOf(outcome.plan, "print").canonicalPlan.amount.baseUnits).toBe("7000000"); // the quote is 6500000
+    expect(shape(sealedAs(outcome, outcome.plan))).toEqual(["B", "sealed", null, 2]); // an honest agreement deal still presents
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, baseUnits: "6500000" } })))));
+  });
+
+  it("M1 currency: the contract's currency is the deal's currency", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, currency: "USDT" } })))));
+    refusedAsBinding(sealedAs(outcome, reseal({ ...unsealed(outcome.plan), currency: "USDT" })));
+  });
+
+  it("M1 decimals: the contract's decimals are the deal's decimals", () => {
+    const { outcome } = accepted();
+    refusedAsBinding(sealedAs(outcome, rebind(outcome.plan, "print", recut((cp) => ({ ...cp, amount: { ...cp.amount, decimals: 18 } })))));
+    refusedAsBinding(sealedAs(outcome, reseal({ ...unsealed(outcome.plan), currencyDecimals: 18 })));
+  });
+
+  it("M2 duplicates: two copies of one node's verdict cannot stand in for both nodes", () => {
+    const { store, outcome } = accepted();
+    expect(store.consume("resv-1", CTX.principal, outcome.plan, NOW)).toEqual({ ok: true });
+    const seal = { reservationId: "resv-1", acceptedDealDigest: store.sealed("resv-1")! };
+    const [first, second] = outcome.verdicts;
+    for (const verdicts of [[first!, first!], [second!, second!]]) {
+      refusedAsMalformed(presentPlan({ submission: agentDag(), outcome: { ...outcome, verdicts }, sealed: seal, asOf: ASOF }));
+    }
+  });
+
+  /** A re-quote from the real seam: top-level verdicts for every node, nested verdicts for the non-current ones. */
+  const requoteOf = (prices: { mail?: string; print?: string }) => {
+    const dag = agentDag();
+    dag.nodes = dag.nodes.map((n) => ({ ...n, price: prices[n.nodeId as "mail" | "print"] ?? n.price }));
+    const outcome = acceptExternalPlan(dag, CTX, world().deps);
+    if (outcome.ok || outcome.refusal.stage !== "revalidation" || !outcome.verdicts) throw new Error("setup");
+    return { dag, outcome, top: outcome.verdicts, nested: outcome.refusal.verdicts };
+  };
+  const presentFor = (dag: ExternalPlanSubmission, outcome: SeamResult) => presentPlan({ submission: dag, outcome, asOf: ASOF });
+
+  it("M2 coverage: a node without a verdict is invalid, with a plan or without one", () => {
+    const { dag, outcome, top, nested } = requoteOf({ print: "5.00" });
+    expect(presentFor(dag, outcome).state).toBe("needs-requote"); // control: the seam's own shape
+    refusedAsMalformed(presentFor(dag, { ...outcome, verdicts: top.filter((v) => v.nodeId !== "mail") } as SeamResult), "a refusal with no verdict for mail");
+    refusedAsMalformed(presentFor(dag, { ...outcome, verdicts: [] } as SeamResult), "a refusal with an empty top-level list");
+    // Every node has a verdict and one has two, the nested list repeating it: only the exact-cover rule refuses this.
+    const twiceStale = { ...outcome, verdicts: [...top, top[1]!], refusal: { stage: "revalidation", verdicts: [...nested, nested[0]!] } } as SeamResult;
+    refusedAsMalformed(presentFor(dag, twiceStale), "a stale node covered twice, both lists agreeing");
+    // With a plan this was already refused by the count check; it stays refused.
+    const { outcome: ok } = accepted();
+    refusedAsMalformed(presentFor(agentDag(), { ...ok, verdicts: ok.verdicts.slice(1) }), "a plan with one verdict for two nodes");
+  });
+
+  it("M2 agreement: a revalidation refusal's nested verdicts are exactly the top-level verdicts that are not current", () => {
+    const { dag, outcome, top, nested } = requoteOf({ print: "5.00" });
+    expect(nested.map((v) => [v.nodeId, v.status])).toEqual([["print", "stale"]]); // control
+    const printStale = nested[0]!;
+    const refusalWith = (verdicts: typeof nested): SeamResult => ({ ...outcome, refusal: { stage: "revalidation", verdicts } } as SeamResult);
+    const cases: Array<[string, SeamResult]> = [
+      ["another status for the same node", { ...outcome, verdicts: top.map((v) => (v.nodeId === "print" ? { nodeId: "print", status: "missing", reason: "capability-not-found" } : v)) } as SeamResult],
+      ["a node the top-level list calls current", refusalWith([{ ...printStale, nodeId: "mail" }, printStale])],
+      ["a node the top-level list does not name", refusalWith([printStale, { nodeId: "ghost", status: "missing", reason: "capability-not-found" }])],
+      ["the same stale node twice", refusalWith([printStale, printStale])],
+      ["the right status on the wrong node", refusalWith([{ ...printStale, nodeId: "mail" }])],
+      ["a nested list with no top-level list", { ok: false, refusal: outcome.refusal, submissionDigest: outcome.submissionDigest } as SeamResult],
+      ["a later-stage refusal beside a verdict that is not current", { ...outcome, refusal: { stage: "economics", reason: "quote-not-covered", nodeId: "print" } } as SeamResult],
+    ];
+    for (const [why, bad] of cases) refusedAsMalformed(presentFor(dag, bad), why);
+    // And the other way round: a non-current top-level node that the nested list leaves out.
+    const both = requoteOf({ mail: "1.00", print: "5.00" });
+    expect(presentFor(both.dag, both.outcome).state).toBe("needs-requote"); // control
+    const leftOut = { ...both.outcome, refusal: { stage: "revalidation", verdicts: both.nested.filter((v) => v.nodeId === "print") } } as SeamResult;
+    refusedAsMalformed(presentFor(both.dag, leftOut), "a non-current node left out of the nested list");
+  });
+
+  it("M2 pins: the seam's own refusals are still presented (a mixed refusal, an empty nested list, a node submitted twice)", () => {
+    // A missing capability beside a current node: nested is [print], top-level is both nodes.
+    const dag = agentDag();
+    dag.nodes[1] = { ...dag.nodes[1]!, capabilityId: "ghost" };
+    const mixed = presentFor(dag, acceptExternalPlan(dag, CTX, world().deps));
+    expect(mixed.state).toBe("refused");
+    expect(mixed.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "current"], ["print", "missing"]]);
+    // R10 gives a node id submitted twice ONE verdict, so the node list repeats it and the verdict list does not.
+    const twice = { ...agentDag(), nodes: [...agentDag().nodes, agentDag().nodes[1]!] };
+    const dup = presentFor(twice, acceptExternalPlan(twice, CTX, world().deps));
+    expect(dup.state).toBe("refused");
+    expect(dup.nodes.map((n) => [n.nodeId, n.state])).toEqual([["mail", "current"], ["print", "invalid-claim"], ["print", "invalid-claim"]]);
+    // R10 gives an id it cannot read one verdict PER CLAIM, so two nodes with the same unreadable id have two.
+    const unreadable = { ...agentDag(), nodes: [{ ...agentDag().nodes[0]!, nodeId: "bad id" }, { ...agentDag().nodes[0]!, nodeId: "bad id" }, agentDag().nodes[1]!] };
+    const twoBad = presentFor(unreadable, acceptExternalPlan(unreadable, CTX, world().deps));
+    expect(twoBad.state).toBe("refused");
+    expect(twoBad.nodes.map((n) => [n.nodeId, n.state])).toEqual([["bad id", "invalid-claim"], ["bad id", "invalid-claim"], ["print", "current"]]);
+    // Before R10 there are no verdicts at all, and the nodes stay proposed.
+    const early = presentFor(agentDag(), acceptExternalPlan(agentDag(), { principal: "agent:intruder" }, world().deps));
+    expect(early.state).toBe("refused");
+    expect(early.nodes.every((n) => n.state === "proposed")).toBe(true);
+  });
+});
+
 describe("N25 through the seam: the accepted deal seals each node's execution inputs", () => {
   const DOC = "e62809887a42910a8af353d240984a2c971d5bc5567f9e0b046b5c14557dd8f3";
   /** The agent's DAG with execution JSON: which document, how many pages, by when, to whom. */
@@ -851,16 +1065,19 @@ describe("N25 through the seam: the accepted deal seals each node's execution in
     expect(loads).toBe(0);
   });
 
-  it("execution JSON is read once and owned: a flipping getter on node.inputs seals its first answer; later mutation changes nothing", () => {
-    const sub = withExec();
-    const print = sub.nodes.find((n) => n.nodeId === "print")!;
-    const first = print.inputs!;
+  it("execution JSON is owned: a flipping getter on node.inputs never runs (round 3: refused); mutating accepted inputs later changes nothing", () => {
+    const flipping = withExec();
+    const flipPrint = flipping.nodes.find((n) => n.nodeId === "print")!;
+    const first = flipPrint.inputs!;
     let reads = 0;
-    Object.defineProperty(print, "inputs", { enumerable: true, get: () => (reads++ === 0 ? first : { documentHash: DOC, pages: 99 }) });
+    Object.defineProperty(flipPrint, "inputs", { enumerable: true, get: () => (reads++ === 0 ? first : { documentHash: DOC, pages: 99 }) });
+    expect(refusal(acceptExternalPlan(flipping, CTX, world().deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(reads).toBe(0);
+    const sub = withExec();
+    const inputs = sub.nodes.find((n) => n.nodeId === "print")!.inputs!;
     const r = accept(sub);
-    expect(reads).toBe(1);
     expect(r.plan.acceptedDealDigest).toBe(accept(withExec()).plan.acceptedDealDigest);
-    (first as { pages: number }).pages = 42;
+    (inputs as { pages: number }).pages = 42;
     expect(binding(r.plan, "print").canonicalPlan.inputs).toEqual({ documentHash: DOC, pages: 2, copies: 1 });
   });
 
@@ -938,10 +1155,20 @@ describe("PlanPresentation and N25: what each unit runs on is shown only from th
       }).not.toThrow();
       expect(p?.state).toBe("invalid");
       expect(p?.nodes).toEqual([]);
-      // Resealed, so integrity alone would pass: only the JSON check refuses it.
+      // Resealed, so integrity alone would pass: only the JSON check refuses it. Content with no canonical
+      // form (NaN, a Date) can't be resealed once canonicalize refuses it (D5, #359): the sealing refuses,
+      // which is stronger. Either way nothing non-JSON is ever shown.
       const { acceptedDealDigest: _d, ...rest } = plan as unknown as CompiledAcceptedPlan;
-      const resealed = presentPlan({ submission: s, outcome: { ...outcome, plan: reseal(rest) } as unknown as SeamResult, asOf: ASOF });
-      expect(resealed.invalid).toEqual({ reason: "malformed-outcome" });
+      let resealedPlan: CompiledAcceptedPlan | undefined;
+      try {
+        resealedPlan = reseal(rest);
+      } catch (err) {
+        expect((err as Error).name).toBe("NonCanonicalValueError");
+      }
+      if (resealedPlan) {
+        const resealed = presentPlan({ submission: s, outcome: { ...outcome, plan: resealedPlan } as unknown as SeamResult, asOf: ASOF });
+        expect(resealed.invalid).toEqual({ reason: "malformed-outcome" });
+      }
     }
   });
 
@@ -1067,5 +1294,341 @@ describe("PlanPresentation and R15: an economics refusal is shown as refused, wi
       expect([p.layer, p.state]).toEqual(["C", "refused"]);
       expect(p.refusal).toEqual(refusalView);
     }
+  });
+});
+
+describe("round 2 of #356 (astra review of a16095a5): capture order, and a snapshot that keeps no two values encoded alike", () => {
+  type Revalidation = SeamDeps["revalidation"];
+  /** Swap every nested R10 dependency for a fabricated one: any effect would change the outcome. */
+  const swapR10 = (rv: Revalidation) => {
+    const m = rv as { -readonly [K in keyof Revalidation]: Revalidation[K] };
+    m.loadCapabilities = () => [];
+    m.loadKernels = () => [];
+    m.csdForType = () => null;
+  };
+
+  it("A: a submission getter that would swap a nested R10 dependency never runs (round 3: refused)", () => {
+    const { deps } = world();
+    const loadCapabilities = deps.revalidation.loadCapabilities;
+    let runs = 0;
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        runs++;
+        swapR10(deps.revalidation);
+        return "req-42";
+      },
+    });
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(runs).toBe(0);
+    expect(deps.revalidation.loadCapabilities).toBe(loadCapabilities);
+  });
+
+  it("A: a reservation callback that swaps a nested R10 dependency changes nothing", () => {
+    const baseline = acceptExternalPlan(agentDag(), CTX, world().deps);
+    const { deps } = world();
+    const sneaky: SeamDeps = {
+      ...deps,
+      loadReservation: (id) => {
+        swapR10(deps.revalidation); // the same object sneaky.revalidation points at
+        return deps.loadReservation(id);
+      },
+    };
+    expect(acceptExternalPlan(agentDag(), CTX, sneaky)).toEqual(baseline);
+  });
+
+  it("C: a submission getter cannot become the reservation's owner by editing the authenticated principal (round 3: it never runs)", () => {
+    const ctx: { principal: string; tenantId?: string | null } = { principal: "agent:intruder" };
+    let runs = 0;
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        runs++;
+        ctx.principal = CTX.principal;
+        return "req-42";
+      },
+    });
+    expect(refusal(acceptExternalPlan(dag, ctx, world().deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(runs).toBe(0);
+    expect(ctx.principal).toBe("agent:intruder");
+    // Control: without the getter, the intruder is still not the owner.
+    expect(refusal(acceptExternalPlan(agentDag(), ctx, world().deps))).toEqual({ stage: "reservation", reason: "wrong-principal" });
+  });
+
+  it("C: a submission getter cannot switch the tenant to see another tenant's capability", () => {
+    const { deps } = world();
+    const scoped: SeamDeps = {
+      ...deps,
+      revalidation: {
+        ...deps.revalidation,
+        loadCapabilities: (ids) => deps.revalidation.loadCapabilities(ids).map((c) => (c.id === "cap-print" ? { ...c, tenantId: "tenant-2" } : c)),
+      },
+    };
+    // Control: the tenant matters. Acting for tenant-2 sees the capability; acting for tenant-1 does not.
+    expect(acceptExternalPlan(agentDag(), { principal: CTX.principal, tenantId: "tenant-2" }, scoped).ok).toBe(true);
+    const asTenant1 = acceptExternalPlan(agentDag(), { principal: CTX.principal, tenantId: "tenant-1" }, scoped);
+    expect(asTenant1.ok === false && asTenant1.verdicts?.find((v) => v.nodeId === "print")).toEqual({ nodeId: "print", status: "missing", reason: "capability-not-found" });
+    const ctx: { principal: string; tenantId?: string | null } = { principal: CTX.principal, tenantId: "tenant-1" };
+    let runs = 0;
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        runs++;
+        ctx.tenantId = "tenant-2";
+        return "req-42";
+      },
+    });
+    // Round 3: the getter never runs, so the tenant is never switched.
+    expect(refusal(acceptExternalPlan(dag, ctx, scoped))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(runs).toBe(0);
+    expect(ctx.tenantId).toBe("tenant-1");
+  });
+
+  it("A: an R10 callable that is not a function is a wiring fault raised BEFORE any submission property is read", () => {
+    const { deps } = world();
+    let reads = 0;
+    const dag = agentDag();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return "req-42";
+      },
+    });
+    for (const key of ["loadCapabilities", "loadKernels", "csdForType"] as const) {
+      const broken = { ...deps, revalidation: { ...deps.revalidation, [key]: "not a function" } } as unknown as SeamDeps;
+      expect(() => acceptExternalPlan(dag, CTX, broken)).toThrow(/revalidation as \{ loadCapabilities, loadKernels, csdForType \}/);
+    }
+    expect(reads).toBe(0);
+  });
+
+  it("A: the pinned R10 dependencies keep their original receiver (method-style loaders still work)", () => {
+    const { deps } = world();
+    class Live {
+      constructor(private readonly base: SeamDeps["revalidation"]) {}
+      loadCapabilities(ids: string[]) {
+        return this.base.loadCapabilities(ids);
+      }
+      loadKernels(ids: string[]) {
+        return this.base.loadKernels(ids);
+      }
+      csdForType(t: string) {
+        return this.base.csdForType(t);
+      }
+    }
+    const baseline = acceptExternalPlan(agentDag(), CTX, deps);
+    expect(acceptExternalPlan(agentDag(), CTX, { ...deps, revalidation: new Live(deps.revalidation) })).toEqual(baseline);
+  });
+
+  it("B: a symbol is NOT_DATA and -0 is 0 in the snapshot, so the digest never collides on them; distinct values still differ", () => {
+    const withSymbol = snapshotSubmission({ ...agentDag(), requestId: Symbol("x") as unknown as string })!;
+    const withObject = snapshotSubmission({ ...agentDag(), requestId: {} as unknown as string })!;
+    expect(withSymbol.requestId).toBe(withObject.requestId); // one owned NOT_DATA
+    expect(submissionDigest(withSymbol)).toBe(submissionDigest(withObject));
+    const withPrice = (price: unknown) => ({ ...agentDag(), nodes: [{ ...agentDag().nodes[0]!, price: price as string }, agentDag().nodes[1]!] });
+    const negative = snapshotSubmission(withPrice(-0))!;
+    const positive = snapshotSubmission(withPrice(0))!;
+    expect(Object.is(negative.nodes[0]!.price, 0)).toBe(true);
+    expect(submissionDigest(negative)).toBe(submissionDigest(positive));
+    const digests = [withPrice(0), withPrice("0"), withPrice(null), withPrice(undefined)].map((d) => submissionDigest(snapshotSubmission(d)!));
+    expect(new Set(digests).size).toBe(4);
+  });
+});
+
+describe("astra, round 3 of #356: no caller code runs inside the seam", () => {
+  /** A method-style R10 whose rows live on its receiver, as in astra's reproduction. */
+  function methodStyleWorld() {
+    const { deps } = world();
+    const counts = { loadCapabilities: 0, loadReservation: 0 };
+    const rv = {
+      capabilityRows: LIVE_CAPS,
+      loadCapabilities(this: { capabilityRows: LiveCapability[] }, ids: string[]) {
+        counts.loadCapabilities++;
+        return this.capabilityRows.filter((c) => ids.includes(c.id));
+      },
+      loadKernels: (ids: string[]) => LIVE_KERNELS.filter((k) => ids.includes(k.id)),
+      csdForType: (t: string) => CSD_OF_TYPE[t] ?? null,
+    };
+    const load = deps.loadReservation;
+    const d: SeamDeps = { ...deps, revalidation: rv, loadReservation: (id) => (counts.loadReservation++, load(id)) };
+    return { deps: d, rv, counts };
+  }
+  /** The live rows as a forger would like them: print at 0.01 instead of 6.50. */
+  const FORGED: LiveCapability[] = LIVE_CAPS.map((c) =>
+    c.id === "cap-print" ? { ...c, pricing: { currency: "USDC", baseCost: "0.01", minimum: "0.01" } } : c,
+  );
+  /** A plan that claims print at 0.01: stale against the real rows. */
+  const cheapPrint = (): ExternalPlanSubmission => {
+    const dag = agentDag();
+    (dag.nodes[1] as { price: string }).price = "0.01";
+    return dag;
+  };
+
+  it("a submission getter that rewrites a loader's receiver state is refused before anything runs", () => {
+    const honest = methodStyleWorld();
+    const baseline = acceptExternalPlan(cheapPrint(), CTX, honest.deps);
+    expect(baseline.ok).toBe(false); // the real rows say 6.50
+    const { deps, rv, counts } = methodStyleWorld();
+    let getterRuns = 0;
+    const dag = cheapPrint();
+    Object.defineProperty(dag, "requestId", {
+      enumerable: true,
+      get: () => {
+        getterRuns++;
+        rv.capabilityRows = FORGED;
+        return "req-42";
+      },
+    });
+    const r = acceptExternalPlan(dag, CTX, deps);
+    expect(getterRuns).toBe(0);
+    expect(r.ok).toBe(false);
+    expect(refusal(r)).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts).toEqual({ loadCapabilities: 0, loadReservation: 0 });
+  });
+
+  it("a Proxy submission is refused without invoking a single trap", () => {
+    const { deps, counts } = methodStyleWorld();
+    let traps = 0;
+    const target = agentDag();
+    const dag = new Proxy(target, {
+      get: (t, k, r) => (traps++, Reflect.get(t, k, r)),
+      getOwnPropertyDescriptor: (t, k) => (traps++, Reflect.getOwnPropertyDescriptor(t, k)),
+      ownKeys: (t) => (traps++, Reflect.ownKeys(t)),
+      getPrototypeOf: (t) => (traps++, Reflect.getPrototypeOf(t)),
+    });
+    const r = acceptExternalPlan(dag, CTX, deps);
+    expect(traps).toBe(0);
+    expect(refusal(r)).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts).toEqual({ loadCapabilities: 0, loadReservation: 0 });
+  });
+
+  it("a getter nested in a node's execution inputs is refused and never runs", () => {
+    const { deps, rv, counts } = methodStyleWorld();
+    let runs = 0;
+    const dag = cheapPrint();
+    const inputs: Record<string, unknown> = {};
+    Object.defineProperty(inputs, "pages", {
+      enumerable: true,
+      get: () => {
+        runs++;
+        rv.capabilityRows = FORGED;
+        return 2;
+      },
+    });
+    (dag.nodes[1] as { inputs?: unknown }).inputs = inputs;
+    const r = acceptExternalPlan(dag, CTX, deps);
+    expect(runs).toBe(0);
+    expect(refusal(r)).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("an accessor inside an execution-JSON array is refused and never runs", () => {
+    const { deps, counts } = methodStyleWorld();
+    let runs = 0;
+    const dag = agentDag();
+    const list: unknown[] = [1, 2];
+    Object.defineProperty(list, 0, { enumerable: true, get: () => (runs++, 1) });
+    (dag.nodes[1] as { inputs?: unknown }).inputs = { list };
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(runs).toBe(0);
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("an array with another prototype is never read", () => {
+    const { deps, counts } = methodStyleWorld();
+    class Edges extends Array {}
+    const dag = agentDag();
+    const edges = Edges.from(dag.edges) as unknown as ExternalPlanSubmission["edges"];
+    expect(acceptExternalPlan({ ...dag, edges }, CTX, deps).ok).toBe(false);
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("caller data nested deeper than the copy's bound is refused before anything runs", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    let deep: Record<string, unknown> = { leaf: 1 };
+    for (let i = 0; i < 20; i++) deep = { next: deep };
+    (dag.nodes[1] as { inputs?: unknown }).inputs = deep;
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("caller data holding more values than the copy's bound is refused before anything runs", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    // Each list is within the length bound; together they exceed the value bound.
+    (dag.nodes[1] as { inputs?: unknown }).inputs = { a: new Array(600_000).fill(0), b: new Array(600_000).fill(0) };
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("a list whose length exceeds the copy's bound is refused without walking it", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    (dag.nodes[1] as { inputs?: unknown }).inputs = { holes: new Array(2 ** 31) };
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("a symbol-keyed property in caller data is refused: JSON never produces one, and a skipped key goes uncounted (astra, round 4 of #356)", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    (dag.nodes[1] as { inputs?: unknown }).inputs = { pages: 1, [Symbol("extra")]: 2 };
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("a plain object wider than the copy's bound in symbol keys is refused (astra, round 4 of #356)", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    const wide: Record<symbol, number> = {};
+    for (let i = 0; i <= 1_000_000; i++) wide[Symbol()] = 0;
+    (dag.nodes[1] as { inputs?: unknown }).inputs = wide;
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  }, 120_000);
+
+  it("a plain object wider than the copy's bound in string keys is refused (astra, round 4 of #356)", () => {
+    const { deps, counts } = methodStyleWorld();
+    const dag = agentDag();
+    const wide: Record<string, number> = {};
+    for (let i = 0; i <= 1_000_000; i++) wide[`k${i}`] = 0;
+    (dag.nodes[1] as { inputs?: unknown }).inputs = wide;
+    expect(refusal(acceptExternalPlan(dag, CTX, deps))).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  }, 120_000);
+
+  it("a getter on a node field is refused and never runs", () => {
+    const { deps, counts } = methodStyleWorld();
+    let runs = 0;
+    const dag = agentDag();
+    Object.defineProperty(dag.nodes[0], "price", { enumerable: true, get: () => (runs++, "3.25") });
+    const r = acceptExternalPlan(dag, CTX, deps);
+    expect(runs).toBe(0);
+    expect(refusal(r)).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+    expect(counts.loadCapabilities).toBe(0);
+  });
+
+  it("a class-instance submission is refused: only plain data is read", () => {
+    class Dag {
+      constructor(readonly requestId: string, readonly reservationId: string, readonly nodes: unknown[], readonly edges: unknown[]) {}
+    }
+    const src = agentDag();
+    const r = acceptExternalPlan(new Dag(src.requestId, src.reservationId, src.nodes, src.edges) as unknown as ExternalPlanSubmission, CTX, methodStyleWorld().deps);
+    expect(refusal(r)).toMatchObject({ stage: "submission", reason: "malformed-submission" });
+  });
+
+  it("an accessor in the authenticated context never runs, and the request is refused", () => {
+    const { deps, counts } = methodStyleWorld();
+    let runs = 0;
+    const ctx = {} as { principal: string };
+    Object.defineProperty(ctx, "principal", { enumerable: true, get: () => (runs++, "agent:buyer-1") });
+    const r = acceptExternalPlan(agentDag(), ctx, deps);
+    expect(runs).toBe(0);
+    expect(r.ok).toBe(false);
+    expect(counts.loadCapabilities).toBe(0);
   });
 });
