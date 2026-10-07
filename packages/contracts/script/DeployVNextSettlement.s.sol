@@ -328,18 +328,54 @@ contract DeployVNextSettlement is Script {
         console2.log("implementation codehash: requires execution - run `--sig run()` WITHOUT --broadcast");
     }
 
-    /// @notice Re-derive the whole tuple from the FACTORY ADDRESS ALONE and re-run every assertion.
+    /// @notice Re-derive the whole tuple from the FACTORY ADDRESS ALONE — plus, for a provisional
+    ///         deployment, its `VNEXT_LABEL` — and re-run every assertion.
     /// @dev    This is what makes the published artifact tamper-EVIDENT rather than merely trusted. The
     ///         artifact is not an authority — it is a claim, and every field of it is re-derivable here
     ///         from one address plus this git commit's build:
+    ///           - the factory's OWN address: re-derived as `VNextDeploySpec.create2Address` of THIS
+    ///             build's `VNextSettlementEscrowFactory` creationCode, the read-back constructor args,
+    ///             and the spec salt for the read-back mode/label — required to equal `factory`. THIS is
+    ///             what proves the on-chain factory is this build's CREATE2 output for its OWN inputs,
+    ///             not merely something that looks like it, and it is why everything below can trust the
+    ///             implementation's code: the implementation is this build's exactly because the factory
+    ///             that constructed it is (N38).
     ///           - implementation: derived independently as `CREATE(factory, nonce 1)` AND read back from
     ///             `factory.implementation()`; both must agree.
+    ///           - the implementation's runtime length and its 3 library `PUSH20 <lib>` link sites: a
+    ///             SECONDARY check now that the address re-derivation above exists — kept because it is
+    ///             cheap and would still catch a future refactor that weakens the primary one.
     ///           - library: recovered from the implementation's ON-CHAIN runtime by locating this build's
     ///             three `PUSH20 <placeholder>` sites in the artifact template and reading the linked
     ///             bytes at the same offsets, then re-proving the codehash relation.
     ///           - codehashes: read with EXTCODEHASH.
     ///         A reviewer runs this against the recorded factory and gets a revert if any recorded field
     ///         was altered. No trusted store, no signature infrastructure required.
+    ///
+    ///         WHAT THIS PROVES, PRECISELY (astra pack-410 Q1/Q5). The bound attester ADDRESSES — not the
+    ///         attesters' code, nor the truth of their getters. The attester-shape probes elsewhere in
+    ///         this file ({_isFixed2of3}/{_isSingleSigner}/{_routeOf}) are SELECTOR-based, not proofs of
+    ///         correct behavior. Passing `verify()` is therefore not clearance to arm arbitrary supplied
+    ///         cohorts; it certifies the factory/implementation pairing alone.
+    ///
+    ///         ACCEPTANCE BINDS A SPECIFIC ADDRESS — this is NOT "no change ever passes" (H7, corrected
+    ///         per astra pack-410 LOW). `verify(factory)` proves only that `factory` IS this build's
+    ///         CREATE2 output for ITS OWN read-back inputs — not that it is the one address any
+    ///         particular consumer accepted. A DIFFERENT, independently and correctly deployed factory
+    ///         from this SAME build also passes `verify()`, on ITS OWN address: changing the code or the
+    ///         inputs does not make verification of that other address fail, it simply produces a
+    ///         different, equally genuine address. An acceptance is bound to the SPECIFIC factory address
+    ///         a consumer accepted, so the CONSUMER — not this function — must compare `verify`'s returned
+    ///         `factory` against that accepted address. What `verify` does rule out, for the one address
+    ///         actually passed in, is that address's code or inputs having drifted since acceptance: there
+    ///         is no upgrade path to drift onto — `implementation` is an immutable set once in the
+    ///         factory's constructor, and neither the factory nor the escrow has an owner, an admin, a
+    ///         mutable delegatecall target, or a `selfdestruct`.
+    ///
+    ///         WHAT THIS DOES NOT PROVE: the git commit the build came from. "This build" is only as
+    ///         trustworthy as whoever compiled and ran it; the published artifact's solc version and
+    ///         optimizer settings stand in for the commit, and pinning the actual commit is the
+    ///         publisher's responsibility, not something an address can certify by itself.
     function verify(address factory) external view returns (Tuple memory t) {
         t = _verify(factory);
         console2.log("== V-next settlement stack : VERIFY (read-only) ==");
@@ -378,6 +414,49 @@ contract DeployVNextSettlement is Script {
         t.typeHash = f.o5TypeHash();
         t.primaryCohortId = IAttesterView(t.primaryAttester).cohortId();
         t.escalationCohortId = IAttesterView(t.escalationAttester).cohortId();
+
+        // N38 (LO-ES-2, astra H7): re-derive the FACTORY's own address from THIS build and require
+        // equality BEFORE trusting any of the getter values read above for anything beyond this check.
+        // Without it, a factory built from different code — or this build's genuine code at a non-spec
+        // salt — passes every assertion below: the implementation it built can have the same runtime
+        // length, the same 3 library link sites, and getters that answer exactly like these. The mode is
+        // read from chain state (the provisional cohort band), never trusted from an argument; the label
+        // is empty for canonical and comes from the environment for provisional, since it is not
+        // recoverable from chain state alone.
+        bool provisional = VNextDeploySpec.isProvisionalCohort(t.primaryCohortId);
+        // N38 follow-up M1 (astra pack-410 Q2, MEDIUM): the mode above is inferred from the PRIMARY
+        // cohort's band ALONE, and {_assertCohortSeparation} below checks the two cohorts hold DISTINCT
+        // ids but never that they share a BAND. Without this, a primary in the canonical band paired
+        // with an escalation cohort in the provisional band (or the reverse) passes every check that
+        // follows — including the address re-derivation, since its mode never looks at the escalation
+        // side at all. `_assertPreflight` (`:614`) already refuses this for script-made deployments, so
+        // this closes the gap for STANDALONE `verify(address)` only.
+        require(
+            VNextDeploySpec.isProvisionalCohort(t.escalationCohortId) == provisional,
+            "verify: primary and escalation cohorts are in different bands (one canonical, one provisional)"
+        );
+        string memory mode = provisional ? VNextDeploySpec.MODE_PROVISIONAL : VNextDeploySpec.MODE_CANONICAL;
+        string memory label = "";
+        if (provisional) {
+            label = _verifyLabel();
+            require(
+                bytes(label).length > 0,
+                "verify: VNEXT_LABEL is required to re-derive a provisional factory's salt"
+            );
+        }
+        require(
+            VNextDeploySpec.create2Address(
+                VNextDeploySpec.contractSalt(mode, block.chainid, VNextDeploySpec.TAG_FACTORY, label),
+                keccak256(
+                    abi.encodePacked(
+                        type(VNextSettlementEscrowFactory).creationCode,
+                        abi.encode(t.usdc, t.primaryAttester, t.escalationAttester, t.schemaUid, t.typeHash)
+                    )
+                )
+            ) == factory,
+            "verify: factory is not this build's CREATE2 output for its own inputs (different code or a non-spec salt)"
+        );
+
         t.eas = _assertCohortsShareEas(t.primaryAttester, t.escalationAttester);
 
         _assertLinkedLibrary(t.settlementLib);
@@ -1033,6 +1112,17 @@ contract DeployVNextSettlement is Script {
         return vm.envOr("VNEXT_ALLOW_UNKNOWN_CHAIN", uint256(0)) == 1;
     }
 
+    /// @dev The ONE reader of `VNEXT_LABEL` inside {_verify}'s re-derivation (N38 follow-up M2, astra
+    ///      pack-410 Q4). `virtual` for the same reason as {_signerOverlapAllowed}/{_unknownChainAllowed}:
+    ///      it reads HOST process state rather than chain state, and `forge` runs the tests within a
+    ///      suite in PARALLEL against one shared environment, so a suite driving this with `vm.setEnv`
+    ///      would race with every other test that touches the variable. Overriding it in a test harness
+    ///      moves the label into EVM state, which forge does isolate per test. Behavior-preserving: the
+    ///      production reader is unchanged (`vm.envString("VNEXT_LABEL")`, same revert on a missing var).
+    function _verifyLabel() internal view virtual returns (string memory) {
+        return vm.envString("VNEXT_LABEL");
+    }
+
     // ════════════════════════════════════════════════════════════════════════════════════════════════
     //                                    PREDICTION + ARTIFACT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1104,10 +1194,18 @@ contract DeployVNextSettlement is Script {
     ///         deployed runtime for `PUSH20 <lib>` and require exactly {LINK_SITES} occurrences — the 3
     ///         `delegatecall` targets on the funding path. An implementation linked to a DIFFERENT library
     ///         yields zero hits and aborts.
-    ///         So the honest statement of {verify}'s guarantee is: "this on-chain factory and
-    ///         implementation match THIS BUILD, including its library" — not "the tuple was reconstructed
-    ///         from an address with no other input". The build is an input, which is why the artifact
-    ///         records the solc version and optimizer settings alongside the addresses.
+    ///         THIS, ON ITS OWN, IS NOW A SECONDARY CHECK (N38). The PRIMARY guarantee that "this
+    ///         on-chain factory and implementation match THIS BUILD, including its library" comes from
+    ///         {_verify} re-deriving the FACTORY's own address from this build's creationCode and
+    ///         read-back inputs before trusting anything read from it — the implementation's code is
+    ///         this build's exactly because the factory that constructed it is. This function's length +
+    ///         link-site count is kept anyway because it is cheap and would still catch a future refactor
+    ///         that weakens the primary check; on its own, length and site-count equality do not rule out
+    ///         a different build whose implementation happens to match both.
+    ///         Neither check proves the git commit the build came from: "this build" is only as
+    ///         trustworthy as whoever compiled and ran it. The artifact records the solc version and
+    ///         optimizer settings alongside the addresses as the stand-in for that commit; pinning the
+    ///         actual commit is the publisher's responsibility.
     function _assertImplementationLinkedTo(address implementation, address lib) internal view {
         bytes memory template = vm.getDeployedCode(ESCROW_ARTIFACT);
         bytes memory onchain = implementation.code;
@@ -1122,6 +1220,7 @@ contract DeployVNextSettlement is Script {
     }
 
     function _guardAgainstRivalDeployment(Inputs memory i, address predictedFactory) internal view {
+        _assertRecordRootContained(_recordRoot());
         string memory path = _artifactPath(i);
         if (!vm.exists(path)) return;
         address recorded = vm.parseJsonAddress(vm.readFile(path), ".factory");
@@ -1139,7 +1238,7 @@ contract DeployVNextSettlement is Script {
     ///      dry-run tuple is still written, because producing a reviewable tuple before anything is spent
     ///      is the point of the dry run; it is just kept where it cannot be mistaken for the real record.
     function _artifactPath(Inputs memory i) internal view returns (string memory) {
-        string memory dir = string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid), "/");
+        string memory dir = string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid), "/");
         string memory prefix = _isBroadcasting() ? "" : "DRYRUN-";
         if (keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL))) {
             return string.concat(dir, prefix, "PROVISIONAL-", i.label, ".json");
@@ -1152,6 +1251,9 @@ contract DeployVNextSettlement is Script {
     }
 
     function _writeArtifact(Inputs memory i, Tuple memory t) internal {
+        // FIRST, before anything else here runs: no record is written unless the record root is contained (no
+        // symlink at, above or below it). `VNextDeployRecordTest`'s writer wiring tests rely on this order.
+        _assertRecordRootContained(_recordRoot());
         bool canonical = keccak256(bytes(i.mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL));
 
         // ── GATE 3 + GATE 4, third and last enforcement point: the DEPLOYMENT ARTIFACT. ───────────────
@@ -1229,9 +1331,14 @@ contract DeployVNextSettlement is Script {
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);
+        // Checked again right here, next to the write: the check at the top guarantees nothing runs against an
+        // uncontained root, and this one keeps the unavoidable check-to-write window as short as it was before the
+        // top check moved (astra round 2 on #339).
+        _assertRecordRootContained(_recordRoot());
         // `vm.writeJson` does not create intermediate directories, and a deploy that succeeded on-chain
-        // but failed to record its tuple is the worst outcome available here.
-        vm.createDir(string.concat("deployments/vnext/", VNextDeploySpec.networkSlug(block.chainid)), true);
+        // but failed to record its tuple is the worst outcome available here. The root itself exists (checked
+        // above), so this creates at most the network directory, in a root with no symlink at, above or below it.
+        vm.createDir(string.concat(_recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
         vm.writeJson(finalJson, path);
         console2.log("wrote artifact:", path);
     }
@@ -1278,6 +1385,142 @@ contract DeployVNextSettlement is Script {
     //                                          INPUT / OUTPUT
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+    /// @dev The only directory the deploy record ever lives in. `foundry.toml` grants exactly this path, and the
+    ///      directory is COMMITTED (`deployments/vnext/README.md`), so it exists before any run and a run never
+    ///      has to create it (see {_assertRecordRootIsReal}). `virtual` only so the record test can point the
+    ///      checks at committed fixtures.
+    function _recordRoot() internal view virtual returns (string memory) {
+        return "deployments/vnext";
+    }
+
+    /// @dev A child of the record root that must never exist. {_assertRecordRootIsReal} asks forge about it.
+    string internal constant ROOT_PROBE = "/.record-root-probe-must-not-exist";
+    uint256 internal constant MAX_LABEL_BYTES = 64;
+
+    /// @dev `VNEXT_LABEL` goes into the record's FILENAME (`PROVISIONAL-<label>.json`) and into every CREATE2
+    ///      salt, so it is held to a short ASCII slug: `[A-Za-z0-9_-]{1,64}`. That excludes `/`, `\`, `.`,
+    ///      whitespace and control characters, so a label can never traverse out of its filename, reach a
+    ///      tracked record (`/../../../base-sepolia/...`), or land on another mode's or network's record
+    ///      (`/../CANONICAL`). Before this check the label was only required to be non-empty (sol review of
+    ///      #339). Canonical runs carry no label at all: `run()` passes "", and a stray `VNEXT_LABEL` in
+    ///      `predict()` would otherwise predict canonical addresses that `run()` never deploys.
+    function _requireValidLabel(string memory mode, string memory label) internal pure {
+        bytes memory b = bytes(label);
+        if (keccak256(bytes(mode)) == keccak256(bytes(VNextDeploySpec.MODE_CANONICAL))) {
+            require(b.length == 0, "VNEXT_LABEL must be empty for a canonical deployment");
+            return;
+        }
+        require(b.length > 0 && b.length <= MAX_LABEL_BYTES, "VNEXT_LABEL must be 1-64 characters");
+        for (uint256 k; k < b.length; ++k) {
+            bytes1 c = b[k];
+            require(
+                (c >= "0" && c <= "9") || (c >= "A" && c <= "Z") || (c >= "a" && c <= "z") || c == "-" || c == "_",
+                "VNEXT_LABEL may contain only A-Z a-z 0-9 - _"
+            );
+        }
+    }
+
+    /// @dev Runs before the record is read ({_guardAgainstRivalDeployment}) and before it is written
+    ///      ({_writeArtifact}): the record root, every directory above it, and the whole tree below it must be
+    ///      reachable without a symlink, or the run stops (sol and astra reviews of #339).
+    ///
+    ///      Why a check is needed at all: `fs_permissions` is NOT a containment boundary against symlinks, and how
+    ///      far it leaks depends on the forge version. Both versions probed follow links on the way to a path that
+    ///      exists. Forge 1.7.1 checks a path that does not exist yet by its lexical form, so it wrote through a
+    ///      symlinked directory and a dangling link under the root, and created `deployments/vnext/<network>` inside
+    ///      a link's target when `deployments` was a symlink to a directory without `vnext`. Forge 1.8.0 (the
+    ///      version CI pins) resolves the links in every path, so a symlinked root or ancestor redirects every
+    ///      record write, with no error at all. `vm.exists`, `vm.isDir`, `vm.fsMetadata` and `vm.readLink` all
+    ///      resolve the link before they look, so none of them can see one.
+    ///
+    ///      Three limits remain; no cheatcode closes any of them. A link swapped in between these checks and the
+    ///      write (a TOCTOU window). A filesystem mounted inside the tree, which `vm.readDir` does not enter. And a
+    ///      HARD link from a record file to a file elsewhere: it is a plain file to every cheatcode (none reports a
+    ///      link count). Git cannot commit one, so placing it needs local write access to the checkout.
+    function _assertRecordRootContained(string memory root) internal view {
+        _assertRecordRootIsReal(root);
+        _assertNoSymlinksBelow(root);
+    }
+
+    /// @dev The root itself, and every directory above it.
+    ///      1. The root must EXIST as a directory. It is committed, so a missing root means the checkout is not the
+    ///         reviewed one, and creating it here would follow a symlinked ancestor (the escape above). A dangling
+    ///         root fails here too, since `isDir` follows it to nothing.
+    ///      2. No symlink AT or ABOVE it. Forge is asked to list a child that must not exist. Where no link is in
+    ///         the way, both versions answer with one error entry at exactly the lexical path
+    ///         `projectRoot/root/<probe>`, and `vm.projectRoot()` is canonical even when forge is started through
+    ///         a symlinked checkout path. With the root or an ancestor a symlink, 1.7.1 refuses to look (its
+    ///         resolved grant no longer prefixes the lexical path), and 1.8.0 answers at the RESOLVED path. Both
+    ///         are refused. An entry that exists at the probe path is refused too. `VNextDeployRecordTest` pins
+    ///         this against committed fixtures on the forge CI pins. A forge change that altered these answers
+    ///         fails the root tests, and one that stopped reporting the fixture links fails the tests outright
+    ///         instead of skipping them (`_requireLinks`). `ts/__tests__/deployments-no-symlinks.test.ts` checks the
+    ///         same links with lstat, independently of forge.
+    function _assertRecordRootIsReal(string memory root) internal view {
+        require(
+            vm.isDir(root),
+            string.concat(
+                "the deployment record root is missing or not a directory (it is committed; a dangling link fails here too): ",
+                root
+            )
+        );
+        string memory probe = string.concat(root, ROOT_PROBE);
+        try vm.readDir(probe, 1) returns (VmSafe.DirEntry[] memory found) {
+            require(
+                found.length == 1 && bytes(found[0].errorMessage).length != 0,
+                string.concat("an entry exists at the deployment record root's probe path, refusing: ", root)
+            );
+            require(
+                keccak256(bytes(found[0].path)) == keccak256(bytes(string.concat(vm.projectRoot(), "/", probe))),
+                string.concat(
+                    "the deployment record root, or a directory above it, is a symlink: forge resolved ",
+                    probe,
+                    " to ",
+                    found[0].path
+                )
+            );
+        } catch {
+            revert(
+                string.concat(
+                    "the deployment record root, or a directory above it, is a symlink (forge refused to look below it): ",
+                    root
+                )
+            );
+        }
+    }
+
+    /// @dev The whole tree below the root, at every depth, without following links. Any symlink refuses. So does
+    ///      ANY entry forge reports it could not inspect (an error is never taken to mean the entry vanished), and
+    ///      any entry forge lists somewhere other than under the root's lexical path.
+    function _assertNoSymlinksBelow(string memory root) internal view {
+        bytes memory prefix = bytes(string.concat(vm.projectRoot(), "/", root, "/"));
+        VmSafe.DirEntry[] memory entries = vm.readDir(root, type(uint64).max);
+        for (uint256 k; k < entries.length; ++k) {
+            require(
+                bytes(entries[k].errorMessage).length == 0,
+                string.concat(
+                    "cannot inspect the deployment record root, refusing: ", entries[k].path, ": ", entries[k].errorMessage
+                )
+            );
+            require(
+                !entries[k].isSymlink,
+                string.concat("symlink under the deployment record root, refusing to read or write through it: ", entries[k].path)
+            );
+            require(
+                _hasPrefix(bytes(entries[k].path), prefix),
+                string.concat("forge listed an entry outside the deployment record root's path, refusing: ", entries[k].path)
+            );
+        }
+    }
+
+    function _hasPrefix(bytes memory s, bytes memory prefix) private pure returns (bool) {
+        if (s.length < prefix.length) return false;
+        for (uint256 i; i < prefix.length; ++i) {
+            if (s[i] != prefix[i]) return false;
+        }
+        return true;
+    }
+
     function _readInputs(string memory mode, string memory label) internal view returns (Inputs memory i) {
         bytes32 h = keccak256(bytes(mode));
         require(
@@ -1285,6 +1528,7 @@ contract DeployVNextSettlement is Script {
                 || h == keccak256(bytes(VNextDeploySpec.MODE_PROVISIONAL)),
             "mode must be CANONICAL or PROVISIONAL"
         );
+        _requireValidLabel(mode, label);
         i.mode = mode;
         i.label = label;
         i.eas = vm.envAddress("VNEXT_EAS");

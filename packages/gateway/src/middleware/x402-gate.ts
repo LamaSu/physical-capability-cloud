@@ -17,6 +17,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { X402Middleware, type RoutePaymentMap, type X402Config } from "@pcc/payments";
 import { MppMiddleware } from "@pcc/payments";
+import { hasValidAdminKey } from "../readmodels/job-execution.js";
 
 // ---------------------------------------------------------------------------
 // Shared route pricing — single source of truth for both protocols
@@ -106,6 +107,13 @@ const mppRoutes = buildMppRoutes();
 // ---------------------------------------------------------------------------
 
 const middleware = new X402Middleware(x402Config, protectedRoutes);
+
+/**
+ * The route a payment was for, as the app declared it (N107): its pattern, never the caller's path.
+ * A path can carry a value (a query, a fragment, an encoded separator, a token in a segment), and
+ * recentPayments is shown to an admin who is not the payer.
+ */
+const routeOf = (req: FastifyRequest) => req.routeOptions?.url ?? "unmatched";
 
 /** Payment stats tracking */
 interface PaymentStats {
@@ -215,7 +223,7 @@ export async function paymentGate(app: FastifyInstance) {
         // Payment verified — track and continue
         stats.paidRequests++;
         stats.recentPayments.unshift({
-          path: req.url,
+          path: routeOf(req),
           payer: "mpp-verified",
           amount: check.routeConfig.amount,
           timestamp: new Date().toISOString(),
@@ -260,7 +268,7 @@ export async function paymentGate(app: FastifyInstance) {
             if (verification.valid) {
               stats.paidRequests++;
               stats.recentPayments.unshift({
-                path: req.url,
+                path: routeOf(req),
                 payer: verification.payer ?? "unknown",
                 amount: payload.accepted.amount,
                 timestamp: new Date().toISOString(),
@@ -294,12 +302,16 @@ export async function paymentGate(app: FastifyInstance) {
 
   // Payment stats endpoint (admin/debug)
   // Note: URL kept as /api/x402/stats for backwards compat — deprecated when MPP is active
-  app.get("/api/x402/stats", async () => {
+  // Who paid for which path (recentPayments) is an admin's to see (N107); anyone else gets the
+  // counts. No client reads this route.
+  app.get("/api/x402/stats", async (req) => {
+    const { recentPayments, ...counts } = stats;
     return {
       enabled,
       protocol,
       deprecated: protocol === "x402",
-      ...stats,
+      ...counts,
+      ...(hasValidAdminKey(req.headers["x-admin-key"]) ? { recentPayments } : {}),
       protectedRoutes: Object.entries(PAYMENT_ROUTES).map(([key, rc]) => ({
         route: key,
         price: rc.price,

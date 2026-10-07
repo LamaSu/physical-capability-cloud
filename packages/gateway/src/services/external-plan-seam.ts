@@ -21,12 +21,28 @@
  *
  * Every input is read ONCE into owned plain data before it is used (the pattern that closed the
  * compiler and R10 under cross-family review): the submission, the principal, each dependency, the
- * policy and the reservation record. A getter, a proxy or a callback cannot change a value between
- * its check and its use, and a failure to READ data is a typed refusal. A dependency CALL that throws
- * is a server fault and propagates.
+ * policy and the reservation record. A failure to READ data is a typed refusal. A dependency CALL that
+ * throws is a server fault and propagates.
+ *
+ * The trust boundary (astra, round 3 of #356):
+ *   - The CALLER's inputs (the submission and the authenticated context) are read WITHOUT running any
+ *     caller code: only plain objects and real arrays, through their own data properties. A Proxy, an
+ *     accessor property, a symbol key or any other prototype refuses the submission, and no getter,
+ *     setter or proxy trap is ever invoked. So nothing a caller supplies can run while the seam works,
+ *     and nothing can change what a dependency sees.
+ *   - PRECONDITION: those inputs are bounded in size before they reach the seam. The submission is
+ *     parsed from an HTTP body the gateway caps at 1 MiB (`bodyLimit`, server.ts), so no object in it
+ *     is wider than that body allows. The copy bounds its own walk, but it cannot bound an object's
+ *     width before enumerating it: JavaScript cannot count an object's own keys without materializing
+ *     them (astra, round 4 of #356).
+ *   - The DEPENDENCIES are server wiring and are trusted. The seam pins WHICH function it calls and
+ *     WITH WHICH receiver, and reads each answer once. A dependency's own state belongs to its
+ *     implementation: a dependency that alters another one's state is server code misbehaving,
+ *     equivalent to returning a forged answer directly, and no in-process seam can prevent that.
  */
 
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import {
   canonicalize,
   compileAcceptedPlan,
@@ -42,6 +58,8 @@ import {
 } from "@pcc/spec";
 import {
   revalidatePlanSnapshots,
+  type LiveCapability,
+  type LiveKernel,
   type NodeVerdict,
   type ResolvedNodeTerms,
   type RevalidationDeps,
@@ -173,8 +191,80 @@ export function planIdForReservation(reservationId: string): string {
 /** An owned stand-in for a non-primitive where a primitive belongs: fails every check, holds no caller reference. */
 const NOT_DATA: object = Object.freeze(Object.create(null));
 
+/**
+ * A primitive is kept; anything else becomes NOT_DATA. A symbol is NOT_DATA too, and -0 becomes 0, so the
+ * snapshot never keeps two values that `tag` would encode alike: the submission digest stays collision-free
+ * over the values actually retained (astra, round 2 of #356). Both are semantics-preserving: a symbol fails
+ * every check NOT_DATA fails, and -0 === 0.
+ */
 function leaf(v: unknown): unknown {
-  return (typeof v === "object" && v !== null) || typeof v === "function" ? NOT_DATA : v;
+  if ((typeof v === "object" && v !== null) || typeof v === "function" || typeof v === "symbol") return NOT_DATA;
+  return Object.is(v, -0) ? 0 : v;
+}
+
+// ── Caller data, read without running caller code ─────────────────────────────────────────────────
+
+/**
+ * Bounds on the no-code copy: its depth, the values it walks, and a list's length (read from the list's
+ * own descriptor before the walk). An object's width is bounded by the seam's size precondition (the
+ * header), not here, because enumerating an object's keys is what would have to be bounded.
+ */
+const MAX_COPY_DEPTH = 16;
+const MAX_COPY_VALUES = 1_000_000;
+const REFUSED: unique symbol = Symbol("refused");
+/** What an object with another prototype becomes: opaque, never read. The validators refuse it where
+ * they would have refused the original (copyPlanJson's "unsupported-value"; NOT_DATA for a field). */
+const NON_PLAIN: object = Object.freeze(Object.create(Object.freeze(Object.create(null))));
+
+/**
+ * An owned copy of caller data, read WITHOUT running any caller code (astra, round 3 of #356). Only
+ * plain objects (prototype Object.prototype or null) and real arrays are walked, through their own
+ * DATA properties, with `util.types.isProxy` (which invokes no trap) checked first. A Proxy or an
+ * accessor property anywhere refuses the whole value, and so does a symbol key: JSON cannot produce one,
+ * and a skipped key would go uncounted (astra, round 4 of #356). An object with another prototype (a
+ * Date, a class instance) is never read: it becomes NON_PLAIN.
+ */
+function plainCopy(root: unknown): unknown {
+  let values = 0;
+  const walk = (v: unknown, depth: number): unknown => {
+    if (++values > MAX_COPY_VALUES || depth > MAX_COPY_DEPTH) throw REFUSED;
+    if (typeof v !== "object" || v === null) return v;
+    if (utilTypes.isProxy(v)) throw REFUSED;
+    if (Array.isArray(v)) {
+      if (Object.getPrototypeOf(v) !== Array.prototype) return NON_PLAIN;
+      const n = (Object.getOwnPropertyDescriptor(v, "length") as PropertyDescriptor).value as number;
+      if (n > MAX_COPY_VALUES) throw REFUSED;
+      const out: unknown[] = [];
+      for (let i = 0; i < n; i++) {
+        const d = Object.getOwnPropertyDescriptor(v, i);
+        if (d === undefined) {
+          out.push(undefined);
+          continue;
+        }
+        if (!("value" in d)) throw REFUSED;
+        out.push(walk(d.value, depth + 1));
+      }
+      return out;
+    }
+    const proto = Object.getPrototypeOf(v);
+    if (proto !== Object.prototype && proto !== null) return NON_PLAIN;
+    const out: Record<string, unknown> = Object.create(null);
+    for (const k of Reflect.ownKeys(v)) {
+      if (typeof k === "symbol") throw REFUSED;
+      const d = Object.getOwnPropertyDescriptor(v, k) as PropertyDescriptor;
+      if (!("value" in d)) throw REFUSED;
+      Object.defineProperty(out, k, { value: walk(d.value, depth + 1), enumerable: true, writable: false, configurable: false });
+    }
+    return out;
+  };
+  return walk(root, 1);
+}
+
+/** One own DATA property of caller data, read without running caller code; undefined otherwise. */
+function dataProp(o: unknown, key: string): unknown {
+  if (typeof o !== "object" || o === null || utilTypes.isProxy(o)) return undefined;
+  const d = Object.getOwnPropertyDescriptor(o, key);
+  return d !== undefined && "value" in d ? d.value : undefined;
 }
 
 /** A list's elements, its length read once and capped; null for a non-array or a lying or over-cap length. */
@@ -225,11 +315,15 @@ function execSnapshot(x: unknown): ExecJsonSnapshot {
   return Object.freeze(c.ok ? { kind: "json" as const, value: c.value } : { kind: "invalid" as const, reason: c.reason });
 }
 
-/** Read a submission once. Null when it cannot be read as a submission at all. Never throws. */
+/**
+ * Read a submission once. Null when it cannot be read as a submission at all, including when it is not
+ * plain data (a Proxy, an accessor or another prototype anywhere). It runs no caller code, and never throws.
+ */
 export function snapshotSubmission(sub: unknown): SubmissionSnapshot | null {
   try {
-    if (typeof sub !== "object" || sub === null) return null;
-    const s = sub as Record<string, unknown>;
+    const plain = plainCopy(sub);
+    if (typeof plain !== "object" || plain === null) return null;
+    const s = plain as Record<string, unknown>;
     const requestId = leaf(s.requestId);
     const reservationId = leaf(s.reservationId);
     const nodesRaw = listOnce(s.nodes, MAX_SUBMISSION_NODES);
@@ -367,8 +461,20 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   let economicsRaw: unknown;
   let unitGrossFn: unknown;
   let econSplitFn: unknown;
+  let loadCapabilitiesFn: unknown;
+  let loadKernelsFn: unknown;
+  let csdForTypeFn: unknown;
   try {
     revalidation = deps.revalidation;
+    // R10's callables are captured HERE, before any submission property is read, like every other
+    // dependency. Capturing the container alone let a submission getter swap a loader later (astra, round 2
+    // of #356).
+    if (typeof revalidation === "object" && revalidation !== null) {
+      const rv = revalidation as Record<string, unknown>;
+      loadCapabilitiesFn = rv.loadCapabilities;
+      loadKernelsFn = rv.loadKernels;
+      csdForTypeFn = rv.csdForType;
+    }
     resolveProgramFn = deps.resolveProgram;
     gateFn = deps.assertProgramForTier;
     evidenceForFn = deps.evidenceFor;
@@ -396,6 +502,9 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   if (
     typeof revalidation !== "object" ||
     revalidation === null ||
+    typeof loadCapabilitiesFn !== "function" ||
+    typeof loadKernelsFn !== "function" ||
+    typeof csdForTypeFn !== "function" ||
     typeof resolveProgram !== "function" ||
     typeof assertProgramForTier !== "function" ||
     typeof evidenceFor !== "function" ||
@@ -406,8 +515,22 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
     reclaimAfterSec < 0 ||
     (economicsRaw !== undefined && (typeof unitGrossFn !== "function" || typeof econSplitFn !== "function"))
   ) {
-    throw new TypeError("acceptExternalPlan: malformed SeamDeps (functions, an integer reclaimAfterSec, and economics as { unitGross, splitNet } when present)");
+    throw new TypeError(
+      "acceptExternalPlan: malformed SeamDeps (functions, revalidation as { loadCapabilities, loadKernels, csdForType }, an integer reclaimAfterSec, and economics as { unitGross, splitNet } when present)",
+    );
   }
+  // R10 gets ONLY this frozen object: the captured callables, each called with its original receiver.
+  const rvReceiver = revalidation as object;
+  const pinnedRevalidation: RevalidationDeps = Object.freeze({
+    loadCapabilities: (ids: string[]) => Reflect.apply(loadCapabilitiesFn as (...a: unknown[]) => unknown, rvReceiver, [ids]) as LiveCapability[],
+    loadKernels: (ids: string[]) => Reflect.apply(loadKernelsFn as (...a: unknown[]) => unknown, rvReceiver, [ids]) as LiveKernel[],
+    csdForType: (type: string) => Reflect.apply(csdForTypeFn as (...a: unknown[]) => unknown, rvReceiver, [type]) as string | null,
+  });
+
+  // The authenticated context, read once BEFORE the submission and without running caller code: only
+  // own data properties count (astra, rounds 2 and 3 of #356). The checks stay where they were.
+  const principal: unknown = leaf(dataProp(ctx, "principal"));
+  const tenantId: unknown = leaf(dataProp(ctx, "tenantId") ?? null);
 
   // The submission, read once. Everything below uses only this copy.
   const snap = snapshotSubmission(sub);
@@ -440,15 +563,8 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
   }
 
   // Authority first. The id in the submission is only a lookup key; authority is the stored record
-  // plus the authenticated principal, and an empty principal matches nothing.
-  let principal: unknown;
-  let tenantId: unknown;
-  try {
-    principal = leaf(ctx?.principal);
-    tenantId = leaf(ctx?.tenantId ?? null);
-  } catch {
-    principal = undefined;
-  }
+  // plus the authenticated principal (captured above, before the submission), and an empty principal
+  // matches nothing.
   if (typeof principal !== "string" || principal.length === 0) {
     return refuse({ stage: "reservation", reason: "wrong-principal" });
   }
@@ -466,7 +582,7 @@ export function acceptExternalPlan(sub: ExternalPlanSubmission, ctx: SeamContext
 
   // R10 on the COPIED nodes. Anything but `current` everywhere is refused with the verdicts (a stale
   // verdict carries the re-quote the agent can re-submit against).
-  const revalidated = revalidatePlanSnapshots(snap.nodes as unknown as SnapshotClaim[], revalidation as RevalidationDeps, {
+  const revalidated = revalidatePlanSnapshots(snap.nodes as unknown as SnapshotClaim[], pinnedRevalidation, {
     tenantId: (typeof tenantId === "string" ? tenantId : null) as string | null,
   });
   const verdicts = revalidated.verdicts;

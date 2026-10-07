@@ -52,6 +52,23 @@ export type ConsumeReservation = (
   now: number,
 ) => { ok: true } | { ok: false; reason: string };
 
+/**
+ * The consume refusals a client may see, by name. Each is a state of the caller's OWN reservation that the
+ * caller can act on; the names are R13's store's `ConsumeRefusal` codes (#402).
+ * - `wrong-principal` and `not-found` are answered as one 404, so there is no existence oracle.
+ * - Every other reason is a server-side diagnostic, logged and answered generically (astra, round 1 of #391).
+ *   That covers the store's `wrong-payer` (the payer is server-derived) and a binding, digest or obligation
+ *   mismatch, where the server disagrees with itself.
+ */
+export const PUBLIC_CONSUME_REASONS: ReadonlySet<string> = new Set([
+  "not-issued",
+  "expired",
+  "wrong-request",
+  "wrong-currency",
+  "over-reservation",
+  "below-min-tier",
+]);
+
 /** Everything accept needs. */
 export interface AgentPlanAcceptWiring {
   seam: SeamDeps;
@@ -175,9 +192,24 @@ export async function agentPlanRoutes(app: FastifyInstance, opts: AgentPlanRoute
       if (typeof clock !== "number" || !Number.isFinite(clock) || clock < 0) return reply.status(500).send({ error: "clock-unavailable" });
       const now = Math.floor(clock);
       const asOf = new Date(now * 1000).toISOString();
-      // The seam's own deps, with the clock pinned. Every other member resolves through the prototype,
-      // so method-style dependencies keep their receiver.
-      const seamAt = Object.create(seam, { now: { value: () => now } }) as SeamDeps;
+      // The seam's own deps, each member read ONCE, with only the clock replaced. Every function is called
+      // on the ORIGINAL seam, so a seam whose methods use private fields or a WeakMap keyed by the instance
+      // keeps working; a prototype wrapper would hand them the wrapper as `this` (astra, round 1 of #391).
+      // Objects (revalidation, policy, economics) are passed as they are, so their own methods keep their
+      // receivers too.
+      const s = seam as Record<keyof SeamDeps, unknown>;
+      const onSeam = (f: unknown): unknown => (typeof f === "function" ? (...a: unknown[]) => Reflect.apply(f, seam, a) : f);
+      const economics = s.economics;
+      const seamAt = {
+        revalidation: s.revalidation,
+        resolveProgram: onSeam(s.resolveProgram),
+        assertProgramForTier: onSeam(s.assertProgramForTier),
+        evidenceFor: onSeam(s.evidenceFor),
+        loadReservation: onSeam(s.loadReservation),
+        policy: s.policy,
+        now: () => now,
+        ...(economics !== undefined ? { economics } : {}),
+      } as SeamDeps;
 
       const submission = req.body as ExternalPlanSubmission;
       const result = acceptExternalPlan(submission, { principal, tenantId: req.tenantId ?? null }, seamAt);
@@ -204,6 +236,19 @@ export async function agentPlanRoutes(app: FastifyInstance, opts: AgentPlanRoute
         return reply.status(500).send({ error: "deal-binding-failed", reason: deal.reason, detail: deal.detail });
       }
 
+      // The success body is built BEFORE the commit: it depends only on the seam's result, so a failure while
+      // presenting or converting it happens while the reservation is still issued, and a retry works (astra,
+      // round 1 of #391). Lost DELIVERY after the commit is not solved here; recovering the sealed deal is a
+      // production gate (the sealed-deal read).
+      const sealed = { reservationId: result.plan.reservationId, acceptedDealDigest: result.plan.acceptedDealDigest };
+      const body = jsonSafe({
+        plan: result.plan,
+        dealBindings: deal.bindings,
+        submissionDigest: result.submissionDigest,
+        sealed,
+        presentation: presentPlan({ submission, outcome: result, sealed, asOf }),
+      });
+
       // R13: the acceptance itself. Only an explicit { ok: true } counts as consumed.
       const consumed: unknown = Reflect.apply(consumeFn, wiring, [result.plan.reservationId, principal, result.plan, now]);
       const c = (typeof consumed === "object" && consumed !== null ? consumed : {}) as { ok?: unknown; reason?: unknown };
@@ -211,19 +256,19 @@ export async function agentPlanRoutes(app: FastifyInstance, opts: AgentPlanRoute
       if (ok !== true) {
         const why = c.reason;
         const reason = typeof why === "string" ? why : "unknown";
-        const hidden = reason === "wrong-principal" || reason === "not-found";
-        return reply.status(hidden ? 404 : 409).send({ error: "reservation-conflict", reason: hidden ? "not-found" : reason });
+        // The existence oracle: someone else's reservation is answered exactly like a missing one.
+        if (reason === "wrong-principal" || reason === "not-found") {
+          return reply.status(404).send({ error: "reservation-conflict", reason: "not-found" });
+        }
+        // Only a documented conflict code reaches the client. Anything else is a store diagnostic: it is
+        // logged and answered with a generic error, never forwarded (astra, round 1 of #391).
+        if (!PUBLIC_CONSUME_REASONS.has(reason)) {
+          req.log.error({ consumeReason: reason }, "agent-plans accept: unexpected consume refusal");
+          return reply.status(500).send({ error: "internal-error" });
+        }
+        return reply.status(409).send({ error: "reservation-conflict", reason });
       }
-      const sealed = { reservationId: result.plan.reservationId, acceptedDealDigest: result.plan.acceptedDealDigest };
-      return reply.status(200).send(
-        jsonSafe({
-          plan: result.plan,
-          dealBindings: deal.bindings,
-          submissionDigest: result.submissionDigest,
-          sealed,
-          presentation: presentPlan({ submission, outcome: result, sealed, asOf }),
-        }),
-      );
+      return reply.status(200).send(body);
     } catch (err) {
       req.log.error({ err }, "agent-plans accept: server fault");
       return reply.status(500).send({ error: "internal-error" });

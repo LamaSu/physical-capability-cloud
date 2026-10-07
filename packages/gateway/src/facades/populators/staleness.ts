@@ -46,9 +46,10 @@ export function isKernelStale(
   now: number = Date.now(),
 ): boolean {
   if (status !== "online") return false;
-  const heartbeatAge = lastHeartbeat
-    ? now - new Date(lastHeartbeat).getTime()
-    : Infinity;
+  // A heartbeat that is not a time counts as no heartbeat (astra r1 on #409, MEDIUM): NaN > threshold
+  // is false, so an unparseable value used to read as fresh.
+  const beatAt = lastHeartbeat ? new Date(lastHeartbeat).getTime() : Number.NaN;
+  const heartbeatAge = Number.isFinite(beatAt) ? now - beatAt : Infinity;
   const threshold = hasActiveListing ? ACTIVE_LISTING_GRACE_MS : STALE_HEARTBEAT_MS;
   return heartbeatAge > threshold;
 }
