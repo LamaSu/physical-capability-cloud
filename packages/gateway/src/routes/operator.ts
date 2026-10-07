@@ -1,11 +1,17 @@
-import crypto from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay } = schema;
+
+/*
+ * Board N31: every write here checks who may act on the kernel through auth/kernel-authority.ts
+ * ("decide" for approve, reject, resume and policy writes; "stop_or_submit" for the e-stop and a
+ * pending approval). The reads (GET policy, GET approvals) are unchanged here.
+ */
 
 /**
  * An operator read the gateway has no real source for yet. It answers 501 with a
@@ -108,10 +114,15 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.put<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
       const policy = req.body as OperatorPolicy;
       if (!policy || policy.version !== 1) {
         return reply.status(400).send({ error: "Invalid policy: version must be 1" });
       }
+      // N31: replacing the policy can clear the stop and every guardrail, so it is a decision.
+      const refusal = refuseKernelAction(req, authority, req.params.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       try {
         const { db } = getStore();
@@ -141,6 +152,11 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.patch<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+      // N31: PATCH {emergencyStop:false} is a resume by another name, so a patch is a decision.
+      const refusal = refuseKernelAction(req, authority, req.params.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
       const patch = req.body as Partial<OperatorPolicy>;
 
       try {
@@ -179,8 +195,13 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-stop — Activate emergency stop */
   app.post("/api/operator/emergency-stop", async (req, reply) => {
-    const { kernelId, reason } = req.body as { kernelId: string; reason?: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const { kernelId, reason } = (req.body ?? {}) as { kernelId?: unknown; reason?: string };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    // N31: the kernel's own operator may always stop it, even by a claimed identity (fail-safe).
+    const refusal = refuseKernelAction(req, authority, kernelId, "stop_or_submit");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     try {
       const { db } = getStore();
@@ -233,8 +254,13 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/emergency-resume — Deactivate emergency stop */
   app.post("/api/operator/emergency-resume", async (req, reply) => {
-    const { kernelId } = req.body as { kernelId: string };
-    if (!kernelId) return reply.status(400).send({ error: "kernelId required" });
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    const { kernelId } = (req.body ?? {}) as { kernelId?: unknown };
+    if (typeof kernelId !== "string" || !kernelId) return reply.status(400).send({ error: "kernelId required" });
+    // N31: undoing a stop is a decision; a claimed identity may stop but never resume.
+    const refusal = refuseKernelAction(req, authority, kernelId, "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     try {
       const { db } = getStore();
@@ -265,13 +291,21 @@ export async function operatorRoutes(app: FastifyInstance) {
 
   /** POST /api/operator/approvals — Submit a job for approval */
   app.post("/api/operator/approvals", async (req, reply) => {
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
     const { kernelId, agentId, capabilityType, parameters, autoApprove } = (req.body ?? {}) as {
       kernelId?: string; agentId?: string; capabilityType?: string;
-      parameters?: Record<string, unknown>; autoApprove?: boolean;
+      parameters?: Record<string, unknown>; autoApprove?: unknown;
     };
     if (typeof kernelId !== "string" || !kernelId || typeof agentId !== "string" || !agentId) {
       return reply.status(400).send({ error: "kernelId and agentId required" });
     }
+    // N31: autoApprove stores an APPROVED record the executor may run, so only a real boolean
+    // counts; a truthy string used to approve.
+    if (autoApprove !== undefined && typeof autoApprove !== "boolean") {
+      return reply.status(400).send({ error: "invalid_body", message: "autoApprove must be a boolean." });
+    }
+    const preApproved = autoApprove === true;
     // The body above is only cast, not validated: a wrong-shaped value would otherwise be
     // persisted unchanged even though the public type requires a string/plain-object.
     // An explicit null is not a capability type either (cross-family review r1 of #513, M3): only an
@@ -282,6 +316,10 @@ export async function operatorRoutes(app: FastifyInstance) {
     if (parameters !== undefined && (parameters === null || typeof parameters !== "object" || Array.isArray(parameters))) {
       return reply.status(400).send({ error: "invalid_body", message: "parameters must be a plain object." });
     }
+    // N31: a pre-approved submission is an approval decision; a pending one is a request the
+    // kernel's own principal may queue.
+    const refusal = refuseKernelAction(req, authority, kernelId, preApproved ? "decide" : "stop_or_submit");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     try {
       const { db } = getStore();
       const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -301,9 +339,9 @@ export async function operatorRoutes(app: FastifyInstance) {
           ...(capabilityType !== undefined && capabilityType !== null ? { capabilityType } : {}),
           parameters: parameters ?? {},
         },
-        status: autoApprove ? "approved" : "pending",
+        status: preApproved ? "approved" : "pending",
         createdAt: now,
-        decidedAt: autoApprove ? now : null,
+        decidedAt: preApproved ? now : null,
         expiresAt: expires,
       }).run();
 
@@ -365,8 +403,17 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/operator/approvals/:id/approve",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
       try {
         const { db } = getStore();
+        // N31: the approval's kernel decides who may approve it.
+        const target = db.select({ kernelId: pendingApprovals.kernelId }).from(pendingApprovals)
+          .where(eq(pendingApprovals.id, req.params.id))
+          .get();
+        if (!target) return reply.status(404).send({ error: "Approval not found" });
+        const refusal = refuseKernelAction(req, authority, target.kernelId, "decide");
+        if (refusal) return reply.code(refusal.status).send(refusal.body);
         const now = new Date().toISOString();
 
         // The update only matches a "pending" row, so its changed-row count is what says
@@ -399,10 +446,19 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>(
     "/api/operator/approvals/:id/reject",
     async (req, reply) => {
+      const authority = authorityOf(req);
+      if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
       const { reason } = (req.body ?? {}) as { reason?: string };
 
       try {
         const { db } = getStore();
+        // N31: same rule as approve; rejecting is a decision too.
+        const target = db.select({ kernelId: pendingApprovals.kernelId }).from(pendingApprovals)
+          .where(eq(pendingApprovals.id, req.params.id))
+          .get();
+        if (!target) return reply.status(404).send({ error: "Approval not found" });
+        const refusal = refuseKernelAction(req, authority, target.kernelId, "decide");
+        if (refusal) return reply.code(refusal.status).send(refusal.body);
         const now = new Date().toISOString();
 
         // Same rule as approve: only a changed row means THIS request rejected it.

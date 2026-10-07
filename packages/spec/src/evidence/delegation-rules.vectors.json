@@ -1,0 +1,511 @@
+{
+  "contract": "pcc.evidence.delegation-time-rules.v1",
+  "skewSeconds": 300,
+  "timestamps": [
+    {
+      "input": "2026-09-24T12:00:00Z",
+      "seconds": 1790251200
+    },
+    {
+      "input": "2026-09-24T12:00:00.123Z",
+      "seconds": 1790251200
+    },
+    {
+      "input": "2026-09-24T12:00:00.123456+00:00",
+      "seconds": 1790251200
+    },
+    {
+      "input": "2026-09-24T12:00:00.999999999Z",
+      "seconds": 1790251200
+    },
+    {
+      "input": "2026-09-24T05:00:00-07:00",
+      "seconds": 1790251200
+    },
+    {
+      "input": "2026-09-24T17:30:00+05:30",
+      "seconds": 1790251200
+    },
+    {
+      "input": "1970-01-01T00:00:00Z",
+      "seconds": 0
+    },
+    {
+      "input": "2026-09-24T12:00:00",
+      "seconds": null
+    },
+    {
+      "input": "2026-09-24t12:00:00z",
+      "seconds": null
+    },
+    {
+      "input": "2026-09-24 12:00:00Z",
+      "seconds": null
+    },
+    {
+      "input": "1700000000",
+      "seconds": null
+    },
+    {
+      "input": "2026-02-30T00:00:00Z",
+      "seconds": null
+    },
+    {
+      "input": "2026-09-24T24:00:00Z",
+      "seconds": null
+    },
+    {
+      "input": "2026-09-24T12:00:60Z",
+      "seconds": null
+    },
+    {
+      "input": "2026-09-24T12:00:00+24:00",
+      "seconds": null
+    },
+    {
+      "input": "2026-09-24T12:00:00.1234567891Z",
+      "seconds": null
+    },
+    {
+      "input": "1969-12-31T23:59:59Z",
+      "seconds": null
+    },
+    {
+      "input": "0099-01-01T00:00:00Z",
+      "seconds": null
+    }
+  ],
+  "scope": [
+    {
+      "name": "ok",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab",
+        "sessionSignedEventCount": 10
+      },
+      "result": "ok"
+    },
+    {
+      "name": "ok_without_operator_or_count",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1"
+      },
+      "result": "ok"
+    },
+    {
+      "name": "contract_ids_empty",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "contract-ids-empty"
+    },
+    {
+      "name": "contract_not_allowed",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-2"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "contract-not-allowed"
+    },
+    {
+      "name": "contract_ids_not_strings",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1",
+            7
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "malformed-delegation"
+    },
+    {
+      "name": "scope_missing",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "malformed-delegation"
+    },
+    {
+      "name": "max_signatures_zero",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 0
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "max-signatures-invalid"
+    },
+    {
+      "name": "max_signatures_fraction",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 1.5
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "max-signatures-invalid"
+    },
+    {
+      "name": "max_signatures_string",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": "10"
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "max-signatures-invalid"
+    },
+    {
+      "name": "signatures_exhausted",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab",
+        "sessionSignedEventCount": 11
+      },
+      "result": "scope-signatures-exhausted"
+    },
+    {
+      "name": "negative_event_count",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab",
+        "sessionSignedEventCount": -1
+      },
+      "result": "scope-signatures-exhausted"
+    },
+    {
+      "name": "zero_event_count",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xabababababababababababababababababababab",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab",
+        "sessionSignedEventCount": 0
+      },
+      "result": "ok"
+    },
+    {
+      "name": "parent_checksummed_not_pinned_form",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xABABABABABABABABABABABABABABABABABABABAB",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "parent-not-operator"
+    },
+    {
+      "name": "parent_other_operator",
+      "delegation": {
+        "parentAgentId": "eip155:8453:0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "scope": {
+          "contractIds": [
+            "job-1"
+          ],
+          "maxSignatures": 10
+        }
+      },
+      "expected": {
+        "settlingJobId": "job-1",
+        "operatorPrincipalId": "eip155:8453:0xabababababababababababababababababababab"
+      },
+      "result": "parent-not-operator"
+    }
+  ],
+  "times": [
+    {
+      "name": "inside_window",
+      "events": [
+        "2026-09-24T11:30:00Z",
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "result": "ok"
+    },
+    {
+      "name": "skew_edges_inclusive",
+      "events": [
+        "2026-09-24T10:55:00Z",
+        "2026-09-24T12:05:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "result": "ok"
+    },
+    {
+      "name": "before_window",
+      "events": [
+        "2026-09-24T11:59:00Z",
+        "2026-09-24T10:54:59Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "result": "event-time-outside-window",
+      "eventIndex": 1
+    },
+    {
+      "name": "after_window",
+      "events": [
+        "2026-09-24T12:05:01Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "result": "event-time-outside-window",
+      "eventIndex": 0
+    },
+    {
+      "name": "malformed_timestamp",
+      "events": [
+        "2026-09-24T11:59:00Z",
+        "1700000000"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "result": "event-time-malformed",
+      "eventIndex": 1
+    },
+    {
+      "name": "window_inverted",
+      "events": [
+        "2026-09-24T12:00:00Z"
+      ],
+      "window": {
+        "notBefore": 1790251200,
+        "notAfter": 1790251199
+      },
+      "result": "malformed-window"
+    },
+    {
+      "name": "bounds_ok",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "1790250600",
+        "end": "1790251200"
+      },
+      "result": "ok"
+    },
+    {
+      "name": "bounds_inverted",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "1790251200",
+        "end": "1790250600"
+      },
+      "result": "time-bounds-inverted"
+    },
+    {
+      "name": "bounds_rfc3339_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "2026-09-24T11:50:00Z",
+        "end": "2026-09-24T12:00:00Z"
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "bounds_leading_zero_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "01790250600",
+        "end": "1790251200"
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "bounds_number_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": 1790250600,
+        "end": 1790251200
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "bounds_above_max_safe_refused",
+      "events": [
+        "2026-09-24T11:59:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "1790250600",
+        "end": "9007199254740992"
+      },
+      "result": "malformed-time-bounds"
+    },
+    {
+      "name": "event_outside_bounds",
+      "events": [
+        "2026-09-24T11:30:00Z"
+      ],
+      "window": {
+        "notBefore": 1790247600,
+        "notAfter": 1790251200
+      },
+      "bounds": {
+        "start": "1790250600",
+        "end": "1790251200"
+      },
+      "result": "event-outside-bounds",
+      "eventIndex": 0
+    },
+    {
+      "name": "canonical_golden_bounds",
+      "events": [
+        "2023-11-14T22:10:00Z"
+      ],
+      "window": {
+        "notBefore": 1699999000,
+        "notAfter": 1700000000
+      },
+      "bounds": {
+        "start": "1699999500",
+        "end": "1700000000"
+      },
+      "result": "ok"
+    }
+  ],
+  "boundsGrammar": "decimal Unix seconds as a string: ^(0|[1-9][0-9]*)$, a safe integer (the canonical settlement-vector golden: start 1699999500, end 1700000000)"
+}

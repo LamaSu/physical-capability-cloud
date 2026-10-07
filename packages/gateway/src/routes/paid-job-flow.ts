@@ -62,6 +62,7 @@ import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
+  receivedAtSeconds,
   isDeviceSignedSignature,
   verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
@@ -1134,10 +1135,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             // per-job escrow, which has no unit id. LO-EV-9 then refuses evidence that commits
             // either (E11 F1), so evidence signed for a V-next milestone cannot anchor it.
             subject: { jobId, kernelId: job.kernelId },
+            // When the gateway received the bundle: the relay row's createdAt.
+            ...(receivedAtSeconds(r.createdAt) !== undefined ? { receivedAt: receivedAtSeconds(r.createdAt) } : {}),
           }));
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
       }
+      // No operatorPrincipalId: the gateway has no authoritative funded operator
+      // (kernel.operatorAddress is self-registered; the funded operator J1 is the
+      // oracle's, at /settle), so session-signed evidence never anchors here.
       const settlementEvidence = await resolveSettlementEvidence({
         deviceBundles: seam2DeviceBundles,
         registeredSigner: seam2RegisteredSigner,
@@ -1929,8 +1935,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
-    if (loaded.kind === "refused") {
-      const refusal = JOB_READ_REFUSAL[loaded.reason];
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
       return reply.status(refusal.status).send(refusal.body);
     }
     if (loaded.kind === "unavailable") {

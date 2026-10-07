@@ -95,6 +95,21 @@ const UNRECOVERED_OUTCOMES: ReadonlySet<AttemptOutcome> = new Set<AttemptOutcome
   "unknown",
 ]);
 
+/**
+ * Who sent the report, per the attempt.v1 contract (item3-attempt-reporting-
+ * contract-v1.md §1): "anonymous" (no key/session), "apiKey" or "user". The
+ * server never records the credential itself — only this coarse kind, plus
+ * (for non-anonymous) a one-way `principalHash`.
+ */
+export type AttemptPrincipalKind = "anonymous" | "apiKey" | "user";
+
+const KNOWN_PRINCIPAL_KINDS: ReadonlySet<string> = new Set<string>(["anonymous", "apiKey", "user"]);
+
+/** Unknown/missing/malformed principal degrades to the LEAST trusted class. */
+function normalizePrincipal(x: unknown): AttemptPrincipalKind {
+  return typeof x === "string" && KNOWN_PRINCIPAL_KINDS.has(x) ? (x as AttemptPrincipalKind) : "anonymous";
+}
+
 // ── Record shape (loose — input is untrusted `unknown[]`) ──────────────────
 
 export interface AttemptLogEntry {
@@ -175,6 +190,10 @@ export interface AttemptRecord {
   proposal: AttemptProposal | null;
   traceId: string | null;
   createdAt: string | null;
+  /** Who sent this report. Defaults to "anonymous" — see normalizePrincipal. */
+  principal: AttemptPrincipalKind;
+  /** One-way hash of the credential, present only when principal !== "anonymous". */
+  principalHash: string | null;
 }
 
 // ── Parsing helpers (never throw; unknown shapes degrade to null/defaults) ──
@@ -243,10 +262,23 @@ function parseDevice(x: unknown): AttemptDevice | null {
   return { make: strField(o, "make"), model: strField(o, "model"), class: strField(o, "class") };
 }
 
+/**
+ * attempt.v1 harness names (contract §1). Anything else reads as "other", as the
+ * sink stores it, so a name that reaches the posted digest is always one of these
+ * whoever wrote the record.
+ */
+const KNOWN_HARNESS_NAMES: ReadonlySet<string> = new Set<string>(["claude-code", "codex", "pcc-hosted", "other"]);
+
 function parseHarness(x: unknown): AttemptHarness | null {
   const o = asRecord(x);
   if (!o) return null;
-  return { name: strField(o, "name"), version: strField(o, "version"), model: strField(o, "model"), label: strField(o, "label") };
+  const name = strField(o, "name");
+  return {
+    name: name === null || KNOWN_HARNESS_NAMES.has(name) ? name : "other",
+    version: strField(o, "version"),
+    model: strField(o, "model"),
+    label: strField(o, "label"),
+  };
 }
 
 function parsePack(x: unknown): AttemptPack | null {
@@ -284,6 +316,8 @@ function parseAttemptRecord(raw: unknown): AttemptRecord | null {
   const seq = typeof o.seq === "number" && Number.isInteger(o.seq) ? o.seq : null;
   if (seq === null) return null;
 
+  const principal = normalizePrincipal(o.principal);
+
   return {
     id: strField(o, "id"),
     sessionId,
@@ -304,6 +338,9 @@ function parseAttemptRecord(raw: unknown): AttemptRecord | null {
     proposal: parseProposal(o.proposal),
     traceId: strField(o, "traceId"),
     createdAt: strField(o, "createdAt"),
+    principal,
+    // Only meaningful (and only ever set upstream) for a non-anonymous principal.
+    principalHash: principal !== "anonymous" ? strField(o, "principalHash") : null,
   };
 }
 
@@ -341,6 +378,9 @@ export interface AttemptSession {
   stalled: boolean;
   /** Any report (including the roll-up) reported outcome budget_stop. */
   budgetStop: boolean;
+  /** The session's FIRST report's principal (F3: provenance follows the opening report). */
+  principal: AttemptPrincipalKind;
+  principalHash: string | null;
 }
 
 const DEFAULT_STALL_MS = 6 * 60 * 60 * 1000;
@@ -378,6 +418,8 @@ function buildSession(sessionId: string, reports: AttemptRecord[], now: number, 
     proposals,
     stalled: !rollup && now - lastAt > stallMs,
     budgetStop: reports.some((r) => r.outcome === "budget_stop"),
+    principal: reports[0].principal,
+    principalHash: reports[0].principalHash,
   };
 }
 
@@ -478,11 +520,68 @@ export function normalizeSummary(s: string): string {
 export interface FailureSignature {
   /** First 16 hex chars of sha256 over the normalized inputs. Stable across ids/uuids/numbers. */
   key: string;
-  /** Human-readable rendering of the same inputs. */
+  /** Human-readable rendering of the same inputs. May contain free text (summary) — JSON view only. */
   template: string;
+  /**
+   * F1: a rendering built ONLY from an allowlisted grammar — phase, outcome, a
+   * known HTTP method, a route template and a bounded status — safe to post to
+   * the bus. NEVER contains the summary. See buildDigestTemplate().
+   */
+  digestTemplate: string;
 }
 
 const FAILING_OUTCOMES: ReadonlySet<AttemptOutcome> = new Set<AttemptOutcome>(["failed", "blocked", "budget_stop"]);
+
+// ── F1: allowlisted digest grammar ──────────────────────────────────────────
+// The digest's signature rendering is intentionally coarser than `template`:
+// exactly one placeholder token (":x") for anything that isn't a literal,
+// short, lowercase route word. This also catches normalizePath's own ":id"
+// placeholder — the digest grammar doesn't distinguish id KINDS, only
+// word-vs-not-word, which is simpler to audit than normalizePath's heuristics.
+const DIGEST_ALLOWED_METHODS: ReadonlySet<string> = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+]);
+const DIGEST_SAFE_SEGMENT_RE = /^[a-z][a-z-]{0,39}$/;
+
+/** `normalizedPath` is ALREADY normalizePath()'s output — segment-check only, no re-normalizing. */
+function digestRouteTemplate(normalizedPath: string): string {
+  const segments = normalizedPath
+    .split("/")
+    .map((seg) => (seg.length === 0 || DIGEST_SAFE_SEGMENT_RE.test(seg) ? seg : ":x"));
+  return segments.join("/");
+}
+
+function buildDigestTemplate(
+  phase: AttemptPhase,
+  outcome: AttemptOutcome,
+  logPart: { method: string; path: string; status: number | null } | null,
+): string {
+  let seg = `${phase}/${outcome}`;
+  if (logPart) {
+    const bits: string[] = [];
+    if (DIGEST_ALLOWED_METHODS.has(logPart.method)) bits.push(logPart.method);
+    bits.push(digestRouteTemplate(logPart.path));
+    if (
+      typeof logPart.status === "number" &&
+      Number.isInteger(logPart.status) &&
+      logPart.status >= 100 &&
+      logPart.status <= 599
+    ) {
+      bits.push(String(logPart.status));
+    }
+    seg += ` ${bits.join(" ")}`;
+  }
+  // Defense in depth: nothing above should be able to carry whitespace/newlines
+  // (the safe-word regex excludes them, and phase/outcome/method/status are all
+  // fixed vocabularies), but collapse+trim anyway per the exact instruction.
+  return seg.replace(/\s+/g, " ").trim();
+}
 
 /**
  * A stable key for "the same break": phase + outcome + the first failing
@@ -506,8 +605,9 @@ export function failureSignature(r: AttemptRecord): FailureSignature | null {
 
   const logTemplatePart = logPart ? ` ${logPart.method} ${logPart.path} ${logPart.status}` : "";
   const template = `${r.phase}/${r.outcome}${logTemplatePart} · ${normSummary}`;
+  const digestTemplate = buildDigestTemplate(r.phase, r.outcome, logPart);
 
-  return { key, template };
+  return { key, template, digestTemplate };
 }
 
 // ── 5. rankSignatures ────────────────────────────────────────────────────────
@@ -515,7 +615,13 @@ export function failureSignature(r: AttemptRecord): FailureSignature | null {
 export interface RankedSignature {
   key: string;
   template: string;
+  /** F1: allowlisted-grammar rendering — the ONLY form weeklyDigest() may print. */
+  digestTemplate: string;
   sessionsHit: number;
+  /** F3: of sessionsHit, how many carried an authenticated (apiKey/user) principal. */
+  authenticatedSessionsHit: number;
+  /** F3: of sessionsHit, how many were anonymous (no principal at all). */
+  anonymousSessionsHit: number;
   harnessNames: string[];
   deviceClasses: string[];
   /** Share of the sessions that hit this signature and never recovered (or stalled). */
@@ -527,9 +633,14 @@ export interface RankedSignature {
 }
 
 const DEFAULT_HALF_LIFE_DAYS = 7;
+/** F3: an authenticated principal's sessions count toward reach only up to this many. */
+const MAX_COUNTED_SESSIONS_PER_PRINCIPAL = 3;
+/** F3: an anonymous session counts for less than an authenticated one — anyone can post one. */
+const ANONYMOUS_SESSION_WEIGHT = 0.5;
 
 interface SignatureAgg {
   template: string;
+  digestTemplate: string;
   sessionIds: Set<string>;
   harnessNames: Set<string>;
   deviceClasses: Set<string>;
@@ -540,7 +651,20 @@ interface SignatureAgg {
 
 /**
  * Rank failure signatures by reach, unrecovered share and recency.
- * score = sessionsHit * (1 + unrecoveredShare) * 0.5^((now-lastSeen)/halfLife).
+ *
+ * F3: reach is provenance-weighted, not a raw session count — an anonymous
+ * session (anyone can post one, no verification at all) counts for
+ * ANONYMOUS_SESSION_WEIGHT, and a single authenticated principal's sessions
+ * count for at most MAX_COUNTED_SESSIONS_PER_PRINCIPAL, so one actor spinning
+ * up many sessions (or many anonymous callers) can't numerically dominate the
+ * ranking the way a raw sessionsHit count would let them:
+ *
+ *   effectiveReach = ANONYMOUS_SESSION_WEIGHT * anonymousSessionsHit
+ *                    + Σ_principal min(sessionsForThatPrincipal, MAX_COUNTED_SESSIONS_PER_PRINCIPAL)
+ *   score = effectiveReach * (1 + unrecoveredShare) * 0.5^((now-lastSeen)/halfLife)
+ *
+ * `sessionsHit` itself stays the raw, unweighted count (still useful as a
+ * "how many total" figure) — only `score` uses the weighted effectiveReach.
  * Ties break on harness spread (a break hitting more harnesses ranks
  * higher), then on key for determinism.
  */
@@ -564,6 +688,7 @@ export function rankSignatures(sessions: AttemptSession[], opts: { now: number; 
       if (!a) {
         a = {
           template: sig.template,
+          digestTemplate: sig.digestTemplate,
           sessionIds: new Set<string>(),
           harnessNames: new Set<string>(),
           deviceClasses: new Set<string>(),
@@ -587,18 +712,41 @@ export function rankSignatures(sessions: AttemptSession[], opts: { now: number; 
   for (const [key, a] of agg) {
     const sessionsHit = a.sessionIds.size;
     let unrecovered = 0;
+    let anonymousSessionsHit = 0;
+    // F3: authenticated sessions grouped by principal identity so one actor's
+    // repeat sessions cap out instead of adding reach linearly forever.
+    // Namespaced by kind ("apiKey:"/"user:") so an apiKey id and a user id
+    // that happen to share a string value can't collide into one bucket.
+    const perPrincipalSessions = new Map<string, number>();
     for (const sid of a.sessionIds) {
       const s = sessionsById.get(sid);
-      if (s && (UNRECOVERED_OUTCOMES.has(s.finalOutcome) || s.stalled)) unrecovered++;
+      if (!s) continue;
+      if (UNRECOVERED_OUTCOMES.has(s.finalOutcome) || s.stalled) unrecovered++;
+      if (s.principal === "anonymous") {
+        anonymousSessionsHit++;
+      } else {
+        const pKey = `${s.principal}:${s.principalHash ?? ""}`;
+        perPrincipalSessions.set(pKey, (perPrincipalSessions.get(pKey) ?? 0) + 1);
+      }
     }
+    const authenticatedSessionsHit = sessionsHit - anonymousSessionsHit;
     const unrecoveredShare = sessionsHit > 0 ? unrecovered / sessionsHit : 0;
     const recencyWeight = Math.pow(0.5, (opts.now - a.lastSeen) / halfLifeMs);
-    const score = sessionsHit * (1 + unrecoveredShare) * recencyWeight;
+
+    let cappedAuthenticated = 0;
+    for (const count of perPrincipalSessions.values()) {
+      cappedAuthenticated += Math.min(count, MAX_COUNTED_SESSIONS_PER_PRINCIPAL);
+    }
+    const effectiveReach = ANONYMOUS_SESSION_WEIGHT * anonymousSessionsHit + cappedAuthenticated;
+    const score = effectiveReach * (1 + unrecoveredShare) * recencyWeight;
 
     ranked.push({
       key,
       template: a.template,
+      digestTemplate: a.digestTemplate,
       sessionsHit,
+      authenticatedSessionsHit,
+      anonymousSessionsHit,
       harnessNames: Array.from(a.harnessNames).sort(),
       deviceClasses: Array.from(a.deviceClasses).sort(),
       unrecoveredShare,
@@ -745,6 +893,10 @@ export interface AttemptTotals {
   stalled: number;
   /** harness name (or "unknown") -> session count. */
   harnessSplit: Record<string, number>;
+  /** F3: sessions whose FIRST report carried an authenticated principal (apiKey/user). */
+  authenticatedSessions: number;
+  /** F3: sessions with no principal at all — unverified, anyone can post one. */
+  anonymousSessions: number;
 }
 
 export interface AttemptAnalysis {
@@ -768,6 +920,18 @@ const DIGEST_EMAIL_RE = /(?<![a-z0-9._%+-])[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?
 
 function scrubDigest(s: string): string {
   return s.replace(DIGEST_UUID_RE, "<uuid>").replace(DIGEST_EMAIL_RE, "[redacted-email]");
+}
+
+// F1: every value interpolated into the digest that isn't already drawn from a
+// fixed, code-controlled vocabulary (harness names, the caller-supplied period
+// label) is escaped so it can't forge Markdown structure or inject a fake
+// heading/link/rule into the posted digest. Newlines collapse to a space FIRST
+// (so a multi-line injection can't survive as a new digest line), then the
+// remaining Markdown-significant characters are backslash-escaped.
+const MARKDOWN_ESCAPE_RE = /[\\*_`~|>[\]()#]/g;
+
+function escapeDigestMarkdown(s: string): string {
+  return s.replace(/\r\n|\r|\n/g, " ").replace(MARKDOWN_ESCAPE_RE, "\\$&");
 }
 
 /** Truncate to a byte budget without splitting a UTF-16 surrogate pair. */
@@ -798,7 +962,7 @@ export function weeklyDigest(a: AttemptAnalysis, opts: { periodLabel: string; to
   const topN = opts.topN ?? DEFAULT_DIGEST_TOP_N;
   const lines: string[] = [];
 
-  lines.push(`# Attempt digest — ${opts.periodLabel}`, "");
+  lines.push(`# Attempt digest — ${escapeDigestMarkdown(opts.periodLabel)}`, "");
 
   lines.push("## Totals");
   lines.push(`- Sessions: ${a.totals.sessions}`);
@@ -806,12 +970,17 @@ export function weeklyDigest(a: AttemptAnalysis, opts: { periodLabel: string; to
   lines.push(`- Failed/blocked: ${a.totals.failedOrBlocked}`);
   lines.push(`- Abandoned: ${a.totals.abandoned}`);
   lines.push(`- Budget stops: ${a.totals.budgetStops}`);
-  lines.push(`- Stalled: ${a.totals.stalled}`, "");
+  lines.push(`- Stalled: ${a.totals.stalled}`);
+  // F3: provenance split, front and center — a reader must not mistake 101
+  // anonymous reports for 101 verified participants.
+  lines.push(`- Authenticated sessions: ${a.totals.authenticatedSessions}`);
+  lines.push(`- Anonymous sessions: ${a.totals.anonymousSessions}`);
+  lines.push("- Anonymous reports are unverified: anyone can post them.", "");
 
   lines.push("## Harness split");
   const harnessEntries = Object.entries(a.totals.harnessSplit).sort((x, y) => y[1] - x[1]);
   if (harnessEntries.length === 0) lines.push("- (no sessions)");
-  else for (const [name, count] of harnessEntries) lines.push(`- ${name}: ${count}`);
+  else for (const [name, count] of harnessEntries) lines.push(`- ${escapeDigestMarkdown(name)}: ${count}`);
   lines.push("");
 
   lines.push("## Funnel");
@@ -828,8 +997,14 @@ export function weeklyDigest(a: AttemptAnalysis, opts: { periodLabel: string; to
   else
     top.forEach((sig, i) => {
       const pct = Math.round(sig.unrecoveredShare * 100);
-      const harnesses = sig.harnessNames.length > 0 ? sig.harnessNames.join(", ") : "unknown";
-      lines.push(`${i + 1}. ${sig.template} — ${sig.sessionsHit} sessions, harnesses: ${harnesses}, unrecovered ${pct}%`);
+      const harnesses =
+        sig.harnessNames.length > 0 ? sig.harnessNames.map(escapeDigestMarkdown).join(", ") : "unknown";
+      // F1: digestTemplate ONLY — never `template` (which may carry the raw
+      // normalized summary/path). F1: escaped defensively even though the
+      // grammar's own charset already excludes Markdown-significant chars.
+      lines.push(
+        `${i + 1}. ${escapeDigestMarkdown(sig.digestTemplate)} — ${sig.sessionsHit} sessions, harnesses: ${harnesses}, unrecovered ${pct}%`,
+      );
     });
   lines.push("");
 
@@ -850,6 +1025,8 @@ function computeTotals(sessions: AttemptSession[]): AttemptTotals {
   let abandoned = 0;
   let budgetStops = 0;
   let stalled = 0;
+  let authenticatedSessions = 0;
+  let anonymousSessions = 0;
 
   for (const s of sessions) {
     const h = s.harnessName ?? "unknown";
@@ -859,9 +1036,21 @@ function computeTotals(sessions: AttemptSession[]): AttemptTotals {
     if (s.finalOutcome === "abandoned") abandoned++;
     if (s.budgetStop) budgetStops++;
     if (s.stalled) stalled++;
+    if (s.principal === "anonymous") anonymousSessions++;
+    else authenticatedSessions++;
   }
 
-  return { sessions: sessions.length, finishedOk, failedOrBlocked, abandoned, budgetStops, stalled, harnessSplit };
+  return {
+    sessions: sessions.length,
+    finishedOk,
+    failedOrBlocked,
+    abandoned,
+    budgetStops,
+    stalled,
+    harnessSplit,
+    authenticatedSessions,
+    anonymousSessions,
+  };
 }
 
 /** Compose the full analysis: sessionize -> rank signatures -> funnel -> proposals -> totals. */

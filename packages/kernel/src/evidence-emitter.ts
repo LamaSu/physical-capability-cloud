@@ -47,6 +47,17 @@ interface StepEvidence {
   assuranceTier: AssuranceTier;
   /** The escrow unit (milestone) and its challenge nonce, when the job names one. */
   unit?: StepUnitContext;
+  /**
+   * Settles once every addEvent called so far on the step has stored its event or failed. Each
+   * call stores only after it, so the step's events are in call order (N123).
+   */
+  stored: Promise<void>;
+  /** Adds that took a place on the step and have not yet stored their event or failed. */
+  pending: number;
+  /** The first add that took a place and could not store its event: finalizeBundle then refuses. */
+  lost: { type: string; error: string } | null;
+  /** Set when the step is cleaned up: an add still pending then fails instead of storing. */
+  detached: boolean;
 }
 
 /** `0x` + 64 lowercase hex each (LO-EV-9 unit binding). */
@@ -59,7 +70,11 @@ const UNIT_FIELD = /^0x[0-9a-f]{64}$/;
 
 export class EvidenceEmitter {
   private kernelId: string;
-  private stepEvidence: Map<string, StepEvidence> = new Map();
+  /**
+   * Steps by job, then by step id. Two map levels, never a joined `job:step` string, so ids such
+   * as ("a:b", "c") and ("a", "b:c") never share a record (astra pack 259).
+   */
+  private stepEvidence: Map<string, Map<string, StepEvidence>> = new Map();
   private bundleListeners: Array<(bundle: EvidenceBundle) => void> = [];
   /**
    * Signing function — async to support HSM/TEE/wallet signers in production.
@@ -124,26 +139,48 @@ export class EvidenceEmitter {
     if (unit && !(UNIT_FIELD.test(unit.settlementUnitId) && UNIT_FIELD.test(unit.challengeNonce))) {
       throw new Error("registerStep: settlementUnitId and challengeNonce must be 0x + 64 lowercase hex");
     }
-    const key = `${jobId}:${stepId}`;
-    this.stepEvidence.set(key, {
+    // A step whose adds are still pending is never replaced: they would store into a record
+    // nothing reads, and report success (astra pack 259). Once they have settled, a later run of
+    // the step registers a fresh record.
+    if ((this.step(jobId, stepId)?.pending ?? 0) > 0) {
+      throw new Error(`registerStep: step ${stepId} of job ${jobId} still has events being stored`);
+    }
+    let steps = this.stepEvidence.get(jobId);
+    if (steps === undefined) {
+      steps = new Map();
+      this.stepEvidence.set(jobId, steps);
+    }
+    steps.set(stepId, {
       jobId,
       stepId,
       events: [],
       assuranceTier,
       ...(unit ? { unit } : {}),
+      stored: Promise.resolve(),
+      pending: 0,
+      lost: null,
+      detached: false,
     });
   }
 
-  /** Add an evidence event for a job step */
+  /** The step's record, if it is registered. */
+  private step(jobId: string, stepId: string): StepEvidence | undefined {
+    return this.stepEvidence.get(jobId)?.get(stepId);
+  }
+
+  /**
+   * Add an evidence event for a job step. The step's events are stored in the order this is
+   * called, whatever order their hashes finish in (N123). The promise settles once this event
+   * is stored, or rejects with the reason it was not.
+   */
   async addEvent(
     jobId: string,
     stepId: string,
     rawEvent: Omit<EvidenceEvent, "id" | "hash">,
   ): Promise<EvidenceEvent> {
-    const key = `${jobId}:${stepId}`;
-    const stepEv = this.stepEvidence.get(key);
+    const stepEv = this.step(jobId, stepId);
     if (!stepEv) {
-      throw new Error(`No step registered for ${key}`);
+      throw new Error(`No step registered for ${jobId}:${stepId}`);
     }
 
     // Every event names its job, and its unit when the step has one, inside the
@@ -171,31 +208,68 @@ export class EvidenceEmitter {
     }
     const bound = { ...rawEvent, payload } as Omit<EvidenceEvent, "id" | "hash">;
 
+    // Hashed now, from the event as called, and stored in call order (N123): an event waits for
+    // the step's earlier events to be stored, or to fail, never for their hashes alone, so a slow
+    // hash cannot put it after later events. The hashes still run concurrently. An event refused
+    // above never takes a place.
     const id = ids.evidence();
-    const hash = await hashEvent(bound);
-
-    const event: EvidenceEvent = {
-      ...bound,
-      id,
-      hash,
-    };
-
-    stepEv.events.push(event);
-    return event;
+    const hashed = hashEvent(bound);
+    void hashed.catch(() => undefined); // a failed hash is this call's to report, in its turn; never unhandled meanwhile
+    stepEv.pending += 1;
+    const stored = stepEv.stored.then(async () => {
+      try {
+        const hash = await hashed;
+        // Cleaned up while this add waited: nothing reads the record any more, so the event is
+        // not stored and the call fails, rather than report storage nothing can see (pack 259).
+        if (stepEv.detached) {
+          throw new Error(`step ${stepId} of job ${jobId} was cleaned up before this ${bound.type} event was stored`);
+        }
+        const event: EvidenceEvent = { ...bound, id, hash };
+        stepEv.events.push(event);
+        return event;
+      } catch (err) {
+        stepEv.lost ??= { type: bound.type, error: err instanceof Error ? err.message : String(err) };
+        throw err;
+      } finally {
+        stepEv.pending -= 1;
+      }
+    });
+    stepEv.stored = stored.then(
+      () => undefined,
+      () => undefined,
+    );
+    return stored;
   }
 
   /** Finalize and sign an evidence bundle for a job step */
   async finalizeBundle(jobId: string, stepId: string): Promise<EvidenceBundle> {
-    const key = `${jobId}:${stepId}`;
-    const stepEv = this.stepEvidence.get(key);
+    const stepEv = this.step(jobId, stepId);
     if (!stepEv) {
-      throw new Error(`No step registered for ${key}`);
-    }
-    if (stepEv.events.length === 0) {
-      throw new Error(`No evidence events for ${key}`);
+      throw new Error(`No step registered for ${jobId}:${stepId}`);
     }
 
-    const bundleHashValue = await hashBundle(stepEv.events);
+    // Sealed at this call (astra pack 259): wait for every add called before it, refuse a step
+    // that lost an event, then hash and return ONE snapshot of its events. The bundle's hash
+    // therefore covers exactly its events; an add called later is stored after the bundle and
+    // never enters it.
+    await stepEv.stored;
+    if (stepEv.detached) {
+      throw new Error(`step ${stepId} of job ${jobId} was cleaned up while its bundle was being finalized`);
+    }
+    if (stepEv.lost) {
+      throw new Error(
+        `an event of step ${stepId} of job ${jobId} could not be stored (${stepEv.lost.type}: ${stepEv.lost.error}), so its evidence is incomplete`,
+      );
+    }
+    // A deep copy: callers still hold the stored events (addEvent returns them, getEvents hands
+    // them out), so a change made through such a reference while the bundle is hashed and
+    // signed must never reach the bundle (astra pack 261).
+    const events = structuredClone(stepEv.events);
+    if (events.length === 0) {
+      throw new Error(`No evidence events for ${jobId}:${stepId}`);
+    }
+
+    const bundleHashValue = await hashBundle(events);
     const signature = await this.signFn(bundleHashValue);
 
     const bundle: EvidenceBundle = {
@@ -204,7 +278,7 @@ export class EvidenceEmitter {
       stepId: stepEv.stepId,
       kernelId: this.kernelId,
       assuranceTier: stepEv.assuranceTier,
-      events: [...stepEv.events],
+      events,
       bundleHash: bundleHashValue,
       kernelSignature: signature,
       createdAt: new Date().toISOString(),
@@ -305,8 +379,7 @@ export class EvidenceEmitter {
 
   /** Get events for a job step */
   getEvents(jobId: string, stepId: string): EvidenceEvent[] {
-    const key = `${jobId}:${stepId}`;
-    return this.stepEvidence.get(key)?.events ?? [];
+    return this.step(jobId, stepId)?.events ?? [];
   }
 
   /** Subscribe to finalized bundles */
@@ -314,8 +387,13 @@ export class EvidenceEmitter {
     this.bundleListeners.push(callback);
   }
 
-  /** Clean up evidence for a completed job step */
+  /** Clean up evidence for a completed job step. An add still pending on it then fails instead of storing. */
   cleanup(jobId: string, stepId: string): void {
-    this.stepEvidence.delete(`${jobId}:${stepId}`);
+    const steps = this.stepEvidence.get(jobId);
+    const stepEv = steps?.get(stepId);
+    if (steps === undefined || stepEv === undefined) return;
+    stepEv.detached = true;
+    steps.delete(stepId);
+    if (steps.size === 0) this.stepEvidence.delete(jobId);
   }
 }
