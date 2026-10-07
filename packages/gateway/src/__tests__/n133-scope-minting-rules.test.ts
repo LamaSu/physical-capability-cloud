@@ -44,6 +44,30 @@ const ENV = ["MOCK_SETTLEMENT", "PCC_GATEWAY_PRIVATE_KEY", "PCC_A2A_AUTH_DISABLE
 const saved: Record<string, string | undefined> = {};
 let app: FastifyInstance;
 
+/**
+ * N98 (#498): a discovery quote is the kernel's REGISTERED capability price, never a template hint. So each
+ * kernel these tests submit to carries exactly one USDC-priced liquid-handler capability, registered once.
+ * No test here asserts an amount; the price only has to be a valid registered one.
+ */
+function ensurePricedLiquidHandler(kernelId: string): void {
+  const capabilities = getRepos().capabilities;
+  if (capabilities.findByKernel(kernelId).some((c: { type: string }) => c.type === "liquid-handler")) return;
+  capabilities.insert({
+    id: `cap-liquid-handler-${kernelId}`,
+    kernelId,
+    type: "liquid-handler",
+    name: "liquid-handler test capability",
+    description: "test",
+    materials: [],
+    tolerances: {},
+    envelope: { x: 1, y: 1, z: 1, unit: "mm" as const },
+    assuranceTiers: [0, 1, 2, 3],
+    pricing: { currency: "USDC", baseCost: "10.00", minimum: "0.01" } as never,
+    availability: {},
+    location: { lat: 40.7, lng: -74 },
+  } as never);
+}
+
 beforeEach(async () => {
   for (const k of ENV) saved[k] = process.env[k];
   process.env.MOCK_SETTLEMENT = "true"; // explicit: rule 4 turned the default off
@@ -52,6 +76,8 @@ beforeEach(async () => {
   process.env.PCC_ADMIN_KEY = ADMIN;
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
+  ensurePricedLiquidHandler(KERNEL);
+  ensurePricedLiquidHandler(LAB);
   __resetA2ATasksForTest();
 
   app = Fastify({ logger: false });
@@ -228,6 +254,37 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
 
       const admin = await send({ ...claimed, "x-admin-key": ADMIN }, "pcc-quote", params(12345));
       expect(admin.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_proof_required" } });
+
+      expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
+      expect(db().select().from(schema.escrows).all()).toHaveLength(0);
+      expect(db().select().from(schema.jobs).all()).toHaveLength(0);
+      expect(db().select().from(schema.executionScopes).all()).toHaveLength(0);
+    });
+
+    it("a falsy buyer is refused as missing for claimed keys, SIWE sessions and the admin before anything is created", async () => {
+      // A falsy buyer skips the binding, so createPccQuote's own required-field check is what
+      // refuses it (Opus 5.5 r3 LOW-1). Pin that refusal, and that nothing is created, per caller.
+      db().delete(schema.escrows).run();
+      db().delete(schema.jobs).run();
+      const key = provisionApiKey({ operatorId: "n133-claimed-falsy-buyer" }).rawKey;
+      const claimed = { authorization: `Bearer ${key}` };
+      const callers: Array<[string, Record<string, string>]> = [
+        ["claimed key", claimed],
+        ["SIWE session", siweSession(BUYER)],
+        ["admin", { ...claimed, "x-admin-key": ADMIN }],
+      ];
+      const falsyBuyers: unknown[] = [undefined, null, "", 0, false];
+      for (const [label, headers] of callers) {
+        for (const skill of ["pcc-quote", "pcc-submit"]) {
+          for (const buyer of falsyBuyers) {
+            const refused = await send(headers, skill, params(buyer));
+            expect(refused.json<{ error?: unknown }>().error, `${label}, ${skill}, buyer ${String(buyer)}`).toMatchObject({
+              code: -32603,
+              message: "userAgentId, kernelId, and capabilityType are required",
+            });
+          }
+        }
+      }
 
       expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
       expect(db().select().from(schema.escrows).all()).toHaveLength(0);

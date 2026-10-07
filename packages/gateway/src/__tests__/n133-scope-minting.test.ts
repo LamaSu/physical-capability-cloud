@@ -24,7 +24,7 @@ import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { operatorRoutes } from "../routes/operator.js";
 import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
-import { initStore, closeStore, getStore } from "../db.js";
+import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { actAsJobParty } from "./helpers/job-read-party.js";
 
@@ -43,6 +43,30 @@ const ENV = ["MOCK_SETTLEMENT", "PCC_GATEWAY_PRIVATE_KEY", "PCC_A2A_AUTH_DISABLE
 const saved: Record<string, string | undefined> = {};
 let app: FastifyInstance;
 
+/**
+ * N98 (#498): a discovery quote is the kernel's REGISTERED capability price, never a template hint. So each
+ * kernel these tests submit to carries exactly one USDC-priced liquid-handler capability, registered once.
+ * No test here asserts an amount; the price only has to be a valid registered one.
+ */
+function ensurePricedLiquidHandler(kernelId: string): void {
+  const capabilities = getRepos().capabilities;
+  if (capabilities.findByKernel(kernelId).some((c: { type: string }) => c.type === "liquid-handler")) return;
+  capabilities.insert({
+    id: `cap-liquid-handler-${kernelId}`,
+    kernelId,
+    type: "liquid-handler",
+    name: "liquid-handler test capability",
+    description: "test",
+    materials: [],
+    tolerances: {},
+    envelope: { x: 1, y: 1, z: 1, unit: "mm" as const },
+    assuranceTiers: [0, 1, 2, 3],
+    pricing: { currency: "USDC", baseCost: "10.00", minimum: "0.01" } as never,
+    availability: {},
+    location: { lat: 40.7, lng: -74 },
+  } as never);
+}
+
 beforeEach(async () => {
   for (const k of ENV) saved[k] = process.env[k];
   // The door as found: MOCK_SETTLEMENT unset, no settlement key, A2A auth on.
@@ -51,6 +75,8 @@ beforeEach(async () => {
   delete process.env.PCC_A2A_AUTH_DISABLED;
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
+  ensurePricedLiquidHandler(KERNEL);
+  ensurePricedLiquidHandler(LAB);
   __resetA2ATasksForTest();
 
   app = Fastify({ logger: false });
