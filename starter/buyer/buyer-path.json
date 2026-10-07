@@ -1,0 +1,169 @@
+{
+  "schema": "pcc-adk/buyer-path@1",
+  "title": "Buy: discover capabilities and hand a priced composition to the human",
+  "goal": "Obtain and read back a proposed composition with its estimated price, then stop before execution, funding or any spend.",
+  "quoteLimit": "This composed plan carries no binding quote. A per-capability negotiated quote exists outside this path; committing it creates a job and escrow, so it needs the human's approval. totalPriceUSD is the sum of steps[].estimatedPriceUSD. The catalog estimate uses each candidate's baseCost, the spec's maximum base cost per job, falling back to minimum or zero when unavailable. Per-unit charges are ignored, so the estimate can be high or low. Estimates come from this gateway's capability candidates and are not verified prices. These fields are API-labelled USD estimates, but the catalog provider parses raw amounts without currency conversion. Label these limitations in the handoff and never invent a quote field or treat a zero estimate as a confirmed free service.",
+  "steps": [
+    {
+      "id": "get-key",
+      "goal": "Use the assigned gateway and keep a valid API key in private local state.",
+      "doneWhen": [
+        "PCC_BASE names the gateway the human assigned; never use production unless told to.",
+        "An existing or newly provisioned key is stored privately and the validation response contains valid: true."
+      ],
+      "asksHuman": [
+        "The gateway to use, only if neither PCC_BASE nor the assignment identifies it; this determines where requests go.",
+        "An email or public wallet address, only if no valid key or authorized identifier is available; provisioning requires one identifier."
+      ],
+      "actions": [
+        {
+          "tool": "provision_api_key",
+          "method": "POST",
+          "route": "/api/auth/provision",
+          "auth": "public; no Bearer key required",
+          "request": "Only if no existing valid key: check the request shape before sending, because the 5-per-IP-per-hour provisioning limit counts rejected (400) attempts too. Capture the response > .pcc/provision.json (private file, mode 0600), never to the terminal or logs. Send {email} or {walletAddress} and your own locally generated Ed25519 publicKey (64 hex characters, optional 0x prefix), so no private key comes back. publicKey is optional: if you omit it, the response carries ed25519.private_key once; store it with the API key in the private 0600 file and never print it. Keep a locally generated private key locally. Optional name and capability are strings. Use the HTTP route directly if the tool cannot forward publicKey.",
+          "responseFields": ["api_key", "key_id", "operator_id", "trace_id", "ed25519.public_key", "ed25519.private_key (only when publicKey was omitted)"],
+          "sources": [
+            "packages/gateway/src/routes/provision.ts",
+            "packages/gateway/src/auth/api-key-auth.ts",
+            "packages/gateway/src/middleware/security-hardening.ts",
+            "packages/gateway/src/middleware/rate-limiter.ts"
+          ]
+        },
+        {
+          "tool": null,
+          "method": "GET",
+          "route": "/api/auth/validate",
+          "auth": "public validation route; send the key in Authorization: Bearer <key> for the handler to validate",
+          "request": "Validate any existing key before provisioning; validate the new key after provisioning. Read the Authorization header from private local state, never expose the key in command arguments or reports. No request body.",
+          "responseFields": ["valid", "operatorId"],
+          "sources": ["packages/gateway/src/routes/provision.ts", "packages/gateway/src/middleware/api-gate.ts"]
+        }
+      ]
+    },
+    {
+      "id": "discover",
+      "goal": "Discover supported types and actual available operators for the desired outcome without paying for search.",
+      "doneWhen": [
+        "Types and template hints have been read, and the public search results identify candidate services for the human's outcome.",
+        "Availability and assurance tiers come from returned service properties; a listed type or template alone is not evidence that an operator is available."
+      ],
+      "asksHuman": [
+        "The desired outcome and location or other acceptance constraints, only when absent from the assignment and impossible to determine locally; these select suitable operators."
+      ],
+      "actions": [
+        {
+          "tool": "list_capability_types",
+          "method": "GET",
+          "route": "/api/capabilities/types",
+          "auth": "public GET; no Bearer key required",
+          "request": "No body or query parameters. Read the returned union of template, registered catalog and CSD types.",
+          "responseFields": ["types"],
+          "sources": ["packages/gateway/src/routes/capabilities.ts", "packages/gateway/src/middleware/api-gate.ts"]
+        },
+        {
+          "tool": "search_capabilities",
+          "method": "GET",
+          "route": "/api/capabilities/templates",
+          "auth": "public GET; no Bearer key required",
+          "request": "The package tool accepts {query}, but this HTTP handler ignores query parameters and returns all templates. Filter the returned templates locally for structural and pricing hints; this is not live operator search.",
+          "responseFields": ["templates[].capabilityType", "templates[].name", "templates[].description", "templates[].basePrice", "templates[].currency"],
+          "sources": ["packages/gateway/src/routes/capabilities.ts", "packages/gateway/src/middleware/api-gate.ts"]
+        },
+        {
+          "tool": null,
+          "method": "POST",
+          "route": "/ask",
+          "auth": "public; no Bearer key or payment required",
+          "request": "Send {query: <plain-English need>} or {query: {text: <plain-English need>}} with nonempty text of at most 500 characters. Use this public catalog search; do not submit payment credentials for discovery.",
+          "responseFields": ["results[].serviceType", "results[].name", "results[].provider.identifier", "results[].additionalProperty"],
+          "response": "The response returns at most 20 results. additionalProperty includes named values such as available, assuranceTiers and materials. results[] is empty when no service matches. This search does not return a price.",
+          "sources": ["packages/gateway/src/routes/well-known-aeo.ts", "packages/gateway/src/middleware/api-gate.ts"]
+        }
+      ]
+    },
+    {
+      "id": "compose",
+      "goal": "Create a proposed plan within the human's budget and assurance requirements, with returned price estimates.",
+      "doneWhen": [
+        "The response has status: proposed, a compositionId and nonempty steps, plus totalPriceUSD and steps[].estimatedPriceUSD; record expiresAt and the assigned capabilities.",
+        "This composed plan carries no binding quote. A per-capability negotiated quote exists outside this path; committing it creates a job and escrow, so it needs the human's approval. The returned prices are estimates; report missing or zero pricing rather than inventing a field or confirming a free service."
+      ],
+      "asksHuman": [
+        "The total budget in USD and minimum assurance tier (0–3), only if the human has not already supplied or confirmed them; money and safety choices are never defaulted."
+      ],
+      "actions": [
+        {
+          "tool": "propose_composition",
+          "method": "POST",
+          "route": "/api/compose",
+          "auth": "Authorization: Bearer <key> required; a SIWE session is also accepted",
+          "request": "Send {outcomeType, steps, budgetUSD, minAssuranceTier} from the assignment and human's choices. Build steps from discovered capability types (1–20 nonempty strings, each at most 120 characters); without steps, outcomeType alone must itself be a capability type. outcomeChain plans only its last entry, so use steps for the intended sequence. outcomeType is 1–120 characters; budgetUSD is positive and at most 1000000000; minAssuranceTier is 0, 1, 2 or 3. Optional location is {lat, lng, radiusKm?}; optimizeFor is price, speed or quality; requester is {agentId, did?}; description is 1–4000 characters. Do not silently relax constraints.",
+          "responseFields": ["compositionId", "status", "steps[].capabilityType", "steps[].capabilityId", "steps[].kernelId", "steps[].operatorAddress", "steps[].estimatedPriceUSD", "totalPriceUSD", "totalDurationMs", "effectiveAssuranceTier", "budgetUSD", "budgetRemainingUSD", "expiresAt", "rejectionReason"],
+          "response": "HTTP 201 means status proposed; HTTP 200 may instead contain over_budget or no_path_found. Inspect status and rejectionReason. totalDurationMs can contain a one-hour placeholder per catalog candidate; it is not a promised ETA. Graph-derived steps always have an empty operatorAddress; catalog steps can too when the kernel lookup fails.",
+          "sources": ["packages/gateway/src/routes/compose.ts", "packages/spec/src/types/composition.ts", "packages/spec/src/types/capability.ts", "packages/gateway/src/routes/negotiation.ts", "packages/gateway/src/middleware/api-gate.ts"]
+        }
+      ]
+    },
+    {
+      "id": "read-plan",
+      "goal": "Read the saved plan back and inspect its price, assignments, constraints and expiry before handing it off.",
+      "doneWhen": [
+        "The saved response has the same compositionId, status: proposed, nonempty steps and unexpired expiresAt, with totalPriceUSD and per-step estimatedPriceUSD consistent with the proposed plan.",
+        "The human's outcome, budget and assurance choices match the returned plan; unresolved provider, pricing or timing limitations are identified."
+      ],
+      "asksHuman": [],
+      "actions": [
+        {
+          "tool": "get_composition",
+          "method": "GET",
+          "route": "/api/compose/{id}",
+          "auth": "Authorization: Bearer <key> required; a SIWE session is also accepted",
+          "request": "Set id to the returned compositionId; no body. Read the saved object rather than relying on a previous success status.",
+          "responseFields": ["compositionId", "status", "steps", "totalPriceUSD", "totalDurationMs", "effectiveAssuranceTier", "budgetUSD", "expiresAt"],
+          "sources": ["packages/gateway/src/routes/compose.ts", "packages/gateway/src/middleware/api-gate.ts"]
+        }
+      ]
+    },
+    {
+      "id": "handoff",
+      "terminal": true,
+      "goal": "Stop and hand the human the saved plan and estimated prices with their limitations.",
+      "doneWhen": [
+        "The human receives the gateway, compositionId, capability assignments, per-step estimates, the API-labelled USD totalPriceUSD, expiry, assurance tier and all pricing or timing limitations, including the lack of currency conversion. This composed plan carries no binding quote. A per-capability negotiated quote exists outside this path; committing it creates a job and escrow, so it needs the human's approval.",
+        "No execution, funding, payment, paid search or job submission occurred. Never claim physical work succeeded until its outcome evidence has been read; this path ends with a proposal."
+      ],
+      "asksHuman": [
+        "Explicit approval for the specific plan and any spend before proceeding beyond this terminal path; presenting the estimate or receiving an API success response is not approval."
+      ],
+      "actions": []
+    }
+  ],
+  "events": {
+    "buyer.identifier-required": {"phase": "get-key", "trigger": "400 identifier_required", "do": "Use an authorized email or public EVM wallet address; ask only if neither is available."},
+    "buyer.invalid-identifier": {"phase": "get-key", "trigger": "400 invalid_email, invalid_wallet_address or invalid_type", "do": "Read the message and correct the identifier or field type without guessing another identity."},
+    "buyer.invalid-public-key": {"phase": "get-key", "trigger": "400 invalid_public_key", "do": "Regenerate or normalize the local Ed25519 public key to 64 hex characters; never send its private key."},
+    "buyer.key-limit": {"phase": "get-key", "trigger": "429 rate_limited or too_many_keys", "do": "Reuse an existing valid key. Honor retry_after_seconds or the Retry-After header; provisioning rate_limited specifies 3600 seconds. Check the request shape before sending because the 5-per-IP-per-hour provisioning limit counts rejected (400) attempts too. Do not loop-provision."},
+    "buyer.invalid-key": {"phase": "get-key", "trigger": "401 invalid_key", "do": "Check private local state and the Authorization header, then provision only when no valid existing key remains."},
+    "buyer.auth-required": {"phase": "compose", "trigger": "401 api_key_required", "do": "Send the stored Bearer key to the assigned gateway; return to get-key if validation fails."},
+    "buyer.invalid-query": {"phase": "discover", "trigger": "400 INVALID_QUERY from public search", "do": "Send nonempty query text of at most 500 characters, then retry once."},
+    "buyer.no-match": {"phase": "discover", "trigger": "Public search returns results: []", "do": "Refine the query using discovered types and known constraints. If no operator matches, report the gap and stop; never fabricate a provider."},
+    "buyer.invalid-compose": {"phase": "compose", "trigger": "400 validation_failed", "do": "Read details and fix the request shape. Preserve human-selected budget and assurance values."},
+    "buyer.no-path": {"phase": "compose", "trigger": "status: no_path_found", "do": "Read rejectionReason, revisit discovery and correct type or location mismatches. If no feasible plan remains, report the limitation and stop."},
+    "buyer.over-budget": {"phase": "compose", "trigger": "status: over_budget", "do": "Show the returned total and rejectionReason. Stop unless the human changes the budget or scope; never increase the budget automatically."},
+    "buyer.plan-missing": {"phase": "read-plan", "trigger": "404 not_found", "do": "Check the gateway and saved compositionId; if missing, propose and read back a fresh plan before handoff."},
+    "buyer.plan-expired": {"phase": "read-plan", "trigger": "410 expired", "do": "Re-propose using the same confirmed constraints and read the new plan back. Present its new price and expiry."},
+    "buyer.payment-required": {"phase": "any", "trigger": "If any route answers 402", "do": "Do not supply payment credentials or pay. Report the unexpected payment requirement and stop."},
+    "buyer.server-failure": {"phase": "any", "trigger": "5xx, including provision_failed during get-key, INTERNAL_ERROR from /ask, or lowercase internal_error from other routes", "do": "If the body has report_hint, send the report it describes once through pcc_report: {type: \"bug\", summary: <redacted one-line summary>, endpoint, method, status, errorCode, traceId}. Otherwise report the redacted failure with the same fields once. Do not claim success or repeatedly retry."}
+  },
+  "reporting": {
+    "tool": "pcc_report",
+    "method": "POST",
+    "route": "/api/feedback",
+    "auth": "public; no Bearer key required",
+    "request": "Send {type: \"bug\", summary: <redacted one-line summary>, endpoint, method, status, errorCode, traceId} for an unrecoverable failure, a 5xx or the same step failing twice. If the response body has report_hint, copy its send fields and traceId and add summary. Report each distinct failure once; never include keys, tokens, private keys, email addresses or a transcript.",
+    "responseFields": ["status", "id (only for a newly submitted report)", "submitted", "deduped (when deduplicated)", "message"],
+    "response": "A newly submitted report returns HTTP 201 with status, id, submitted: true and message. A deduplicated report returns HTTP 200 {status, submitted: false, deduped: true, message} with no id; accept it and do not retry.",
+    "sources": ["packages/gateway/src/routes/feedback.ts", "packages/gateway/src/report-hint.ts", "packages/gateway/src/middleware/api-gate.ts", "apps/dashboard/public/agent-package.json"]
+  }
+}

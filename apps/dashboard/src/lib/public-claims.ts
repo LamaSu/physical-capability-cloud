@@ -177,6 +177,7 @@ export const PUBLISHED_SURFACES: readonly string[] = [
   "apps/dashboard/public/about.html",
   "apps/dashboard/public/about.md",
   "apps/dashboard/public/llms.txt",
+  "apps/dashboard/public/.well-known/agent.md",
   "apps/dashboard/public/pricing.md",
   "apps/dashboard/public/whitepaper.md",
   "apps/dashboard/public/visualizer.js",
@@ -218,7 +219,7 @@ export const UNCHECKED_SURFACES: Readonly<Record<string, string>> = {
   "packages/gateway/src/routes/snippet.ts":
     "adk (R4): the /onboard/snippet.json `npx` field names @pcc/onboard, which is not on npm; publish the package or drop the field",
   "packages/onboard-kit/AGENT_INSTRUCTIONS.md":
-    "adk (R3): served as /docs/agent-guide and docs://pcc/agent-guide; the rewrite replaces the fixed taxonomy and 'broker compiles'",
+    "adk (R3): no longer served by the gateway; /docs/agent-guide redirects to the generated /.well-known/agent.md and docs://pcc/agent-guide reads it; the old file is rewritten separately",
   "PCC-NETWORK.md":
     "Managed by LamaSu/pcc-network-kit; fix the template there (operator decision #2284)",
   "packages/gateway/src/routes/well-known.ts":

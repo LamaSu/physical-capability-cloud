@@ -14,7 +14,10 @@
  * as the public, agent-facing integration reference — its own header points
  * *away* from CLAUDE.md ("For a quick primer + MANDATORY project rules, see
  * CLAUDE.md"), i.e. CLAUDE.md is the internal primer and this is the external
- * one — so it is the correct, safe source for docs://pcc/agent-guide.
+ * one — so it is the correct, safe source for docs://pcc/integration.
+ * docs://pcc/agent-guide serves the same committed, generated
+ * buyer and supply golden path as GET /.well-known/agent.md, using the same
+ * artifact loader so both entry points agree.
  *
  * Session plumbing intentionally duplicates (rather than shares) the small
  * amount of Streamable HTTP boilerplate in http-mcp-server.ts: that surface
@@ -36,12 +39,14 @@ import "@fastify/swagger";
 import { z } from "zod";
 import { loadAgentPackage, PCC_MCP_ICON_URL } from "./http-mcp-server.js";
 import { resolveGatewayAsset } from "./mcp-app-view.js";
+import { AGENT_MD_SEGMENTS, loadAgentMd } from "../routes/well-known-agent.js";
 
 export const DOCS_MOUNT_PATH = "/mcp/docs";
 const DOCS_SESSION_TTL_MS = 10 * 60 * 1000;
 const DOCS_MAX_SESSIONS = 50;
 
 export const DOCS_AGENT_GUIDE_URI = "docs://pcc/agent-guide";
+export const DOCS_INTEGRATION_URI = "docs://pcc/integration";
 export const DOCS_API_URI = "docs://pcc/api";
 export const DOCS_QUICKSTART_URI = "docs://pcc/quickstart";
 
@@ -52,10 +57,10 @@ interface ProseDoc {
   description: string;
   /** Repo-root-relative path segments, resolved via resolveGatewayAsset. */
   segments: string[];
-  envVarOverride: string;
+  envVarOverride?: string;
 }
 
-// The two prose docs — real files committed to the repo, read + cached ONCE at
+// The three prose docs — real files committed to the repo, read + cached ONCE at
 // startup (primeDocsAssets), so a production image missing a doc fails to BOOT
 // with a clear diagnostic instead of throwing at the first resources/read or
 // search_docs call (directive 6).
@@ -63,12 +68,21 @@ const PROSE_DOCS: ProseDoc[] = [
   {
     uri: DOCS_AGENT_GUIDE_URI,
     name: "pcc-agent-guide",
-    title: "PCC Agent Integration Guide",
+    title: "PCC Agent Golden Path",
+    description:
+      "Prescriptive buyer planning and instrument onboarding instructions, generated from " +
+      "the committed buyer path and starter runbook. Stop before any spend and obtain human approval.",
+    segments: [...AGENT_MD_SEGMENTS],
+  },
+  {
+    uri: DOCS_INTEGRATION_URI,
+    name: "pcc-integration-reference",
+    title: "PCC Agent Integration Reference",
     description:
       "Full API reference, DTOs, MCP tools, operator onboarding, and environment variables for " +
       "agents integrating with the PCC gateway.",
     segments: ["docs", "AGENT_INTEGRATION.md"],
-    envVarOverride: "PCC_DOC_AGENT_GUIDE_PATH",
+    envVarOverride: "PCC_DOC_INTEGRATION_PATH",
   },
   {
     uri: DOCS_QUICKSTART_URI,
@@ -82,14 +96,16 @@ const PROSE_DOCS: ProseDoc[] = [
 ];
 
 // Startup cache for the committed prose docs (directive 6). The API-reference
-// resource is generated live from app.swagger() (no file), so only these two
+// resource is generated live from app.swagger() (no file), so only these three
 // file-backed docs are cached here.
 const proseDocCache = new Map<string, string>();
 
 function readProseDoc(doc: ProseDoc): string {
   let text = proseDocCache.get(doc.uri);
   if (text === undefined) {
-    text = readFileSync(resolveGatewayAsset(doc.segments, doc.envVarOverride), "utf8");
+    text = doc.uri === DOCS_AGENT_GUIDE_URI
+      ? loadAgentMd()
+      : readFileSync(resolveGatewayAsset(doc.segments, doc.envVarOverride), "utf8");
     proseDocCache.set(doc.uri, text);
   }
   return text;
@@ -116,8 +132,10 @@ export function primeDocsAssets(): void {
     throw new Error(
       "PCC docs assets are missing from the runtime image — the /mcp/docs surface cannot " +
         `serve its resources. Missing: ${failures.join("; ")}. These are committed under docs/ ` +
-        "and MUST ship in the production image (see docs/DEPLOY.md / Dockerfile). Override paths " +
-        "with the per-doc env vars (e.g. PCC_DOC_AGENT_GUIDE_PATH).",
+        "and apps/dashboard/public/.well-known/ and MUST ship in the production image " +
+        "(see docs/DEPLOY.md / Dockerfile). Override the integration and quickstart paths with " +
+        "PCC_DOC_INTEGRATION_PATH and PCC_DOC_QUICKSTART_PATH; " +
+        "apps/dashboard/public/.well-known/agent.md uses the same artifact as its HTTP route.",
     );
   }
 }
@@ -172,7 +190,7 @@ function registerSearchDocsTool(server: McpServer): void {
       title: "Search PCC docs",
       description:
         "Case-insensitive full-text search across PCC's public prose documentation " +
-        `(${DOCS_AGENT_GUIDE_URI}, ${DOCS_QUICKSTART_URI}) — returns matching lines with their ` +
+        `(${DOCS_AGENT_GUIDE_URI}, ${DOCS_INTEGRATION_URI}, ${DOCS_QUICKSTART_URI}) — returns matching lines with their ` +
         "source URI and line number.",
       inputSchema: {
         query: z.string().min(1).max(200).describe("Text to search for."),
@@ -205,7 +223,7 @@ function createDocsMcpServer(app: FastifyInstance, version: string): McpServer {
       version,
       description:
         "Read-only documentation surface for the Physical Capability Cloud — the agent " +
-        "integration guide, live OpenAPI reference, and quickstarts, as MCP resources. " +
+        "golden path, integration reference, live OpenAPI reference, and quickstarts, as MCP resources. " +
         "For the tools that DO things (discover, negotiate, settle), see the product MCP server.",
       icons: [{ src: PCC_MCP_ICON_URL, mimeType: "image/svg+xml" }],
     },

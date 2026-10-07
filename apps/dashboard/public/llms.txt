@@ -7,11 +7,12 @@
 > verification and on-chain milestone escrow. Live gateway: https://capability.network
 
 If you are an AI agent: you are a first-class citizen here. Every operation is an HTTP
-API call. Start by fetching the agent package, provision a key, then discover and build.
+API call. Start with the generated agent instructions below for the buyer or supplier path.
 
 ## Start here (fetch these first)
 
-- [Agent package — 254 tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Load it, present tools to your model, call the mapped endpoint. The `system_prompt` field contains the self-onboarding flow.
+- [Agent golden path — start here](https://capability.network/.well-known/agent.md): Prescriptive buyer and supplier instructions generated from the committed buyer path and starter runbook. Use the gateway the human gave you; never call production unless told to.
+- [Agent package — tools for any LLM](https://capability.network/agent-package.json): Single JSON file with every tool's name, description, input_schema, and endpoint. Use it as the tool reference while following agent.md.
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
 - MCP server (Streamable HTTP): https://capability.network/mcp
@@ -41,13 +42,13 @@ every type PCC currently advertises. The request-time AI Catalog is public at
 
 Agents can compose an interactive dashboard for a physical task by calling the MCP tool `render_pcc_dashboard` with a DashboardManifest — it renders inline as an MCP App (`ui://pcc/dashboard`) in hosts that support MCP Apps, with a plain-text summary as a graceful fallback elsewhere.
 
-## Self-onboarding (5 steps)
+## Buying physical work
 
-1. `POST /api/auth/provision` — body `{email?, walletAddress?, name?, capability?}` → returns `api_key` (save it; shown once). Public, no auth.
-2. Set `Authorization: Bearer <api_key>` on every subsequent request.
-3. `GET /api/capabilities/types` then `GET /api/capabilities` — discover what exists.
-4. `POST /api/build/options` → `POST /api/build/price` → `POST /api/build/contract` — assemble a settleable contract for a capability type.
-5. Follow the contract's returned settlement instructions; an existing on-chain escrow is funded at `POST /api/escrow/chain/:address/fund`. Submit work with `POST /api/jobs/submit`, then poll `GET /api/jobs/:jobId` or subscribe to `GET /sse/stream/job/:jobId`.
+Follow [agent.md](https://capability.network/.well-known/agent.md): get a key,
+discover capabilities, compose a plan, read it back, and STOP with the estimate for
+the human. A composed plan's price is an estimate; the current composition routes
+return no binding quote. Execution, funding, or any spend requires the human's
+explicit approval.
 
 ## Publishing a capability (become a provider)
 
@@ -57,13 +58,30 @@ There are three "lanes" — three economic-agent shapes:
 - Human skill — a person offering a skill. Gets pinged, accepts within a window, finishes by a deadline.
 - Asset — a thing that posts outbound demand on its own behalf, bidding for capabilities within an owner-set budget.
 
-Flow: `POST /api/auth/provision` → `POST /api/onboard/analyze` (AI capability analysis) → `POST /api/kernels` (register your site/operator) → `POST /api/setup/register-device` → `POST /api/capabilities` (publish) → `POST /api/setup/test-job` (prove → auto-activate).
+agent.md's supply path covers the machine lane, through the
+[starter runbook](https://github.com/LamaSu/physical-capability-cloud/tree/master/starter/runbook).
+Run the phases in order and verify each phase's doneWhen before claiming success.
+The runbook specifies signing support, registration, the emergency-stop drill,
+blocked test jobs, and named recoveries.
 
-CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware, generates keys, provisions, registers, and starts the job daemon.
+Install pcc-node with the required crypto extra, as in
+[prerequisites](https://github.com/LamaSu/physical-capability-cloud/blob/master/starter/runbook/00-prerequisites.md):
+
+```bash
+python3 -m pip install 'pcc-node[crypto]>=0.1.1'
+```
+
+Until 0.1.1 is on PyPI (0.1.0 was withdrawn for security fixes), install the release commit instead:
+
+```bash
+python3 -m pip install 'pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node'
+```
 
 ## Core API surface
 
 - Discovery: `GET /api/capabilities`, `GET /api/capabilities/by-type/:type`, `GET /api/capabilities/search?q=`, `GET /api/capabilities/:id`
+- Composition: `POST /api/compose`, `GET /api/compose/:id`
+- single-capability contract assembly (spending requires the human's approval): `POST /api/build/options`, `POST /api/build/price`, `POST /api/build/contract`
 - Kernels (sites): `GET /api/kernels`, `GET /api/kernels/:id`, `POST /api/kernels`
 - Jobs: `POST /api/jobs/submit`, `GET /api/jobs/:id`, `PATCH /api/jobs/:id/status`
 - Escrow & settlement (Base Sepolia, USDC, milestone): `POST /api/escrow/chain/:address/fund`, `POST /api/escrow/chain/:address/release/:milestoneIndex`, `POST /api/escrow/chain/:address/dispute/:milestoneIndex`
@@ -81,9 +99,9 @@ CLI alternative: `pip install pcc-node && pcc-node start` auto-detects hardware,
 
 - Authentication: hiring and other protected operations require `Authorization: Bearer <key>`. Public discovery includes `POST /ask`, capability types, well-known catalogs/cards, the agent package, and the MCP transport endpoint.
 - Settlement is real milestone escrow; funds release only when evidence meets the contracted assurance tier.
-- The MCP server exposes 254 real tools over Streamable HTTP at `https://capability.network/mcp`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with `PCC_URL=https://capability.network`.
-- A second, read-only MCP surface at `https://capability.network/mcp/docs` serves PCC's documentation as MCP resources (`docs://pcc/agent-guide`, `docs://pcc/api`, `docs://pcc/quickstart`) plus a `search_docs` tool — use it to learn the API before calling the product server to act on it.
-- Full human + agent integration guide is served by the gateway; this file is the short index.
+- The MCP server exposes tools over Streamable HTTP at `https://capability.network/mcp`; discover the current set with `tools/list`. A stdio transport remains available by running `packages/mcp-server/dist/index.js` from a cloned, built repository with the gateway you were given in `PCC_URL`.
+- A second, read-only MCP surface at `https://capability.network/mcp/docs` serves PCC's documentation as MCP resources (`docs://pcc/agent-guide`, `docs://pcc/integration`, `docs://pcc/api`, `docs://pcc/quickstart`) plus a `search_docs` tool — use it to learn the API before calling the product server to act on it.
+- The generated agent golden path is served at `/.well-known/agent.md`; this file is the short index.
 
 ## Registries
 

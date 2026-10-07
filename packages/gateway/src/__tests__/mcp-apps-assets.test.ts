@@ -15,14 +15,15 @@
  * scripts/mcp-app-smoke.mjs + the Dockerfile asset-presence RUN assertion.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { primeMcpAppAssets, _resetMcpAppAssetCacheForTests } from "../mcp/mcp-app-view.js";
 import { primeDocsAssets, _resetDocsAssetCacheForTests } from "../mcp/docs-mcp-server.js";
+import * as agentMd from "../routes/well-known-agent.js";
 
 const ASSET_ENV = [
   "PCC_UI_KIT_PATH",
   "PCC_DASHBOARD_SCHEMA_PATH",
-  "PCC_DOC_AGENT_GUIDE_PATH",
+  "PCC_DOC_INTEGRATION_PATH",
   "PCC_DOC_QUICKSTART_PATH",
 ];
 
@@ -53,9 +54,27 @@ describe("directive 6 — MCP-App runtime asset startup priming", () => {
     expect(() => primeMcpAppAssets()).toThrow(/MCP Apps assets are missing[\s\S]*pcc-ui\.js/);
   });
 
-  it("primeDocsAssets() FAILS FAST with a clear diagnostic that names the missing doc", () => {
+  it("primeDocsAssets() FAILS FAST with a clear diagnostic that names the missing quickstart", () => {
     _resetDocsAssetCacheForTests();
-    process.env.PCC_DOC_AGENT_GUIDE_PATH = "/pcc/definitely/missing/AGENT_INTEGRATION.md";
+    process.env.PCC_DOC_QUICKSTART_PATH = "/pcc/definitely/missing/README.md";
+    expect(() => primeDocsAssets()).toThrow(/docs assets are missing[\s\S]*README\.md/);
+  });
+
+  it("primeDocsAssets() FAILS FAST with a clear diagnostic that names the missing integration reference", () => {
+    _resetDocsAssetCacheForTests();
+    process.env.PCC_DOC_INTEGRATION_PATH = "/pcc/definitely/missing/AGENT_INTEGRATION.md";
     expect(() => primeDocsAssets()).toThrow(/docs assets are missing[\s\S]*AGENT_INTEGRATION\.md/);
+  });
+
+  it("primeDocsAssets() FAILS FAST with a clear diagnostic that names missing agent.md", () => {
+    _resetDocsAssetCacheForTests();
+    const load = vi.spyOn(agentMd, "loadAgentMd").mockImplementation(() => {
+      throw new Error(`Missing artifact: ${agentMd.AGENT_MD_SEGMENTS.join("/")}`);
+    });
+    try {
+      expect(() => primeDocsAssets()).toThrow(/docs assets are missing[\s\S]*agent\.md/);
+    } finally {
+      load.mockRestore();
+    }
   });
 });
