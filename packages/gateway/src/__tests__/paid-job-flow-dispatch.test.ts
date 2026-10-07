@@ -28,8 +28,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
+import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { getKernelService } from "../services/kernel-service.js";
@@ -100,8 +99,7 @@ async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  await app.register(deviceRelayRoutes);
   await app.register(jobRoutes);
   await app.ready();
   return app;
@@ -112,7 +110,9 @@ async function submitJob(app: FastifyInstance, kernelId: string, userAgentId: st
   const res = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
-    payload: { kernelId, capabilityType: "liquid-handler", userAgentId },
+    // A type the kernel actually registers: the quote is the registered capability's price (N98),
+    // so a type the kernel does not offer is refused before any job exists.
+    payload: { kernelId, capabilityType: "fdm", userAgentId },
   });
   expect(res.statusCode).toBe(201);
   const body = res.json();

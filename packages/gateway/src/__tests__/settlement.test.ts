@@ -17,6 +17,7 @@ import { resetSettlementService, getSettlementService } from "../services/settle
 import { closeWorkflowStore } from "../workflow-store.js";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { OracleAttestation } from "@pcc/contracts";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Mocks — must be declared before any imports that use them
@@ -170,6 +171,8 @@ async function buildApp(): Promise<FastifyInstance> {
   resetSettlementService();
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app); // job reads are object-authorized (F3)
   await app.register(settlementRoutes);
   await app.ready();
   return app;
@@ -574,6 +577,25 @@ describe("Settlement Routes", () => {
       expect(body.jobId).toBe("job-001");
       expect(body.milestoneIndex).toBe(0);
     });
+
+    it("a released milestone changes nothing in the SWF ledger: behavior, not spelling (astra EC2 F5)", async () => {
+      const { swfService } = await import("../routes/swf.js");
+      const escrowMod = await import("../contracts/escrow-client.js");
+      vi.mocked(escrowMod.isWriteEnabled).mockReturnValue(true);
+      const ledger = () => {
+        const epoch = swfService.getActiveEpoch();
+        return JSON.stringify({ summary: swfService.getSummary(), accruals: epoch ? swfService.getAccrualsForEpoch(epoch.id) : [] });
+      };
+      const before = ledger();
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/settlement/release",
+        payload: { jobId: "job-001", milestoneIndex: 0, contractAddress: "0xDeAdBeEf00000000000000000000000000000001", attestation: mkAttestationBody() },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json<{ status: string }>().status).toBe("released");
+      expect(ledger()).toBe(before);
+    });
   });
 
   // ── GET /api/settlement/:jobId ─────────────────────────────────────────
@@ -601,15 +623,20 @@ describe("Settlement Routes", () => {
       expect(typeof body.settled).toBe("boolean");
     });
 
-    it("shows settled=true for a completed job", async () => {
-      // job-004 is seeded with status "completed"
+    it("NEGATIVE: a completed job is not settled by its row (readmodels F1)", async () => {
+      // job-004 is seeded "completed"; its escrow (esc-001, by CWM) sits at the seed's
+      // 0xESCROW_CONTRACT_001, which is no contract address, so the escrow is mock data and the
+      // payout reads simulated (#409 r1 MEDIUM 1), never settled and never paid.
       const res = await app.inject({
         method: "GET",
         url: "/api/settlement/job-004",
       });
       expect(res.statusCode).toBe(200);
       const body = res.json();
-      expect(body.settled).toBe(true);
+      expect(body.settled).toBe(false);
+      expect(body.status).toBe("simulated");
+      expect(body.jobStatus).toBe("completed");
+      expect(body.settledAt).toBeNull();
     });
 
     it("does not match static routes like 'status'", async () => {
@@ -702,14 +729,22 @@ describe("Full evidence-to-settlement flow", () => {
     const evidenceBody = evidenceRes.json();
     expect(evidenceBody.bundles[0].bundleId).toBe("bundle-test-001");
 
-    // Step 3: Verify settlement status reflects settled state
+    // Step 3: the settlement read reports what the records show. The release was sent to
+    // 0xDeAdBeEf...01, which the gateway holds no escrow record for, and
+    // SettlementService.releaseMilestone updates only the job row. job-004's own escrow
+    // record is the seed's mock esc-001 (no contract address), so the payout is simulated
+    // (#409 r1 MEDIUM 1), not settled; the row's "settled" is reported as the job row's claim
+    // (readmodels F1).
     const settlementRes = await app.inject({
       method: "GET",
       url: "/api/settlement/job-004",
     });
     expect(settlementRes.statusCode).toBe(200);
     const settlementBody = settlementRes.json();
-    expect(settlementBody.settled).toBe(true);
+    expect(settlementBody.jobStatus).toBe("settled");
+    expect(settlementBody.settled).toBe(false);
+    expect(settlementBody.status).toBe("simulated");
+    expect(settlementBody.notices).toContain("job_row_reports_settled");
   });
 
   it("processes evidence without on-chain calls when write is disabled", async () => {
