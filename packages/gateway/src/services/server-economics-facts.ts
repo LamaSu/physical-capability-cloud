@@ -225,7 +225,10 @@ export type EconomicsFactsRefusalCode = (typeof ECONOMICS_FACTS_REFUSAL_CODES)[n
 
 export interface EconomicsFactsRefusal {
   code: EconomicsFactsRefusalCode;
-  /** Informative only, and never a configured value or a caller's string. */
+  /**
+   * Informative only: an entry number, or the path of the first field the binding's schema refused (a path can hold
+   * a plan node id). Never a configured value.
+   */
   detail?: string;
 }
 
