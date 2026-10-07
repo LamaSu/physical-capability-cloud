@@ -11,6 +11,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import type { OperatorPolicy, Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
+import { gateJobRead, refuseJobRead } from "../readmodels/job-read-gate.js";
 import type { SubmitJobInput, RegisterDeviceInput } from "../facades/index.js";
 import { getStore } from "../db.js";
 import { schema, eq } from "@pcc/store";
@@ -244,6 +245,10 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
    * Poll job status — hybrid KernelService in-memory + DB fallback.
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/status", async (req, reply) => {
+    const gate = gateJobRead(req, req.params.jobId);
+    if (!gate.ok) {
+      return refuseJobRead(reply, gate, { error: "not_found", message: `job '${req.params.jobId}' not found` });
+    }
     const result = await facade.getStatus(req.params.jobId);
     return sendResult(reply, result);
   });

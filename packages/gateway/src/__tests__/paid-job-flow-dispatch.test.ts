@@ -119,7 +119,9 @@ async function submitJob(app: FastifyInstance, kernelId: string, userAgentId: st
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
     headers: { "x-admin-key": ADMIN },
-    payload: { kernelId, capabilityType: "liquid-handler", userAgentId },
+    // A type the kernel actually registers: the quote is the registered capability's price (N98),
+    // so a type the kernel does not offer is refused before any job exists.
+    payload: { kernelId, capabilityType: "fdm", userAgentId },
   });
   expect(res.statusCode).toBe(201);
   const body = res.json();

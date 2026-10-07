@@ -20,6 +20,7 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dispatchToolCall, httpMcpRoutes } from "../mcp/http-mcp-server.js";
+import { APP_HOST_OPERATION_IDS } from "../mcp/operation-ids.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { provisionApiKey, generateApiKey } from "../auth/api-key-auth.js";
 import {
@@ -513,6 +514,8 @@ describe("[adversarial] end-to-end /mcp — the bearer reaches the handler; sess
     expect(html).toContain("capability.request_quote");
     // job.cancel is unregistered → the injected allowlist must NOT contain it.
     expect(html).not.toContain("job.cancel");
+    // astra r2 on #342 (F2): the view injects EXACTLY the read-only, approval-"none" subset.
+    expect(html).toContain(`window.__PCC_HOST_OPERATIONS__ = ${JSON.stringify([...APP_HOST_OPERATION_IDS])};`);
     expect(html).toContain("callOperation");
     expect(html).toContain("tools/call");
   });

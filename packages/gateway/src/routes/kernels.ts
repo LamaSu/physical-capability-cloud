@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
+import { jobReadScopeOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
 import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
@@ -123,8 +124,19 @@ export async function kernelRoutes(app: FastifyInstance) {
     // `capabilityTypes`; expose both shapes for callers that haven't
     // migrated yet. Purely additive — KernelHealthSnapshot fields are
     // preserved.
+    // A kernel's detail is public, but its recent jobs are job records (F3 round 3): the list holds
+    // only the jobs this caller may read (jobReadScopeOf). recentJobsScope says what the list
+    // covers, so an empty list never reads as "this kernel has no jobs": "all" for an admin
+    // without a tenant, "readable_by_caller" for everyone else (none without a proven wallet),
+    // "unavailable" when the records the rule needs could not be read.
+    const scope = jobReadScopeOf(req);
+    const recentJobs = scope.ok ? (snapshot.recentJobs ?? []).filter((job) => scopeAllows(scope, job.id)) : [];
+    const recentJobsScope =
+      scope.ok && scope.jobIds === null ? "all" : !scope.ok && scope.kind === "unavailable" ? "unavailable" : "readable_by_caller";
     const responseKernel: Record<string, unknown> = {
       ...snapshot,
+      recentJobs,
+      recentJobsScope,
       capabilities: snapshot.capabilityTypes ?? [],
       discoveryStatus,
     };
@@ -149,13 +161,17 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Get jobs for a kernel.
-   * Returns { jobs: JobDTO[] }.
+   * Returns { jobs: JobDTO[] }: only the jobs the caller may read (F3 round 3). Identity first,
+   * before the jobs are read: no credential is 401, an unproven one 403. A proven wallet gets the
+   * jobs it operates or bought; an admin all of them (within its tenant under TENANT_ENFORCE).
    */
   app.get<{ Params: { kernelId: string } }>(
     "/api/kernels/:kernelId/jobs",
     async (req, reply) => {
+      const scope = jobReadScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
       const result = await facade.getJobs(req.params.kernelId);
-      if (result.success) return { jobs: result.data };
+      if (result.success) return { jobs: result.data.filter((job) => scopeAllows(scope, job.id)) };
       return sendResult(reply, result);
     },
   );
