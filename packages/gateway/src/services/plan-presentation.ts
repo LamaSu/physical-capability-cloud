@@ -12,6 +12,12 @@
  *  - the compiled plan is intact: `acceptedDealDigest` is re-derived from an owned copy of the plan and
  *    must equal the one it carries, and the plan is bound to the submission's request, reservation
  *    and plan id, and to exactly its node set;
+ *  - each node's execution contract is the one its planHash names, and agrees with its binding (step,
+ *    operator, tier, program) and its unit (amount, currency, decimals);
+ *  - R10's verdicts are exactly one per submitted node, and a refusal's nested verdicts are exactly the
+ *    top-level ones that are not current;
+ *  - the acceptance-time live terms shown beside a deal are the deal's own (price in exact base units,
+ *    currency, operator, tier, capability identity);
  *  - the seal record names this reservation and exactly this deal digest.
  *
  * Every input is read ONCE into owned, validated data (the review pattern of #351/#355/#356). A
@@ -26,6 +32,7 @@
 import {
   acceptedDealDigest,
   copyPlanJson,
+  planHashOf,
   type CanonicalPlan,
   type CompiledAcceptedPlan,
   type CompiledJob,
@@ -108,6 +115,13 @@ export interface PlanNodePresentation {
    * them as data.
    */
   execution?: { planHash: string; inputs: PlanJsonObject; constraints: PlanJsonObject };
+  /**
+   * Evidence strength actually committed for this node (item 6): tier, program hash, and the evidence
+   * required at that tier. Taken ONLY from the intact, bound plan's `canonicalPlan.assurance` — never
+   * the proposal — so a caller cannot claim strength it did not earn. Evidence entries keep the
+   * canonicalPlan's order; `requirementId` is not copied, since it is a non-semantic label.
+   */
+  assurance?: { tier: number; program: string | null; evidence: Array<{ evidenceTypeId: string; tier: number }> };
 }
 
 export interface PlanPresentation {
@@ -124,6 +138,11 @@ export interface PlanPresentation {
   asOf: string;
   nodes: PlanNodePresentation[];
   edges: Array<{ from: string; to: string }>;
+  /**
+   * Preview facts PCC has no trusted source for (item 6): named honestly so a UI renders "unknown" and
+   * never invents one. Always present, in every state. Today that is exactly `["time-estimate"]`.
+   */
+  unknowns: string[];
   /** Totals and obligations of the compiled deal (item 6); absent before compilation. */
   preview?: {
     gross: Money;
@@ -132,6 +151,17 @@ export interface PlanPresentation {
     payoutsByRecipient: Array<{ recipient: string; amount: Money }>;
     tierByNode: Array<{ nodeId: string; tier: number }>;
     reclaimAt: string;
+  };
+  /**
+   * The reservation's expiry (item 6), shown only when the caller supplied a `reservation` naming
+   * THIS submission's reservation (see `PresentPlanArgs.reservation`). Absent when no reservation was
+   * supplied.
+   */
+  expiry?: {
+    /** ISO 8601 of the reservation's `expiresAt`. */
+    reservationExpiresAt: string;
+    /** The compiled deal's reclaim time — the same string as `preview.reclaimAt`. Present only once compiled. */
+    reclaimAt?: string;
   };
   /** The compiled deal's commitments (item 8): immutable once sealed. */
   deal?: {
@@ -153,12 +183,28 @@ export interface SealRecord {
   acceptedDealDigest: string;
 }
 
+/**
+ * The reservation store's expiry preview (item 6): a minimal, server-truth projection — deliberately
+ * NOT the full store record (no principal, payer, state — the seam already enforces those).
+ */
+export interface ReservationWindow {
+  reservationId: string;
+  /** Unix seconds. */
+  expiresAt: number;
+}
+
 export interface PresentPlanArgs {
   submission: ExternalPlanSubmission;
   /** The seam's answer for THIS submission, once evaluated. */
   outcome?: SeamResult;
   /** The store's seal record for the submission's reservation, if the consume has happened (R13). */
   sealed?: SealRecord | null;
+  /**
+   * The reservation store's live expiry for the submission's reservation, if supplied (item 6). Must
+   * name the SAME reservation as the submission; a mismatch or malformed window makes the whole
+   * presentation `invalid` (never mixed in, like the deal's own binding).
+   */
+  reservation?: ReservationWindow | null;
   /** Server time of the evaluation, ISO 8601. */
   asOf: string;
 }
@@ -203,6 +249,27 @@ function listOf<T>(x: unknown, max: number, item: (v: unknown) => T): T[] {
   return out;
 }
 
+/**
+ * `{ reservationId, expiresAt }` if well-formed (non-empty id; expiresAt a non-negative safe integer,
+ * unix seconds); else null. Never throws — unlike the shape-readers above, a malformed `reservation`
+ * arg is a MISMATCH-style refusal ("plan-binding"), not a generic parse failure, because it is checked
+ * against another already-trusted input (the submission's own reservationId), exactly like the plan's
+ * own binding check.
+ */
+/** The largest unix time (seconds) an ECMAScript Date can hold: 8.64e15 ms. */
+const MAX_RENDERABLE_UNIX_SECONDS = 8_640_000_000_000;
+
+function readReservationWindow(x: unknown): ReservationWindow | null {
+  if (typeof x !== "object" || x === null) return null;
+  const o = x as Record<string, unknown>;
+  const reservationId = o.reservationId;
+  const expiresAt = o.expiresAt;
+  if (typeof reservationId !== "string" || reservationId.length === 0) return null;
+  // Bounded by what a Date can render (8.64e15 ms), so a window that validates here can always be shown.
+  if (!isInt(expiresAt, 0, MAX_RENDERABLE_UNIX_SECONDS)) return null;
+  return { reservationId, expiresAt };
+}
+
 const VERDICT_STATUSES = new Set(["current", "stale", "missing", "unavailable", "unpriceable", "incompatible", "invalid-claim"]);
 const DIFF_FIELDS = new Set(["capabilityType", "csd", "currency", "kernelId", "matchedCapabilityDigest", "operator", "price", "tier"]);
 const REFUSAL_STAGES = new Set(["submission", "reservation", "revalidation", "currency", "tier", "program", "evidence", "compile", "economics"]);
@@ -226,7 +293,8 @@ function readLive(x: unknown): LiveView {
 }
 
 type VerdictView =
-  | { nodeId: string; status: "current"; live: LiveView }
+  /** `tier` and `gross` are R10's exact resolved terms (not displayed): what an accepted deal is checked against. */
+  | { nodeId: string; status: "current"; live: LiveView; tier: number; gross: bigint }
   | { nodeId: string; status: "stale"; live: LiveView; diffs: DiffView[] }
   | { nodeId: string; status: Exclude<PlanNodeState, "proposed" | "current" | "stale" | "compiled" | "sealed">; reason: string };
 
@@ -235,7 +303,15 @@ function readVerdict(x: unknown): VerdictView {
   const nodeId = str(o.nodeId);
   const status = str(o.status);
   need(VERDICT_STATUSES.has(status)); // a forged status such as "sealed" is refused
-  if (status === "current") return { nodeId, status, live: readLive(o.resolved) };
+  if (status === "current") {
+    const resolved = o.resolved;
+    const live = readLive(resolved);
+    const exact = obj(resolved);
+    const tier = exact.tier;
+    const gross = exact.grossBaseUnits;
+    need(isInt(tier, 0, 3) && isBig(gross) && gross >= 0n);
+    return { nodeId, status, live, tier: tier as number, gross: gross as bigint };
+  }
   if (status === "stale") {
     return {
       nodeId,
@@ -440,17 +516,97 @@ function planIsBound(plan: CompiledAcceptedPlan, snap: SubmissionSnapshot, nodeI
   // Every binding names exactly the unit that carries its node, so identity and money cannot mix.
   return plan.nodeToUnit.every((b) => {
     const job = plan.jobs[b.jobIndex];
+    const unit = job?.units[b.milestoneIndex];
     const cp = b.canonicalPlan;
     return (
       job !== undefined &&
       job.jobId === b.jobId &&
       job.nodeIds[b.milestoneIndex] === b.nodeId &&
-      job.units[b.milestoneIndex] !== undefined &&
+      unit !== undefined &&
       // N25: the node's execution contract names this plan, this node and this unit.
       cp.planId === plan.planId &&
       cp.planNodeId === b.nodeId &&
       cp.job.jobId === b.jobId &&
-      cp.job.milestoneIndex === b.milestoneIndex
+      cp.job.milestoneIndex === b.milestoneIndex &&
+      // The contract shown is the contract hashed, and it agrees with the binding and the unit shown
+      // beside it. The digest commits the carried planHash and the recomputed one without requiring them
+      // to be equal, so equality is checked here. Addresses and hashes compare lowercased (hex case
+      // carries no meaning, and the compiler lowercases the contract); money compares as the exact
+      // base-unit string of the unit's gross, never as a parsed number.
+      b.planHash === planHashOf(cp) &&
+      cp.job.stepId === b.stepId &&
+      cp.operator === b.operator.toLowerCase() &&
+      cp.assurance.tier === b.tier &&
+      cp.assurance.committedProgramHash === (b.committedProgramHash === null ? null : b.committedProgramHash.toLowerCase()) &&
+      cp.amount.baseUnits === unit.g.toString() &&
+      cp.amount.currency === plan.currency &&
+      cp.amount.decimals === plan.currencyDecimals
+    );
+  });
+}
+
+/**
+ * The verdicts are an exact one-to-one cover of the submitted nodes: every submitted node id has a
+ * verdict, and no id has more verdicts than nodes were submitted under it. R10 gives an id it could
+ * read, submitted twice, ONE verdict, and an id it could not read one verdict per claim, so the bound
+ * is the number of nodes submitted under that id, not 1. A verdict for an id nobody submitted counts
+ * as more than the zero allowed.
+ */
+function coversNodes(verdicts: readonly VerdictView[], nodeIds: readonly string[]): boolean {
+  const submitted = new Map<string, number>();
+  for (const id of nodeIds) submitted.set(id, (submitted.get(id) ?? 0) + 1);
+  const given = new Map<string, number>();
+  for (const v of verdicts) given.set(v.nodeId, (given.get(v.nodeId) ?? 0) + 1);
+  for (const [id, n] of given) if (n > (submitted.get(id) ?? 0)) return false;
+  return [...submitted.keys()].every((id) => given.has(id));
+}
+
+/** Two verdict lists say the same thing: the same nodes with the same statuses, in any order. */
+function sameVerdicts(a: readonly VerdictView[], b: readonly VerdictView[]): boolean {
+  const key = (v: VerdictView) => JSON.stringify([v.nodeId, v.status]);
+  const x = a.map(key).sort();
+  const y = b.map(key).sort();
+  return x.length === y.length && x.every((k, i) => k === y[i]);
+}
+
+/** A decimal price as exact base units at `decimals`, or null if it is not an exact amount at that precision. No float is involved. */
+function baseUnitsOf(price: string, decimals: number): bigint | null {
+  const m = /^(0|[1-9][0-9]{0,77})(?:\.([0-9]{1,78}))?$/.exec(price);
+  if (m === null) return null;
+  const fraction = m[2] ?? "";
+  if (fraction.length > decimals) return null;
+  return BigInt(m[1]!) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
+}
+
+/**
+ * The acceptance-time terms R10 resolved for each accepted node are the terms the deal sealed, so the
+ * live view shown beside a deal cannot contradict it (astra, #434). The shown price is exactly the
+ * resolved amount in base units, and that amount is the unit's gross, or, when an economics agreement
+ * grossed the unit up (royalties on top), no more than it: the seam refuses a gross below the quote,
+ * and the plan does not record the quote. That bound only REFUSES a verdict that cannot be the accepted
+ * one; it proves nothing about a lower quote, so a sealed agreement-backed deal never presents the quote. Currency, operator, tier (resolved, and among the tiers
+ * shown as offered) and the capability's type, csd and matched digest equal the deal's contract.
+ * Addresses and hashes compare lowercased: the compiler lowercases the contract, and hex case carries
+ * no meaning. Every accepted node needs a current verdict; `verdictOf` is already an exact cover.
+ */
+function liveTermsMatchDeal(plan: CompiledAcceptedPlan, verdictOf: ReadonlyMap<string, VerdictView>): boolean {
+  return plan.nodeToUnit.every((b) => {
+    const v = verdictOf.get(b.nodeId);
+    if (v === undefined || v.status !== "current") return false;
+    const unit = plan.jobs[b.jobIndex]!.units[b.milestoneIndex]!; // `planIsBound` has checked that both exist
+    const cp = b.canonicalPlan;
+    const shown = baseUnitsOf(v.live.priceDecimal, plan.currencyDecimals);
+    return (
+      shown !== null &&
+      shown === v.gross &&
+      (plan.agreementHash === null ? v.gross === unit.g : v.gross <= unit.g) &&
+      v.live.currency === plan.currency &&
+      cp.operator === v.live.operator.toLowerCase() &&
+      v.tier === b.tier &&
+      v.live.assuranceTiers.includes(b.tier) &&
+      cp.capability.type === v.live.capabilityType &&
+      cp.capability.csd === v.live.csd &&
+      cp.capability.matchedCapabilityDigest === v.live.matchedCapabilityDigest.toLowerCase()
     );
   });
 }
@@ -473,9 +629,19 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
     const submissionRaw = a.submission;
     const outcomeRaw = a.outcome;
     const sealedRaw = a.sealed;
+    const reservationRaw = a.reservation;
     asOf = str(a.asOf);
     snap = snapshotSubmission(submissionRaw);
     if (!snap || !isStr(snap.requestId) || !isStr(snap.reservationId)) return invalid("malformed-submission", asOf, snap);
+
+    // The reservation preview (item 6): read once. A window naming another reservation, or malformed,
+    // is a binding mismatch — mismatched server inputs never mix, exactly like the plan's own binding.
+    let reservation: ReservationWindow | undefined;
+    if (reservationRaw !== undefined && reservationRaw !== null) {
+      const win = readReservationWindow(reservationRaw);
+      if (!win || win.reservationId !== snap.reservationId) return invalid("plan-binding", asOf, snap);
+      reservation = win;
+    }
 
     const nodes = snap.nodes.filter((n): n is NonNullable<typeof n> => n !== null && isStr(n.nodeId));
     const nodeIds = nodes.map((n) => n.nodeId as string);
@@ -485,11 +651,20 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
     const plan = outcome?.ok ? outcome.plan : undefined;
     if (plan && !planIsIntact(plan)) return invalid("plan-integrity", asOf, snap);
     if (plan && !planIsBound(plan, snap, nodeIds)) return invalid("plan-binding", asOf, snap);
-    const verdictList = outcome ? (outcome.ok ? outcome.verdicts : outcome.verdicts ?? outcome.refusal.verdicts ?? []) : [];
-    if (!verdictList.every((v) => nodeIds.includes(v.nodeId))) return invalid("malformed-outcome", asOf, snap);
+    // The top-level verdicts are R10's, one per submitted node (absent only when R10 never ran).
+    const verdictList = outcome?.verdicts ?? [];
+    if (outcome?.verdicts !== undefined && !coversNodes(outcome.verdicts, nodeIds)) return invalid("malformed-outcome", asOf, snap);
+    // A refusal repeats the verdicts that are not current, as its nested list. The two lists must agree
+    // exactly: the nested list is not a second source of node states, and an absent list is an empty one.
+    if (outcome && !outcome.ok && !sameVerdicts(outcome.refusal.verdicts ?? [], verdictList.filter((v) => v.status !== "current"))) {
+      return invalid("malformed-outcome", asOf, snap);
+    }
     if (plan && !(verdictList.length === nodeIds.length && verdictList.every((v) => v.status === "current"))) {
       return invalid("malformed-outcome", asOf, snap);
     }
+    const verdictOf = new Map(verdictList.map((v) => [v.nodeId, v]));
+    // The live terms shown beside the deal are the deal's own (a mismatch is two server inputs that disagree).
+    if (plan && !liveTermsMatchDeal(plan, verdictOf)) return invalid("plan-binding", asOf, snap);
     // All units of one compiled deal share one reclaim time; a plan where they differ is not intact.
     const reclaims = plan ? [...new Set(plan.jobs.flatMap((j) => j.units.map((u) => u.reclaimAt.toString())))] : [];
     if (plan && reclaims.length !== 1) return invalid("plan-integrity", asOf, snap);
@@ -509,7 +684,6 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
       state = "needs-requote";
     } else state = "refused";
 
-    const verdictOf = new Map(verdictList.map((v) => [v.nodeId, v]));
     const bindingOf = new Map((plan?.nodeToUnit ?? []).map((b) => [b.nodeId, b]));
     const presented: PlanNodePresentation[] = nodes
       .map((n) => {
@@ -523,8 +697,12 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
         const v = verdictOf.get(id);
         if (v) {
           out.state = v.status;
-          if (v.status === "current") out.live = v.live;
-          else if (v.status === "stale") {
+          // A sealed deal shows only terms it commits. An agreement-backed deal does not commit the operator's
+          // quote (royalties go on top, and the plan keeps only the gross), so the live view, quote included,
+          // is not shown beside one: nothing can check it against the deal (astra, #434 confirmation).
+          if (v.status === "current") {
+            if (!(sealed && plan?.agreementHash != null)) out.live = v.live;
+          } else if (v.status === "stale") {
             out.live = v.live;
             out.diffs = v.diffs;
           } else out.reason = v.reason;
@@ -541,6 +719,11 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
             payouts: u.payouts.map((p) => ({ recipient: p.recipient, amount: money(p.amount, plan) })),
           };
           out.execution = { planHash: b.planHash, inputs: b.canonicalPlan.inputs, constraints: b.canonicalPlan.constraints };
+          out.assurance = {
+            tier: b.canonicalPlan.assurance.tier,
+            program: b.canonicalPlan.assurance.committedProgramHash,
+            evidence: b.canonicalPlan.assurance.evidence.map((e) => ({ evidenceTypeId: e.evidenceTypeId, tier: e.tier })),
+          };
         }
         return out;
       })
@@ -557,6 +740,7 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
       edges: snap.edges
         .filter((e): e is NonNullable<typeof e> => e !== null && isStr(e.from) && isStr(e.to))
         .map((e) => ({ from: e.from as string, to: e.to as string })),
+      unknowns: ["time-estimate"],
     };
     if (outcome && !outcome.ok) {
       const { verdicts: _v, ...refusal } = outcome.refusal;
@@ -599,6 +783,12 @@ export function presentPlan(args: PresentPlanArgs): PlanPresentation {
         sealed,
       };
     }
+    if (reservation) {
+      presentation.expiry = {
+        reservationExpiresAt: new Date(reservation.expiresAt * 1000).toISOString(),
+        ...(presentation.preview ? { reclaimAt: presentation.preview.reclaimAt } : {}),
+      };
+    }
     return presentation;
   } catch {
     return invalid(snap ? "malformed-outcome" : "malformed-input", asOf, snap);
@@ -616,5 +806,6 @@ function invalid(reason: InvalidReason, asOf: string, snap: SubmissionSnapshot |
     asOf,
     nodes: [],
     edges: [],
+    unknowns: ["time-estimate"],
   };
 }

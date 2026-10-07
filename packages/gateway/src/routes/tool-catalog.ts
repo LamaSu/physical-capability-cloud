@@ -3,10 +3,10 @@
  * live operator instances. Companion to /api/capabilities (operator-bound)
  * and /api/marketplace (live offerings).
  *
- * Demand signals at the capability-type level (POST /api/tool-catalog/bounty)
- * route to tool maintainers, enabling pull-side market discovery: buyers
- * signal want, tool maintainers see signal even with no live operator, then
- * recruit/stand-up an operator or build the missing tool.
+ * POST /api/tool-catalog/bounty accepts a capability-type-level demand signal
+ * but stores, funds and routes NOTHING and notifies nobody: it answers 200 with
+ * an ephemeral, unresolvable reference and notified/persisted/funded = false.
+ * Durable, funded demand is the kit-build job offer path (kits K2).
  *
  * Storage: in-memory Map for the initial scaffold. Production wiring will
  * replace with the same persistence layer used by /api/marketplace + /api/bounty
@@ -167,9 +167,10 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
 
   // POST /api/tool-catalog/bounty — type-level demand signal
   //
-  // Routes demand to all maintainers of tools implementing capabilityType.
-  // For the scaffold, returns the match set; full bounty/escrow integration
-  // happens in a follow-on PR via @pcc/payments.
+  // Computes the maintainers whose tools implement capabilityType. It persists,
+  // funds and notifies nothing, and the response states that explicitly
+  // (notified/persisted/funded: false, 200 rather than 201). The durable,
+  // escrow-backed replacement is the kit-build offer (ledger R7/R45).
   app.post("/api/tool-catalog/bounty", async (req, reply) => {
     const parsed = TypeLevelBountyRequestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -198,16 +199,19 @@ export async function toolCatalogRoutes(app: FastifyInstance): Promise<void> {
     const response: TypeLevelBountyResponse = {
       bountyId,
       capabilityType: b.capabilityType,
-      matchingToolsNotified: matches.length,
+      matchingToolsNotified: 0,
       matchingTools: matches.map((e) => ({
         id: e.id,
         name: e.name,
         maintainerDid: e.maintainerDid,
       })),
       expiresAt,
+      notified: false,
+      persisted: false,
+      funded: false,
     };
 
-    return reply.code(201).send(response);
+    return reply.code(200).send(response);
   });
 }
 

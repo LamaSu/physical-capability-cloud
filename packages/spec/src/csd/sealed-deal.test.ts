@@ -121,9 +121,11 @@ describe("every deal the compiler can seal parses, with its terms intact", () =>
     const p = plan({
       feeBps: 235,
       feeRecipient: ADDR("fe"),
+      // Under an agreement each operator quotes 9 of the 10 USDC gross: its own leg (90% of the net, the
+      // licensor taking 10%) then carries exactly the net of its quote, the floor the compiler holds it to.
       nodes: [
-        node({ nodeId: "print", tierKey: "tier2", committedProgramHash: PROGRAM_T2 }),
-        node({ nodeId: "mail", capabilityType: "mail.drop", operator: OP_B, payoutAddress: ADDR("b1") }),
+        node({ nodeId: "print", tierKey: "tier2", committedProgramHash: PROGRAM_T2, quoteBaseUnits: 9n * USDC }),
+        node({ nodeId: "mail", capabilityType: "mail.drop", operator: OP_B, payoutAddress: ADDR("b1"), quoteBaseUnits: 9n * USDC }),
       ],
     });
     const d = parsed(sealed(p, { assertProgramForTier: gate, splitNet: tenPercent }));
@@ -154,7 +156,15 @@ describe("every deal the compiler can seal parses, with its terms intact", () =>
         payouts: Array.from({ length: 16 }, (_, i) => ({ recipient: i === 0 ? u.payoutAddress : ADDR((0x40 + i).toString(16)), amount: (i === 0 ? u.n - 15n : 1n).toString() })),
       })),
     });
-    const big = sealed(plan({ nodes: [node({ nodeId: "print", grossBaseUnits: (1n << 128n) - 1n })], edges: [], reservation: { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: (1n << 128n) - 1n } }), { splitNet: legs16 });
+    // The operator's own leg is the net less 15 one-unit legs, so it quotes exactly that (the floor).
+    const big = sealed(
+      plan({
+        nodes: [node({ nodeId: "print", grossBaseUnits: (1n << 128n) - 1n, quoteBaseUnits: (1n << 128n) - 1n - 15n })],
+        edges: [],
+        reservation: { reservationId: "resv-1", requestId: "req-1", currency: "USDC", maxAmountBaseUnits: (1n << 128n) - 1n },
+      }),
+      { splitNet: legs16 },
+    );
     const unit = JSON.parse(big).jobs[0].units[0];
     expect(canonicalize(unit).length).toBeLessThan(MAX_SEALED_UNIT_BYTES / 4);
     expect(parsed(big).units[0]!.g).toBe((1n << 128n) - 1n);
@@ -273,7 +283,8 @@ describe("anything else is a typed refusal", () => {
   });
 
   it("never throws: a thousand one-character corruptions each parse or refuse", () => {
-    const bytes = sealed(plan({ feeBps: 235, feeRecipient: ADDR("fe") }), { splitNet: tenPercent });
+    const quoted = [node({ nodeId: "print", quoteBaseUnits: 9n * USDC }), node({ nodeId: "mail", capabilityType: "mail.drop", quoteBaseUnits: 9n * USDC })];
+    const bytes = sealed(plan({ feeBps: 235, feeRecipient: ADDR("fe"), nodes: quoted }), { splitNet: tenPercent });
     let refused = 0;
     for (let i = 0; i < 1000; i++) {
       const at = (i * 7919) % bytes.length;

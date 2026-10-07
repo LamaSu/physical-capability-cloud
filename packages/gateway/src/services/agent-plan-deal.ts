@@ -148,6 +148,10 @@ export function bindDeal(
     if (id === undefined || unitOf.has(b.nodeId)) return mismatch(`binding:${b.nodeId}`);
     unitOf.set(b.nodeId, id);
   }
+  // The compiler promises a BIJECTION between nodes and job units; check it rather than rely on it
+  // (astra, round 1 of #391). Two nodes on one unit, or a unit no node maps to, is an encoder mismatch.
+  if (new Set(unitOf.values()).size !== unitOf.size) return mismatch("binding-not-one-to-one");
+  if (unitIds.length !== unitCount) return mismatch("unit-count");
   const position = new Map(unitIds.map((id, i) => [id, i]));
   const bindings = plan.nodeToUnit.map((b) => ({
     digest: plan.acceptedDealDigest,

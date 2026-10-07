@@ -109,6 +109,15 @@ describe("AuditLogRepository", () => {
       expect(rows[0].eventType).toBe("escrow.funded");
     });
 
+    it("filters by resourceId (operator funnel durable check)", () => {
+      repo.insert({ timestamp: new Date().toISOString(), eventType: "operator.funnel", resourceType: "kernel", resourceId: "kernel-a", action: "kernel_created" });
+      repo.insert({ timestamp: new Date().toISOString(), eventType: "operator.funnel", resourceType: "kernel", resourceId: "kernel-b", action: "kernel_created" });
+      const rows = repo.query({ eventType: "operator.funnel", resourceType: "kernel", resourceId: "kernel-a" });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.resourceId).toBe("kernel-a");
+      expect(repo.query({ eventType: "operator.funnel" })).toHaveLength(2);
+    });
+
     it("filters by since (ISO timestamp)", () => {
       const now = new Date();
       // Insert a clearly future entry

@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -437,9 +437,9 @@ export function StartPage() {
       const deviceId = `dev_${form.category}_${Date.now().toString(36)}`;
       const kernelId = "kernel_dev_001";
 
-      await fetch("/api/setup/register-device", {
+      await authorizedFetch("/api/setup/register-device", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           kernelId,
           deviceId,

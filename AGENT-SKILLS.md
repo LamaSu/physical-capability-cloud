@@ -69,9 +69,9 @@ Every PCCP capability is exposed as a REST API endpoint that any AI agent can ca
 
 | Skill | Method | Endpoint | What It Does |
 |-------|--------|----------|-------------|
-| `list_batches` | GET | `/api/batches` | List batch manifests (HPLC runs, etc.) |
-| `get_batch` | GET | `/api/batches/:id` | Get batch details with sample slots |
-| `get_batch_by_job` | GET | `/api/batches/by-job/:jobId` | Find batches containing a job's samples |
+| `list_batches` | GET | `/api/batches` | List batch manifests (HPLC runs, etc.) of the kernels you operate (admin: all) |
+| `get_batch` | GET | `/api/batches/:id` | Get batch details with sample slots (admin or the kernel's operator) |
+| `get_batch_by_job` | GET | `/api/batches/by-job/:jobId` | Find batches containing a job's samples (a party to the job; a buyer sees only its job's slots) |
 
 ## ZK Proof Skills
 
@@ -135,9 +135,9 @@ Every PCCP capability is exposed as a REST API endpoint that any AI agent can ca
 | Skill | Protocol | Endpoint | What It Does |
 |-------|----------|----------|-------------|
 | `stream_job` | SSE | `/sse/stream/job/:jobId` | Real-time job events |
-| `stream_kernel` | SSE | `/sse/stream/kernel/:kernelId` | All events from a kernel |
-| `stream_device` | SSE | `/sse/stream/device/:deviceId` | All events from a device |
-| `stream_batch` | SSE | `/sse/stream/batch/:batchId` | Batch lifecycle events |
+| `stream_kernel` | SSE | `/sse/stream/kernel/:kernelId` | All events from a kernel (admin or the kernel's operator) |
+| `stream_device` | SSE | `/sse/stream/device/:deviceId` | All events from a device (admin or its kernel's operator) |
+| `stream_batch` | SSE | `/sse/stream/batch/:batchId` | Batch lifecycle events (admin or its kernel's operator) |
 | `stream_notifications` | SSE | `/sse/notifications` | Global notification stream |
 
 ## Agent-to-Agent Protocol (A2A)

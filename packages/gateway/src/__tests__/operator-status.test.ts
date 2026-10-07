@@ -118,7 +118,9 @@ describe("GET /api/operators/:slug/status", () => {
       label: "Webhook printer",
       transport: "webhook",
       describe: "POST to local printer endpoint",
-      endpoint: { url: "http://localhost:9100" },
+      // N84: webhook targets must be public https URLs; loopback and private
+      // addresses are refused at attach time (see n84-channel-ssrf.test.ts).
+      endpoint: { url: "https://printer.example.com:9100" },
     });
     const res = await app.inject({
       method: "GET",
@@ -197,7 +199,7 @@ describe("GET /api/operators/:slug/status", () => {
       transport: "webhook",
       describe: "currently off for maintenance",
       enabled: false,
-      endpoint: { url: "http://localhost:9100" },
+      endpoint: { url: "https://printer.example.com:9100" },
     });
     const res = await app.inject({
       method: "GET",

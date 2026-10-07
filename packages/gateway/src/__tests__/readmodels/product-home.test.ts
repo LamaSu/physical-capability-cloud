@@ -1,0 +1,380 @@
+/**
+ * ProductHomeDTO (PX-7, shell #2007 / product-steward #2170). The negative tests pin what the
+ * home page used to show: invented kernel and job counts, a count of the first page as the
+ * total, and a "Total Value Locked" that summed every escrow total (refunded, released and
+ * mock escrows included).
+ */
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import Fastify, { type FastifyInstance } from "fastify";
+import { HELD_ESCROW_STATUSES, HELD_MILESTONE_STATUSES, NOT_HELD_MILESTONE_STATUSES, RELEASE_DECIDED_MILESTONE_STATUSES } from "@pcc/spec";
+import { ESCROW_CONTESTED, ESCROW_HOLDS } from "../../readmodels/operator-work.js";
+import {
+  buildCapabilities,
+  buildEscrowHeld,
+  buildJobs,
+  buildKernels,
+  buildProductHomeDTO,
+  type ProductHomeSources,
+} from "../../readmodels/product-home.js";
+
+const AS_OF = "2026-09-24T12:00:00.000Z";
+const NOW = Date.parse(AS_OF);
+const ago = (ms: number) => new Date(NOW - ms).toISOString();
+const MIN = 60_000;
+
+describe("kernels", () => {
+  it("counts online, stale and other with the kernel read model's own rule", () => {
+    const k = buildKernels(
+      {
+        kernels: [
+          { id: "fresh", status: "online", lastHeartbeat: ago(1 * MIN) },
+          { id: "old", status: "online", lastHeartbeat: ago(10 * MIN) },
+          { id: "listed-old", status: "online", lastHeartbeat: ago(10 * MIN) },
+          { id: "never", status: "online", lastHeartbeat: null },
+          { id: "off", status: "offline", lastHeartbeat: ago(1 * MIN) },
+          { id: "maint", status: "maintenance", lastHeartbeat: null },
+        ],
+        capabilities: [{ kernelId: "listed-old" }],
+      },
+      NOW,
+    );
+    // A kernel that lists a capability gets the longer grace; one with no heartbeat is stale.
+    expect(k).toMatchObject({ total: 6, online: 2, stale: 2, other: 2, source: "gateway_kernel_rows" });
+    expect(k.rule).toMatch(/5 minutes/);
+  });
+
+  it("NEGATIVE (r1 MEDIUM 2): a heartbeat that is not a time counts as no heartbeat: stale, never online", () => {
+    const k = buildKernels({ kernels: [{ id: "bad", status: "online", lastHeartbeat: "not-a-date" }], capabilities: [] }, NOW);
+    expect(k).toMatchObject({ total: 1, online: 0, stale: 1 });
+  });
+});
+
+describe("capabilities", () => {
+  const kernels = [
+    { id: "k-live", status: "online", lastHeartbeat: ago(1 * MIN) },
+    // Past the 24-hour listing grace (it lists a capability, so the 5-minute window does not apply).
+    { id: "k-stale", status: "online", lastHeartbeat: new Date(NOW - 30 * 3_600_000).toISOString() },
+    { id: "k-off", status: "offline", lastHeartbeat: ago(1 * MIN) },
+  ];
+
+  it("counts listed capabilities per type, and those on a kernel online by the kernel rule", () => {
+    const c = buildCapabilities(
+      {
+        kernels,
+        capabilities: [
+          { kernelId: "k-live", type: "3d-printing" },
+          { kernelId: "k-live", type: "cnc" },
+          { kernelId: "k-stale", type: "3d-printing" },
+          { kernelId: "k-off", type: "cnc" },
+          { kernelId: "k-gone", type: "cnc" },
+          { kernelId: "k-live", type: "  " },
+        ],
+      },
+      NOW,
+    );
+    expect(c).toMatchObject({ state: "read", total: 6, onOnlineKernels: 3, source: "gateway_capability_rows" });
+    expect(c.byType).toEqual([
+      { type: "3d-printing", total: 2, onOnlineKernels: 1 },
+      { type: "cnc", total: 3, onOnlineKernels: 1 },
+      { type: null, total: 1, onOnlineKernels: 1 },
+    ]);
+  });
+
+  it("NEGATIVE: a capability on a stale, offline or missing kernel is listed but never counted as on an online kernel", () => {
+    const c = buildCapabilities(
+      { kernels, capabilities: ["k-stale", "k-off", "k-gone"].map((kernelId) => ({ kernelId, type: "cnc" })) },
+      NOW,
+    );
+    expect(c.total).toBe(3);
+    expect(c.onOnlineKernels).toBe(0);
+  });
+});
+
+describe("jobs", () => {
+  it("counts by execution phase; active is known and unfinished", () => {
+    const j = buildJobs([
+      { status: "pending" },
+      { status: "queued" },
+      { status: "executing" },
+      { status: "paused" },
+      { status: "completed" },
+      { status: "settled" },
+      { status: "failed" },
+      { status: "done" },
+    ]);
+    expect(j.total).toBe(8);
+    expect(j.active).toBe(4);
+    expect(j.byPhase).toMatchObject({ pending: 1, queued: 1, running: 1, paused: 1, completed: 2, failed: 1, unknown: 1 });
+  });
+
+  it("NEGATIVE: an undocumented status is unknown and never active", () => {
+    const j = buildJobs([{ status: "done" }, { status: "" }, {}]);
+    expect(j.active).toBe(0);
+    expect(j.byPhase.unknown).toBe(3);
+  });
+});
+
+describe("escrowHeld", () => {
+  const escrows = [
+    { id: "e-usdc", contractAddress: "0x3333333333333333333333333333333333333333", currency: "USDC", status: "funded" },
+    { id: "e-eur", contractAddress: "0x4444444444444444444444444444444444444444", currency: "EUR", status: "funded" },
+    { id: "e-mock", contractAddress: "mock-escrow-abc", currency: "USDC", status: "funded" },
+    { id: "e-doge", contractAddress: "0x5555555555555555555555555555555555555555", currency: "DOGE", status: "funded" },
+  ];
+
+  it("sums MILESTONE amounts in held states per currency, never escrow totals", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "12.50", status: "funded" },
+        { escrowId: "e-usdc", amount: "7.50", status: "locked" },
+        { escrowId: "e-usdc", amount: "1.00", status: "releasing" },
+        { escrowId: "e-eur", amount: "3.25", status: "disputed" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([
+      { currency: "EUR", decimals: 2, amountBaseUnits: "325", milestones: 1 },
+      { currency: "USDC", decimals: 6, amountBaseUnits: "21000000", milestones: 3 },
+    ]);
+    expect(h).toMatchObject({ source: "gateway_escrow_record", confirmation: "record_only" });
+  });
+
+  it("NEGATIVE: released, refunded, slashed and never-funded milestones are not held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: ["released", "refunded", "slashed", "created", "unfunded", "pending", "SETTLED_RELEASED", "SETTLED_REFUNDED"].map((status) => ({
+        escrowId: "e-usdc",
+        amount: "100",
+        status,
+      })),
+    });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("escrow #3356: legacy V3 EVIDENCED and ATTESTED milestones are held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "2", status: "evidenced" },
+        { escrowId: "e-usdc", amount: "3", status: "ATTESTED" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "5000000", milestones: 2 }]);
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("NEGATIVE (escrow #3356): a RELEASE_ALLOCATED milestone is an upper bound reported apart, never added to held", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "4", status: "funded" },
+        { escrowId: "e-usdc", amount: "10", status: "release_allocated" },
+        { escrowId: "e-eur", amount: "1.50", status: "RELEASE_ALLOCATED" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "4000000", milestones: 1 }]);
+    expect(h.releaseDecided).toEqual({
+      bound: "at_most",
+      byCurrency: [
+        { currency: "EUR", decimals: 2, amountBaseUnits: "150", milestones: 1 },
+        { currency: "USDC", decimals: 6, amountBaseUnits: "10000000", milestones: 1 },
+      ],
+    });
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("NEGATIVE (r1 MEDIUM 1): an escrow at no real contract address (the seed's 0xESCROW_CONTRACT_001) is simulated, never held money", () => {
+    const seeded = [{ id: "e-seed", contractAddress: "0xESCROW_CONTRACT_001", currency: "USDC", status: "active" }];
+    const h = buildEscrowHeld({ escrows: seeded, milestones: [{ escrowId: "e-seed", amount: "27.00", status: "releasing" }] });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.excludedSimulatedEscrows).toBe(1);
+  });
+
+  it("NEGATIVE: a mock escrow is excluded entirely, even with held milestones", () => {
+    const h = buildEscrowHeld({ escrows, milestones: [{ escrowId: "e-mock", amount: "500", status: "funded" }] });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.excludedSimulatedEscrows).toBe(1);
+  });
+
+  it("NEGATIVE: an unknown word is unclassified, and an inexact amount or unknown currency is uncounted, never summed", () => {
+    const h = buildEscrowHeld({
+      escrows,
+      milestones: [
+        { escrowId: "e-usdc", amount: "5", status: "completed" },
+        { escrowId: "e-usdc", amount: "5", status: "mystery" },
+        { escrowId: "e-doge", amount: "5", status: "funded" },
+        { escrowId: "e-usdc", amount: "0.1234567", status: "funded" },
+        { escrowId: "e-missing", amount: "5", status: "funded" },
+      ],
+    });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.unclassifiedMilestones).toBe(2);
+    expect(h.uncountedMilestones).toBe(3);
+  });
+
+  it("the held and not-held word sets are disjoint and published in the DTO", () => {
+    const held = new Set(HELD_MILESTONE_STATUSES);
+    for (const w of NOT_HELD_MILESTONE_STATUSES) expect(held.has(w), w).toBe(false);
+    const empty = buildEscrowHeld({ escrows: [], milestones: [] });
+    expect(empty.heldStatuses).toEqual(HELD_MILESTONE_STATUSES);
+    expect(empty.releaseDecidedStatuses).toEqual(RELEASE_DECIDED_MILESTONE_STATUSES);
+    expect(empty.releaseDecided).toEqual({ byCurrency: [], bound: "at_most" });
+  });
+});
+
+describe("held money needs an escrow record that holds it (self-found after #409 r2)", () => {
+  // The gateway's default V1/V2 path (paid-job-flow.ts) writes the escrow "created" with milestones
+  // "pending", then "evidence_submitted" on evidence; no writer ever moves an escrow row to "funded".
+  const v2 = { id: "e-v2", contractAddress: "0x6666666666666666666666666666666666666666", currency: "USDC", status: "created" };
+
+  it("an escrow record that never says funded: its evidence_submitted milestone is unclassified, not held", () => {
+    const h = buildEscrowHeld({ escrows: [v2], milestones: [{ escrowId: "e-v2", amount: "12.50", status: "evidence_submitted" }] });
+    expect(h.byCurrency).toEqual([]);
+    expect(h.unclassifiedMilestones).toBe(1);
+  });
+
+  it("the same milestone under an escrow record that holds the funds is held (positive control)", () => {
+    const h = buildEscrowHeld({ escrows: [{ ...v2, status: "funded" }], milestones: [{ escrowId: "e-v2", amount: "12.50", status: "evidence_submitted" }] });
+    expect(h.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "12500000", milestones: 1 }]);
+    expect(h.unclassifiedMilestones).toBe(0);
+  });
+
+  it("the V1/V2 lifecycle: pending is not held, evidence_submitted is unclassified, completed and released is neither", () => {
+    const at = (escrowStatus: string, milestoneStatus: string) =>
+      buildEscrowHeld({ escrows: [{ ...v2, status: escrowStatus }], milestones: [{ escrowId: "e-v2", amount: "12.50", status: milestoneStatus }] });
+    expect(at("created", "pending")).toMatchObject({ byCurrency: [], unclassifiedMilestones: 0 });
+    expect(at("created", "evidence_submitted")).toMatchObject({ byCurrency: [], unclassifiedMilestones: 1 });
+    expect(at("completed", "released")).toMatchObject({ byCurrency: [], unclassifiedMilestones: 0 });
+  });
+
+  it("a release-decided milestone under an escrow record that does not hold is unclassified too, never an upper bound", () => {
+    const h = buildEscrowHeld({ escrows: [v2], milestones: [{ escrowId: "e-v2", amount: "10", status: "RELEASE_ALLOCATED" }] });
+    expect(h.releaseDecided.byCurrency).toEqual([]);
+    expect(h.unclassifiedMilestones).toBe(1);
+  });
+
+  it("every escrow word that holds the funds lets a held milestone count, and the DTO publishes them", () => {
+    for (const status of HELD_ESCROW_STATUSES) {
+      const h = buildEscrowHeld({ escrows: [{ ...v2, status: status.toLowerCase() }], milestones: [{ escrowId: "e-v2", amount: "1", status: "funded" }] });
+      expect(h.byCurrency.length, status).toBe(1);
+    }
+    for (const status of ["created", "pending", "unfunded", "completed", "released", "refunded", "settled_released", "expired", "", "mystery"]) {
+      const h = buildEscrowHeld({ escrows: [{ ...v2, status }], milestones: [{ escrowId: "e-v2", amount: "1", status: "funded" }] });
+      expect(h, status).toMatchObject({ byCurrency: [], unclassifiedMilestones: 1 });
+    }
+    expect(buildEscrowHeld({ escrows: [], milestones: [] }).heldEscrowStatuses).toEqual(HELD_ESCROW_STATUSES);
+  });
+
+  it("the escrow words are the ones operator work reads as holding or contested (one rule for both read models)", () => {
+    expect(new Set(HELD_ESCROW_STATUSES)).toEqual(new Set([...ESCROW_HOLDS, ...ESCROW_CONTESTED]));
+  });
+});
+
+describe("buildProductHomeDTO", () => {
+  const sources = (over: Partial<ProductHomeSources> = {}): ProductHomeSources => ({
+    kernels: { ok: true, value: { kernels: [], capabilities: [] } },
+    jobs: { ok: true, value: [] },
+    escrow: { ok: true, value: { escrows: [], milestones: [] } },
+    network: "base-sepolia",
+    ...over,
+  });
+
+  it("carries the schema id, the read time and the configured network with its chain id", () => {
+    const dto = buildProductHomeDTO(sources(), AS_OF);
+    expect(dto.schemaId).toBe("pcc.product-home/v1");
+    expect(dto.asOf).toBe(AS_OF);
+    expect(dto.settlementNetwork).toEqual({ name: "base-sepolia", chainId: 84532, basis: "gateway_config" });
+    expect(buildProductHomeDTO(sources({ network: "mystery-net" }), AS_OF).settlementNetwork.chainId).toBeNull();
+    expect(buildProductHomeDTO(sources({ network: null }), AS_OF).settlementNetwork.name).toBeNull();
+  });
+
+  it("a section the route withholds from this caller is unavailable with the route's reason", () => {
+    const dto = buildProductHomeDTO(sources({ escrow: { ok: false, withheld: "no tenant on escrow records" } }), AS_OF);
+    expect(dto.escrowHeld).toEqual({ state: "unavailable", reason: "no tenant on escrow records" });
+  });
+
+  it("NEGATIVE: a section that could not be read is unavailable with a reason, never zero", () => {
+    const dto = buildProductHomeDTO(sources({ kernels: { ok: false }, jobs: { ok: false }, escrow: { ok: false } }), AS_OF);
+    for (const section of [dto.kernels, dto.capabilities, dto.jobs, dto.escrowHeld]) {
+      expect(section.state).toBe("unavailable");
+      expect((section as { reason: string }).reason).toMatch(/could not be read/);
+    }
+  });
+});
+
+describe("GET /api/product/home on a real store", () => {
+  let app: FastifyInstance;
+  beforeAll(async () => {
+    process.env.PCC_DB_PATH = ":memory:";
+    const db = await import("../../db.js");
+    db.initStore({ seed: true });
+    const { productHomeRoutes } = await import("../../routes/product-home.js");
+    app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      const t = req.headers["x-test-tenant"];
+      if (typeof t === "string") (req as any).tenantId = t;
+    });
+    await app.register(productHomeRoutes);
+    await app.ready();
+  });
+  afterAll(async () => {
+    await app.close();
+    (await import("../../db.js")).closeStore();
+    delete process.env.TENANT_ENFORCE;
+  });
+
+  it("answers every section from the gateway's records, no-store", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/product/home" });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["cache-control"]).toBe("no-store");
+    const dto = res.json();
+    expect(dto.kernels.state).toBe("read");
+    expect(dto.kernels.total).toBeGreaterThan(0);
+    expect(dto.capabilities.state).toBe("read");
+    expect(dto.capabilities.total).toBeGreaterThan(0);
+    expect(dto.capabilities.byType.reduce((n: number, t: { total: number }) => n + t.total, 0)).toBe(dto.capabilities.total);
+    expect(dto.jobs.state).toBe("read");
+    expect(dto.jobs.total).toBeGreaterThan(0);
+    expect(dto.escrowHeld.state).toBe("read");
+    // The seed's escrows are mock data at no real contract address: none of it is held money.
+    expect(dto.escrowHeld.byCurrency).toEqual([]);
+    expect(dto.escrowHeld.excludedSimulatedEscrows).toBeGreaterThan(0);
+    expect(dto.settlementNetwork.basis).toBe("gateway_config");
+  });
+
+  it("NEGATIVE (self-found after #409 r2): a real V1/V2 escrow the gateway never marked funded holds no money after evidence; a funded one does", async () => {
+    const { getStore } = await import("../../db.js");
+    const repos = getStore().repos;
+    const escrowRow = (id: string, address: string, status: string) =>
+      ({
+        id, cwmId: `cwm-${id}`, contractAddress: address, payer: "agent-x", totalAmount: "12.50", currency: "USDC", status,
+        createdAt: "2026-09-24T10:00:00.000Z", deadline: "2026-09-25T10:00:00.000Z",
+      }) as any;
+    // The default V1/V2 path: escrow "created", milestone "pending", then "evidence_submitted".
+    repos.escrows.insert(escrowRow("esc-v2-real", "0x7777777777777777777777777777777777777777", "created"));
+    repos.escrows.insertMilestone({ id: "ms-v2-real", escrowId: "esc-v2-real", stepId: "step-1", amount: "12.50", status: "pending", bondAmount: "0" } as any);
+    repos.escrows.updateMilestoneStatus("ms-v2-real", "evidence_submitted");
+    // V3 mode A funds upfront: escrow "funded", milestone "funded".
+    repos.escrows.insert(escrowRow("esc-v3-real", "0x8888888888888888888888888888888888888888", "funded"));
+    repos.escrows.insertMilestone({ id: "ms-v3-real", escrowId: "esc-v3-real", stepId: "step-1", amount: "12.50", status: "funded", bondAmount: "0" } as any);
+    const dto = (await app.inject({ method: "GET", url: "/api/product/home" })).json();
+    expect(dto.escrowHeld.byCurrency).toEqual([{ currency: "USDC", decimals: 6, amountBaseUnits: "12500000", milestones: 1 }]);
+    expect(dto.escrowHeld.unclassifiedMilestones).toBe(1);
+  });
+
+  it("NEGATIVE: under TENANT_ENFORCE escrow is unavailable, and a caller with no tenant gets no job counts", async () => {
+    process.env.TENANT_ENFORCE = "true";
+    try {
+      const none = (await app.inject({ method: "GET", url: "/api/product/home" })).json();
+      expect(none.escrowHeld.state).toBe("unavailable");
+      expect(none.escrowHeld.reason).toMatch(/no tenant/);
+      expect(none.jobs.state).toBe("unavailable");
+      expect(none.jobs.reason).toMatch(/no tenant/);
+      const withTenant = (await app.inject({ method: "GET", url: "/api/product/home", headers: { "x-test-tenant": "tenant-x" } })).json();
+      expect(withTenant.jobs).toMatchObject({ state: "read", total: 0 });
+    } finally {
+      delete process.env.TENANT_ENFORCE;
+    }
+  });
+});
