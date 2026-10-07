@@ -112,7 +112,7 @@ PCC ships a library-only durable execution package at `packages/workflow/` — e
 
 ## 1. What Is PCC
 
-PCC is AWS for the physical world. It is a cloud control plane for physical manufacturing capabilities.
+PCC exists to turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. It is a cloud control plane for physical capabilities, organised much like a cloud provider:
 
 - **Shop Kernels** = Availability Zones. Each kernel is a physical site (lab, workshop, factory) with equipment.
 - **Capabilities** = billable units. Not machines — what machines can DO (3D printing, CNC milling, HPLC analysis).
@@ -271,11 +271,11 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/kernels` | List all kernels. Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. |
-| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. |
+| GET | `/api/kernels` | List all kernels (PUBLIC). Optional `?status=` filter. Returns `{kernels: KernelDTO[]}`. Each site's location is coarse (about 5 km) unless its operator opted in; see KernelDTO. |
+| GET | `/api/kernels/:kernelId` | Get kernel with health snapshot. Returns `{kernel: KernelHealthSnapshot}`. Its `recentJobs` hold only the jobs you may read; `recentJobsScope` says so (`all`, `readable_by_caller` or `unavailable`). |
 | GET | `/api/kernels/:kernelId/devices` | List devices. Returns `{devices: DeviceStatusDTO[]}`. |
-| GET | `/api/kernels/:kernelId/jobs` | List jobs for kernel. Returns `{jobs: JobDTO[]}`. |
-| POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. |
+| GET | `/api/kernels/:kernelId/jobs` | List the kernel's jobs you may read (its operator and an admin: all of them; a buyer: its own). Returns `{jobs: JobDTO[]}`. No credential: 401; no proven wallet: 403. |
+| POST | `/api/kernels` | Register/upsert a kernel. Body: `CreateKernelInput`. `locationVisibility: "exact"` publishes the exact site and street address (a public storefront); it needs `X-Admin-Key`, or a wallet you proved (SIWE) that is the kernel's operator, else 403. `"approximate"` (the default) needs only ownership; omitted on an update, the current choice stays. |
 | POST | `/api/kernels/:kernelId/heartbeat` | Send heartbeat. |
 | POST | `/api/kernels/:kernelId/announce` | Announce capabilities to the network. |
 
@@ -287,6 +287,25 @@ State machine: `CREATED -> CONFIGURING -> QUOTED -> REVIEWING -> COMMITTED`. Ses
 | GET | `/api/jobs/:jobId` | Get job with evidence and timeline. Returns `{job: JobDetailDTO, evidence}`. |
 | PATCH | `/api/jobs/:jobId/status` | Update job status. Body: `{status, progress?}`. |
 | POST | `/api/jobs/submit` | Submit a job. Body: `{kernelId, capabilityId, params, assuranceTier}`. |
+
+**Read access:** a job's record, status, evidence, drift alerts, execution and settlement (`GET /api/jobs/:jobId` and its `/status`, `/execution`, `/settlement`, `/evidence` and `/drift-alerts`, plus `GET /api/settlement/:jobId` and `GET /api/evidence/:jobId`) are readable only by an admin (`X-Admin-Key`), the operator of the job's kernel, or the job's recorded buyer. Anyone else gets the same 404 as for a job that does not exist; an unauthenticated caller gets 401. A kernel's batches (`GET /api/batches`, `GET /api/batches/:batchId`) and its kernel, device and batch streams are readable only by an admin or the kernel's operator (a SIWE-proven wallet); a job's buyer reads its batches through `GET /api/batches/by-job/:jobId`, which shows only that job's slots. Log lines, sensor readings and what is derived from readings (anomalies, and channel aggregates, which are computed over the readings the caller may read) are filtered per record: a record is kept only when the caller may read every job that owns it (or, owned by no job, every kernel it names), and a record naming neither is an admin's. A record tied to a batch is owned by what the live batch holds, never by the names in its payload: a slot or sample by its slot's job, and each part of a record that names a batch but none of its slots (a batch-level event or reading, or one batch-level source of an anomaly) by every job of the batch; a job the record names only adds an owner. A record whose owners cannot be known (an unknown slot or batch, a malformed binding) is an unscoped admin's only. This holds under `TENANT_ENFORCE` too, so a tenant-scoped admin or an operator sees only its tenant's jobs there, and records are judged exactly as they are sent. A batch is sent as a typed projection of the live batch (the spec's fields only), so a slot shows only to a caller who may read its live job; a batch's `runConfig` shows only to a caller who sees every slot of the batch, and otherwise it is null and `runConfigWithheld` is true. Adding a slot (`POST /api/batches/:batchId/slots`) is an admin's or the batch kernel's operator's, for a job of that kernel they may read. A shared batch (`/api/batches/shared/*`) is a public opportunity: anyone sees its kernel, capability, price, timing and how many slots are taken; only an admin or the kernel's operator may open one or see its claims; a claim needs a proven wallet and is made for that wallet (an admin may name the claimant); and only an admin, the kernel's operator or the claimant a claim names may release it.
+
+### Operator Work
+
+Scoped to your kernels (kernels whose `operatorAddress` is your API key's operator id or your wallet). Every field is assigned by the gateway; a source that could not be read, or cannot be tied to you yet, is reported in `sources` instead of appearing as an empty list.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/operator/work` | Your work: open job offers for your capability types, offers your kernels claimed, your kernels' jobs and pending approvals. Returns `OperatorWorkDTO` `{schemaId, asOf, kernels, items, total, truncated, sources}`; each item has `phase` + `phaseSource` (who asserted it), `pay` with its `funding` (`escrowed`, `declared_unfunded`, `simulated` or `unknown`; a declared price is never income), and `actions[]` with the route to call. `?limit=` 1-500 (default 200). |
+| GET | `/api/operator/income` | What the escrow records show for your kernels' jobs. Returns `OperatorIncomeDTO` `{rows, totalsByStatus, uncountedRows, historyAvailable: false, reasonIfNot}`; totals are sums of rows only, and no gateway record makes a payout `paid`. |
+
+### Product Home
+
+Platform-wide facts for a home page or status bar, each from a named gateway source. A section whose records could not be read is `{state: "unavailable", reason}`, never a zero.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/product/home` | Returns `ProductHomeDTO` `{schemaId, asOf, kernels, capabilities, jobs, settlementNetwork, escrowHeld}`. `kernels`: `online` / `stale` / `other` by the kernel read model's heartbeat rule (stated in `rule`). `capabilities`: listed capabilities and how many sit on an online kernel, `byType`; a listing is not a promise of capacity. `jobs`: counts `byPhase` (execution phases) and `active` (known and not finished). `settlementNetwork`: the network this gateway is configured for (`basis: "gateway_config"`), not proof that an escrow lives there. `escrowHeld`: sums of milestone amounts in held states per currency, in base units, mock escrows excluded, bonds never counted; a milestone counts only when its escrow record also says the escrow holds the funds (`heldEscrowStatuses`), and any other is counted apart in `unclassifiedMilestones` (the default V1/V2 path never marks an escrow row funded); a decided but unpaid release (`RELEASE_ALLOCATED`) is reported apart in `releaseDecided` as an upper bound (`bound: "at_most"`), never added to held; `confirmation: "record_only"` (no chain read). Under `TENANT_ENFORCE`, job counts are your tenant's and `escrowHeld` is unavailable (escrow records carry no tenant). `cache-control: no-store`. |
 
 ### Escrow & Settlement
 
@@ -396,7 +415,7 @@ Sessions expire after 24 hours. Step data is merged (not replaced) on updates.
 | GET | `/health` | Gateway healthcheck (bare alias of `/api/health`; same JSON payload — not the SPA shell). Also reports the served build: `commit` (the full git SHA a build argument named, recorded in the image at build time, or `null`), `commitSource` (`build_argument` or `unknown`), `buildArg`, `sourceDigest` (digest of the source the image was built from; CI checks it against the commit before pushing, and `scripts/verify-build-source.sh` checks any served gateway), `sourceDigestSpec`, and `deployMetadata.railwayGitCommitSha` (host metadata, never reported as `commit`); see `docs/DEPLOY.md`. |
 | GET | `/api/status` | Detailed status. |
 | GET | `/.well-known/agent-registration.json` | ERC-8004 Agent Registration File (PUBLIC). |
-| GET | `/agent-package.json` | 249-tool agent package for any LLM (PUBLIC). |
+| GET | `/agent-package.json` | The agent package (250+ tools) for any LLM (PUBLIC). |
 | GET/POST | `/api/sensors/*` | Sensor channels, readings, anomalies. |
 | GET/POST | `/api/zk/*` | ZK proof creation and verification. |
 | GET/POST | `/api/logistics/*` | Shipments, bookings, installations. |
@@ -479,6 +498,8 @@ curl -X POST https://capability.network/api/kernels \
     "maxAssuranceTier": 2
   }'
 ```
+
+The gateway stores the exact `location` and `physicalAddress`, but every read shows the site coarse: the centre of its geohash-5 cell (about 5 km across), with `physicalAddress: null`. A public storefront can publish its exact location with `"locationVisibility": "exact"` (see the kernels table above). A kernel registered without coordinates reads as no location, never as `{0,0}`.
 
 Register the device:
 ```bash
@@ -584,11 +605,12 @@ curl -X POST https://capability.network/api/wizard/sessions/$SESSION_ID/complete
 
 For operators who prefer CLI:
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
+# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
-This auto-detects hardware, generates Ed25519 keys, provisions an API key, registers the kernel, announces capabilities, and starts a daemon. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
+This auto-detects hardware, generates Ed25519 keys, registers the kernel with the API key you give it (`PCC_API_KEY` or `--api-key`), and starts a daemon that keeps the kernel online. Without a key it stops: the gateway refuses to provision one without an email, so provision it first (`POST /api/auth/provision`). From 0.1.1 the daemon takes no jobs: jobs run through the operating agent's typed operations. Set `PCC_BASE` and `PCC_API_KEY` env vars if not using defaults.
 
 ---
 
@@ -610,7 +632,9 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   envelope?: WorkEnvelope;           // Build volume
   assuranceTiers: (0|1|2|3)[];       // Which tiers this supports
   pricing: PricingModel;             // {currency, baseCost, minimum, ...}
-  location: {lat, lng};
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell
+  locationCell: string | null;       // the site's geohash-5 cell
   tags?: string[];
   // Enrichment (populated by facades):
   reputation?: number;               // 0-1000, from ERC-8004
@@ -654,8 +678,10 @@ All facade responses use the `Result<T>` pattern: `{success: true, data: T}` or 
   id: string;
   name: string;
   operatorAddress: string;
-  location: {lat, lng};
-  physicalAddress: string;
+  location: {lat, lng} | null;       // see locationPrecision
+  locationPrecision: "exact"|"approximate"|"none"; // exact only if the operator opted in; approximate = centre of the ~5 km geohash-5 cell; none = no location ({0,0} included)
+  locationCell: string | null;       // the site's geohash-5 cell
+  physicalAddress: string | null;    // only when the operator opted in
   maxAssuranceTier: 0|1|2|3;
   status: "online"|"offline"|"maintenance"|"suspended";
   lastHeartbeat: string;
@@ -917,9 +943,9 @@ Connect the PCC MCP server to Claude Code or any MCP-compatible client.
 
 ---
 
-## 10. Agent Package (249 Tools)
+## 10. Agent Package (250+ Tools)
 
-The agent package is a single JSON file any LLM can consume, containing 249 tools with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
+The agent package is a single JSON file any LLM can consume, containing 250+ tools (the exact count is its `toolCount`) with input schemas and endpoint mappings. It is the load-bearing piece of the **Claude Max front door**: drop the JSON into a Claude conversation and Claude can transact on the user's behalf without further hand-holding.
 
 > **Claude Max quickstart**: visit `https://capability.network/start` for the three-card landing (Code / Desktop / Web). Per-surface walkthroughs live in `docs/quickstart/`.
 
@@ -933,8 +959,8 @@ curl https://capability.network/agent-package.json
 | Field | Purpose |
 |-------|---------|
 | `title`, `description` | Human-friendly product framing |
-| `system_prompt` | ~9000 chars. Claude-as-user-agent framing: two-step model (identify → post job-offer), composition pattern (pizza + courier), auth flow, verification ("executor success ≠ outcome success"), DO/DON'T list, 15-category taxonomy. Drop this verbatim into a Claude conversation and it can operate. |
-| `tools` | 249 entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
+| `system_prompt` | ~22,000 chars. Claude-as-user-agent framing: two-step model (identify → post job-offer), composition pattern (pizza + courier), auth flow, verification ("executor success ≠ outcome success"), DO/DON'T list, 15-category taxonomy. Drop this verbatim into a Claude conversation and it can operate. |
+| `tools` | 250+ entries. Each has `name`, `description`, `input_schema` (JSON Schema), and `endpoint` (`{method, path}`). |
 | `examples` | 3 worked examples — pizza, STL print, operator browse. Each lists user_request + step-by-step what_claude_does + tools_used. |
 | `auth` | `modes`, `provision_endpoint`, `public_endpoints_no_auth`, `bearer_header`, `trace_header`. |
 | `categories` | 15 PCC categories (C.1..C.15) with canonical `capabilityType` examples. |
@@ -944,7 +970,7 @@ curl https://capability.network/agent-package.json
 - **Claude Max (the easy path)**: paste the JSON URL into a conversation, or install the skill at `https://capability.network/skills/pcc.md`. The polished `system_prompt` plus the catalog + examples is enough context.
 - **Other LLMs**: load the JSON, present `tools[].description` to your model, when it picks a tool make the corresponding HTTP request to `https://capability.network` + `endpoint.path`, passing input as JSON body (POST/PUT/PATCH) or query params (GET).
 
-**Polish script**: `scripts/polish-agent-package-claude-max.mjs` rewrites the system_prompt + adds top-level fields. Idempotent. Re-run when the framing changes.
+**Polish script (retired 2026-09-29)**: `scripts/polish-agent-package-claude-max.mjs` refuses to run. Its templates are older than the live package, so a re-run would drop later edits and downgrade the version. Edit `apps/dashboard/public/agent-package.json` directly; `agent-pack-truth.test.ts` and `agent-package-auto-feedback.test.ts` in `packages/gateway` guard it.
 
 ---
 
@@ -981,7 +1007,9 @@ Subscribe to Server-Sent Events for real-time updates. Connect with `EventSource
 | Device updates | `GET /sse/stream/device/:deviceId` | Health changes, sensor readings |
 | Batch updates | `GET /sse/stream/batch/:batchId` | Batch job progress |
 | Notifications | `GET /sse/notifications` | Global notification stream |
-| Camera stream | `GET /api/ot2/camera/stream` | Live camera frames from equipment |
+| Camera stream | `GET /api/relay/:kernelId/camera/stream` | Frame notifications from a kernel's camera (kernel operator or active scope holder) |
+
+The job stream follows the job read rule above. The kernel, device and batch streams carry job-bound sensor readings, so only an admin or the kernel's operator (a SIWE-proven wallet) may subscribe; anyone else gets the 404 an unknown kernel, device or batch gets, and a caller with no credential gets 401.
 
 Example:
 ```bash
@@ -998,16 +1026,17 @@ curl -N -H "Authorization: Bearer $PCC_KEY" \
 ### Install and run
 
 ```bash
-pip install pcc-node
+pip install "pcc-node[crypto]>=0.1.1"
+# until 0.1.1 is on PyPI: python3 -m pip install "pcc-node[crypto] @ git+https://github.com/LamaSu/physical-capability-cloud@dcc44db9a4065985207b2739fa3cce11f54a6ff5#subdirectory=packages/pcc-node"
 pcc-node start
 ```
 
 This single command:
 1. Auto-detects connected hardware (printers, lab equipment, cameras)
 2. Generates Ed25519 signing keys
-3. Provisions an API key from the gateway
-4. Registers a kernel and announces capabilities
-5. Starts a daemon that processes jobs and emits evidence
+3. Uses the API key you give it (`PCC_API_KEY` or `--api-key`); without one it stops, because the gateway refuses to provision a key without an email
+4. Registers a kernel
+5. Starts a daemon that keeps the kernel online. From 0.1.1 it takes no jobs: they run through the operating agent's typed operations
 
 ### Commands
 

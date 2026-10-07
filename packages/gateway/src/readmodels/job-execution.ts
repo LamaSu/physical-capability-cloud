@@ -26,6 +26,7 @@
  */
 
 import {
+  EscrowStatusSchema,
   JOB_EXECUTION_SCHEMA_ID,
   JOB_EXECUTION_EVIDENCE_LIMIT,
   classifyMoneyStatus,
@@ -51,7 +52,7 @@ import {
   type VerificationAxis,
 } from "@pcc/spec";
 import { timingSafeEqual } from "node:crypto";
-import { schema, eq, and, or } from "@pcc/store";
+import { schema, eq, and, or, sql } from "@pcc/store";
 
 // ── Source shapes (structural; the builder never touches the DB) ─────────────
 
@@ -150,6 +151,16 @@ const READ_FAILED = (what: string): ReadError => ({
 
 /** Mock-settlement escrows are created with this address prefix (paid-job-flow.ts). */
 export const MOCK_ESCROW_ADDRESS_PREFIX = "mock-escrow-";
+
+/**
+ * A mock-settlement escrow: the paid-job flow's `mock-escrow-` address, or any contract address that
+ * is not a 20-byte hex address, such as the seed's `0xESCROW_CONTRACT_001`. No contract can hold
+ * money at such an address (astra r1 on #409, MEDIUM: seeded mock escrows were counted as held).
+ */
+export function isSimulatedEscrowAddress(contractAddress: unknown): boolean {
+  const a = String(contractAddress ?? "");
+  return a.startsWith(MOCK_ESCROW_ADDRESS_PREFIX) || !/^0x[0-9a-fA-F]{40}$/.test(a);
+}
 
 export function buildJobExecutionDTO(src: JobExecutionSources, asOf: string): JobExecutionDTO {
   const execution = buildExecution(src.job);
@@ -303,12 +314,24 @@ function moneyView(status: string, vocabulary: MoneyStateView["vocabulary"]): Mo
   return { sourceStatus: String(status ?? ""), vocabulary, tone: c.tone, label: c.label, known: c.known };
 }
 
+/**
+ * The milestone record's own vocabulary: every word escrow_milestones.status holds, normalized. The
+ * spec types the column as an EscrowStatus (@pcc/spec EscrowStatusSchema; packages/db
+ * schema/settlement.ts), and the gateway's writer adds two words of its own: paid-job-flow.ts
+ * inserts "pending" for the milestones of an escrow it has not funded, and writes
+ * "evidence_submitted" when evidence arrives. A word outside this set (an escrow-only word such as
+ * SETTLED_RELEASED, or a V-next unit word put in the milestone field) is not a milestone status, so
+ * it decides neither the payout nor the funding (review r1 of #515, residual MEDIUM).
+ */
+export const MILESTONE_WORDS: ReadonlySet<string> = new Set(
+  [...EscrowStatusSchema.options, "pending", "evidence_submitted"].map(normalizeMoneyStatus),
+);
 /** Milestone words (escrow_milestones.status) that claim this job's money was released. */
-const MILESTONE_RELEASED = new Set(["RELEASED", "SETTLED_RELEASED"]);
+const MILESTONE_RELEASED = new Set(["RELEASED"]);
 /** A milestone word that may or may not mean released: never read either way. */
 const MILESTONE_AMBIGUOUS = new Set(["COMPLETED"]);
 /** Milestone words that say the payer was refunded. */
-const MILESTONE_REFUNDED = new Set(["REFUNDED", "SETTLED_REFUNDED"]);
+const MILESTONE_REFUNDED = new Set(["REFUNDED"]);
 /** Escrow words (escrows.status) that claim everything in the escrow was released. */
 const ESCROW_ALL_RELEASED = new Set(["COMPLETED", "RELEASED", "SETTLED_RELEASED"]);
 /** Escrow words that contradict a release of this job's milestone. */
@@ -337,6 +360,8 @@ export type PayoutUnknownReason = NonNullable<SettlementAxis["payoutUnknownReaso
  *
  *   either status unrecognized                        -> unknown  (status_unrecognized)
  *   milestone COMPLETED (ambiguous for a milestone)   -> unknown  (status_ambiguous)
+ *   the milestone's word is not a milestone status (MILESTONE_WORDS), such as an
+ *   escrow-only SETTLED_RELEASED or SETTLED_REFUNDED  -> unknown  (status_unrecognized)
  *   milestone released + escrow refunded, settled_refunded, disputed, slashed or expired
  *                                                     -> unknown  (records_conflict)
  *   milestone released + any other escrow word        -> reported_released (never paid)
@@ -359,6 +384,7 @@ export function reconcilePayout(
   const e = normalizeMoneyStatus(escrow.sourceStatus);
   const conflict = { payout: "unknown", unknownReason: "records_conflict" } as const;
   if (MILESTONE_AMBIGUOUS.has(m)) return { payout: "unknown", unknownReason: "status_ambiguous" };
+  if (!MILESTONE_WORDS.has(m)) return { payout: "unknown", unknownReason: "status_unrecognized" };
   if (MILESTONE_RELEASED.has(m)) {
     return ESCROW_AGAINST_RELEASE.has(e) ? conflict : { payout: "reported_released", unknownReason: null };
   }
@@ -367,6 +393,14 @@ export function reconcilePayout(
   }
   // Not released (waiting / running / failed): this job's money has not been released.
   return ESCROW_ALL_RELEASED.has(e) ? conflict : { payout: "not_paid", unknownReason: null };
+}
+
+/**
+ * The settlement axis alone, for read models that need only this job's money (operator
+ * work and income). Same resolver output, same payout rule, same notices basis.
+ */
+export function buildSettlementAxis(job: JobRow, read: SourceRead<SettlementSource>): SettlementAxis {
+  return buildSettlement(job, read);
 }
 
 function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): SettlementAxis {
@@ -386,7 +420,7 @@ function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): Settl
   if (s.link !== "linked") return { ...empty, link: s.link };
 
   const escrow = s.escrow;
-  const simulated = String(escrow.contractAddress ?? "").startsWith(MOCK_ESCROW_ADDRESS_PREFIX);
+  const simulated = isSimulatedEscrowAddress(escrow.contractAddress);
   const mine = s.milestones.filter((m) => m.stepId === job.stepId);
   // One milestone for this step is this job's only when no other job could claim it: a
   // milestone records no job, so a shared CWM and step (a re-run, a duplicate) is not
@@ -441,6 +475,14 @@ function buildSettlement(job: JobRow, read: SourceRead<SettlementSource>): Settl
     payout = r.payout;
     payoutUnknownReason = r.unknownReason;
     payoutBasis = "milestone_record";
+    // The job row saying `settled` while this job's milestone record says not released (or
+    // refunded) means one of the two records is wrong. SettlementService.releaseMilestone,
+    // for one, updates the job row after an on-chain release and never the milestone
+    // record. So the payout is unknown, never "not paid". The row never makes it released.
+    if ((payout === "not_paid" || payout === "refunded") && normalizeJobRowStatus(job.status) === "settled") {
+      payout = "unknown";
+      payoutUnknownReason = "job_row_conflict";
+    }
   } else {
     payoutUnknownReason = milestoneMatch === "shared_by_jobs" ? "milestone_shared" : "no_single_milestone";
   }
@@ -473,6 +515,7 @@ function buildNotices(
   if ((evidence.fabricatedEventCount ?? 0) > 0) notices.push("fabricated_evidence");
   if (settlement.record?.simulated) notices.push("simulated_settlement");
   if (settlement.payoutUnknownReason === "records_conflict") notices.push("settlement_records_conflict");
+  if (settlement.payoutUnknownReason === "job_row_conflict") notices.push("settlement_row_conflict");
   if (settlement.payoutUnknownReason === "status_unrecognized") notices.push("settlement_status_unrecognized");
   if (settlement.payoutUnknownReason === "milestone_shared") notices.push("milestone_shared_by_jobs");
   if (settlement.link === "conflicting") notices.push("settlement_link_conflict");
@@ -510,7 +553,7 @@ export interface JobExecutionRepos {
 
 /** Drizzle db handle (better-sqlite3), for the reads the repositories do not offer. */
 export interface JobExecutionDb {
-  select(): any;
+  select(fields?: any): any;
 }
 
 export interface JobExecutionLoadOptions {
@@ -760,11 +803,12 @@ export type JobReadDecision =
   | { allow: false; reason: "not_a_party" };
 
 /**
- * True only when PCC_ADMIN_KEY is set and the header equals it (constant-time). There is
- * no development bypass: an unset key grants nothing.
+ * True only when PCC_ADMIN_KEY is set to a value that is not empty or whitespace-only
+ * and the header equals it exactly (constant-time; neither side is trimmed). There is
+ * no development bypass: an unset, empty or whitespace-only key grants nothing.
  */
 export function hasValidAdminKey(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
-  if (typeof expected !== "string" || expected.length === 0 || typeof provided !== "string") return false;
+  if (typeof expected !== "string" || expected.trim().length === 0 || typeof provided !== "string") return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
@@ -787,21 +831,78 @@ const sameWallet = (recorded: unknown, wallet: string) =>
  * record no buyer at all, so only their operator and admins can read them here.
  */
 export function authorizeJobRead(
-  job: JobRow,
+  job: Pick<JobRow, "id" | "kernelId">,
   wallet: string,
-  repos: Pick<JobExecutionRepos, "kernels">,
+  repos: { kernels: { findAll(): unknown[] } },
   db: JobExecutionDb,
 ): JobReadDecision {
-  const kernel = repos.kernels.findById(job.kernelId) as { operatorAddress?: string } | undefined;
-  if (kernel && sameWallet(kernel.operatorAddress, wallet)) return { allow: true, as: "kernel_operator" };
+  return decideJobRead(job, jobReaderOf(wallet, repos, db));
+}
 
+/**
+ * What a PROVEN wallet may read, computed from the wallet alone (cross-family review r2 of
+ * #403, MEDIUM): the kernels it operates, and the jobs whose single negotiation session names
+ * it. Every read here takes only the wallet, never the job a request asks about, so the work
+ * a refusal costs does not depend on whether that job exists, how many sessions it has, or
+ * which kernel it runs on. A decision is then two set lookups (decideJobRead).
+ */
+export interface JobReader {
+  /** The kernels whose recorded operatorAddress is this wallet. */
+  kernels: ReadonlySet<string>;
+  /** The jobs with exactly one negotiation session, and that session names this wallet. */
+  buyerJobs: ReadonlySet<string>;
+}
+
+/** The kernels this proven wallet operates: one read of every kernel, the same for any request. */
+export function operatedKernelsOf(wallet: string, repos: { kernels: { findAll(): unknown[] } }): Set<string> {
+  return new Set(
+    (repos.kernels.findAll() as Array<{ id: string; operatorAddress?: string }>)
+      .filter((kernel) => sameWallet(kernel.operatorAddress, wallet))
+      .map((kernel) => kernel.id),
+  );
+}
+
+export function jobReaderOf(wallet: string, repos: { kernels: { findAll(): unknown[] } }, db: JobExecutionDb): JobReader {
   const { negotiationSessions } = schema;
-  const sessions = db
-    .select()
+  // The sessions that name this wallet (in any letter case; sameWallet re-checks the shape)...
+  const named = db
+    .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId })
     .from(negotiationSessions)
-    .where(eq(negotiationSessions.jobId, job.id))
-    .all() as Array<{ userAgentId: string | null }>;
-  if (sessions.length === 1 && sameWallet(sessions[0]!.userAgentId, wallet)) return { allow: true, as: "buyer" };
+    .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`)
+    .all() as Array<{ jobId: string | null; userAgentId: string | null }>;
+  const candidates = [...new Set(named.filter((s) => s.jobId && sameWallet(s.userAgentId, wallet)).map((s) => s.jobId!))];
+  // ...then how many sessions each of those jobs has: the buyer rule needs exactly one.
+  const buyerJobs = new Set<string>();
+  if (candidates.length > 0) {
+    const counts = db
+      .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` })
+      .from(negotiationSessions)
+      .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId))))
+      .groupBy(negotiationSessions.jobId)
+      .all() as Array<{ jobId: string | null; sessions: number }>;
+    for (const row of counts) if (row.jobId && Number(row.sessions) === 1) buyerJobs.add(row.jobId);
+  }
+  return { kernels: operatedKernelsOf(wallet, repos), buyerJobs };
+}
 
+/** authorizeJobRead's rule as two lookups in the caller's reader. */
+export function decideJobRead(job: Pick<JobRow, "id" | "kernelId">, reader: JobReader): JobReadDecision {
+  if (reader.kernels.has(job.kernelId)) return { allow: true, as: "kernel_operator" };
+  if (reader.buyerJobs.has(job.id)) return { allow: true, as: "buyer" };
   return { allow: false, reason: "not_a_party" };
+}
+
+/**
+ * The ids, among `jobs`, of the jobs this PROVEN wallet may read: the same rule as
+ * authorizeJobRead, applied to every job at once for the routes that list or enumerate jobs
+ * (F3 round 2), from one reader.
+ */
+export function jobsReadableBy(
+  jobs: ReadonlyArray<Pick<JobRow, "id" | "kernelId">>,
+  wallet: string,
+  repos: { kernels: { findAll(): unknown[] } },
+  db: JobExecutionDb,
+): Set<string> {
+  const reader = jobReaderOf(wallet, repos, db);
+  return new Set(jobs.filter((job) => decideJobRead(job, reader).allow).map((job) => job.id));
 }

@@ -790,8 +790,9 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
         level([executorBundle(), bundle([ev("instrument_result", READER, payload)], OP_B)], ASSIGNED_A),
         label,
       ).toBe("inspected_output");
-      // get:mock is isFabricated's single read of payload.mock.
-      expect([...traps].sort(), label).toEqual(["get:mock", "getOwnPropertyDescriptor:pass", "getPrototypeOf", "ownKeys"]);
+      // getOwnPropertyDescriptor:mock is the own-only read of payload.mock (astra pack 267): an
+      // absent mock is never read through the prototype, so no get:mock.
+      expect([...traps].sort(), label).toEqual(["getOwnPropertyDescriptor:mock", "getOwnPropertyDescriptor:pass", "getPrototypeOf", "ownKeys"]);
     }
   });
 
@@ -819,7 +820,6 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
       ["mock:1", ev("execution_completed", PRINTER, { mock: 1 })],
       ["payload null", ev("execution_completed", PRINTER, null)],
       ["payload undefined", { ...ev("execution_completed", PRINTER), payload: undefined as never }],
-      ["inherited mock:true", ev("execution_completed", PRINTER, Object.create({ mock: true }))],
       ["both markers", ev("execution_completed", PRINTER, { mock: true }, { simulated: true })],
     ];
     for (const [label, variant] of variants) {
@@ -828,6 +828,12 @@ describe("single read: one snapshot of the input per call, so no pass can disagr
       expect(provesALevel, label).toBe(!isFabricated(variant));
       expect(bundleHasFabricatedEvents({ events: [variant] }), label).toBe(isFabricated(variant));
     }
+    // An INHERITED marker (here a custom prototype) is not the payload's own: the levels read
+    // own fields only (astra pack 267), so it is ignored, as one written on Object.prototype
+    // would be. Hashed evidence never carries one, because canonicalize reads own fields only.
+    const inherited = ev("execution_completed", PRINTER, Object.create({ mock: true }));
+    expect(isFabricated(inherited)).toBe(true);
+    expect(level([bundle([inherited], OP_A)])).toBe("device_reported");
   });
 });
 

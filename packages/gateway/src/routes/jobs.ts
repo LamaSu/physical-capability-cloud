@@ -2,17 +2,13 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getJobFacade } from "../facades/index.js";
 import { getRepos, getStore } from "../db.js";
+import { gateJobRead, jobReadScopeOf, refuseJobRead } from "../readmodels/job-read-gate.js";
 import { tenantOpts } from "../config/tenant-enforce.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import {
-  JOB_READ_REFUSAL,
-  authorizeJobRead,
   buildJobExecutionDTO,
-  jobReadCallerOf,
   loadJobExecutionSources,
-  precheckJobRead,
   type JobExecutionRepos,
-  type JobRow,
 } from "../readmodels/job-execution.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
@@ -32,19 +28,47 @@ export async function jobRoutes(app: FastifyInstance) {
   /**
    * List jobs with optional kernel/status filtering and DTO enrichment.
    * Supports: ?kernelId=, ?status=, or both.
+   *
+   * Only the jobs the caller may read (jobReadScopeOf, F3 round 2): an admin lists every job
+   * in its tenant; a proven wallet lists the jobs of the kernels it operates and the jobs it
+   * is the recorded buyer of. No credential is 401, an unproven one 403.
+   *
+   * N111 — offset/limit carry a querystring schema so Fastify's ajv coerces
+   * "10" -> 10 (coerceTypes is on by default) before the handler ever sees
+   * them. Without this, both arrive as strings and the facade's
+   * `offset + limit` becomes string concatenation, not addition. The schema
+   * also bounds limit to [1, 200] and offset to >= 0; an unparsable or
+   * out-of-bounds value is a 400 from Fastify before this handler runs.
    */
   app.get<{ Querystring: { kernelId?: string; status?: string; offset?: number; limit?: number } }>(
     "/api/jobs",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          properties: {
+            kernelId: { type: "string" },
+            status: { type: "string" },
+            offset: { type: "integer", minimum: 0, default: 0 },
+            // 50 matches the facade's pre-existing default (job.facade.ts list()).
+            limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+          },
+        },
+      },
+    },
     async (req, reply) => {
       const asOf = new Date().toISOString();
-      // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true.
-      // Default OFF preserves cross-tenant listing (today's behavior).
+      const scope = jobReadScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
+      // Wave 4.1.x — pass through tenant filter when TENANT_ENFORCE=true. The scope applies
+      // the tenant too, including a tenant-less caller's (the repository cannot take null).
       const tOpts = tenantOpts(req as any);
       const result = await facade.list(
         {
           kernelId: req.query.kernelId,
           status: req.query.status,
           ...(tOpts?.tenantId ? { tenantId: tOpts.tenantId } : {}),
+          ...(scope.jobIds ? { jobIds: scope.jobIds } : {}),
         },
         {},
         { offset: req.query.offset, limit: req.query.limit },
@@ -65,6 +89,11 @@ export async function jobRoutes(app: FastifyInstance) {
    * Returns 404 when not found (previously returned 200 with { error: "not_found" }).
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId", async (req, reply) => {
+    // Object-authorized like /execution (F3): admin, kernel operator or recorded buyer.
+    const gate = gateJobRead(req, req.params.jobId);
+    if (!gate.ok) {
+      return refuseJobRead(reply, gate, { error: "JOB_NOT_FOUND", message: `job '${req.params.jobId}' not found` });
+    }
     const result = await facade.getById(req.params.jobId);
     if (result.success) {
       const { evidenceBundles, ...job } = result.data;
@@ -80,52 +109,20 @@ export async function jobRoutes(app: FastifyInstance) {
    * naming its source; nothing is inferred across axes, and a source that cannot be
    * read is reported `unavailable`, never defaulted.
    *
-   * Identity is checked before the job is read, so no refusal depends on whether the job
-   * exists: no credential is 401, and a credential without a proven wallet is 403
-   * identity_unverified (precheckJobRead). Then only an admin, or a proven wallet that is the
-   * job's kernel operator or recorded buyer (authorizeJobRead), reads it. Anyone else gets
-   * the same 404 as a missing job, whatever TENANT_ENFORCE says. Under TENANT_ENFORCE a job
-   * of another tenant is also a 404.
+   * Behind the job read family's gate (gateJobRead): identity is checked before the job is
+   * read, so no refusal depends on whether the job exists. No credential is 401, and a
+   * credential without a proven wallet is 403 identity_unverified. Then only an admin, or a
+   * proven wallet that is the job's kernel operator or recorded buyer, reads it. Anyone else
+   * gets the same 404 as a missing job, whatever TENANT_ENFORCE says.
    */
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/execution", async (req, reply) => {
     const asOf = new Date().toISOString();
-    const notFound = () =>
-      reply.code(404).send({ error: "not_found", message: `job '${req.params.jobId}' not found` });
-    const pre = precheckJobRead(jobReadCallerOf(req));
-    if (!pre.proceed) {
-      const refusal = JOB_READ_REFUSAL[pre.reason];
-      return reply.code(refusal.status).send(refusal.body);
+    const gate = gateJobRead(req, req.params.jobId);
+    if (!gate.ok) {
+      return refuseJobRead(reply, gate, { error: "not_found", message: `job '${req.params.jobId}' not found` });
     }
-    let store;
-    let job: JobRow | undefined;
-    try {
-      store = getStore();
-      job = store.repos.jobs.findById(req.params.jobId) as JobRow | undefined;
-    } catch (error) {
-      req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: job row read failed");
-      return reply.code(503).send({
-        error: "read_model_unavailable",
-        message: "The job record could not be read. Try again shortly.",
-      });
-    }
-    if (!job) return notFound();
-
-    const tenant = tenantOpts(req as any);
-    if (tenant && (job.tenantId ?? null) !== tenant.tenantId) return notFound();
-
-    if (pre.as === "proven") {
-      let decision;
-      try {
-        decision = authorizeJobRead(job, pre.wallet, store.repos as unknown as JobExecutionRepos, store.db);
-      } catch (error) {
-        req.log.error({ jobId: req.params.jobId, err: error }, "job execution read model: authorization read failed");
-        return reply.code(503).send({
-          error: "read_model_unavailable",
-          message: "The job record could not be read. Try again shortly.",
-        });
-      }
-      if (!decision.allow) return notFound();
-    }
+    const { job } = gate;
+    const store = getStore();
 
     const sources = loadJobExecutionSources(job, store.repos as unknown as JobExecutionRepos, store.db, {
       onReadError: (source, error) =>

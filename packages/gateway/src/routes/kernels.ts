@@ -1,7 +1,11 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import { createHash, timingSafeEqual } from "node:crypto";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
+import { jobReadScopeOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
+import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
+import { recordOperatorStage } from "../services/funnel-tracker.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -46,6 +50,33 @@ function buildCapabilityRegistrationHint(kernelId: string) {
   };
 }
 
+/**
+ * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
+ * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
+ * grants nothing in any environment: there is no development bypass. (WP-A #326 adds a shared
+ * helper, auth/admin-key.ts; this route keeps its own until that merges.)
+ */
+function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
+  if (typeof expected !== "string" || expected.trim().length === 0) return false;
+  if (typeof provided !== "string" || provided.length === 0) return false;
+  const a = createHash("sha256").update(provided, "utf8").digest();
+  const b = createHash("sha256").update(expected, "utf8").digest();
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Board N68: what this request may do to a kernel's location visibility. Only a proven identity
+ * counts: WP-A (#326) sets `provenWallet` for a SIWE session or a key minted from one, and nothing
+ * sets it before that merges; `operatorId` is a claimed identity and never counts.
+ */
+function locationOptInAuthority(req: FastifyRequest): LocationOptInAuthority {
+  const proven = (req as { provenWallet?: unknown }).provenWallet;
+  return {
+    admin: hasAdminSecret(req.headers["x-admin-key"]),
+    provenWallet: typeof proven === "string" && proven.length > 0 ? proven : null,
+  };
+}
+
 export async function kernelRoutes(app: FastifyInstance) {
   const facade = getKernelFacade();
 
@@ -82,8 +113,19 @@ export async function kernelRoutes(app: FastifyInstance) {
     // `capabilityTypes`; expose both shapes for callers that haven't
     // migrated yet. Purely additive — KernelHealthSnapshot fields are
     // preserved.
+    // A kernel's detail is public, but its recent jobs are job records (F3 round 3): the list holds
+    // only the jobs this caller may read (jobReadScopeOf). recentJobsScope says what the list
+    // covers, so an empty list never reads as "this kernel has no jobs": "all" for an admin
+    // without a tenant, "readable_by_caller" for everyone else (none without a proven wallet),
+    // "unavailable" when the records the rule needs could not be read.
+    const scope = jobReadScopeOf(req);
+    const recentJobs = scope.ok ? (snapshot.recentJobs ?? []).filter((job) => scopeAllows(scope, job.id)) : [];
+    const recentJobsScope =
+      scope.ok && scope.jobIds === null ? "all" : !scope.ok && scope.kind === "unavailable" ? "unavailable" : "readable_by_caller";
     const responseKernel: Record<string, unknown> = {
       ...snapshot,
+      recentJobs,
+      recentJobsScope,
       capabilities: snapshot.capabilityTypes ?? [],
       discoveryStatus,
     };
@@ -108,13 +150,17 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Get jobs for a kernel.
-   * Returns { jobs: JobDTO[] }.
+   * Returns { jobs: JobDTO[] }: only the jobs the caller may read (F3 round 3). Identity first,
+   * before the jobs are read: no credential is 401, an unproven one 403. A proven wallet gets the
+   * jobs it operates or bought; an admin all of them (within its tenant under TENANT_ENFORCE).
    */
   app.get<{ Params: { kernelId: string } }>(
     "/api/kernels/:kernelId/jobs",
     async (req, reply) => {
+      const scope = jobReadScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
       const result = await facade.getJobs(req.params.kernelId);
-      if (result.success) return { jobs: result.data };
+      if (result.success) return { jobs: result.data.filter((job) => scopeAllows(scope, job.id)) };
       return sendResult(reply, result);
     },
   );
@@ -136,10 +182,20 @@ export async function kernelRoutes(app: FastifyInstance) {
       actorId,
       req.ip,
       req.headers["user-agent"],
+      locationOptInAuthority(req),
     );
     if (!result.success) return sendResult(reply, result);
     const { kernel, created } = result.data;
     if (created) {
+      // Operator-onboarding funnel (ADK track item 4): kernel_created.
+      // Telemetry must never break kernel registration.
+      try {
+        recordOperatorStage(kernel.id, "kernel_created", {
+          operatorId: (req as unknown as { operatorId?: string | null }).operatorId ?? null,
+        });
+      } catch {
+        /* funnel tracking must never break kernel registration */
+      }
       return reply.code(201).send({
         kernel,
         created: true,

@@ -81,9 +81,11 @@ export {
 } from "./network/index.js";
 export {
   TMPValidatorBridge,
+  TIER_ENFORCING_PIPELINES,
   type BenchmarkProofEnvelope,
   type ValidationResult as TMPValidationResult,
   type TMPAcceptanceCallback,
+  type ValidationContext as TMPValidationContext,
 } from "./tmp-validator-bridge.js";
 export {
   OracleVerificationBridge,

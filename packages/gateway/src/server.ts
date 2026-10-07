@@ -4,6 +4,8 @@ import { buildReportHint, decorateWithReportHint } from "./report-hint.js";
 initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
+import { writeAuditHook } from "./services/write-audit-hook.js";
+import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook } from "./services/telemetry-privacy.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -34,6 +36,8 @@ import { startRoutes } from "./routes/start.js";
 import { marketplaceRoutes } from "./routes/marketplace.js";
 import { spaceRoutes } from "./routes/spaces.js";
 import { operatorRoutes } from "./routes/operator.js";
+import { operatorWorkRoutes } from "./routes/operator-work.js";
+import { productHomeRoutes } from "./routes/product-home.js";
 import { operatorsPublicRoutes } from "./routes/operators-public.js";
 import { operatorChannelsRoutes } from "./routes/operator-channels.js";
 import { operatorStatusRoutes } from "./routes/operator-status.js";
@@ -41,6 +45,7 @@ import { capabilityAvailabilityRoutes } from "./routes/capability-availability.j
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
 import { composeRoutes } from "./routes/compose.js";
+import { agentPlanRoutes } from "./routes/agent-plans.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
 import { skillsRoutes } from "./routes/skills.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
@@ -80,12 +85,14 @@ import { traceRoutes } from "./routes/traces.js";
 import { jobSubmitRoutes } from "./routes/job-submit.js";
 import { pgtrRelayRoutes } from "./routes/pgtr-relay.js";
 import { tmpTaskRoutes } from "./routes/tmp-tasks.js";
+import { FsTmpTaskStore } from "./services/tmp-task-store.js";
 import { setupRoutes } from "./routes/setup.js";
 import { unbrowseRoutes } from "./routes/unbrowse.js";
 import { csdRoutes } from "./routes/csd.js";
 import { discoverRoutes } from "./routes/discover.js";
 import { ipRoutes } from "./routes/ip.js";
 import { contributorRoutes } from "./routes/contributors.js";
+import { economicsRoutes } from "./routes/economics.js";
 import { swfRoutes } from "./routes/swf.js";
 import { docRoutes } from "./routes/docs.js";
 import { statusRoutes } from "./routes/status.js";
@@ -124,10 +131,7 @@ import { gaslessRoutes } from "./routes/gasless.js";
 import { contextPackRoutes } from "./routes/context-pack.js";
 import { nearRoutes } from "./routes/near.js";
 import { litProvisionRoutes } from "./routes/lit-provision.js";
-import { ot2ChatRoutes } from "./routes/ot2-chat.js";
-import { ot2CameraRoutes } from "./routes/ot2-camera.js";
-import { ot2RelayRoutes } from "./routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "./routes/ot2-scope.js";
+import { ot2LegacyGoneRoutes } from "./routes/ot2-legacy-gone.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
@@ -135,10 +139,11 @@ import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
 import { securityMonitorPlugin } from "./middleware/security-monitor.js";
-import { corsOriginValidator, securityHeaders } from "./middleware/security-hardening.js";
+import { corsDelegator, irCorsReadProjection, securityHeaders } from "./middleware/security-hardening.js";
 import { rateLimiter } from "./middleware/rate-limiter.js";
+import { isRelayGateOpen, rejectRelayWithoutAdminKey } from "./middleware/relay-admin-gate.js";
 import { dlpRedactor } from "./middleware/dlp-redactor.js";
-import { scopeChecker } from "./middleware/scope-checker.js";
+import { scopeChecker, hasAdminScope } from "./middleware/scope-checker.js";
 import { templateRoutes } from "./routes/templates.js";
 import { nlQueryRoutes } from "./routes/nl-query.js";
 import { complianceTemplateRoutes } from "./routes/compliance-templates.js";
@@ -156,6 +161,7 @@ import { physicalOperatorAgent, dataProductStubAgent } from "./routes/template-a
 import { commentaryRoutes } from "./routes/commentary.js";
 import { visualizerEvents } from "./routes/visualizer-events.js";
 import { apiGate } from "./middleware/api-gate.js";
+import { rejectNonCanonicalTarget } from "./middleware/canonical-request-target.js";
 import { tenantContext } from "./middleware/tenant-context.js";
 import { traceIdPlugin } from "./middleware/trace-id.js";
 import { agentFeedbackRoutes } from "./routes/agent-feedback.js";
@@ -181,10 +187,16 @@ export async function createGateway(port = 3200) {
   initKernelService();
 
   const app = Fastify({
-    logger: true,
+    // Default pino logger, with a request serializer that never logs the public
+    // telemetry sink's raw URL, IP or host details (#458 round 3).
+    logger: GATEWAY_LOGGER_OPTIONS,
     bodyLimit: 1_048_576, // 1 MB body limit (prevents oversized payload attacks)
     trustProxy: true, // Trust Railway/Cloudflare proxy headers for real client IP
   });
+
+  app.log.info(isRelayGateOpen()
+    ? "[relay] The device relay is open."
+    : "[relay] The device relay is admin-only.");
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers
@@ -283,14 +295,23 @@ export async function createGateway(port = 3200) {
     await shutdownPostHog();
   });
 
-  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin)
-  await app.register(cors, {
-    origin: corsOriginValidator,
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-PCC-API-Key", "X-PCC-Session", "X-Request-ID"],
-    maxAge: 86400, // Cache preflight for 24h
-  });
+  // The request-target guard (N105) is the FIRST onRequest hook: before the relay admin gate, CORS,
+  // the rate limiter, apiGate, scopeChecker and every other decision, so the path they judge is
+  // the path the router routes.
+  app.addHook("onRequest", rejectNonCanonicalTarget);
+  // SECOND onRequest hook, directly after the request-target guard: non-canonical relay targets get
+  // the guard's 400 before any authorization decision. A refused relay request runs no later
+  // request-stage hook, parser or handler. Response hooks (onSend, onResponse, the write audit)
+  // still run; see middleware/relay-admin-gate.ts.
+  app.addHook("onRequest", rejectRelayWithoutAdminKey);
+
+  // CORS: explicit allowlist replaces origin:true (CRIT-01 fix — prevents CSRF from any origin).
+  // Per request (corsDelegator): the credentialed allowlist exactly as before, plus credential-less
+  // GET access to the closed IR's public read routes for the governed GenUI view (row 37).
+  await app.register(cors, { delegator: corsDelegator });
+  // ...and such a wildcard response is the server-side IR projection, never the raw body
+  // (astra #562 r1 F1). This is a ROOT hook, so it wraps every route registered below.
+  app.addHook("onSend", irCorsReadProjection);
 
   // Security response headers (X-Frame-Options, CSP, HSTS, etc.)
   await securityHeaders(app);
@@ -384,37 +405,13 @@ export async function createGateway(port = 3200) {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
 
-  // Automatic write-operation audit hook — logs all POST/PUT/DELETE requests
-  // to the audit log so every state-changing call is captured without
-  // per-route boilerplate. Individual routes may also log richer events.
-  app.addHook("onResponse", async (request, reply) => {
-    const method = request.method;
-    if (method !== "POST" && method !== "PUT" && method !== "DELETE" && method !== "PATCH") return;
-
-    const actor = (request as any).operatorId ?? (request as any).apiKeyId ?? (
-      request.headers.authorization ? "authenticated" : "anonymous"
-    );
-
-    try {
-      const { auditService: audit } = await import("./services/audit-service.js");
-      audit.log({
-        eventType: "http.write",
-        actor,
-        resourceType: "http",
-        action: method.toLowerCase(),
-        metadata: {
-          method,
-          url: request.url,
-          statusCode: reply.statusCode,
-          duration_ms: Math.round(reply.elapsedTime ?? 0),
-        },
-        ip: request.ip,
-        userAgent: request.headers["user-agent"],
-      });
-    } catch {
-      // Audit failures must never affect request handling
-    }
-  });
+  // Automatic write-operation audit hook (services/write-audit-hook.ts) — logs all
+  // POST/PUT/PATCH/DELETE requests to the audit log. The public telemetry sink's
+  // audit rows omit the caller's IP and User-Agent (#458 round 1).
+  app.addHook("onResponse", writeAuditHook);
+  // An unrouted lookalike of the public telemetry sink gets a fixed 404 before the
+  // default not-found handler can log its raw URL (#458 round 3).
+  app.addHook("onRequest", telemetryLookalikeHook);
 
   // SIWE auth routes (nonce, verify, me, logout, sessions)
   await app.register(siweAuthPlugin);
@@ -672,11 +669,17 @@ export async function createGateway(port = 3200) {
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
   await app.register(composeRoutes);
+  // R9: externally authored plans. Validate is a live read; accept is money-path (the scope checker
+  // default-denies it) and answers 503 until the R13 store, #349, the evidence map, the fee policy and
+  // escrow's encoder are wired.
+  await app.register(agentPlanRoutes);
   // D2 compiler-ABI: GET /api/compose/registry-snapshot(/:registryDigest). Static
   // path so find-my-way prefers it over composeRoutes' parametric /api/compose/:id.
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(operatorWorkRoutes);
+  await app.register(productHomeRoutes);
   await app.register(operatorsPublicRoutes);
   await app.register(operatorChannelsRoutes);
   await app.register(operatorStatusRoutes);
@@ -723,13 +726,17 @@ export async function createGateway(port = 3200) {
   await app.register(traceRoutes);
   await app.register(jobSubmitRoutes);
   await app.register(pgtrRelayRoutes);
-  await app.register(tmpTaskRoutes);
+  // TMP tasks are owner-bound (E11e). This gateway cannot resolve a milestone's poster yet, so only an
+  // admin key creates them (#6182, the N55 precedent; the deploy consequence is operator item 134). Each
+  // task is durable and write-once on this gateway's volume, beside pcc.db (E11f, #6309).
+  await app.register(tmpTaskRoutes, { isAdmin: hasAdminScope, store: new FsTmpTaskStore() });
   await app.register(setupRoutes);
   await app.register(unbrowseRoutes);
   await app.register(csdRoutes);
   await app.register(discoverRoutes);
   await app.register(ipRoutes);
   await app.register(contributorRoutes);
+  await app.register(economicsRoutes);
   await app.register(docRoutes);
   await app.register(photoVerificationRoutes);
   await app.register(humanVerificationRoutes);
@@ -758,13 +765,13 @@ export async function createGateway(port = 3200) {
   // Lit Protocol key provisioning
   await app.register(litProvisionRoutes);
 
-  // OT-2 remote agent relay (chat + camera + tool-call relay + execution scopes)
-  await app.register(ot2ChatRoutes);
-  await app.register(ot2CameraRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  // The legacy OT-2 relay (/api/ot2/{tool-call,tool-result,scope,chat,camera})
+  // is retired (N4b-gw item 1): every /api/ot2/* request answers 410 Gone with
+  // the /api/relay/:kernelId/... route that replaces it.
+  await app.register(ot2LegacyGoneRoutes);
 
-  // Generic device relay -- works for any device type, namespaced by kernelId
+  // Generic device relay -- works for any device type, namespaced by kernelId.
+  // Default-deny, per kernel (N4b-gw item 4; see RELAY_ROUTE_ACCESS).
   await app.register(deviceRelayRoutes);
 
   // Wizard sessions + compliance

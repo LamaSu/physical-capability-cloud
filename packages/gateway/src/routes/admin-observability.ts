@@ -34,6 +34,7 @@ import {
   funnelEnabled,
   getCohortFunnel,
   getFunnelForTraceId,
+  getOperatorFunnel,
   FUNNEL_AUDIT_EVENT,
 } from "../services/funnel-tracker.js";
 
@@ -93,6 +94,12 @@ function guard(
 // durable JSONL next to the gateway DB (the same path routes/feedback.ts uses).
 // Only the file's tail is scanned, so a large sink can't make this view slow.
 const DEFAULT_ATTEMPT_SCAN_BYTES = 20 * 1024 * 1024;
+// F5 (pp-item10a-467-analysis-r1-9fc6c1c3): PCC_ATTEMPT_SCAN_MAX_BYTES had no
+// upper ceiling — an unsafe operator configuration (e.g. a misplaced extra
+// zero) combined with a very large sink could drive Buffer.alloc() to an
+// enormous, process-threatening allocation. Clamp to 200 MB regardless of
+// what the environment requests.
+const MAX_ATTEMPT_SCAN_BYTES = 200 * 1024 * 1024; // 209715200
 const MAX_ATTEMPT_DAYS = 90;
 const MAX_SESSION_ROWS = 500;
 const MAX_SIGNATURE_ROWS = 100;
@@ -101,9 +108,11 @@ function feedbackFilePath(): string {
   return `${dirname(process.env.PCC_DB_PATH ?? "/app/data/pcc.sqlite")}/feedback.jsonl`;
 }
 
-function attemptScanBytes(): number {
+/** Exported test-only (mirrors feedback.ts's __resetFeedbackRateLimit convention). */
+export function attemptScanBytes(): number {
   const n = Number.parseInt(process.env.PCC_ATTEMPT_SCAN_MAX_BYTES ?? "", 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ATTEMPT_SCAN_BYTES;
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_ATTEMPT_SCAN_BYTES;
+  return Math.min(n, MAX_ATTEMPT_SCAN_BYTES);
 }
 
 /** Attempt records created at or after `sinceMs`, read from the sink's tail. */
@@ -170,6 +179,21 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
     async (req, reply) => {
       if (!guard(req, reply)) return;
       const funnel = getCohortFunnel({ since: req.query.since });
+      return {
+        since: req.query.since ?? null,
+        funnel,
+        generated_at: new Date().toISOString(),
+        source: "audit_log",
+      };
+    },
+  );
+
+  // ── Operator-onboarding cohort funnel (ADK track item 4) ─────────────────
+  app.get<{ Querystring: { since?: string } }>(
+    "/api/admin/observability/operator-funnel",
+    async (req, reply) => {
+      if (!guard(req, reply)) return;
+      const funnel = getOperatorFunnel({ since: req.query.since });
       return {
         since: req.query.since ?? null,
         funnel,
@@ -297,7 +321,16 @@ export async function adminObservabilityRoutes(app: FastifyInstance) {
         totals: analysis.totals,
         funnel: analysis.funnel,
         signatures: analysis.signatures.slice(0, MAX_SIGNATURE_ROWS),
-        proposals: analysis.proposals,
+        // F2 (pp-item10a-467-analysis-r1-9fc6c1c3): this aggregate view must
+        // not return verbatim public report text. `examples` is omitted here;
+        // proposalQueue()'s own return shape (still carrying examples) is
+        // unchanged for internal callers.
+        proposals: analysis.proposals.map(({ target, routeTo, count, sessions }) => ({
+          target,
+          routeTo,
+          count,
+          sessions,
+        })),
         sessions: analysis.sessions.slice(0, sessionLimit).map(sessionRow),
         generated_at: new Date(now).toISOString(),
         source: "feedback_jsonl",

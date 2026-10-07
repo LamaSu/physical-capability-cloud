@@ -108,7 +108,6 @@ class TestStartCommand:
              mock.patch("pcc_node.cli.provision_api_key", return_value="test-key"), \
              mock.patch("pcc_node.cli.register_kernel", return_value={"ok": True}), \
              mock.patch("pcc_node.cli.register_signing_key", return_value=(200, {})), \
-             mock.patch("pcc_node.cli.announce_capabilities"), \
              mock.patch("pcc_node.cli.run_daemon") as mock_daemon:
             result = runner.invoke(main, ["start", "--yes", "-c", config_path, "--api-key", "k"])
         assert result.exit_code == 0

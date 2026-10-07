@@ -32,6 +32,14 @@ describe("BountyService", () => {
   // ── Demand Signals ──────────────────────────────────────────────
 
   describe("demand signals", () => {
+    it("gives every signal a unique random id (no restart-colliding counter)", () => {
+      const a = svc.submitDemand(makeDemandInput());
+      const b = new BountyService().submitDemand(makeDemandInput());
+
+      expect(a.id).toMatch(/^demand-[0-9a-f]{8}-/);
+      expect(a.id).not.toBe(b.id);
+    });
+
     it("should submit a demand signal", () => {
       const signal = svc.submitDemand(makeDemandInput());
       expect(signal.id).toMatch(/^demand-/);
@@ -96,15 +104,17 @@ describe("BountyService", () => {
       expect(top[0].annualValue).toBe(3_600);
     });
 
-    it("should exclude fulfilled signals from getTopDemand", () => {
+    it("a returned signal is a frozen snapshot: mutating it cannot fulfil it or change the counts (astra pack 36b)", () => {
       const s1 = svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "ebw" }));
       svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "ebw" }));
 
-      // Manually set one to fulfilled
-      (s1 as DemandSignal).status = "fulfilled";
+      expect(Object.isFrozen(s1)).toBe(true);
+      expect(() => {
+        (s1 as { status: string }).status = "fulfilled";
+      }).toThrow(TypeError);
 
       const top = svc.getTopDemand();
-      expect(top[0].count).toBe(1); // only r2 counted
+      expect(top[0].count).toBe(2); // both still active: nothing outside the service can fulfil a signal
     });
   });
 
@@ -125,7 +135,8 @@ describe("BountyService", () => {
         expiresInDays: 60,
       });
 
-      expect(bounty.id).toMatch(/^bounty-/);
+      expect(bounty.id).toMatch(/^bounty-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+      expect(bounty.fundingStatus).toBe("unfunded");
       expect(bounty.status).toBe("open");
       expect(bounty.bountyReward).toBe(2500);
       expect(bounty.currency).toBe("USDC");
@@ -136,7 +147,40 @@ describe("BountyService", () => {
 
   // ── Auto-Bounty Creation ────────────────────────────────────────
 
-  describe("auto-bounty creation", () => {
+  describe("auto-bounty creation (default: off)", () => {
+    it("never auto-creates a bounty by default, even when every threshold is met", () => {
+      // 3 requesters AND an annual value far above $10K: both triggers fire.
+      for (const r of ["r1", "r2", "r3"]) {
+        svc.submitDemand(makeDemandInput({ requesterId: r, capabilityType: "ebw", estimatedJobValue: 5000, estimatedFrequency: "daily" }));
+      }
+
+      expect(svc.checkAndCreateBounties()).toHaveLength(0);
+      expect(svc.listBounties()).toHaveLength(0);
+    });
+
+    it("stays off for any options value other than an explicit true", () => {
+      const loose = new BountyService({ autoCreateTreasuryBounties: "yes" as unknown as boolean });
+      loose.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 1000, estimatedFrequency: "monthly" }));
+
+      expect(loose.checkAndCreateBounties()).toHaveLength(0);
+    });
+  });
+
+  describe("auto-bounty creation (explicit opt-in, tests/demos only)", () => {
+    beforeEach(() => {
+      svc = new BountyService({ autoCreateTreasuryBounties: true });
+    });
+
+    it("marks every auto-created bounty unfunded: no treasury backs it", () => {
+      svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 1000, estimatedFrequency: "monthly" }));
+
+      const created = svc.checkAndCreateBounties();
+      expect(created).toHaveLength(1);
+      expect(created[0].proposedFundingSource).toBe("treasury");
+      expect("fundedBy" in created[0]).toBe(false);
+      expect(created[0].fundingStatus).toBe("unfunded");
+    });
+
     it("should auto-create bounty when 3+ requesters want the same capability", () => {
       svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "ebw", estimatedJobValue: 100, estimatedFrequency: "monthly" }));
       svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "ebw", estimatedJobValue: 100, estimatedFrequency: "monthly" }));
@@ -236,8 +280,8 @@ describe("BountyService", () => {
     });
   });
 
-  describe("verify bounty", () => {
-    it("should verify bounty with passing score", () => {
+  describe("verify bounty (retired: astra pack 36)", () => {
+    it("refuses any caller-supplied score and changes nothing", () => {
       const bounty = svc.createBounty({
         capabilityType: "ebw",
         description: "EBW bounty",
@@ -247,47 +291,21 @@ describe("BountyService", () => {
         expiresInDays: 30,
       });
       svc.claimBounty(bounty.id, "operator-001");
-
-      const verified = svc.verifyBounty(bounty.id, "job-001", 0.95);
-      expect(verified.status).toBe("verified");
-      expect(verified.verificationJobId).toBe("job-001");
-      expect(verified.verificationScore).toBe(0.95);
+      for (const score of [0.95, 0.4]) {
+        expect(() => svc.verifyBounty(bounty.id, "job-001", score)).toThrow(/verification is retired/);
+      }
+      const after = svc.listBounties().find((b) => b.id === bounty.id)!;
+      expect(after.status).toBe("claimed");
+      expect(after.verificationScore).toBeUndefined();
+      expect(after.verificationJobId).toBeUndefined();
     });
 
-    it("should NOT advance to verified with failing score", () => {
-      const bounty = svc.createBounty({
-        capabilityType: "ebw",
-        description: "EBW bounty",
-        bountyReward: 2000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 30,
-      });
-      svc.claimBounty(bounty.id, "operator-001");
-
-      const result = svc.verifyBounty(bounty.id, "job-001", 0.4);
-      expect(result.status).toBe("claimed"); // stays claimed
-      expect(result.verificationScore).toBe(0.4);
-    });
-
-    it("should throw when verifying unclaimed bounty", () => {
-      const bounty = svc.createBounty({
-        capabilityType: "ebw",
-        description: "EBW bounty",
-        bountyReward: 2000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 30,
-      });
-
-      expect(() => svc.verifyBounty(bounty.id, "job-001", 0.9)).toThrow(
-        /cannot be verified/,
-      );
+    it("still reports an unknown bounty as not found", () => {
+      expect(() => svc.verifyBounty("bounty-missing", "job-001", 0.9)).toThrow(/not found/);
     });
   });
-
-  describe("pay bounty", () => {
-    it("should pay a verified bounty", () => {
+  describe("pay bounty (retired: astra pack 36)", () => {
+    it("refuses to pay: nothing funds a bounty", () => {
       const bounty = svc.createBounty({
         capabilityType: "ebw",
         description: "EBW bounty",
@@ -297,54 +315,16 @@ describe("BountyService", () => {
         expiresInDays: 30,
       });
       svc.claimBounty(bounty.id, "operator-001");
-      svc.verifyBounty(bounty.id, "job-001", 0.9);
-
-      const paid = svc.payBounty(bounty.id);
-      expect(paid.status).toBe("paid");
-      expect(paid.paidAt).toBeTruthy();
+      expect(() => svc.payBounty(bounty.id)).toThrow(/payment is retired/);
+      const after = svc.listBounties().find((b) => b.id === bounty.id)!;
+      expect(after.status).toBe("claimed");
+      expect(after.paidAt).toBeUndefined();
     });
 
-    it("should throw when paying unverified bounty", () => {
-      const bounty = svc.createBounty({
-        capabilityType: "ebw",
-        description: "EBW bounty",
-        bountyReward: 2000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 30,
-      });
-      svc.claimBounty(bounty.id, "operator-001");
-
-      expect(() => svc.payBounty(bounty.id)).toThrow(/cannot be paid/);
-    });
-
-    it("should mark demand signals as fulfilled when bounty is paid", () => {
-      svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "ebw" }));
-      svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "ebw" }));
-      svc.submitDemand(makeDemandInput({ requesterId: "r3", capabilityType: "other" }));
-
-      const bounty = svc.createBounty({
-        capabilityType: "ebw",
-        description: "EBW bounty",
-        bountyReward: 2000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 30,
-      });
-      svc.claimBounty(bounty.id, "operator-001");
-      svc.verifyBounty(bounty.id, "job-001", 0.85);
-      svc.payBounty(bounty.id);
-
-      const ebwSignals = svc.getDemandSignals("ebw");
-      expect(ebwSignals.every((s) => s.status === "fulfilled")).toBe(true);
-
-      const otherSignals = svc.getDemandSignals("other");
-      expect(otherSignals[0].status).toBe("active");
+    it("still reports an unknown bounty as not found", () => {
+      expect(() => svc.payBounty("bounty-missing")).toThrow(/not found/);
     });
   });
-
-  // ── List / Filter Bounties ──────────────────────────────────────
-
   describe("list bounties", () => {
     it("should list bounties by status", () => {
       const b1 = svc.createBounty({
@@ -419,142 +399,224 @@ describe("BountyService", () => {
   // ── Leaderboard ─────────────────────────────────────────────────
 
   describe("leaderboard", () => {
-    it("should track bounty hunters", () => {
-      const b1 = svc.createBounty({
+    function claimOne(operatorId: string, capabilityType: string) {
+      const b = svc.createBounty({ ...{
         capabilityType: "ebw",
-        description: "EBW",
+        description: "EBW bounty",
         bountyReward: 2000,
         currency: "USDC",
         requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
         expiresInDays: 30,
-      });
-      const b2 = svc.createBounty({
-        capabilityType: "cryo-em",
-        description: "Cryo-EM",
-        bountyReward: 3000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 2, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 60,
-      });
+      }, capabilityType });
+      svc.claimBounty(b.id, operatorId);
+      return b;
+    }
 
-      // operator-001 completes both
-      svc.claimBounty(b1.id, "operator-001");
-      svc.verifyBounty(b1.id, "job-001", 0.9);
-      svc.payBounty(b1.id);
-
-      svc.claimBounty(b2.id, "operator-001");
-      svc.verifyBounty(b2.id, "job-002", 0.85);
-      svc.payBounty(b2.id);
-
-      const leaderboard = svc.getLeaderboard();
-      expect(leaderboard).toHaveLength(1);
-      expect(leaderboard[0].operatorId).toBe("operator-001");
-      expect(leaderboard[0].bountiesClaimed).toBe(2);
-      expect(leaderboard[0].bountiesCompleted).toBe(2);
-      expect(leaderboard[0].totalEarned).toBe(5000);
-      expect(leaderboard[0].capabilitiesOnboarded).toContain("ebw");
-      expect(leaderboard[0].capabilitiesOnboarded).toContain("cryo-em");
-      expect(leaderboard[0].reputation).toBe(100);
+    it("tracks claims and shows no earnings or completions: nothing is ever paid", () => {
+      claimOne("operator-001", "ebw");
+      claimOne("operator-001", "cryo-em");
+      const [top] = svc.getLeaderboard();
+      expect(top.operatorId).toBe("operator-001");
+      expect(top.bountiesClaimed).toBe(2);
+      expect(top.bountiesCompleted).toBe(0);
+      expect(top.totalEarned).toBe(0);
     });
 
-    it("should rank by total earned", () => {
-      const b1 = svc.createBounty({
-        capabilityType: "ebw",
-        description: "EBW",
-        bountyReward: 1000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 30,
-      });
-      const b2 = svc.createBounty({
-        capabilityType: "cryo-em",
-        description: "Cryo-EM",
-        bountyReward: 4000,
-        currency: "USDC",
-        requirements: { minimumAssuranceTier: 2, mustComplete1Job: true, mustPassVerification: true },
-        expiresInDays: 60,
-      });
-
-      svc.claimBounty(b1.id, "operator-small");
-      svc.verifyBounty(b1.id, "job-001", 0.9);
-      svc.payBounty(b1.id);
-
-      svc.claimBounty(b2.id, "operator-big");
-      svc.verifyBounty(b2.id, "job-002", 0.95);
-      svc.payBounty(b2.id);
-
-      const leaderboard = svc.getLeaderboard();
-      expect(leaderboard[0].operatorId).toBe("operator-big");
-      expect(leaderboard[0].totalEarned).toBe(4000);
-      expect(leaderboard[1].operatorId).toBe("operator-small");
-      expect(leaderboard[1].totalEarned).toBe(1000);
-    });
-
-    it("should respect limit parameter", () => {
-      // Create and complete 3 bounties for 3 different operators
-      for (let i = 1; i <= 3; i++) {
-        const b = svc.createBounty({
-          capabilityType: `cap-${i}`,
-          description: `Cap ${i}`,
-          bountyReward: i * 1000,
-          currency: "USDC",
-          requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
-          expiresInDays: 30,
-        });
-        svc.claimBounty(b.id, `operator-${i}`);
-        svc.verifyBounty(b.id, `job-${i}`, 0.9);
-        svc.payBounty(b.id);
-      }
-
+    it("respects the limit parameter", () => {
+      for (let i = 0; i < 3; i++) claimOne(`operator-${i}`, `cap-${i}`);
       expect(svc.getLeaderboard(2)).toHaveLength(2);
-      expect(svc.getLeaderboard(2)[0].totalEarned).toBe(3000);
+      for (const h of svc.getLeaderboard()) expect(h.totalEarned).toBe(0);
     });
   });
-
-  // ── Full Lifecycle ──────────────────────────────────────────────
-
   describe("full lifecycle", () => {
-    it("should complete demand -> auto-bounty -> claim -> verify -> pay", () => {
-      // Step 1: Multiple requesters submit demand for "cryo-em"
-      svc.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 500, estimatedFrequency: "monthly" }));
-      svc.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "cryo-em", estimatedJobValue: 800, estimatedFrequency: "monthly" }));
-      svc.submitDemand(makeDemandInput({ requesterId: "r3", capabilityType: "cryo-em", estimatedJobValue: 300, estimatedFrequency: "weekly" }));
-
-      // Step 2: Check thresholds — should auto-create bounty
-      // Annual value: 500*12 + 800*12 + 300*52 = 6000 + 9600 + 15600 = 31200
-      const created = svc.checkAndCreateBounties();
+    it("demand -> auto-bounty (demo opt-in) -> claim, then verification and payment are refused", () => {
+      const demo = new BountyService({ autoCreateTreasuryBounties: true });
+      demo.submitDemand(makeDemandInput({ requesterId: "r1", capabilityType: "cryo-em", estimatedJobValue: 500, estimatedFrequency: "monthly" }));
+      demo.submitDemand(makeDemandInput({ requesterId: "r2", capabilityType: "cryo-em", estimatedJobValue: 800, estimatedFrequency: "monthly" }));
+      demo.submitDemand(makeDemandInput({ requesterId: "r3", capabilityType: "cryo-em", estimatedJobValue: 300, estimatedFrequency: "weekly" }));
+      const created = demo.checkAndCreateBounties();
       expect(created).toHaveLength(1);
       const bounty = created[0];
-      expect(bounty.capabilityType).toBe("cryo-em");
-      expect(bounty.demandCount).toBe(3);
-      expect(bounty.estimatedAnnualValue).toBe(31_200);
-      // 5% of 31200 = 1560
-      expect(bounty.bountyReward).toBe(1_560);
-      expect(bounty.fundedBy).toBe("treasury");
-
-      // Step 3: Operator claims
-      const claimed = svc.claimBounty(bounty.id, "operator-cryo");
-      expect(claimed.status).toBe("claimed");
-
-      // Step 4: Operator completes first job, verifier scores it
-      const verified = svc.verifyBounty(bounty.id, "job-cryo-001", 0.92);
-      expect(verified.status).toBe("verified");
-
-      // Step 5: Payout
-      const paid = svc.payBounty(bounty.id);
-      expect(paid.status).toBe("paid");
-      expect(paid.paidAt).toBeTruthy();
-
-      // Step 6: Demand signals marked as fulfilled
-      const signals = svc.getDemandSignals("cryo-em");
-      expect(signals.every((s) => s.status === "fulfilled")).toBe(true);
-
-      // Step 7: Leaderboard updated
-      const lb = svc.getLeaderboard();
-      expect(lb).toHaveLength(1);
-      expect(lb[0].operatorId).toBe("operator-cryo");
-      expect(lb[0].totalEarned).toBe(1_560);
-      expect(lb[0].capabilitiesOnboarded).toContain("cryo-em");
+      expect(bounty.fundingStatus).toBe("unfunded");
+      expect(bounty.proposedFundingSource).toBe("treasury");
+      expect("fundedBy" in bounty).toBe(false);
+      expect(demo.claimBounty(bounty.id, "operator-cryo").status).toBe("claimed");
+      expect(() => demo.verifyBounty(bounty.id, "job-cryo-001", 0.92)).toThrow(/verification is retired/);
+      expect(() => demo.payBounty(bounty.id)).toThrow(/payment is retired/);
+      expect(demo.getLeaderboard()[0].totalEarned).toBe(0);
     });
+  });
+});
+
+describe("pack 36 (astra) findings: an unfunded bounty is never verified by a caller or paid", () => {
+  function claimed() {
+    const s = new BountyService();
+    const b = s.createBounty({
+      capabilityType: "hplc",
+      description: "Reusable HPLC kit",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
+      expiresInDays: 30,
+    });
+    s.claimBounty(b.id, "operator-1");
+    return { s, b };
+  }
+
+  it("HIGH 2: verifyBounty refuses a caller-supplied score, and the bounty stays claimed", () => {
+    const { s, b } = claimed();
+    expect(() => s.verifyBounty(b.id, "invented-job", 1)).toThrow(/verification is retired/);
+    expect(s.listBounties().find((x) => x.id === b.id)!.status).toBe("claimed");
+  });
+
+  it("HIGH 1: payBounty refuses an unfunded bounty; nothing becomes paid and no earnings appear", () => {
+    const { s, b } = claimed();
+    expect(() => s.payBounty(b.id)).toThrow(/payment is retired/);
+    const after = s.listBounties().find((x) => x.id === b.id)!;
+    expect(after.status).not.toBe("paid");
+    expect(after.paidAt).toBeUndefined();
+    const hunter = s.getLeaderboard().find((h) => h.operatorId === "operator-1");
+    expect(hunter?.totalEarned ?? 0).toBe(0);
+    expect(hunter?.bountiesCompleted ?? 0).toBe(0);
+  });
+
+  it("a new bounty names no funder while nothing funds it", () => {
+    const { b } = claimed();
+    expect(b.fundingStatus).toBe("unfunded");
+    expect("fundedBy" in b).toBe(false);
+  });
+
+  it("demand and bounty ids carry a full UUID after their prefix (test-gap note)", () => {
+    const s = new BountyService();
+    const sig = s.submitDemand(makeDemandInput());
+    const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+    expect(sig.id).toMatch(new RegExp(`^demand-${UUID}$`));
+    const { b } = claimed();
+    expect(b.id).toMatch(new RegExp(`^bounty-${UUID}$`));
+  });
+});
+
+describe("pack 36b (astra): returned records are detached snapshots, so no caller can forge state", () => {
+  it("mutating every returned object never changes a later read", () => {
+    const s = new BountyService();
+    const created = s.createBounty({
+      capabilityType: "hplc",
+      description: "HPLC kit",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true },
+      expiresInDays: 30,
+    });
+    const claimedRec = s.claimBounty(created.id, "operator-1");
+    const forge = (o: unknown, patch: Record<string, unknown>) => {
+      try {
+        Object.assign(o as object, patch);
+      } catch {
+        /* a frozen snapshot refusing the write is also fine */
+      }
+    };
+    forge(created, { status: "paid", paidAt: "2026-01-01T00:00:00Z", fundingStatus: "funded" });
+    forge(claimedRec, { status: "verified", verificationScore: 1, verificationJobId: "invented" });
+    forge(s.listBounties()[0], { status: "paid", fundingStatus: "funded" });
+    forge(s.getLeaderboard()[0], { totalEarned: 999, bountiesCompleted: 7 });
+    const sig = s.submitDemand(makeDemandInput());
+    forge(sig, { status: "fulfilled" });
+    forge(s.getDemandSignals()[0], { status: "fulfilled" });
+
+    const stored = s.listBounties().find((b) => b.id === created.id)!;
+    expect(stored.status).toBe("claimed");
+    expect(stored.fundingStatus).toBe("unfunded");
+    expect("paidAt" in stored).toBe(false);
+    expect("verificationScore" in stored).toBe(false);
+    const hunter = s.getLeaderboard()[0]!;
+    expect(hunter.totalEarned).toBe(0);
+    expect(hunter.bountiesCompleted).toBe(0);
+    expect(s.getDemandSignals()[0]!.status).toBe("active");
+  });
+});
+
+describe("pack 36c (astra): stored state is runtime-private, so no holder of the service can forge it", () => {
+  const REQ = { minimumAssuranceTier: 1, mustComplete1Job: true, mustPassVerification: true };
+  function claimed() {
+    const s = new BountyService();
+    const b = s.createBounty({
+      capabilityType: "hplc",
+      description: "HPLC kit",
+      bountyReward: 100,
+      currency: "USDC",
+      requirements: { ...REQ },
+      expiresInDays: 30,
+    });
+    s.claimBounty(b.id, "operator-1");
+    return { s, b };
+  }
+  const loose = (s: BountyService) => s as unknown as Record<string, unknown>;
+  const tryAssign = (o: unknown, patch: Record<string, unknown>) => {
+    try {
+      Object.assign(o as object, patch);
+    } catch {
+      /* refused: also fine */
+    }
+  };
+
+  it("HIGH 1: the stored maps are unreachable, by name or by enumeration; nothing becomes paid or funded, no earnings", () => {
+    const { s, b } = claimed();
+    // The verdict's reproduction: reach the maps by name ...
+    const bounties = loose(s).bounties as Map<string, object> | undefined;
+    const hunters = loose(s).hunters as Map<string, object> | undefined;
+    if (bounties?.get(b.id)) tryAssign(bounties.get(b.id), { status: "paid", fundingStatus: "funded", paidAt: "2026-01-01T00:00:00Z" });
+    if (hunters?.get("operator-1")) tryAssign(hunters.get("operator-1"), { totalEarned: 100, bountiesCompleted: 1 });
+    // ... or discover them without names.
+    for (const v of Object.values(loose(s))) {
+      if (v instanceof Map) for (const rec of v.values()) tryAssign(rec, { status: "paid", fundingStatus: "funded", totalEarned: 100, bountiesCompleted: 1 });
+    }
+    expect(Object.values(loose(s)).some((v) => v instanceof Map)).toBe(false);
+    const [after] = s.listBounties();
+    expect(after).toMatchObject({ status: "claimed", fundingStatus: "unfunded" });
+    expect("paidAt" in after!).toBe(false);
+    expect(s.getLeaderboard()[0]).toMatchObject({ totalEarned: 0, bountiesCompleted: 0 });
+  });
+
+  it("HIGH 2: no runtime path sets verified, a verification job or a score", () => {
+    const { s, b } = claimed();
+    const bounties = loose(s).bounties as Map<string, object> | undefined;
+    if (bounties?.get(b.id)) tryAssign(bounties.get(b.id), { status: "verified", verificationJobId: "invented", verificationScore: 1 });
+    const [after] = s.listBounties();
+    expect(after!.status).toBe("claimed");
+    expect("verificationJobId" in after!).toBe(false);
+    expect("verificationScore" in after!).toBe(false);
+  });
+
+  it("a holder of the shared instance cannot shadow its readers or add state", () => {
+    const { s } = claimed();
+    tryAssign(s, { listBounties: () => [{ status: "paid" }], getLeaderboard: () => [{ totalEarned: 100 }], extra: 1 });
+    expect(s.listBounties()[0]!.status).toBe("claimed");
+    expect(s.getLeaderboard()[0]!.totalEarned).toBe(0);
+    expect(Object.keys(s)).toEqual([]);
+    expect(Object.isFrozen(s)).toBe(true);
+  });
+
+  it("the treasury auto-bounty switch cannot be flipped on after construction", () => {
+    const s = new BountyService();
+    tryAssign(s, { autoCreateTreasuryBounties: true });
+    for (const r of ["r1", "r2", "r3"]) {
+      s.submitDemand(makeDemandInput({ requesterId: r, capabilityType: "ebw", estimatedJobValue: 5000, estimatedFrequency: "daily" }));
+    }
+    expect(s.checkAndCreateBounties()).toEqual([]);
+    expect(s.listBounties()).toEqual([]);
+  });
+
+  it("inputs are copied on the way in: mutating a caller's object later changes nothing stored", () => {
+    const s = new BountyService();
+    const requirements = { ...REQ };
+    s.createBounty({ capabilityType: "hplc", description: "d", bountyReward: 100, currency: "USDC", requirements, expiresInDays: 30 });
+    requirements.mustPassVerification = false;
+    requirements.minimumAssuranceTier = 0;
+    expect(s.listBounties()[0]!.requirements).toEqual(REQ);
+    // An out-of-schema nested value is copied too, never shared.
+    const input = { ...makeDemandInput(), extra: { note: "a" } };
+    s.submitDemand(input);
+    input.extra.note = "b";
+    expect((s.getDemandSignals()[0] as unknown as { extra?: { note: string } }).extra?.note).toBe("a");
   });
 });

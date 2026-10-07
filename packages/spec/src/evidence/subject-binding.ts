@@ -79,6 +79,18 @@
  * copies, deep-frozen. A consumer that evaluates the events further (levels,
  * admission) must evaluate them, not its own objects.
  *
+ * WHAT THE RESULT DOES NOT COMMIT (E11b LOW). The bundle hash commits the
+ * sorted MULTISET of event hashes (hashBundle sorts them and keeps duplicates),
+ * and each event hash commits `type`,
+ * `timestamp`, `source` and `payload`. An event's `id` and the ORDER of
+ * `events` are not committed. They come back as the caller supplied them, for
+ * display and archiving, and the same signed `bundleHash` verifies with any
+ * ids and in any order. So a consumer must treat neither as signed: identify an
+ * event by its `hash`, and when order matters, order by committed fields
+ * (`timestamp`, then `hash`). An archive written from the result (the IPFS
+ * evidence archive) may therefore differ in ids and order for the same
+ * `bundleHash`.
+ *
  * NOTHING REPLACED AFTER LOAD CHANGES AN ANSWER (the realm-mutation residual
  * sensors reproduced against this file, bus #5381).
  *   - The checks call only intrinsics captured when the modules load: those
@@ -185,7 +197,8 @@ export type EvidenceSubjectBindingErrorCode =
   | "unsupported-runtime";
 
 export type EvidenceSubjectBindingResult =
-  /** `events`: the verified copies, in input order, deep-frozen (see the header). */
+  /** `events`: the verified copies, in input order, deep-frozen (see the header). Each event's `id`
+   *  and the order are uncommitted metadata (header: WHAT THE RESULT DOES NOT COMMIT). */
   | { ok: true; events: EvidenceEvent[] }
   | { ok: false; reason: EvidenceSubjectBindingErrorCode; eventIndex?: number };
 

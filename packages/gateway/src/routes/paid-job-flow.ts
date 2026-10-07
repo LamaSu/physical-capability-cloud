@@ -32,11 +32,19 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 import { schema, eq, and, sql } from "@pcc/store";
-import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
-import { applyPricingRules, sanitizeText } from "@pcc/kernel";
+import { sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
+import {
+  SETTLEMENT_CURRENCY,
+  MAX_QUOTE_QUANTITY,
+  centsToDecimal,
+  registeredQuotePrice,
+  validatePricingRules,
+  pricingRulesThatApply,
+  exactQuoteTotal,
+} from "../services/quote-pricing.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
@@ -54,6 +62,8 @@ import {
   GAS_LIMITS,
 } from "../contracts/escrow-client.js";
 import { driveSettlement } from "../services/settlement-crank.js";
+import { buildJobSettlementRead, loadLegacySettlement } from "../readmodels/legacy-settlement.js";
+import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
@@ -764,26 +774,61 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sanitizedSelections[key] = typeof value === "string" ? sanitizeText(value) : value;
       }
 
-      // Auto-compute quote
-      const template = getTemplate(capabilityType);
-      const basePrice = template?.basePricingHints?.basePrice
-        ? parseFloat(template.basePricingHints.basePrice)
-        : 10;
-      const quantity = (sanitizedSelections.quantity as number) ?? 1;
-      const { adjustedPrice, adjustments } = applyPricingRules(
-        basePrice * quantity,
-        policy.pricingRules.filter((r) => r.enabled),
-      );
+      // The quote is the operator's REGISTERED price for the selected capability (N98): never a
+      // template hint, never a default. Exactly one capability of this type on this kernel; job
+      // creation (createJobFromSession) then resolves the same one.
+      const candidates = getRepos().capabilities.findByKernel(kernelId).filter((c) => c.type === capabilityType);
+      if (candidates.length === 0) {
+        return reply.status(404).send({ error: "capability_not_found", message: `No ${capabilityType} capability is registered on this kernel.` });
+      }
+      if (candidates.length > 1) {
+        return reply.status(409).send({ error: "capability_ambiguous", message: `This kernel registers more than one ${capabilityType} capability, so no single price applies.` });
+      }
+      const registered = registeredQuotePrice(candidates[0]!.pricing);
+      if (!registered.ok) {
+        if (registered.reason === "unsupported-currency") {
+          return reply.status(422).send({
+            error: "capability_price_unsupported_currency",
+            currency: registered.currency,
+            settlementCurrency: SETTLEMENT_CURRENCY,
+            message: `This capability is registered in ${registered.currency}, but this gateway settles only in ${SETTLEMENT_CURRENCY}. There is no conversion.`,
+          });
+        }
+        return reply.status(422).send({ error: "capability_price_undeclared", reason: registered.reason, message: "This capability declares no usable price, so it cannot be quoted." });
+      }
+      const quantityRaw = sanitizedSelections.quantity;
+      const quantity = quantityRaw === undefined ? 1 : quantityRaw;
+      if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_QUOTE_QUANTITY) {
+        return reply.status(400).send({ error: "invalid_quantity", message: `quantity must be a whole number from 1 to ${MAX_QUOTE_QUANTITY}.` });
+      }
+      // F4: every rule is validated BEFORE any rule is applied, whether enabled or not — a malformed
+      // policy must never reach quoting, let alone money. All before any side effect (no session row
+      // exists yet).
+      const rulesValidation = validatePricingRules(policy.pricingRules);
+      if (!rulesValidation.ok) {
+        return reply.status(422).send({
+          error: "operator_pricing_policy_invalid",
+          ruleIndex: rulesValidation.ruleIndex,
+          ...(rulesValidation.ruleId !== undefined ? { ruleId: rulesValidation.ruleId } : {}),
+          reason: rulesValidation.reason,
+        });
+      }
+      // Exact arithmetic in cents up to the rules: the registered price times the quantity, never
+      // below the operator's declared minimum. exactQuoteTotal works entirely in bigint (F1): no
+      // money value ever passes through `Number`.
+      let subtotalCents = registered.cents * BigInt(quantity);
+      if (registered.minimumCents !== null && subtotalCents < registered.minimumCents) subtotalCents = registered.minimumCents;
+      const applicableRules = pricingRulesThatApply(rulesValidation.rules, { quantity, material: sanitizedSelections.material });
+      const { totalCents, adjustments } = exactQuoteTotal(subtotalCents, applicableRules);
 
       const quote = {
-        basePrice: basePrice.toFixed(2),
-        adjustments: adjustments.map((a) => ({
-          ruleId: a.ruleId,
-          label: a.label,
-          impact: a.amount.toFixed(2),
-        })),
-        totalPrice: adjustedPrice.toFixed(2),
-        currency: template?.basePricingHints?.currency ?? "USDC",
+        basePrice: centsToDecimal(registered.cents),
+        adjustments,
+        totalPrice: centsToDecimal(totalCents),
+        currency: registered.currency,
+        // Rates the registered pricing declares per unit of usage, which a discovery quote cannot
+        // measure: shown so the buyer sees them, and not charged by this quote.
+        ...(Object.keys(registered.usage).length > 0 ? { unquotedUsage: registered.usage } : {}),
         bondAmount: "0.00",
         challengeWindowSeconds: 0,
         validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
@@ -1913,121 +1958,30 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
   // ═════════════════════════════════════════════════════════════════════
   // GET /api/jobs/:jobId/settlement — Settlement status
   // ═════════════════════════════════════════════════════════════════════
+  //
+  // A projection of the execution read model's settlement axis (legacy-settlement.ts):
+  // `status`, `settled` and `paidAmount` say only what this job's own escrow records show.
+  // A completed job is never "settled" by its row, a mock escrow is "simulated", and
+  // `paidAmount` is null unless a settlement read confirms this job's release (no gateway
+  // record does: a recorded release is `reported_released`, its amount `reportedReleasedAmount`).
+  // Read behind #353's identity-first object authorization (see loadLegacySettlement).
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
-    const { jobId } = req.params;
-
-    try {
-      const repos = getRepos();
-      const { db } = getStore();
-
-      const job = repos.jobs.findById(jobId);
-      if (!job) {
-        return reply.status(404).send({ error: "Job not found" });
-      }
-
-      // Look up negotiation session for escrow info
-      const sessionRow = db.select().from(negotiationSessions)
-        .where(eq(negotiationSessions.jobId, jobId))
-        .get();
-
-      const escrowAddress = sessionRow?.escrowAddress ?? null;
-      let escrowData: Record<string, unknown> | null = null;
-      let milestoneData: Array<Record<string, unknown>> = [];
-
-      // Look up escrow details
-      if (sessionRow?.cwmId) {
-        const escrow = repos.escrows.findByCwm(sessionRow.cwmId);
-        if (escrow) {
-          escrowData = {
-            id: escrow.id,
-            contractAddress: escrow.contractAddress,
-            totalAmount: escrow.totalAmount,
-            currency: escrow.currency,
-            escrowStatus: escrow.status,
-            deadline: escrow.deadline,
-          };
-
-          const milestones = repos.escrows.findMilestonesByEscrow(escrow.id);
-          milestoneData = milestones.map((ms) => ({
-            id: ms.id,
-            stepId: ms.stepId,
-            amount: ms.amount,
-            bondAmount: ms.bondAmount,
-            status: ms.status,
-            evidenceBundleHash: ms.evidenceBundleHash,
-            challengeWindowStart: ms.challengeWindowStart,
-            challengeWindowEnd: ms.challengeWindowEnd,
-          }));
-        }
-      }
-
-      // Look up evidence
-      const bundles = repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
-
-      // Map job status to settlement status
-      let settlementStatus: string;
-      switch (job.status) {
-        case "pending":
-          settlementStatus = "pending";
-          break;
-        case "active":
-        case "executing":
-        case "queued":
-        case "preparing":
-          settlementStatus = "executing";
-          break;
-        case "evidence_stored":
-        case "evidence_submitted":
-        case "collecting_evidence":
-          settlementStatus = "evidence_submitted";
-          break;
-        case "settled":
-          settlementStatus = "settled";
-          break;
-        case "completed":
-          settlementStatus = "settled";
-          break;
-        case "failed":
-        case "cancelled":
-          settlementStatus = "cancelled";
-          break;
-        default:
-          settlementStatus = job.status;
-      }
-
-      // Check if escrow is funded
-      if (settlementStatus === "pending" && escrowData) {
-        const eStatus = escrowData.escrowStatus as string;
-        if (eStatus === "funded" || eStatus === "active") {
-          settlementStatus = "funded";
-        }
-      }
-
-      const quote = sessionRow?.quote as Record<string, unknown> | null;
-
-      return {
-        jobId: job.id,
-        status: settlementStatus,
-        escrowAddress,
-        evidenceHash: latestBundle?.bundleHash ?? null,
-        evidenceBundleId: latestBundle?.id ?? job.evidenceBundleId ?? null,
-        milestones: milestoneData,
-        paidAmount: (escrowData?.totalAmount as string) ?? quote?.totalPrice ?? null,
-        currency: (escrowData?.currency as string) ?? (quote?.currency as string) ?? "USDC",
-        escrow: escrowData,
-        session: sessionRow ? {
-          id: sessionRow.id,
-          capabilityType: sessionRow.capabilityType,
-          committedAt: sessionRow.committedAt,
-        } : null,
-      };
-    } catch (err) {
-      return reply.status(500).send({
-        error: "query_failed",
-        details: err instanceof Error ? err.message : String(err),
+    const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
+      return reply.status(refusal.status).send(refusal.body);
+    }
+    if (loaded.kind === "unavailable") {
+      return reply.status(503).send({
+        error: "read_model_unavailable",
+        message: "The job record could not be read. Try again shortly.",
       });
     }
+    if (loaded.kind === "not_found") {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+    reply.header("cache-control", "no-store");
+    return buildJobSettlementRead(loaded.job, loaded.sources, loaded.dto, loaded.sessions);
   });
 }
