@@ -1008,7 +1008,7 @@ describe("D: every write entry point goes through the same policy (chain Plan)",
     expect(ps[0]!.headers["Idempotency-Key"]).toMatch(/^idem-/);
     expect(ps[0]!.body).toMatchObject({ outcomeType: "pizza", budgetUSD: 25, minAssuranceTier: 0 });
     expect(document.body.textContent).toContain("oven");
-    expect(document.body.textContent).toContain("total 12.00 USDC");
+    expect(document.body.textContent).toContain("estimated total: 12.00 USDC (planner's estimate)"); // R12: an estimate, never a fact
     // Execute is still a money write: it needs the kit-owned approval.
     expect((Array.from(document.querySelectorAll("button")) as HTMLButtonElement[]).find((b) => (b.textContent || "").indexOf("Execute") === 0)!.textContent).toBe("Execute · needs approval");
   });
@@ -1322,7 +1322,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     expect(text(".pcc-win .pcc-realreq-blocked")).toContain('"__proto__"');
     const block = text(".pcc-win .pcc-realreq") || "";
     expect(block).not.toContain("benign");
-    expect(block).not.toContain("Amount 1.00");
+    expect(block).not.toContain("This request would pay 1.00");
     btn("Approve").click();
     await flush();
     expect(posts(calls).length).toBe(0);
@@ -1359,7 +1359,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     const calls = installFetch(() => ({ status: 200 }));
     boot(act({ path: FUND, body: { amount: 1, totalAmount: 1000000 } }));
     btn("Go").click();
-    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["amount 1.00 (no currency in the request)", "totalAmount 1,000,000.00 (no currency in the request)"]);
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["amount in this request: 1.00 (no currency in the request)", "totalAmount in this request: 1,000,000.00 (no currency in the request)"]);
     gateApproveBtn()!.click();
     await flush();
     expect(posts(calls)[0]!.body).toMatchObject({ amount: 1, totalAmount: 1000000 });
@@ -1377,7 +1377,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     const body = { escrowId: "esc-1", amount: 21.99, payee: "0xevil", split: { a: 1 }, note: "5" };
     boot(man([{ ...approvalWin, approve: { ...approvalWin.approve, body } }]));
     await flush();
-    expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["Amount 21.99 (no currency in the request)"]);
+    expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["This request would pay 21.99 (no currency in the request)"]);
     expect(all(".pcc-win .pcc-realreq-ref")).toEqual(["ref esc-1"]);
     expect(bodyRows(".pcc-win")).toEqual([["payee", 'reported: "0xevil"'], ["split", 'reported: {"a":1}'], ["note", 'reported: "5"'], ["idempotencyKey", "set by the kit when sent"]]);
     btn("Approve").click();
@@ -1392,7 +1392,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     const body = { amount: 3, currency: "USDC", asset: "ETH", jobId: "j1", offerId: "o1", memo: "m", n: null, deep: { x: [1, 2] } };
     boot(act({ path: FUND, body }));
     btn("Go").click();
-    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["Amount 3.00 USDC"]); // amount + its currency
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["This request would pay 3.00 USDC"]); // amount + its currency
     expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId j1", "offerId o1"]);
     expect(bodyRows(".pcc-overlay")).toEqual([["asset", 'reported: "ETH"'], ["memo", 'reported: "m"'], ["n", "reported: null"], ["deep", 'reported: {"x":[1,2]}'], ["idempotencyKey", "set by the kit when sent"]]);
     gateApproveBtn()!.click();
@@ -1403,9 +1403,9 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
   it("an amount that is not a plain number is shown as sent, never coerced into a sum", () => {
     installFetch(() => ({ status: 200 }));
     const cases: Array<[unknown, string]> = [
-      [true, "Amount true (no currency in the request)"], [[1000], "Amount [1000] (no currency in the request)"],
-      ["0x0F4240", 'Amount "0x0F4240" (no currency in the request)'], [{ v: 5 }, 'Amount {"v":5} (no currency in the request)'],
-      ["21.99", "Amount 21.99 (no currency in the request)"], [12, "Amount 12.00 (no currency in the request)"],
+      [true, "This request would pay true (no currency in the request)"], [[1000], "This request would pay [1000] (no currency in the request)"],
+      ["0x0F4240", 'This request would pay "0x0F4240" (no currency in the request)'], [{ v: 5 }, 'This request would pay {"v":5} (no currency in the request)'],
+      ["21.99", "This request would pay 21.99 (no currency in the request)"], [12, "This request would pay 12.00 (no currency in the request)"],
     ];
     for (const [amount, shown] of cases) {
       boot(act({ path: FUND, body: { amount } }));
@@ -1439,7 +1439,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     expect(record.textContent).toContain("The bound record says (context, not what will be sent)");
     expect(record.textContent).toContain("Free sample - no charge");
     expect(document.querySelector(".pcc-win .pcc-approval-cost")).toBeNull(); // the record's 0.01 is not shown as a cost
-    expect(text(".pcc-win .pcc-realreq-amt")).toBe("Amount 5,000.00 USDC");
+    expect(text(".pcc-win .pcc-realreq-amt")).toBe("This request would pay 5,000.00 USDC");
   });
 
   it("F1: a record amount that no request amount matches raises a kit warning (st-failed)", async () => {
@@ -1475,8 +1475,8 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
   it("F2: an amount is never rounded for display: a value two decimals cannot hold is shown as sent", () => {
     installFetch(() => ({ status: 200 }));
     const cases: Array<[unknown, string]> = [
-      [0.0049, "Amount 0.0049 ETH"], ["0.0049", 'Amount "0.0049" ETH'], [1234.5678, "Amount 1234.5678 ETH"],
-      [0.005, "Amount 0.005 ETH"], [12.5, "Amount 12.50 ETH"], ["1,000", 'Amount "1,000" ETH'],
+      [0.0049, "This request would pay 0.0049 ETH"], ["0.0049", 'This request would pay "0.0049" ETH'], [1234.5678, "This request would pay 1234.5678 ETH"],
+      [0.005, "This request would pay 0.005 ETH"], [12.5, "This request would pay 12.50 ETH"], ["1,000", 'This request would pay "1,000" ETH'],
     ];
     for (const [amount, shown] of cases) {
       boot(act({ path: FUND, body: { amount, asset: "ETH" } }));
@@ -1489,10 +1489,10 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     installFetch(() => ({ status: 200 }));
     boot(act({ path: FUND, body: { amount: 5 } }));
     btn("Go").click();
-    expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("Amount 5.00 (no currency in the request)");
+    expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("This request would pay 5.00 (no currency in the request)");
     boot(act({ path: FUND, body: { amount: 5, currency: "" } }));
     btn("Go").click();
-    expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("Amount 5.00 (no currency in the request)");
+    expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("This request would pay 5.00 (no currency in the request)");
     expect(rows(".pcc-overlay")).toContainEqual(["currency", 'reported: ""']);
   });
 

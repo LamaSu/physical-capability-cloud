@@ -124,7 +124,7 @@ export const SCHEMA_FIELDS: Readonly<Record<BindSchema, SchemaSpec>> = Object.fr
     fields: Object.freeze<SchemaField[]>([
       { label: kitText("Name"), key: "name", kind: "text", required: true },
       { label: kitText("Type"), key: "type", kind: "capType", required: true },
-      { label: kitText("Base cost"), key: "pricing.baseCost", kind: "amount", money: true },
+      { label: kitText("Listed price (operator's listing)"), key: "pricing.baseCost", kind: "amount", money: true },
       { label: kitText("Currency"), key: "pricing.currency", kind: "currency", money: true },
       { label: kitText("Assurance tiers"), key: "assuranceTiers", kind: "tiers" },
       { label: kitText("Available"), key: "available", kind: "bool" },

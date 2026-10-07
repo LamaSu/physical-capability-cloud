@@ -139,9 +139,10 @@ describe("pcc-ui kit renders a manifest in snapshot mode (offline, no gateway)",
     await flush();
     expect(document.querySelector(".pcc-metric-amount")!.textContent).toContain("21.99");
     expect(document.querySelector(".pcc-receipt-num")!.textContent).toContain("21.99");
-    // The snapshot's email and kernel id are not address/hash values.
+    // R12: a legacy escrow record's parties are attributed: an id stays an id, anything else is reported
+    // (never "unrecognised value" for a valid kernel id).
     expect(Array.from(document.querySelectorAll(".pcc-receipt-parties .pcc-mono")).map((node) => node.textContent))
-      .toEqual(["unrecognised value", "unrecognised value"]);
+      .toEqual(["reported: you@example.com", "kernel_dominos_7764"]);
     expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain("escrow-milestone");
   });
 

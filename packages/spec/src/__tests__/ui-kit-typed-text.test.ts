@@ -380,9 +380,9 @@ describe("a helper deleted from a mapped sink", () => {
     expect(text(".pcc-approval-what")).toBe("The dashboard calls this: “Print parts”");
     expect(text(".pcc-approval-rationale")).toBe("The dashboard calls this: “Use the mill”");
     expect(text(".pcc-approval-record .pcc-args-v")).toBe("reported: PLA");
-    expect(text(".pcc-receipt-cur")).toBe(" currency not reported");
+    expect(text(".pcc-receipt-cur")).toBe(" (currency not reported) (PCC escrow service)"); // R12: attributed legacy amount
     expect(Array.from(document.querySelectorAll(".pcc-receipt-parties .pcc-mono")).map((node) => node.textContent))
-      .toEqual(["unrecognised value", "0x" + "ab".repeat(20)]);
+      .toEqual(["short", "0x" + "ab".repeat(20)]); // R12: a legacy party in the id grammar stays an id
     expect(text(".pcc-receipt-rail")).toContain(" · reported: bad rail");
     expect(text(".pcc-receipt-tx")).toBe("unrecognised value");
     expect(text(".pcc-chain-outcome")).toBe("reported: bad type");
