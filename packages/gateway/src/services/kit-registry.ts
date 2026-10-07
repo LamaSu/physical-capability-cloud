@@ -49,6 +49,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   canonicalize,
+  CSD_CAPABILITY_URL_PATTERN,
   computeKitDigest,
   normalizeKitManifest,
   validateKitCompleteness,
@@ -61,8 +62,13 @@ import { isValidRegistryDigest } from "./registry-snapshot-store.js";
 export const MAX_KIT_MANIFEST_BYTES = 256 * 1024;
 /** Default number of NEW kits one publisher may create in a rolling 24 hours. */
 export const DEFAULT_KIT_PUBLISH_DAILY_LIMIT = 20;
+/** Default number of bindings one principal may create in a rolling 24 hours. */
+export const DEFAULT_KIT_BIND_DAILY_LIMIT = 50;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const PUBLICATION_SCHEMA = "pcc.kit-publication.v1" as const;
+const BINDING_SCHEMA = "pcc.kit-binding.v0" as const;
+const WITHDRAWAL_SCHEMA = "pcc.kit-binding-withdrawal.v0" as const;
+const BINDING_ID = /^kb_[0-9a-f]{32}$/;
 
 /** The server-side publication record. Never returned by a route. */
 export interface KitPublicationRecord {
@@ -80,6 +86,43 @@ const PublicationRecordSchema = z
     publishedAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s),
   })
   .strict();
+
+const BindingRecordSchema = z.object({
+  schema: z.literal(BINDING_SCHEMA),
+  bindingId: z.string().regex(BINDING_ID),
+  kitDigest: z.string().refine(isValidRegistryDigest),
+  csdUrl: z.string().regex(CSD_CAPABILITY_URL_PATTERN),
+  target: z.object({
+    kind: z.literal("kernel"),
+    kernelId: z.string().min(1).max(200),
+    capabilityId: z.string().min(1).max(200),
+  }).strict(),
+  identityStatus: z.enum(["proven", "self_asserted"]),
+  boundBy: z.string().regex(/^[0-9a-f]{64}$/),
+  boundAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s),
+}).strict();
+
+const BindingWithdrawalRecordSchema = z.object({
+  schema: z.literal(WITHDRAWAL_SCHEMA),
+  bindingId: z.string().regex(BINDING_ID),
+  withdrawnAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s),
+  identityStatus: z.enum(["proven", "self_asserted"]),
+  withdrawnBy: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+
+/** Server-side records; principal hashes are omitted from route responses. */
+export type KitBindingRecord = z.infer<typeof BindingRecordSchema>;
+export type KitBindingWithdrawalRecord = z.infer<typeof BindingWithdrawalRecordSchema>;
+export interface KitBindingEntry {
+  binding: KitBindingRecord;
+  withdrawal: KitBindingWithdrawalRecord | null;
+}
+export type BindingRead = KitBindingEntry;
+
+type CreateBindingInput = Omit<KitBindingRecord, "schema" | "bindingId" | "boundAt">
+  & Partial<Pick<KitBindingRecord, "schema" | "bindingId" | "boundAt">>;
+type WithdrawBindingInput = Omit<KitBindingWithdrawalRecord, "schema" | "withdrawnAt">
+  & Partial<Pick<KitBindingWithdrawalRecord, "schema" | "withdrawnAt">>;
 
 /** A verified kit as the routes return it: content and publication time, no publisher. */
 export interface KitView {
@@ -148,6 +191,8 @@ export interface KitRegistryOptions {
   now?: () => Date;
   /** New kits per publisher per rolling 24 h; default PCC_KIT_PUBLISH_DAILY_LIMIT or 20. */
   dailyLimit?: number;
+  /** New bindings per principal per rolling 24 h; default PCC_KIT_BIND_DAILY_LIMIT or 50. */
+  bindDailyLimit?: number;
   /** Audit sink; default auditService.log. */
   audit?: (entry: AuditEntry) => void;
   /** Whether the root is durable enough to publish to; default isDurableKitRoot(). */
@@ -180,6 +225,12 @@ function configuredDailyLimit(): number {
   return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_KIT_PUBLISH_DAILY_LIMIT;
 }
 
+function configuredBindDailyLimit(): number {
+  const raw = process.env.PCC_KIT_BIND_DAILY_LIMIT;
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULT_KIT_BIND_DAILY_LIMIT;
+}
+
 const utf8 = new TextEncoder();
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
@@ -205,6 +256,7 @@ export class KitRegistry {
   private readonly rootDir: string;
   private readonly now: () => Date;
   private readonly dailyLimit: number;
+  private readonly bindDailyLimit: number;
   private readonly audit: (entry: AuditEntry) => void;
   private readonly durable: () => boolean;
   /** O_NOFOLLOW, or 0 when this runtime has none: then the registry refuses to read or publish (astra k1b). */
@@ -213,11 +265,13 @@ export class KitRegistry {
   private linksChecked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private lastSkipped: string[] = [];
+  private lastSkippedBindings: string[] = [];
 
   constructor(options: KitRegistryOptions = {}) {
     this.rootDir = options.rootDir ?? resolveKitRegistryRoot();
     this.now = options.now ?? (() => new Date());
     this.dailyLimit = options.dailyLimit ?? configuredDailyLimit();
+    this.bindDailyLimit = options.bindDailyLimit ?? configuredBindDailyLimit();
     this.audit = options.audit ?? ((entry) => auditService.log(entry));
     this.durable = options.durable ?? isDurableKitRoot;
     this.noFollow = options.noFollowFlag ?? fsConstants.O_NOFOLLOW ?? 0;
@@ -226,6 +280,21 @@ export class KitRegistry {
   /** Digests the latest listing skipped because they failed verification. */
   get skipped(): readonly string[] {
     return this.lastSkipped;
+  }
+
+  /** Binding ids or shards the latest binding scan skipped because they failed verification. */
+  get skippedBindings(): readonly string[] {
+    return this.lastSkippedBindings;
+  }
+
+  /** The registry's clock, shared by binding records and their projections. */
+  timestamp(): Date {
+    return this.now();
+  }
+
+  /** Binding events use the same audit sink as publications. */
+  auditBinding(entry: AuditEntry): void {
+    this.audit(entry);
   }
 
   // ── Reads ──────────────────────────────────────────────────────────
@@ -264,6 +333,91 @@ export class KitRegistry {
   async publisherOf(kitDigest: string): Promise<string | null> {
     if (!isValidRegistryDigest(kitDigest)) return null;
     return (await this.readVerified(kitDigest))?.record.publisher ?? null;
+  }
+
+  /** A verified binding and its withdrawal, or null when the binding is absent. */
+  async readBinding(bindingId: string): Promise<KitBindingEntry | null> {
+    if (!BINDING_ID.test(bindingId)) return null;
+    const binding = await this.readBindingRecord("bindings", bindingId, BindingRecordSchema);
+    if (!binding) return null;
+    const withdrawal = await this.readBindingRecord("binding-withdrawals", bindingId, BindingWithdrawalRecordSchema);
+    return { binding, withdrawal };
+  }
+
+  /** Verified bindings read from disk now, including any first withdrawal. */
+  async listBindings(filter: { kitDigest?: string; kernelIds?: readonly string[] } = {}): Promise<KitBindingEntry[]> {
+    const entries = await this.scanBindings();
+    const kernels = filter.kernelIds === undefined ? null : new Set(filter.kernelIds);
+    return entries.filter(({ binding }) =>
+      (filter.kitDigest === undefined || binding.kitDigest === filter.kitDigest)
+      && (kernels === null || kernels.has(binding.target.kernelId)));
+  }
+
+  /** Check the active tuple, claim quota and create on one write queue entry. */
+  createBindingIfAbsent(input: CreateBindingInput, principal: string, now: Date): Promise<{ binding: KitBindingRecord; created: boolean }> {
+    const run = this.queue.then(async () => {
+      const existing = (await this.listBindings({ kitDigest: input.kitDigest, kernelIds: [input.target.kernelId] }))
+        .filter(({ binding, withdrawal }) => withdrawal === null && binding.csdUrl === input.csdUrl
+          && binding.target.capabilityId === input.target.capabilityId)
+        .map(({ binding }) => binding)
+        .sort((a, b) => Date.parse(a.boundAt) - Date.parse(b.boundAt)
+          || (a.bindingId < b.bindingId ? -1 : a.bindingId > b.bindingId ? 1 : 0))[0];
+      if (existing) return { binding: existing, created: false };
+      await this.ensureBindingWritesSupported();
+      await this.claimQuota(principal, input.kitDigest, now, "binding-quota", this.bindDailyLimit,
+        () => new KitRegistryError("bind_quota", 429, `at most ${this.bindDailyLimit} new bindings per principal per 24 hours`));
+      return { binding: await this.createBinding(input), created: true };
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Unqueued immutable create; production calls it only inside createBindingIfAbsent's queue entry. */
+  private async createBinding(input: CreateBindingInput): Promise<KitBindingRecord> {
+    await this.ensureBindingWritesSupported();
+    const parsed = BindingRecordSchema.safeParse({
+      schema: BINDING_SCHEMA,
+      bindingId: `kb_${randomUUID().replaceAll("-", "")}`,
+      boundAt: this.now().toISOString(),
+      ...input,
+    });
+    if (!parsed.success) throw new KitRegistryError("invalid_binding", 400, "the binding record is invalid");
+    const record = parsed.data;
+    const dir = (await this.dirFor("bindings", record.bindingId.slice(3, 5), true))!;
+    if (!(await this.createOnce(dir, `${record.bindingId}.json`, canonicalize(record)))) {
+      throw new KitRegistryError("binding_exists", 409, "a binding with that id already exists");
+    }
+    const stored = await this.readBindingRecord("bindings", record.bindingId, BindingRecordSchema);
+    if (!stored) throw new KitIntegrityError(record.bindingId, "the binding record vanished after it was written");
+    return stored;
+  }
+
+  /** The first immutable withdrawal wins; subsequent calls return its original time. */
+  withdrawBinding(input: WithdrawBindingInput): Promise<{ record: KitBindingWithdrawalRecord; created: boolean }> {
+    const run = this.queue.then(async () => {
+      await this.ensureBindingWritesSupported();
+      const parsed = BindingWithdrawalRecordSchema.safeParse({
+        schema: WITHDRAWAL_SCHEMA,
+        withdrawnAt: this.now().toISOString(),
+        ...input,
+      });
+      if (!parsed.success) throw new KitRegistryError("invalid_binding", 400, "the binding withdrawal record is invalid");
+      const record = parsed.data;
+      const dir = (await this.dirFor("binding-withdrawals", record.bindingId.slice(3, 5), true))!;
+      const created = await this.createOnce(dir, `${record.bindingId}.json`, canonicalize(record));
+      const stored = await this.readBindingRecord("binding-withdrawals", record.bindingId, BindingWithdrawalRecordSchema);
+      if (!stored) throw new KitIntegrityError(record.bindingId, "the withdrawal record vanished after it was written");
+      return { record: stored, created };
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async ensureBindingWritesSupported(): Promise<void> {
+    if (!this.durable()) {
+      throw new KitRegistryError("registry_not_durable", 503, "the kit registry has no durable storage in this environment");
+    }
+    await this.ensureLinksSupported();
   }
 
   // ── Publish ────────────────────────────────────────────────────────
@@ -328,7 +482,8 @@ export class KitRegistry {
 
     await this.ensureLinksSupported();
     const now = this.now();
-    await this.claimQuota(publisher, kitDigest, now);
+    await this.claimQuota(publisher, kitDigest, now, "quota", this.dailyLimit,
+      () => new KitRegistryError("publish_quota", 429, `at most ${this.dailyLimit} new kits per publisher per 24 hours`));
     await this.writeManifestOnce(kitDigest, bytes);
     const { record, created } = await this.writePublicationOnce({
       schema: PUBLICATION_SCHEMA,
@@ -466,24 +621,25 @@ export class KitRegistry {
   }
 
   /**
-   * Claim the publisher's next quota slot, exactly across processes: claim n
-   * (an exclusive create) needs claim n - dailyLimit to be at least 24 hours
-   * old. A claim is spent even if the publish then fails (conservative).
+   * Claim the principal's next quota slot, exactly across processes: claim n
+   * (an exclusive create) needs claim n - limit to be at least 24 hours old.
+   * A claim is spent even if the subsequent record write fails.
    */
-  private async claimQuota(publisher: string, kitDigest: string, now: Date): Promise<void> {
+  private async claimQuota(
+    publisher: string, kitDigest: string, now: Date, area: string, limit: number, refused: () => KitRegistryError,
+  ): Promise<void> {
     const owner = createHash("sha256").update(publisher, "utf8").digest("hex");
     const root = await this.root();
-    const quotaDir = path.join(root, "quota");
+    const quotaDir = path.join(root, area);
     await fs.mkdir(quotaDir, { recursive: true });
-    const dir = (await this.dirFor("quota", owner, true))!;
-    const refused = () => new KitRegistryError("publish_quota", 429, `at most ${this.dailyLimit} new kits per publisher per 24 hours`);
+    const dir = (await this.dirFor(area, owner, true))!;
     for (let attempt = 0; attempt < 16; attempt++) {
       let next = 0;
       for (const entry of await fs.readdir(dir)) {
         const m = CLAIM_NAME.exec(entry);
         if (m) next = Math.max(next, Number(m[1]) + 1);
       }
-      const back = next - this.dailyLimit;
+      const back = next - limit;
       if (back >= 0) {
         const old = await this.readNoFollow(dir, `${back}.json`, kitDigest);
         let claimedAt = Number.POSITIVE_INFINITY;
@@ -497,7 +653,72 @@ export class KitRegistry {
       if (await this.createOnce(dir, `${next}.json`, canonicalize({ claimedAt: now.toISOString(), kitDigest }))) return;
       // Another process took claim `next`; look again.
     }
-    throw new KitRegistryError("publish_busy", 503, "too many concurrent publishes for this publisher; retry");
+    throw area === "quota"
+      ? new KitRegistryError("publish_busy", 503, "too many concurrent publishes for this publisher; retry")
+      : new KitRegistryError("bind_busy", 503, "too many concurrent binding claims for this principal; retry");
+  }
+
+  /** Verify a binding record's UTF-8, schema, canonical bytes and file identity. */
+  private async readBindingRecord<T extends { bindingId: string }>(area: string, bindingId: string, schema: z.ZodType<T>): Promise<T | null> {
+    const dir = await this.dirFor(area, bindingId.slice(3, 5), false);
+    if (!dir) return null;
+    const raw = await this.readNoFollow(dir, `${bindingId}.json`, bindingId);
+    if (!raw) return null;
+    let text: string;
+    let record: T;
+    try {
+      text = strictUtf8.decode(raw);
+      record = schema.parse(JSON.parse(text));
+    } catch {
+      throw new KitIntegrityError(bindingId, "the binding record is malformed");
+    }
+    const canonical = utf8.encode(canonicalize(record));
+    if (record.bindingId !== bindingId || raw.length !== canonical.length || raw.some((byte, i) => byte !== canonical[i])) {
+      throw new KitIntegrityError(bindingId, "the binding record does not match its file identity or canonical form");
+    }
+    return record;
+  }
+
+  /** Scan bindings afresh and remember records or shards that fail verification. */
+  private async scanBindings(): Promise<KitBindingEntry[]> {
+    const entries: KitBindingEntry[] = [];
+    const skipped: string[] = [];
+    const area = path.join(await this.root(), "bindings");
+    let st;
+    try {
+      st = await fs.lstat(area);
+    } catch (err) {
+      if (errnoOf(err) === "ENOENT") {
+        this.lastSkippedBindings = skipped;
+        return entries;
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) throw new KitIntegrityError("(bindings)", "a registry directory is a symlink or not a directory");
+    for (const shard of (await fs.readdir(area)).sort()) {
+      if (!/^[0-9a-f]{2}$/.test(shard)) continue;
+      let names: string[];
+      try {
+        const dir = await this.dirFor("bindings", shard, false);
+        names = dir ? (await fs.readdir(dir)).sort() : [];
+      } catch {
+        skipped.push(`(bindings/${shard})`);
+        continue;
+      }
+      for (const name of names) {
+        const match = /^(kb_([0-9a-f]{32}))\.json$/.exec(name);
+        if (!match || !match[2]!.startsWith(shard)) continue;
+        const bindingId = match[1]!;
+        try {
+          const entry = await this.readBinding(bindingId);
+          if (entry) entries.push(entry);
+        } catch {
+          skipped.push(bindingId);
+        }
+      }
+    }
+    this.lastSkippedBindings = skipped;
+    return entries;
   }
 
   /** The publication record, or null when absent. Throws KitIntegrityError on a malformed record or a symlink. */
