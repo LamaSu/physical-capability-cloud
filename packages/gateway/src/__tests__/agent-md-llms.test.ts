@@ -18,7 +18,12 @@ describe("agent golden path public index", () => {
   });
 
   it("does not publish hand-kept tool counts", () => {
-    expect(llms).not.toMatch(/\b\d+\s+(?:real\s+)?tools\b/i);
+    // Opus r1 F6: a number within two words of "tool" or "tools", on either side, so "256 MCP tools",
+    // "253 tool definitions", "250+ tools" and "tools: 77" are caught, not only "254 real tools".
+    const toolCounts = [/\b\d[\d,]*\+?\s+(?:\S+\s+){0,2}tools?\b/i, /\btools?\b\W*(?:\S+\s+){0,2}\(?\d/i];
+    for (const [name, text] of [["llms.txt", llms], ["agent.md", readSource("apps/dashboard/public/.well-known/agent.md")]]) {
+      for (const pattern of toolCounts) expect(text.match(pattern)?.[0], `${name} states a tool count`).toBeUndefined();
+    }
     expect(llms).not.toContain("254");
   });
 

@@ -114,6 +114,34 @@ function privateKeyPaths(value: unknown, path: string[] = []): string[] {
   ]);
 }
 
+/** Every string leaf of a body, with its dotted path. */
+function stringLeaves(value: unknown, path: string[] = []): Array<[string, string]> {
+  if (typeof value === "string") return [[path.join("."), value]];
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, child]) => stringLeaves(child, [...path, key]));
+}
+
+/**
+ * Opus r1 F6: a name-based scan misses a secret under another name (usage.header and usage.example
+ * repeat the raw key). Every path whose string holds the API key or a private-key value must be
+ * store-only and absent from the fields to read. Returns the paths it found.
+ */
+function expectSecretValuesStoreOnly(body: Record<string, unknown>): string[] {
+  const leaves = stringLeaves(body);
+  const secrets = [
+    body.api_key as string,
+    ...leaves.filter(([path]) => /private_key/.test(path.split(".").at(-1) ?? "")).map(([, value]) => value),
+  ];
+  for (const secret of secrets) expect(typeof secret === "string" && secret.length >= 32).toBe(true);
+  const holders = leaves.filter(([, value]) => secrets.some((secret) => value.includes(secret))).map(([path]) => path);
+  const provision = provisionAction();
+  for (const path of holders) {
+    expect(names(provision.storeOnlyFields, path), `${path} holds a secret value: it must be store-only`).toBe(true);
+    expect(names(provision.responseFields, path), `${path} holds a secret value: it must not be read`).toBe(false);
+  }
+  return holders;
+}
+
 /** Every emitted path must be a documented response field and named in the request prose. */
 function expectDocumented(paths: string[]): void {
   const provision = provisionAction();
@@ -171,6 +199,7 @@ describe("agent golden path names every private key the provision response carri
     expect(paths).toContain("operator_wallet.private_key");
     expect(paths.filter((path) => /^ed25519\..*private_key/.test(path))).toEqual([]);
     expectDocumented(paths);
+    expect(expectSecretValuesStoreOnly(body)).toEqual(expect.arrayContaining(["api_key", "usage.header", "usage.example", ...paths]));
   });
 
   it("identity write off, no publicKey: both encodings of the minted Ed25519 private key", async () => {
@@ -192,6 +221,7 @@ describe("agent golden path names every private key the provision response carri
     const paths = privateKeyPaths(body);
     expect(paths).toEqual(expect.arrayContaining(["ed25519.private_key", "ed25519.private_key_pkcs8_base64"]));
     expectDocumented(paths);
+    expect(expectSecretValuesStoreOnly(body)).toEqual(expect.arrayContaining(["api_key", "usage.header", "usage.example", ...paths]));
   });
 });
 
@@ -287,6 +317,7 @@ describe("agent golden path captures the provision response without leaking it (
           const validate = await run("bash", ["-c", (validateAction().recipe ?? []).join("\n")], { cwd: dir, env });
 
           const body = JSON.parse(readFileSync(join(dir, ".pcc/provision.json"), "utf8"));
+          expectSecretValuesStoreOnly(body);
           const secrets: string[] = [
             body.api_key, body.ed25519.private_key, body.ed25519.private_key_pkcs8_base64, body.operator_wallet.private_key,
           ];

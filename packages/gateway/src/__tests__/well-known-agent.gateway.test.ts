@@ -71,3 +71,39 @@ describe("/.well-known/agent.md through the real gateway (Opus r1 F4)", () => {
     expect(await rawStatus("/.well-known/%61gent.md")).toBe(400);
   });
 });
+
+/**
+ * Opus r1 F6: agent.md's auth labels were hand-kept, and no test tied them to the gate. Each buyer
+ * action is sent with no key and an empty body: a "public" action must not get apiGate's 401
+ * api_key_required (nor a 402); a "Bearer <key> required" action must get exactly that 401.
+ */
+describe("each buyer action's auth label matches the real gateway (Opus r1 F6)", () => {
+  interface LabelledAction { method: string; route: string; auth: string }
+  const buyer = JSON.parse(readFileSync(new URL("../../../../starter/buyer/buyer-path.json", import.meta.url), "utf8")) as {
+    steps: Array<{ actions: LabelledAction[] }>;
+    reporting: LabelledAction;
+  };
+  const actions = [...buyer.steps.flatMap((step) => step.actions), buyer.reporting];
+
+  it("labels every action public or key-required", () => {
+    expect(actions.length).toBeGreaterThan(5);
+    for (const { auth } of actions) expect(auth).toMatch(/^public\b|^Authorization: Bearer <key> required\b/);
+  });
+
+  for (const action of actions) {
+    it(`${action.method} ${action.route} with no key: ${action.auth.startsWith("public") ? "not refused by the gate" : "401 api_key_required"}`, async () => {
+      const res = await app.inject({
+        method: action.method as "GET" | "POST",
+        url: action.route.replace(/\{[^}]+\}/g, "auth-label-probe"),
+        ...(action.method === "GET" ? {} : { payload: {} }),
+      });
+      const refusedByGate = res.statusCode === 401 && JSON.parse(res.body).error === "api_key_required";
+      if (action.auth.startsWith("public")) {
+        expect(refusedByGate, `${res.statusCode} ${res.body.slice(0, 120)}`).toBe(false);
+        expect(res.statusCode).not.toBe(402);
+      } else {
+        expect(refusedByGate, `${res.statusCode} ${res.body.slice(0, 120)}`).toBe(true);
+      }
+    });
+  }
+});
