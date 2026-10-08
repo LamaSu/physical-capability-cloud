@@ -113,6 +113,8 @@ describe("BAD_PAYLOAD: anything off the v1 schema, never repaired", () => {
     ["an EIP712Domain entry in types", (w) => (w.typedData.types.EIP712Domain = [{ name: "name", type: "string" }])],
     ["a salt in the domain", (w) => (w.typedData.domain.salt = zeroHash)],
     ["a bytes32 of the wrong length", (w) => (w.typedData.message.jobIdHash = "0x1234")],
+    ["a decimal above 2^256 - 1", (w) => (w.totalGross = (1n << 256n).toString())],
+    ["a string longer than 256 characters", (w) => (w.typedData.domain.name = "x".repeat(300))],
   ];
   for (const [name, mutate] of cases) {
     it(name, async () => {
@@ -140,6 +142,23 @@ describe("X402_REFUSED: x402 never funds an escrow (plan G10)", () => {
       await expectRefusal("X402_REFUSED", mutate);
     });
   }
+});
+
+describe("the caller's own arguments", () => {
+  it("a quote that is not a bigint, or a negative margin, is a caller error (TypeError)", async () => {
+    const { fx, prepare } = await setup();
+    await expect(prepare(fx.wire(), { quote: { maxTotalGross: Number(fx.totalGross) as never } })).rejects.toThrow(TypeError);
+    await expect(prepare(fx.wire(), { marginSeconds: -1n })).rejects.toThrow(TypeError);
+  });
+  it("PAYER_NOT_SIGNER: a wallet with no account", async () => {
+    const { chain, expectRefusal } = await setup();
+    await expectRefusal("PAYER_NOT_SIGNER", () => {}, { wallet: chain.accountless() });
+  });
+  it("LIVE_CHECK_FAILED: the chain id cannot be read", async () => {
+    const { chain, expectRefusal } = await setup();
+    chain.state.failChainId = true;
+    await expectRefusal("LIVE_CHECK_FAILED", () => {});
+  });
 });
 
 describe("CHAIN_MISMATCH", () => {

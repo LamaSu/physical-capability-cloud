@@ -15,6 +15,7 @@ import {
   decodeFunctionData,
   encodeFunctionResult,
   keccak256,
+  parseTransaction,
   stringToHex,
   toFunctionSelector,
   toHex,
@@ -201,6 +202,16 @@ export function parityV(signature: Hex): Hex {
   return `${signature.slice(0, 130)}0${v - 27}` as Hex;
 }
 
+/** What the fake does with the n-th transaction sent: mine it (success or reverted), or never mine it. */
+export type ReceiptPlan = "success" | "reverted" | "none";
+
+export interface SentTx {
+  hash: Hex;
+  to: Address;
+  data: Hex;
+  plan: ReceiptPlan;
+}
+
 export interface ChainState {
   chainId: number;
   walletChainId: number;
@@ -210,6 +221,15 @@ export interface ChainState {
   log: Array<{ method: string; params: readonly unknown[] }>;
   failCalls: boolean;
   failBlocks: boolean;
+  failCode: boolean;
+  failChainId: boolean;
+  /** eth_sendRawTransaction throws, as a transport error after (or before) the node took the transaction would. */
+  failSend: boolean;
+  /** Receipt plans for the sends, in order; a send past the end is mined successfully. */
+  receipts: ReceiptPlan[];
+  sent: SentTx[];
+  /** Runs after the n-th send is accepted (0-based): e.g. make policy() read as funded. */
+  afterSend?: (index: number) => void;
 }
 
 /** A revert as a node reports it: JSON-RPC error code 3 carrying the revert data. */
@@ -230,6 +250,11 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
     log: [],
     failCalls: false,
     failBlocks: false,
+    failCode: false,
+    failChainId: false,
+    failSend: false,
+    receipts: [],
+    sent: [],
   };
   if (o.escrowCode) state.code.set(fx.escrow.toLowerCase(), "0x363d3d37");
 
@@ -247,12 +272,16 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
   on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => zeroAddress);
   on(fx.escrow, ESCROW_ABI, "unitState", () => 1);
   on(fx.usdc, ERC20_ABI, "approve", () => true);
+  on(fx.usdc, ERC20_ABI, "allowance", () => fx.totalGross);
+  on(fx.escrow, ESCROW_ABI, "fund", () => undefined);
+  const sentTx = (hash: unknown) => state.sent.find((t) => t.hash === hash);
 
   const provider = (which: "public" | "wallet") => ({
     async request({ method, params }: { method: string; params?: readonly unknown[] }): Promise<unknown> {
       state.log.push({ method, params: params ?? [] });
       switch (method) {
         case "eth_chainId":
+          if (state.failChainId) throw new Error("fake chain: eth_chainId unavailable");
           return toHex(which === "wallet" ? state.walletChainId : state.chainId);
         case "eth_getBlockByNumber":
         case "eth_getBlockByHash":
@@ -265,6 +294,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
             transactions: [],
           };
         case "eth_getCode":
+          if (state.failCode) throw new Error("fake chain: eth_getCode unavailable");
           return state.code.get(String((params as unknown[])[0]).toLowerCase()) ?? "0x";
         case "eth_call": {
           if (state.failCalls) throw new Error("fake chain: eth_call unavailable");
@@ -273,16 +303,78 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           if (!handler) throw new Error(`fake chain: no handler for ${to} ${data.slice(0, 10)}`);
           return handler(data);
         }
+        // Just enough of a node for viem to send a legacy transaction from a local account and wait for its receipt.
+        case "eth_blockNumber":
+          return toHex(state.block.number);
+        case "eth_getTransactionCount":
+          return toHex(state.sent.length);
+        case "eth_gasPrice":
+          return toHex(1_000_000_000n);
+        case "eth_estimateGas":
+          return toHex(200_000n);
+        case "eth_sendRawTransaction": {
+          if (state.failSend) throw new Error("fake chain: the connection dropped");
+          const raw = (params as [Hex])[0];
+          const tx = parseTransaction(raw);
+          const index = state.sent.length;
+          state.sent.push({ hash: keccak256(raw), to: tx.to!, data: tx.data ?? "0x", plan: state.receipts[index] ?? "success" });
+          state.afterSend?.(index);
+          return keccak256(raw);
+        }
+        case "eth_getTransactionByHash": {
+          const tx = sentTx((params as unknown[])[0]);
+          if (!tx) return null;
+          const mined = tx.plan !== "none";
+          return {
+            hash: tx.hash,
+            from: fx.payer.address,
+            to: tx.to,
+            input: tx.data,
+            nonce: toHex(state.sent.indexOf(tx)),
+            blockHash: mined ? state.block.hash : null,
+            blockNumber: mined ? toHex(state.block.number) : null,
+            transactionIndex: mined ? "0x0" : null,
+            value: "0x0",
+            gas: toHex(200_000n),
+            gasPrice: toHex(1_000_000_000n),
+            type: "0x0",
+            v: "0x1b",
+            r: "0x1",
+            s: "0x1",
+          };
+        }
+        case "eth_getTransactionReceipt": {
+          const tx = sentTx((params as unknown[])[0]);
+          if (!tx || tx.plan === "none") return null;
+          return {
+            transactionHash: tx.hash,
+            blockHash: state.block.hash,
+            blockNumber: toHex(state.block.number),
+            status: tx.plan === "success" ? "0x1" : "0x0",
+            from: fx.payer.address,
+            to: tx.to,
+            logs: [],
+            logsBloom: `0x${"00".repeat(256)}`,
+            transactionIndex: "0x0",
+            type: "0x0",
+            gasUsed: "0x1",
+            cumulativeGasUsed: "0x1",
+            effectiveGasPrice: "0x1",
+            contractAddress: null,
+          };
+        }
         default:
           throw new Error(`fake chain: unexpected ${method}`);
       }
     },
   });
-  const publicClient = createPublicClient({ transport: custom(provider("public"), { retryCount: 0 }) });
-  const wallet = (account: LocalAccount = fx.payer) => createWalletClient({ account, transport: custom(provider("wallet"), { retryCount: 0 }) });
+  const publicClient = createPublicClient({ transport: custom(provider("public"), { retryCount: 0 }), pollingInterval: 20 });
+  const wallet = (account: LocalAccount = fx.payer, options: { dataSuffix?: Hex } = {}) =>
+    createWalletClient({ account, transport: custom(provider("wallet"), { retryCount: 0 }), ...options });
+  const accountless = () => createWalletClient({ transport: custom(provider("wallet"), { retryCount: 0 }) });
   /** Methods that would send or sign a transaction: the SDK must call none before a refusal. */
   const sends = () => state.log.filter((x) => x.method === "eth_sendRawTransaction" || x.method === "eth_sendTransaction");
-  return { state, on, publicClient, wallet, sends };
+  return { state, on, publicClient, wallet, accountless, sends };
 }
 
 /** The pins a test passes for the fake chain (no built-in pin exists for 31337). */

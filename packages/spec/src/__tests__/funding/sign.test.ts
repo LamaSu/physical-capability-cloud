@@ -63,6 +63,17 @@ describe("signJobPolicy", () => {
     expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet(newAccount()) }))).toBe("PAYER_NOT_SIGNER");
   });
 
+  it("PAYER_NOT_SIGNER: a wallet with no account", async () => {
+    const { chain, prepared } = await setup();
+    expect(await refusal(signJobPolicy({ prepared, wallet: chain.accountless() }))).toBe("PAYER_NOT_SIGNER");
+  });
+
+  it("LIVE_CHECK_FAILED: the wallet's chain id cannot be read", async () => {
+    const { chain, prepared } = await setup();
+    chain.state.failChainId = true;
+    expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet() }))).toBe("LIVE_CHECK_FAILED");
+  });
+
   it("CHAIN_MISMATCH: the wallet moved to another chain after prepare", async () => {
     const { chain, prepared } = await setup();
     chain.state.walletChainId = 1;
