@@ -177,6 +177,37 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
     expect(scopeRow(res.json().scopeId).createdBy).toBe(LETTERED);
   });
 
+  it("a claimed key naming a capability the kernel doesn't register is refused for proof (403) before the capability lookup (404); nothing is created", async () => {
+    // r4 review F2: the binding comes before N98's registered-capability lookup, so an unproven
+    // caller learns nothing about what a kernel registers. Pin that order.
+    const unregistered = "n133-unregistered-capability";
+    const submitUnregistered = (headers: Record<string, string>) =>
+      app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        headers,
+        payload: { kernelId: KERNEL, capabilityType: unregistered, userAgentId: BUYER },
+      });
+    const counts = () => ({
+      sessions: db().select().from(schema.negotiationSessions).all().length,
+      escrows: db().select().from(schema.escrows).all().length,
+      jobs: db().select().from(schema.jobs).all().length,
+      scopes: db().select().from(schema.executionScopes).all().length,
+    });
+    const before = counts();
+
+    const refused = await submitUnregistered(claimedOnly(BUYER));
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: "forbidden", reason: "buyer_proof_required" });
+    expect(counts()).toEqual(before);
+
+    // Control: the same request from the buyer's proven wallet passes the binding and gets N98's 404.
+    const proven = await submitUnregistered(asKey(BUYER));
+    expect(proven.statusCode).toBe(404);
+    expect(proven.json().error).toBe("capability_not_found");
+    expect(counts()).toEqual(before);
+  });
+
   it("negotiation: a proven buyer opens its own session; a mismatch is refused; the admin commits for the buyer", async () => {
     const mismatch = await app.inject({
       method: "POST", url: "/api/negotiate/session", headers: asKey(BUYER),
