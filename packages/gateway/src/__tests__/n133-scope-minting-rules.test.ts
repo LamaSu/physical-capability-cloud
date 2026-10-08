@@ -292,6 +292,37 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
       expect(db().select().from(schema.executionScopes).all()).toHaveLength(0);
     });
 
+    it("a falsy buyer is refused as missing for claimed keys, SIWE sessions and the admin before anything is created", async () => {
+      // A falsy buyer skips the binding, so createPccQuote's own required-field check is what
+      // refuses it (Opus 5.5 r3 LOW-1). Pin that refusal, and that nothing is created, per caller.
+      db().delete(schema.escrows).run();
+      db().delete(schema.jobs).run();
+      const key = provisionApiKey({ operatorId: "n133-claimed-falsy-buyer" }).rawKey;
+      const claimed = { authorization: `Bearer ${key}` };
+      const callers: Array<[string, Record<string, string>]> = [
+        ["claimed key", claimed],
+        ["SIWE session", siweSession(BUYER)],
+        ["admin", { ...claimed, "x-admin-key": ADMIN }],
+      ];
+      const falsyBuyers: unknown[] = [undefined, null, "", 0, false];
+      for (const [label, headers] of callers) {
+        for (const skill of ["pcc-quote", "pcc-submit"]) {
+          for (const buyer of falsyBuyers) {
+            const refused = await send(headers, skill, params(buyer));
+            expect(refused.json<{ error?: unknown }>().error, `${label}, ${skill}, buyer ${String(buyer)}`).toMatchObject({
+              code: -32603,
+              message: "userAgentId, kernelId, and capabilityType are required",
+            });
+          }
+        }
+      }
+
+      expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
+      expect(db().select().from(schema.escrows).all()).toHaveLength(0);
+      expect(db().select().from(schema.jobs).all()).toHaveLength(0);
+      expect(db().select().from(schema.executionScopes).all()).toHaveLength(0);
+    });
+
     it("a SIWE session's wallet submits for itself; naming someone else is refused before anything is created", async () => {
       const auth = siweSession(BUYER);
       const other = await send(auth, "pcc-submit", params(OTHER));
