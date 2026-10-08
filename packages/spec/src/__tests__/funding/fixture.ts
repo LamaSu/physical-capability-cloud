@@ -13,6 +13,7 @@ import {
   createWalletClient,
   custom,
   decodeFunctionData,
+  encodeErrorResult,
   encodeFunctionResult,
   keccak256,
   parseTransaction,
@@ -286,6 +287,22 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
   on(fx.usdc, ERC20_ABI, "allowance", () => fx.totalGross);
   on(fx.escrow, ESCROW_ABI, "fund", () => undefined);
   const sentTx = (hash: unknown) => state.sent.find((t) => t.hash === hash);
+  const fundSelector = toFunctionSelector((ESCROW_ABI as readonly { type: string; name?: string }[]).find((x) => x.type === "function" && x.name === "fund") as never);
+  /**
+   * reviewer-charlie L3 (implementer-delta): `fund()` refuses a sender other than the payer that carries no payer
+   * signature, exactly as the escrow does (ESC:718: `msg.sender != payer && payerSignature.length == 0 -> OnlyPayer`). A
+   * call with no `from` runs as the zero address, as on a node. It runs before any test handler, because in the
+   * contract it precedes every other fund() revert except five (NotInitialized, AlreadySealed, ConfigTooLarge,
+   * SignatureTooLarge and BadUnitCount, ESC:703-713); a test that injects one of those sees it only for a payer-sent
+   * call, the only kind the SDK makes. The fake models no other fund() check.
+   */
+  const onlyPayer = (from: Address | undefined, to: Address, data: Hex) => {
+    if (to.toLowerCase() !== fx.escrow.toLowerCase() || data.slice(0, 10) !== fundSelector) return;
+    const [, acceptance] = decodeFunctionData({ abi: ESCROW_ABI, data }).args as unknown as [unknown, { payerSignature: Hex }];
+    if ((from ?? zeroAddress).toLowerCase() !== fx.payer.address.toLowerCase() && acceptance.payerSignature === "0x") {
+      revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "OnlyPayer" }));
+    }
+  };
 
   const provider = (which: "public" | "wallet") => ({
     async request({ method, params }: { method: string; params?: readonly unknown[] }): Promise<unknown> {
@@ -313,7 +330,8 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           return state.code.get(String((params as unknown[])[0]).toLowerCase()) ?? "0x";
         case "eth_call": {
           if (state.failCalls) throw new Error("fake chain: eth_call unavailable");
-          const { to, data } = (params as [{ to: Address; data: Hex }])[0];
+          const { from, to, data } = (params as [{ from?: Address; to: Address; data: Hex }])[0];
+          onlyPayer(from, to, data);
           const handler = state.handlers.get(`${to.toLowerCase()}:${data.slice(0, 10)}`);
           if (!handler) throw new Error(`fake chain: no handler for ${to} ${data.slice(0, 10)}`);
           return handler(data);

@@ -4,7 +4,8 @@
  * buyer-funding.anvil.test.ts.
  */
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData, encodeErrorResult, getAbiItem, keccak256, stringToHex, toFunctionSelector, type Hex } from "viem";
+import { decodeFunctionData, encodeErrorResult, encodeFunctionData, getAbiItem, keccak256, stringToHex, toFunctionSelector, type Hex } from "viem";
+import { describeRevert } from "../../funding/chain.js";
 import {
   FundingRefusal,
   approveAndFund,
@@ -490,5 +491,39 @@ describe("approveAndFund: a run that stops before fund() is sent is classified b
     expect(result.outcome).toBe("indeterminate");
     expect(result.fundTx).toBeUndefined();
     expect(chain.state.sent).toHaveLength(1);
+  });
+});
+
+// reviewer-charlie L3 (implementer-delta): a simulation proves something only if it runs as the transaction will, from
+// the payer. The fake now refuses a payer-less fund() from anyone else (OnlyPayer), as the escrow does (ESC:718).
+describe("approveAndFund: both simulations run from the payer, who sends both transactions", () => {
+  it("the approve and the fund() are simulated from the payer", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    expect((await fund()).outcome).toBe("committed");
+    const simulations = chain.state.log
+      .filter((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest")
+      .map((x) => (x.params as [{ from?: string; to: string }])[0]);
+    expect(simulations.map((c) => c.to.toLowerCase())).toEqual([fx.usdc.toLowerCase(), fx.escrow.toLowerCase()]);
+    expect(simulations.map((c) => c.from?.toLowerCase())).toEqual([fx.payer.address.toLowerCase(), fx.payer.address.toLowerCase()]);
+  });
+
+  it("the fake's fund() is the escrow's: a sender other than the payer, with no payer signature, reverts OnlyPayer", async () => {
+    const { fx, chain } = await setup();
+    const data = encodeFunctionData({
+      abi: ESCROW_ABI,
+      functionName: "fund",
+      args: [fx.configs, { expiry: fx.expiry, payerSignature: "0x", operatorSignature: fx.operatorSignature }],
+    });
+    const simulate = (account?: Hex) =>
+      chain.publicClient.call({ account, to: fx.escrow, data }).then(
+        () => "ok",
+        (e: unknown) => describeRevert(e),
+      );
+    expect(await simulate(fx.payer.address)).toBe("ok");
+    expect(await simulate(fx.operator.address)).toBe("OnlyPayer");
+    expect(await simulate()).toBe("OnlyPayer");
   });
 });
