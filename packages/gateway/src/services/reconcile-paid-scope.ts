@@ -22,8 +22,10 @@
  *
  * Binding: the record must name this scope, its verified payer must be the scope's buyer, and its
  * escrow must be the scope's job's escrow (found the way the accept route and the relay find it),
- * whose row passes the same preconditions as at the accept (escrowRowRefusal). So the same buyer's
- * escrow for another job is refused. One funding activates one scope: a record of an escrow the
+ * whose row passes the same preconditions as at the accept (escrowRowRefusal). These are the binding
+ * rule's checks (funding-binding.ts, shared with the funding-status DTO), plus the row's status
+ * (funded or active), which only an activation needs. So the same buyer's escrow for another job
+ * is refused. One funding activates one scope: a record of an escrow the
  * store already binds to another scope, or for a scope it binds to other funding, is refused. The
  * store sees the escrow address folded to lower case (escrowKey), for the lookup and in the
  * inserted record, so that holds even over a store that matches letter case exactly.
@@ -172,8 +174,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       const scope = tx.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
       if (!scope) return refused("scope_not_found");
 
-      // Bound to this scope: the binding rule (funding-binding.ts), shared with the funding-status
-      // DTO. escrowForJob reads through the same connection, so inside this transaction.
+      // Bound to this scope: the binding rule (funding-binding.ts), shared with the funding-status DTO.
       const recordRefusal = recordScopeRefusal(record, scope);
       if (recordRefusal !== null) return refused(recordRefusal);
 
@@ -195,6 +196,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
         return { kind: "already_active", scopeId, escrowAddress: keptForThis.escrowAddress, expiresAt: scope.expiresAt, record: keptForThis };
       }
 
+      // The job's escrow row: escrowForJob reads through the same connection, so inside this transaction.
       const escrow = escrowForJob(scope.jobId);
       const rowRefusal = escrowRowRefusal(escrow, scope.createdBy);
       if (rowRefusal !== null || !escrow) return refused(rowRefusal ?? "escrow_missing");
