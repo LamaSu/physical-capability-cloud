@@ -217,7 +217,30 @@ describe("generated agent golden path", () => {
     expect(provision.request).toContain("publicKey is optional");
     expect(provision.request).toContain("ed25519.private_key once");
     expect(provision.request).toContain("private 0600 file and never print it");
-    expect(provision.responseFields).toContain("ed25519.private_key (only when publicKey was omitted)");
+    expect(provision.storeOnlyFields).toContain("ed25519.private_key (only when publicKey was omitted)");
+    expect(provision.responseFields.join(" ")).not.toContain("private_key");
+  });
+
+  it("renders an action's recipe as a bash block and its store-only fields on their own line", async () => {
+    const { renderAgentMd } = await import("../docs/render-agent-md.js");
+    const buyer = json("starter/buyer/buyer-path.json");
+    buyer.steps = [buyer.steps[0]];
+    buyer.steps[0].actions = [
+      { ...buyer.steps[0].actions[0], request: "Send it.", recipe: ["first line", "second line"],
+        responseFields: ["visible"], storeOnlyFields: ["secret_a", "secret_b (when present)"] },
+      { ...buyer.steps[0].actions[1], recipe: undefined, storeOnlyFields: undefined },
+    ];
+    const rendered = renderAgentMd({
+      runbook: json("starter/runbook/runbook.json"), index: json("starter/runbook/index.json"),
+      buyer, agentPackage: json("apps/dashboard/public/agent-package.json"),
+    });
+    expect(rendered).toContain([
+      "Request: Send it.", "", "```bash", "first line", "second line", "```", "",
+      "Read response fields: visible.", "Store only, never read into the conversation: secret_a, secret_b (when present).",
+    ].join("\n"));
+    // An action without a recipe or store-only fields renders exactly as before.
+    const validate = rendered.slice(rendered.indexOf("Direct HTTP → `GET /api/auth/validate`"));
+    expect(validate.split("\n").slice(0, 4).join("\n")).not.toMatch(/```|Store only/);
   });
 
   it("uses pcc_report's canonical request and accepts deduplicated feedback without an id", () => {

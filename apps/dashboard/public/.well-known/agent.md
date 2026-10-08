@@ -12,7 +12,7 @@ Ask the human only for what you cannot do or find yourself (class C facts), in o
 
 Never claim success until the relevant doneWhen checks are verified against actual responses or the device. A listing, an HTTP 200, a mock run or a hand-written evidence bundle does not prove physical completion. Report blocked or failed checks honestly.
 
-Never execute a composition, submit a job, fund escrow or spend through a payment challenge without the human's explicit approval of the plan, price, scope and evidence requirements. The automatic buyer path ends at STOP. Keep API keys, private keys and transcripts out of logs, chat and reports.
+Never execute a composition, submit a job, fund escrow or spend through a payment challenge without the human's explicit approval of the plan, price, scope and evidence requirements. The automatic buyer path ends at STOP. Keep API keys, private keys and transcripts out of logs, chat, reports and version control.
 
 ## Buy: plan, read back, hand off
 
@@ -30,19 +30,36 @@ Ask the human only for missing facts:
 - An email or public wallet address, only if no valid key or authorized identifier is available; provisioning requires one identifier.
 
 Direct HTTP → `POST /api/auth/provision`. Auth: public; no Bearer key required.
-Request: Do not call the `provision_api_key` tool, or any tool that hands this response back to you: a tool result enters the conversation, and the tool cannot send publicKey. Only if no existing valid key: check the request shape before sending, because the 5-per-IP-per-hour provisioning limit counts rejected (400) attempts too. Capture the response > .pcc/provision.json (private file, mode 0600), never to the terminal or logs. Send {email} or {walletAddress} and your own locally generated Ed25519 publicKey (64 hex characters, optional 0x prefix), so the gateway does not mint an Ed25519 key for you. publicKey is optional: if you omit it, the response carries ed25519.private_key once (the same key again as ed25519.private_key_pkcs8_base64); store it with the API key in the private 0600 file and never print it. Whether or not you send publicKey, the response can also carry operator_wallet.private_key, an EVM wallet key the gateway mints when it writes an on-chain identity for you; it stays in the same private 0600 file and is never printed. Keep a locally generated private key locally. Optional name and capability are strings.
-Read response fields: api_key, key_id, operator_id, trace_id, ed25519.public_key, ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), operator_wallet.private_key (when present).
+Request: Do not call the `provision_api_key` tool, or any tool that hands this response back to you: a tool result enters the conversation, and the tool cannot send publicKey. Only if no existing valid key: check the request shape before sending, because the 5-per-IP-per-hour provisioning limit counts rejected (400) attempts too. Write the request body to .pcc/provision-request.json with your file-writing tool, not with echo or printf, whose arguments other users of the machine can read (ps): {email} or {walletAddress}, and your own locally generated Ed25519 publicKey (64 hex characters, optional 0x prefix), so the gateway does not mint an Ed25519 key for you. publicKey is optional: if you omit it, the response carries ed25519.private_key once (the same key again as ed25519.private_key_pkcs8_base64); store it with the API key in the private 0600 file and never print it. Whether or not you send publicKey, the response can also carry operator_wallet.private_key, an EVM wallet key the gateway mints when it writes an on-chain identity for you; it stays in the same private 0600 file and is never printed. Keep a locally generated private key locally. Optional name and capability are strings. Then run the recipe below as one script, from the folder you work in. It makes .pcc/ private (0700) and ignored by git before any secret arrives, writes the response straight to .pcc/provision.json, prints only the HTTP status and the fields to read, and writes .pcc/auth.header from the file without printing the key; never print, cat or paste .pcc/provision.json. The supply path captures its key the same way (starter/runbook/00-prerequisites.md, step 4).
+
+```bash
+umask 077 && mkdir -p .pcc && chmod 700 .pcc
+if git rev-parse --git-dir >/dev/null 2>&1 && ! git check-ignore -q .pcc/provision.json; then echo '.pcc/' >> "$(git rev-parse --git-path info/exclude)"; fi
+curl -s -o .pcc/provision.json -w 'HTTP %{http_code}\n' -X POST "$PCC_BASE/api/auth/provision" -H 'Content-Type: application/json' --data-binary @.pcc/provision-request.json
+rm -f .pcc/provision-request.json
+python3 -c 'import json; r = json.load(open(".pcc/provision.json")); print({k: r.get(k) for k in ("error", "message", "retry_after_seconds", "key_id", "operator_id", "trace_id")}, "ed25519.public_key:", (r.get("ed25519") or {}).get("public_key"))'
+python3 -c 'import json; k = json.load(open(".pcc/provision.json"))["api_key"]; open(".pcc/auth.header", "w").write("Authorization: Bearer " + k + "\n")'
+chmod 600 .pcc/provision.json .pcc/auth.header
+```
+
+Read response fields: key_id, operator_id, trace_id, ed25519.public_key.
+Store only, never read into the conversation: api_key, usage.header (holds api_key), usage.example (holds api_key), ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), operator_wallet.private_key (when present).
 Gateway source: [provision.ts](https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/gateway/src/routes/provision.ts), [api-key-auth.ts](https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/gateway/src/auth/api-key-auth.ts), [security-hardening.ts](https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/gateway/src/middleware/security-hardening.ts), [rate-limiter.ts](https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/gateway/src/middleware/rate-limiter.ts).
 
 Direct HTTP → `GET /api/auth/validate`. Auth: public validation route; send the key in Authorization: Bearer `<key>` for the handler to validate.
-Request: Validate any existing key before provisioning; validate the new key after provisioning. Read the Authorization header from private local state, never expose the key in command arguments or reports. No request body.
+Request: Validate any existing key before provisioning; validate the new key after provisioning. Read the Authorization header from private local state, never expose the key in command arguments or reports: send it as a header file with curl -H @.pcc/auth.header, as below. The provisioning recipe writes that file. For an existing key held in an environment variable, make .pcc/ private as that recipe's first line does, then write the file with `umask 077; printf 'Authorization: Bearer %s\n' "$PCC_API_KEY" > .pcc/auth.header`; printf is a shell builtin, so the key never appears in a command's arguments. No request body.
+
+```bash
+curl -s "$PCC_BASE/api/auth/validate" -H @.pcc/auth.header
+```
+
 Read response fields: valid, operatorId.
 Gateway source: [provision.ts](https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/gateway/src/routes/provision.ts), [api-gate.ts](https://github.com/LamaSu/physical-capability-cloud/blob/master/packages/gateway/src/middleware/api-gate.ts).
 
 Done when:
 
 - PCC_BASE names the gateway the human assigned; never use production unless told to.
-- An existing or newly provisioned key is stored privately and the validation response contains valid: true.
+- An existing or newly provisioned key is stored privately (.pcc/ is 0700 and ignored by git), no key or private key was printed, and the validation response contains valid: true.
 
 ### 2. discover
 

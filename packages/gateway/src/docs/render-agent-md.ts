@@ -22,7 +22,11 @@ interface Action {
   route: string;
   auth: string;
   request: string;
+  /** Shell lines rendered verbatim as one bash block after the request. */
+  recipe?: string[];
   responseFields: string[];
+  /** Secret-bearing response fields: kept in a private file, never read into the conversation. */
+  storeOnlyFields?: string[];
   response?: string;
   sources: string[];
 }
@@ -70,10 +74,13 @@ const prose = (text: string) => http(text).split("`")
   .map((part, index) => (index % 2 ? part : placeholders(part))).join("`");
 
 function renderAction(action: Action): string[] {
+  if (action.recipe?.some((line) => line.includes("```"))) throw new Error(`A recipe line for ${action.route} would close its code block`);
   return [
     `${action.tool ? `Tool: \`${action.tool}\`` : "Direct HTTP"} → \`${action.method} ${action.route}\`. Auth: ${placeholders(action.auth)}.`,
     `Request: ${placeholders(action.request)}`,
+    ...(action.recipe?.length ? ["", "```bash", ...action.recipe, "```", ""] : []),
     `Read response fields: ${action.responseFields.length ? action.responseFields.join(", ") : "none"}.${action.response ? ` ${action.response}` : ""}`,
+    ...(action.storeOnlyFields?.length ? [`Store only, never read into the conversation: ${action.storeOnlyFields.join(", ")}.`] : []),
     `Gateway source: ${[...new Set(action.sources)].map(sourceLink).join(", ")}.`,
     "",
   ];
@@ -96,7 +103,7 @@ export function renderAgentMd({ runbook, index, buyer, agentPackage }: AgentMdSo
     "",
     "Never claim success until the relevant doneWhen checks are verified against actual responses or the device. A listing, an HTTP 200, a mock run or a hand-written evidence bundle does not prove physical completion. Report blocked or failed checks honestly.",
     "",
-    "Never execute a composition, submit a job, fund escrow or spend through a payment challenge without the human's explicit approval of the plan, price, scope and evidence requirements. The automatic buyer path ends at STOP. Keep API keys, private keys and transcripts out of logs, chat and reports.",
+    "Never execute a composition, submit a job, fund escrow or spend through a payment challenge without the human's explicit approval of the plan, price, scope and evidence requirements. The automatic buyer path ends at STOP. Keep API keys, private keys and transcripts out of logs, chat, reports and version control.",
     "",
     "## Buy: plan, read back, hand off",
     "",

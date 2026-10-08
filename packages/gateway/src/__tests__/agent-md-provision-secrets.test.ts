@@ -5,8 +5,13 @@
  * the 201 body, and check the buyer path and the supply runbook against them.
  */
 
+import { execFile, spawnSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -60,12 +65,22 @@ import { initStore, closeStore } from "../db.js";
 
 const root = new URL("../../../../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), "utf8");
-const provisionAction = () => JSON.parse(read("starter/buyer/buyer-path.json")).steps[0].actions[0] as {
+interface BuyerAction {
   tool: string | null;
   route: string;
   request: string;
+  recipe?: string[];
   responseFields: string[];
-};
+  storeOnlyFields?: string[];
+}
+const getKeyActions = () => JSON.parse(read("starter/buyer/buyer-path.json")).steps[0].actions as BuyerAction[];
+const provisionAction = () => getKeyActions()[0];
+const validateAction = () => getKeyActions()[1];
+/** A field list names `path` exactly or as `path (condition)`. */
+const names = (fields: string[] | undefined, path: string) =>
+  (fields ?? []).some((field) => field === path || field.startsWith(`${path} (`));
+/** The API key's own path and the two usage strings that repeat it (Opus r1 F2). */
+const API_KEY_PATHS = ["api_key", "usage.header", "usage.example"];
 
 /**
  * Opus r1 F1: a tool call returns the 201 body (API key, private keys) into the conversation, and
@@ -106,11 +121,13 @@ function expectDocumented(paths: string[]): void {
   expect(provision.tool, "the get-key step must send provisioning over direct HTTP, never a tool").toBeNull();
   expect(provision.request.startsWith(NO_TOOL), "the request must open with the no-tool rule").toBe(true);
   for (const path of paths) {
-    expect(
-      provision.responseFields.some((field) => field === path || field.startsWith(`${path} (`)),
-      `buyer path responseFields must name ${path}`,
-    ).toBe(true);
+    expect(names(provision.storeOnlyFields, path), `buyer path must mark ${path} store-only`).toBe(true);
+    expect(names(provision.responseFields, path), `${path} must not be listed as a field to read`).toBe(false);
     expect(provision.request, `buyer path request must name ${path}`).toContain(path);
+  }
+  for (const path of API_KEY_PATHS) {
+    expect(names(provision.storeOnlyFields, path), `buyer path must mark ${path} store-only`).toBe(true);
+    expect(names(provision.responseFields, path), `${path} must not be listed as a field to read`).toBe(false);
   }
 }
 
@@ -169,6 +186,9 @@ describe("agent golden path names every private key the provision response carri
     const body = res.json();
     expect(body.ed25519.source).toBe("server-minted");
     expect(mockRegisterAgentOnChain).not.toHaveBeenCalled();
+    // The raw API key comes back twice more, in usage.header and usage.example (Opus r1 F2).
+    expect(body.usage.header).toContain(body.api_key);
+    expect(body.usage.example).toContain(body.api_key);
     const paths = privateKeyPaths(body);
     expect(paths).toEqual(expect.arrayContaining(["ed25519.private_key", "ed25519.private_key_pkcs8_base64"]));
     expectDocumented(paths);
@@ -187,6 +207,108 @@ describe("agent golden path provisions over direct HTTP, never through a tool (O
     expect(doc).toContain("Direct HTTP → `POST /api/auth/provision`");
     expect(doc).not.toContain("Tool: `provision_api_key`");
     expect(doc).toContain(`Request: ${NO_TOOL}`);
+  });
+});
+
+const run = promisify(execFile);
+/** CI images carry all four; elsewhere the run-it-as-written case needs them on PATH. */
+const recipeTools = spawnSync("sh", ["-c", "command -v bash && command -v curl && command -v python3 && command -v git"]).status === 0;
+
+describe("agent golden path captures the provision response without leaking it (Opus r1 F2)", () => {
+  it("makes .pcc private and git-ignored before the request, writes the response and header to files, and validates from the header file", () => {
+    const recipe = provisionAction().recipe ?? [];
+    const at = (needle: string) => recipe.findIndex((line) => line.includes(needle));
+    const curl = at("/api/auth/provision");
+    expect(recipe[0]).toBe("umask 077 && mkdir -p .pcc && chmod 700 .pcc");
+    expect(at("git check-ignore -q .pcc/provision.json")).toBeGreaterThan(0);
+    expect(recipe[at("git check-ignore")]).toContain("info/exclude");
+    expect(at("git check-ignore")).toBeLessThan(curl);
+    expect(recipe[curl]).toContain("-o .pcc/provision.json");
+    expect(recipe[curl]).toContain("--data-binary @.pcc/provision-request.json");
+    expect(at(".pcc/auth.header")).toBeGreaterThan(curl);
+    expect(recipe).toContain("chmod 600 .pcc/provision.json .pcc/auth.header");
+    // Nothing dumps the response or the key: no cat, no echo of a variable, no print of the whole body or key.
+    expect(recipe.join("\n")).not.toMatch(/\bcat\b|\becho\s+"?\$|print\(r\)|print\(k\)/);
+    expect(provisionAction().request).toContain("never print, cat or paste .pcc/provision.json");
+    expect(validateAction().recipe).toEqual(['curl -s "$PCC_BASE/api/auth/validate" -H @.pcc/auth.header']);
+    expect(validateAction().request).toContain("printf is a shell builtin");
+    const getKey = JSON.parse(read("starter/buyer/buyer-path.json")).steps[0] as { doneWhen: string[] };
+    expect(getKey.doneWhen.join(" ")).toContain("(.pcc/ is 0700 and ignored by git), no key or private key was printed");
+  });
+
+  it("agent.md renders both recipes as bash blocks, lists only non-secret fields to read, and marks the rest store-only", () => {
+    const doc = read("apps/dashboard/public/.well-known/agent.md");
+    expect(doc).toContain(["```bash", ...(provisionAction().recipe ?? []), "```"].join("\n"));
+    expect(doc).toContain(["```bash", ...(validateAction().recipe ?? []), "```"].join("\n"));
+    expect(doc).toContain("Read response fields: key_id, operator_id, trace_id, ed25519.public_key.");
+    expect(doc).toContain(
+      "Store only, never read into the conversation: api_key, usage.header (holds api_key), usage.example (holds api_key), " +
+      "ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), " +
+      "operator_wallet.private_key (when present).",
+    );
+    expect(doc).toContain("Keep API keys, private keys and transcripts out of logs, chat, reports and version control.");
+  });
+
+  describe("the recipe, run as written against the real provision route", () => {
+    let app: FastifyInstance;
+
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      app = await buildApp();
+    });
+
+    afterEach(async () => {
+      if (app) await app.close();
+      closeStore();
+    });
+
+    it.runIf(recipeTools || process.env.CI === "true")(
+      "prints no secret, leaves .pcc 0700 and git-ignored with 0600 files, and its header validates",
+      async () => {
+        // Identity write on and no publicKey: every secret the 201 can carry comes back at once.
+        mockIsIdentityWriteEnabled.mockReturnValue(true);
+        mockRegisterAgentOnChain.mockResolvedValue({
+          agentId: 7n,
+          txHash: "0xfeed" + "0".repeat(60),
+          registryAddress: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+          chainId: 84532,
+        });
+        mockGenerateOperatorWallet.mockResolvedValue({ address: "0x" + "ce".repeat(20), privateKey: "0x" + "9f".repeat(32) });
+        mockSetAgentWalletOnChain.mockRejectedValue(new Error("no chain in tests"));
+        await app.listen({ port: 0, host: "127.0.0.1" });
+        const env = { ...process.env, PCC_BASE: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}` };
+        const dir = mkdtempSync(join(tmpdir(), "agent-md-recipe-"));
+        try {
+          await run("git", ["init", "-q"], { cwd: dir });
+          // The agent writes the request body with its file-writing tool before running the recipe.
+          mkdirSync(join(dir, ".pcc"));
+          writeFileSync(join(dir, ".pcc/provision-request.json"), JSON.stringify({ email: "recipe-run@example.com" }));
+          const provision = await run("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], { cwd: dir, env });
+          const validate = await run("bash", ["-c", (validateAction().recipe ?? []).join("\n")], { cwd: dir, env });
+
+          const body = JSON.parse(readFileSync(join(dir, ".pcc/provision.json"), "utf8"));
+          const secrets: string[] = [
+            body.api_key, body.ed25519.private_key, body.ed25519.private_key_pkcs8_base64, body.operator_wallet.private_key,
+          ];
+          for (const secret of secrets) expect(typeof secret === "string" && secret.length >= 32).toBe(true);
+          const printed = provision.stdout + provision.stderr + validate.stdout + validate.stderr;
+          secrets.forEach((secret, index) => expect(printed.includes(secret), `secret #${index} was printed`).toBe(false));
+          expect(provision.stdout).toContain("HTTP 201");
+          expect(provision.stdout).toContain(body.key_id);
+          expect(JSON.parse(validate.stdout)).toMatchObject({ valid: true });
+          expect(statSync(join(dir, ".pcc")).mode & 0o777).toBe(0o700);
+          for (const file of ["provision.json", "auth.header"])
+            expect(statSync(join(dir, ".pcc", file)).mode & 0o777, file).toBe(0o600);
+          expect(readFileSync(join(dir, ".pcc/auth.header"), "utf8") === `Authorization: Bearer ${body.api_key}\n`).toBe(true);
+          expect(existsSync(join(dir, ".pcc/provision-request.json"))).toBe(false);
+          // check-ignore exits 1 (and execFile rejects) when the path is not ignored.
+          await expect(run("git", ["check-ignore", "-q", ".pcc/provision.json"], { cwd: dir })).resolves.toBeDefined();
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      },
+      30_000,
+    );
   });
 });
 
