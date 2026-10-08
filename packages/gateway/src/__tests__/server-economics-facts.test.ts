@@ -11,6 +11,7 @@
  * requirement map and the R13 reservation record.
  */
 
+import { constants as bufferConstants } from "node:buffer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize, computeScheduleHash, economics, type EvidenceRequirement, type RateSchedule } from "@pcc/spec";
 import { closeStore, getRepos, initStore } from "../db.js";
@@ -635,7 +636,9 @@ describe("the request is read without running any code it carries (EC6 M1)", () 
     expect(codes(serverEconomicsFacts(revokedProxy() as EconomicsFactsRequest, honest(ag)))).toEqual(["AGREEMENT_UNREADABLE", "PLAN_INVALID", "CLOCK_INVALID", "CURRENCY_NOT_SUPPORTED"]);
   });
 
-  it("for values that are not Proxies, ownedJson accepts and refuses what snapshotJson does, and returns an equal copy", () => {
+  // The parity domain (EC6 r2, finding 2): no Proxy, within the work budget, and every path snapshotJson builds within the
+  // engine's longest string. The round-3 tests pin the three exceptions outside it.
+  it("in the parity domain, ownedJson accepts and refuses what snapshotJson does, and returns an equal copy", () => {
     const nest = (n: number): unknown => (n === 0 ? 0 : [nest(n - 1)]);
     const cyclic: Record<string, unknown> = { a: 1 };
     cyclic.self = cyclic;
@@ -775,5 +778,132 @@ describe("a source's malformed answer is refused by name before anything reads i
     expect(run({ ...ENV, PCC_PROTOCOL_FEE_RECIPIENT: { toString: () => TREASURY } })).toEqual(["FEE_NOT_CONFIGURED"]);
     expect(run({ ...ENV, PCC_FORBIDDEN_RECIPIENTS: [TOKEN, FACTORY] })).toEqual(["FORBIDDEN_RECIPIENTS_NOT_CONFIGURED"]);
     expect(configuredProtocolFee({ PCC_PROTOCOL_FEE_BPS: 235 as unknown as string, PCC_PROTOCOL_FEE_RECIPIENT: TREASURY })).toBeNull();
+  });
+});
+
+// ── EC6 round 3: the ChatGPT verdict on 1577dddb (SHIP-WITH-FIXES: finding 1 MEDIUM, finding 2 LOW) ──────────────
+
+/** MAX_COPY_WORK, twice MAX_COPY_VALUES. Written out, so a change to the budget fails a test. */
+const WORK = 2_000_000;
+
+/** An object with `n` own non-enumerable data properties: keys a copy examines and skips. */
+function hiddenKeys(n: number): object {
+  const o = {};
+  for (let i = 0; i < n; i++) Object.defineProperty(o, `h${i}`, { value: i, enumerable: false });
+  return o;
+}
+
+/**
+ * What a read examines, counted as it happens: the own-property descriptors it reads and the keys Reflect.ownKeys
+ * lists for it. Both globals are restored before this returns.
+ */
+function measured<T>(read: () => T): { result: T; reads: number; listed: number } {
+  const real = { getOwnPropertyDescriptor: Object.getOwnPropertyDescriptor, ownKeys: Reflect.ownKeys };
+  const patch = (on: object, name: string, value: unknown) => Object.defineProperty(on, name, { value, writable: true, configurable: true });
+  let reads = 0;
+  let listed = 0;
+  patch(Object, "getOwnPropertyDescriptor", (o: object, k: PropertyKey) => (reads++, real.getOwnPropertyDescriptor(o, k)));
+  patch(Reflect, "ownKeys", (o: object) => {
+    const keys = real.ownKeys(o);
+    listed += keys.length;
+    return keys;
+  });
+  try {
+    const result = read();
+    return { result, reads, listed };
+  } finally {
+    patch(Object, "getOwnPropertyDescriptor", real.getOwnPropertyDescriptor);
+    patch(Reflect, "ownKeys", real.ownKeys);
+  }
+}
+
+describe("the copy's work is bounded, and its parity with snapshotJson has a stated domain (EC6 r2, findings 1 and 2)", () => {
+  const MISSING = ["PARTY_REGISTRY_UNAVAILABLE", "INTENDED_USE_UNAVAILABLE", "UNIT_FACTS_UNAVAILABLE"];
+  type Refusable = { ok: boolean; refusals?: Array<{ code: string }> };
+
+  it("the measure is live: it counts every read snapshotJson, which has no work budget, makes of a value past the budget", () => {
+    // 1,100 references to one object with 2,000 hidden keys: 1,100 entries and 2,200,000 hidden keys, past the budget.
+    const over = new Array(1_100).fill(hiddenKeys(2_000));
+    const theirs = measured(() => economics.snapshotJson(over));
+    expect(theirs).toEqual({ result: { ok: true, value: new Array(1_100).fill({}) }, reads: 1_100 + 2_200_000, listed: 2_200_000 });
+    expect(ownedJson(over)).toEqual({ ok: false }); // the second parity exception: past the budget, ownedJson refuses
+  });
+
+  it("the verdict's reproduction: 5,000 references to one object with 5,000 hidden keys are refused within the budget, from ownedJson and both entry points", () => {
+    const bad = new Array(5_000).fill(hiddenKeys(5_000));
+    // Unbudgeted, this read 25,005,001 descriptors and returned 5,000 empty objects. Now the 399th visit's keys cross
+    // the budget (5,001 + 399 × 5,000 = 2,000,001) before any of them is read: 1 length, 399 entries and 398 × 5,000
+    // keys are read, and 399 × 5,000 keys are listed.
+    expect(measured(() => ownedJson(bad))).toEqual({ result: { ok: false }, reads: 1_990_400, listed: 1_995_000 });
+    const entries: Array<() => Refusable> = [
+      () => serverEconomicsFacts(request(bad), today()),
+      () => economicsBindingFor({ ...request(bad), accepted: null }, today()),
+    ];
+    for (const entry of entries) {
+      const m = measured(entry);
+      expect(codes(m.result)).toEqual(["AGREEMENT_UNREADABLE", ...MISSING]);
+      // The request's other fields and its two-node plan add a few reads; the agreement adds no more than the budget.
+      expect(m.reads).toBeLessThanOrEqual(WORK + 1 + 50);
+      expect(m.listed).toBeLessThanOrEqual(WORK + 5_000 + 50);
+    }
+  });
+
+  it("the budget is exact: 2,000,000 keys examined are copied as snapshotJson copies them; one more is refused before any key past the budget is read", () => {
+    // A root holding `a` and `e` hidden keys; `a` lists 17 references to one object with 117,645 hidden keys:
+    // (1 + e) + (1 + 17) + 17 × 117,645 = 1,999,984 + e keys examined.
+    const shared = hiddenKeys(117_645);
+    const rootWith = (e: number) => {
+      const root: Record<string, unknown> = { a: new Array(17).fill(shared) };
+      for (let i = 0; i < e; i++) Object.defineProperty(root, `r${i}`, { value: i, enumerable: false });
+      return root;
+    };
+    const atBudget = rootWith(16);
+    const pastBudget = rootWith(17);
+    const at = measured(() => ownedJson(atBudget));
+    // Every key examined is read: the root's 17, the list's length and 17 entries, and 17 × 117,645. Only objects list keys.
+    expect(at).toEqual({ result: { ok: true, value: { a: new Array(17).fill({}) } }, reads: WORK, listed: 17 + 17 * 117_645 });
+    const theirs = economics.snapshotJson(atBudget);
+    expect(theirs.ok && at.result.ok ? [theirs.value, at.result.value] : "refused").toEqual([{ a: new Array(17).fill({}) }, { a: new Array(17).fill({}) }]);
+    const past = measured(() => ownedJson(pastBudget));
+    expect(past.result).toEqual({ ok: false });
+    // The 17th visit's keys cross the budget and are listed, but none of them is read.
+    expect(past.reads).toBe(1 + 1 + 17 + 16 * 117_645);
+    expect(past.reads).toBeLessThanOrEqual(WORK);
+    expect(economics.snapshotJson(pastBudget).ok).toBe(true); // snapshotJson has no work budget
+  });
+
+  it("data whose keys are all enumerable meets MAX_COPY_VALUES first: a million lists, 1,999,999 keys examined, are copied as snapshotJson copies them", () => {
+    // Every value is a list, which examines the most keys per value: 1 + 16 + 15 × 65,536 + 16,943 = 1,000,000 values,
+    // and 1,000,000 lengths plus 999,999 entries examined.
+    const lists = (last: number) => [...Array.from({ length: 15 }, () => new Array(65_536).fill([])), new Array(last).fill([])];
+    const million = lists(16_943);
+    const ours = measured(() => ownedJson(million));
+    expect(ours.reads).toBe(1_999_999);
+    const theirs = economics.snapshotJson(million);
+    expect(ours.result.ok && theirs.ok).toBe(true);
+    expect(JSON.stringify(ours.result.ok ? ours.result.value : null)).toBe(JSON.stringify(theirs.ok ? theirs.value : null));
+    // One value more: both readers refuse it on MAX_COPY_VALUES, with the work budget not yet spent.
+    const over = lists(16_944);
+    expect(ownedJson(over).ok).toBe(false);
+    expect(economics.snapshotJson(over).ok).toBe(false);
+  });
+
+  it("the third parity exception (finding 2): snapshotJson refuses a value whose path outgrows the engine's longest string; ownedJson builds no path and copies it", () => {
+    // The verdict's counterexample, sized from this engine's own limit: one long key, 40 levels deep. The path
+    // snapshotJson builds for the innermost value (input.<key>.<key>…) is longer than the longest string the engine
+    // can hold. The value has 41 values, 40 levels, no Proxy, accessor or cycle, and all of its keys are enumerable.
+    const key = "x".repeat(Math.ceil(bufferConstants.MAX_STRING_LENGTH / 40));
+    let value: unknown = 0;
+    for (let i = 0; i < 40; i++) value = { [key]: value };
+    const theirs = economics.snapshotJson(value);
+    expect(theirs.ok ? "accepted" : theirs.reason).toBe("the input could not be read as JSON data");
+    const ours = ownedJson(value);
+    let level = ours.ok ? ours.value : undefined;
+    for (let i = 0; i < 40; i++) {
+      const keys = typeof level === "object" && level !== null ? Object.keys(level) : [];
+      expect(keys.length === 1 && keys[0] === key).toBe(true);
+      level = (level as Record<string, unknown>)[key];
+    }
+    expect(level).toBe(0);
   });
 });

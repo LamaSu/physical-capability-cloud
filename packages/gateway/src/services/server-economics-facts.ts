@@ -35,8 +35,16 @@
  *
  * Nothing missing is filled in. No empty list stands in for a registry that does not exist, and no default for a
  * configuration that is unset. A refusal lists every missing fact it can name, in a fixed order. The request (its
- * agreement, nodes and acceptance) is read without running any code it carries (`ownedJson`), and untrusted input
- * never makes this module throw. A source is server code: what it answers is checked before anything reads it, and a
+ * agreement, nodes and acceptance) is read without running any code it carries, within a work budget (`ownedJson`),
+ * and untrusted input never makes this module throw.
+ *
+ * PRECONDITION, the seam's own (external-plan-seam.ts, its header): the request arrives bounded in size. The accept
+ * route that wires this module must keep it, as the seam's submission does: it is parsed from an HTTP body the gateway
+ * caps at 1 MiB (`bodyLimit`, server.ts), so no object in it is wider than that body allows. The work budget bounds
+ * the copy's walk, but not one object's width before it is enumerated: JavaScript cannot count an object's own keys
+ * without materializing them.
+ *
+ * A source is server code: what it answers is checked before anything reads it, and a
  * malformed answer is refused (SERVER_FACTS_INVALID); a source that throws (a database fault) propagates, as a
  * dependency fault does in the seam. It stores nothing: it adds no ledger, and money moves only through the V-next
  * payouts the binding returns.
@@ -303,6 +311,15 @@ function field(from: unknown, key: string): unknown {
 const MAX_COPY_DEPTH = 64;
 const MAX_COPY_ARRAY_LENGTH = 65_536;
 const MAX_COPY_VALUES = 1_000_000;
+/**
+ * The copy's work budget, which snapshotJson does not have (EC6 r2, finding 1): the own keys it examines. An object
+ * costs every own key, including a non-enumerable one it skips, and a list costs its length and each entry. Each is
+ * charged before any of them is read, and a shared object is charged again on every visit. Every value but the root
+ * is reached through one key or entry, and each list adds its length, so data whose keys are all enumerable examines
+ * at most 2 × values − 1 keys. Within MAX_COPY_VALUES this budget refuses none of it: only keys the copy skips can
+ * exhaust the budget first.
+ */
+const MAX_COPY_WORK = 2 * MAX_COPY_VALUES;
 /** Thrown only inside `ownedJson`, whose catch never reads what was thrown. */
 const NOT_DATA: unique symbol = Symbol("not-data");
 
@@ -314,13 +331,30 @@ export type OwnedJson = { ok: true; value: unknown } | { ok: false };
  * it, so a Proxy anywhere, revoked or not, refuses the whole value and none of its traps runs. Only own data
  * properties are read, through their descriptors, so no getter and no `toJSON` runs either.
  *
- * Otherwise it accepts and refuses what `snapshotJson` does. It refuses accessors, symbol keys, holes, cycles,
- * functions, bigint, undefined, and objects with a prototype other than Object.prototype or null; it skips
- * non-enumerable keys, and it has the same depth, length and size bounds. Nothing thrown inside escapes, and the
- * catch inspects nothing.
+ * Its data rules are `snapshotJson`'s. It refuses accessors, symbol keys, holes, cycles, functions, bigint, undefined,
+ * and objects with a prototype other than Object.prototype or null; it skips non-enumerable keys, and it has the same
+ * depth, length and size bounds. Nothing thrown inside escapes, and the catch inspects nothing.
+ *
+ * It also has a work budget (MAX_COPY_WORK). It reads at most one descriptor past the budget: the length of a list
+ * whose charge then crosses it. It lists the keys of at most one object past the budget, the one whose keys cross it,
+ * and the caller paid to build that object (the PRECONDITION in the module header).
+ *
+ * Parity with `snapshotJson` (EC6 r2, finding 2): for a value that holds no Proxy, stays within the work budget, and
+ * whose every diagnostic path `snapshotJson` can build, the two readers accept and refuse the same values and copy
+ * them equally. Outside that domain they differ in three ways, and a test pins each one:
+ *   - a Proxy: refused here, by design (EC6 R2-D2);
+ *   - more keys than MAX_COPY_WORK: refused here, by design. Only keys the copy skips can cause this;
+ *   - a path longer than the engine's longest string: `snapshotJson` names each value by its path (`input.a[0]`), so it
+ *     refuses such a value. This copy builds no path, so it reads the value.
  */
 export function ownedJson(root: unknown): OwnedJson {
   let values = 0;
+  let work = 0;
+  /** Charges keys about to be examined, before any of them is read. */
+  const examine = (keys: number): void => {
+    work += keys;
+    if (work > MAX_COPY_WORK) throw NOT_DATA;
+  };
   const onPath = new Set<object>();
   const copy = (v: unknown, depth: number): unknown => {
     if (++values > MAX_COPY_VALUES) throw NOT_DATA;
@@ -333,6 +367,7 @@ export function ownedJson(root: unknown): OwnedJson {
       if (Array.isArray(v)) {
         const length: unknown = Object.getOwnPropertyDescriptor(v, "length")?.value;
         if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > MAX_COPY_ARRAY_LENGTH) throw NOT_DATA;
+        examine(1 + length); // its length, and each entry
         const out: unknown[] = [];
         for (let i = 0; i < length; i++) {
           const d = Object.getOwnPropertyDescriptor(v, i);
@@ -343,8 +378,10 @@ export function ownedJson(root: unknown): OwnedJson {
       }
       const proto: unknown = Object.getPrototypeOf(v);
       if (proto !== Object.prototype && proto !== null) throw NOT_DATA;
+      const keys = Reflect.ownKeys(v);
+      examine(keys.length); // every own key, the non-enumerable ones it skips included
       const out: Record<string, unknown> = {};
-      for (const key of Reflect.ownKeys(v)) {
+      for (const key of keys) {
         if (typeof key === "symbol") throw NOT_DATA;
         const d = Object.getOwnPropertyDescriptor(v, key);
         if (d === undefined || !d.enumerable) continue; // own enumerable keys only, as snapshotJson and JSON.stringify

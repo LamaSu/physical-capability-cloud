@@ -553,7 +553,7 @@ On success it returns each unit's payouts in plan order, with `agreementHash` an
 - From server sources today: the fee and its recipient (`PCC_PROTOCOL_FEE_BPS`, `PCC_PROTOCOL_FEE_RECIPIENT`), the currency's decimals (the compiler's `SETTLEMENT_TOKEN_DECIMALS`), the request's clock reading, the forbidden recipients (`PCC_FORBIDDEN_RECIPIENTS`), and the sealed rate schedules in the contributors registry.
 - Refused by name, with no stand-in, until a source exists: the license registry's copies and the parties' registered payout addresses (operator item 27), the intended use, what runs in each unit, and any schedule whose rate depends on a unit's capture class or jobs per day.
 - Unset or malformed configuration is refused, never defaulted.
-- The request's agreement, plan nodes and acceptance are copied without running any code they carry: a Proxy anywhere is refused before it is touched, and no getter runs. A source's answer is checked before anything reads it. A malformed answer is refused (`SERVER_FACTS_INVALID`), and a source that throws propagates as a server fault.
+- The request's agreement, plan nodes and acceptance are copied without running any code they carry: a Proxy anywhere is refused before it is touched, and no getter runs. The copy charges every key it examines, skipped non-enumerable keys included, to a fixed work budget, so no request makes it scan without bound. The request must arrive bounded in size, as the accept route's 1 MiB HTTP body is, because no reader can count an object's keys without listing them. A source's answer is checked before anything reads it. A malformed answer is refused (`SERVER_FACTS_INVALID`), and a source that throws propagates as a server fault.
 
 ## 10. What is out of scope in v1
 
