@@ -2108,13 +2108,14 @@
     // what
     var summary = info.summary || info.name || info.description;
     if (summary) { var what = untrustedLabel(summary); what.classList.add('pcc-approval-what'); box.appendChild(what); }
-    // who + cost
+    // who + cost. R12 r2b (b): each value the bound record states is attributed on its own line ("bound record
+    // reports <role>: <value>", as a receipt's parties are since r2 B), not only by the box heading.
     var line = el('div', 'pcc-approval-line');
     var payee = info.payee || (info.provider && (info.provider.id || info.provider.name)) || info.operatorAddress;
-    if (payee) line.appendChild(el('span', 'pcc-mono', joinText(kitText('to '), partyText(payee))));
+    if (payee) line.appendChild(el('span', 'pcc-mono', joinText(kitText('bound record reports payee: '), partyText(payee))));
     var amount = info.amount || info.totalAmount || (info.price && (info.price.base || info.price.amount));
     var currency = info.currency || (info.price && info.price.currency) || '';
-    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', joinText(amountText(amount), currency ? joinText(kitText(' '), requestValueText(currency)) : kitText(''))));
+    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', joinText(kitText('bound record reports amount: '), amountText(amount), currency ? joinText(kitText(' '), requestValueText(currency)) : kitText(''))));
     if (line.childNodes.length) box.appendChild(line);
     if (info.rationale) { var rationale = untrustedLabel(info.rationale); rationale.classList.add('pcc-approval-rationale'); box.appendChild(rationale); }
     // args table (ui.summaryKeys when present)

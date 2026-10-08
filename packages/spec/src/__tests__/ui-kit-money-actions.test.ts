@@ -1461,7 +1461,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     withRecord({ summary: "Pizza", amount: 12 });
     boot(man([recordWin({ escrowId: "esc-1" })]));
     await flush();
-    expect(text(".pcc-win .pcc-approval-record .pcc-approval-cost")).toBe("12.00");
+    expect(text(".pcc-win .pcc-approval-record .pcc-approval-cost")).toBe("bound record reports amount: 12.00"); // R12 r2b (b): per-line attribution
   });
 
   it("N5: a failed record read says 'Details unavailable'; the request block still shows what would be sent", async () => {

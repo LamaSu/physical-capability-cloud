@@ -2226,3 +2226,54 @@ describe("R12 r2b B1 (lane review, HIGH): a metric on money data is a report, ne
     }
   });
 });
+
+// ── R12 r2b (b) (lane review gap (b), MEDIUM): the approval record's payee and amount were attributed only by its box heading ──
+describe("R12 r2b (b) (lane review, MEDIUM): each value an approval's bound record states carries its own attribution", () => {
+  const approvalAt = (path: string, approveBody: Record<string, unknown> = {}) =>
+    r2Man([{ kind: "approval", binding: { path }, approve: { id: "a1", label: "Approve", kind: "post", path: "/api/jobs/j1/approve", body: approveBody } }]);
+  const recordBox = () => document.querySelector(".pcc-approval-record") as HTMLElement;
+  const recordLines = () => Array.from(recordBox().querySelectorAll(".pcc-approval-line > *")).map((n) => n.textContent);
+  /** `v` appears in the record box, and every leaf that shows it reads exactly `line` (its own attribution). */
+  function expectOnlyAttributedIn(v: string, line: string, tag: string) {
+    const leaves = Array.from(recordBox().querySelectorAll("*")).filter((n) => n.children.length === 0 && (n.textContent || "").includes(v));
+    expect(leaves.length, tag + ": " + v + " is shown").toBeGreaterThan(0);
+    for (const n of leaves) expect(n.textContent, tag + ": " + v).toBe(line);
+  }
+
+  it("the lane review's repro: the record's payee and its amount each name the bound record, not only the box heading (live and snapshot)", async () => {
+    const JOB = { summary: "Print run", payee: R2B_PAYEE, amount: 250, currency: "USDC" }; // repro_gaps.cjs, verbatim
+    for (const mode of ["live", "snapshot"] as const) {
+      if (mode === "live") r2BootLive(approvalAt("/api/jobs/j1"), [r2Ok(JOB)]);
+      else boot({}, approvalAt("/api/jobs/j1"), { _ts: "2026-09-24T00:00:00Z", "/api/jobs/j1": JOB });
+      await flush();
+      expect(recordBox().querySelector(".pcc-untrusted-k")!.textContent, mode).toBe("The bound record says (context, not what will be sent):");
+      expect(recordLines(), mode).toEqual(["bound record reports payee: " + R2B_PAYEE, "bound record reports amount: 250.00 USDC"]);
+      expectOnlyAttributedIn(R2B_PAYEE, "bound record reports payee: " + R2B_PAYEE, mode);
+      expectOnlyAttributedIn("250.00", "bound record reports amount: 250.00 USDC", mode);
+    }
+  });
+
+  it("every shape a record states them in (payee, provider id or name, operator address; amount, totalAmount, price.base, price.amount; with or without a currency): each line names the bound record", async () => {
+    const OPERATOR = "0x" + "77".repeat(20);
+    const CASES: Array<[string, Record<string, unknown>, string[]]> = [
+      ["provider id, totalAmount (a string)", { provider: { id: "kernel_1" }, totalAmount: "12.5" }, ["bound record reports payee: kernel_1", "bound record reports amount: 12.50"]],
+      ["operator address, price.base + price.currency", { operatorAddress: OPERATOR, price: { base: 7, currency: "USDC" } }, ["bound record reports payee: " + OPERATOR, "bound record reports amount: 7.00 USDC"]],
+      ["payee, price.amount not a plain sum (shown as sent)", { payee: "kernel_2", price: { amount: "0.0049" } }, ["bound record reports payee: kernel_2", 'bound record reports amount: "0.0049"']],
+      ["provider name outside the id grammar, no amount", { provider: { name: "Mill A" } }, ["bound record reports payee: reported: Mill A"]],
+      ["an amount and no party", { amount: 3, currency: "USDC" }, ["bound record reports amount: 3.00 USDC"]],
+    ];
+    for (const [tag, rec, lines] of CASES) {
+      r2BootLive(approvalAt("/api/jobs/j1"), [r2Ok(rec)]);
+      await flush();
+      expect(recordLines(), tag).toEqual(lines);
+    }
+  });
+
+  it("when the request carries its own amount the record's amount line is dropped (unchanged), and its payee is still attributed", async () => {
+    r2BootLive(approvalAt("/api/jobs/j1", { amount: 5, currency: "USDC" }), [r2Ok({ payee: R2B_PAYEE, amount: 250, currency: "USDC" })]);
+    await flush();
+    expect(recordLines()).toEqual(["bound record reports payee: " + R2B_PAYEE]);
+    expect(recordBox().querySelector(".pcc-approval-cost")).toBeNull();
+    expect(document.querySelector(".pcc-mismatch")!.textContent).toContain("The bound record says 250.00, but the request sends 5.00");
+  });
+});
