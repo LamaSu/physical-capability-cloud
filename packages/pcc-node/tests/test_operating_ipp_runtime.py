@@ -249,6 +249,31 @@ class TestTheRunBelongsToItsClaim:
         assert runtime.run(OPERATION, {"text": "hi"}, claim=Claim()).error == "cancelled:not_started"
         assert printer.requests == []
 
+    @pytest.mark.parametrize("field", ["job_id", "kernel_id", "claim_token"])
+    def test_a_claim_missing_a_field_sends_nothing_even_with_a_live_lease(self, printer, field):
+        claim = Claim()
+        setattr(claim, field, "")
+        runtime, _, _ = _runtime(printer.url)
+        assert runtime.run(OPERATION, {"text": "hi"}, claim=claim).error == "no_claim"
+        assert printer.requests == []
+
+    def test_the_transport_is_never_handed_a_request_without_a_live_lease(self):
+        """The transport is injectable, so the runtime itself must hold the request back: an injected
+        transport need not check the lease the way post_ipp does."""
+        calls = []
+
+        def post(url, payload, **kwargs):
+            calls.append(payload)
+            return _Answer(200, answer(1, [job_group(77)]), True)
+
+        runtime = _fast("http://127.0.0.1:9", post=post)
+        dead = Claim()
+        dead.alive = False
+        assert runtime.run(OPERATION, {"text": "hi"}, claim=dead).error == "lease_lost:not_started"
+        runtime.cancel()
+        assert runtime.run(OPERATION, {"text": "hi"}, claim=Claim()).error == "cancelled:not_started"
+        assert calls == []
+
     def test_an_unknown_operation_is_refused(self, printer):
         runtime, _, _ = _runtime(printer.url)
         assert runtime.run("print_photo", {"text": "hi"}, claim=Claim()).error == "unknown_operation:print_photo"

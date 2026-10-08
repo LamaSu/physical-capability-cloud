@@ -770,3 +770,20 @@ class TestPrinterState:
     ])
     def test_anything_else_is_not_idle(self, http_status, body):
         assert printer_is_idle(http_status, body, 9) is False
+
+
+class TestQueuedInDeviceOutranksEveryOtherReason:
+    """RFC 8011 sec 5.3.8: 'queued-in-device' means the printer handed the job to a device that cannot
+    report status, so it "never will have any better information" about the outcome. An error or stop
+    reason beside it is not that device's report: the outcome stays unobservable (#377's order checks
+    it first). Without that rule these read as FAILED; the allowlist alone cannot tell them apart."""
+
+    @pytest.mark.parametrize("reasons", [
+        pytest.param(("queued-in-device", "job-completed-with-errors"), id="beside-errors"),
+        pytest.param(("job-canceled-by-user", "queued-in-device"), id="beside-a-cancel"),
+    ])
+    def test_queued_in_device_beside_an_error_or_a_stop_is_unobservable(self, reasons):
+        body = ipp_response(job_state=9, reasons=reasons, request_id=7, job_id=42)
+        verdict, observation = ipp_completion_verdict(200, body, 7, 42)
+        assert verdict == POLL_UNOBSERVABLE, observation
+        assert "queued-in-device" in observation["reason"]
