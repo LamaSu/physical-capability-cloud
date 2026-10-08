@@ -687,7 +687,9 @@ class TestEvidenceBundleOutcomeEvents:
         assert progress["payload"]["level"] == "submitted"
         assert progress["payload"]["level"] == EVIDENCE_LEVEL_SUBMITTED
         assert progress["payload"]["result"] == result
-        assert progress["payload"] == {"level": "submitted", "result": result}
+        # Old: the payload was exactly {level, result}.  New: it also commits
+        # the PCC job (LO-EV-9, evidence #3241): every event binds payload.jobId.
+        assert progress["payload"] == {"level": "submitted", "result": result, "jobId": "j1"}
         assert progress["timestamp"] == bundle["executedAt"]
         assert bundle["result"] == result
 

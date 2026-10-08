@@ -16,6 +16,7 @@ queued and untouched, for an operating agent to take.
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
@@ -71,6 +72,76 @@ EVENT_EXECUTION_FAILED = "execution_failed"
 # which is what the settlement oracle releases on.  A submitted-only result is
 # recorded as execution_progress at this level and never as a completion.
 EVIDENCE_LEVEL_SUBMITTED = "submitted"
+
+# LO-EV-9 (evidence #3219/#3241; spec's subject-binding.ts rules 5, 8 and 9; the pattern of
+# kernel-sdk's job handler and the kernel's EvidenceEmitter, #341): every evidence event commits the
+# PCC job it belongs to at top-level payload.jobId, plus the settlement unit and challenge nonce when
+# the assignment names them, and never a unit it does not name. Device-local ids never take these
+# names: they stay nested (payload.result, payload.response) or carry their own (ippJobId).
+# Ported from #420 (fix/pcc-node-evidence-binding @1e261766).
+UNIT_FIELD_RE = re.compile(r"0x[0-9a-f]{64}")
+UNIT_FIELDS = ("settlementUnitId", "challengeNonce")
+BINDING_FIELDS = ("jobId",) + UNIT_FIELDS
+
+
+class AssignmentBindingError(ValueError):
+    """The job assignment cannot be bound: no job id, or a malformed unit field."""
+
+
+def assignment_binding(job: Dict) -> Dict[str, str]:
+    """The fields every evidence event for ``job`` must commit.
+
+    ``jobId`` is the PCC job id.  ``settlementUnitId`` and ``challengeNonce``
+    come together or not at all (a unit without its nonce is half a
+    binding), each ``0x`` + 64 lowercase hex, and a field that is present
+    must hold a value: an explicit null is refused, as kernel-sdk refuses it
+    (evidence review of #420, F2/F3).  Raises AssignmentBindingError
+    otherwise: evidence that cannot bind is refused before anything runs.
+    """
+    job_id = job.get("id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        raise AssignmentBindingError("the assignment has no job id")
+    binding = {"jobId": job_id}
+    named = [field for field in UNIT_FIELDS if field in job]
+    if named and len(named) != len(UNIT_FIELDS):
+        raise AssignmentBindingError(
+            "settlementUnitId and challengeNonce must be assigned together"
+        )
+    for field in named:
+        value = job[field]
+        if not (isinstance(value, str) and UNIT_FIELD_RE.fullmatch(value)):
+            raise AssignmentBindingError(f"{field} must be 0x + 64 lowercase hex")
+        binding[field] = value
+    return binding
+
+
+def bind_event_payload(payload: Any, binding: Dict[str, str]) -> Dict[str, Any]:
+    """A copy of ``payload`` that commits the binding fields.
+
+    Refused (ValueError), as the kernel's EvidenceEmitter refuses them: a
+    payload that already carries a different value for a bound field (the
+    event would claim another job or unit), and a payload carrying a unit
+    field the assignment never named (evidence review of #420, F1).
+    """
+    out: Dict[str, Any] = dict(payload) if isinstance(payload, dict) else {"result": payload}
+    for field in BINDING_FIELDS:
+        if field in out and field not in binding:
+            raise ValueError(f"event payload.{field} was not named by the assignment")
+    for field, value in binding.items():
+        if field in out and out[field] != value:
+            raise ValueError(
+                f"event payload.{field} {out[field]!r} does not match the assignment's {value!r}"
+            )
+        out[field] = value
+    return out
+
+
+def _resolve_binding(job_id: str, binding: Optional[Dict[str, str]]) -> Dict[str, str]:
+    resolved = dict(binding) if binding else {"jobId": job_id}
+    if resolved.get("jobId") != job_id:
+        raise ValueError(f"binding is for job {resolved.get('jobId')!r}, not {job_id!r}")
+    return resolved
+
 
 # Outcome reported directly by an adapter via a "status" key.  Compared after
 # `.strip().lower()`: a device that shouts "FAILED" must not slip past the
@@ -529,6 +600,8 @@ def build_evidence_bundle(
     job_id: str,
     device: Dict,
     result: Dict,
+    *,
+    binding: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Construct an evidence bundle from execution result.
 
@@ -547,15 +620,23 @@ def build_evidence_bundle(
     astra verdict item 6): it let any caller put ``execution_completed`` next
     to a failed result, emit both terminal events, or emit types outside the
     closed EVIDENCE_EVENT_TYPES enum.
+
+    Every event's payload commits ``binding`` (LO-EV-9, :func:`bind_event_payload`):
+    ``{"jobId": job_id}`` by default, or the :func:`assignment_binding` of the
+    job, which must name ``job_id``.  ValueError when an event cannot bind.
     """
     now = datetime.now(tz=timezone.utc).isoformat()
+    resolved = _resolve_binding(job_id, binding)
     return {
         "jobId": job_id,
         "deviceId": device.get("id", device.get("host", "unknown")),
         "deviceProtocol": device.get("protocol", device.get("type", "unknown")),
         "executedAt": now,
         "result": result,
-        "events": _synthesize_events(device, result, now),
+        "events": [
+            {**event, "payload": bind_event_payload(event["payload"], resolved)}
+            for event in _synthesize_events(device, result, now)
+        ],
     }
 
 
