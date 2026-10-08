@@ -88,7 +88,7 @@ const plainConfig: TextSinkConfig = {
       { name: "baseUnitsText", reason: "Formats only decimal base units with checked decimal precision" },
       { name: "fmtUsd", reason: "Preserves the existing amount formatter, including invalid-input String bytes required by the task" },
       { name: "fmtTs", reason: "Preserves the existing timestamp formatter; timeText separately checks the canonical UTC grammar" },
-      { name: "fmtVal", reason: "Preserves locale grouping for finite numeric metrics; other values use typed helpers" },
+      { name: "fmtVal", reason: "Preserves locale grouping for finite numeric metrics on non-money data; money data (R12 r2b B1) and other values use typed helpers" },
       { name: "statusPillText", reason: "Applies the surface's closed status vocabulary and attributes every other status" },
       { name: "reportedText", reason: "Attributes server prose as reported and qualifies unconfirmed money surfaces" },
       { name: "dataStatusText", reason: "Applies the binding's settlement classifier or closed status vocabulary" },

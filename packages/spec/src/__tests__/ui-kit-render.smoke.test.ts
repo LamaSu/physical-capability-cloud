@@ -137,7 +137,8 @@ describe("pcc-ui kit renders a manifest in snapshot mode (offline, no gateway)",
 
   it("fills async metric + receipt bindings from the snapshot (baked 21.99)", async () => {
     await flush();
-    expect(document.querySelector(".pcc-metric-amount")!.textContent).toContain("21.99");
+    // R12 r2b B1: the example's "Order total" metric reads the escrow record's totalAmount: a report, never a bare amount.
+    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("reported: 21.99 - settlement unconfirmed");
     expect(document.querySelector(".pcc-receipt-num")!.textContent).toContain("21.99");
     // R12 r2 B: a legacy escrow record's parties are claims naming the escrow service (an id stays an id,
     // anything else is reported; never "unrecognised value" for a valid kernel id), never a payer -> payee layout.

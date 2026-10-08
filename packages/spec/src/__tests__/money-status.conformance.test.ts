@@ -2121,3 +2121,108 @@ describe("R12 r2 C (run 2 F2 HIGH = run 3 F3 MEDIUM): a closed, validated asset 
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// R12 round 2b: the lane review of #599 @4a996991 (reviewer-bravo), blocker B1, gap (b) and mutant X-2
+// (implementer-delta).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+const R2B_PAYEE = "0x" + "34".repeat(20);
+const R2B_TOKEN = "0x" + "56".repeat(20);
+
+// ── R12 r2b B1 (lane review, HIGH; known gap (a)): a metric window painted a money AMOUNT bare ──
+describe("R12 r2b B1 (lane review, HIGH): a metric on money data is a report, never a bare, scaled or formatted number", () => {
+  // The lane review's exact repro body (verify/tools/repro_metric_live.cjs): a numeric amount, unpinned, state 1.
+  const REVIEW_ECON = { amount: 1000000, feeAmount: "23500", recipient: R2B_PAYEE, token: R2B_TOKEN, assuranceTier: 1 };
+  const REVIEW_UNPINNED = { finalState: null, phase: "active", isAllocated: false, economics: REVIEW_ECON };
+  const REVIEW_PINNED = { ...REVIEW_UNPINNED, ...PIN_FIELDS, network: { chainId: 84532 } };
+  // The real producer's economics (settlement-read.ts: amount and feeAmount are decimal strings).
+  const ROUTE_UNPINNED = { ...REVIEW_UNPINNED, economics: { ...REVIEW_ECON, amount: "1000000" } };
+  const LEGACY = { status: "funded", totalAmount: 250, amount: "250", currency: "USDC", contractAddress: "0x" + "11".repeat(20), payee: R2B_PAYEE };
+  // The job execution read model's own shape (readmodels/job-execution.ts: escrowTotal and the milestone amount are strings).
+  const JOB_EXECUTION = { schemaId: "pcc.job-execution.v1", asOf: "2026-10-08T00:00:00Z", job: { jobId: "j1" }, notices: [],
+    settlement: { link: "linked", source: "gateway_escrow_record", payout: "unknown", record: { kind: "gateway_escrow_record", escrowId: "esc-1",
+      milestone: { milestoneId: "m1", stepId: "s1", amount: "100", challengeWindowEnd: null }, escrowTotal: { amount: "250", currency: "USDC" } } } };
+  type Win = Record<string, unknown>;
+  const metric = (path: string, select: string, format?: string, bindSelect?: string): Win =>
+    ({ kind: "metric", label: "Value", binding: bindSelect === undefined ? { path } : { path, select: bindSelect }, select, ...(format === undefined ? {} : { format }) });
+  const metricText = () => (document.querySelector(".pcc-metric-amount") as HTMLElement).textContent;
+  /** One metric window, live (its read answered with `body`) or from a baked snapshot; returns the painted value. */
+  async function metricOf(win: Win, path: string, body: unknown, mode: "live" | "snapshot") {
+    if (mode === "live") r2BootLive(r2Man([win]), [r2Ok(body)]);
+    else boot({}, r2Man([win]), { _ts: "2026-09-24T00:00:00Z", [path]: body });
+    await flush();
+    return metricText();
+  }
+
+  it("the lane review's exact repro (live, unpinned): the receipt withholds the amount; the metric selecting economics.amount (format int) is a report, unscaled, with no reference", async () => {
+    r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_RC } }, { kind: "metric", label: "Unit amount", binding: { path: R2_RC }, select: "economics.amount", format: "int" }]),
+      [r2Ok(REVIEW_UNPINNED), r2Ok(REVIEW_UNPINNED)]);
+    await flush();
+    expect(document.querySelector(".pcc-receipt-amount")!.textContent).toBe("amount pending - not confirmed at a finalized block");
+    expect(metricText()).toBe("reported: 1000000 - settlement unconfirmed");
+    expect(document.querySelector(".pcc-metric-amount")!.closest(".pcc-win")!.querySelector(".pcc-pin-ref")).toBeNull();
+  });
+
+  it("pinned or not, live or snapshot, in every format: a metric never states the amount as a fact, never scales or formats it, never paints a reference", async () => {
+    for (const [tag, body] of [["unpinned", REVIEW_UNPINNED], ["pinned", REVIEW_PINNED]] as const) {
+      for (const mode of ["live", "snapshot"] as const) {
+        for (const format of ["int", "usd", "pct", "ts", undefined]) {
+          const t = await metricOf(metric(R2_RC, "economics.amount", format), R2_RC, body, mode);
+          const at = `${tag} ${mode} format ${String(format)}`;
+          if (format === "ts") expect(t, at).toBe("time not reported"); // a number is never a time; the amount is not shown
+          else expect(t, at).toBe("reported: 1000000 - settlement unconfirmed");
+          expect(t, at).not.toMatch(/1,000,000|1000000%/);
+          expect(document.querySelector(".pcc-pin-ref"), at).toBeNull();
+        }
+      }
+    }
+  });
+
+  // Every money-shaped selector, not only economics.amount: a money route's every field, and on a NON-money route
+  // (jobs, capabilities, ...) every value reached through a record that carries a money field or names a currency.
+  const MONEY_CASES: Array<[string, string, unknown, string, string | undefined, string, string?]> = [
+    ["legacy escrow totalAmount (a number), usd", "/api/escrow/e1", LEGACY, "totalAmount", "usd", "reported: 250 - settlement unconfirmed"],
+    ["legacy escrow totalAmount (a number), no format", "/api/escrow/e1", LEGACY, "totalAmount", undefined, "reported: 250 - settlement unconfirmed"],
+    ["legacy escrow totalAmount (a number), int", "/api/escrow/e1", LEGACY, "totalAmount", "int", "reported: 250 - settlement unconfirmed"],
+    ["legacy escrow amount (a string), usd", "/api/escrow/e1", LEGACY, "amount", "usd", "reported: 250 - settlement unconfirmed"],
+    ["legacy escrow payee", "/api/escrow/e1", LEGACY, "payee", undefined, "reported: " + R2B_PAYEE + " - settlement unconfirmed"],
+    ["V-next economics.amount as the route emits it (a decimal string), int", R2_RC, ROUTE_UNPINNED, "economics.amount", "int", "reported: 1000000 - settlement unconfirmed"],
+    ["V-next economics.feeAmount, usd", R2_RC, ROUTE_UNPINNED, "economics.feeAmount", "usd", "reported: 23500 - settlement unconfirmed"],
+    ["V-next economics.recipient", R2_RC, ROUTE_UNPINNED, "economics.recipient", undefined, "reported: " + R2B_PAYEE + " - settlement unconfirmed"],
+    ["job execution read model: the escrow total", "/api/jobs/j1/execution", JOB_EXECUTION, "settlement.record.escrowTotal.amount", "usd", "reported: 250 - settlement unconfirmed"],
+    ["job execution read model: this job's milestone amount", "/api/jobs/j1/execution", JOB_EXECUTION, "settlement.record.milestone.amount", "usd", "reported: 100 - settlement unconfirmed"],
+    ["a job whose payment is nested (no money field at its top)", "/api/jobs/j1", { id: "j1", progress: 0.4, payment: { amount: 250, currency: "USDC" } }, "payment.amount", "usd", "reported: 250 - settlement unconfirmed"],
+    ["a job list's row amount", "/api/jobs", [{ id: "j1", amount: 250 }], "0.amount", "usd", "reported: 250 - settlement unconfirmed"],
+    ["a capability's listed price (its pricing names a currency)", "/api/capabilities/c1", { id: "c1", name: "Printer", pricing: { currency: "USDC", baseCost: 12, minimum: 5 } }, "pricing.baseCost", "usd", "reported: 12 - settlement unconfirmed"],
+    ["capability templates' base price hint (it names a currency)", "/api/capabilities/templates", { templates: [{ type: "fdm", paramCount: 3, basePrice: 12, currency: "USDC" }] }, "templates.0.basePrice", "usd", "reported: 12 - settlement unconfirmed"],
+    ["a binding.select projection never sheds its record's money shape", "/api/jobs/j1", { amount: 250, job: { count: 3 } }, "count", "int", "reported: 3 - settlement unconfirmed", "job"],
+  ];
+
+  it("every money-shaped selector, not only economics.amount: attributed, unformatted, live and snapshot", async () => {
+    for (const [tag, path, body, select, format, want, bindSelect] of MONEY_CASES) {
+      for (const mode of ["live", "snapshot"] as const) {
+        expect(await metricOf(metric(path, select, format, bindSelect), path, body, mode), `${tag} (${mode})`).toBe(want);
+      }
+    }
+  });
+
+  // Non-money metrics keep their formats; a money record's id and time keep their typed rendering (the gate is the
+  // number path, not every field); and the gate reads structure, never a field-name guess: a lab balance is not money.
+  const CONTROLS: Array<[string, string, unknown, string, string | undefined, string]> = [
+    ["a kernel's completed-job count (int)", "/api/kernels/k1", { kernel: { id: "k1", reputation: 4.8, jobsCompleted: 1234 } }, "kernel.jobsCompleted", "int", "1,234"],
+    ["a kernel's reputation (no format)", "/api/kernels/k1", { kernel: { id: "k1", reputation: 4.8, jobsCompleted: 1234 } }, "kernel.reputation", undefined, "4.8"],
+    ["a job's progress (pct)", "/api/jobs/j1/status", { progress: 0.42 }, "progress", "pct", "42%"],
+    ["a kernel list's count", "/api/kernels", { kernels: [{ id: "k1" }, { id: "k2" }], count: 2 }, "count", "int", "2"],
+    ["a lab balance's reading (a weighing scale, no money field, no currency)", "/api/sensors/s1", { id: "s1", balance: 12.5, unit: "g" }, "balance", undefined, "12.5"],
+    ["a money record's id stays an id", "/api/jobs/j1", { id: "job-1", payee: "short" }, "id", undefined, "job-1"],
+    ["a money record's time stays a time", "/api/jobs/j1", { id: "job-1", timestamp: "2026-10-06T00:00:00Z", payee: "short" }, "timestamp", "ts", new Date("2026-10-06T00:00:00Z").toLocaleString()],
+  ];
+
+  it("controls: a non-money metric keeps its format; a money record's id and time keep their typed rendering", async () => {
+    for (const [tag, path, body, select, format, want] of CONTROLS) {
+      for (const mode of ["live", "snapshot"] as const) {
+        expect(await metricOf(metric(path, select, format), path, body, mode), `${tag} (${mode})`).toBe(want);
+      }
+    }
+  });
+});

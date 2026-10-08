@@ -587,10 +587,13 @@
     if (isNaN(d.getTime())) return mintText(String(v));
     try { return mintText(d.toLocaleString()); } catch (e) { return mintText(d.toISOString()); }
   }
-  function fmtVal(v, format, path) {
+  function fmtVal(v, format, path, money) {
     if (v == null) return kitText('—');
     if (format === 'ts') return timeText(v);
-    if (typeof v !== 'number' || !isFinite(v)) return boundText(path, v, false);
+    // R12 r2b B1: a value on money data is a report, never a fact: attributed to its source and shown as sent,
+    // never scaled or formatted (base units are not dollars; read-surface contract rule 14). Only a non-money
+    // number takes the window's format.
+    if (money || typeof v !== 'number' || !isFinite(v)) return boundText(path, v, !!money);
     switch (format) {
       case 'usd': return fmtUsd(v);
       case 'int': { var n = Number(v); return mintText(Math.round(n).toLocaleString('en-US')); }
@@ -1609,6 +1612,23 @@
     if (/id$|type$/i.test(field)) return idText(v);
     return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, money);
   }
+  // R12 r2b B1 (lane review, known gap (a)): is the value a selector reaches money? Money data by isMoneyData (a
+  // money route, or a record carrying a money field), or ANY record on the way to the value is money-shaped: it
+  // carries a money field or names a currency (a listed price, a budget hint, an escrow total). Structure, never a
+  // guess from the selected field's name, and fail closed: a nested amount is as much money as a top-level one.
+  function moneyShaped(bindingPath, o) {
+    return isMoneyData(bindingPath, o) || (!!o && typeof o === 'object' && !Array.isArray(o) && ownKey(o, 'currency') && o.currency != null);
+  }
+  function selectsMoney(bindingPath, root, sel) {
+    var parts = sel == null || sel === '' ? [] : String(sel).split('.');
+    var cur = root;
+    if (moneyShaped(bindingPath, cur)) return true;
+    for (var i = 0; i < parts.length && cur != null && typeof cur === 'object'; i++) {
+      cur = Array.isArray(cur) && /^\d+$/.test(parts[i]) ? cur[parseInt(parts[i], 10)] : cur[parts[i]];
+      if (moneyShaped(bindingPath, cur)) return true;
+    }
+    return false;
+  }
 
   // note — prose; split on double newline into <p>, textContent only.
   function renderNote(ctx, w) {
@@ -1631,8 +1651,15 @@
     resolveBinding(ctx, w.binding).then(function (r) {
       var raw = sel != null ? dot(r.data, sel) : r.data;
       if (r.error) { clear(wrap._body); wrap._body.appendChild(errorLine(r.error)); }
-      else setText(val, isStatusPath(sel) && raw != null && typeof raw !== 'object'
-        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format, sel));
+      else {
+        // R12 r2b B1: money is judged on the whole way to the value -- from the response itself (live: the
+        // unprojected body; otherwise the baked record) through binding.select, then from the bound data through
+        // the selector -- so neither a projection nor a nested record sheds its money shape.
+        var bpath = w.binding && w.binding.path;
+        var top = r.raw !== undefined ? r.raw : ctx.snapshot && typeof bpath === 'string' ? ctx.snapshot[bpath] : undefined;
+        var money = selectsMoney(bpath, top, w.binding && w.binding.select) || selectsMoney(bpath, r.data, sel);
+        setText(val, isStatusPath(sel) && raw != null && typeof raw !== 'object' ? boundText(sel, raw, money) : fmtVal(raw, w.format, sel, money));
+      }
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
