@@ -24,6 +24,7 @@ import { getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { sameIdentity } from "../auth/buyer-identity.js";
 import { mockFundsWrites } from "./settlement-mode.js";
+import { escrowLabelRefusal, type EscrowLabelRefusal } from "./funding-binding.js";
 import {
   escrowKey,
   fundingRecordStore,
@@ -72,17 +73,18 @@ export interface FundingEscrow {
 }
 
 /** Why an escrow ROW cannot pay for `buyer`'s scope, whatever the chain says, or null. */
-export type EscrowRowRefusal = "escrow_missing" | "escrow_payer_not_buyer" | "escrow_not_funded";
+export type EscrowRowRefusal = EscrowLabelRefusal | "escrow_not_funded";
 
 /**
  * The escrow row's own preconditions, for a mock and a real escrow alike: it exists, its payer
- * label is the buyer, and its status is funded or active. None of this is proof of funding (the
- * payer column is a label and the status a DB flag); a real escrow needs its verification record
- * besides (buyerFundingVerdict, reconcilePaidScope).
+ * label is the buyer (the binding rule's checks 4 and 5, funding-binding.ts), and its status is
+ * funded or active. None of this is proof of funding (the payer column is a label and the status a
+ * DB flag); a real escrow needs its verification record besides (buyerFundingVerdict,
+ * reconcilePaidScope).
  */
 export function escrowRowRefusal(escrow: FundingEscrow | undefined | null, buyer: string): EscrowRowRefusal | null {
-  if (!escrow) return "escrow_missing";
-  if (!sameIdentity(escrow.payer, buyer)) return "escrow_payer_not_buyer";
+  const label = escrowLabelRefusal(escrow, buyer);
+  if (label !== null || !escrow) return label ?? "escrow_missing";
   if (escrow.status !== "funded" && escrow.status !== "active") return "escrow_not_funded";
   return null;
 }

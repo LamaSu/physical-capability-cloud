@@ -39,8 +39,8 @@
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
-import { sameIdentity } from "../auth/buyer-identity.js";
 import { emergencyStopState } from "../routes/device-relay.js";
+import { recordEscrowRefusal, recordScopeRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
 import {
   acceptanceFor,
@@ -160,6 +160,7 @@ function blockRefusal(tx: FundingTx, kernelId: string, buyer: string): "buyer_bl
 export function reconcilePaidScope(scopeId: string, record: FundingVerificationRecord): ReconcileResult {
   const store = fundingRecordStore();
   if (!store) return refused("funding_record_store_unavailable");
+  // The binding rule's checks 1 and 2 (funding-binding.ts), before any read; check 3 needs the scope.
   if (!isWellFormedFundingRecord(record)) return refused("record_malformed");
   if (record.scopeId !== scopeId) return refused("record_scope_mismatch");
   try {
@@ -168,12 +169,15 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       const scope = tx.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get();
       if (!scope) return refused("scope_not_found");
 
-      // Bound to this scope. escrowForJob reads through the same connection, so inside this transaction.
-      if (!sameIdentity(record.buyer, scope.createdBy)) return refused("record_buyer_not_scope_buyer");
+      // Bound to this scope: the binding rule (funding-binding.ts), shared with the funding-status
+      // DTO. escrowForJob reads through the same connection, so inside this transaction.
+      const recordRefusal = recordScopeRefusal(record, scope);
+      if (recordRefusal !== null) return refused(recordRefusal);
       const escrow = escrowForJob(scope.jobId);
       const rowRefusal = escrowRowRefusal(escrow, scope.createdBy);
       if (rowRefusal !== null || !escrow) return refused(rowRefusal ?? "escrow_missing");
-      if (!sameAddress(escrow.contractAddress, record.escrowAddress)) return refused("record_escrow_not_scope_escrow");
+      const escrowRefusal = recordEscrowRefusal(record, escrow);
+      if (escrowRefusal !== null) return refused(escrowRefusal);
 
       // One funding, one scope. The store sees the escrow address folded (escrowKey), for the lookup
       // and the insert, so a store that matches letter case exactly cannot bind it twice.
@@ -181,17 +185,12 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       const forEscrow = store.findByEscrow(tx, toKeep.escrowAddress);
       if (forEscrow && forEscrow.scopeId !== scopeId) return refused("escrow_bound_to_other_scope");
       // The record kept for this scope, if any, must be this buyer's well-formed record of this
-      // escrow. (It names this scope by the store's contract; checked again, defence in depth.)
+      // escrow: the binding rule's checks 1 to 3 on it (check 2, that it names this scope, holds by
+      // the store's contract; checked again, defence in depth), and the same escrow as this record.
       const kept = store.findByScope(tx, scopeId);
-      if (
-        kept &&
-        (kept.scopeId !== scopeId ||
-          !sameAddress(kept.escrowAddress, record.escrowAddress) ||
-          !isWellFormedFundingRecord(kept) ||
-          !sameIdentity(kept.buyer, scope.createdBy))
-      ) {
-        return refused("scope_bound_to_other_funding");
-      }
+      const keptIsThisFunding =
+        kept !== null && recordScopeRefusal(kept, scope) === null && sameAddress(kept.escrowAddress, record.escrowAddress);
+      if (kept && !keptIsThisFunding) return refused("scope_bound_to_other_funding");
 
       // (d) Idempotent on (scopeId, escrow): an activation that already happened is returned as it is.
       if (scope.status === "active") {
