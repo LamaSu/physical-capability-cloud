@@ -272,6 +272,35 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   });
 });
 
+describe("S2.2 the compare-and-set moves only the exact row the checks read", () => {
+  /** A store whose insert also changes the scope, as a writer between the checks and the compare-and-set would. */
+  function writerInside(change: ReturnType<typeof sql>) {
+    __setFundingRecordStoreForTest({
+      ...store,
+      insert(tx, record) {
+        store.insert(tx, record);
+        tx.run(change);
+      },
+    });
+  }
+
+  it("(neg-cas-status) a status changed inside the transaction is not activated; everything rolls back", async () => {
+    const { scopeId } = await paidScope(f);
+    writerInside(sql`UPDATE execution_scopes SET status = 'revoked' WHERE id = ${scopeId}`);
+    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("activation_conflict"));
+    expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
+    expect(store.count()).toBe(0);
+  });
+
+  it("(neg-cas-expiry) a window changed inside the transaction is not activated; everything rolls back", async () => {
+    const { scopeId } = await paidScope(f);
+    writerInside(sql`UPDATE execution_scopes SET expires_at = ${iso(T0 + 2 * TTL)} WHERE id = ${scopeId}`);
+    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("activation_conflict"));
+    expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
+    expect(store.count()).toBe(0);
+  });
+});
+
 describe("S2.2 binding: the record is this scope's buyer's funding of this scope's escrow", () => {
   it("(neg-record-scope) a record naming another scope is refused", async () => {
     const one = await paidScope(f, { real: ESCROW_A });

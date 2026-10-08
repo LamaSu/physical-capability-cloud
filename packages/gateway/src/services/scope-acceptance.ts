@@ -134,10 +134,10 @@ export function buyerFundingVerdict(
   const store = fundingRecordStore();
   if (!store) return refusedFunding("escrow_not_buyer_funded");
   const record = store.findByEscrow(getStore().db, escrow.contractAddress);
-  // A record proves funding only when it is well formed and finalized, is this escrow's (the store
-  // answers by escrow; checked again, defence in depth) and its verified payer is this buyer.
+  // A record proves funding only when there is one, well formed and finalized, it is this escrow's
+  // (the store answers by escrow; checked again, defence in depth) and its verified payer is this
+  // buyer. (isWellFormedFundingRecord is false for null.)
   if (
-    !record ||
     !isWellFormedFundingRecord(record) ||
     !sameAddress(record.escrowAddress, escrow.contractAddress) ||
     !sameIdentity(record.buyer, buyer)
