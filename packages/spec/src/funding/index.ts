@@ -1,6 +1,8 @@
 /**
  * `@pcc/spec/funding`: the buyer-funding SDK for V-next escrows (buyer-funding plan S3.1), for a viem EOA. Author:
  * implementer-bravo (pcc-adk). Self-contained (viem is its only dependency) so it can move into `@pcc/adk`.
+ * viem is an optional peer of `@pcc/spec`: install viem ^2 alongside it, or importing this subpath fails with
+ * ERR_MODULE_NOT_FOUND.
  *
  *   const prepared = await prepareFunding({ payload, wallet, publicClient, quote: { maxTotalGross }, pins });
  *   const acceptance = await signJobPolicy({ prepared, wallet });   // optional for a payer-sent fund()
