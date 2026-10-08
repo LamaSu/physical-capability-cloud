@@ -53,9 +53,9 @@ export const ECDSA_S_MAX = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe
 export const UNIT_FUNDED_ACTIVE = 1;
 
 /**
- * EIP-1167 as the factory's Clones.sol builds it (its line 23): the 10-byte creation code copies the 45 bytes after it
- * (0x2d bytes from offset 0x0a) and returns them as the clone's runtime, 363d3d373d3d3d363d73 ‖ impl ‖ 5af43d82803e90
- * 3d91602b57fd5bf3, which delegates every call to `impl`.
+ * EIP-1167 as the factory's Clones.sol builds it (its line 23). The 10-byte creation code copies the 45 bytes after
+ * it (0x2d bytes from offset 0x0a) and returns them as the clone's runtime, which delegates every call to `impl`:
+ *   363d3d373d3d3d363d73 ‖ impl ‖ 5af43d82803e903d91602b57fd5bf3
  */
 const EIP1167_CREATION: Hex = "0x3d602d80600a3d3981f3";
 const EIP1167_RUNTIME_PREFIX: Hex = "0x363d3d373d3d3d363d73";
