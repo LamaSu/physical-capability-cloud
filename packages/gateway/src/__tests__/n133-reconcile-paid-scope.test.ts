@@ -10,8 +10,11 @@
  * The record store is the test-only one (helpers/test-funding-record-store.ts): a TEMP table on the
  * test's own connection, so its inserts roll back with the transaction.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { sql } from "@pcc/store";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createDatabase, sql } from "@pcc/store";
 import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { __setFundingRecordStoreForTest, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import {
@@ -181,22 +184,32 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(store.count()).toBe(0);
   });
 
-  it("(neg-twice) two reconciles of one scope with the same funding: exactly one activates, the other is already_active", async () => {
+  // reconcilePaidScope is synchronous on the gateway's one connection, so two calls in one process
+  // run one after the other: these two tests are sequential and in-process, not races. The
+  // cross-connection case is neg-two-connections, below.
+  it("(neg-twice) two sequential, in-process reconciles of one scope with the same funding: the first activates, the second is already_active", async () => {
     const { scopeId } = await paidScope(f);
-    const results = await Promise.all([0, 1].map(async () => reconcilePaidScope(scopeId, verification(scopeId))));
-    expect(results.map((r) => r.kind).sort()).toEqual(["activated", "already_active"]);
+    const first = reconcilePaidScope(scopeId, verification(scopeId));
+    const second = reconcilePaidScope(scopeId, verification(scopeId));
+    expect([first.kind, second.kind]).toEqual(["activated", "already_active"]);
     expect(scopeRow(scopeId).status).toBe("active");
     expect(store.count()).toBe(1);
   });
 
-  it("(neg-race-escrow) two reconciles of one scope with different escrows: exactly one activates, the other is refused", async () => {
-    const { scopeId } = await paidScope(f);
-    const results = await Promise.all(
-      [ESCROW_A, ESCROW_B].map(async (escrowAddress) => reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress }))),
-    );
-    expect(results[0].kind).toBe("activated");
-    expect(results[1]).toEqual(refused("record_escrow_not_scope_escrow"));
+  it("(neg-race-escrow) two sequential, in-process reconciles of one scope, each record of the job's escrow at its turn: the second is refused", async () => {
+    const { scopeId, escrowId } = await paidScope(f);
+    const insert = vi.spyOn(store, "insert");
+    const first = reconcilePaidScope(scopeId, verification(scopeId)); // the job's escrow is ESCROW_A
+    // Between the calls the job's escrow row is re-pointed to ESCROW_B, so the second record IS the
+    // job's escrow's at its turn: it is refused because the scope is bound to ESCROW_A's funding,
+    // not because ESCROW_B is some other job's escrow.
+    setEscrow(escrowId, { contractAddress: ESCROW_B });
+    const second = reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }));
+    expect(first.kind).toBe("activated");
+    expect(second).toEqual(refused("scope_bound_to_other_funding"));
+    expect(insert).toHaveBeenCalledTimes(1);
     expect(store.count()).toBe(1);
+    expect(store.findByScope(db(), scopeId)?.escrowAddress).toBe(ESCROW_A);
   });
 
   it("(neg-other-funding) a live scope's record is never replaced by another escrow's", async () => {
@@ -497,5 +510,46 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     const again = await acceptScope(f, scopeId);
     expect(again.statusCode).toBe(409);
     expect(again.json()).toMatchObject({ error: "already_decided", status: "active" });
+  });
+});
+
+describe("S2.2 across connections: one database file, two connections (as two gateway processes)", () => {
+  let dir: string | undefined;
+  afterAll(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("(neg-two-connections) while a reconcile runs, a second connection reads the old row and cannot start a write; then it reads the activation", async () => {
+    dir = mkdtempSync(join(tmpdir(), "fund-s2-two-connections-"));
+    const file = join(dir, "pcc.sqlite");
+    await tearDownFixture(f); // this test's own fixture, on a database file
+    f = await setUpFixture({ dbPath: file });
+    store = installTestFundingRecordStore();
+    const { scopeId } = await paidScope(f);
+    const other = createDatabase(file).sqlite;
+    other.pragma("busy_timeout = 0"); // SQLITE_BUSY at once, not after the 5 s default
+    const statusOf = () => (other.prepare("SELECT status FROM execution_scopes WHERE id = ?").get(scopeId) as { status: string }).status;
+    const seen: string[] = [];
+    __setFundingRecordStoreForTest({
+      ...store,
+      insert(tx, record) {
+        store.insert(tx, record); // inside reconcile's BEGIN IMMEDIATE transaction
+        seen.push(statusOf());
+        try {
+          other.prepare("BEGIN IMMEDIATE").run();
+          seen.push("began");
+          other.prepare("ROLLBACK").run();
+        } catch (err) {
+          seen.push((err as { code?: string }).code ?? "error");
+        }
+      },
+    });
+    try {
+      expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+      expect(seen).toEqual(["awaiting_funding", "SQLITE_BUSY"]);
+      expect(statusOf()).toBe("active");
+    } finally {
+      other.close();
+    }
   });
 });

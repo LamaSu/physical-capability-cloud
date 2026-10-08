@@ -55,14 +55,17 @@ function ensurePricedLiquidHandler(kernelId: string): void {
 
 const saved: Record<string, string | undefined> = {};
 
-/** beforeEach: a fresh store and app, mock settlement on (the escrow is then made real per test), the clock at T0. */
-export async function setUpFixture(): Promise<Fixture> {
+/**
+ * beforeEach: a fresh store and app, mock settlement on (the escrow is then made real per test), the
+ * clock at T0. The store is in memory unless `dbPath` names a database file.
+ */
+export async function setUpFixture(opts: { dbPath?: string } = {}): Promise<Fixture> {
   for (const k of ENV) saved[k] = process.env[k];
   process.env.MOCK_SETTLEMENT = "true";
   delete process.env.PCC_GATEWAY_PRIVATE_KEY;
   delete process.env.PCC_A2A_AUTH_DISABLED;
   process.env.PCC_ADMIN_KEY = ADMIN;
-  process.env.PCC_DB_PATH = ":memory:";
+  process.env.PCC_DB_PATH = opts.dbPath ?? ":memory:";
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(T0);
   initStore({ seed: true });
