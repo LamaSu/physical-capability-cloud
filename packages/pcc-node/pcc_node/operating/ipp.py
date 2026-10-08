@@ -90,8 +90,10 @@ IPP_REASONS_STOPPED = frozenset({
 # finished job is retained and could be restarted (sec 5.3.7.2). Any other reason with state 9 --
 # 'job-completed-with-warnings', a processing reason such as 'job-printing' that contradicts it, a
 # vendor keyword -- cannot establish that this job printed cleanly: UNOBSERVABLE, never COMPLETED.
+# 'none' must also stand alone (pack 77 H3): beside another reason it contradicts itself.
+IPP_REASON_NONE = "none"
 IPP_REASONS_COMPLETED_OK = frozenset({
-    "none", "job-completed-successfully", "job-restartable",
+    IPP_REASON_NONE, "job-completed-successfully", "job-restartable",
 })
 # RFC 8011 sec 5.1.4: a keyword is 1 to 255 US-ASCII lowercase letters, digits, "-", "." and "_",
 # and its first character is a lowercase letter. Matched with fullmatch, so a trailing newline is
@@ -350,10 +352,10 @@ def ipp_completion_verdict(http_status: Any, body: Any, request_id: int, job_id:
     No terminal verdict without proof the answer is about THIS job (r31 round-1 finding 2): exactly
     one integer job-id equal to ``job_id``, else WAITING. For job-state 9, job-state-reasons must be
     well-formed (:func:`ipp_job_state_reasons`); missing, duplicated or malformed reasons -> WAITING.
-    Then 'queued-in-device' -> UNOBSERVABLE; errors, cancellation or abort -> FAILED; any other
-    reason outside :data:`IPP_REASONS_COMPLETED_OK` -> UNOBSERVABLE (r31 round-2 finding 4: the
-    combination does not establish a clean completion); and COMPLETED only when every reason is in
-    that allowlist. FAILED for 7 canceled / 8 aborted. Everything else -- 3-6, an unknown or
+    Then 'queued-in-device' -> UNOBSERVABLE; errors, cancellation or abort -> FAILED; 'none' beside
+    any other reason -> UNOBSERVABLE (pack 77 H3: it contradicts itself); any other reason outside
+    :data:`IPP_REASONS_COMPLETED_OK` -> UNOBSERVABLE (r31 round-2 finding 4: the combination does
+    not establish a clean completion); and COMPLETED only when every reason is in that allowlist. FAILED for 7 canceled / 8 aborted. Everything else -- 3-6, an unknown or
     unreadable state, a non-success IPP status-code (e.g. 0x0406 not-found: the job may have been
     purged), a request-id that is not ours, a malformed body, a non-200 HTTP status (RFC 8010 sec
     3.4.3) or a transport failure (status 0) -- is WAITING.
@@ -405,6 +407,14 @@ def ipp_completion_verdict(http_status: Any, body: Any, request_id: int, job_id:
         if stopped:
             observation["reason"] = f"job-state completed, but the printer also reports {', '.join(stopped)}"
             return POLL_FAILED, observation
+        if IPP_REASON_NONE in strict_reasons and len(strict_reasons) != 1:
+            # Pack 77 H3 (astra, 67875cd1): 'none' says no reason applies, so beside any other value,
+            # 'job-completed-successfully' included, the answer contradicts itself.
+            observation["reason"] = (
+                f"job-state completed with 'none' beside other reasons ({_short(', '.join(strict_reasons))}): "
+                "'none' means no reason applies, so the answer contradicts itself"
+            )
+            return POLL_UNOBSERVABLE, observation
         unexpected = sorted(set(strict_reasons) - IPP_REASONS_COMPLETED_OK)
         if unexpected:
             observation["reason"] = (

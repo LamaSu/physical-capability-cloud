@@ -582,3 +582,34 @@ class TestH4ErrorsAndStoppedAndQueuedInDeviceOutrankTheAllowlist:
         body = ipp_response(job_state=9, reasons=reasons, request_id=7, job_id=42)
         verdict, observation = ipp_completion_verdict(200, body, 7, 42)
         assert verdict == expected, observation
+
+
+# ---------------------------------------------------------------------------
+# Pack 77 H3 (astra on #377 @67875cd1): 'none' must stand alone
+# ---------------------------------------------------------------------------
+
+class TestNoneMustStandAlone:
+    """'none' says no reason applies (RFC 8011 sec 5.3.8). Beside any other value it contradicts
+    itself, so it is not a clean completion even when every value is in the allowlist. Each case
+    below is decided by this rule alone: without it, both allowlisted pairs read as COMPLETED."""
+
+    @pytest.mark.parametrize("reasons", [
+        pytest.param(("none", "job-completed-successfully"), id="none-then-successfully"),
+        pytest.param(("job-completed-successfully", "none"), id="successfully-then-none"),
+        pytest.param(("none", "job-restartable"), id="none-plus-restartable"),
+        pytest.param(("none", "none"), id="none-twice"),
+    ])
+    def test_none_beside_another_reason_is_unobservable(self, reasons):
+        body = ipp_response(job_state=9, reasons=reasons, request_id=7, job_id=42)
+        verdict, observation = ipp_completion_verdict(200, body, 7, 42)
+        assert verdict == POLL_UNOBSERVABLE, observation
+        assert "contradicts itself" in observation["reason"]
+
+    def test_none_alone_still_completes(self):
+        body = ipp_response(job_state=9, reasons=("none",), request_id=7, job_id=42)
+        assert ipp_completion_verdict(200, body, 7, 42)[0] == POLL_COMPLETED
+
+    def test_errors_beside_none_still_fail(self):
+        """An explicit error outranks the contradiction: the job is reported failed, not dropped."""
+        body = ipp_response(job_state=9, reasons=("none", "job-completed-with-errors"), request_id=7, job_id=42)
+        assert ipp_completion_verdict(200, body, 7, 42)[0] == POLL_FAILED
