@@ -371,6 +371,13 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
   });
 
+  it("(neg-kept-buyer) a kept record of this scope and escrow whose verified payer is another buyer blocks the activation", async () => {
+    const { scopeId } = await paidScope(f);
+    store.plant(verification(scopeId, { buyer: OTHER }));
+    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_bound_to_other_funding"));
+    expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+  });
+
   it("(neg-kept-lying) a store answering for this scope with another scope's record is not believed", async () => {
     const { scopeId } = await paidScope(f);
     const other = verification("scope_elsewhere");
