@@ -3,7 +3,9 @@
 Ported from #377 (fix/pcc-node-completion-pollers @67875cd1, r31 rounds 1 to 3). There it read the
 state of a job ``lp`` had spooled, once per daemon cycle. On master a device runs only through the
 operating agent's typed operations, so the same reader serves the operating runtime for IPP
-printers. Everything here is pure: bytes in, bytes or a verdict out, no I/O.
+printers, which also submits the print itself (:func:`encode_print_job`, :func:`print_job_answer`)
+and asks whether the printer is idle (:func:`encode_get_printer_attributes`,
+:func:`printer_is_idle`). Everything here is pure: bytes in, bytes or a verdict out, no I/O.
 
 A job is read as COMPLETED only when ALL of these hold (RFC 8011 B.1.2.1: "The transition of the
 Job object into the 'completed' state is the only indicator that the Job has been printed"):
@@ -37,6 +39,8 @@ POLL_WAITING = "waiting"          # not finished, or not (yet) readable
 POLL_UNOBSERVABLE = "unobservable"
 
 IPP_REQUEST_VERSION = b"\x02\x00"              # IPP/2.0
+IPP_OPERATION_PRINT_JOB = 0x0002               # RFC 8011 sec 4.2.1
+IPP_OPERATION_GET_PRINTER_ATTRIBUTES = 0x000B  # RFC 8011 sec 4.2.5
 IPP_OPERATION_GET_JOB_ATTRIBUTES = 0x0009      # RFC 8011 sec 4.3.4
 IPP_INT_MAX = 2 ** 31 - 1                      # integer(1:MAX); request-id range
 
@@ -44,14 +48,22 @@ IPP_INT_MAX = 2 ** 31 - 1                      # integer(1:MAX); request-id rang
 IPP_TAG_OPERATION_ATTRIBUTES = 0x01
 IPP_TAG_JOB_ATTRIBUTES = 0x02
 IPP_TAG_END_OF_ATTRIBUTES = 0x03
+IPP_TAG_PRINTER_ATTRIBUTES = 0x04
 IPP_DELIMITER_TAG_MAX = 0x0F
 
 IPP_VALUE_INTEGER = 0x21
 IPP_VALUE_ENUM = 0x23
+IPP_VALUE_NAME_WITHOUT_LANGUAGE = 0x42
 IPP_VALUE_KEYWORD = 0x44
 IPP_VALUE_URI = 0x45
 IPP_VALUE_CHARSET = 0x47
 IPP_VALUE_NATURAL_LANGUAGE = 0x48
+IPP_VALUE_MIME_MEDIA_TYPE = 0x49
+
+# The requesting-user-name pcc-node sends with Print-Job and Get-Printer-Attributes.
+IPP_REQUESTING_USER_NAME = "pcc-node"
+# printer-state (type1 enum), RFC 8011 sec 5.4.11: 3 idle, 4 processing, 5 stopped.
+IPP_PRINTER_STATE_IDLE = 3
 
 # RFC 8011 appendix B.1.2: 0x0000-0x00FF is the "successful" class.
 IPP_STATUS_SUCCESS_MAX = 0x00FF
@@ -129,6 +141,59 @@ def _check_id(value: Any, what: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= IPP_INT_MAX:
         raise ValueError(f"{what} out of range: {value!r}")
     return value
+
+
+def _ascii_text(value: Any, what: str, limit: int = 255) -> bytes:
+    """A name or MIME type as sent: 1 to ``limit`` printable US-ASCII characters, else ValueError."""
+    if (not isinstance(value, str) or not 1 <= len(value) <= limit
+            or any(not 0x20 <= ord(ch) <= 0x7E for ch in value)):
+        raise ValueError(f"{what} must be 1 to {limit} printable ASCII characters: {value!r}")
+    return value.encode("ascii")
+
+
+def _operation_head(operation: int, request_id: int, printer_uri: str) -> bytes:
+    """The header and the three operation attributes every request starts with (RFC 8011 sec 4.1.4)."""
+    _check_id(request_id, "request-id")
+    return b"".join((
+        IPP_REQUEST_VERSION,
+        _i16(operation),
+        _i32(request_id),
+        bytes((IPP_TAG_OPERATION_ATTRIBUTES,)),
+        _ipp_value(IPP_VALUE_CHARSET, b"attributes-charset", b"utf-8"),
+        _ipp_value(IPP_VALUE_NATURAL_LANGUAGE, b"attributes-natural-language", b"en"),
+        _ipp_value(IPP_VALUE_URI, b"printer-uri", printer_uri.encode("ascii")),
+    ))
+
+
+def encode_print_job(printer_uri: str, request_id: int, document: bytes, *, document_format: str,
+                     job_name: str) -> bytes:
+    """Encode an IPP/2.0 Print-Job request (RFC 8011 sec 4.2.1) carrying ``document``.
+
+    Operation attributes in RFC 8011 sec 4.2.1.1's order: attributes-charset,
+    attributes-natural-language, printer-uri, requesting-user-name, job-name, document-format. Then
+    the end-of-attributes-tag, then the document's bytes (RFC 8010 sec 3.1.1: the data follows the
+    attributes). The printer's answer names the job-id it created (:func:`print_job_answer`).
+    """
+    if not isinstance(document, (bytes, bytearray)):
+        raise ValueError(f"the document must be bytes, not {type(document).__name__}")
+    return b"".join((
+        _operation_head(IPP_OPERATION_PRINT_JOB, request_id, printer_uri),
+        _ipp_value(IPP_VALUE_NAME_WITHOUT_LANGUAGE, b"requesting-user-name", IPP_REQUESTING_USER_NAME.encode("ascii")),
+        _ipp_value(IPP_VALUE_NAME_WITHOUT_LANGUAGE, b"job-name", _ascii_text(job_name, "job-name")),
+        _ipp_value(IPP_VALUE_MIME_MEDIA_TYPE, b"document-format", _ascii_text(document_format, "document-format")),
+        bytes((IPP_TAG_END_OF_ATTRIBUTES,)),
+        bytes(document),
+    ))
+
+
+def encode_get_printer_attributes(printer_uri: str, request_id: int) -> bytes:
+    """Encode an IPP/2.0 Get-Printer-Attributes request for printer-state only (RFC 8011 sec 4.2.5)."""
+    return b"".join((
+        _operation_head(IPP_OPERATION_GET_PRINTER_ATTRIBUTES, request_id, printer_uri),
+        _ipp_value(IPP_VALUE_NAME_WITHOUT_LANGUAGE, b"requesting-user-name", IPP_REQUESTING_USER_NAME.encode("ascii")),
+        _ipp_value(IPP_VALUE_KEYWORD, b"requested-attributes", b"printer-state"),
+        bytes((IPP_TAG_END_OF_ATTRIBUTES,)),
+    ))
 
 
 def encode_get_job_attributes(printer_uri: str, job_id: int, request_id: int) -> bytes:
@@ -432,3 +497,44 @@ def ipp_completion_verdict(http_status: Any, body: Any, request_id: int, job_id:
         return POLL_WAITING, observation
     observation["reason"] = f"unrecognised job-state {state}"
     return POLL_WAITING, observation
+
+
+def print_job_answer(http_status: Any, body: Any, request_id: int) -> Tuple[Optional[int], Dict[str, Any]]:
+    """The job-id the printer's answer to OUR Print-Job names, or None. Pure; never raises.
+
+    Returns ``(job_id, observation)``. That job-id is the execution id the printer issued for THIS
+    print, the only handle a completion is ever read through (#377 round 3). It is read only from an
+    HTTP 200, well-formed IPP/1.x or 2.x answer that echoes our request-id with a successful
+    status-code, and only from its one Job Attributes group: exactly one integer(1:MAX) job-id. Any
+    other answer names no job this node can follow, and ``observation["reason"]`` says why.
+    """
+    observation: Dict[str, Any] = {"httpStatus": http_status}
+    response, problem = _answer_problem(http_status, body, request_id, observation)
+    if response is None:
+        observation["reason"] = problem
+        return None, observation
+    job_id, problem = ipp_job_id(response)
+    observation["reportedJobId"] = job_id
+    if job_id is None:
+        observation["reason"] = f"the answer names no usable job-id: {problem}"
+        return None, observation
+    observation["reason"] = f"the printer created job {job_id}"
+    return job_id, observation
+
+
+def printer_is_idle(http_status: Any, body: Any, request_id: int) -> bool:
+    """True only when the answer to OUR Get-Printer-Attributes says printer-state 3 (idle). Pure.
+
+    Read like a job verdict: HTTP 200, well-formed IPP/1.x or 2.x, our request-id, a successful
+    status-code, then exactly one printer-state holding exactly one 4-octet enum in the one Printer
+    Attributes group. Processing (4), stopped (5) and anything unreadable are not idle.
+    """
+    response, _ = _answer_problem(http_status, body, request_id, {})
+    if response is None:
+        return False
+    attribute, _ = _single_attribute(response, IPP_TAG_PRINTER_ATTRIBUTES, "printer", "printer-state")
+    if attribute is None or len(attribute["values"]) != 1:
+        return False
+    value_tag, value = attribute["values"][0]
+    return (value_tag == IPP_VALUE_ENUM and len(value) == 4
+            and int.from_bytes(value, "big", signed=True) == IPP_PRINTER_STATE_IDLE)

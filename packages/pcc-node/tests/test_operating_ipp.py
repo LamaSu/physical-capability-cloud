@@ -22,8 +22,12 @@ from pcc_node.operating.ipp import (
     IppDecodeError,
     decode_ipp_response,
     encode_get_job_attributes,
+    encode_get_printer_attributes,
+    encode_print_job,
     ipp_completion_verdict,
     ipp_job_state,
+    print_job_answer,
+    printer_is_idle,
 )
 
 
@@ -613,3 +617,156 @@ class TestNoneMustStandAlone:
         """An explicit error outranks the contradiction: the job is reported failed, not dropped."""
         body = ipp_response(job_state=9, reasons=("none", "job-completed-with-errors"), request_id=7, job_id=42)
         assert ipp_completion_verdict(200, body, 7, 42)[0] == POLL_FAILED
+
+
+# ---------------------------------------------------------------------------
+# Print-Job and Get-Printer-Attributes (the IPP print runtime's submit and idle check)
+# ---------------------------------------------------------------------------
+
+def answer(groups, status=0x0000, request_id=5, version=b"\x02\x00"):
+    """An IPP answer: an operation group, then ``groups`` (raw bytes, each starting with its tag)."""
+    return (
+        version + status.to_bytes(2, "big") + request_id.to_bytes(4, "big", signed=True)
+        + b"\x01" + ipp_attr(0x47, b"attributes-charset", b"utf-8")
+        + ipp_attr(0x48, b"attributes-natural-language", b"en")
+        + b"".join(groups) + b"\x03"
+    )
+
+
+def job_group(job_id=77, tag=0x21, value=None, duplicate=False):
+    value = value if value is not None else job_id.to_bytes(4, "big", signed=True)
+    out = b"\x02" + ipp_attr(tag, b"job-id", value)
+    if duplicate:
+        out += ipp_attr(tag, b"job-id", value)
+    return out + ipp_attr(0x23, b"job-state", (3).to_bytes(4, "big")) + ipp_attr(0x44, b"job-state-reasons", b"none")
+
+
+def printer_group(state=3, tag=0x23, value=None, duplicate=False):
+    value = value if value is not None else state.to_bytes(4, "big", signed=True)
+    out = b"\x04" + ipp_attr(tag, b"printer-state", value)
+    return out + (ipp_attr(tag, b"printer-state", value) if duplicate else b"")
+
+
+class TestPrintJobEncoding:
+    PRINTER_URI = "ipp://10.0.0.1:631/printers/office"
+
+    # Written out field by field from RFC 8010 sec 3.1 and RFC 8011 sec 4.2.1.1 -- NOT by the encoder.
+    EXPECTED = (
+        b"\x02\x00"                                   # version-number 2.0
+        b"\x00\x02"                                   # operation-id Print-Job
+        b"\x00\x00\x00\x05"                           # request-id 5
+        b"\x01"                                       # operation-attributes-tag
+        b"\x47" b"\x00\x12" b"attributes-charset" b"\x00\x05" b"utf-8"
+        b"\x48" b"\x00\x1b" b"attributes-natural-language" b"\x00\x02" b"en"
+        b"\x45" b"\x00\x0b" b"printer-uri" b"\x00\x22" b"ipp://10.0.0.1:631/printers/office"
+        b"\x42" b"\x00\x14" b"requesting-user-name" b"\x00\x08" b"pcc-node"
+        b"\x42" b"\x00\x08" b"job-name" b"\x00\x08" b"pcc-node"
+        b"\x49" b"\x00\x0f" b"document-format" b"\x00\x0a" b"text/plain"
+        b"\x03"                                       # end-of-attributes-tag
+        b"hello, printer\n"                           # the document, after the attributes
+    )
+
+    def test_request_bytes_are_exact(self):
+        encoded = encode_print_job(self.PRINTER_URI, 5, b"hello, printer\n",
+                                   document_format="text/plain", job_name="pcc-node")
+        assert encoded == self.EXPECTED, f"\nexpected {self.EXPECTED.hex()}\n     got {encoded.hex()}"
+
+    def test_the_document_follows_the_attributes_verbatim(self):
+        document = bytes(range(256)) * 4   # any bytes, end-of-attributes-tag values included
+        encoded = encode_print_job(self.PRINTER_URI, 5, document, document_format="text/plain", job_name="j")
+        assert encoded.endswith(b"\x03" + document)
+        decoded = decode_ipp_response(encoded)   # the document is never read as attributes
+        [group] = decoded["groups"]
+        assert [a["name"] for a in group["attributes"]] == [
+            "attributes-charset", "attributes-natural-language", "printer-uri",
+            "requesting-user-name", "job-name", "document-format",
+        ]
+
+    @pytest.mark.parametrize("kwargs", [
+        pytest.param({"request_id": 0}, id="request-id-zero"),
+        pytest.param({"request_id": True}, id="request-id-bool"),
+        pytest.param({"document": "text, not bytes"}, id="document-not-bytes"),
+        pytest.param({"job_name": ""}, id="empty-job-name"),
+        pytest.param({"job_name": "x" * 256}, id="job-name-too-long"),
+        pytest.param({"job_name": "line\nbreak"}, id="job-name-control-character"),
+        pytest.param({"job_name": "café"}, id="job-name-not-ascii"),
+        pytest.param({"document_format": ""}, id="empty-format"),
+        pytest.param({"document_format": "text/plain\r\nX: y"}, id="format-control-characters"),
+    ])
+    def test_bad_inputs_are_refused(self, kwargs):
+        args = {"request_id": 5, "document": b"x", "document_format": "text/plain", "job_name": "pcc-node"}
+        args.update(kwargs)
+        with pytest.raises(ValueError):
+            encode_print_job(self.PRINTER_URI, args.pop("request_id"), args.pop("document"), **args)
+
+
+class TestPrintJobAnswer:
+    def test_the_job_id_the_printer_created_is_read(self):
+        job_id, observation = print_job_answer(200, answer([job_group(77)]), 5)
+        assert job_id == 77
+        assert observation["reportedJobId"] == 77 and observation["ippStatusCode"] == "0x0000"
+
+    @pytest.mark.parametrize("status", [0x0001, 0x0002, 0x00FF])
+    def test_every_successful_status_code_is_read(self, status):
+        assert print_job_answer(200, answer([job_group(77)], status=status), 5)[0] == 77
+
+    @pytest.mark.parametrize("http_status,body,reason", [
+        pytest.param(0, None, "transport failure", id="no-answer"),
+        pytest.param(500, answer([job_group()]), "HTTP 500", id="http-500"),
+        pytest.param(200, answer([job_group()], request_id=6), "not ours", id="another-request-id"),
+        pytest.param(200, answer([job_group()], status=0x040A), "not a success", id="document-format-not-supported"),
+        pytest.param(200, answer([job_group()], status=0x0507), "not a success", id="not-accepting-jobs"),
+        pytest.param(200, answer([job_group()], version=b"\x03\x00"), "not an IPP/1.x", id="ipp-3"),
+        pytest.param(200, answer([]), "no usable job-id", id="no-job-group"),
+        pytest.param(200, answer([job_group(), job_group()]), "no usable job-id", id="two-job-groups"),
+        pytest.param(200, answer([job_group(duplicate=True)]), "no usable job-id", id="two-job-ids"),
+        pytest.param(200, answer([job_group(tag=0x44)]), "not a 4-octet integer", id="job-id-a-keyword"),
+        pytest.param(200, answer([job_group(value=b"\x00\x4d")]), "not a 4-octet integer", id="two-octets"),
+        pytest.param(200, answer([job_group(value=b"\x00\x00\x00\x00")]), "out of range", id="job-id-zero"),
+        pytest.param(200, answer([b"\x04" + ipp_attr(0x21, b"job-id", (77).to_bytes(4, "big"))]),
+                     "no usable job-id", id="job-id-only-in-a-printer-group"),
+        pytest.param(200, answer([job_group()])[:-3], "malformed", id="truncated"),
+        pytest.param(200, "text", "malformed", id="not-bytes"),
+    ])
+    def test_an_answer_that_names_no_job_of_ours_names_none(self, http_status, body, reason):
+        job_id, observation = print_job_answer(http_status, body, 5)
+        assert job_id is None
+        assert reason in observation["reason"], observation
+
+
+class TestPrinterState:
+    PRINTER_URI = "ipp://10.0.0.1:631/printers/office"
+
+    EXPECTED = (
+        b"\x02\x00" b"\x00\x0b" b"\x00\x00\x00\x09" b"\x01"   # IPP/2.0, Get-Printer-Attributes, request-id 9
+        b"\x47" b"\x00\x12" b"attributes-charset" b"\x00\x05" b"utf-8"
+        b"\x48" b"\x00\x1b" b"attributes-natural-language" b"\x00\x02" b"en"
+        b"\x45" b"\x00\x0b" b"printer-uri" b"\x00\x22" b"ipp://10.0.0.1:631/printers/office"
+        b"\x42" b"\x00\x14" b"requesting-user-name" b"\x00\x08" b"pcc-node"
+        b"\x44" b"\x00\x14" b"requested-attributes" b"\x00\x0d" b"printer-state"
+        b"\x03"
+    )
+
+    def test_request_bytes_are_exact(self):
+        assert encode_get_printer_attributes(self.PRINTER_URI, 9) == self.EXPECTED
+
+    def test_idle_is_printer_state_3(self):
+        assert printer_is_idle(200, answer([printer_group(3)], request_id=9), 9) is True
+
+    @pytest.mark.parametrize("http_status,body", [
+        pytest.param(200, answer([printer_group(4)], request_id=9), id="processing"),
+        pytest.param(200, answer([printer_group(5)], request_id=9), id="stopped"),
+        pytest.param(200, answer([printer_group(3)], request_id=8), id="another-request-id"),
+        pytest.param(200, answer([printer_group(3)], request_id=9, status=0x0400), id="error-status"),
+        pytest.param(500, answer([printer_group(3)], request_id=9), id="http-500"),
+        pytest.param(0, None, id="no-answer"),
+        pytest.param(200, answer([printer_group(3, duplicate=True)], request_id=9), id="two-printer-states"),
+        pytest.param(200, answer([printer_group(3), printer_group(3)], request_id=9), id="two-printer-groups"),
+        pytest.param(200, answer([printer_group(3, tag=0x21)], request_id=9), id="integer-not-enum"),
+        pytest.param(200, answer([printer_group(value=b"\x00\x03")], request_id=9), id="two-octets"),
+        pytest.param(200, answer([b"\x02" + ipp_attr(0x23, b"printer-state", (3).to_bytes(4, "big"))], request_id=9),
+                     id="in-a-job-group"),
+        pytest.param(200, answer([printer_group(3)], request_id=9)[:-2], id="truncated"),
+    ])
+    def test_anything_else_is_not_idle(self, http_status, body):
+        assert printer_is_idle(http_status, body, 9) is False
