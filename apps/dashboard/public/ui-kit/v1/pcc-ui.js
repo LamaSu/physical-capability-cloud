@@ -1165,6 +1165,12 @@
     pinRow(d, kitText('finality'), pin, 'finality');
     return d;
   }
+  // The visible reference line and its expandable details, for ONE pinned read, under the money fact it
+  // backs (the receipt and the run window share it).
+  function appendPinReference(parent, pin) {
+    parent.appendChild(el('div', 'pcc-mono pcc-muted pcc-pin-ref', pinReferenceText(pin)));
+    parent.appendChild(pinDetails(pin));
+  }
   // Contract rules 11 and 15: only a registry-confirmed real asset goes unmarked.
   function assetBadgeText(ar) {
     var v = ar && typeof ar === 'object' && !Array.isArray(ar) ? ar.value : null;
@@ -1797,6 +1803,11 @@
   function renderRun(ctx, w) {
     var wrap = winShell(kitText('Run'), kitText('connecting'), 'st-running');
     var pill = wrap.querySelector('.pcc-pill');
+    // R12 r2 A: the chain reference of the read the pill shows (network, escrow, unit, block and hash, plus
+    // the expandable details the receipt uses), or nothing. It is painted in the SAME update as the pill,
+    // from that poll's own unprojected live body, so an earlier poll's pin is never kept.
+    var pinBox = el('div', 'pcc-run-pin');
+    wrap._body.appendChild(pinBox);
     var latest = el('div', 'pcc-run-latest', kitText('Waiting for the first update…'));
     wrap._body.appendChild(latest);
     var started = Date.now();
@@ -1828,19 +1839,32 @@
       for (var i = 0; i < f.lines.length; i++) feedLine(joinText(f.lines[i].ts, statusPillText(f.lines[i].label, verified, f.money)));
     }
 
-    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
+    // One update of the header: the pill node is replaced, and the reference box is cleared and refilled
+    // from `p` (this read's pin, or null) at the same time, so the two can never disagree.
+    function setPill(node, p) {
+      if (pill.parentNode) pill.parentNode.replaceChild(node, pill);
+      pill = node;
+      clear(pinBox);
+      if (p) appendPinReference(pinBox, p);
+    }
+    // `live` is true only for a successful poll of the binding (never a snapshot or a stream event), and
+    // `data` is then that poll's whole response: a run never projects its read (binding.select is unused).
     function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
       var cls = null; // this read's pill class, when it sets one
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
-        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source
-        setText(pill, dataStatusText(bpath, data, statusVal, live)); pill.className = 'pcc-pill ' + cls;
+        cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source AND pin
+        // R12 r2 A: a state (any of 1-9, D) shows only with this read's own pin, and then the pill is a money
+        // fact on that pin and its reference is painted with it.
+        var pin = live === true ? chainPin(data, bpath) : null;
+        var txt = dataStatusText(bpath, data, statusVal, live);
+        setPill(pin && cls !== 'st-unknown' ? moneyFactEl('span', 'pcc-pill ' + cls, chainFactText(txt, pin)) : el('span', 'pcc-pill ' + cls, txt), pin);
       } else if (statusVal != null) {
         cls = dataStatusClass(bpath, data, statusVal, live);
-        setText(pill, dataStatusText(bpath, data, statusVal, live)); pill.className = 'pcc-pill ' + cls;
+        setPill(el('span', 'pcc-pill ' + cls, dataStatusText(bpath, data, statusVal, live)), null);
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
-        setText(pill, kitText('unknown')); pill.className = 'pcc-pill st-unknown';
+        setPill(el('span', 'pcc-pill st-unknown', kitText('unknown')), null);
       }
       // Secondary text (the latest line, timeline and feed lines) is plain only on a VERIFIED PAYEE
       // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
@@ -1902,8 +1926,9 @@
         setTimeout(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }, w.binding.pollMs || POLL_DEFAULT_MS);
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
-        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
-        setText(pill, kitText('unknown · read failed')); pill.className = 'pcc-pill st-unknown';
+        // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3), nor
+        // its reference (R12 r2 A).
+        setPill(el('span', 'pcc-pill st-unknown', kitText('unknown · read failed')), null);
         paintLatest(false); paintFeed(false); // nothing earlier stays vouched for (astra r7 F10)
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
@@ -2139,8 +2164,7 @@
       if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), idText(e.rail))));
       wrap._body.appendChild(railRow);
       if (pin) {
-        wrap._body.appendChild(el('div', 'pcc-mono pcc-muted pcc-pin-ref', pinReferenceText(pin)));
-        wrap._body.appendChild(pinDetails(pin));
+        appendPinReference(wrap._body, pin);
         var logs = logFieldsNode(e);
         if (logs) wrap._body.appendChild(logs);
       }
@@ -2939,6 +2963,8 @@
       '.pcc-receipt-parties{display:flex;gap:8px;align-items:center;}',
       '.pcc-receipt-source{font:450 12px/17px var(--font);margin:0 0 4px;}',
       '.pcc-pin-ref{font:450 12px/17px var(--mono);margin-top:6px;overflow-wrap:anywhere;}',
+      '.pcc-run-pin:empty{display:none;}',
+      '.pcc-run-pin .pcc-pin-ref{margin-top:0;}',
       '.pcc-pin-details{margin-top:4px;font:450 12px/17px var(--font);}',
       '.pcc-pin-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}',
       '.pcc-pin-row .pcc-mono{overflow-wrap:anywhere;}',

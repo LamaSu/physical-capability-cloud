@@ -1697,3 +1697,201 @@ describe("R12 r2 D (the same class, receipt sinks): a pinned read whose fields d
     expect(body).toContain(ECON.recipient);
   });
 });
+
+// ── R12 r2 A (run 3 F1 HIGH = run 2 F4 HIGH): the run window's money pill carries THIS poll's chain reference ──
+/** LIVE boot whose every request is answered by the TEST (deferred), so each poll's update can be inspected
+ *  before the next one; an unanswered poll stays pending, which ends the poll chain. */
+type R2Call = { url: string; settle: (r: R2Reply) => void };
+function r2BootGated(manifest: string): R2Call[] {
+  assertKitTextBeforeBoot();
+  document.documentElement.removeAttribute("data-theme");
+  document.head.innerHTML = "";
+  document.body.innerHTML = "";
+  (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+  const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+  const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+  document.body.appendChild(mNode); // LIVE mode
+  const calls: R2Call[] = [];
+  (window as unknown as { fetch: unknown }).fetch = (url: unknown) => new Promise((resolve, reject) => {
+    calls.push({ url: String(url), settle: (r) => {
+      if (r === "reject") { reject(new Error("network down")); return; }
+      resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: () => null }, json: () => Promise.resolve(r.body ?? {}), text: () => Promise.resolve(JSON.stringify(r.body ?? {})) });
+    } });
+  });
+  // eslint-disable-next-line no-eval
+  (0, eval)(kitSrc);
+  assertKitTextViolations();
+  return calls;
+}
+/** Answer the i-th request (waiting for the kit to make it), then let the update land. */
+async function r2Answer(calls: R2Call[], i: number, reply: R2Reply) {
+  for (let t = 0; t < 400 && calls.length <= i; t++) await r2Wait(2);
+  expect(calls.length, "request " + i + " was made").toBeGreaterThan(i);
+  calls[i]!.settle(reply);
+  await flush();
+}
+/** End a polling test: wait until the window has made its NEXT request into this test's own mock, and leave
+ *  it unanswered. The window then waits forever, so it can never take a later test's reply (a stale window's
+ *  timer would otherwise call whatever fetch the next test installs). */
+async function r2Park(calls: R2Call[], i: number) {
+  for (let t = 0; t < 400 && calls.length <= i; t++) await r2Wait(2);
+  expect(calls.length, "the window parked on request " + i).toBeGreaterThan(i);
+}
+const r2Short = (h: string) => h.slice(0, 6) + "…" + h.slice(-4);
+/** The visible reference the kit must show for a pinned body (from the body's own fields). */
+function r2ExpectedRef(b: Record<string, unknown>): string {
+  const net = (SETTLEMENT_NETWORKS as Record<number, string>)[b.chainId as number]!;
+  const block = String(b.asOfBlock).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${net} · escrow ${r2Short(String(b.escrow))} · unit ${r2Short(String(b.unitId))} · block ${block} (${r2Short(String(b.asOfBlockHash))}) · finalized`;
+}
+
+describe("R12 r2 A (run 3 F1 HIGH = run 2 F4 HIGH): no run pill carries a chain-derived money tone without THIS read's visible reference", () => {
+  // Run 3's exact reproduction (verdict-run3.md, F1).
+  const RUN3_PATH = "/api/settlement/units/0xabababababababababababababababababababababababababababababababab/lifecycle";
+  const RUN3_MANIFEST = { csd: "pcc://artifacts/dashboard/v1", title: "Settlement", sections: [{ windows: [{ kind: "run", binding: { path: RUN3_PATH }, statusFrom: "finalState" }] }] };
+  const RUN3_BODY = {
+    chainId: 84532, escrow: "0x1212121212121212121212121212121212121212",
+    unitId: "0xabababababababababababababababababababababababababababababababab",
+    asOfBlock: "12345678", asOfBlockHash: "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    finality: "finalized", unitState: 8, finalState: "SETTLED_RELEASED", isTerminal: true, isAllocated: false, phase: "settled",
+  };
+  // The same manifest, polling every 5ms, so the test can drive the next polls (each one answered by the test).
+  const RUN3_POLLING = JSON.stringify({ ...RUN3_MANIFEST, sections: [{ windows: [{ ...RUN3_MANIFEST.sections[0]!.windows[0]!, binding: { path: RUN3_PATH, pollMs: 5 } }] }] });
+  const pill = () => document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+  const ref = () => document.querySelector(".pcc-run-pin .pcc-pin-ref")?.textContent ?? null;
+  const details = () => document.querySelector(".pcc-run-pin .pcc-pin-details");
+  const PENDING = "pending - not confirmed at a finalized block";
+  /** The invariant, checked after every update: a chain-derived money tone (any money tone but the pending
+   *  refusal) has exactly the reference of the body that produced it; anything else has none. */
+  function invariant(body: Record<string, unknown> | null, tag: string) {
+    const cls = pill().className, text = pill().textContent;
+    const chainTone = /st-(settled|refunded|running|failed)/.test(cls) || (cls.includes("st-waiting") && text !== PENDING);
+    if (chainTone) {
+      expect(body, tag + ": a money tone came from a body").not.toBeNull();
+      expect(ref(), tag).toBe(r2ExpectedRef(body!));
+      expect(details()?.textContent, tag).toContain(String(body!.asOfBlockHash));
+    } else {
+      expect(ref(), tag + " (" + cls + " / " + text + ")").toBeNull();
+    }
+  }
+
+  it("run 3's exact manifest and body: a green pill AND the visible reference (Base Sepolia, the escrow, the unit, 12345678, the hash)", async () => {
+    const calls = r2BootGated(JSON.stringify(RUN3_MANIFEST));
+    await r2Answer(calls, 0, r2Ok(RUN3_BODY));
+    expect(calls[0]!.url).toContain(RUN3_PATH);
+    expect(pill().className).toContain("st-settled");
+    expect(pill().textContent).toBe("SETTLED_RELEASED");
+    expect(ref()).toBe("Base Sepolia · escrow 0x1212…1212 · unit 0xabab…abab · block 12,345,678 (0xcdcd…cdcd) · finalized");
+    const d = details()!;
+    expect(d.querySelector("summary")!.textContent).toBe("Reference: the chain read behind this money fact");
+    const rows = Array.from(d.querySelectorAll(".pcc-pin-row .pcc-mono")).map((x) => x.textContent);
+    expect(rows).toEqual(["84532", RUN3_BODY.escrow, RUN3_BODY.unitId, "12345678", RUN3_BODY.asOfBlockHash, "finalized"]);
+    invariant(RUN3_BODY, "run 3 body");
+  });
+
+  it("then a failing poll removes the reference and the green; an unpinned poll is pending with no reference; an other-unit body has no reference", async () => {
+    const calls = r2BootGated(RUN3_POLLING);
+    await r2Answer(calls, 0, r2Ok(RUN3_BODY));
+    expect(pill().className).toContain("st-settled");
+    expect(ref()).not.toBeNull();
+    invariant(RUN3_BODY, "1 pinned");
+    await r2Answer(calls, 1, "reject"); // a failing poll
+    expect(pill().className).not.toContain("st-settled");
+    expect(pill().textContent).toBe("unknown · read failed");
+    expect(ref()).toBeNull();
+    expect(details()).toBeNull();
+    invariant(null, "2 failed");
+    await r2Answer(calls, 2, r2Ok(RUN3_BODY)); // pinned again: the reference comes back with the green
+    invariant(RUN3_BODY, "3 pinned again");
+    await r2Answer(calls, 3, r2Ok({ ...RUN3_BODY, finality: "safe" })); // finality not "finalized"
+    expect(pill().className).toContain("st-waiting");
+    expect(pill().textContent).toBe(PENDING);
+    expect(ref()).toBeNull();
+    invariant(null, "4 unfinalized");
+    await r2Answer(calls, 4, r2Ok(RUN3_BODY));
+    invariant(RUN3_BODY, "5 pinned again");
+    await r2Answer(calls, 5, r2Ok({ ...RUN3_BODY, unitId: R2_OTHER_UNIT })); // a body for another unit
+    expect(pill().className).not.toContain("st-settled");
+    expect(ref()).toBeNull();
+    invariant(null, "6 other unit");
+    await r2Park(calls, 6);
+  });
+
+  it("a state change replaces the reference in the same update: never an earlier poll's pin", async () => {
+    const calls = r2BootGated(RUN3_POLLING);
+    const six = { ...r2Lifecycle(6), unitId: RUN3_BODY.unitId, escrow: RUN3_BODY.escrow, asOfBlock: "12345600", asOfBlockHash: "0x" + "77".repeat(32) };
+    await r2Answer(calls, 0, r2Ok(six));
+    expect(pill().className).toContain("st-waiting"); // RELEASE_ALLOCATED, pinned: a chain-derived money state (D)
+    expect(pill().textContent).toBe("release decided - payout outstanding");
+    expect(ref()).toBe(r2ExpectedRef(six));
+    invariant(six, "6 pinned");
+    await r2Answer(calls, 1, r2Ok(RUN3_BODY)); // the unit settles at a later block
+    expect(pill().className).toContain("st-settled");
+    expect(ref()).toBe(r2ExpectedRef(RUN3_BODY));
+    expect(ref()).not.toContain("12,345,600");
+    invariant(RUN3_BODY, "8 pinned");
+    await r2Answer(calls, 2, r2Ok(r2Without(six, R2_PIN_KEYS))); // back to 6, unpinned
+    expect(ref()).toBeNull();
+    invariant(null, "6 unpinned");
+    await r2Park(calls, 3);
+  });
+
+  it("the invariant holds over every state 1..9, pinned, broken and failed, in any order", async () => {
+    const calls = r2BootGated(RUN3_POLLING);
+    let i = 0;
+    for (let n = 1; n <= 9; n++) {
+      const pinned = { ...r2Lifecycle(n), unitId: RUN3_BODY.unitId, asOfBlock: String(12345600 + n) };
+      await r2Answer(calls, i++, r2Ok(pinned));
+      invariant(pinned, n + " pinned");
+      expect(ref(), n + " pinned").not.toBeNull(); // every state 1..9 is chain-derived money state (D)
+      for (const [name, broken] of R2_BROKEN_PINS) {
+        await r2Answer(calls, i++, r2Ok(broken(pinned)));
+        invariant(null, n + " " + name);
+      }
+      await r2Answer(calls, i++, "reject");
+      invariant(null, n + " failed");
+    }
+    await r2Park(calls, i);
+  });
+
+  it("a snapshot, a stream event and a nested pinned object never paint a reference (only the poll's own unprojected live body can)", async () => {
+    boot({}, JSON.stringify(RUN3_MANIFEST), { _ts: "2026-09-24T00:00:00Z", [RUN3_PATH]: RUN3_BODY }); // baked: never a live read
+    await flush();
+    expect(pill().textContent).toBe("state not shown - not a live read of a settlement route");
+    expect(ref()).toBeNull();
+    // binding.select names a nested object: the run classifies its whole read, and the nested pin lends nothing
+    const calls = r2BootGated(JSON.stringify({ ...RUN3_MANIFEST, sections: [{ windows: [{ kind: "run", binding: { path: RUN3_PATH, select: "claim" }, statusFrom: "claim.finalState" }] }] }));
+    await r2Answer(calls, 0, r2Ok({ finalState: null, isAllocated: false, phase: "active", claim: RUN3_BODY }));
+    expect(pill().className).not.toContain("st-settled");
+    expect(ref()).toBeNull();
+  });
+
+  it("an SSE event carrying a pinned settled body is never a verified read: no state, no reference", async () => {
+    const ssePath = "/sse/stream/settlement/u1";
+    assertKitTextBeforeBoot();
+    document.documentElement.removeAttribute("data-theme");
+    document.head.innerHTML = "";
+    document.body.innerHTML = "";
+    (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+    const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+    const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest";
+    mNode.textContent = JSON.stringify({ ...RUN3_MANIFEST, sections: [{ windows: [{ kind: "run", binding: { path: RUN3_PATH, sse: ssePath }, statusFrom: "finalState" }] }] });
+    document.body.appendChild(mNode);
+    const frame = "data: " + JSON.stringify(RUN3_BODY) + "\n\n";
+    (window as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+      if (new URL(String(url)).pathname !== ssePath) return new Promise(() => {});
+      const enc = new TextEncoder();
+      let sent = false;
+      const body = new ReadableStream<Uint8Array>({ pull(c) { if (!sent) { sent = true; c.enqueue(enc.encode(frame)); } else c.close(); } });
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, body });
+    };
+    // eslint-disable-next-line no-eval
+    (0, eval)(kitSrc);
+    assertKitTextViolations();
+    await flush();
+    await flush();
+    expect(pill().className).not.toContain("st-settled");
+    expect(pill().textContent).toBe("state not shown - not a live read of a settlement route");
+    expect(ref()).toBeNull();
+  });
+});
