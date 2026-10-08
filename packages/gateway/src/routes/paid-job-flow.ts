@@ -88,6 +88,7 @@ import { isMockSettlement } from "../services/settlement-mode.js";
 import {
   acceptanceFor,
   buyerFundingRefusal,
+  PAID_SCOPE_TTL_MS,
   SCOPE_AWAITING_ACCEPTANCE,
   SCOPE_AWAITING_FUNDING,
   SCOPE_REJECTED,
@@ -277,7 +278,9 @@ function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
  *     mode and not trusted; a policy that is missing, garbled or cannot be read): awaiting_acceptance.
  *   - The stop is engaged or cannot be read: awaiting_acceptance too, even for an auto policy. The
  *     relay's POST /scope mints nothing then, and the accept route refuses then.
- *   - Accepted: active on the buyer's own, real funding, else awaiting_funding.
+ *   - Accepted: active on the buyer's own, real funding, else awaiting_funding. At the mint that
+ *     can only be a test's mock escrow: no verification record can name a scope that does not
+ *     exist yet, so a real escrow's scope goes live later, through reconcilePaidScope.
  */
 export function mintedScopeStatus(kernelId: string, buyer: string, escrowId: string): string {
   let policy: unknown;
@@ -714,7 +717,8 @@ export async function createJobFromSession(
   // the insert below.
   const scopeId = `scope_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const allowedTools = getWriteToolsForDeviceType(session.capabilityType);
-  const expiry = new Date(Date.now() + 60 * 60_000).toISOString(); // 1 hour
+  // The scope's lifetime; for a scope that is not live yet, its window to be accepted and funded.
+  const expiry = new Date(Date.now() + PAID_SCOPE_TTL_MS).toISOString(); // 1 hour
 
   const scopeStatus = mintedScopeStatus(session.kernelId, buyer, escrowId);
   db.insert(executionScopes).values({
