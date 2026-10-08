@@ -29,8 +29,11 @@
  * inserted record, so that holds even over a store that matches letter case exactly.
  *
  * Idempotent on (scopeId, escrow): once the scope is active on this escrow's record, a repeat
- * returns that activation (already_active) and inserts nothing and moves no TTL. A record for a
- * scope that is active on anything else is refused.
+ * returns that activation (already_active) and inserts nothing and moves no TTL. The answer comes
+ * before anything that reads the escrow row, so it still holds after settlement, when the row reads
+ * completed (fund-s2 review LOW-3). It needs the record's own checks (well formed, this scope, this
+ * buyer), the scope active, and the kept record being this scope's buyer's well-formed record of
+ * this escrow. A record for a scope that is active on anything else is refused.
  *
  * Fails closed: no record store (production, until Q9) is funding_record_store_unavailable, and
  * nothing is read or written. The result is a typed discriminated union; nothing reads an error's
@@ -173,6 +176,25 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       // DTO. escrowForJob reads through the same connection, so inside this transaction.
       const recordRefusal = recordScopeRefusal(record, scope);
       if (recordRefusal !== null) return refused(recordRefusal);
+
+      // The record kept for this scope, if any. It counts as this funding only when it is this
+      // buyer's well-formed record of this scope (the binding rule's checks 1 to 3; that it names
+      // this scope holds by the store's contract, checked again as defence in depth) and of this
+      // record's escrow.
+      const kept = store.findByScope(tx, scopeId);
+      const keptForThis =
+        kept !== null && recordScopeRefusal(kept, scope) === null && sameAddress(kept.escrowAddress, record.escrowAddress)
+          ? kept
+          : null;
+
+      // (d) Idempotent on (scopeId, escrow), ahead of everything that reads the escrow row: once the
+      // scope is live on this escrow's record, a repeat is that activation (already_active), whatever
+      // the row says now (it reads completed after settlement). Nothing is written, no TTL moves.
+      // Every refusal stays on the path below.
+      if (scope.status === "active" && keptForThis) {
+        return { kind: "already_active", scopeId, escrowAddress: keptForThis.escrowAddress, expiresAt: scope.expiresAt, record: keptForThis };
+      }
+
       const escrow = escrowForJob(scope.jobId);
       const rowRefusal = escrowRowRefusal(escrow, scope.createdBy);
       if (rowRefusal !== null || !escrow) return refused(rowRefusal ?? "escrow_missing");
@@ -184,20 +206,11 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       const toKeep: FundingVerificationRecord = { ...record, escrowAddress: escrowKey(record.escrowAddress) };
       const forEscrow = store.findByEscrow(tx, toKeep.escrowAddress);
       if (forEscrow && forEscrow.scopeId !== scopeId) return refused("escrow_bound_to_other_scope");
-      // The record kept for this scope, if any, must be this buyer's well-formed record of this
-      // escrow: the binding rule's checks 1 to 3 on it (check 2, that it names this scope, holds by
-      // the store's contract; checked again, defence in depth), and the same escrow as this record.
-      const kept = store.findByScope(tx, scopeId);
-      const keptIsThisFunding =
-        kept !== null && recordScopeRefusal(kept, scope) === null && sameAddress(kept.escrowAddress, record.escrowAddress);
-      if (kept && !keptIsThisFunding) return refused("scope_bound_to_other_funding");
+      if (kept && !keptForThis) return refused("scope_bound_to_other_funding");
 
-      // (d) Idempotent on (scopeId, escrow): an activation that already happened is returned as it is.
-      if (scope.status === "active") {
-        return kept
-          ? { kind: "already_active", scopeId, escrowAddress: kept.escrowAddress, expiresAt: scope.expiresAt, record: kept }
-          : refused("scope_active_other_funding");
-      }
+      // Live, and not on this escrow's record (a mock-escrow or pre-N133 activation): kept is null
+      // here, since a kept record is either this funding (answered above) or refused just above.
+      if (scope.status === "active") return refused("scope_active_other_funding");
 
       // (a) What allows the activation, re-read now.
       if (scope.status === "revoked") return refused("scope_revoked");

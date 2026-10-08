@@ -265,6 +265,46 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(scopeRow(scopeId)).toEqual(after);
   });
 
+  it("(neg-settled-repeat) a duplicate after settlement is already_active, nothing written: the escrow row's status is not read for it (P6)", async () => {
+    const { scopeId, escrowId } = await paidScope(f);
+    const record = verification(scopeId);
+    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    const after = scopeRow(scopeId);
+    setEscrow(escrowId, { status: "completed" }); // the job settled (paid-job-flow, settlement-keeper)
+    vi.setSystemTime(T0 + 10 * MIN);
+    const insert = vi.spyOn(store, "insert");
+    expect(reconcilePaidScope(scopeId, record)).toEqual({
+      kind: "already_active",
+      scopeId,
+      escrowAddress: ESCROW_A,
+      expiresAt: after.expiresAt,
+      record,
+    });
+    expect(insert).not.toHaveBeenCalled();
+    expect(store.count()).toBe(1);
+    expect(scopeRow(scopeId)).toEqual(after);
+    // The refusals stay: another buyer's record, and another escrow's record, of this scope.
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: OTHER }))).toEqual(refused("record_buyer_not_scope_buyer"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }))).toEqual(refused("escrow_not_funded"));
+    expect(insert).not.toHaveBeenCalled();
+  });
+
+  it("(neg-active-kept) for a live scope, a repeat is already_active only on its buyer's own well-formed kept record", async () => {
+    const { scopeId } = await paidScope(f);
+    const record = verification(scopeId);
+    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    // The kept record replaced by one that is not this funding: unfinalized, then another buyer's.
+    for (const bad of [{ ...record, finality: "latest" }, { ...record, buyer: OTHER }]) {
+      db().run(sql`DELETE FROM test_funding_records`);
+      store.plant(bad);
+      expect(reconcilePaidScope(scopeId, record), JSON.stringify(bad)).toEqual(refused("scope_bound_to_other_funding"));
+    }
+    // A store answering for this scope with another scope's record.
+    __setFundingRecordStoreForTest({ ...store, findByScope: () => verification("scope_elsewhere") });
+    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
+    expect(scopeRow(scopeId).status).toBe("active");
+  });
+
   it("(neg-nostore) no record store: the fail-closed reason, and nothing changes", async () => {
     const { scopeId } = await paidScope(f);
     __setFundingRecordStoreForTest(null);
