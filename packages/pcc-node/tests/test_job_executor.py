@@ -1025,3 +1025,121 @@ class TestCapabilityMap:
 
     def test_3d_print_maps_to_octoprint(self):
         assert "octoprint" in CAPABILITY_PROTOCOL_MAP["3d-print"]
+
+
+# ---------------------------------------------------------------------------
+# LO-EV-9 (evidence #3219/#3241): every event binds the assignment
+# Ported from #420 (fix/pcc-node-evidence-binding @1e261766). Its execute() cases have no
+# counterpart: on master execute() refuses every polled job before any evidence exists.
+# ---------------------------------------------------------------------------
+
+from pcc_node.job_executor import (  # noqa: E402
+    AssignmentBindingError,
+    assignment_binding,
+    bind_event_payload,
+)
+
+UNIT = "0x" + "ab" * 32
+NONCE = "0x" + "cd" * 32
+
+
+class TestEvidenceBindsTheAssignment:
+    DEVICE = {"id": "d1", "protocol": "ipp"}
+
+    @pytest.mark.parametrize(
+        "result", [GH_SUCCESS, IPP_ACCEPTED, IPP_FAIL_TIMEOUT, {}, None, {"foo": "bar"}]
+    )
+    def test_every_event_commits_the_pcc_job(self, result):
+        bundle = build_evidence_bundle("job-7", self.DEVICE, result)
+        assert bundle["events"], "the trail is never empty (execution_started)"
+        for event in bundle["events"]:
+            assert event["payload"]["jobId"] == "job-7", event["type"]
+
+    def test_unit_fields_are_committed_on_every_event_when_assigned(self):
+        binding = {"jobId": "job-7", "settlementUnitId": UNIT, "challengeNonce": NONCE}
+        for result in (GH_SUCCESS, IPP_ACCEPTED, IPP_FAIL_TIMEOUT):
+            bundle = build_evidence_bundle("job-7", self.DEVICE, result, binding=binding)
+            for event in bundle["events"]:
+                assert event["payload"]["settlementUnitId"] == UNIT
+                assert event["payload"]["challengeNonce"] == NONCE
+
+    def test_without_a_unit_no_event_commits_one(self):
+        """spec rule 8: when the subject names no unit, no event may commit one."""
+        bundle = build_evidence_bundle("job-7", self.DEVICE, GH_SUCCESS)
+        for event in bundle["events"]:
+            assert "settlementUnitId" not in event["payload"]
+            assert "challengeNonce" not in event["payload"]
+
+    def test_a_binding_for_another_job_is_refused(self):
+        with pytest.raises(ValueError):
+            build_evidence_bundle("job-7", self.DEVICE, GH_SUCCESS, binding={"jobId": "job-8"})
+
+    def test_a_result_naming_another_job_cannot_reach_payload_job_id(self):
+        # A completed payload is the result itself; a device-local "jobId" there
+        # would claim another job, so the bundle is refused rather than built.
+        with pytest.raises(ValueError, match="payload.jobId"):
+            build_evidence_bundle("job-7", self.DEVICE, {**GH_SUCCESS, "jobId": "device-local-1"})
+        same = build_evidence_bundle("job-7", self.DEVICE, {**GH_SUCCESS, "jobId": "job-7"})
+        assert all(e["payload"]["jobId"] == "job-7" for e in same["events"])
+
+    @pytest.mark.parametrize("field,value", [("settlementUnitId", UNIT), ("challengeNonce", NONCE)])
+    def test_a_unit_field_the_assignment_never_named_cannot_reach_the_payload(self, field, value):
+        # evidence review of #420, F1 (probe P1): the result carries a unit
+        # field, the assignment names none -- refused, never signed through.
+        with pytest.raises(ValueError, match="not named by the assignment"):
+            build_evidence_bundle("job-1", self.DEVICE, {**GH_SUCCESS, field: value}, binding={"jobId": "job-1"})
+
+    def test_a_result_naming_another_unit_cannot_reach_the_payload(self):
+        binding = {"jobId": "job-1", "settlementUnitId": UNIT, "challengeNonce": NONCE}
+        with pytest.raises(ValueError, match="payload.settlementUnitId"):
+            build_evidence_bundle("job-1", self.DEVICE, {**GH_SUCCESS, "settlementUnitId": "0x" + "ef" * 32},
+                                  binding=binding)
+
+    def test_bind_event_payload_wraps_a_non_dict(self):
+        assert bind_event_payload("raw", {"jobId": "j"}) == {"result": "raw", "jobId": "j"}
+
+    def test_bind_event_payload_leaves_the_caller_s_payload_alone(self):
+        payload = {"level": "submitted"}
+        assert bind_event_payload(payload, {"jobId": "j"}) == {"level": "submitted", "jobId": "j"}
+        assert payload == {"level": "submitted"}
+
+    def test_assignment_binding_accepts_well_formed_unit_fields(self):
+        job = {"id": "job-7", "settlementUnitId": UNIT, "challengeNonce": NONCE, "extra": 1}
+        assert assignment_binding(job) == {"jobId": "job-7", "settlementUnitId": UNIT, "challengeNonce": NONCE}
+        assert assignment_binding({"id": "job-7"}) == {"jobId": "job-7"}
+        bundle = build_evidence_bundle("job-7", self.DEVICE, GH_SUCCESS, binding=assignment_binding(job))
+        assert all(e["payload"]["settlementUnitId"] == UNIT for e in bundle["events"])
+
+    @pytest.mark.parametrize(
+        "job",
+        [
+            {},
+            {"id": ""},
+            {"id": "   "},
+            {"id": 42},
+            {"id": "j", "settlementUnitId": "0x" + "AB" * 32},
+            {"id": "j", "settlementUnitId": "0x" + "ab" * 31},
+            {"id": "j", "challengeNonce": "ab" * 32},
+            {"id": "j", "challengeNonce": 7},
+            # evidence review of #420: F2, half a binding ...
+            {"id": "j", "settlementUnitId": UNIT},
+            {"id": "j", "challengeNonce": NONCE},
+            # ... and F3, an explicit null is not absence (kernel-sdk 400s)
+            {"id": "j", "settlementUnitId": None, "challengeNonce": None},
+            {"id": "j", "settlementUnitId": UNIT, "challengeNonce": None},
+            # and a value with a trailing newline is not 0x + 64 lowercase hex
+            {"id": "j", "settlementUnitId": UNIT + "\n", "challengeNonce": NONCE},
+        ],
+    )
+    def test_assignment_binding_refuses_unbindable_assignments(self, job):
+        with pytest.raises(AssignmentBindingError):
+            assignment_binding(job)
+
+    def test_execute_still_refuses_every_polled_job_before_any_evidence(self):
+        """On master execute() refuses a polled job outright (68b): an unbindable one is no exception."""
+        gateway = mock.Mock()
+        ex = JobExecutor(devices=[{"id": "p1", "protocol": "ipp", "host": "10.0.0.1"}], gateway_client=gateway)
+        for job in ({"id": "job-9", "challengeNonce": "0xBAD"}, {"capabilityType": "document-printing"},
+                    {"id": "job-10", "settlementUnitId": UNIT, "challengeNonce": NONCE}):
+            assert ex.execute(job)["status"] == "refused"
+        assert gateway.method_calls == []
