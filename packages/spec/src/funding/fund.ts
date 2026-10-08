@@ -29,7 +29,7 @@ import { encodeFunctionData, zeroAddress, zeroHash, type Address, type Hex, type
 import { assertChain, describeRevert, pinBlock, pinnedReader, type PinnedBlock } from "./chain.js";
 import { refuse } from "./errors.js";
 import { DEFAULT_MARGIN_SECONDS, assertPrepared, checkTiming, type PreparedFunding } from "./prepare.js";
-import { ERC20_ABI, ESCROW_ABI, FACTORY_ABI } from "./vnext.js";
+import { ERC20_ABI, ESCROW_ABI, FACTORY_ABI, cloneRuntimeCode } from "./vnext.js";
 
 export type FundedStateKind = "funded_ours" | "unfunded" | "other" | "unreadable";
 
@@ -199,6 +199,12 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
     refuse("LIVE_CHECK_FAILED", `read the escrow's code: ${describeRevert(e)}`);
   }
   if (code === "0x") refuse("ESCROW_NOT_CREATED", `no clone at ${prepared.escrow} yet: the gateway creates it (factory.createEscrow) before funding`);
+  // reviewer-charlie L5: the approve's spender must run the real escrow code, the EIP-1167 clone of the implementation
+  // the pinned factory reported live at prepare (prepared.implementation; an immutable, FAC:34). Checked before the
+  // funding state is read, so other code at this address can never short-circuit to "already funded".
+  if (!same(code, cloneRuntimeCode(prepared.implementation))) {
+    refuse("DEPLOYMENT_MISMATCH", `the code at ${prepared.escrow} is not the EIP-1167 clone of the pinned implementation ${prepared.implementation}`);
+  }
   const before = await fundedStateAt(publicClient, block, prepared);
   if (before.kind === "funded_ours") {
     return { outcome: "committed", alreadyFunded: true, stage: "precheck", readBack: before, detail: "already funded under this policy; nothing was sent" };

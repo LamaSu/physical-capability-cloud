@@ -10,10 +10,13 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  concat,
   decodeAbiParameters,
   getAbiItem,
   hashTypedData,
+  keccak256,
   parseAbiParameters,
+  size,
   toFunctionSelector,
   type Address,
   type Hex,
@@ -22,6 +25,7 @@ import { CIRCLE_USDC } from "../../funding/pins.js";
 import {
   EIP712_DOMAIN_TYPEHASH,
   ESCROW_ABI,
+  FACTORY_ABI,
   JOB_POLICY_TYPEHASH,
   POLICY_NONCE_DOMAIN,
   POLICY_SALT_DOMAIN,
@@ -29,6 +33,7 @@ import {
   SETTLEMENT_UNIT_DOMAIN,
   acceptanceDigest,
   cloneInitCodeHash,
+  cloneRuntimeCode,
   domainSeparator,
   jobPolicyHash,
   jobPolicyTypedData,
@@ -151,6 +156,19 @@ describe("V-next encoders reproduce the golden vectors", () => {
     expect(toFunctionSelector(fund)).toBe(
       golden.selectors["fund((uint256,bytes32,uint8,uint8,uint256,uint256,uint256,uint16,address,uint256,uint16,bytes32,(address,uint256)[])[],(uint256,bytes,bytes))"],
     );
+  });
+
+  // reviewer-charlie L5 (implementer-delta): the two new live checks rest on these bytes.
+  it("the factory's predictEscrow selector is the frozen one (its PolicyIdentity tuple in order)", () => {
+    const predict = getAbiItem({ abi: FACTORY_ABI, name: "predictEscrow" });
+    expect(toFunctionSelector(predict)).toBe(golden.selectors["predictEscrow((address,address,bytes32,bytes32,uint256,bytes32,bytes32))"]);
+  });
+
+  it("the clone runtime the SDK requires at the escrow is what the golden init code deploys", () => {
+    const runtime = cloneRuntimeCode(golden.outputs.implementation as Address);
+    expect(size(runtime)).toBe(45);
+    // Clones.sol's 10-byte creation code copies the 0x2d bytes after it (offset 0x0a) and returns them as the code.
+    expect(keccak256(concat(["0x3d602d80600a3d3981f3", runtime]))).toBe(golden.outputs.initCodeHash);
   });
 });
 

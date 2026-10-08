@@ -4,11 +4,24 @@
  * refusal must sign and send nothing.
  */
 import { describe, expect, it } from "vitest";
-import { getAddress, hashTypedData, maxUint256, zeroHash, type Hex, type LocalAccount } from "viem";
+import { getAbiItem, getAddress, hashTypedData, maxUint256, toFunctionSelector, zeroHash, type Hex, type LocalAccount } from "viem";
 import { FundingRefusal, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs } from "../../funding/index.js";
 import { CIRCLE_USDC } from "../../funding/pins.js";
 import { ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
-import { DAY, IMPLEMENTATION, NOW, OTHER, buildFixture, highS, makeChain, newAccount, parityV, testPins, type FixtureOptions } from "./fixture.js";
+import {
+  DAY,
+  FACTORY_PREDICT_ABI,
+  IMPLEMENTATION,
+  NOW,
+  OTHER,
+  buildFixture,
+  highS,
+  makeChain,
+  newAccount,
+  parityV,
+  testPins,
+  type FixtureOptions,
+} from "./fixture.js";
 
 const MARGIN = 300n;
 
@@ -252,6 +265,21 @@ describe("the pinned deployment, read live at one block", () => {
     const { chain, expectRefusal } = await setup();
     chain.state.failBlocks = true;
     await expectRefusal("LIVE_CHECK_FAILED", () => {});
+  });
+  // reviewer-charlie L5 (implementer-delta): the escrow the approve names must also be the pinned factory's own answer
+  // (ABI doc §5.2 lists factory.predictEscrow(identity) among the deployment checks), not only this module's CREATE2.
+  it("ESCROW_NOT_PREDICTED: the pinned factory's live predictEscrow(identity) is not the derived escrow", async () => {
+    const { fx, chain, expectRefusal } = await setup();
+    chain.on(fx.factory, FACTORY_PREDICT_ABI, "predictEscrow", () => OTHER);
+    await expectRefusal("ESCROW_NOT_PREDICTED", () => {});
+  });
+  it("the live predictEscrow read goes to the pinned factory, at the block the other live checks ran at", async () => {
+    const { fx, chain, prepare } = await setup();
+    const prepared = await prepare();
+    const selector = toFunctionSelector(getAbiItem({ abi: FACTORY_PREDICT_ABI, name: "predictEscrow" }));
+    const call = chain.state.log.find((x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(selector));
+    expect((call!.params as [{ to: string }])[0].to.toLowerCase()).toBe(fx.factory.toLowerCase());
+    expect(call!.params[1]).toEqual({ blockHash: prepared.verifiedAt.blockHash, requireCanonical: true });
   });
 });
 

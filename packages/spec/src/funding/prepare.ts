@@ -211,7 +211,8 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   // 5. The terms: the configs' hash (ESC:873), then the address that hash commits to through the salt (FAC:390-398).
   const root = prePolicyRoot(p.fund.configs);
   if (!same(root, m.prePolicyRoot)) refuse("POLICY_ROOT_MISMATCH", `keccak256(abi.encode(configs)) is ${root}; the policy says ${m.prePolicyRoot}`);
-  const salt = policySalt({
+  // The factory's PolicyIdentity, in its field order (VNextSettlementLib PolicyIdentity), with the recomputed root.
+  const identity = {
     payer: m.payer,
     operator: m.operator,
     jobIdHash: m.jobIdHash,
@@ -219,7 +220,8 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
     policyNonce: m.policyNonce,
     prePolicyRoot: root,
     acceptedPolicyDigest: m.acceptedPolicyDigest,
-  });
+  };
+  const salt = policySalt(identity);
   const escrow = predictEscrow(p.factory, m.implementation, salt);
   if (!same(escrow, p.escrow)) refuse("ESCROW_NOT_PREDICTED", `escrow ${p.escrow} is not CREATE2(factory, salt, clone(implementation)) = ${escrow}`);
 
@@ -270,8 +272,9 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
     refuse("OPERATOR_SIGNATURE_INVALID", `the operator signature recovers to ${operatorSigner ?? "nothing"} over these terms, not the operator ${m.operator}`);
   }
 
-  // 10. Live, at one pinned block: the pinned factory's implementation (an immutable, FAC:34), that implementation's
-  //     token (an immutable, ESC:75), and the time rules.
+  // 10. Live, at one pinned block: the pinned factory's implementation (an immutable, FAC:34), the factory's own
+  //     prediction of the escrow address (ABI doc §5.2), that implementation's token (an immutable, ESC:75), and the
+  //     time rules.
   const live = async <T>(what: string, read: () => Promise<T>): Promise<T> => {
     try {
       return await read();
@@ -286,6 +289,12 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   const liveImplementation = await live("factory.implementation()", () => reader.read<Address>(p.factory, FACTORY_ABI, "implementation"));
   if (!same(liveImplementation, m.implementation)) {
     refuse("DEPLOYMENT_MISMATCH", `the pinned factory's implementation is ${liveImplementation}; the policy names ${m.implementation}`);
+  }
+  // reviewer-charlie L5: the escrow the approve names must also be the pinned factory's own answer for this identity
+  // (FAC:146, 390-392), so it never rests on this module's salt and CREATE2 derivation alone.
+  const predicted = await live("factory.predictEscrow(identity)", () => reader.read<Address>(p.factory, FACTORY_ABI, "predictEscrow", [identity]));
+  if (!same(predicted, escrow)) {
+    refuse("ESCROW_NOT_PREDICTED", `the pinned factory's predictEscrow(identity) is ${predicted}; this module derived ${escrow}`);
   }
   const liveToken = await live("implementation.USDC()", () => reader.read<Address>(m.implementation, ESCROW_ABI, "USDC"));
   if (!same(liveToken, pins.usdc)) refuse("TOKEN_NOT_PINNED", `the implementation settles in ${liveToken}, not the pinned USDC ${pins.usdc}`);

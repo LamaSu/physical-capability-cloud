@@ -16,6 +16,7 @@ import {
   encodeErrorResult,
   encodeFunctionResult,
   keccak256,
+  parseAbi,
   parseTransaction,
   stringToHex,
   toFunctionSelector,
@@ -62,6 +63,20 @@ const FEE_RECIPIENT: Address = "0x4444444444444444444444444444444444444444";
 export const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
 export const newAccount = (): PrivateKeyAccount => privateKeyToAccount(generatePrivateKey());
+
+/**
+ * reviewer-charlie L5 (implementer-delta): the runtime code of an EIP-1167 clone of `implementation`, as the factory's
+ * Clones.sol deploys it (its line 23: 363d3d373d3d3d363d73 ‖ impl ‖ 5af43d82803e903d91602b57fd5bf3). Written here
+ * independently of the SDK's copy, so a drift in either one fails the unit suite.
+ */
+export const cloneRuntime = (implementation: Address): Hex =>
+  `0x363d3d373d3d3d363d73${implementation.slice(2).toLowerCase()}5af43d82803e903d91602b57fd5bf3`;
+
+/** The factory's `predictEscrow` as the contract declares it (FAC:146; ABI doc §7), independently of the SDK's ABI. */
+export const FACTORY_PREDICT_ABI = parseAbi([
+  "struct PolicyIdentity { address payer; address operator; bytes32 jobIdHash; bytes32 termsHash; uint256 policyNonce; bytes32 prePolicyRoot; bytes32 acceptedPolicyDigest; }",
+  "function predictEscrow(PolicyIdentity p) view returns (address)",
+]);
 
 /** JSON wire form: bigint as a decimal string, as the gateway would send it. */
 export function toWire<T>(value: T): any {
@@ -268,7 +283,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
     receipts: [],
     sent: [],
   };
-  if (o.escrowCode) state.code.set(fx.escrow.toLowerCase(), "0x363d3d37");
+  if (o.escrowCode) state.code.set(fx.escrow.toLowerCase(), cloneRuntime(IMPLEMENTATION));
 
   /** Answer `functionName` on `to` with `result(args)`. */
   const on = (to: Address, abi: Abi, functionName: string, result: (args: readonly unknown[]) => unknown) => {
@@ -279,6 +294,11 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
     );
   };
   on(fx.factory, FACTORY_ABI, "implementation", () => IMPLEMENTATION);
+  // As the factory answers it (FAC:146, 390-392): the clone address for the identity it is GIVEN, so an identity passed
+  // wrongly yields another address.
+  on(fx.factory, FACTORY_PREDICT_ABI, "predictEscrow", ([p]) =>
+    predictEscrow(fx.factory, IMPLEMENTATION, policySalt(p as Parameters<typeof policySalt>[0])),
+  );
   on(IMPLEMENTATION, ESCROW_ABI, "USDC", () => fx.usdc);
   on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, fx.message.prePolicyRoot, zeroHash, fx.message.acceptedPolicyDigest]);
   on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => zeroAddress);

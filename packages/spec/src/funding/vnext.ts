@@ -52,7 +52,13 @@ export const ECDSA_S_MAX = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe
 /** `UnitState.FUNDED_ACTIVE`. */
 export const UNIT_FUNDED_ACTIVE = 1;
 
-const EIP1167_PREFIX: Hex = "0x3d602d80600a3d3981f3363d3d373d3d3d363d73";
+/**
+ * EIP-1167 as the factory's Clones.sol builds it (its line 23): the 10-byte creation code copies the 45 bytes after it
+ * (0x2d bytes from offset 0x0a) and returns them as the clone's runtime, 363d3d373d3d3d363d73 ‖ impl ‖ 5af43d82803e90
+ * 3d91602b57fd5bf3, which delegates every call to `impl`.
+ */
+const EIP1167_CREATION: Hex = "0x3d602d80600a3d3981f3";
+const EIP1167_RUNTIME_PREFIX: Hex = "0x363d3d373d3d3d363d73";
 const EIP1167_SUFFIX: Hex = "0x5af43d82803e903d91602b57fd5bf3";
 
 /** The JobPolicy struct's fields, in order (ABI doc §1 `JOB_POLICY_TYPEHASH`). */
@@ -193,9 +199,14 @@ export function policySalt(id: {
   );
 }
 
+/** The runtime code at an EIP-1167 clone of `implementation` (45 bytes); pinned to the golden init code by the golden test. */
+export function cloneRuntimeCode(implementation: Address): Hex {
+  return concat([EIP1167_RUNTIME_PREFIX, implementation, EIP1167_SUFFIX]);
+}
+
 /** keccak256 of the EIP-1167 creation code for a clone of `implementation` (ABI doc §3 step 3). */
 export function cloneInitCodeHash(implementation: Address): Hex {
-  return keccak256(concat([EIP1167_PREFIX, implementation, EIP1167_SUFFIX]));
+  return keccak256(concat([EIP1167_CREATION, cloneRuntimeCode(implementation)]));
 }
 
 /** ABI doc §3 step 3: the address `factory.predictEscrow(identity)` returns (FAC:390-392). */
@@ -279,9 +290,11 @@ export const ERC20_ABI = parseAbi([
   "function allowance(address owner, address spender) view returns (uint256)",
 ]);
 
-/** Factory reads (FAC:34, 54). */
+/** Factory reads (FAC:34, 54, 146). `predictEscrow`'s selector is pinned to the golden vector (0xa5b0de55). */
 export const FACTORY_ABI = parseAbi([
+  "struct PolicyIdentity { address payer; address operator; bytes32 jobIdHash; bytes32 termsHash; uint256 policyNonce; bytes32 prePolicyRoot; bytes32 acceptedPolicyDigest; }",
   "function implementation() view returns (address)",
+  "function predictEscrow(PolicyIdentity p) view returns (address)",
   "function fundedEscrowOf(bytes32 policyKey) view returns (address)",
 ]);
 

@@ -18,13 +18,19 @@ export type FundingRefusalCode =
   | "TOKEN_NOT_PINNED"
   /** The factory is not the pinned factory for the chain, or the chain has no factory pin. */
   | "FACTORY_NOT_PINNED"
-  /** The pinned factory has no code, or its implementation is not the one the policy names. */
+  /**
+   * The pinned factory has no code, its implementation is not the one the policy names, or the code at the escrow is
+   * not the EIP-1167 clone of that implementation.
+   */
   | "DEPLOYMENT_MISMATCH"
   /** The policy's payer is not the wallet's own address. */
   | "PAYER_NOT_SIGNER"
   /** keccak256(abi.encode(configs)) is not the policy's prePolicyRoot. */
   | "POLICY_ROOT_MISMATCH"
-  /** The escrow is not the CREATE2 address of the factory, the policy salt and the implementation's clone. */
+  /**
+   * The escrow is not the CREATE2 address of the factory, the policy salt and the implementation's clone, as derived
+   * here or as the pinned factory's own `predictEscrow(identity)` answers.
+   */
   | "ESCROW_NOT_PREDICTED"
   /** The EIP-712 domain is not the escrow clone's own. */
   | "DOMAIN_MISMATCH"

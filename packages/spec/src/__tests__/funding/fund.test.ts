@@ -29,7 +29,7 @@ import {
   type SendResult,
 } from "../../funding/index.js";
 import { ERC20_ABI, ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
-import { DAY, NOW, OTHER, buildFixture, makeChain, newAccount, revertWith, testPins, type FixtureOptions } from "./fixture.js";
+import { DAY, NOW, OTHER, buildFixture, cloneRuntime, makeChain, newAccount, revertWith, testPins, type FixtureOptions } from "./fixture.js";
 
 const MARGIN = 300n;
 const TX = keccak256(stringToHex("tx")) as Hex;
@@ -164,6 +164,22 @@ describe("approveAndFund: refusals before anything is sent", () => {
   it("ESCROW_NOT_CREATED: the clone does not exist yet", async () => {
     const { chain, fund, simulated } = await setup({}, { escrowCode: false });
     expect(await refusal(fund())).toBe("ESCROW_NOT_CREATED");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  // reviewer-charlie L5 (implementer-delta): the approve's spender must run the real escrow code: the EIP-1167 clone of
+  // the implementation the pinned factory reported.
+  it("DEPLOYMENT_MISMATCH: the code at the escrow is not an EIP-1167 proxy", async () => {
+    const { fx, chain, fund, simulated } = await setup();
+    chain.state.code.set(fx.escrow.toLowerCase(), "0x6080604052348015600f57600080fd5b50");
+    expect(await refusal(fund())).toBe("DEPLOYMENT_MISMATCH");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  it("DEPLOYMENT_MISMATCH: the escrow is an EIP-1167 proxy to another implementation", async () => {
+    const { fx, chain, fund, simulated } = await setup();
+    chain.state.code.set(fx.escrow.toLowerCase(), cloneRuntime(OTHER));
+    expect(await refusal(fund())).toBe("DEPLOYMENT_MISMATCH");
     expect(simulated()).toEqual([]);
     expect(chain.sends()).toEqual([]);
   });
