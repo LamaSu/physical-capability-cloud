@@ -73,6 +73,11 @@ describe("agent golden path public index", () => {
     for (const uri of ["agent-guide", "api", "quickstart", "integration"]) {
       expect(docsMcp).toContain(`docs://pcc/${uri}`);
     }
+    // Opus r1 I6: the Start-here entry for the same server names all four resources too.
+    const startHere = llms.split("\n").find((line) => line.startsWith("- MCP docs server ("));
+    for (const resource of ["agent guide", "integration reference", "API reference", "quickstart"]) {
+      expect(startHere).toContain(resource);
+    }
   });
 
   it("updates the claim ledger for the retired onboarding document", () => {

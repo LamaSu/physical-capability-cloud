@@ -16,7 +16,7 @@ API call. Start with the generated agent instructions below for the buyer or sup
 - [ERC-8004 Agent Registration](https://capability.network/.well-known/agent-registration.json): On-chain identity / discovery file (public).
 - [Capability types](https://capability.network/api/capabilities/types): The list of capability type strings (public).
 - MCP server (Streamable HTTP): https://capability.network/mcp
-- MCP docs server (read-only — agent guide, API reference, quickstarts as resources, plus `search_docs`): https://capability.network/mcp/docs
+- MCP docs server (read-only — agent guide, integration reference, API reference and quickstart as resources, plus `search_docs`): https://capability.network/mcp/docs
 - AI Catalog: https://capability.network/.well-known/ai-catalog.json
 
 ## When to use PCC
