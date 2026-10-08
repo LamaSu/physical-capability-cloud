@@ -386,11 +386,12 @@
   var LIST_PROFILES = {
     // routes/jobs.ts query schema `limit: { type: "integer", minimum: 1, maximum: 200, default: 50 }`
     // (N111, which also coerces offset/limit in job.facade.ts via toSafeOffsetOrLimit(..., 50)). The
-    // route returns `total`, `offset`, `limit` and `hasMore` beside `jobs`, but the view does NOT
-    // declare the jobs total: it keeps the reviewed conservative path ("N returned; more may exist"
-    // for a full page; "none" only for an empty first page of a positive limit), which stays true
-    // either way. Declaring `total: "total"` for jobs is a follow-up now that N111 has landed.
-    "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], paged: { defaultLimit: 50 } },
+    // route answers `{ jobs, items, total, offset, limit, hasMore, asOf }`, and `total` is its own
+    // property: job.facade.ts list() counts every job matching the tenant, kernelId, status and the
+    // caller's readable-jobs scope (jobReadScopeOf), BEFORE the page is cut. So the window can say
+    // "N of M returned", and claim "none" only when that total is a valid 0. Both the admin count
+    // and a scoped wallet's count are pinned by route inject (dashboard-ir-list-producers.test.ts).
+    "/api/jobs": { rows: "jobs", title: ["id", "capabilityId"], meta: ["id", "capabilityId", "kernelId", "status", "createdAt", "updatedAt"], status: ["status"], paged: { defaultLimit: 50, total: "total" } },
     // routes/kernels.ts:61 answers `{ kernels }`, unpaginated — no `paged` entry at all.
     "/api/kernels": { rows: "kernels", title: ["name", "id"], meta: ["id", "status", "version", "capabilityCount"], status: ["status"] },
     // routes/capabilities.ts:303 query schema `limit: { minimum: 1, maximum: 200, default: 50 }`.
