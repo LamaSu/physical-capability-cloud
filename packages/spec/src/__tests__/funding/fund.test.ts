@@ -690,6 +690,28 @@ describe("approveAndFund: no send while the payer has a transaction pending", ()
     expect(reads.map((x) => (x.params as unknown[])[1])).toEqual(expect.arrayContaining(["pending", "latest"]));
   });
 
+  it("the guard reads the payer's own nonce, at pending then at latest, before anything is simulated (foxtrot F2)", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    chain.state.log.length = 0;
+    expect((await fund()).outcome).toBe("committed");
+    const firstSimulation = chain.state.log.findIndex((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest");
+    const guardReads = chain.state.log
+      .slice(0, firstSimulation)
+      .filter((x) => x.method === "eth_getTransactionCount")
+      .map((x) => [String(x.params[0]).toLowerCase(), x.params[1]]);
+    const payer = fx.payer.address.toLowerCase();
+    expect(guardReads).toEqual([
+      [payer, "pending"],
+      [payer, "latest"],
+    ]);
+    // The fake counts per address, as a node does: the escrow (a contract) is at 1, and the operator has sent nothing.
+    expect(await chain.publicClient.getTransactionCount({ address: fx.escrow, blockTag: "pending" })).toBe(1);
+    expect(await chain.publicClient.getTransactionCount({ address: fx.operator.address, blockTag: "pending" })).toBe(0);
+  });
+
   it("LIVE_CHECK_FAILED: the payer's nonce cannot be read, so nothing is sent", async () => {
     const { chain, fund, simulated } = await setup();
     chain.state.failNonce = true;

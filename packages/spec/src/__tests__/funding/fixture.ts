@@ -381,9 +381,13 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           // reviewer-charlie L7 (implementer-delta): as a node counts the payer's nonce. "latest" counts mined
           // transactions only; "pending" also counts those still in the pool: a send planned "none" never mines, and
           // `mempool` stands for the payer's other pending ones. viem signs each send with the "pending" nonce.
+          // foxtrot F2: per address, as a node counts. Only the payer sends here. An address with code answers 1, a
+          // contract's starting nonce (EIP-161; the escrow clone never creates, so it stays 1), and any other account
+          // has sent nothing.
           if (state.failNonce) throw new Error("fake chain: eth_getTransactionCount unavailable");
+          const [who, tag] = params as [Address, unknown];
+          if (who.toLowerCase() !== fx.payer.address.toLowerCase()) return toHex(state.code.has(who.toLowerCase()) ? 1 : 0);
           const mined = state.sent.filter((t) => t.plan !== "none").length;
-          const tag = (params as unknown[])[1];
           return toHex(state.priorNonce + (tag === "pending" ? state.sent.length + state.mempool : mined));
         }
         case "eth_gasPrice":
