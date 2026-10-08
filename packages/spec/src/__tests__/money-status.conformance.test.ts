@@ -2277,3 +2277,33 @@ describe("R12 r2b (b) (lane review, MEDIUM): each value an approval's bound reco
     expect(document.querySelector(".pcc-mismatch")!.textContent).toContain("The bound record says 250.00, but the request sends 5.00");
   });
 });
+
+// ── R12 r2b X-2 (lane review N1, LOW, test only): the non-settlement receipt pill's attribution was right but unpinned ──
+describe("R12 r2b X-2 (lane review N1, LOW): a non-settlement record's receipt pill attributes its status word, never shows it as verified", () => {
+  const RUN3_JOB = { status: "running", amount: "250", currency: "USDC", payee: "0x3434343434343434343434343434343434343434" }; // run 3's body, verbatim
+  const receiptAt = (p: string) => r2Man([{ kind: "receipt", binding: { path: p } }]);
+  const pill = () => document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+
+  it("run 3's /api/jobs/j1 body carrying a money word as its status: the pill reads 'reported status: <word> - settlement unconfirmed', st-unknown (live and snapshot); a safe word and no status keep their text", async () => {
+    const CASES: Array<[string | undefined, string]> = [
+      ["settled", "reported status: settled - settlement unconfirmed"],
+      ["PAYEE_RECEIVED_FUNDS", "reported status: PAYEE_RECEIVED_FUNDS - settlement unconfirmed"],
+      ["paid", "reported status: paid - settlement unconfirmed"],
+      ["released", "reported status: released - settlement unconfirmed"],
+      ["running", "running"], // a safe word stays plain
+      [undefined, "no settlement state"], // PCC's own text
+    ];
+    for (const [status, want] of CASES) {
+      const body = status === undefined ? r2Without(RUN3_JOB, ["status"]) : { ...RUN3_JOB, status };
+      for (const mode of ["live", "snapshot"] as const) {
+        if (mode === "live") r2BootLive(receiptAt("/api/jobs/j1"), [r2Ok(body)]);
+        else boot({}, receiptAt("/api/jobs/j1"), { _ts: "2026-09-24T00:00:00Z", "/api/jobs/j1": body });
+        await flush();
+        const at = `${String(status)} (${mode})`;
+        expect(document.querySelector(".pcc-win-title")!.textContent, at).toBe("Record");
+        expect(pill().textContent, at).toBe(want);
+        expect(pill().className, at).toBe("pcc-pill st-unknown");
+      }
+    }
+  });
+});
