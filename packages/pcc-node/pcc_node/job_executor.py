@@ -89,8 +89,11 @@ SUCCESS_STATUS_VALUES = frozenset({
 #               a synchronous API's own answer that it ran the request
 #   printed  -> no current adapter.  An ``lp`` exit of 0 and an OctoPrint 2xx
 #               both mean the job was QUEUED or STARTED, so those adapters
-#               report ``submitted``; ``printed`` waits for an adapter that
-#               observes a finished print (IPP job-state, OctoPrint /api/job).
+#               report ``submitted``.  A finished IPP print is observed on the
+#               operating path instead: operating/ipp_runtime.IppPrintRuntime
+#               reads the printer's own job-state for the job-id it created and
+#               signs that record; it does not go through this classifier.
+#               OctoPrint stays unobserved (its REST API names no print attempt).
 COMPLETION_FLAG_KEYS = ("printed", "executed")
 
 # ACCEPTANCE flags -- the device only reported that it TOOK the request.
