@@ -52,7 +52,10 @@ export type FundingRefusalCode =
   | "SIGNATURE_NOT_CANONICAL"
   /** The escrow clone does not exist yet (the gateway creates it before prepare returns). */
   | "ESCROW_NOT_CREATED"
-  /** The escrow or the job is already funded, under some other acceptance. */
+  /**
+   * The escrow or the job is already funded under some other acceptance, or the escrow reports this policy funded
+   * without the pinned factory's witness (`fundedEscrowOf(policyKey)` is not this escrow).
+   */
   | "ALREADY_FUNDED"
   /** A chain read the checks depend on failed; the SDK fails closed. */
   | "LIVE_CHECK_FAILED"

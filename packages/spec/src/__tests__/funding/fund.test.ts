@@ -4,7 +4,18 @@
  * buyer-funding.anvil.test.ts.
  */
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData, encodeErrorResult, encodeFunctionData, getAbiItem, keccak256, stringToHex, toFunctionSelector, type Hex } from "viem";
+import {
+  decodeFunctionData,
+  encodeErrorResult,
+  encodeFunctionData,
+  getAbiItem,
+  keccak256,
+  stringToHex,
+  toFunctionSelector,
+  zeroAddress,
+  type Address,
+  type Hex,
+} from "viem";
 import { describeRevert } from "../../funding/chain.js";
 import {
   FundingRefusal,
@@ -46,8 +57,14 @@ async function setup(o: FixtureOptions = {}, chainOptions = { escrowCode: true }
   });
   const fund = (wallet = chain.wallet(), p = prepared, extra: Partial<ApproveAndFundArgs> = {}) =>
     approveAndFund({ prepared: p, wallet, publicClient: chain.publicClient, ...extra });
-  const fundedAs = (policyHash: Hex) =>
-    chain.on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, fx.message.prePolicyRoot, policyHash, fx.message.acceptedPolicyDigest]);
+  /**
+   * The escrow funded under `policyHash`, as one fund() transaction leaves it: policy() reports the hash, and the
+   * pinned factory's fundedEscrowOf(policyKey) names this escrow (ESC:893; FAC:244-245). `o` breaks that agreement.
+   */
+  const fundedAs = (policyHash: Hex, o: { witness?: Address; prePolicyRoot?: Hex } = {}) => {
+    chain.on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, o.prePolicyRoot ?? fx.message.prePolicyRoot, policyHash, fx.message.acceptedPolicyDigest]);
+    chain.on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => o.witness ?? fx.escrow);
+  };
   /** eth_call selectors the SDK simulated (approve / fund), as opposed to reads. */
   const simulated = () =>
     chain.state.log
@@ -525,5 +542,79 @@ describe("approveAndFund: both simulations run from the payer, who sends both tr
     expect(await simulate(fx.payer.address)).toBe("ok");
     expect(await simulate(fx.operator.address)).toBe("OnlyPayer");
     expect(await simulate()).toBe("OnlyPayer");
+  });
+});
+
+// reviewer-charlie L4 (implementer-delta): "funded under this policy" must not rest on the escrow's own report alone.
+// The pinned factory writes fundedEscrowOf(policyKey) only from acceptPolicy, which only the clone CREATE2 placed at
+// the policy's predicted address can call, inside the fund() that stores jobPolicyHash_ (FAC:228-245; ESC:873-893).
+// So that slot is a witness the escrow's code cannot forge, read at the same pinned block as policy().
+describe("funded_ours rests on the pinned factory's witness, not only on the escrow's own report", () => {
+  const fundedEscrowOfSelector = toFunctionSelector(getAbiItem({ abi: FACTORY_ABI, name: "fundedEscrowOf" }));
+  const policySelector = toFunctionSelector(getAbiItem({ abi: ESCROW_ABI, name: "policy" }));
+
+  it("the hash matches and fundedEscrowOf(policyKey) is this escrow, both read at the same pinned block: funded_ours", async () => {
+    const { fx, chain, prepared, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash);
+    chain.state.log.length = 0;
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared, blockHash: chain.state.block.hash });
+    expect(s.kind).toBe("funded_ours");
+    const calls = chain.state.log.filter((x) => x.method === "eth_call");
+    const at = (selector: string) => calls.find((x) => (x.params as [{ data: Hex }])[0].data.startsWith(selector))?.params[1];
+    const pin = { blockHash: chain.state.block.hash, requireCanonical: true };
+    expect(at(policySelector)).toEqual(pin);
+    expect(at(fundedEscrowOfSelector)).toEqual(pin);
+  });
+
+  it("the witness cannot be read: unreadable, and indeterminate after the fund() was sent", async () => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    const witnessFails = () =>
+      chain.on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => {
+        throw new Error("fake chain: fundedEscrowOf unavailable");
+      });
+    chain.state.afterSend = (i) => {
+      if (i === 1) {
+        fundedAs(fx.jobPolicyHash);
+        witnessFails();
+      }
+    };
+    const result = await fund();
+    expect(result.readBack.kind).toBe("unreadable");
+    expect(result.outcome).toBe("indeterminate");
+    expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("unreadable");
+  });
+
+  for (const [name, witness] of [
+    ["another escrow", OTHER],
+    ["no escrow", zeroAddress],
+  ] as const) {
+    it(`the hash matches but fundedEscrowOf(policyKey) names ${name}: never funded_ours, never committed`, async () => {
+      const { fx, chain, prepared, fund, fundedAs } = await setup();
+      fundedAs(fx.jobPolicyHash, { witness });
+      const s = await readFundedState({ publicClient: chain.publicClient, prepared });
+      expect(s.kind).toBe("other");
+      expect(s.detail).toContain("fundedEscrowOf");
+      // Before anything is sent: a refusal, not "already funded".
+      expect(await refusal(fund())).toBe("ALREADY_FUNDED");
+      expect(chain.sends()).toEqual([]);
+    });
+  }
+
+  it("after the fund() was sent, an escrow that reports this policy without the factory's witness is indeterminate", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash, { witness: zeroAddress });
+    };
+    const result = await fund();
+    expect(result.readBack.kind).toBe("other");
+    expect(result.outcome).toBe("indeterminate");
+  });
+
+  it("the hash matches but policy().prePolicyRoot_ is not this policy's: never funded_ours", async () => {
+    const { fx, chain, prepared, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash, { prePolicyRoot: keccak256(stringToHex("another root")) });
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared });
+    expect(s.kind).toBe("other");
+    expect(s.detail).toContain("prePolicyRoot_");
   });
 });

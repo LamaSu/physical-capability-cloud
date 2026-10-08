@@ -8,16 +8,20 @@
  * those same bytes, then sent with `dataSuffix: "0x"` so a client-configured suffix cannot change them.
  *
  * FUNDED IS READ FROM THE CONTRACT (plan G5), never inferred from a receipt, a tx hash or a USDC balance. It
- * means `policy().jobPolicyHash_` equals the hash this SDK recomputed. The escrow writes that value only in
- * `_acceptPolicy` (ESC:893), after checking keccak256(configs) against the root its address commits to (ESC:873)
- * and both signatures (FAC:253-256), and in the same transaction that pulls exactly ΣG from the payer (ESC:843).
+ * means `policy().jobPolicyHash_` equals the hash this SDK recomputed (with `prePolicyRoot_` equal to ours), AND the
+ * pinned factory's `fundedEscrowOf(policyKey)` is this escrow, both at one pinned block. The escrow writes that hash
+ * only in `_acceptPolicy` (ESC:893), after checking keccak256(configs) against the root its address commits to
+ * (ESC:873) and both signatures (FAC:253-256), and in the same transaction that pulls exactly ΣG from the payer
+ * (ESC:843). The factory writes that slot only for the clone at the policy's predicted address (FAC:228-245), so it
+ * witnesses the escrow's report without trusting the escrow's code (reviewer-charlie L4).
  *
  * THREE OUTCOMES (verify-writes-three-outcomes):
  *   committed      the read-back shows this exact policy funded;
  *   unchanged      the send was refused for certain (never broadcast, or mined and reverted) AND the read-back
  *                  shows the escrow unfunded;
  *   indeterminate  anything else: a broadcast with no receipt, a successful receipt whose read-back is not
- *                  "funded" (a stale read or a reorg), funding under another acceptance, or an unreadable state.
+ *                  "funded" (a stale read or a reorg), funding under another acceptance, an escrow report the
+ *                  pinned factory does not witness, or an unreadable state.
  * Indeterminate is not success. Call `readFundedState` later to resolve it; a retried `approveAndFund` returns
  * `committed` without sending if the escrow is by then funded under this policy.
  */
@@ -77,17 +81,45 @@ async function fundedStateAt(publicClient: PublicClient, block: PinnedBlock, pre
     blockHash: block.hash,
     unitStates,
   });
+  // The pinned factory's record of the escrow that funded this (payer, operator, job), read at the same block.
+  const fundedEscrowOf = () => reader.read<Address>(prepared.factory, FACTORY_ABI, "fundedEscrowOf", [prepared.policyKey]);
   try {
-    const [, , , policyHash] = await reader.read<readonly [Address, bigint, Hex, Hex, Hex]>(prepared.escrow, ESCROW_ABI, "policy");
+    const [, , preRoot, policyHash] = await reader.read<readonly [Address, bigint, Hex, Hex, Hex]>(prepared.escrow, ESCROW_ABI, "policy");
     if (same(policyHash, prepared.jobPolicyHash)) {
+      // reviewer-charlie L4: the escrow's own report is not enough, since code at this address could return any
+      // values. The pinned factory must witness it: it writes fundedEscrowOf(policyKey) only in acceptPolicy, which
+      // only the clone CREATE2 placed at this policy's predicted address may call (FAC:228-245), from inside the fund()
+      // that then stores jobPolicyHash_ (ESC:840, 893). A hash the factory does not witness is never "funded" here;
+      // it is "other", so it is never committed (indeterminate after a send, ALREADY_FUNDED before one).
+      // prePolicyRoot_ comes back in the same policy() read, so design note §3's root check costs no extra call.
+      if (!same(preRoot, prepared.prePolicyRoot)) {
+        return state("other", `policy() reports this policy's jobPolicyHash_ but prePolicyRoot_ ${preRoot}, not ${prepared.prePolicyRoot}`);
+      }
+      const witness = await fundedEscrowOf();
+      if (!same(witness, prepared.escrow)) {
+        return state(
+          "other",
+          `policy().jobPolicyHash_ is this policy's, but the pinned factory's fundedEscrowOf(policyKey) is ${witness}, not this escrow: the escrow's report is not witnessed, so it is not taken as funded`,
+        );
+      }
+      // Design note §3 also promised unitCount() == n and unitIdAt(i) == our unit ids. They are not read: that is
+      // 1 + n more calls (up to 17), and with the witness above they cannot differ. The witnessed clone ran fund(),
+      // which froze exactly the configs whose keccak256 it checked against prePolicyRoot_ (ESC:739-832, 873), and
+      // stored the hash the factory computed over the unitsRoot of those unit ids in that order (ESC:875-893). So
+      // jobPolicyHash_ == ours already fixes every unit id and its order. Each unitState read below also reverts for
+      // an id the escrow does not hold (onlyExisting), which makes the state unreadable rather than funded.
       const unitStates: number[] = [];
       for (const id of prepared.unitIds) unitStates.push(await reader.read<number>(prepared.escrow, ESCROW_ABI, "unitState", [id]));
-      return state("funded_ours", `policy().jobPolicyHash_ is this policy's ${prepared.jobPolicyHash}`, unitStates);
+      return state(
+        "funded_ours",
+        `policy().jobPolicyHash_ is this policy's ${prepared.jobPolicyHash}, and the pinned factory's fundedEscrowOf(policyKey) is this escrow`,
+        unitStates,
+      );
     }
     if (!same(policyHash, zeroHash)) {
       return state("other", `the escrow is funded under another acceptance: policy().jobPolicyHash_ is ${policyHash}, not ${prepared.jobPolicyHash}`);
     }
-    const fundedEscrow = await reader.read<Address>(prepared.factory, FACTORY_ABI, "fundedEscrowOf", [prepared.policyKey]);
+    const fundedEscrow = await fundedEscrowOf();
     if (!same(fundedEscrow, zeroAddress)) {
       return state("other", `this job is already funded by escrow ${fundedEscrow} (factory.fundedEscrowOf); this escrow can never fund`);
     }
