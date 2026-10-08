@@ -589,7 +589,9 @@
   }
   function fmtVal(v, format, path, money) {
     if (v == null) return kitText('—');
-    if (format === 'ts') return timeText(v);
+    // R12 r2c N3: on money data a time is a report like every other value (shown as sent); anything that is not
+    // a canonical UTC time still reads "time not reported", so this format never shows an amount.
+    if (format === 'ts') return money && canonicalPlainTime(v) ? reportedText(v, false, true) : timeText(v);
     // R12 r2b B1: a value on money data is a report, never a fact: attributed to its source and shown as sent,
     // never scaled or formatted (base units are not dollars; read-surface contract rule 14). Only a non-money
     // number takes the window's format.
@@ -1602,11 +1604,15 @@
     return typeof p === 'string' && /status|state|phase/i.test(p.split('.').pop() || '');
   }
   // A bound value shown as plain text (a list title or meta field, a metric): a status field takes the
-  // closed-vocabulary rule (astra r6, the F8/F11 class); anything else (a name, an id, an amount) is shown
-  // as sent. Never verified: these windows read collections, snapshots or single values, not a live
-  // settlement read model.
+  // closed-vocabulary rule (astra r6, the F8/F11 class). R12 r2c N3: on money data EVERY other value is a
+  // report, whatever its field is called -- a party's id (payeeId), the record's own id, a name, a type, an
+  // amount -- attributed and shown as sent, never bare and never only framed. No field is exempt: the closed
+  // allowlist of fields shown bare from money data is empty (the conformance test enumerates it), so money data
+  // never reaches the name/id/type lines after the money one. Only non-money data keeps a name, an id or a type
+  // typed. Never verified: these windows read collections, snapshots or single values, not a live settlement read.
   function boundText(path, v, money) {
     if (isStatusPath(path)) return statusPillText(v, false, money);
+    if (money) return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, true);
     var field = typeof path === 'string' ? path.split('.').pop() : '';
     if (/name$/i.test(field)) return nameText(v);
     if (/id$|type$/i.test(field)) return idText(v);
@@ -1705,20 +1711,26 @@
       if (r.error) { wrap._body.appendChild(errorLine(r.error)); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       var rows = w.binding && w.binding.select != null ? (Array.isArray(r.data) ? r.data : firstArray(r.data)) : firstArray(r.raw != null ? r.raw : r.data);
       if (!rows.length) { wrap._body.appendChild(el('p', 'pcc-muted', kitText('Nothing here yet.'))); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
+      // R12 r2c N3: money is judged on the whole way to each painted value, as the metric judges it (r2b B1): the
+      // response itself (live: its unprojected body; otherwise the baked record) through binding.select, then the
+      // row and each record on the field's path. So a row inside a money record, or a party or an amount nested in
+      // a row's money-shaped record, is a report even on a non-money route.
+      var lpath = w.binding && w.binding.path;
+      var listBody = r.raw !== undefined ? r.raw : ctx.snapshot && typeof lpath === 'string' ? ctx.snapshot[lpath] : undefined;
+      var listMoney = selectsMoney(lpath, listBody, w.binding && w.binding.select);
       var limit = w.limit || rows.length;
       var listNode = el('ul', 'pcc-list');
       for (var i = 0; i < rows.length && i < limit; i++) {
         var row = rows[i];
         var li = el('li', 'pcc-list-row');
         var main = el('div', 'pcc-list-main');
-        var rowMoney = isMoneyData(w.binding && w.binding.path, row);
         var tv = dot(row, w.item.title);
-        main.appendChild(el('span', 'pcc-list-title', tv != null ? boundText(w.item.title, tv, rowMoney) : idText(w.item.title || '')));
+        main.appendChild(el('span', 'pcc-list-title', tv != null ? boundText(w.item.title, tv, listMoney || selectsMoney(lpath, row, w.item.title)) : idText(w.item.title || '')));
         var metaVals = [];
         var metaKeys = (w.item.meta || []);
         for (var j = 0; j < metaKeys.length; j++) {
           var mv = dot(row, metaKeys[j]);
-          if (mv != null && mv !== '') metaVals.push(boundText(metaKeys[j], mv, rowMoney));
+          if (mv != null && mv !== '') metaVals.push(boundText(metaKeys[j], mv, listMoney || selectsMoney(lpath, row, metaKeys[j])));
         }
         if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', joinWithText(kitText(' · '), metaVals)));
         li.appendChild(main);

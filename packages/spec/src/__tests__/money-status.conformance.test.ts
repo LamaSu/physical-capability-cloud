@@ -2206,19 +2206,18 @@ describe("R12 r2b B1 (lane review, HIGH): a metric on money data is a report, ne
     }
   });
 
-  // Non-money metrics keep their formats; a money record's id and time keep their typed rendering (the gate is the
-  // number path, not every field); and the gate reads structure, never a field-name guess: a lab balance is not money.
+  // Non-money metrics keep their formats; and the gate reads structure, never a field-name guess: a lab balance is
+  // not money. (R12 r2c N3: a money record's id and time are reports now, so the two rows that pinned them bare,
+  // "a money record's id stays an id" and "a money record's time stays a time", moved to the r2c block, stricter.)
   const CONTROLS: Array<[string, string, unknown, string, string | undefined, string]> = [
     ["a kernel's completed-job count (int)", "/api/kernels/k1", { kernel: { id: "k1", reputation: 4.8, jobsCompleted: 1234 } }, "kernel.jobsCompleted", "int", "1,234"],
     ["a kernel's reputation (no format)", "/api/kernels/k1", { kernel: { id: "k1", reputation: 4.8, jobsCompleted: 1234 } }, "kernel.reputation", undefined, "4.8"],
     ["a job's progress (pct)", "/api/jobs/j1/status", { progress: 0.42 }, "progress", "pct", "42%"],
     ["a kernel list's count", "/api/kernels", { kernels: [{ id: "k1" }, { id: "k2" }], count: 2 }, "count", "int", "2"],
     ["a lab balance's reading (a weighing scale, no money field, no currency)", "/api/sensors/s1", { id: "s1", balance: 12.5, unit: "g" }, "balance", undefined, "12.5"],
-    ["a money record's id stays an id", "/api/jobs/j1", { id: "job-1", payee: "short" }, "id", undefined, "job-1"],
-    ["a money record's time stays a time", "/api/jobs/j1", { id: "job-1", timestamp: "2026-10-06T00:00:00Z", payee: "short" }, "timestamp", "ts", new Date("2026-10-06T00:00:00Z").toLocaleString()],
   ];
 
-  it("controls: a non-money metric keeps its format; a money record's id and time keep their typed rendering", async () => {
+  it("controls: a non-money metric keeps its format", async () => {
     for (const [tag, path, body, select, format, want] of CONTROLS) {
       for (const mode of ["live", "snapshot"] as const) {
         expect(await metricOf(metric(path, select, format), path, body, mode), `${tag} (${mode})`).toBe(want);
@@ -2304,6 +2303,181 @@ describe("R12 r2b X-2 (lane review N1, LOW): a non-settlement record's receipt p
         expect(pill().textContent, at).toBe(want);
         expect(pill().className, at).toBe("pcc-pill st-unknown");
       }
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// R12 round 2c: the lane's N3 (MEDIUM, the class of round-2 finding B) on #599 @867ad4f7 (implementer-echo).
+// On money data the list and metric windows painted a field whose name ends in id or type bare (idText) and one
+// ending in name only framed ("name: X"), so a party such as payeeId was unattributed. Closing the property, not
+// the field: a list row was judged money by its own top-level keys only, so a party nested in a row's payment, or
+// a row inside a money record, was not money at all; and a metric's "ts" format showed a money record's time bare.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+describe("R12 r2c N3 (lane, MEDIUM): every value a list or metric window paints from a money record is attributed, whatever its field is called", () => {
+  const rep = (v: string) => "reported: " + v + " - settlement unconfirmed";
+  type Win = Record<string, unknown>;
+  const metricWin = (path: string, select: string, extra: Win = {}): Win => ({ kind: "metric", label: "Value", binding: { path }, select, ...extra });
+  const listWin = (path: string, title: string, meta: string[], bindSelect?: string): Win =>
+    ({ kind: "list", binding: bindSelect === undefined ? { path } : { path, select: bindSelect }, item: { title, meta } });
+  /** Boot `windows`, every one bound to `path` whose read answers `body`: live (one reply per window) or from a baked snapshot. */
+  async function paint(windows: Win[], path: string, body: unknown, mode: "live" | "snapshot") {
+    if (mode === "live") r2BootLive(r2Man(windows), windows.map(() => r2Ok(body)));
+    else boot({}, r2Man(windows), { _ts: "2026-09-24T00:00:00Z", [path]: body });
+    await flush();
+  }
+  const texts = (selector: string) => Array.from(document.querySelectorAll(selector)).map((n) => n.textContent);
+
+  // The real producer's job execution read model (gateway readmodels/job-execution.ts: buildJobExecution's job block,
+  // buildEvidence's bundle summaries, the settlement axis r2b B1 used). It is money data (its settlement axis), and
+  // its job block names the job's operator: kernelId and kernelName are the party this job's milestone pays.
+  const EXEC = "/api/jobs/j1/execution";
+  const JOB_EXECUTION_N3 = {
+    schemaId: "pcc.job-execution.v1", asOf: "2026-10-08T00:00:00Z",
+    job: { jobId: "j1", stepId: "s1", capabilityId: "cap-1", kernelId: "kernel_1", capabilityType: "fdm", capabilityName: "FDM print",
+      kernelName: "Mill A", contractedTier: 1, createdAt: "2026-10-08T00:00:00Z" },
+    evidence: { state: "stored", source: "gateway_evidence_store", bundleCount: 1, truncated: false, eventCount: 3, fabricatedEventCount: 0, latestStoredAt: "2026-10-08T00:00:00Z",
+      bundles: [{ bundleId: "b1", stepId: "s1", bundleHash: "0x" + "ef".repeat(32), claimedTier: 1, eventCount: 3, fabricatedEventCount: 0,
+        signer: { algorithm: "ed25519", id: "kernel_1-key" }, storedAt: "2026-10-08T00:00:00Z" }] },
+    notices: [],
+    settlement: { link: "linked", source: "gateway_escrow_record", payout: "unknown", record: { kind: "gateway_escrow_record", escrowId: "esc-1",
+      contractAddress: "0x" + "11".repeat(20), milestone: { milestoneId: "m1", stepId: "s1", amount: "100", challengeWindowEnd: null },
+      escrowTotal: { amount: "250", currency: "USDC" } } },
+  };
+
+  it("the payeeId repro (live and snapshot): a metric selecting a money record's payeeId reads 'reported: <payee> - settlement unconfirmed', never the bare id", async () => {
+    // r2b's legacy escrow record on its own route, naming its payee by id: an address, and a kernel id.
+    const ESCROW = { status: "funded", totalAmount: 250, currency: "USDC", contractAddress: "0x" + "11".repeat(20) };
+    for (const payeeId of [R2B_PAYEE, "kernel_1"]) {
+      for (const mode of ["live", "snapshot"] as const) {
+        await paint([metricWin("/api/escrow/e1", "payeeId")], "/api/escrow/e1", { ...ESCROW, payeeId }, mode);
+        expect(texts(".pcc-metric-amount"), `payeeId ${payeeId} (${mode})`).toEqual([rep(payeeId)]);
+      }
+    }
+  });
+
+  // tag, path, body, select, the value as sent, binding.select
+  const NESTED: Array<[string, string, unknown, string, string, string?]> = [
+    ["the job execution read model's operator (job.kernelId)", EXEC, JOB_EXECUTION_N3, "job.kernelId", "kernel_1"],
+    ["the job execution read model's operator name (job.kernelName)", EXEC, JOB_EXECUTION_N3, "job.kernelName", "Mill A"],
+    ["the job execution read model's capability type (job.capabilityType)", EXEC, JOB_EXECUTION_N3, "job.capabilityType", "fdm"],
+    ["the job execution read model's escrow id (settlement.record.escrowId)", EXEC, JOB_EXECUTION_N3, "settlement.record.escrowId", "esc-1"],
+    ["the job execution read model's milestone id", EXEC, JOB_EXECUTION_N3, "settlement.record.milestone.milestoneId", "m1"],
+    ["the job execution read model's bundle signer (evidence.bundles.0.signer.id)", EXEC, JOB_EXECUTION_N3, "evidence.bundles.0.signer.id", "kernel_1-key"],
+    ["a binding.select projection to the job block keeps its record's money shape (kernelId)", EXEC, JOB_EXECUTION_N3, "kernelId", "kernel_1", "job"],
+    ["a party record nested in a job's payment (payment.payee.id)", "/api/jobs/j1", { id: "j1", progress: 0.4, payment: { amount: 250, currency: "USDC", payee: { id: "kernel_1", name: "Mill A", type: "kernel" } } }, "payment.payee.id", "kernel_1"],
+    ["a party record nested in a job's payment (payment.payee.name)", "/api/jobs/j1", { id: "j1", progress: 0.4, payment: { amount: 250, currency: "USDC", payee: { id: "kernel_1", name: "Mill A", type: "kernel" } } }, "payment.payee.name", "Mill A"],
+    ["a party record nested in a job's payment (payment.payee.type)", "/api/jobs/j1", { id: "j1", progress: 0.4, payment: { amount: 250, currency: "USDC", payee: { id: "kernel_1", name: "Mill A", type: "kernel" } } }, "payment.payee.type", "kernel"],
+  ];
+
+  it("a nested party id (live and snapshot): the job execution read model's operator, escrow, milestone and signer ids, a party nested in a payment, and a projection: each a report", async () => {
+    for (const [tag, path, body, select, want, bindSelect] of NESTED) {
+      for (const mode of ["live", "snapshot"] as const) {
+        const win = bindSelect === undefined ? metricWin(path, select) : { kind: "metric", label: "Value", binding: { path, select: bindSelect }, select };
+        await paint([win], path, body, mode);
+        expect(texts(".pcc-metric-amount"), `${tag} (${mode})`).toEqual([rep(want)]);
+      }
+    }
+  });
+
+  it("a list-row party id (live and snapshot): every title and meta value of a money list's row is a report, the payee's id, the payer's id, the payee's name and the row's own id and type", async () => {
+    const ROWS = [{ id: "esc-1", status: "funded", totalAmount: 250, currency: "USDC", payeeId: R2B_PAYEE, payerId: "user_9", payeeName: "Mill A", type: "milestone" }];
+    for (const mode of ["live", "snapshot"] as const) {
+      await paint([listWin("/api/escrow", "payeeId", ["payerId", "payeeName", "id", "type"])], "/api/escrow", ROWS, mode);
+      expect(texts(".pcc-list-title"), "title " + mode).toEqual([rep(R2B_PAYEE)]);
+      expect(texts(".pcc-list-meta"), "meta " + mode).toEqual([[rep("user_9"), rep("Mill A"), rep("esc-1"), rep("milestone")].join(" · ")]);
+    }
+  });
+
+  it("a party nested in a list row (live and snapshot): on a jobs list a row whose payment is nested (no money field at its top) paints the payment's party and amount as reports while the job's own id stays typed; a capability list's listed price is a report while its own name, id and type stay typed", async () => {
+    const JOBS = [{ id: "j1", status: "running", payment: { amount: 250, currency: "USDC", payee: { id: "kernel_1", name: "Mill A" } } }];
+    const CAPS = [{ id: "c1", name: "Printer", type: "fdm", pricing: { currency: "USDC", baseCost: 12 } }];
+    for (const mode of ["live", "snapshot"] as const) {
+      await paint([listWin("/api/jobs", "id", ["payment.payee.id", "payment.payee.name", "payment.amount"])], "/api/jobs", JOBS, mode);
+      expect(texts(".pcc-list-meta"), "jobs meta " + mode).toEqual([[rep("kernel_1"), rep("Mill A"), rep("250")].join(" · ")]);
+      expect(texts(".pcc-list-title"), "jobs title " + mode).toEqual(["j1"]); // the job's own id is not reached through a money record
+      await paint([listWin("/api/capabilities", "name", ["id", "type", "pricing.baseCost"])], "/api/capabilities", CAPS, mode);
+      expect(texts(".pcc-list-meta"), "capabilities meta " + mode).toEqual([["c1", "fdm", rep("12")].join(" · ")]);
+      expect(texts(".pcc-list-title"), "capabilities title " + mode).toEqual(["name: Printer"]);
+    }
+  });
+
+  it("rows inside a money record (live and snapshot): a list over a money record's rows, by its first array or a binding.select projection (the job execution read model's evidence bundles), paints every value, a party's id included, as a report", async () => {
+    // A job record carrying its payment at its top (money data) whose first array lists its parties.
+    const JOB_PARTIES = { id: "j1", amount: 250, currency: "USDC", parties: [{ role: "payee", partyId: "kernel_1", partyName: "Mill A" }] };
+    for (const mode of ["live", "snapshot"] as const) {
+      await paint([listWin("/api/jobs/j1", "partyId", ["partyName", "role"])], "/api/jobs/j1", JOB_PARTIES, mode);
+      expect(texts(".pcc-list-title"), "first array title " + mode).toEqual([rep("kernel_1")]);
+      expect(texts(".pcc-list-meta"), "first array meta " + mode).toEqual([[rep("Mill A"), rep("payee")].join(" · ")]);
+      await paint([listWin(EXEC, "signer.id", ["bundleId", "stepId"], "evidence.bundles")], EXEC, JOB_EXECUTION_N3, mode);
+      expect(texts(".pcc-list-title"), "projection title " + mode).toEqual([rep("kernel_1-key")]);
+      expect(texts(".pcc-list-meta"), "projection meta " + mode).toEqual([[rep("b1"), rep("s1")].join(" · ")]);
+    }
+  });
+
+  it("the record r2b's controls and the typed-text test pinned bare (it carries a payee, so it is money data): its own id and its time (format ts) are reports; what is not a canonical UTC time still reads 'time not reported'; a non-money time keeps its locale rendering", async () => {
+    const MONEY_REC = { id: "job-1", timestamp: "2026-10-06T00:00:00Z", payee: "short" };
+    const wins = [metricWin("/api/jobs/j1", "id"), metricWin("/api/jobs/j1", "timestamp", { format: "ts" })];
+    for (const mode of ["live", "snapshot"] as const) {
+      await paint(wins, "/api/jobs/j1", MONEY_REC, mode);
+      expect(texts(".pcc-metric-amount"), "money " + mode).toEqual([rep("job-1"), rep("2026-10-06T00:00:00Z")]);
+      await paint(wins, "/api/jobs/j1", { ...MONEY_REC, timestamp: 1759708800000 }, mode);
+      expect(texts(".pcc-metric-amount"), "money, a number for a time " + mode).toEqual([rep("job-1"), "time not reported"]);
+      await paint(wins, "/api/jobs/j1", { id: "job-1", timestamp: "2026-10-06T00:00:00Z" }, mode);
+      expect(texts(".pcc-metric-amount"), "non-money " + mode).toEqual(["job-1", new Date("2026-10-06T00:00:00Z").toLocaleString()]);
+    }
+  });
+
+  // The CLOSED allowlist of fields a list or metric window may paint bare from money data, one reason per entry.
+  // It is EMPTY: no field truly has to stay bare. A record's own id can itself be a party's (a payee's or an
+  // operator's own record, a list of parties), a type or a name is the record's word like any other, and a time
+  // is attributed as sent. A field may join only with its reason, and never one naming a party role.
+  const MONEY_BARE_ALLOWLIST: ReadonlyArray<readonly [field: string, reason: string]> = [];
+  const PARTY_ROLES = /party|payee|payer|recipient|operator|buyer|seller|owner|address|wallet/i;
+  // The probe: every suffix the kit exempted (id, type and name, in any case), every party role (the lane's, and
+  // the kit's and read models' own: provider, kernel, challenger, signer) as itself, an id, an address, a name and a
+  // type, the read models' record keys, and generic keys.
+  const ROLES = ["party", "payee", "payer", "recipient", "operator", "buyer", "seller", "owner", "wallet", "provider", "kernel", "challenger", "signer", "account", "merchant", "customer", "user"];
+  const CANDIDATES = Array.from(new Set([
+    "id", "Id", "ID", "_id", "uid", "type", "Type", "TYPE", "name", "Name", "NAME", "displayName", "fullName", "legalName", "username",
+    ...ROLES, ...ROLES.flatMap((r) => [r + "Id", r + "ID", r + "_id", r + "Address", r + "Name", r + "Type"]),
+    "address", "escrowId", "escrowAddress", "contractAddress", "jobId", "stepId", "milestoneId", "unitId", "cwmId", "capabilityId", "capabilityType", "capabilityName",
+    "bundleId", "tokenId", "txHash", "token", "rail", "kind", "ref", "key", "code", "label", "title", "memo", "note", "uri", "hash", "slug", "sku", "symbol", "network",
+  ]));
+
+  it("the closed allowlist is empty and enumerated: probing every id/type/name suffix, every party role (as itself, an id, an address, a name and a type) and the read models' keys, in the metric and in both list slots, live and snapshot, the fields painted bare from money data are exactly the allowlist's", async () => {
+    for (const [field, reason] of MONEY_BARE_ALLOWLIST) {
+      expect(field, "a party field may never be allowlisted").not.toMatch(PARTY_ROLES);
+      expect(reason.trim().length, field + " needs its one-line reason").toBeGreaterThan(0);
+    }
+    expect(CANDIDATES.filter((f) => /status|state|phase/i.test(f)), "no probe takes the status path").toEqual([]);
+    const value = (i: number) => "v" + i;
+    const record: Record<string, unknown> = Object.fromEntries([["totalAmount", 250], ...CANDIDATES.map((f, i) => [f, value(i)])]);
+    const bare = new Set<string>();
+    for (const mode of ["live", "snapshot"] as const) {
+      await paint(CANDIDATES.map((f) => metricWin("/api/escrow/e1", f)), "/api/escrow/e1", record, mode);
+      const metrics = texts(".pcc-metric-amount");
+      expect(metrics.length, "metrics " + mode).toBe(CANDIDATES.length);
+      CANDIDATES.forEach((f, i) => { if (metrics[i] !== rep(value(i))) bare.add(f); });
+      await paint(CANDIDATES.map((f) => listWin("/api/escrow", f, [f])), "/api/escrow", [record], mode);
+      const titles = texts(".pcc-list-title"), metas = texts(".pcc-list-meta");
+      expect([titles.length, metas.length], "list rows " + mode).toEqual([CANDIDATES.length, CANDIDATES.length]);
+      CANDIDATES.forEach((f, i) => { if (titles[i] !== rep(value(i)) || metas[i] !== rep(value(i))) bare.add(f); });
+    }
+    expect([...bare].sort(), "the fields painted bare from money data").toEqual(MONEY_BARE_ALLOWLIST.map(([f]) => f).sort());
+  });
+
+  it("controls (they pass before and after): non-money data keeps its typed rendering in both windows; on money data a status field keeps the closed vocabulary (a safe word stays plain, anything else, a party included, is reported)", async () => {
+    const KERNEL = { kernel: { id: "k1", name: "Bench", type: "fdm", reputation: 4.8 } };
+    for (const mode of ["live", "snapshot"] as const) {
+      await paint([metricWin("/api/kernels/k1", "kernel.id"), metricWin("/api/kernels/k1", "kernel.name"), metricWin("/api/kernels/k1", "kernel.type"), metricWin("/api/kernels/k1", "kernel.reputation")],
+        "/api/kernels/k1", KERNEL, mode);
+      expect(texts(".pcc-metric-amount"), "kernel metrics " + mode).toEqual(["k1", "name: Bench", "fdm", "4.8"]);
+      await paint([listWin("/api/kernels", "name", ["id", "type"])], "/api/kernels", [{ name: "Bench", id: "kernel_1", type: "fdm" }], mode);
+      expect(texts(".pcc-list-title"), "kernel list title " + mode).toEqual(["name: Bench"]);
+      expect(texts(".pcc-list-meta"), "kernel list meta " + mode).toEqual(["kernel_1 · fdm"]);
+      await paint([metricWin("/api/escrow/e1", "status"), metricWin("/api/escrow/e1", "payeeState")], "/api/escrow/e1", { status: "running", payeeState: R2B_PAYEE, totalAmount: 250 }, mode);
+      expect(texts(".pcc-metric-amount"), "status path " + mode).toEqual(["running", "reported status: " + R2B_PAYEE + " - settlement unconfirmed"]);
     }
   });
 });

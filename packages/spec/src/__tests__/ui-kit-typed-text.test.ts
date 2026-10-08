@@ -365,8 +365,9 @@ describe("a helper deleted from a mapped sink", () => {
       expect(node.classList.contains("pcc-untrusted")).toBe(true);
     }
     expect(document.getElementById("pcc-ui-styles")!.textContent).toContain(".pcc-agent");
+    // R12 r2c N3: /api/jobs/j1 carries a payee, so it is money data: its id and its time are reports, shown as sent.
     expect(Array.from(document.querySelectorAll(".pcc-metric-amount")).map((node) => node.textContent))
-      .toEqual(["job-1", new Date("2026-10-06T00:00:00Z").toLocaleString()]);
+      .toEqual(["reported: job-1 - settlement unconfirmed", "reported: 2026-10-06T00:00:00Z - settlement unconfirmed"]);
     expect(text(".pcc-cap-name")).toBe("name: Printer");
     expect(text(".pcc-cap-desc")).toBe("reported: Prints parts");
     expect(text(".pcc-list-title")).toBe("name: Bench");
