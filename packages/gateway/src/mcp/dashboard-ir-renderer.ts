@@ -573,7 +573,10 @@ export function listWindow(node: IrNode, data: unknown, returned: number): ListW
     parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
   }
   if (offset === "unknown") parts.push(kitText("offset not shown"));
-  else if (offset > 0) parts.push(joinKitText(kitText("from row "), countText(offset + 1)));
+  // The first row shown is offset + 1, unless that is past the safe-integer range (offset ===
+  // Number.MAX_SAFE_INTEGER): then the same position is stated exactly as "after row <offset>", never
+  // as "from row —" (R12 r2 E; ChatGPT run 3 on #599).
+  else if (offset > 0) parts.push(Number.isSafeInteger(offset + 1) ? joinKitText(kitText("from row "), countText(offset + 1)) : joinKitText(kitText("after row "), countText(offset)));
 
   if (prof?.paged) {
     const paged = prof.paged;

@@ -1492,7 +1492,7 @@
       parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
     }
     if (offset === "unknown") parts.push(kitText("offset not shown"));
-    else if (offset > 0) parts.push(joinKitText(kitText("from row "), countText(offset + 1)));
+    else if (offset > 0) parts.push(Number.isSafeInteger(offset + 1) ? joinKitText(kitText("from row "), countText(offset + 1)) : joinKitText(kitText("after row "), countText(offset)));
     if (prof?.paged) {
       const paged = prof.paged;
       if (paged.total !== void 0) {

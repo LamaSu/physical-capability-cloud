@@ -61,6 +61,24 @@ describe("N110 listWindow: unit table (pure, no DOM)", () => {
     expect(r.empty).toBe("no rows in this window");
   });
 
+  // R12 r2 E (ChatGPT run 3 on #599 @aa0b8df6, minor): offset + 1 past MAX_SAFE_INTEGER showed "from row —".
+  it("offset Number.MAX_SAFE_INTEGER: 'after row 9007199254740991', never 'from row —'", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: Number.MAX_SAFE_INTEGER } }), undefined, 1);
+    expect(r.note).toBe("after row 9007199254740991");
+    expect(r.note).not.toContain("—");
+    expect(r.empty).toBe("no rows in this window");
+  });
+
+  it("offset Number.MAX_SAFE_INTEGER - 1: its next row is still safe, so 'from row 9007199254740991'", () => {
+    const r = listWindow(listNode({ path: "/api/jobs", query: { offset: Number.MAX_SAFE_INTEGER - 1 } }), undefined, 1);
+    expect(r.note).toBe("from row 9007199254740991");
+  });
+
+  it("offset Number.MAX_SAFE_INTEGER on a paged route with a total: the position is exact and the total fails closed", () => {
+    const r = listWindow(listNode({ path: "/api/capabilities", query: { offset: Number.MAX_SAFE_INTEGER } }), { total: Number.MAX_SAFE_INTEGER }, 1);
+    expect(r.note).toBe("after row 9007199254740991 · total not shown");
+  });
+
   it("offset 'abc' (off-grammar): offset not shown (an unknown offset is never 0)", () => {
     const r = listWindow(listNode({ path: "/api/jobs", query: { offset: "abc" } }), undefined, 1);
     expect(r.note).toBe("offset not shown");
@@ -184,6 +202,17 @@ describe("N110 end-to-end on the rebuilt pcc-ir-kit.js", () => {
     expect(empty.textContent).toBe("no rows in this window");
     expect(empty.textContent).not.toBe("none");
     expect(s.q(".pcc-list .pcc-window").textContent).toBe("filtered by this view: type=pizza");
+    s.close();
+  });
+
+  it("R12 r2 E: an offset of Number.MAX_SAFE_INTEGER renders 'after row 9007199254740991' from the rebuilt bytes, never 'from row —'", async () => {
+    const s = scene([{ status: 200, json: { items: [], total: 0, asOf: iso(T0) } }], T0);
+    s.deliver(capsManifest({ offset: Number.MAX_SAFE_INTEGER })); await s.settle();
+    const note = s.q(".pcc-list .pcc-window");
+    expect(note).not.toBeNull();
+    expect(note.textContent).toContain("after row 9007199254740991");
+    expect(note.textContent).not.toContain("from row");
+    expect(s.q(".pcc-list .pcc-empty").textContent).toBe("no rows in this window");
     s.close();
   });
 
