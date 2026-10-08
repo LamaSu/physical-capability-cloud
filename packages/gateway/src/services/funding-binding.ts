@@ -55,3 +55,23 @@ export function escrowLabelRefusal(escrow: BindingEscrow | null | undefined, buy
 export function recordEscrowRefusal(record: FundingVerificationRecord, escrow: BindingEscrow): RecordEscrowRefusal | null {
   return sameAddress(escrow.contractAddress, record.escrowAddress) ? null : "record_escrow_not_scope_escrow";
 }
+
+export type FundingBindingRefusal = RecordScopeRefusal | EscrowLabelRefusal | RecordEscrowRefusal;
+
+/**
+ * The six checks, in order: null when `record` binds to `scope` and to `escrow`, the escrow row of
+ * the scope's job (null or undefined when the job has none), else the first check that fails.
+ * reconcilePaidScope runs the same checks one by one, with the escrow row's status (and the kept
+ * record) checked between them; the funding-status DTO runs them all here.
+ */
+export function fundingBindingRefusal(
+  record: FundingVerificationRecord,
+  scope: BindingScope,
+  escrow: BindingEscrow | null | undefined,
+): FundingBindingRefusal | null {
+  const recordRefusal = recordScopeRefusal(record, scope);
+  if (recordRefusal !== null) return recordRefusal;
+  const labelRefusal = escrowLabelRefusal(escrow, scope.createdBy);
+  if (labelRefusal !== null || !escrow) return labelRefusal ?? "escrow_missing";
+  return recordEscrowRefusal(record, escrow);
+}
