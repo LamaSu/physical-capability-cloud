@@ -121,8 +121,12 @@ class TestTruths(unittest.TestCase):
     def test_every_provisioning_call_sends_its_own_public_key(self):
         # Rehearsal R0's P9: without publicKey, the response carries a server-made private key.
         # A body is either inline JSON, or a private file built just before the call (115c F5).
+        # The supply runbook's rule: the buyer path (starter/buyer/) is a separate flow whose
+        # publicKey is optional by design; its own test follows.
         calls = 0
         for path, text in text_files():
+            if "buyer" in path.relative_to(STARTER).parts:
+                continue
             for m in re.finditer(r"curl [^\n]*/api/auth/provision", text):
                 calls += 1
                 after = text[m.end(): m.end() + 300]
@@ -134,6 +138,22 @@ class TestTruths(unittest.TestCase):
                 else:
                     self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
         self.assertEqual(calls, 1)  # the operator's own; phase 6's buyer key went with its submission (115e)
+
+    def test_the_buyer_path_provisions_once_into_a_private_file(self):
+        # #603 (Opus r1 F1/F2): the buyer path provisions over direct HTTP with one recipe. It makes
+        # .pcc private before the call and redirects the response into it; a minted key (no
+        # publicKey) stays in that file. agent-md-provision-secrets.test.ts runs the recipe as
+        # written and checks that nothing secret is printed.
+        buyer = json.loads((STARTER / "buyer" / "buyer-path.json").read_text(encoding="utf-8"))
+        provision = buyer["steps"][0]["actions"][0]
+        self.assertEqual((provision["tool"], provision["route"]), (None, "/api/auth/provision"))
+        calls = [line for line in provision["recipe"] if re.search(r"curl [^\n]*/api/auth/provision", line)]
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].endswith(" > .pcc/provision.json"), calls[0])
+        recipe = provision["recipe"]
+        self.assertLess(recipe.index("umask 077 && mkdir -p .pcc && chmod 700 .pcc"), recipe.index(calls[0]))
+        everywhere = [m for _, text in text_files() for m in re.finditer(r"curl [^\n]*/api/auth/provision", text)]
+        self.assertEqual(len(everywhere), 2)  # the operator's own (runbook phase 0) and the buyer's own
 
     def test_no_key_is_expanded_onto_a_command_line(self):
         # A key in argv is readable by every user of the machine (ps, /proc/<pid>/cmdline).

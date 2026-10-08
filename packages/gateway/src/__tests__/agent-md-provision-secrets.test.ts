@@ -253,8 +253,7 @@ describe("agent golden path captures the provision response without leaking it (
     expect(at("git check-ignore -q .pcc/provision.json")).toBeGreaterThan(0);
     expect(recipe[at("git check-ignore")]).toContain("info/exclude");
     expect(at("git check-ignore")).toBeLessThan(curl);
-    expect(recipe[curl]).toContain("-o .pcc/provision.json");
-    expect(recipe[curl]).toContain("--data-binary @.pcc/provision-request.json");
+    expect(recipe[curl]).toMatch(/--data-binary @\.pcc\/provision-request\.json > \.pcc\/provision\.json$/);
     expect(at(".pcc/auth.header")).toBeGreaterThan(curl);
     expect(recipe).toContain("chmod 600 .pcc/provision.json .pcc/auth.header");
     // Nothing dumps the response or the key: no cat, no echo of a variable, no print of the whole body or key.
@@ -324,7 +323,7 @@ describe("agent golden path captures the provision response without leaking it (
           for (const secret of secrets) expect(typeof secret === "string" && secret.length >= 32).toBe(true);
           const printed = provision.stdout + provision.stderr + validate.stdout + validate.stderr;
           secrets.forEach((secret, index) => expect(printed.includes(secret), `secret #${index} was printed`).toBe(false));
-          expect(provision.stdout).toContain("HTTP 201");
+          expect(provision.stdout).toContain("'error': None");
           expect(provision.stdout).toContain(body.key_id);
           expect(JSON.parse(validate.stdout)).toMatchObject({ valid: true });
           expect(statSync(join(dir, ".pcc")).mode & 0o777).toBe(0o700);
