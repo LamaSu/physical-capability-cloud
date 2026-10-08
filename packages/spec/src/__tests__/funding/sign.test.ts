@@ -63,6 +63,20 @@ describe("signJobPolicy", () => {
     expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet(newAccount()) }))).toBe("PAYER_NOT_SIGNER");
   });
 
+  it("a non-payer wallet, or the payer on another chain, is refused before it is ever asked to sign", async () => {
+    const { fx, chain, prepared } = await setup();
+    let asked = 0;
+    const counting = (owner: LocalAccount) =>
+      rewritingAccount(owner, async (td) => {
+        asked++;
+        return owner.signTypedData(td);
+      });
+    expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet(counting(newAccount())) }))).toBe("PAYER_NOT_SIGNER");
+    chain.state.walletChainId = 1;
+    expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet(counting(fx.payer)) }))).toBe("CHAIN_MISMATCH");
+    expect(asked).toBe(0);
+  });
+
   it("PAYER_NOT_SIGNER: a wallet with no account", async () => {
     const { chain, prepared } = await setup();
     expect(await refusal(signJobPolicy({ prepared, wallet: chain.accountless() }))).toBe("PAYER_NOT_SIGNER");

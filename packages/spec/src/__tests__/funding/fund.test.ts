@@ -4,7 +4,7 @@
  * buyer-funding.anvil.test.ts.
  */
 import { describe, expect, it } from "vitest";
-import { decodeFunctionData, encodeErrorResult, keccak256, stringToHex, type Hex } from "viem";
+import { decodeFunctionData, encodeErrorResult, getAbiItem, keccak256, stringToHex, toFunctionSelector, type Hex } from "viem";
 import {
   FundingRefusal,
   approveAndFund,
@@ -351,6 +351,28 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     for (const x of pinned) {
       expect((x.params as unknown[])[1]).toEqual({ blockHash: expect.stringMatching(/^0x[0-9a-f]{64}$/), requireCanonical: true });
     }
+  });
+
+  it("the allowance is read at the approve's own block, not at the block the pre-checks ran at", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    const precheckBlock = chain.state.block.hash;
+    // The chain moves on between the pre-checks and the approve, so the approve lands in a later block.
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => {
+      chain.advanceBlock();
+      return true;
+    });
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    chain.state.log.length = 0;
+    expect((await fund()).outcome).toBe("committed");
+    const approveBlock = chain.state.sent[0]!.block.hash;
+    expect(approveBlock).not.toBe(precheckBlock);
+    const allowanceSelector = toFunctionSelector(getAbiItem({ abi: ERC20_ABI, name: "allowance" }));
+    const allowanceRead = chain.state.log.find(
+      (x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(allowanceSelector),
+    );
+    expect((allowanceRead!.params as unknown[])[1]).toEqual({ blockHash: approveBlock, requireCanonical: true });
   });
 
   it("the read-back is at the fund() receipt's block, even when the chain has moved on", async () => {
