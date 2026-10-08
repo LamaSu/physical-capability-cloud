@@ -84,6 +84,7 @@ COPY packages/demand-intel/package.json packages/demand-intel/
 COPY packages/demo-video/package.json packages/demo-video/
 COPY packages/dht-core/package.json packages/dht-core/
 COPY packages/federation/package.json packages/federation/
+COPY packages/hosted-agent/package.json packages/hosted-agent/
 COPY packages/identity/package.json packages/identity/
 COPY packages/intent-broker/package.json packages/intent-broker/
 COPY packages/intent-collector/package.json packages/intent-collector/
