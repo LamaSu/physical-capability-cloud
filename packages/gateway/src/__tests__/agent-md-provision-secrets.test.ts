@@ -61,10 +61,19 @@ import { initStore, closeStore } from "../db.js";
 const root = new URL("../../../../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), "utf8");
 const provisionAction = () => JSON.parse(read("starter/buyer/buyer-path.json")).steps[0].actions[0] as {
-  tool: string;
+  tool: string | null;
+  route: string;
   request: string;
   responseFields: string[];
 };
+
+/**
+ * Opus r1 F1: a tool call returns the 201 body (API key, private keys) into the conversation, and
+ * the provision_api_key tool cannot send publicKey. The get-key step names no tool and says why.
+ */
+const NO_TOOL =
+  "Do not call the `provision_api_key` tool, or any tool that hands this response back to you: " +
+  "a tool result enters the conversation, and the tool cannot send publicKey.";
 
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
@@ -93,7 +102,9 @@ function privateKeyPaths(value: unknown, path: string[] = []): string[] {
 /** Every emitted path must be a documented response field and named in the request prose. */
 function expectDocumented(paths: string[]): void {
   const provision = provisionAction();
-  expect(provision.tool).toBe("provision_api_key");
+  expect(provision.route).toBe("/api/auth/provision");
+  expect(provision.tool, "the get-key step must send provisioning over direct HTTP, never a tool").toBeNull();
+  expect(provision.request.startsWith(NO_TOOL), "the request must open with the no-tool rule").toBe(true);
   for (const path of paths) {
     expect(
       provision.responseFields.some((field) => field === path || field.startsWith(`${path} (`)),
@@ -161,6 +172,21 @@ describe("agent golden path names every private key the provision response carri
     const paths = privateKeyPaths(body);
     expect(paths).toEqual(expect.arrayContaining(["ed25519.private_key", "ed25519.private_key_pkcs8_base64"]));
     expectDocumented(paths);
+  });
+});
+
+describe("agent golden path provisions over direct HTTP, never through a tool (Opus r1 F1)", () => {
+  it("no buyer action names provision_api_key, and agent.md renders the get-key step as direct HTTP", () => {
+    const buyer = JSON.parse(read("starter/buyer/buyer-path.json")) as {
+      steps: Array<{ actions: Array<{ tool: string | null }> }>;
+      reporting: { tool: string | null };
+    };
+    const tools = [...buyer.steps.flatMap((step) => step.actions), buyer.reporting].map((action) => action.tool);
+    expect(tools).not.toContain("provision_api_key");
+    const doc = read("apps/dashboard/public/.well-known/agent.md");
+    expect(doc).toContain("Direct HTTP → `POST /api/auth/provision`");
+    expect(doc).not.toContain("Tool: `provision_api_key`");
+    expect(doc).toContain(`Request: ${NO_TOOL}`);
   });
 });
 

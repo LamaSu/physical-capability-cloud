@@ -203,7 +203,7 @@ describe("generated agent golden path", () => {
       expect(step.goal && step.doneWhen.length).toBeTruthy();
       expect(Array.isArray(step.asksHuman)).toBe(true);
       for (const action of step.actions) {
-        if (!action.tool) continue; // /ask is a direct public HTTP call.
+        if (!action.tool) continue; // Direct HTTP: /ask, validate, and provisioning (no tool may return its secrets).
         const tool = tools.get(action.tool) as { endpoint: { method: string; path: string } };
         expect(tool, action.tool).toBeDefined();
         expect({ method: action.method, path: action.route }).toEqual(tool.endpoint);
