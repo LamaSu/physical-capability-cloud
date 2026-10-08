@@ -64,22 +64,31 @@ const github = "https://github.com/LamaSu/physical-capability-cloud/blob/master/
 const link = (path: string) => `[${path}](${github}${path})`;
 const sourceLink = (path: string) => `[${path.split("/").at(-1)}](${github}${path})`;
 const cell = (text: string) => text.replace(/\|/g, "\\|").replace(/\n/g, " ");
-const placeholders = (text: string) => text.replace(/<([^>]+)>/g, "`<$1>`");
+/** A <…> run that rendered Markdown would read as an HTML tag (a letter after "<"); "a < b > c" stays prose. */
+const placeholders = (text: string) => text.replace(/<(\/?[A-Za-z][^<>\n]*)>/g, "`<$1>`");
+/** A method and route; a sentence-final "." stays outside the span. */
 const http = (text: string) => text.replace(
-  /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:\$PCC_BASE|<gateway>)?\/[^\s`"|,;)]+/g,
+  /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:\$PCC_BASE|<gateway>)?\/[^\s`"|,;)]*[^\s`"|,;).]/g,
   (route) => `\`${route}\``,
 );
-/** Placeholders outside code spans only: http() spans may already hold <id>. */
-const prose = (text: string) => http(text).split("`")
-  .map((part, index) => (index % 2 ? part : placeholders(part))).join("`");
+/**
+ * Prose outside code spans: wrap routes, then placeholders outside the new route spans. An existing
+ * code span passes through whole; an odd number of backticks is an unbalanced span and throws.
+ */
+const prose = (text: string) => {
+  const parts = text.split("`");
+  if (parts.length % 2 === 0) throw new Error(`Unbalanced backticks in agent.md source text: ${text}`);
+  return parts.map((part, index) => (index % 2 ? part : http(part).split("`")
+    .map((piece, inner) => (inner % 2 ? piece : placeholders(piece))).join("`"))).join("`");
+};
 
 function renderAction(action: Action): string[] {
   if (action.recipe?.some((line) => line.includes("```"))) throw new Error(`A recipe line for ${action.route} would close its code block`);
   return [
-    `${action.tool ? `Tool: \`${action.tool}\`` : "Direct HTTP"} → \`${action.method} ${action.route}\`. Auth: ${placeholders(action.auth)}.`,
-    `Request: ${placeholders(action.request)}`,
+    `${action.tool ? `Tool: \`${action.tool}\`` : "Direct HTTP"} → \`${action.method} ${action.route}\`. Auth: ${prose(action.auth)}.`,
+    `Request: ${prose(action.request)}`,
     ...(action.recipe?.length ? ["", "```bash", ...action.recipe, "```", ""] : []),
-    `Read response fields: ${action.responseFields.length ? action.responseFields.join(", ") : "none"}.${action.response ? ` ${action.response}` : ""}`,
+    `Read response fields: ${action.responseFields.length ? action.responseFields.join(", ") : "none"}.${action.response ? ` ${prose(action.response)}` : ""}`,
     ...(action.storeOnlyFields?.length ? [`Store only, never read into the conversation: ${action.storeOnlyFields.join(", ")}.`] : []),
     `Gateway source: ${[...new Set(action.sources)].map(sourceLink).join(", ")}.`,
     "",
@@ -119,7 +128,7 @@ export function renderAgentMd({ runbook, index, buyer, agentPackage }: AgentMdSo
       lines.push(step.terminal ? "Human handoff; approval is required before any further action:" : "Ask the human only for missing facts:", "", ...step.asksHuman.map((ask) => `- ${ask}`), "");
     } else lines.push("Ask the human only for missing facts: none.", "");
     for (const action of step.actions) lines.push(...renderAction(action));
-    lines.push("Done when:", "", ...step.doneWhen.map((check) => `- ${http(check)}`), "");
+    lines.push("Done when:", "", ...step.doneWhen.map((check) => `- ${prose(check)}`), "");
   });
 
   lines.push(
@@ -136,7 +145,7 @@ export function renderAgentMd({ runbook, index, buyer, agentPackage }: AgentMdSo
       `### ${number}. ${phase.id} — ${link(`starter/runbook/${phase.file}`)}`,
       "",
       `Goal: ${phase.goal}`,
-      "Done when:", "", ...phase.doneWhen.map((check) => `- ${http(check)}`), "",
+      "Done when:", "", ...phase.doneWhen.map((check) => `- ${prose(check)}`), "",
       `Ask the human: ${phase.asksHuman.length ? phase.asksHuman.join("; ") : "nothing"}. Next: ${phase.next ?? "stop after the session report"}.`,
       "",
     );
@@ -149,7 +158,7 @@ export function renderAgentMd({ runbook, index, buyer, agentPackage }: AgentMdSo
   for (const [id, event] of Object.entries(index.events)) {
     const source = event.file ? ` Read ${link(`starter/runbook/${event.file}`)}${event.section ? `, section “${event.section}”` : ""}.` : "";
     const report = event.report ? ` Report ${event.report.phase} ${event.report.outcome}.` : "";
-    lines.push(`| ${cell(id)} | ${cell(prose(event.trigger))} | ${cell(prose(event.do))}${cell(source)}${report} |`);
+    lines.push(`| ${cell(id)} | ${cell(prose(event.trigger))} | ${cell(prose(event.do))}${cell(source)}${cell(report)} |`);
   }
   lines.push("", "## Report the attempt", "",
     "For buyer friction, a missing binding quote or a failed check, send a redacted report:", "",

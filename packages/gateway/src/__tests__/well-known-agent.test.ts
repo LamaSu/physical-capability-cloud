@@ -103,6 +103,54 @@ describe("generated agent golden path", () => {
     expect(rendered).toContain("`GET /api/x/<id>`");
   });
 
+  describe("escapes every prose field the same way (Opus r1 F5)", () => {
+    const render = async (edit: (sources: Record<string, any>) => void) => {
+      const { renderAgentMd } = await import("../docs/render-agent-md.js");
+      const sources: Record<string, any> = {
+        runbook: json("starter/runbook/runbook.json"), index: json("starter/runbook/index.json"),
+        buyer: json("starter/buyer/buyer-path.json"), agentPackage: json("apps/dashboard/public/agent-package.json"),
+      };
+      edit(sources);
+      return renderAgentMd(sources as never);
+    };
+
+    it("keeps an existing code span whole, and wraps a bare route and placeholder in request and auth", async () => {
+      const rendered = await render(({ buyer }) => {
+        buyer.steps[0].actions[1].request = "Run `curl -H @.pcc/auth.header <base>/api/auth/validate` once. Then DELETE /api/auth/keys/<id> to revoke it.";
+        buyer.steps[0].actions[1].auth = "send Bearer <key> to GET /api/auth/validate";
+        buyer.steps[0].actions[1].response = "Then read GET /api/compose/<id> back.";
+      });
+      expect(rendered).toContain("Request: Run `curl -H @.pcc/auth.header <base>/api/auth/validate` once. Then `DELETE /api/auth/keys/<id>` to revoke it.");
+      expect(rendered).toContain("Auth: send Bearer `<key>` to `GET /api/auth/validate`.");
+      expect(rendered).toContain("Read response fields: valid, operatorId. Then read `GET /api/compose/<id>` back.");
+    });
+
+    it("never doubles a route already in a code span, and leaves a sentence-final period outside the span", async () => {
+      const rendered = await render(({ buyer }) => {
+        buyer.events["buyer.invalid-key"].do = "Call `GET /api/auth/validate` first.";
+        buyer.steps[0].doneWhen[0] = "count < 5 and size > 3, then GET /api/auth/validate.";
+      });
+      const row = rendered.split("\n").find((line) => line.startsWith("| buyer.invalid-key |"));
+      expect(row).toContain("| Call `GET /api/auth/validate` first. |");
+      expect(row).not.toContain("``");
+      expect(rendered).toContain("- count < 5 and size > 3, then `GET /api/auth/validate`.");
+    });
+
+    it("escapes a pipe in a report phase so the table row keeps three cells", async () => {
+      const rendered = await render(({ index }) => {
+        index.events["prerequisites.pipe-test"] = { trigger: "t", do: "d", report: { phase: "pha|se", outcome: "blocked" } };
+      });
+      const row = rendered.split("\n").find((line) => line.startsWith("| prerequisites.pipe-test |"));
+      expect(row).toBe("| prerequisites.pipe-test | t | d Report pha\\|se blocked. |");
+      expect(row?.replace(/\\\|/g, "").split("|")).toHaveLength(5);
+    });
+
+    it("refuses unbalanced backticks instead of rendering a broken span", async () => {
+      await expect(render(({ buyer }) => { buyer.steps[0].actions[0].request = "Run `curl once."; }))
+        .rejects.toThrow(/Unbalanced backticks/);
+    });
+  });
+
   it("depends only on attempt_reporting from the agent package", async () => {
     const { renderAgentMd } = await import("../docs/render-agent-md.js");
     const sources = {
