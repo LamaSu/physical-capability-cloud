@@ -26,11 +26,12 @@ describe("generated agent golden path", () => {
     }
   });
 
-  it("registers the public route before the API authentication gate", () => {
+  it("registers the route plugin in server.ts as a statement, not a comment", () => {
+    // Registration order does not decide publicness: every root hook, apiGate's included, reaches
+    // the route (Fastify 4 adds root hooks to existing children). well-known-agent.gateway.test.ts
+    // pins the behaviour through createGateway (Opus r1 F4).
     const server = read("packages/gateway/src/server.ts");
-    const registration = server.indexOf("await app.register(wellKnownAgentRoutes)");
-    expect(registration).toBeGreaterThan(0);
-    expect(registration).toBeLessThan(server.indexOf("await app.register(apiGate)"));
+    expect(server).toMatch(/^ {2}await app\.register\(wellKnownAgentRoutes\);$/m);
     expect(server.endsWith("\n\n")).toBe(true);
   });
 

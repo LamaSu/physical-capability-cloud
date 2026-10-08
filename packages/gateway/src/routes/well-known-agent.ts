@@ -13,7 +13,10 @@ export function loadAgentMd(): string {
   return readFileSync(resolveGatewayAsset(AGENT_MD_SEGMENTS), "utf8");
 }
 
-/** Public, registered before the API gate, like the sibling discovery routes. */
+/**
+ * Public: apiGate's hook reaches every route, whatever the registration order, and skips non-/api
+ * paths ("/.well-known/" is a public prefix too). well-known-agent.gateway.test.ts pins it.
+ */
 export async function wellKnownAgentRoutes(app: FastifyInstance): Promise<void> {
   const markdown = loadAgentMd(); // Fail at startup if the image lost the asset.
   app.get("/.well-known/agent.md", {
