@@ -133,7 +133,7 @@ Human handoff; approval is required before any further action:
 
 Done when:
 
-- The human receives the gateway, compositionId, capability assignments, per-step estimates, the API-labelled USD totalPriceUSD, expiry, assurance tier and all pricing or timing limitations, including the lack of currency conversion. This composed plan carries no binding quote. A per-capability negotiated quote exists outside this path; committing it creates a job and escrow, so it needs the human's approval.
+- The human receives the gateway, compositionId, capability assignments, per-step estimates, the API-labelled USD totalPriceUSD, expiry, assurance tier and all pricing or timing limitations, including the lack of currency conversion, and that the capability assignments and prices come from this gateway's candidate pool and are not verified. This composed plan carries no binding quote. A per-capability negotiated quote exists outside this path; committing it creates a job and escrow, so it needs the human's approval.
 - No execution, funding, payment, paid search or job submission occurred. Never claim physical work succeeded until its outcome evidence has been read; this path ends with a proposal.
 
 ## Supply: follow the starter runbook

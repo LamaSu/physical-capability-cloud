@@ -314,6 +314,10 @@ describe("generated agent golden path", () => {
     expect(buyer.quoteLimit).toContain(scope);
     expect(buyer.steps.find((step: { id: string }) => step.id === "compose").doneWhen.join(" ")).toContain(scope);
     expect(buyer.steps.at(-1).doneWhen.join(" ")).toContain(scope);
+    // Opus r1 I2: without the compose facade any key holder can add candidates, so the handoff
+    // says the assignments, not only the prices, are unverified.
+    expect(buyer.steps.at(-1).doneWhen.join(" "))
+      .toContain("the capability assignments and prices come from this gateway's candidate pool and are not verified");
     for (const fact of ["maximum base cost per job", "Per-unit charges are ignored", "estimate can be high or low", "this gateway's capability candidates", "not verified prices", "without currency conversion"])
       expect(buyer.quoteLimit).toContain(fact);
     expect(buyer.quoteLimit).not.toMatch(/\/api\/dev|\/api\/test|\b[A-Z][A-Z0-9]+_[A-Z0-9_]+\b/);
