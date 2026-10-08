@@ -138,6 +138,28 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
   });
 
+  it("(neg-blocklist-malformed) a block list that is present but not an array of strings is policy_unavailable, never 'nobody blocked'", async () => {
+    const { scopeId } = await paidScope(f);
+    const policy = basePolicy();
+    // P9 of the fund-s2 review: a string naming the buyer (the kernel's policy engine reads it as
+    // blocked); then a null, a number, and an array holding a non-string.
+    for (const blockedAgents of [BUYER, null, 42, [OTHER, 7]]) {
+      setPolicy(KERNEL, { ...policy, blockedAgents });
+      expect(reconcilePaidScope(scopeId, verification(scopeId)), JSON.stringify(blockedAgents)).toEqual(refused("policy_unavailable"));
+      expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
+      expect(store.count()).toBe(0);
+    }
+    expect((await writeAs(f, scopeId)).statusCode).toBe(403);
+    // A policy with no block list blocks nobody, as before; nor does a list of other buyers.
+    const noList = { ...policy };
+    delete noList.blockedAgents;
+    setPolicy(KERNEL, noList);
+    const other = await paidScope(f, { real: ESCROW_B });
+    expect(reconcilePaidScope(other.scopeId, verification(other.scopeId, { escrowAddress: ESCROW_B })).kind).toBe("activated");
+    setPolicy(KERNEL, { ...policy, blockedAgents: [OTHER] });
+    expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+  });
+
   it("(neg-revoked) a scope the operator revoked never activates", async () => {
     const { scopeId } = await paidScope(f);
     expect((await revokeScope(f, scopeId)).statusCode).toBe(200);

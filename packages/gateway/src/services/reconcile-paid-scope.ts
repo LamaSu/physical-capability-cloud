@@ -8,7 +8,11 @@
  *   a. re-read what allows the activation: the scope (not revoked, awaiting_funding, its
  *      pre-activation window still open: a lapsed window answers `expired` and the scope never
  *      activates), the kernel's emergency stop (clear, and its policy readable) and its operator
- *      policy (the buyer is not on the block list);
+ *      policy (the buyer is not on the block list; a block list that is present but is not an
+ *      array of strings is policy_unavailable, since it cannot show the buyer unblocked). The
+ *      block-list read's catch (blockRefusal) is defence in depth and unreachable today:
+ *      emergencyStopState reads the same policy row first, on the same connection, and answers
+ *      unavailable (policy_unavailable here) when that read throws or the policy is not an object;
  *   b. insert the verification record through the funding-record port, unless the store already
  *      keeps this scope's record of this escrow (the Stage-1 verifier may have stored it first);
  *   c. compare-and-set the scope from awaiting_funding to active, with expiresAt = now +
@@ -82,7 +86,7 @@ export const RECONCILE_REFUSALS = [
   /** Any status but awaiting_funding (or active, above): not accepted yet, rejected, expired, ... */
   "scope_not_awaiting_funding",
   "kernel_emergency_stopped",
-  /** The kernel's policy cannot be read, so its stop and block list cannot be told. */
+  /** The kernel's policy cannot be read, or its block list is not an array of strings: its stop or block list cannot be told. */
   "policy_unavailable",
   /** The buyer is on the kernel's block list. */
   "buyer_blocked",
@@ -118,15 +122,31 @@ class ActivationConflict extends Error {
 
 const refused = (reason: ReconcileRefusal): ReconcileResult => ({ kind: "refused", reason });
 
-/** The kernel's block list, read in the transaction: buyer_blocked, policy_unavailable, or null. */
+/**
+ * Whether the policy has a block list (blockedAgents present) that is not an array of strings: a
+ * string, null, a number, an object, or an array holding anything but strings. Such a list cannot
+ * show the buyer unblocked. acceptanceFor (#591's) reads it as "nobody blocked", and the kernel's
+ * policy engine reads a string as blocked (a substring match), so the two would disagree.
+ */
+function malformedBlockList(policy: unknown): boolean {
+  const list = typeof policy === "object" && policy !== null ? (policy as Record<string, unknown>).blockedAgents : undefined;
+  return list !== undefined && !(Array.isArray(list) && list.every((id) => typeof id === "string"));
+}
+
+/**
+ * The kernel's block list, read in the transaction: buyer_blocked, policy_unavailable (also for a
+ * block list that is present but malformed), or null.
+ */
 function blockRefusal(tx: FundingTx, kernelId: string, buyer: string): "buyer_blocked" | "policy_unavailable" | null {
   let policy: unknown;
   try {
     const row = tx.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
     policy = row ? row.policy : DEFAULT_OPERATOR_POLICY;
   } catch {
+    // Defence in depth, unreachable today: emergencyStopState reads this row first (module comment).
     return "policy_unavailable";
   }
+  if (malformedBlockList(policy)) return "policy_unavailable";
   return acceptanceFor(policy, buyer) === "refused" ? "buyer_blocked" : null;
 }
 
