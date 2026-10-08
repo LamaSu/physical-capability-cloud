@@ -35,6 +35,11 @@
       "types": "./dist/tool-manifests/index.d.ts",
       "import": "./dist/tool-manifests/index.js",
       "default": "./dist/tool-manifests/index.js"
+    },
+    "./funding": {
+      "types": "./dist/funding/index.d.ts",
+      "import": "./dist/funding/index.js",
+      "default": "./dist/funding/index.js"
     }
   },
   "files": [
@@ -54,6 +59,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.7.0",
+    "viem": "^2",
     "zod": "^3.23.0"
   }
 }
