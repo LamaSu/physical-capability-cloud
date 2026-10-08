@@ -18,7 +18,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { CIRCLE_USDC } from "../pins.js";
+import { CIRCLE_USDC } from "../../funding/pins.js";
 import {
   EIP712_DOMAIN_TYPEHASH,
   ESCROW_ABI,
@@ -40,7 +40,7 @@ import {
   unitsRoot,
   type JobPolicyMessage,
   type UnitConfig,
-} from "../vnext.js";
+} from "../../funding/vnext.js";
 
 const CONTRACTS = new URL("../../../../contracts/", import.meta.url);
 const golden = JSON.parse(readFileSync(new URL("test/fixtures/vnext-golden/vnext-golden-vectors.json", CONTRACTS), "utf8")) as {
