@@ -4,7 +4,8 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
-import { SCOPE_AWAITING_ACCEPTANCE, SCOPE_AWAITING_FUNDING, scopeFundingRefusal } from "../services/scope-acceptance.js";
+import { SCOPE_AWAITING_ACCEPTANCE, SCOPE_AWAITING_FUNDING, scopeFundingVerdict } from "../services/scope-acceptance.js";
+import { reconcileFundingRefusal, reconcilePaidScope, type ReconcileResult } from "../services/reconcile-paid-scope.js";
 import { emergencyStopState, stopRefusal } from "./device-relay.js";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay, executionScopes } = schema;
@@ -507,6 +508,14 @@ export async function operatorRoutes(app: FastifyInstance) {
    * acceptance the scope is live ("active") only on its buyer's own, real funding (rule 3);
    * otherwise it waits in awaiting_funding, and the answer says why. To refuse a scope, revoke it
    * (POST /api/relay/:kernelId/scope/:scopeId/revoke).
+   *
+   * Buyer funding S2.2: a test's mock escrow makes the scope live here, as before. A real escrow
+   * whose finalized verification record names this scope (scopeFundingVerdict) goes live through
+   * reconcilePaidScope, in the same transaction as the accept: the accept moves the scope to
+   * awaiting_funding, then reconcilePaidScope activates it and starts its TTL; the answer then
+   * carries the reconcile result as `activation`. If reconcilePaidScope refuses, the accept stands
+   * and the scope waits in awaiting_funding. No record store is configured in production (Q9), so
+   * there no record exists and this answers exactly what it answered before.
    */
   app.post<{ Params: { scopeId: string } }>("/api/operator/scopes/:scopeId/accept", async (req, reply) => {
     const authority = authorityOf(req);
@@ -526,16 +535,36 @@ export async function operatorRoutes(app: FastifyInstance) {
       // synchronous section (better-sqlite3): no stop request runs between them.
       const stop = emergencyStopState(scope.kernelId);
       if (stop !== "clear") return stopRefusal(reply, stop);
-      const fundingRefusal = scopeFundingRefusal(scope);
-      const status = fundingRefusal === null ? "active" : SCOPE_AWAITING_FUNDING;
-      const { changes } = db.update(executionScopes)
-        .set({ status })
-        .where(and(eq(executionScopes.id, scope.id), eq(executionScopes.status, SCOPE_AWAITING_ACCEPTANCE)))
-        .run();
+      const funding = scopeFundingVerdict(scope);
+      const status = funding.kind === "mock_funded" ? "active" : SCOPE_AWAITING_FUNDING;
+      // The accept and, on a verification record, the activation: one transaction (reconcilePaidScope
+      // runs in a savepoint of it). A throw rolls both back, so a 500 changed nothing.
+      const { changes, activation } = db.transaction((tx) => {
+        const accepted = tx.update(executionScopes)
+          .set({ status })
+          .where(and(eq(executionScopes.id, scope.id), eq(executionScopes.status, SCOPE_AWAITING_ACCEPTANCE)))
+          .run();
+        const activated: ReconcileResult | null =
+          accepted.changes === 1 && funding.kind === "record_funded" ? reconcilePaidScope(scope.id, funding.record) : null;
+        return { changes: accepted.changes, activation: activated };
+      });
       if (changes === 0) {
         const current = db.select({ status: executionScopes.status }).from(executionScopes).where(eq(executionScopes.id, scope.id)).get();
         return reply.status(409).send(scopeAlreadyDecided(current?.status ?? "unknown"));
       }
+      if (activation) {
+        const live = activation.kind === "activated";
+        return {
+          accepted: true,
+          scopeId: scope.id,
+          kernelId: scope.kernelId,
+          jobId: scope.jobId,
+          status: live ? "active" : SCOPE_AWAITING_FUNDING,
+          fundingRefusal: reconcileFundingRefusal(activation),
+          activation,
+        };
+      }
+      const fundingRefusal = funding.kind === "refused" ? funding.reason : null;
       return { accepted: true, scopeId: scope.id, kernelId: scope.kernelId, jobId: scope.jobId, status, fundingRefusal };
     } catch {
       return reply.status(500).send({ error: "Failed to accept the scope" });
