@@ -63,7 +63,7 @@ async function setup(o: FixtureOptions = {}, chainOptions = { escrowCode: true }
    */
   const fundedAs = (policyHash: Hex, o: { witness?: Address; prePolicyRoot?: Hex } = {}) => {
     chain.on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, o.prePolicyRoot ?? fx.message.prePolicyRoot, policyHash, fx.message.acceptedPolicyDigest]);
-    chain.on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => o.witness ?? fx.escrow);
+    chain.state.fundedEscrow = o.witness ?? fx.escrow; // the slot for this job's policyKey only (foxtrot F1)
   };
   /** eth_call selectors the SDK simulated (approve / fund), as opposed to reads. */
   const simulated = () =>
@@ -117,8 +117,8 @@ describe("readFundedState: read from the contract, never from a receipt or a bal
     expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("other");
   });
   it("other: the job is funded by another escrow, so this one never can be", async () => {
-    const { fx, chain, prepared } = await setup();
-    chain.on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => OTHER);
+    const { chain, prepared } = await setup();
+    chain.state.fundedEscrow = OTHER;
     expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("other");
   });
   it("unreadable: a read fails, or no block can be pinned", async () => {
@@ -200,8 +200,8 @@ describe("approveAndFund: refusals before anything is sent", () => {
     expect(chain.sends()).toEqual([]);
   });
   it("ALREADY_FUNDED: the job is funded by another escrow", async () => {
-    const { fx, chain, fund } = await setup();
-    chain.on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => OTHER);
+    const { chain, fund } = await setup();
+    chain.state.fundedEscrow = OTHER;
     expect(await refusal(fund())).toBe("ALREADY_FUNDED");
   });
   it("LIVE_CHECK_FAILED: the funding state cannot be read, or no block can be pinned", async () => {
@@ -580,6 +580,17 @@ describe("funded_ours rests on the pinned factory's witness, not only on the esc
     const pin = { blockHash: chain.state.block.hash, requireCanonical: true };
     expect(at(policySelector)).toEqual(pin);
     expect(at(fundedEscrowOfSelector)).toEqual(pin);
+    // foxtrot F1: and under this job's policyKey.
+    const witnessCall = calls.find((x) => (x.params as [{ data: Hex }])[0].data.startsWith(fundedEscrowOfSelector));
+    expect(decodeFunctionData({ abi: FACTORY_ABI, data: (witnessCall!.params as [{ data: Hex }])[0].data }).args).toEqual([fx.policyKey]);
+  });
+
+  it("the fake's fundedEscrowOf is the factory's mapping: it answers for this job's policyKey alone (foxtrot F1)", async () => {
+    const { fx, chain, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash);
+    const slot = (key: Hex) => chain.publicClient.readContract({ address: fx.factory, abi: FACTORY_ABI, functionName: "fundedEscrowOf", args: [key] });
+    expect(await slot(fx.policyKey)).toBe(fx.escrow);
+    expect(await slot(fx.jobPolicyHash)).toBe(zeroAddress);
   });
 
   it("the witness cannot be read: unreadable, and indeterminate after the fund() was sent", async () => {

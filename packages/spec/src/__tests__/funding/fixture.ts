@@ -258,6 +258,12 @@ export interface ChainState {
   mempool: number;
   /** eth_getTransactionCount throws. */
   failNonce: boolean;
+  /**
+   * foxtrot F1 (implementer-delta): the pinned factory's `fundedEscrowOf` slot for THIS job's policyKey (FAC:54), zero
+   * until a funding writes it (FAC:245). Like the mapping, the fake answers it for that key alone: any other key reads
+   * zero.
+   */
+  fundedEscrow: Address;
   /** Runs after the n-th send is accepted (0-based): e.g. make policy() read as funded. */
   afterSend?: (index: number) => void;
 }
@@ -291,6 +297,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
     priorNonce: 0,
     mempool: 0,
     failNonce: false,
+    fundedEscrow: zeroAddress,
   };
   if (o.escrowCode) state.code.set(fx.escrow.toLowerCase(), cloneRuntime(IMPLEMENTATION));
 
@@ -310,7 +317,9 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
   );
   on(IMPLEMENTATION, ESCROW_ABI, "USDC", () => fx.usdc);
   on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, fx.message.prePolicyRoot, zeroHash, fx.message.acceptedPolicyDigest]);
-  on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => zeroAddress);
+  on(fx.factory, FACTORY_ABI, "fundedEscrowOf", ([key]) =>
+    String(key).toLowerCase() === fx.policyKey.toLowerCase() ? state.fundedEscrow : zeroAddress,
+  );
   on(fx.escrow, ESCROW_ABI, "unitState", () => 1);
   on(fx.usdc, ERC20_ABI, "approve", () => true);
   on(fx.usdc, ERC20_ABI, "allowance", () => fx.totalGross);
