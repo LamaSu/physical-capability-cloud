@@ -1,7 +1,7 @@
 /**
  * PGTR Relay routes -- Payment-Gated Transaction Relay (ERC-8194).
  *
- * POST /api/pgtr/relay   -- Relay a payment-gated transaction through PCCForwarder
+ * POST /api/pgtr/relay   -- DISABLED: answers 501 to every request (PGTR_RELAY_DISABLED_REFUSAL)
  * GET  /api/pgtr/status   -- Check PGTR relay availability and config
  *
  * The relay endpoint accepts an EIP-3009 signed payment authorization bundled
@@ -12,6 +12,28 @@
 import type { FastifyInstance } from "fastify";
 import { isAddress, type Address, type Hex } from "viem";
 
+/**
+ * POST /api/pgtr/relay is disabled (economics security finding, bus #7292, 2026-10-08).
+ *
+ * With PCC_PGTR_FORWARDER_ADDRESS and PCC_PGTR_RELAYER_KEY set, the handler below sent
+ * a PCCForwarder.relay transaction from the relayer key for any authenticated caller,
+ * with the payer, target and callData taken from the request body. The forwarder checks
+ * a signature only for the USDC transferWithAuthorization when the amount is above 0,
+ * and that signature covers the payment, never the target or the calldata. relay then
+ * calls the target with pgtrSender() = payer, which MilestoneEscrow V1-V3 trust as the
+ * sender. So any API key or SIWE session could act as any payer against a trusted target.
+ *
+ * The relay stays off until a redesign binds the target and the calldata to the payer's
+ * signature. Until then the route's onRequest hook answers every request with this 501,
+ * and GET /api/pgtr/status reports enabled: false.
+ */
+export const PGTR_RELAY_DISABLED_REFUSAL = {
+  error: "not_implemented",
+  code: "PGTR_RELAY_DISABLED",
+  message:
+    "The PGTR relay is disabled. It stays off until the target contract and the calldata are bound to the payer's signature.",
+} as const;
+
 export async function pgtrRelayRoutes(app: FastifyInstance) {
   // ── Status ──────────────────────────────────────────────────────────
 
@@ -20,7 +42,9 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
     const relayerConfigured = !!process.env.PCC_PGTR_RELAYER_KEY;
 
     return {
-      enabled: !!forwarderAddress && relayerConfigured,
+      // false whatever the env says, while POST /api/pgtr/relay is disabled
+      enabled: false,
+      disabledCode: PGTR_RELAY_DISABLED_REFUSAL.code,
       forwarderAddress: forwarderAddress ?? null,
       relayerConfigured,
     };
@@ -41,7 +65,13 @@ export async function pgtrRelayRoutes(app: FastifyInstance) {
       r: string;
       s: string;
     };
-  }>("/api/pgtr/relay", async (req, reply) => {
+  }>("/api/pgtr/relay", {
+    // Disabled (PGTR_RELAY_DISABLED_REFUSAL). This hook answers every request before any
+    // content-type parser reads the body. Returning reply ends the request stage, so the
+    // handler below never runs: it never reads the relayer key and never calls the
+    // forwarder. The handler is kept unchanged for the redesign.
+    onRequest: async (_req, reply) => reply.code(501).send(PGTR_RELAY_DISABLED_REFUSAL),
+  }, async (req, reply) => {
     // Check configuration
     const forwarderAddress = process.env.PCC_PGTR_FORWARDER_ADDRESS;
     const relayerKey = process.env.PCC_PGTR_RELAYER_KEY;

@@ -1,6 +1,9 @@
 /**
  * PGTR Client -- Payment-Gated Transaction Relay (ERC-8194) client.
  *
+ * DISABLED on the gateway: POST /api/pgtr/relay answers 501 PGTR_RELAY_DISABLED
+ * (see PGTRClient below).
+ *
  * Enables keyless agent authentication by bundling EIP-3009 USDC payment
  * authorizations with target contract calls. The client:
  *
@@ -44,6 +47,11 @@ export interface PGTRClientConfig {
  *
  * Sends relay requests to the gateway, which forwards them to the
  * PCCForwarder contract on-chain.
+ *
+ * DISABLED: the gateway answers POST /api/pgtr/relay with 501 PGTR_RELAY_DISABLED
+ * until the relay binds the target and the calldata to the payer's signature, so
+ * relayAction() throws "PGTR relay failed (501): ...". GET /api/pgtr/status reports
+ * enabled: false.
  */
 export class PGTRClient {
   private gatewayUrl: string;
@@ -103,7 +111,9 @@ export class PGTRClient {
   /**
    * Check if the PGTR relay endpoint is available.
    *
-   * @returns true if the relay endpoint responds, false otherwise
+   * @returns true if the relay endpoint responds, false otherwise. While the gateway's
+   * relay is disabled, /api/pgtr/status still answers 200 (with enabled: false), so
+   * true does not mean relayAction() can succeed.
    */
   async isAvailable(): Promise<boolean> {
     try {
