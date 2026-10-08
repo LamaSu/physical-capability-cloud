@@ -95,8 +95,11 @@ export interface UnitConfig {
   payouts: readonly PayoutEntry[];
 }
 
-/** The JobPolicy message: what both parties sign (ABI doc §3 step 6). */
-export interface JobPolicyMessage {
+/**
+ * The JobPolicy message: what both parties sign (ABI doc §3 step 6). A type alias, not an interface, so it is
+ * assignable to viem's `Record<string, unknown>` typed-data message.
+ */
+export type JobPolicyMessage = {
   chainId: bigint;
   factory: Address;
   implementation: Address;
@@ -111,7 +114,7 @@ export interface JobPolicyMessage {
   unitsRoot: Hex;
   expiry: bigint;
   acceptedPolicyDigest: Hex;
-}
+};
 
 /** The policy as EIP-712 typed data, in viem's form (no `EIP712Domain` entry: it is derived from `domain`). */
 export interface JobPolicyTypedData {
