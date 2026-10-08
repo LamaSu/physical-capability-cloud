@@ -13,7 +13,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { sql } from "@pcc/store";
 import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
-import { __setFundingRecordStoreForTest } from "../services/funding-record-port.js";
+import { __setFundingRecordStoreForTest, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import { installTestFundingRecordStore, type TestFundingRecordStore } from "./helpers/test-funding-record-store.js";
 import {
   BUYER,
@@ -339,6 +339,18 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     expect(reconcilePaidScope(scopeId, null as never)).toEqual(refused("record_malformed"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
+  });
+
+  it("(neg-block-number) a block number is a uint64: 2^64 - 1 is well formed, 2^64 and above are malformed", async () => {
+    const { scopeId } = await paidScope(f);
+    for (const blockNumber of ["18446744073709551616", "99999999999999999999"]) {
+      expect(isWellFormedFundingRecord(verification(scopeId, { blockNumber })), blockNumber).toBe(false);
+      expect(reconcilePaidScope(scopeId, verification(scopeId, { blockNumber })), blockNumber).toEqual(refused("record_malformed"));
+    }
+    expect(store.count()).toBe(0);
+    const max = verification(scopeId, { blockNumber: "18446744073709551615" });
+    expect(isWellFormedFundingRecord(max)).toBe(true);
+    expect(reconcilePaidScope(scopeId, max).kind).toBe("activated");
   });
 
   it("(neg-escrow-row) the scope's escrow row must exist, be the buyer's and be funded", async () => {

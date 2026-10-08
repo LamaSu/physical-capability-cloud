@@ -88,7 +88,10 @@ export function __setFundingRecordStoreForTest(store: FundingRecordStore | null)
 
 const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
 const BLOCK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
+/** A canonical decimal of at most 20 digits; with UINT64_MAX below, a uint64 (a chain's block number). */
 const BLOCK_NUMBER_RE = /^(0|[1-9][0-9]{0,19})$/;
+/** 2^64 - 1: 20-digit decimals above it pass BLOCK_NUMBER_RE and are refused by this bound. */
+const UINT64_MAX = 18446744073709551615n;
 
 /** The same 0x address, in any letter case. Anything that is not a 0x address never matches. */
 export function sameAddress(a: unknown, b: unknown): boolean {
@@ -111,7 +114,7 @@ export function isWellFormedFundingRecord(record: unknown): record is FundingVer
     && typeof r.escrowAddress === "string" && ADDRESS_RE.test(r.escrowAddress)
     && typeof r.buyer === "string" && ADDRESS_RE.test(r.buyer)
     && typeof r.chainId === "number" && Number.isSafeInteger(r.chainId) && r.chainId > 0
-    && typeof r.blockNumber === "string" && BLOCK_NUMBER_RE.test(r.blockNumber)
+    && typeof r.blockNumber === "string" && BLOCK_NUMBER_RE.test(r.blockNumber) && BigInt(r.blockNumber) <= UINT64_MAX
     && typeof r.blockHash === "string" && BLOCK_HASH_RE.test(r.blockHash)
     && nonEmpty(r.verifierVersion, 100)
     && typeof r.verifiedAt === "string" && !Number.isNaN(Date.parse(r.verifiedAt))
