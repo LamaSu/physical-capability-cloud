@@ -34,13 +34,16 @@
  *   maxAgreementAgeSeconds, authorityFloor   left out, so the binding's and the compiler's reviewed policy values apply.
  *
  * Nothing missing is filled in. No empty list stands in for a registry that does not exist, and no default for a
- * configuration that is unset. A refusal lists every missing fact it can name, in a fixed order. Untrusted input
- * never makes this module throw; a source that throws (a database fault) propagates, as a dependency fault does in
- * the seam. It stores nothing: it adds no ledger, and money moves only through the V-next payouts the binding
- * returns.
+ * configuration that is unset. A refusal lists every missing fact it can name, in a fixed order. The request (its
+ * agreement, nodes and acceptance) is read without running any code it carries (`ownedJson`), and untrusted input
+ * never makes this module throw. A source is server code: what it answers is checked before anything reads it, and a
+ * malformed answer is refused (SERVER_FACTS_INVALID); a source that throws (a database fault) propagates, as a
+ * dependency fault does in the seam. It stores nothing: it adds no ledger, and money moves only through the V-next
+ * payouts the binding returns.
  */
 
-import { SETTLEMENT_TOKEN_DECIMALS, assertScheduleIsWellFormed, computeScheduleHash, type RateSchedule } from "@pcc/spec";
+import { types as utilTypes } from "node:util";
+import { RateScheduleSchema, SETTLEMENT_TOKEN_DECIMALS, assertScheduleIsWellFormed, computeScheduleHash, type RateSchedule } from "@pcc/spec";
 import {
   EconomicAgreementSchema,
   IdSchema,
@@ -50,7 +53,6 @@ import {
   ZERO_ADDRESS,
   agreementUnitGross,
   netSplitterFor,
-  snapshotJson,
   type AcceptedAgreementHashes,
   type EconomicAgreement,
   type IntendedUse,
@@ -73,17 +75,20 @@ const MAX_PLAN_NODES = 1024;
 
 // ── Configuration ────────────────────────────────────────────────────────────────────────────────
 
+/** A configuration value as set. One that is not a string (only an injected env can hold one) reads as unset. */
+const setting = (value: unknown): string => (typeof value === "string" ? value : "");
+
 /**
  * The fee PCC charges, from configuration; null when it is not configured, or configured wrong. The basis points
  * must be a plain decimal integer up to the escrow's MAX_FEE_BPS, and a non-zero fee needs a non-zero recipient.
  */
 export function configuredProtocolFee(env: NodeJS.ProcessEnv = process.env): { feeBps: number; feeRecipient: string | null } | null {
-  const raw = env.PCC_PROTOCOL_FEE_BPS?.trim() ?? "";
+  const raw = setting(env.PCC_PROTOCOL_FEE_BPS).trim();
   if (!DECIMAL_BPS.test(raw)) return null;
   const feeBps = Number(raw);
   if (feeBps > MAX_FEE_BPS) return null;
   if (feeBps === 0) return { feeBps, feeRecipient: null };
-  const recipient = env.PCC_PROTOCOL_FEE_RECIPIENT?.trim() ?? "";
+  const recipient = setting(env.PCC_PROTOCOL_FEE_RECIPIENT).trim();
   return ADDRESS.test(recipient) && recipient.toLowerCase() !== ZERO_ADDRESS ? { feeBps, feeRecipient: recipient } : null;
 }
 
@@ -106,7 +111,7 @@ type ForbiddenRead =
  * Empty entries (a trailing comma) carry nothing and are ignored.
  */
 function readForbiddenRecipients(env: NodeJS.ProcessEnv): ForbiddenRead {
-  const entries = (env.PCC_FORBIDDEN_RECIPIENTS ?? "")
+  const entries = setting(env.PCC_FORBIDDEN_RECIPIENTS)
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s !== "");
@@ -251,12 +256,13 @@ export interface EconomicsFactsRequest {
 
 /**
  * Where each fact comes from. A source that does not exist yet is null, and every fact it would supply is refused.
- * The four nullable sources' signatures are placeholders until their owners build them.
+ * The four nullable sources' signatures are placeholders until their owners build them. An answer that is not what
+ * its signature says is refused (SERVER_FACTS_INVALID), never read as if it were.
  */
 export interface EconomicsFactsSources {
   /** Configuration: the protocol fee and the forbidden recipients. */
   env: NodeJS.ProcessEnv;
-  /** The contributors registry's sealed rate schedules (`sealedSchedules`). */
+  /** The contributors registry's sealed rate schedules (`sealedSchedules`). The answer is checked before it is read. */
   sealedSchedules(hashes: readonly string[]): SealedSchedules;
   /** Operator item 27: the registry's copy of licenseId@version, or null when it holds none. */
   licenseRegistry: ((licenseId: string, version: number) => License | null) | null;
@@ -277,16 +283,90 @@ export type ServerEconomicsFactsResult =
   | { ok: true; facts: ServerEconomicsFacts }
   | { ok: false; refusals: EconomicsFactsRefusal[] };
 
-/** One own data property of a server-built request, read once; undefined for an accessor or a missing key. */
+// ── Caller data, read without running caller code ────────────────────────────────────────────────
+
+/**
+ * One own data property of the request, read once and without running caller code; undefined for an accessor, a
+ * missing key or a Proxy (`util.types.isProxy` invokes no trap).
+ */
 function field(from: unknown, key: string): unknown {
   try {
-    if (typeof from !== "object" || from === null) return undefined;
+    if (typeof from !== "object" || from === null || utilTypes.isProxy(from)) return undefined;
     const d = Object.getOwnPropertyDescriptor(from, key);
     return d !== undefined && "value" in d ? d.value : undefined;
   } catch {
     return undefined;
   }
 }
+
+/** snapshotJson's bounds (@pcc/spec economics/input.ts), so the copy refuses at the same sizes. */
+const MAX_COPY_DEPTH = 64;
+const MAX_COPY_ARRAY_LENGTH = 65_536;
+const MAX_COPY_VALUES = 1_000_000;
+/** Thrown only inside `ownedJson`, whose catch never reads what was thrown. */
+const NOT_DATA: unique symbol = Symbol("not-data");
+
+export type OwnedJson = { ok: true; value: unknown } | { ok: false };
+
+/**
+ * An owned copy of plain JSON data, read WITHOUT running any code the value carries (EC6 M1; the seam's `plainCopy`
+ * is the model). `util.types.isProxy`, which invokes no trap, is asked of every object before anything else touches
+ * it, so a Proxy anywhere, revoked or not, refuses the whole value and none of its traps runs. Only own data
+ * properties are read, through their descriptors, so no getter and no `toJSON` runs either.
+ *
+ * Otherwise it accepts and refuses what `snapshotJson` does. It refuses accessors, symbol keys, holes, cycles,
+ * functions, bigint, undefined, and objects with a prototype other than Object.prototype or null; it skips
+ * non-enumerable keys, and it has the same depth, length and size bounds. Nothing thrown inside escapes, and the
+ * catch inspects nothing.
+ */
+export function ownedJson(root: unknown): OwnedJson {
+  let values = 0;
+  const onPath = new Set<object>();
+  const copy = (v: unknown, depth: number): unknown => {
+    if (++values > MAX_COPY_VALUES) throw NOT_DATA;
+    if (v === null || typeof v === "string" || typeof v === "boolean" || typeof v === "number") return v;
+    // A function, bigint, symbol or undefined is not JSON data, and a Proxy is refused before it is touched.
+    if (typeof v !== "object" || utilTypes.isProxy(v)) throw NOT_DATA;
+    if (depth >= MAX_COPY_DEPTH || onPath.has(v)) throw NOT_DATA;
+    onPath.add(v);
+    try {
+      if (Array.isArray(v)) {
+        const length: unknown = Object.getOwnPropertyDescriptor(v, "length")?.value;
+        if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0 || length > MAX_COPY_ARRAY_LENGTH) throw NOT_DATA;
+        const out: unknown[] = [];
+        for (let i = 0; i < length; i++) {
+          const d = Object.getOwnPropertyDescriptor(v, i);
+          if (d === undefined || !("value" in d)) throw NOT_DATA; // a hole, or an accessor
+          out.push(copy(d.value, depth + 1));
+        }
+        return out;
+      }
+      const proto: unknown = Object.getPrototypeOf(v);
+      if (proto !== Object.prototype && proto !== null) throw NOT_DATA;
+      const out: Record<string, unknown> = {};
+      for (const key of Reflect.ownKeys(v)) {
+        if (typeof key === "symbol") throw NOT_DATA;
+        const d = Object.getOwnPropertyDescriptor(v, key);
+        if (d === undefined || !d.enumerable) continue; // own enumerable keys only, as snapshotJson and JSON.stringify
+        if (!("value" in d)) throw NOT_DATA;
+        // defineProperty, not assignment: a "__proto__" key stays an own key, for the closed schemas to refuse.
+        Object.defineProperty(out, key, { value: copy(d.value, depth + 1), enumerable: true, writable: true, configurable: true });
+      }
+      return out;
+    } finally {
+      onPath.delete(v);
+    }
+  };
+  try {
+    return { ok: true, value: copy(root, 0) };
+  } catch {
+    // NOT_DATA, or an engine error (a module namespace's uninitialized binding). What was thrown is never read.
+    return { ok: false };
+  }
+}
+
+/** The schedules source's answer, as `SealedSchedules` says it is, bounded by the lookups it was asked for. */
+const SealedSchedulesSchema = z.object({ available: z.boolean(), schedules: z.array(RateScheduleSchema).max(MAX_SCHEDULE_LOOKUPS) }).strict();
 
 const PlanNodesSchema = z
   .array(z.object({ nodeId: IdSchema, capabilityId: IdSchema }).strict())
@@ -295,7 +375,7 @@ const PlanNodesSchema = z
 
 const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
-function assemble(agreementCopy: ReturnType<typeof snapshotJson>, request: unknown, sources: EconomicsFactsSources): ServerEconomicsFactsResult {
+function assemble(agreementCopy: OwnedJson, request: unknown, sources: EconomicsFactsSources): ServerEconomicsFactsResult {
   const refusals: EconomicsFactsRefusal[] = [];
   const env: NodeJS.ProcessEnv = sources.env ?? {}; // no configuration is unconfigured, never process.env by default
 
@@ -303,7 +383,7 @@ function assemble(agreementCopy: ReturnType<typeof snapshotJson>, request: unkno
   const ag: EconomicAgreement | null = parsed !== null && parsed.success ? parsed.data : null;
   if (ag === null) refusals.push({ code: "AGREEMENT_UNREADABLE" });
 
-  const nodesCopy = snapshotJson(field(request, "nodes"));
+  const nodesCopy = ownedJson(field(request, "nodes"));
   const nodesParsed = nodesCopy.ok ? PlanNodesSchema.safeParse(nodesCopy.value) : null;
   const nodes: PlanNodeRef[] | null = nodesParsed !== null && nodesParsed.success ? nodesParsed.data : null;
   if (nodes === null) refusals.push({ code: "PLAN_INVALID" });
@@ -323,13 +403,17 @@ function assemble(agreementCopy: ReturnType<typeof snapshotJson>, request: unkno
   const forbidden = readForbiddenRecipients(env);
   if (!forbidden.ok) refusals.push(forbidden.refusal);
 
-  // Rate schedules: the registry's sealed bodies for the hashes the agreement names.
+  // Rate schedules: the registry's sealed bodies for the hashes the agreement names. The answer is copied and checked
+  // before anything reads it (EC6 M2); the call itself stays outside, so a source that throws still propagates.
   let schedules: RateSchedule[] = [];
   if (ag !== null) {
-    const sealed = sources.sealedSchedules(namedScheduleHashes(ag));
-    if (!sealed.available) refusals.push({ code: "SCHEDULE_REGISTRY_UNAVAILABLE" });
+    const answer: unknown = sources.sealedSchedules(namedScheduleHashes(ag));
+    const copy = ownedJson(answer);
+    const sealed = copy.ok ? SealedSchedulesSchema.safeParse(copy.value) : null;
+    if (sealed === null || !sealed.success) refusals.push({ code: "SERVER_FACTS_INVALID", detail: "schedules (the registry answered malformed schedules)" });
+    else if (!sealed.data.available) refusals.push({ code: "SCHEDULE_REGISTRY_UNAVAILABLE" });
     else {
-      schedules = sealed.schedules;
+      schedules = sealed.data.schedules;
       if (schedules.some((s) => s.segments.some((seg) => RATE_FACT_SEGMENT_KINDS.has(seg.kind)))) refusals.push({ code: "RATE_FACTS_UNAVAILABLE" });
     }
   }
@@ -347,7 +431,7 @@ function assemble(agreementCopy: ReturnType<typeof snapshotJson>, request: unkno
         const answer: unknown = lookup(l.licenseId, l.version);
         if (answer === null) continue;
         // Checked here, before its parties are read below: a row is the registry's license for exactly this key.
-        const copy = snapshotJson(answer);
+        const copy = ownedJson(answer);
         const row = copy.ok ? LicenseSchema.safeParse(copy.value) : null;
         if (row === null || !row.success) {
           refusals.push({ code: "SERVER_FACTS_INVALID", detail: "licenses (the registry answered a malformed license)" });
@@ -420,7 +504,7 @@ function ordered(refusals: readonly EconomicsFactsRefusal[]): EconomicsFactsRefu
 
 /** The facts the binding checks this request's agreement against, or every missing fact by name. */
 export function serverEconomicsFacts(request: EconomicsFactsRequest, sources: EconomicsFactsSources = productionEconomicsFactsSources()): ServerEconomicsFactsResult {
-  return assemble(snapshotJson(field(request, "agreement")), request, sources);
+  return assemble(ownedJson(field(request, "agreement")), request, sources);
 }
 
 export type EconomicsBindingResult =
@@ -437,13 +521,16 @@ export function economicsBindingFor(
   request: EconomicsFactsRequest & { accepted: AcceptedAgreementHashes | null },
   sources: EconomicsFactsSources = productionEconomicsFactsSources(),
 ): EconomicsBindingResult {
-  const copy = snapshotJson(field(request, "agreement"));
+  const copy = ownedJson(field(request, "agreement"));
   const assembled = assemble(copy, request, sources);
   if (!assembled.ok) return assembled;
   const agreement = copy.ok ? copy.value : undefined; // facts were assembled, so the copy parsed
-  // Passed as read. Only null means "this acceptance is the payer's": an absent or malformed value is checked by the
-  // binding and refused (AGREEMENT_HASH_MISMATCH:SCHEMA_INVALID), never taken as null.
-  const accepted = field(request, "accepted") as AcceptedAgreementHashes | null;
+  // Only null means "this acceptance is the payer's". Anything else reaches the binding as an owned copy; a value the
+  // copy refuses (a Proxy, an accessor) reaches it as undefined, as an absent one does. The binding checks both and
+  // refuses them (AGREEMENT_HASH_MISMATCH:SCHEMA_INVALID); neither is ever taken as null.
+  const acceptedRaw = field(request, "accepted");
+  const acceptedCopy = acceptedRaw === null ? null : ownedJson(acceptedRaw);
+  const accepted = (acceptedCopy === null ? null : acceptedCopy.ok ? acceptedCopy.value : undefined) as AcceptedAgreementHashes | null;
   return {
     ok: true,
     facts: assembled.facts,
