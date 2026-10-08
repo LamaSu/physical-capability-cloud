@@ -7,7 +7,7 @@ import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore } from "../db.js";
 import { LIST_PROFILES, listRowsOf } from "./dashboard-ir.js";
 import type { IrNode } from "./dashboard-ir.js";
-import { bindListRows, UNAVAILABLE } from "./dashboard-ir-renderer.js";
+import { bindListRows, listWindow, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 
 // genui review of #344 r5 (typed list fields): a mistyped field fails the WHOLE row closed, so the
@@ -41,6 +41,14 @@ beforeAll(async () => {
   process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   app = Fastify({ logger: false });
+  // A proven-wallet caller for the jobs-total pin below, set the way f3-job-read-surface.test.ts
+  // sets it. Requests without these test headers are unchanged.
+  app.addHook("onRequest", async (req) => {
+    const principal = req.headers["x-test-principal"];
+    if (typeof principal === "string") (req as unknown as { operatorId: string }).operatorId = principal;
+    const proven = req.headers["x-test-proven-wallet"];
+    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+  });
   await app.register(cookie);
   await app.register(capabilityRoutes);
   await app.register(kernelRoutes);
@@ -102,5 +110,56 @@ describe("listRowsOf reads only the route's own rows key", () => {
     expect(listRowsOf("/api/unknown", { items: [1] })).toBeNull(); // unknown path — null = no collection, distinct from a real empty one (astra 28e H1)
     expect(listRowsOf("/api/jobs", { jobs: "x" })).toBeNull(); // mistyped {jobs:"x"} — null = no collection, distinct from a real empty one (astra 28e H1)
     expect(listRowsOf("/api/jobs", { jobs: [] })).toEqual([]); // a real empty collection is still [] — the source explicitly returned it
+  });
+});
+
+describe("N110 follow-up: the jobs list's declared total is the route's own cross-page count (route inject)", () => {
+  // LIST_PROFILES['/api/jobs'].paged.total is "total": the window prints it ("N of M returned") and
+  // claims "none" only on a valid 0. So it must count the CALLER'S readable jobs across every page:
+  // job.facade.ts list() applies the tenant, kernelId, status and jobReadScopeOf filters before the cut.
+  type JobsPage = { jobs: Array<{ id: string; status: string }>; total: unknown };
+  const page = async (url: string, headers: Record<string, string>): Promise<JobsPage> => {
+    const res = await app.inject({ method: "GET", url, headers });
+    expect(res.statusCode, url).toBe(200);
+    return res.json() as JobsPage;
+  };
+  const listNode = (query?: Record<string, unknown>) =>
+    ({ type: "list", id: "n1", props: {}, bind: { path: "/api/jobs", ...(query ? { query } : {}) } }) as unknown as IrNode;
+  const ADMIN_H = { "x-admin-key": ADMIN };
+  const OPERATOR_NYC = "0x1111111111111111111111111111111111111111"; // the seeded kernel-nyc operator
+  const PARTY = { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": OPERATOR_NYC };
+  const STRANGER = "0x9999999999999999999999999999999999999999";
+  const STRANGER_H = { "x-test-principal": STRANGER, "x-test-proven-wallet": STRANGER };
+
+  it("an admin's limit=1 page reports every job in `total`, and the window says '1 of M returned'", async () => {
+    const all = await page("/api/jobs?limit=200", ADMIN_H);
+    expect(all.total).toBe(all.jobs.length); // the seeded store fits in one page of 200
+    expect(all.jobs.length).toBeGreaterThan(1);
+    const one = await page("/api/jobs?limit=1", ADMIN_H);
+    expect(one.jobs).toHaveLength(1);
+    expect(one.total).toBe(all.total);
+    expect(listWindow(listNode({ limit: 1 }), one, one.jobs.length).note).toBe(`1 of ${all.jobs.length} returned`);
+  });
+
+  it("a status filter's `total` counts only the jobs with that status", async () => {
+    const all = await page("/api/jobs?limit=200", ADMIN_H);
+    const status = all.jobs[0]!.status;
+    const want = all.jobs.filter((j) => j.status === status).length;
+    expect(want).toBeLessThan(all.jobs.length); // the seeded store mixes statuses, so the filter bites
+    expect((await page(`/api/jobs?status=${encodeURIComponent(status)}&limit=1`, ADMIN_H)).total).toBe(want);
+  });
+
+  it("a proven wallet's `total` counts only the jobs it may read, before the page cut; a stranger's is 0", async () => {
+    const admin = await page("/api/jobs?limit=200", ADMIN_H);
+    const party = await page("/api/jobs?limit=200", PARTY);
+    expect(party.jobs.length).toBeGreaterThan(0);
+    expect(party.total).toBe(party.jobs.length);
+    expect(party.total as number).toBeLessThan(admin.total as number); // other operators' jobs are never counted
+    expect((await page("/api/jobs?limit=1", PARTY)).total).toBe(party.total);
+    const stranger = await page("/api/jobs", STRANGER_H);
+    expect(stranger.jobs).toEqual([]);
+    expect(stranger.total).toBe(0);
+    // So "none" is honest for the stranger: its readable collection really is empty.
+    expect(listWindow(listNode(), stranger, 0)).toEqual({ empty: "none", note: null });
   });
 });
