@@ -35,6 +35,7 @@ import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
 import { sameIdentity } from "../auth/buyer-identity.js";
 import { emergencyStopState } from "../routes/device-relay.js";
+import { scopeExpiryMs } from "./scope-expiry.js";
 import {
   acceptanceFor,
   escrowForJob,
@@ -177,8 +178,9 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       // (a) What allows the activation, re-read now.
       if (scope.status === "revoked") return refused("scope_revoked");
       if (scope.status !== SCOPE_AWAITING_FUNDING) return refused("scope_not_awaiting_funding");
-      // An unreadable expiresAt cannot show the window open, so it counts as lapsed.
-      if (!(Date.parse(scope.expiresAt) > now.getTime())) return { kind: "expired", scopeId, windowEndedAt: scope.expiresAt };
+      // The window, read fail-closed as the accept route reads it: an unreadable expiresAt is long
+      // past (scopeExpiryMs), so it counts as lapsed.
+      if (scopeExpiryMs(scope.expiresAt) <= now.getTime()) return { kind: "expired", scopeId, windowEndedAt: scope.expiresAt };
       const stop = emergencyStopState(scope.kernelId);
       if (stop === "stopped") return refused("kernel_emergency_stopped");
       if (stop !== "clear") return refused("policy_unavailable");

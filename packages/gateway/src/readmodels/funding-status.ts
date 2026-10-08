@@ -19,6 +19,7 @@
  */
 import { sameIdentity } from "../auth/buyer-identity.js";
 import { isWellFormedFundingRecord, type FundingVerificationRecord } from "../services/funding-record-port.js";
+import { scopeExpiryMs } from "../services/scope-expiry.js";
 
 /** Schema id for clients that pin a version. */
 export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
@@ -105,9 +106,13 @@ export interface FundingStatusDTO {
   } | null;
 }
 
-/** asOf < expiresAt, both readable. Anything unreadable leaves the window closed. */
+/**
+ * asOf < expiresAt, both readable. Anything unreadable leaves the window closed: an unreadable asOf
+ * is NaN (every comparison false), and an unreadable expiresAt is long past (scopeExpiryMs, as the
+ * accept route and reconcilePaidScope read it).
+ */
 function windowOpen(asOf: string, expiresAt: string): boolean {
-  return Date.parse(asOf) < Date.parse(expiresAt);
+  return Date.parse(asOf) < scopeExpiryMs(expiresAt);
 }
 
 /** The funding state of `scope`, given the record that names it (or null). See FUNDING_STATES. */
