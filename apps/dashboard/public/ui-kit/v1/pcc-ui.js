@@ -2088,7 +2088,9 @@
     return box;
   }
 
-  // receipt — amount large + payer→payee + rail + event timeline + tx ids.
+  // receipt — amount large + payer→payee + rail + event timeline + tx ids. Only a live, pinned, readable
+  // V-next read shows facts (and the payer→payee layout); every other server value on it is a claim that
+  // names who reports it (R12 rule 4), and a record that is not a settlement record reads as a neutral record.
   function renderReceipt(ctx, w) {
     var wrap = winShell(kitText('Receipt'), null, null);
     wrap._body.appendChild(loadingLine());
@@ -2115,6 +2117,16 @@
       var rec = settlementReadClass(e, bpath, liveRead);
       var statePin = vnext && pin !== null && rec[0] !== 'st-unknown' ? pin : null;
       if (legacy) wrap._body.appendChild(el('p', 'pcc-muted pcc-receipt-source', kitText('Reported by the PCC escrow service - not a chain read.')));
+      // R12 r2 B: a record that is not a settlement record (a job, an A2A task, any other shape) is presented
+      // as a neutral record: retitled, and its source stated first.
+      if (!vnext && !legacy) {
+        var title = wrap.querySelector('.pcc-win-title');
+        if (title) setText(title, kitText('Record'));
+        wrap._body.appendChild(el('p', 'pcc-muted pcc-receipt-source', kitText('Reported by the bound record - not a settlement record.')));
+      }
+      // Who reports every value below that is not a pinned money fact (R12 rule 4, r2 B).
+      var reporter = legacy ? kitText('PCC escrow service') : kitText('bound record');
+      var claimText = function (role, valueText) { return joinText(reporter, kitText(' reports '), role, kitText(': '), valueText); };
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
       if (vnext) {
@@ -2133,21 +2145,34 @@
         }
       }
       wrap._body.appendChild(amtRow);
-      var pay = el('div', 'pcc-receipt-parties');
+      // R12 r2 B: a party is a bare chain fact ONLY on a live, pinned, readable V-next read, where the payee is
+      // economics.recipient from that pinned response (contract rule 16) and the payer->payee layout is used.
+      // The settlement read carries no payer, so a payer in its body is a claim even there. Every other
+      // receipt lists its parties as claims naming their source, never laid out as a payer->payee payment.
       var payer = e.payer || e.funder;
-      pay.appendChild(el('span', 'pcc-mono', payer ? partyText(payer) : kitText('payer not reported')));
-      pay.appendChild(el('span', 'pcc-arrow', kitText('→')));
-      if (vnext) {
-        // The payee is a money fact: economics.recipient from the same pinned response (contract rule 16).
+      if (statePin) {
+        var pay = el('div', 'pcc-receipt-parties');
+        pay.appendChild(payer ? el('span', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))) : el('span', 'pcc-mono', kitText('payer not reported')));
+        pay.appendChild(el('span', 'pcc-arrow', kitText('→')));
         if (econ.recipient == null) pay.appendChild(el('span', 'pcc-mono pcc-muted', kitText('payee not reported')));
-        else if (statePin && typeof econ.recipient === 'string' && PLAIN_HEX_RE.test(econ.recipient)) pay.appendChild(moneyFactEl('span', 'pcc-mono', chainFactText(hexText(econ.recipient), statePin)));
-        else if (statePin) pay.appendChild(el('span', 'pcc-mono pcc-muted', hexText(econ.recipient)));
-        else pay.appendChild(el('span', 'pcc-mono pcc-muted', pin ? kitText('payee not shown') : kitText('payee pending')));
+        else if (typeof econ.recipient === 'string' && PLAIN_HEX_RE.test(econ.recipient)) pay.appendChild(moneyFactEl('span', 'pcc-mono', chainFactText(hexText(econ.recipient), statePin)));
+        else pay.appendChild(el('span', 'pcc-mono pcc-muted', hexText(econ.recipient)));
+        wrap._body.appendChild(pay);
       } else {
-        var payee = e.payee || e.provider;
-        pay.appendChild(el('span', 'pcc-mono', payee ? partyText(payee) : kitText('payee not reported')));
+        var claims = el('div', 'pcc-receipt-claims');
+        // A settlement record (V-next or legacy) says when a party is missing; a neutral record lists only what it has.
+        if (payer) claims.appendChild(el('div', 'pcc-mono pcc-receipt-claim', claimText(kitText('payer'), partyText(payer))));
+        else if (vnext || legacy) claims.appendChild(el('div', 'pcc-mono pcc-muted', kitText('payer not reported')));
+        if (vnext) {
+          // An unpinned (or unreadable) V-next payee is withheld, like its amount.
+          claims.appendChild(el('div', 'pcc-mono pcc-muted', econ.recipient == null ? kitText('payee not reported') : pin ? kitText('payee not shown') : kitText('payee pending')));
+        } else {
+          var payee = e.payee || e.provider;
+          if (payee) claims.appendChild(el('div', 'pcc-mono pcc-receipt-claim', claimText(kitText('payee'), partyText(payee))));
+          else if (legacy) claims.appendChild(el('div', 'pcc-mono pcc-muted', kitText('payee not reported')));
+        }
+        if (claims.childNodes.length) wrap._body.appendChild(claims);
       }
-      wrap._body.appendChild(pay);
       var railRow = el('div', 'pcc-receipt-rail');
       // With statePin the pill and its caption are money facts. Without it the pill is the classifier's
       // refusal (pending, not shown, fields disagree) and names no state. A legacy word is attributed to the
@@ -2161,7 +2186,7 @@
       if (pin) { var badge = assetBadgeText(e.assetReality); if (badge) railRow.appendChild(el('span', 'pcc-pill st-unknown pcc-asset-badge', badge)); }
       if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-muted pcc-settle-label', chainFactText(joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead)), statePin)));
       else if (!vnext && rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead))));
-      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), idText(e.rail))));
+      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), claimText(kitText('rail'), idText(e.rail))))); // never in a settlement read
       wrap._body.appendChild(railRow);
       if (pin) {
         appendPinReference(wrap._body, pin);
@@ -2186,8 +2211,9 @@
         }
         wrap._body.appendChild(tl);
       }
+      // Never in a settlement read either: a transaction hash or an address on a receipt is its source's claim.
       var tx = e.txHash || e.tx || e.escrowAddress || e.address;
-      if (tx) wrap._body.appendChild(el('div', 'pcc-mono pcc-receipt-tx', hexText(tx)));
+      if (tx) wrap._body.appendChild(el('div', 'pcc-mono pcc-receipt-tx pcc-receipt-claim', claimText(kitText(e.txHash || e.tx ? 'transaction' : e.escrowAddress ? 'escrow address' : 'address'), hexText(tx))));
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -2961,6 +2987,8 @@
       '.pcc-receipt-num{font:650 22px/28px var(--font);color:var(--ink);}',
       '.pcc-receipt-cur{font:450 14px/20px var(--font);color:var(--ink-2);}',
       '.pcc-receipt-parties{display:flex;gap:8px;align-items:center;}',
+      '.pcc-receipt-claims{display:flex;flex-direction:column;gap:2px;margin:2px 0;}',
+      '.pcc-receipt-claim{color:var(--ink-2);overflow-wrap:anywhere;}',
       '.pcc-receipt-source{font:450 12px/17px var(--font);margin:0 0 4px;}',
       '.pcc-pin-ref{font:450 12px/17px var(--mono);margin-top:6px;overflow-wrap:anywhere;}',
       '.pcc-run-pin:empty{display:none;}',

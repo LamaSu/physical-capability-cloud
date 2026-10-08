@@ -1895,3 +1895,108 @@ describe("R12 r2 A (run 3 F1 HIGH = run 2 F4 HIGH): no run pill carries a chain-
     expect(ref()).toBeNull();
   });
 });
+
+// ── R12 r2 B (run 3 F2 HIGH = run 2 F3 MEDIUM): a receipt party is a bare chain fact ONLY from a live, pinned V-next read ──
+describe("R12 r2 B (run 3 F2 HIGH = run 2 F3 MEDIUM): every other receipt party is an attributed claim, never a payer->payee payment", () => {
+  // The verdicts' exact bodies.
+  const RUN3_JOB = { status: "running", amount: "250", currency: "USDC", payee: "0x3434343434343434343434343434343434343434" };
+  const RUN2_PARTIES = { payer: "0x1111111111111111111111111111111111111111", payee: "0x2222222222222222222222222222222222222222" };
+  const PAYEE = "0x" + "34".repeat(20);
+  const ECON = { amount: "1000000", feeAmount: "23500", recipient: PAYEE, token: "0x" + "56".repeat(20), assuranceTier: 1 };
+  const receiptAt = (p: string) => r2Man([{ kind: "receipt", binding: { path: p } }]);
+  /** Every leaf element whose text carries `v`. */
+  const leavesWith = (v: string) => Array.from(document.querySelectorAll(".pcc-win *")).filter((n) => n.children.length === 0 && (n.textContent || "").includes(v)) as HTMLElement[];
+  /** `v` appears, and ONLY inside a claim line that reads exactly `line`: no bare party anywhere. */
+  function expectOnlyAttributed(v: string, line: string, tag: string) {
+    const nodes = leavesWith(v);
+    expect(nodes.length, tag + ": " + v + " is shown").toBeGreaterThan(0);
+    for (const n of nodes) {
+      expect(n.classList.contains("pcc-receipt-claim"), tag + ": " + v + " in ." + n.className).toBe(true);
+      expect(n.textContent, tag).toBe(line);
+    }
+  }
+  const noPaymentLayout = (tag: string) => {
+    expect(document.querySelector(".pcc-receipt-parties"), tag).toBeNull();
+    expect(document.querySelector(".pcc-arrow"), tag).toBeNull();
+  };
+  const winText = () => document.querySelector(".pcc-win")!.textContent!;
+
+  it("run 3's exact /api/jobs/j1 body: a neutral record, its payee a claim of the bound record, no payer->payee layout (live and snapshot)", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      if (mode === "live") r2BootLive(receiptAt("/api/jobs/j1"), [r2Ok(RUN3_JOB)]);
+      else boot({}, receiptAt("/api/jobs/j1"), { _ts: "2026-09-24T00:00:00Z", "/api/jobs/j1": RUN3_JOB });
+      await flush();
+      noPaymentLayout(mode);
+      expectOnlyAttributed(RUN3_JOB.payee, "bound record reports payee: " + RUN3_JOB.payee, mode);
+      expect(document.querySelector(".pcc-win-title")!.textContent, mode).toBe("Record");
+      expect(document.querySelector(".pcc-receipt-source")!.textContent, mode).toBe("Reported by the bound record - not a settlement record.");
+      expect(winText(), mode).toContain("reported amount: 250.00 USDC (the bound record)");
+      const pill = document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+      expect(pill.className, mode).toContain("st-unknown");
+      expect(document.querySelector(".pcc-receipt-rail")!.textContent, mode).toContain("not a settlement record");
+    }
+  });
+
+  it("run 2's {payer, payee} body: both parties are claims of the bound record, on any non-settlement route", async () => {
+    for (const p of ["/api/jobs/j1", "/api/escrow/e1", "/api/a2a/tasks/t1"]) {
+      r2BootLive(receiptAt(p), [r2Ok(RUN2_PARTIES)]);
+      await flush();
+      noPaymentLayout(p);
+      expectOnlyAttributed(RUN2_PARTIES.payer, "bound record reports payer: " + RUN2_PARTIES.payer, p);
+      expectOnlyAttributed(RUN2_PARTIES.payee, "bound record reports payee: " + RUN2_PARTIES.payee, p);
+      expect(document.querySelector(".pcc-receipt-source")!.textContent, p).toBe("Reported by the bound record - not a settlement record.");
+    }
+  });
+
+  it("an unpinned V-next read: its payer is a claim, its payee is withheld (pending), no payer->payee layout", async () => {
+    const unpinned = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", payer: RUN2_PARTIES.payer, economics: ECON };
+    for (const [tag, boot2] of [
+      ["live, no pin", () => r2BootLive(receiptAt(R2_RC), [r2Ok(unpinned)])],
+      ["live, not finalized", () => r2BootLive(receiptAt(R2_RC), [r2Ok({ ...unpinned, ...PIN_FIELDS, finality: "safe" })])],
+      ["snapshot, pinned", () => boot({}, receiptAt(R2_RC), { _ts: "2026-09-24T00:00:00Z", [R2_RC]: { ...unpinned, ...PIN_FIELDS } })],
+    ] as Array<[string, () => void]>) {
+      boot2();
+      await flush();
+      noPaymentLayout(tag);
+      expectOnlyAttributed(RUN2_PARTIES.payer, "bound record reports payer: " + RUN2_PARTIES.payer, tag);
+      expect(leavesWith(PAYEE), tag).toEqual([]); // the recipient is not shown at all
+      expect(winText(), tag).toContain("payee pending");
+      expect(document.querySelector(".pcc-win-title")!.textContent, tag).toBe("Receipt");
+    }
+  });
+
+  it("a legacy escrow record's parties are claims of the PCC escrow service", async () => {
+    r2BootLive(receiptAt("/api/escrow/e1"), [r2Ok({ status: "funded", contractAddress: "0x" + "99".repeat(20), totalAmount: "5", ...RUN2_PARTIES })]);
+    await flush();
+    noPaymentLayout("legacy");
+    expectOnlyAttributed(RUN2_PARTIES.payer, "PCC escrow service reports payer: " + RUN2_PARTIES.payer, "legacy");
+    expectOnlyAttributed(RUN2_PARTIES.payee, "PCC escrow service reports payee: " + RUN2_PARTIES.payee, "legacy");
+    expect(document.querySelector(".pcc-receipt-source")!.textContent).toBe("Reported by the PCC escrow service - not a chain read.");
+  });
+
+  it("a transaction hash, an address and a rail on a receipt are claims of their source too (never in a settlement read)", async () => {
+    const tx = "0x" + "9a".repeat(32);
+    r2BootLive(receiptAt("/api/jobs/j1"), [r2Ok({ ...RUN3_JOB, txHash: tx, rail: "x402" })]);
+    await flush();
+    expectOnlyAttributed(tx, "bound record reports transaction: " + tx, "tx");
+    expect(document.querySelector(".pcc-receipt-rail")!.textContent).toContain(" · bound record reports rail: x402");
+    const addr = "0x" + "77".repeat(20);
+    r2BootLive(receiptAt("/api/escrow/e1"), [r2Ok({ status: "funded", contractAddress: "0x1", escrowAddress: addr })]);
+    await flush();
+    expectOnlyAttributed(addr, "PCC escrow service reports escrow address: " + addr, "escrowAddress");
+  });
+
+  it("the pinned live V-next receipt is unchanged: payer not reported -> the payee as a money fact; an off-contract payer in it is still a claim", async () => {
+    const pinned = { finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled", ...PIN_FIELDS, economics: ECON };
+    r2BootLive(receiptAt(R2_RC), [r2Ok(pinned)]);
+    await flush();
+    expect(Array.from(document.querySelectorAll(".pcc-receipt-parties > *")).map((n) => n.textContent)).toEqual(["payer not reported", "→", PAYEE]);
+    expect(document.querySelector(".pcc-receipt-claims")).toBeNull();
+    expect(document.querySelector(".pcc-win-title")!.textContent).toBe("Receipt");
+    expect(document.querySelector(".pcc-pin-ref")).not.toBeNull();
+    r2BootLive(receiptAt(R2_RC), [r2Ok({ ...pinned, payer: RUN2_PARTIES.payer })]);
+    await flush();
+    expect(Array.from(document.querySelectorAll(".pcc-receipt-parties > *")).map((n) => n.textContent))
+      .toEqual(["bound record reports payer: " + RUN2_PARTIES.payer, "→", PAYEE]);
+  });
+});

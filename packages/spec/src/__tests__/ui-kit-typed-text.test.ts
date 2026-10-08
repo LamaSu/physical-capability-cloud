@@ -381,10 +381,11 @@ describe("a helper deleted from a mapped sink", () => {
     expect(text(".pcc-approval-rationale")).toBe("The dashboard calls this: “Use the mill”");
     expect(text(".pcc-approval-record .pcc-args-v")).toBe("reported: PLA");
     expect(text(".pcc-receipt-cur")).toBe(" (currency not reported) (PCC escrow service)"); // R12: attributed legacy amount
-    expect(Array.from(document.querySelectorAll(".pcc-receipt-parties .pcc-mono")).map((node) => node.textContent))
-      .toEqual(["short", "0x" + "ab".repeat(20)]); // R12: a legacy party in the id grammar stays an id
-    expect(text(".pcc-receipt-rail")).toContain(" · reported: bad rail");
-    expect(text(".pcc-receipt-tx")).toBe("unrecognised value");
+    // R12 r2 B: a legacy party is a claim naming the escrow service (an id in the grammar stays an id)
+    expect(Array.from(document.querySelectorAll(".pcc-receipt-claims .pcc-receipt-claim")).map((node) => node.textContent))
+      .toEqual(["PCC escrow service reports payer: short", "PCC escrow service reports payee: 0x" + "ab".repeat(20)]);
+    expect(text(".pcc-receipt-rail")).toContain(" · PCC escrow service reports rail: reported: bad rail");
+    expect(text(".pcc-receipt-tx")).toBe("PCC escrow service reports transaction: unrecognised value");
     expect(text(".pcc-chain-outcome")).toBe("reported: bad type");
     const formWindow = document.querySelector(".pcc-form-fields")!.closest(".pcc-win")!;
     (formWindow.querySelector(".pcc-btn") as HTMLButtonElement).click();
