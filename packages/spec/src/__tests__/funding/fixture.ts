@@ -210,12 +210,20 @@ export interface SentTx {
   to: Address;
   data: Hex;
   plan: ReceiptPlan;
+  /** The block that was latest when it was sent: where a mined plan lands. */
+  block: { number: bigint; hash: Hex };
 }
+
+type FakeBlock = { number: bigint; hash: Hex; timestamp: bigint };
 
 export interface ChainState {
   chainId: number;
   walletChainId: number;
-  block: { number: bigint; hash: Hex; timestamp: bigint };
+  /** The latest block; every block ever latest stays readable by hash in `blocks`. */
+  block: FakeBlock;
+  blocks: Map<string, FakeBlock>;
+  /** The node answers "latest" with a pending block (no number, no hash). */
+  pendingBlock: boolean;
   code: Map<string, Hex>;
   handlers: Map<string, (data: Hex) => Hex>;
   log: Array<{ method: string; params: readonly unknown[] }>;
@@ -238,10 +246,13 @@ export function revertWith(data: Hex): never {
 }
 
 export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
+  const genesis: FakeBlock = { number: 100n, hash: keccak256(stringToHex("pcc:funding-test:block-100")), timestamp: NOW };
   const state: ChainState = {
     chainId: Number(fx.chainId),
     walletChainId: Number(fx.chainId),
-    block: { number: 100n, hash: keccak256(stringToHex("pcc:funding-test:block-100")), timestamp: NOW },
+    block: genesis,
+    blocks: new Map([[genesis.hash, genesis]]),
+    pendingBlock: false,
     code: new Map([
       [fx.factory.toLowerCase(), "0x6080" as Hex],
       [IMPLEMENTATION.toLowerCase(), "0x6080" as Hex],
@@ -284,15 +295,19 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           if (state.failChainId) throw new Error("fake chain: eth_chainId unavailable");
           return toHex(which === "wallet" ? state.walletChainId : state.chainId);
         case "eth_getBlockByNumber":
-        case "eth_getBlockByHash":
+        case "eth_getBlockByHash": {
           if (state.failBlocks) throw new Error("fake chain: no block");
+          const b = method === "eth_getBlockByHash" ? state.blocks.get(String((params as unknown[])[0]).toLowerCase()) : state.block;
+          if (!b) return null;
+          const pending = method === "eth_getBlockByNumber" && state.pendingBlock;
           return {
-            number: toHex(state.block.number),
-            hash: state.block.hash,
+            number: pending ? null : toHex(b.number),
+            hash: pending ? null : b.hash,
             parentHash: zeroHash,
-            timestamp: toHex(state.block.timestamp),
+            timestamp: toHex(b.timestamp),
             transactions: [],
           };
+        }
         case "eth_getCode":
           if (state.failCode) throw new Error("fake chain: eth_getCode unavailable");
           return state.code.get(String((params as unknown[])[0]).toLowerCase()) ?? "0x";
@@ -317,7 +332,13 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           const raw = (params as [Hex])[0];
           const tx = parseTransaction(raw);
           const index = state.sent.length;
-          state.sent.push({ hash: keccak256(raw), to: tx.to!, data: tx.data ?? "0x", plan: state.receipts[index] ?? "success" });
+          state.sent.push({
+            hash: keccak256(raw),
+            to: tx.to!,
+            data: tx.data ?? "0x",
+            plan: state.receipts[index] ?? "success",
+            block: { number: state.block.number, hash: state.block.hash },
+          });
           state.afterSend?.(index);
           return keccak256(raw);
         }
@@ -331,8 +352,8 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
             to: tx.to,
             input: tx.data,
             nonce: toHex(state.sent.indexOf(tx)),
-            blockHash: mined ? state.block.hash : null,
-            blockNumber: mined ? toHex(state.block.number) : null,
+            blockHash: mined ? tx.block.hash : null,
+            blockNumber: mined ? toHex(tx.block.number) : null,
             transactionIndex: mined ? "0x0" : null,
             value: "0x0",
             gas: toHex(200_000n),
@@ -348,8 +369,8 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           if (!tx || tx.plan === "none") return null;
           return {
             transactionHash: tx.hash,
-            blockHash: state.block.hash,
-            blockNumber: toHex(state.block.number),
+            blockHash: tx.block.hash,
+            blockNumber: toHex(tx.block.number),
             status: tx.plan === "success" ? "0x1" : "0x0",
             from: fx.payer.address,
             to: tx.to,
@@ -371,10 +392,17 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
   const publicClient = createPublicClient({ transport: custom(provider("public"), { retryCount: 0 }), pollingInterval: 20 });
   const wallet = (account: LocalAccount = fx.payer, options: { dataSuffix?: Hex } = {}) =>
     createWalletClient({ account, transport: custom(provider("wallet"), { retryCount: 0 }), ...options });
+  /** A new latest block, 12 s later; the old one stays readable by hash. */
+  const advanceBlock = () => {
+    const number = state.block.number + 1n;
+    const next: FakeBlock = { number, hash: keccak256(stringToHex(`pcc:funding-test:block-${number}`)), timestamp: state.block.timestamp + 12n };
+    state.blocks.set(next.hash, next);
+    state.block = next;
+  };
   const accountless = () => createWalletClient({ transport: custom(provider("wallet"), { retryCount: 0 }) });
   /** Methods that would send or sign a transaction: the SDK must call none before a refusal. */
   const sends = () => state.log.filter((x) => x.method === "eth_sendRawTransaction" || x.method === "eth_sendTransaction");
-  return { state, on, publicClient, wallet, accountless, sends };
+  return { state, on, publicClient, wallet, accountless, advanceBlock, sends };
 }
 
 /** The pins a test passes for the fake chain (no built-in pin exists for 31337). */

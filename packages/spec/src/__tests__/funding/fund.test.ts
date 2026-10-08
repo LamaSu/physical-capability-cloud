@@ -335,6 +335,50 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     expect(result.readBack.kind).toBe("unreadable");
   });
 
+  it("every read is pinned to one block by its hash (EIP-1898); only the two simulations run at latest", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    chain.state.log.length = 0;
+    expect((await fund()).outcome).toBe("committed");
+    const reads = chain.state.log.filter((x) => x.method === "eth_getCode" || x.method === "eth_call");
+    const atLatest = reads.filter((x) => (x.params as unknown[])[1] === "latest");
+    expect(atLatest.map((x) => ((x.params as [{ data: Hex }])[0].data as string).slice(0, 10))).toEqual(simulatedData(chain).map((d) => d.slice(0, 10)));
+    expect(atLatest).toHaveLength(2);
+    const pinned = reads.filter((x) => (x.params as unknown[])[1] !== "latest");
+    expect(pinned.length).toBeGreaterThan(4);
+    for (const x of pinned) {
+      expect((x.params as unknown[])[1]).toEqual({ blockHash: expect.stringMatching(/^0x[0-9a-f]{64}$/), requireCanonical: true });
+    }
+  });
+
+  it("the read-back is at the fund() receipt's block, even when the chain has moved on", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) {
+        fundedAs(fx.jobPolicyHash);
+        chain.advanceBlock();
+      }
+    };
+    const result = await fund();
+    expect(result.outcome).toBe("committed");
+    expect(result.readBack.blockHash).toBe(chain.state.sent[1]!.block.hash);
+    expect(result.readBack.blockHash).not.toBe(chain.state.block.hash);
+  });
+
+  it("indeterminate: the fund() send throws after the approve (it may have been broadcast)", async () => {
+    const { chain, fund } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 0) chain.state.failSend = true;
+    };
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.fundTx).toBeUndefined();
+    expect(result.readBack.kind).toBe("unfunded");
+  });
+
   it("committed even when the fund() receipt is lost, once the escrow reads funded under this policy", async () => {
     const { fx, chain, fund, fundedAs } = await setup();
     chain.state.receipts = ["success", "none"];

@@ -236,6 +236,11 @@ describe("the pinned deployment, read live at one block", () => {
     chain.state.failCalls = true;
     await expectRefusal("LIVE_CHECK_FAILED", () => {});
   });
+  it("LIVE_CHECK_FAILED: the node answers latest with a pending block, which has no hash to pin", async () => {
+    const { chain, expectRefusal } = await setup();
+    chain.state.pendingBlock = true;
+    await expectRefusal("LIVE_CHECK_FAILED", () => {});
+  });
   it("LIVE_CHECK_FAILED: no block to pin", async () => {
     const { chain, expectRefusal } = await setup();
     chain.state.failBlocks = true;
