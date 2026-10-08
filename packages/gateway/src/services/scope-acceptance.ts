@@ -25,6 +25,7 @@ import { schema, eq } from "@pcc/store";
 import { sameIdentity } from "../auth/buyer-identity.js";
 import { mockFundsWrites } from "./settlement-mode.js";
 import {
+  escrowKey,
   fundingRecordStore,
   isWellFormedFundingRecord,
   sameAddress,
@@ -133,7 +134,8 @@ export function buyerFundingVerdict(
   }
   const store = fundingRecordStore();
   if (!store) return refusedFunding("escrow_not_buyer_funded");
-  const record = store.findByEscrow(getStore().db, escrow.contractAddress);
+  // Folded before the store sees it, as reconcilePaidScope looks up and keeps it (escrowKey).
+  const record = store.findByEscrow(getStore().db, escrowKey(escrow.contractAddress));
   // A record proves funding only when there is one, well formed and finalized, it is this escrow's
   // (the store answers by escrow; checked again, defence in depth) and its verified payer is this
   // buyer. (isWellFormedFundingRecord is false for null.)

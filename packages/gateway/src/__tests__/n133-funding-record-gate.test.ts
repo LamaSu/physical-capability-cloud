@@ -14,7 +14,11 @@ import {
   scopeFundingRefusal,
 } from "../services/scope-acceptance.js";
 import { __setFundingRecordStoreForTest, fundingRecordStore, type FundingRecordStore } from "../services/funding-record-port.js";
-import { installTestFundingRecordStore, type TestFundingRecordStore } from "./helpers/test-funding-record-store.js";
+import {
+  installCaseExactFundingRecordStore,
+  installTestFundingRecordStore,
+  type TestFundingRecordStore,
+} from "./helpers/test-funding-record-store.js";
 import {
   BUYER,
   ESCROW_A,
@@ -76,6 +80,16 @@ describe("S2.1 buyerFundingVerdict: a real escrow passes only on its finalized r
     store.plant(record);
     expect(buyerFundingVerdict(escrow(), BUYER, SCOPE)).toEqual({ kind: "record_funded", record });
     expect(buyerFundingRefusal(escrow({ contractAddress: ESCROW_A.toUpperCase().replace("0X", "0x") }), BUYER, SCOPE)).toBeNull();
+  });
+
+  it("(gate-escrow-case) the gate looks the record up by the folded address, as reconcilePaidScope keeps it", () => {
+    // Over a store that matches letter case exactly: the record is kept in lower case (escrowKey),
+    // and the escrow row names the contract in upper case.
+    const store = installCaseExactFundingRecordStore();
+    const record = verification(SCOPE);
+    store.plant(record);
+    const upper = "0x" + ESCROW_A.slice(2).toUpperCase();
+    expect(buyerFundingVerdict(escrow({ contractAddress: upper }), BUYER, SCOPE)).toEqual({ kind: "record_funded", record });
   });
 
   it("(neg-gate-scope) a record naming another scope does not fund this one; without a scope id (the mint) none does", () => {

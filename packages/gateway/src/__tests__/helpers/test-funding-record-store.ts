@@ -5,7 +5,9 @@
  * The records live in a TEMP table on the test's own in-memory SQLite connection, the connection
  * every gateway query runs on. So an insert takes part in the caller's transaction exactly as a
  * real table's would: a rollback undoes it. UNIQUE keys hold the port's contract: one record per
- * scope, and one per escrow address in any letter case.
+ * scope, and one per escrow address in any letter case. It passes the conformance suite
+ * (funding-record-store-conformance.ts). installCaseExactFundingRecordStore, below, is a
+ * deliberately broken store for the tests that show the suite and reconcilePaidScope catch one.
  */
 import { sql } from "@pcc/store";
 import { getStore } from "../../db.js";
@@ -91,6 +93,49 @@ export function installTestFundingRecordStore(): TestFundingRecordStore {
     },
     plant(record) {
       insertRow(db, record);
+    },
+  };
+  __setFundingRecordStoreForTest(store);
+  return store;
+}
+
+/**
+ * TEST ONLY, and deliberately BROKEN: a store that matches escrow addresses exactly as given (an
+ * ordinary `WHERE escrow_address = ?`) and keeps no unique key on the escrow, only on the scope. It
+ * breaks the port's contract (one record per escrow, in any letter case), as the fund-s2 review's
+ * probe P10 store did. The conformance suite must fail it, and reconcilePaidScope must still let one
+ * funding activate only one scope over it (it folds the address before the store sees it).
+ */
+export function installCaseExactFundingRecordStore(): TestFundingRecordStore {
+  const { db } = getStore();
+  db.run(sql`CREATE TEMP TABLE IF NOT EXISTS test_funding_records_case_exact (
+    scope_id TEXT NOT NULL UNIQUE,
+    escrow_address TEXT NOT NULL,
+    body TEXT NOT NULL
+  )`);
+  const insertExact = (handle: FundingDbHandle, row: object) => {
+    const r = row as Record<string, unknown>;
+    handle.run(sql`INSERT INTO test_funding_records_case_exact (scope_id, escrow_address, body)
+      VALUES (${r.scopeId as string}, ${r.escrowAddress as string}, ${JSON.stringify(row)})`);
+  };
+  const parse = (row: { body: string } | undefined) => (row ? (JSON.parse(row.body) as FundingVerificationRecord) : null);
+  const store: TestFundingRecordStore = {
+    insert(tx, record) {
+      insertExact(tx, record);
+    },
+    findByEscrow(handle, escrowAddress) {
+      return parse(handle.get<{ body: string } | undefined>(
+        sql`SELECT body FROM test_funding_records_case_exact WHERE escrow_address = ${escrowAddress}`,
+      ));
+    },
+    findByScope(handle, scopeId) {
+      return parse(handle.get<{ body: string } | undefined>(sql`SELECT body FROM test_funding_records_case_exact WHERE scope_id = ${scopeId}`));
+    },
+    count() {
+      return db.get<{ n: number }>(sql`SELECT count(*) AS n FROM test_funding_records_case_exact`).n;
+    },
+    plant(record) {
+      insertExact(db, record);
     },
   };
   __setFundingRecordStoreForTest(store);

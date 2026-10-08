@@ -24,7 +24,9 @@
  * escrow must be the scope's job's escrow (found the way the accept route and the relay find it),
  * whose row passes the same preconditions as at the accept (escrowRowRefusal). So the same buyer's
  * escrow for another job is refused. One funding activates one scope: a record of an escrow the
- * store already binds to another scope, or for a scope it binds to other funding, is refused.
+ * store already binds to another scope, or for a scope it binds to other funding, is refused. The
+ * store sees the escrow address folded to lower case (escrowKey), for the lookup and in the
+ * inserted record, so that holds even over a store that matches letter case exactly.
  *
  * Idempotent on (scopeId, escrow): once the scope is active on this escrow's record, a repeat
  * returns that activation (already_active) and inserts nothing and moves no TTL. A record for a
@@ -48,6 +50,7 @@ import {
   SCOPE_AWAITING_FUNDING,
 } from "./scope-acceptance.js";
 import {
+  escrowKey,
   fundingRecordStore,
   isWellFormedFundingRecord,
   sameAddress,
@@ -172,8 +175,10 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       if (rowRefusal !== null || !escrow) return refused(rowRefusal ?? "escrow_missing");
       if (!sameAddress(escrow.contractAddress, record.escrowAddress)) return refused("record_escrow_not_scope_escrow");
 
-      // One funding, one scope.
-      const forEscrow = store.findByEscrow(tx, record.escrowAddress);
+      // One funding, one scope. The store sees the escrow address folded (escrowKey), for the lookup
+      // and the insert, so a store that matches letter case exactly cannot bind it twice.
+      const toKeep: FundingVerificationRecord = { ...record, escrowAddress: escrowKey(record.escrowAddress) };
+      const forEscrow = store.findByEscrow(tx, toKeep.escrowAddress);
       if (forEscrow && forEscrow.scopeId !== scopeId) return refused("escrow_bound_to_other_scope");
       // The record kept for this scope, if any, must be this buyer's well-formed record of this
       // escrow. (It names this scope by the store's contract; checked again, defence in depth.)
@@ -208,7 +213,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       if (blocked !== null) return refused(blocked);
 
       // (b) The record, in this transaction.
-      if (!kept) store.insert(tx, record);
+      if (!kept) store.insert(tx, toKeep);
 
       // (c) The compare-and-set, from the exact row read above; the TTL starts now.
       const expiresAt = new Date(now.getTime() + PAID_SCOPE_TTL_MS).toISOString();
@@ -224,7 +229,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
         )
         .run();
       if (changes !== 1) throw new ActivationConflict();
-      const activation = kept ?? record;
+      const activation = kept ?? toKeep;
       return { kind: "activated", scopeId, escrowAddress: activation.escrowAddress, activatedAt: now.toISOString(), expiresAt, record: activation };
     }, { behavior: "immediate" });
   } catch (err) {

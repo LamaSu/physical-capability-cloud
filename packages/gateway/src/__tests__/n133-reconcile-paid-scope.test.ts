@@ -14,7 +14,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { sql } from "@pcc/store";
 import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { __setFundingRecordStoreForTest, isWellFormedFundingRecord } from "../services/funding-record-port.js";
-import { installTestFundingRecordStore, type TestFundingRecordStore } from "./helpers/test-funding-record-store.js";
+import {
+  installCaseExactFundingRecordStore,
+  installTestFundingRecordStore,
+  type TestFundingRecordStore,
+} from "./helpers/test-funding-record-store.js";
 import {
   BUYER,
   ESCROW_A,
@@ -396,6 +400,28 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     expect(reconcilePaidScope(two.scopeId, verification(two.scopeId))).toEqual(refused("escrow_bound_to_other_scope"));
     expect(scopeRow(two.scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(1);
+  });
+
+  it("(neg-escrow-case) one funding activates one scope even over a store that matches escrow letter case exactly (P10)", async () => {
+    // The fund-s2 review's P10: two jobs whose escrow rows name one contract in different letter
+    // case. reconcilePaidScope folds the address for the lookup and the insert, so the second is
+    // refused over a store with case-exact lookups and no unique escrow key. Both orders: a fold on
+    // one side only would let one of them through.
+    store = installCaseExactFundingRecordStore();
+    const upper = (address: string) => "0x" + address.slice(2).toUpperCase();
+    for (const [first, second] of [
+      [ESCROW_A, upper(ESCROW_A)],
+      [upper(ESCROW_B), ESCROW_B],
+    ]) {
+      const one = await paidScope(f, { real: first });
+      const two = await paidScope(f, { real: second });
+      expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { escrowAddress: first })).kind).toBe("activated");
+      expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { escrowAddress: second })), second).toEqual(
+        refused("escrow_bound_to_other_scope"),
+      );
+      expect(scopeRow(two.scopeId).status).toBe("awaiting_funding");
+    }
+    expect(store.count()).toBe(2); // one record per contract
   });
 
   it("(neg-kept-record) a kept record that is not this buyer's well-formed record blocks the activation", async () => {

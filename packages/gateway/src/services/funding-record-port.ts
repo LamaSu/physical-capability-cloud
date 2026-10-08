@@ -59,7 +59,10 @@ export interface FundingVerificationRecord {
  *
  * Contract: at most one record per scope and at most one per escrow address (one funding activates
  * one scope). An insert that would make a second for either throws, and the caller's transaction
- * then rolls back. Escrow addresses compare without letter case.
+ * then rolls back. Escrow addresses compare without letter case. The gateway's callers also fold
+ * the address (escrowKey) before a store sees it, so one funding cannot bind two scopes even
+ * through a store that matches letter case exactly. The checks a store must pass are
+ * __tests__/helpers/funding-record-store-conformance.ts.
  */
 export interface FundingRecordStore {
   insert(tx: FundingTx, record: FundingVerificationRecord): void;
@@ -92,6 +95,15 @@ const BLOCK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 const BLOCK_NUMBER_RE = /^(0|[1-9][0-9]{0,19})$/;
 /** 2^64 - 1: 20-digit decimals above it pass BLOCK_NUMBER_RE and are refused by this bound. */
 const UINT64_MAX = 18446744073709551615n;
+
+/**
+ * The form in which the gateway hands an escrow address to a store, for a lookup and in an inserted
+ * record: lower case (fund-s2 review LOW-1). Records some other writer kept may be in any case, so
+ * they are still compared with sameAddress.
+ */
+export function escrowKey(escrowAddress: string): string {
+  return escrowAddress.toLowerCase();
+}
 
 /** The same 0x address, in any letter case. Anything that is not a 0x address never matches. */
 export function sameAddress(a: unknown, b: unknown): boolean {
