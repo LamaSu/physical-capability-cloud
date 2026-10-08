@@ -634,3 +634,56 @@ describe("funded_ours rests on the pinned factory's witness, not only on the esc
     expect(s.detail).toContain("prePolicyRoot_");
   });
 });
+
+// reviewer-charlie L7 (implementer-delta): retry safety. After an indeterminate result the earlier approve or fund() may
+// still be pending. A retry that sent again would re-approve and re-send: fund #2 reverts AlreadySealed once fund #1
+// lands, but its gas is spent, and an approve landing after the funding leaves a standing allowance. So approveAndFund
+// sends nothing while the payer's nonce at "pending" is above its nonce at "latest".
+describe("approveAndFund: no send while the payer has a transaction pending", () => {
+  /** Methods that send, from the log since `mark`. */
+  const sendsSince = (chain: Awaited<ReturnType<typeof setup>>["chain"], mark: number) =>
+    chain.state.log.slice(mark).filter((x) => x.method === "eth_sendRawTransaction" || x.method === "eth_sendTransaction");
+
+  it("PAYER_TX_PENDING: a retry while the earlier fund() is still pending sends and simulates nothing", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.receipts = ["success", "none"];
+    const first = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+    expect(first.outcome).toBe("indeterminate");
+    expect(chain.state.sent).toHaveLength(2);
+    const mark = chain.state.log.length;
+    const simulatedBefore = simulated().length;
+    expect(await refusal(fund())).toBe("PAYER_TX_PENDING");
+    expect(sendsSince(chain, mark)).toEqual([]);
+    expect(simulated()).toHaveLength(simulatedBefore);
+    expect(chain.state.sent).toHaveLength(2);
+  });
+
+  it("PAYER_TX_PENDING: a payer transaction this SDK did not send is pending too", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.priorNonce = 3;
+    chain.state.mempool = 1;
+    expect(await refusal(fund())).toBe("PAYER_TX_PENDING");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+
+  it("equal nonces proceed: a payer with mined history and nothing pending funds as usual", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.priorNonce = 3;
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    expect((await fund()).outcome).toBe("committed");
+    expect(chain.state.sent).toHaveLength(2);
+    const reads = chain.state.log.filter((x) => x.method === "eth_getTransactionCount" && (x.params as unknown[])[0] === fx.payer.address);
+    expect(reads.map((x) => (x.params as unknown[])[1])).toEqual(expect.arrayContaining(["pending", "latest"]));
+  });
+
+  it("LIVE_CHECK_FAILED: the payer's nonce cannot be read, so nothing is sent", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.failNonce = true;
+    expect(await refusal(fund())).toBe("LIVE_CHECK_FAILED");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+});

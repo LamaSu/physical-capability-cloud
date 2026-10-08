@@ -400,6 +400,12 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
       expect(result.stage).toBe("fund");
       expect(result.fundTx).toBeDefined();
       expect(result.readBack.kind).toBe("unfunded");
+      // reviewer-charlie L7 (implementer-delta): a retry while that fund() is still in anvil's pool refuses, and sends
+      // nothing: the buyer's nonce at "pending" stays where it was.
+      const pendingNonce = await pub.getTransactionCount({ address: buyer.address, blockTag: "pending" });
+      expect(pendingNonce).toBe((await pub.getTransactionCount({ address: buyer.address, blockTag: "latest" })) + 1);
+      expect(await refusal(approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub }))).toBe("PAYER_TX_PENDING");
+      expect(await pub.getTransactionCount({ address: buyer.address, blockTag: "pending" })).toBe(pendingNonce);
     } finally {
       await testClient.mine({ blocks: 1 });
       await testClient.setAutomine(true);

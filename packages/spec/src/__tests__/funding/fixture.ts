@@ -252,6 +252,12 @@ export interface ChainState {
   /** Receipt plans for the sends, in order; a send past the end is mined successfully. */
   receipts: ReceiptPlan[];
   sent: SentTx[];
+  /** Transactions the payer had mined before the test (its nonce at "latest" and "pending" both start here). */
+  priorNonce: number;
+  /** Payer transactions pending in the node's pool that this SDK did not send (counted at "pending" only). */
+  mempool: number;
+  /** eth_getTransactionCount throws. */
+  failNonce: boolean;
   /** Runs after the n-th send is accepted (0-based): e.g. make policy() read as funded. */
   afterSend?: (index: number) => void;
 }
@@ -282,6 +288,9 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
     failSend: false,
     receipts: [],
     sent: [],
+    priorNonce: 0,
+    mempool: 0,
+    failNonce: false,
   };
   if (o.escrowCode) state.code.set(fx.escrow.toLowerCase(), cloneRuntime(IMPLEMENTATION));
 
@@ -359,8 +368,15 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
         // Just enough of a node for viem to send a legacy transaction from a local account and wait for its receipt.
         case "eth_blockNumber":
           return toHex(state.block.number);
-        case "eth_getTransactionCount":
-          return toHex(state.sent.length);
+        case "eth_getTransactionCount": {
+          // reviewer-charlie L7 (implementer-delta): as a node counts the payer's nonce. "latest" counts mined
+          // transactions only; "pending" also counts those still in the pool: a send planned "none" never mines, and
+          // `mempool` stands for the payer's other pending ones. viem signs each send with the "pending" nonce.
+          if (state.failNonce) throw new Error("fake chain: eth_getTransactionCount unavailable");
+          const mined = state.sent.filter((t) => t.plan !== "none").length;
+          const tag = (params as unknown[])[1];
+          return toHex(state.priorNonce + (tag === "pending" ? state.sent.length + state.mempool : mined));
+        }
         case "eth_gasPrice":
           return toHex(1_000_000_000n);
         case "eth_estimateGas":

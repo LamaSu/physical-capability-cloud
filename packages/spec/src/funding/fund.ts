@@ -22,8 +22,9 @@
  *   indeterminate  anything else: a broadcast with no receipt, a successful receipt whose read-back is not
  *                  "funded" (a stale read or a reorg), funding under another acceptance, an escrow report the
  *                  pinned factory does not witness, or an unreadable state.
- * Indeterminate is not success. Call `readFundedState` later to resolve it; a retried `approveAndFund` returns
- * `committed` without sending if the escrow is by then funded under this policy.
+ * Indeterminate is not success. After an indeterminate result, resolve with readFundedState (or wait for the earlier
+ * transactions) before retrying. A retried `approveAndFund` sends nothing while the payer has a transaction pending
+ * (PAYER_TX_PENDING), and returns `committed` without sending once the escrow reads funded under this policy.
  */
 import { encodeFunctionData, zeroAddress, zeroHash, type Address, type Hex, type PublicClient, type WalletClient } from "viem";
 import { assertChain, describeRevert, pinBlock, pinnedReader, type PinnedBlock } from "./chain.js";
@@ -174,6 +175,16 @@ export interface ApproveAndFundArgs {
   receiptTimeoutMs?: number;
 }
 
+/**
+ * Approve exactly ΣG to the verified escrow, then send the payer's `fund()`, and report the outcome from the escrow's
+ * own state: committed, unchanged or indeterminate (see the module comment). Throws a `FundingRefusal` only before
+ * its first broadcast; after that it always returns a result.
+ *
+ * Retries: after an indeterminate result, resolve with readFundedState (or wait for the earlier transactions) before
+ * retrying. While the payer has any transaction pending (its nonce at "pending" above "latest"), this refuses
+ * PAYER_TX_PENDING and sends nothing; once the escrow reads funded under this policy, it returns `committed` with
+ * `alreadyFunded: true` and sends nothing.
+ */
 export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingResult> {
   const prepared = assertPrepared(args.prepared);
   const { wallet, publicClient } = args;
@@ -212,6 +223,27 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
   if (before.kind === "other") refuse("ALREADY_FUNDED", before.detail);
   if (before.kind === "unreadable") refuse("LIVE_CHECK_FAILED", before.detail);
   checkTiming(prepared, block.timestamp, margin);
+
+  // reviewer-charlie L7: retry safety. After an indeterminate result the earlier approve or fund() may still be in
+  // flight, and sending again would re-approve and re-send: fund #2 reverts AlreadySealed once fund #1 lands, but its
+  // gas is spent, and an approve that lands after the funding leaves a standing allowance. So nothing is sent while the
+  // payer has a pending transaction: its nonce at "pending" above its nonce at "latest". "pending" is read first, so a
+  // transaction that mines between the two reads is not counted as pending. This sees only what the read client's
+  // node knows: a transaction broadcast through another node may not be in its pool yet.
+  let pendingNonce: number;
+  let latestNonce: number;
+  try {
+    pendingNonce = await publicClient.getTransactionCount({ address: prepared.payer, blockTag: "pending" });
+    latestNonce = await publicClient.getTransactionCount({ address: prepared.payer, blockTag: "latest" });
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `read the payer's nonce: ${describeRevert(e)}`);
+  }
+  if (pendingNonce > latestNonce) {
+    refuse(
+      "PAYER_TX_PENDING",
+      `the payer has ${pendingNonce - latestNonce} transaction(s) pending (nonce ${pendingNonce} at pending, ${latestNonce} at latest): resolve the earlier run with readFundedState, or wait for those transactions, before retrying`,
+    );
+  }
 
   // 1. approve(escrow, ΣG), from the frozen prepared values: the verified escrow, exactly ΣG.
   const approveData = encodeFunctionData({ abi: ERC20_ABI, functionName: "approve", args: [prepared.escrow, prepared.totalGross] });

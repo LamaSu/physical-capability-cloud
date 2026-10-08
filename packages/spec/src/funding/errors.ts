@@ -66,7 +66,13 @@ export type FundingRefusalCode =
   /** A chain read the checks depend on failed; the SDK fails closed. */
   | "LIVE_CHECK_FAILED"
   /** The approve simulation reverted; nothing was broadcast. */
-  | "SIMULATION_REVERTED";
+  | "SIMULATION_REVERTED"
+  /**
+   * The payer has a transaction still pending (its nonce at "pending" is above its nonce at "latest"), so an earlier
+   * approve or fund() may still land; nothing was sent. After an indeterminate result, resolve with readFundedState
+   * (or wait for the earlier transactions) before retrying.
+   */
+  | "PAYER_TX_PENDING";
 
 export class FundingRefusal extends Error {
   readonly code: FundingRefusalCode;

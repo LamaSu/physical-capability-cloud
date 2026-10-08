@@ -7,6 +7,10 @@
  *   const result = await approveAndFund({ prepared, wallet, publicClient });
  *   if (result.outcome !== "committed") { ... }                     // "indeterminate" is NOT success
  *
+ * After an indeterminate result, resolve with readFundedState (or wait for the earlier transactions) before retrying:
+ * `readFundedState({ publicClient, prepared })` reads the escrow again. A retried approveAndFund refuses
+ * PAYER_TX_PENDING, sending nothing, while the payer still has a transaction pending.
+ *
  * A gateway (or anything else) never gets the buyer's key: the SDK signs and sends from the caller's own wallet,
  * and only after verifying every term. There is no x402 path: x402 cannot fund a V-next escrow (plan G10).
  */
