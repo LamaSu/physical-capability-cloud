@@ -134,6 +134,15 @@ describe("approveAndFund: refusals before anything is sent", () => {
     chain.state.walletChainId = 1;
     expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
   });
+  // reviewer-charlie L2 (implementer-delta): the reference is the policy's chain, not the other client's.
+  it("CHAIN_MISMATCH: the wallet and the read client both moved to the same chain, which is not the policy's", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.chainId = 1;
+    chain.state.walletChainId = 1;
+    expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
   it("ESCROW_NOT_CREATED: the clone does not exist yet", async () => {
     const { chain, fund, simulated } = await setup({}, { escrowCode: false });
     expect(await refusal(fund())).toBe("ESCROW_NOT_CREATED");

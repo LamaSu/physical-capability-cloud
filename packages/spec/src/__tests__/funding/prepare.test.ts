@@ -172,6 +172,13 @@ describe("CHAIN_MISMATCH", () => {
     chain.state.chainId = 1;
     await expectRefusal("CHAIN_MISMATCH", () => {});
   });
+  // reviewer-charlie L2 (implementer-delta): the reference is the policy's chain, not the other client's.
+  it("the wallet and the read client agree with each other, on a chain that is not the policy's", async () => {
+    const { chain, expectRefusal } = await setup();
+    chain.state.chainId = 1;
+    chain.state.walletChainId = 1;
+    await expectRefusal("CHAIN_MISMATCH", () => {});
+  });
 });
 
 describe("pins: the token and the factory", () => {

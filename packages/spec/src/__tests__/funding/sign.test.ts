@@ -94,6 +94,14 @@ describe("signJobPolicy", () => {
     expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet() }))).toBe("CHAIN_MISMATCH");
   });
 
+  // reviewer-charlie L2 (implementer-delta): the reference is the policy's chain, not the other client's.
+  it("CHAIN_MISMATCH: the wallet and the read client both moved to the same chain, which is not the policy's", async () => {
+    const { chain, prepared } = await setup();
+    chain.state.chainId = 1;
+    chain.state.walletChainId = 1;
+    expect(await refusal(signJobPolicy({ prepared, wallet: chain.wallet() }))).toBe("CHAIN_MISMATCH");
+  });
+
   it("SIGNATURE_NOT_CANONICAL: a wallet that returns the high-s twin", async () => {
     const { fx, chain, prepared } = await setup();
     const account = rewritingAccount(fx.payer, async (td) => highS(await fx.payer.signTypedData(td)));
