@@ -412,3 +412,74 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     expect(result.readBack.kind).toBe("funded_ours");
   });
 });
+
+// reviewer-charlie L1 (implementer-delta): both stop paths (the approve stops the run; the fund() simulation reverts)
+// send nothing more, but "nothing more was sent" does not mean "unchanged". Someone holding the buyer's JobPolicy
+// signature can fund the escrow from the buyer's allowance at any time, and a read can fail. So each stop path is
+// classified by the escrow's read-back, like every other path (verify-writes-three-outcomes).
+describe("approveAndFund: a run that stops before fund() is sent is classified by the read-back, never assumed unchanged", () => {
+  it("the approve stops the run, but the escrow reads funded under this policy: committed", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 0) {
+        // In the approve's own block, a relayed fund() carrying the buyer's signature spent the allowance.
+        chain.on(fx.usdc, ERC20_ABI, "allowance", () => 0n);
+        fundedAs(fx.jobPolicyHash);
+      }
+    };
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.detail).toContain("allowance");
+    expect(result.readBack.kind).toBe("funded_ours");
+    expect(result.outcome).toBe("committed");
+    expect(result.fundTx).toBeUndefined();
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the approve stops the run (mined, reverted), and the escrow cannot be read back: indeterminate, never unchanged", async () => {
+    const { chain, fund } = await setup();
+    chain.state.receipts = ["reverted"];
+    chain.state.afterSend = (i) => {
+      if (i === 0) chain.state.failCalls = true;
+    };
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.detail).toContain("reverted");
+    expect(result.readBack.kind).toBe("unreadable");
+    expect(result.outcome).toBe("indeterminate");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the fund() simulation reverts because the escrow was funded under this policy in the meantime: committed", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 0) {
+        // Between the approve and the fund(), a relayer holding the buyer's signature funded the escrow: it is sealed.
+        fundedAs(fx.jobPolicyHash);
+        chain.on(fx.escrow, ESCROW_ABI, "fund", () => revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "AlreadySealed" })));
+      }
+    };
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.detail).toContain("AlreadySealed");
+    expect(result.readBack.kind).toBe("funded_ours");
+    expect(result.outcome).toBe("committed");
+    expect(result.fundTx).toBeUndefined();
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the fund() simulation reverts, and the escrow cannot be read back: indeterminate, never unchanged", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.escrow, ESCROW_ABI, "fund", () => {
+      chain.state.failCalls = true; // the node stops answering calls right after the simulation
+      return revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "InvalidOrDisabledCohort" }));
+    });
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.detail).toContain("InvalidOrDisabledCohort");
+    expect(result.readBack.kind).toBe("unreadable");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.fundTx).toBeUndefined();
+    expect(chain.state.sent).toHaveLength(1);
+  });
+});
