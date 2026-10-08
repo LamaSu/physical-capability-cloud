@@ -39,7 +39,7 @@ describe("generated agent golden path", () => {
     const { wellKnownAgentRoutes } = await import("../routes/well-known-agent.js");
     const app = Fastify({ logger: false });
     const staticRoutes: string[] = [];
-    app.addHook("onRoute", (route) => staticRoutes.push(route.url));
+    app.addHook("onRoute", (route) => { staticRoutes.push(route.url); });
     try {
       await app.register(staticPlugin, {
         root: fileURLToPath(new URL("apps/dashboard/public/", root)),
