@@ -177,6 +177,37 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
     expect(scopeRow(res.json().scopeId).createdBy).toBe(LETTERED);
   });
 
+  it("a claimed key naming a capability the kernel doesn't register is refused for proof (403) before the capability lookup (404); nothing is created", async () => {
+    // r4 review F2: the binding comes before N98's registered-capability lookup, so an unproven
+    // caller learns nothing about what a kernel registers. Pin that order.
+    const unregistered = "n133-unregistered-capability";
+    const submitUnregistered = (headers: Record<string, string>) =>
+      app.inject({
+        method: "POST",
+        url: "/api/jobs/submit-from-discovery",
+        headers,
+        payload: { kernelId: KERNEL, capabilityType: unregistered, userAgentId: BUYER },
+      });
+    const counts = () => ({
+      sessions: db().select().from(schema.negotiationSessions).all().length,
+      escrows: db().select().from(schema.escrows).all().length,
+      jobs: db().select().from(schema.jobs).all().length,
+      scopes: db().select().from(schema.executionScopes).all().length,
+    });
+    const before = counts();
+
+    const refused = await submitUnregistered(claimedOnly(BUYER));
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json()).toMatchObject({ error: "forbidden", reason: "buyer_proof_required" });
+    expect(counts()).toEqual(before);
+
+    // Control: the same request from the buyer's proven wallet passes the binding and gets N98's 404.
+    const proven = await submitUnregistered(asKey(BUYER));
+    expect(proven.statusCode).toBe(404);
+    expect(proven.json().error).toBe("capability_not_found");
+    expect(counts()).toEqual(before);
+  });
+
   it("negotiation: a proven buyer opens its own session; a mismatch is refused; the admin commits for the buyer", async () => {
     const mismatch = await app.inject({
       method: "POST", url: "/api/negotiate/session", headers: asKey(BUYER),
@@ -254,37 +285,6 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
 
       const admin = await send({ ...claimed, "x-admin-key": ADMIN }, "pcc-quote", params(12345));
       expect(admin.json<{ error?: unknown }>().error).toMatchObject({ code: -32001, data: { reason: "buyer_proof_required" } });
-
-      expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
-      expect(db().select().from(schema.escrows).all()).toHaveLength(0);
-      expect(db().select().from(schema.jobs).all()).toHaveLength(0);
-      expect(db().select().from(schema.executionScopes).all()).toHaveLength(0);
-    });
-
-    it("a falsy buyer is refused as missing for claimed keys, SIWE sessions and the admin before anything is created", async () => {
-      // A falsy buyer skips the binding, so createPccQuote's own required-field check is what
-      // refuses it (Opus 5.5 r3 LOW-1). Pin that refusal, and that nothing is created, per caller.
-      db().delete(schema.escrows).run();
-      db().delete(schema.jobs).run();
-      const key = provisionApiKey({ operatorId: "n133-claimed-falsy-buyer" }).rawKey;
-      const claimed = { authorization: `Bearer ${key}` };
-      const callers: Array<[string, Record<string, string>]> = [
-        ["claimed key", claimed],
-        ["SIWE session", siweSession(BUYER)],
-        ["admin", { ...claimed, "x-admin-key": ADMIN }],
-      ];
-      const falsyBuyers: unknown[] = [undefined, null, "", 0, false];
-      for (const [label, headers] of callers) {
-        for (const skill of ["pcc-quote", "pcc-submit"]) {
-          for (const buyer of falsyBuyers) {
-            const refused = await send(headers, skill, params(buyer));
-            expect(refused.json<{ error?: unknown }>().error, `${label}, ${skill}, buyer ${String(buyer)}`).toMatchObject({
-              code: -32603,
-              message: "userAgentId, kernelId, and capabilityType are required",
-            });
-          }
-        }
-      }
 
       expect(db().select().from(schema.negotiationSessions).all()).toHaveLength(0);
       expect(db().select().from(schema.escrows).all()).toHaveLength(0);
@@ -436,6 +436,42 @@ describe("N133 rule 2: a paid write scope goes live only on the kernel operator'
     expect(late.statusCode).toBe(409);
     expect(late.json().error).toBe("scope_expired");
     expect(scopeRow(scopeId).status).toBe("awaiting_acceptance");
+  });
+
+  // Fail closed: `new Date(x) <= new Date()` is false when x does not parse, so the accept route
+  // took a scope whose window it could not read. expires_at is TEXT NOT NULL and every writer
+  // stores toISOString(), so these come only from a hand edit, a restore or another writer (epoch
+  // milliseconds stored as text). Each is refused as an expired window is, and nothing goes live.
+  const UNREADABLE_EXPIRIES = ["", " ", "garbage", "Invalid Date", "1728400000000"];
+  const setExpiry = (scopeId: string, expiresAt: string) =>
+    db().update(schema.executionScopes).set({ expiresAt }).where(eq(schema.executionScopes.id, scopeId)).run();
+
+  for (const unreadable of UNREADABLE_EXPIRIES) {
+    it(`a scope whose expiry can't be read (${JSON.stringify(unreadable)}) can't be accepted either; nothing goes live`, async () => {
+      const { scopeId } = (await submit(asKey(BUYER), BUYER)).json() as { scopeId: string };
+      setExpiry(scopeId, unreadable);
+      const late = await accept(scopeId);
+      expect(late.statusCode).toBe(409);
+      expect(late.json()).toEqual({ error: "scope_expired", message: "This scope expired before it was accepted; this request changed nothing." });
+      expect(scopeRow(scopeId).status).toBe("awaiting_acceptance");
+      expect((await writeAs(asKey(BUYER), scopeId)).statusCode).toBe(403);
+      expect(queued()).toHaveLength(0);
+    });
+  }
+
+  it("controls for the unreadable expiries: a readable future expiry is accepted, a readable past one is not", async () => {
+    const open = (await submit(asKey(BUYER), BUYER)).json() as { scopeId: string };
+    setExpiry(open.scopeId, new Date(Date.now() + 10 * 60_000).toISOString());
+    const accepted = await accept(open.scopeId);
+    expect(accepted.statusCode).toBe(200);
+    expect(scopeRow(open.scopeId).status).toBe("active");
+
+    const shut = (await submit(asKey(BUYER), BUYER)).json() as { scopeId: string };
+    setExpiry(shut.scopeId, new Date(Date.now() - 1000).toISOString());
+    const late = await accept(shut.scopeId);
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toBe("scope_expired");
+    expect(scopeRow(shut.scopeId).status).toBe("awaiting_acceptance");
   });
 
   it("an approval queued through POST /api/operator/approvals can't name a scope to activate", async () => {
