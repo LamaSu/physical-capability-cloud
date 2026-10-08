@@ -65,6 +65,9 @@ const http = (text: string) => text.replace(
   /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:\$PCC_BASE|<gateway>)?\/[^\s`"|,;)]+/g,
   (route) => `\`${route}\``,
 );
+/** Placeholders outside code spans only: http() spans may already hold <id>. */
+const prose = (text: string) => http(text).split("`")
+  .map((part, index) => (index % 2 ? part : placeholders(part))).join("`");
 
 function renderAction(action: Action): string[] {
   return [
@@ -132,14 +135,14 @@ export function renderAgentMd({ runbook, index, buyer, agentPackage }: AgentMdSo
     );
   });
 
-  lines.push("## Named events: recover or report", "", index.about, "",
+  lines.push("## Named events: recover or report", "", prose(index.about), "",
     "| Event id | Trigger | What to do |", "| --- | --- | --- |");
   for (const [id, event] of Object.entries(buyer.events))
-    lines.push(`| ${cell(id)} | ${cell(http(event.trigger))} | ${cell(http(event.do))} |`);
+    lines.push(`| ${cell(id)} | ${cell(prose(event.trigger))} | ${cell(prose(event.do))} |`);
   for (const [id, event] of Object.entries(index.events)) {
     const source = event.file ? ` Read ${link(`starter/runbook/${event.file}`)}${event.section ? `, section “${event.section}”` : ""}.` : "";
     const report = event.report ? ` Report ${event.report.phase} ${event.report.outcome}.` : "";
-    lines.push(`| ${cell(id)} | ${cell(http(event.trigger))} | ${cell(http(event.do))}${cell(source)}${report} |`);
+    lines.push(`| ${cell(id)} | ${cell(prose(event.trigger))} | ${cell(prose(event.do))}${cell(source)}${report} |`);
   }
   lines.push("", "## Report the attempt", "",
     "For buyer friction, a missing binding quote or a failed check, send a redacted report:", "",

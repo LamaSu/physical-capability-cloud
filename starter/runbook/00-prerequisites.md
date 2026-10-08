@@ -37,7 +37,7 @@ python3 -c "import nacl.signing" && echo "signing OK"
 ```
 
 ## 3. The node's signing key, made here and never sent
-The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half. That way no private key ever travels: a provisioning request without a public key gets a server-made private key back in the response.
+The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half. That way the node's signing key never travels: a provisioning request without a public key gets a server-made private key back in the response.
 ```bash
 umask 077
 python3 - <<'EOF' > .pcc/node-public-key
@@ -57,7 +57,7 @@ chmod 600 .pcc/node-keys.json
 
 Write the human's answer into `.pcc/operator.json` with your file-writing tool, not with `echo` or `printf`: a command's text can be read by other users of this machine while it runs (`ps`). For example: `{"email": "operator@example.org", "name": "Bench plate reader"}`. The request below is built from that file, sent from a private file, and deleted.
 
-The response contains your **API key**. Write it straight to a private file, and **never print it, echo it, or paste it into the conversation**.
+The response contains your **API key**. On a gateway that writes on-chain identities it also contains `operator_wallet.private_key`, a wallet key the gateway mints and keeps for the account; this runbook never uses it. Write the response straight to a private file, and **never print it, echo it, or paste it into the conversation**.
 
 ```bash
 umask 077

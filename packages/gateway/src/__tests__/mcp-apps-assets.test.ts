@@ -72,7 +72,7 @@ describe("directive 6 — MCP-App runtime asset startup priming", () => {
       throw new Error(`Missing artifact: ${agentMd.AGENT_MD_SEGMENTS.join("/")}`);
     });
     try {
-      expect(() => primeDocsAssets()).toThrow(/docs assets are missing[\s\S]*agent\.md/);
+      expect(() => primeDocsAssets()).toThrow("Missing: apps/dashboard/public/.well-known/agent.md — ");
     } finally {
       load.mockRestore();
     }

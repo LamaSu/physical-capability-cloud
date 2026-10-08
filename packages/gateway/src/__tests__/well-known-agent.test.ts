@@ -56,6 +56,11 @@ describe("generated agent golden path", () => {
     }
   });
 
+  it("advertises agent.md in the 404 body for an unknown /.well-known path", async () => {
+    const { unimplementedWellKnownBody } = await import("../routes/well-known.js");
+    expect(unimplementedWellKnownBody("/.well-known/nope.json")!.available).toContain("/.well-known/agent.md");
+  });
+
   it("has no drift from the current committed sources", async () => {
     const { renderAgentMd } = await import("../docs/render-agent-md.js");
     const sources = {
@@ -75,6 +80,26 @@ describe("generated agent golden path", () => {
     for (const value of ["test-phase-goal", "test-recovery", "test-buyer-goal"])
       expect(rendered).toContain(value);
     expect(rendered).not.toBe(read(artifactPath));
+  });
+
+  it("keeps every angle-bracket placeholder inside code, where rendered Markdown shows it", () => {
+    const outsideCode = read(artifactPath)
+      .replace(/^```[\s\S]*?^```.*$/gm, "")
+      .replace(/`[^`\n]+`/g, "");
+    expect(outsideCode).not.toMatch(/<[^>\n]+>/);
+  });
+
+  it("wraps prose placeholders in code without splitting a route's code span", async () => {
+    const { renderAgentMd } = await import("../docs/render-agent-md.js");
+    const index = json("starter/runbook/index.json");
+    // The route is not sentence-final: http() keeps a trailing period inside its code span.
+    index.about = "Keys are <phase>.<event>; see GET /api/x/<id> first.";
+    const rendered = renderAgentMd({
+      runbook: json("starter/runbook/runbook.json"), index,
+      buyer: json("starter/buyer/buyer-path.json"), agentPackage: json("apps/dashboard/public/agent-package.json"),
+    });
+    expect(rendered).toContain("`<phase>`.`<event>`");
+    expect(rendered).toContain("`GET /api/x/<id>`");
   });
 
   it("depends only on attempt_reporting from the agent package", async () => {
