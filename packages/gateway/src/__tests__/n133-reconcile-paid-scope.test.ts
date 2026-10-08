@@ -342,6 +342,15 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
   });
 
+  it("(neg-kept-lying) a store answering for this scope with another scope's record is not believed", async () => {
+    const { scopeId } = await paidScope(f);
+    const other = verification("scope_elsewhere");
+    __setFundingRecordStoreForTest({ ...store, findByScope: () => other });
+    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_bound_to_other_funding"));
+    expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+    expect(store.count()).toBe(0);
+  });
+
   it("an unknown scope is refused", () => {
     expect(reconcilePaidScope("scope_unknown", verification("scope_unknown"))).toEqual(refused("scope_not_found"));
   });

@@ -154,10 +154,13 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       // One funding, one scope.
       const forEscrow = store.findByEscrow(tx, record.escrowAddress);
       if (forEscrow && forEscrow.scopeId !== scopeId) return refused("escrow_bound_to_other_scope");
+      // The record kept for this scope, if any, must be this buyer's well-formed record of this
+      // escrow. (It names this scope by the store's contract; checked again, defence in depth.)
       const kept = store.findByScope(tx, scopeId);
       if (
         kept &&
-        (!sameAddress(kept.escrowAddress, record.escrowAddress) ||
+        (kept.scopeId !== scopeId ||
+          !sameAddress(kept.escrowAddress, record.escrowAddress) ||
           !isWellFormedFundingRecord(kept) ||
           !sameIdentity(kept.buyer, scope.createdBy))
       ) {
