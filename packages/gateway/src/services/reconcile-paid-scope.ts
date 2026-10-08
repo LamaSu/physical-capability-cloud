@@ -250,6 +250,30 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
   }
 }
 
+/**
+ * The accept route's `activation`: a reconcile outcome without its record, which carries the
+ * buyer's wallet, the block hash and the verifier's build (fund-s2 review NIT-2). An activation is
+ * {kind, activatedAt, expiresAt, escrowAddress}; the other outcomes carry what they need to be read.
+ */
+export type ReconcileAnswer =
+  | { kind: "activated"; activatedAt: string; expiresAt: string; escrowAddress: string }
+  | { kind: "already_active"; expiresAt: string; escrowAddress: string }
+  | { kind: "refused"; reason: ReconcileRefusal }
+  | { kind: "expired"; windowEndedAt: string };
+
+export function reconcileAnswer(result: ReconcileResult): ReconcileAnswer {
+  switch (result.kind) {
+    case "activated":
+      return { kind: "activated", activatedAt: result.activatedAt, expiresAt: result.expiresAt, escrowAddress: result.escrowAddress };
+    case "already_active":
+      return { kind: "already_active", expiresAt: result.expiresAt, escrowAddress: result.escrowAddress };
+    case "refused":
+      return { kind: "refused", reason: result.reason };
+    case "expired":
+      return { kind: "expired", windowEndedAt: result.windowEndedAt };
+  }
+}
+
 /** The accept route's `fundingRefusal` for a reconcile outcome: null when the scope is live. */
 export function reconcileFundingRefusal(result: ReconcileResult): ReconcileRefusal | "scope_expired" | null {
   switch (result.kind) {

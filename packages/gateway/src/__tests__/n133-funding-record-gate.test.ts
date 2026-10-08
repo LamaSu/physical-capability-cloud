@@ -8,6 +8,7 @@
  * Negatives are tagged (neg-...) for the mutation runner.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { sql } from "@pcc/store";
 import {
   buyerFundingRefusal,
   buyerFundingVerdict,
@@ -213,18 +214,43 @@ describe("the accept route and reconcilePaidScope", () => {
       jobId,
       status: "active",
       fundingRefusal: null,
+      // The activation without its record (NIT-2): no buyer wallet, block hash or verifier build.
       activation: {
         kind: "activated",
-        scopeId,
-        escrowAddress: ESCROW_A,
         activatedAt: iso(T0 + 10 * MIN),
         expiresAt: iso(T0 + 10 * MIN + TTL),
-        record,
+        escrowAddress: ESCROW_A,
       },
     });
+    expect(accepted.payload).not.toContain(record.blockHash);
+    expect(accepted.payload).not.toContain(record.verifierVersion);
     expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 10 * MIN + TTL) });
     expect(store.count()).toBe(1);
     expect((await writeAs(f, scopeId)).statusCode).toBe(201);
+  });
+
+  it("(neg-accept-live) an already_active outcome inside the accept is answered live (NIT-1)", async () => {
+    // Unreachable today (the accept moves the scope to awaiting_funding); a TEMP trigger makes the
+    // scope live inside the accept's own transaction, so reconcilePaidScope answers already_active.
+    const store = installTestFundingRecordStore();
+    const res = await submit(f);
+    const { scopeId, jobId, escrowId } = res.json() as { scopeId: string; jobId: string; escrowId: string };
+    setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
+    db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    db().run(sql`CREATE TEMP TRIGGER test_live_at_accept AFTER UPDATE OF status ON main.execution_scopes
+      WHEN NEW.status = 'awaiting_funding' BEGIN UPDATE execution_scopes SET status = 'active' WHERE id = NEW.id; END`);
+    const accepted = await acceptScope(f, scopeId);
+    db().run(sql`DROP TRIGGER temp.test_live_at_accept`);
+    expect(accepted.json()).toEqual({
+      accepted: true,
+      scopeId,
+      kernelId: KERNEL,
+      jobId,
+      status: "active",
+      fundingRefusal: null,
+      activation: { kind: "already_active", expiresAt: iso(T0 + TTL), escrowAddress: ESCROW_A },
+    });
+    expect(scopeRow(scopeId).status).toBe("active");
   });
 
   it("(neg-accept-blocked) the buyer blocked since the mint: the accept stands, the scope waits, nothing activates", async () => {
@@ -236,11 +262,8 @@ describe("the accept route and reconcilePaidScope", () => {
     setPolicy(KERNEL, { ...basePolicy(), blockedAgents: [BUYER] });
     const accepted = await acceptScope(f, scopeId);
     expect(accepted.statusCode).toBe(200);
-    expect(accepted.json()).toMatchObject({
-      status: "awaiting_funding",
-      fundingRefusal: "buyer_blocked",
-      activation: { kind: "refused", reason: "buyer_blocked" },
-    });
+    expect(accepted.json()).toMatchObject({ status: "awaiting_funding", fundingRefusal: "buyer_blocked" });
+    expect(accepted.json().activation).toEqual({ kind: "refused", reason: "buyer_blocked" });
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
   });

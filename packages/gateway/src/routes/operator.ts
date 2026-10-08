@@ -5,7 +5,7 @@ import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 import { SCOPE_AWAITING_ACCEPTANCE, SCOPE_AWAITING_FUNDING, scopeFundingVerdict } from "../services/scope-acceptance.js";
-import { reconcileFundingRefusal, reconcilePaidScope, type ReconcileResult } from "../services/reconcile-paid-scope.js";
+import { reconcileAnswer, reconcileFundingRefusal, reconcilePaidScope, type ReconcileResult } from "../services/reconcile-paid-scope.js";
 import { emergencyStopState, stopRefusal } from "./device-relay.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
 
@@ -514,9 +514,11 @@ export async function operatorRoutes(app: FastifyInstance) {
    * whose finalized verification record names this scope (scopeFundingVerdict) goes live through
    * reconcilePaidScope, in the same transaction as the accept: the accept moves the scope to
    * awaiting_funding, then reconcilePaidScope activates it and starts its TTL; the answer then
-   * carries the reconcile result as `activation`. If reconcilePaidScope refuses, the accept stands
-   * and the scope waits in awaiting_funding. No record store is configured in production (Q9), so
-   * there no record exists and this answers exactly what it answered before.
+   * carries the reconcile outcome as `activation`, without the verification record
+   * (reconcileAnswer: an activation is {kind, activatedAt, expiresAt, escrowAddress}). If
+   * reconcilePaidScope refuses, the accept stands and the scope waits in awaiting_funding. No
+   * record store is configured in production (Q9), so there no record exists and this answers
+   * exactly what it answered before.
    */
   app.post<{ Params: { scopeId: string } }>("/api/operator/scopes/:scopeId/accept", async (req, reply) => {
     const authority = authorityOf(req);
@@ -555,7 +557,9 @@ export async function operatorRoutes(app: FastifyInstance) {
         return reply.status(409).send(scopeAlreadyDecided(current?.status ?? "unknown"));
       }
       if (activation) {
-        const live = activation.kind === "activated";
+        // Live on either outcome that leaves the scope active (already_active is unreachable here
+        // today: the accept itself moves the scope to awaiting_funding).
+        const live = activation.kind === "activated" || activation.kind === "already_active";
         return {
           accepted: true,
           scopeId: scope.id,
@@ -563,7 +567,7 @@ export async function operatorRoutes(app: FastifyInstance) {
           jobId: scope.jobId,
           status: live ? "active" : SCOPE_AWAITING_FUNDING,
           fundingRefusal: reconcileFundingRefusal(activation),
-          activation,
+          activation: reconcileAnswer(activation),
         };
       }
       const fundingRefusal = funding.kind === "refused" ? funding.reason : null;
