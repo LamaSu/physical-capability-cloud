@@ -264,7 +264,7 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
   return NOT_A_SETTLEMENT_RECORD();
 }
 
-/** The only routes whose LIVE reads may present a FINAL settlement state (settlement-read.ts UNIT_ID_RE). */
+/** The only routes whose LIVE reads may present a settlement state, final or not (settlement-read.ts UNIT_ID_RE). */
 export const SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
 const SETTLEMENT_ROUTE_UNIT_RE = /^\/api\/settlement\/units\/(0x[0-9a-fA-F]{64})\/(?:receipt|lifecycle)$/;
 
@@ -298,7 +298,7 @@ const PIN_BLOCK_RE = /^(?:0|[1-9][0-9]{0,15})$/;
  * so a body for another unit is never this binding's fact; `asOfBlock` is a canonical decimal string
  * that is a safe integer; `asOfBlockHash` is a 32-byte word; and `finality === "finalized"` (the route
  * already refuses other heads, settlement-read.ts; the kit checks again). This checks shape only;
- * provenance (a LIVE read of that route) is the caller's to establish.
+ * provenance (a LIVE read of that route, its unprojected body) is the caller's to establish.
  */
 export function chainPin(read: unknown, routePath: unknown): SettlementPin | null {
   if (read === null || typeof read !== "object" || Array.isArray(read)) return null;
@@ -320,37 +320,44 @@ export function chainPin(read: unknown, routePath: unknown): SettlementPin | nul
   return Object.freeze({ chainId, network: SETTLEMENT_NETWORKS[chainId]!, escrow, unitId, asOfBlock, asOfBlockHash, finality: "finalized" as const });
 }
 
-/** A settled- or refunded-shaped LIVE read whose pin is missing, malformed, for another unit or chain,
- *  or not finalized: R12 "pending before finality", never green. */
+/** A LIVE read of a settlement route whose pin is missing, malformed, for another unit or chain, or not
+ *  finalized: R12 "pending before finality" (rule 5). It shows no state at all, final or not. */
 const PENDING_FINALITY = (): MoneyStatusClassification =>
   Object.freeze({ key: "PENDING_FINALITY", tone: "waiting" as const, label: "pending - not confirmed at a finalized block", known: true });
+/** A V-next record that is not a LIVE read of its own settlement route (a baked snapshot, a fallback, a
+ *  stream event, a projection, another route): no state is shown, final or not (R12 r2, D). */
+const NOT_A_LIVE_SETTLEMENT_READ = (): MoneyStatusClassification => UNKNOWN("", "state not shown - not a live read of a settlement route");
+
+/** R12 rule 4: the attribution of a word the PCC escrow service reports (a legacy escrow record). */
+export const ESCROW_SERVICE_REPORTS = "PCC escrow service reports: ";
+export const NOT_CONFIRMED_ON_CHAIN = " (not confirmed on chain)";
 
 /**
  * Display classification of a settlement record, given WHERE it came from (astra r2 on #313, F1: field
- * shape is not provenance). A FINAL V-next presentation (settled 8, refunded 9) is shown only for a LIVE
- * read of an exact per-unit settlement route WHOSE BODY CARRIES A VALID PIN (chainPin, R12); a live read
- * without one is pending. A baked snapshot, a fallback, a stream event, or a settled-shaped body from any
- * other route is unknown. Every other classification passes through unchanged: non-final states claim
- * nothing final, and the flat table has no green.
+ * shape is not provenance).
+ *  - A V-next record (it has `unitState` or `finalState`) shows ANY chain-derived state -- 1 to 7 as much
+ *    as the final 8 and 9 -- only from a LIVE read of the exact per-unit settlement route WHOSE BODY
+ *    CARRIES A VALID PIN (chainPin; R12, and R12 r2 D: a non-final state is a money claim too, e.g. state 1
+ *    says "funds committed"). A live read of that route without a valid pin is pending; anything else (a
+ *    baked snapshot, a fallback, a stream event, a projection, another route) is unknown.
+ *  - A legacy escrow record's word, in ANY state, is the PCC escrow service's report, not a chain read
+ *    (R12 rule 4; r2 D, the same class): attributed, and it takes no money tone (unknown, never running,
+ *    waiting, failed or refunded).
+ *  - Anything else ("not a settlement record") passes through: it is already unknown.
  */
 export function classifySettlementRead(
   record: unknown,
   source: { path?: unknown; live?: unknown } | null | undefined,
 ): MoneyStatusClassification {
   const c = classifySettlementRecord(record);
-  const vnext = record !== null && typeof record === "object" && !Array.isArray(record)
-    && (has(record as Record<string, unknown>, "unitState") || has(record as Record<string, unknown>, "finalState"));
-  if (c.tone !== "settled" && c.tone !== "refunded") return c;
-  // R12 rule 4: a legacy escrow record's word (the flat table's "refunded") is the PCC escrow service's
-  // report, not a chain read, so it never takes a final tone. classifySettlementRecord gives a final tone
-  // to nothing else that lacks unitState/finalState.
-  if (!vnext) {
-    return Object.freeze({ key: c.key, tone: "waiting" as const, label: "PCC escrow service reports: " + (c.label ?? c.key) + " (not confirmed on chain)", known: true });
+  const o = record !== null && typeof record === "object" && !Array.isArray(record) ? (record as Record<string, unknown>) : null;
+  if (o === null || !(has(o, "unitState") || has(o, "finalState"))) {
+    // classifySettlementRecord knows no word outside a legacy escrow record, so `known` is exactly "a
+    // legacy record with a flat-table word".
+    return c.known ? Object.freeze({ key: c.key, tone: "unknown" as const, label: ESCROW_SERVICE_REPORTS + (c.label ?? c.key) + NOT_CONFIRMED_ON_CHAIN, known: true }) : c;
   }
   const path = source && typeof source.path === "string" ? source.path.split("?")[0]! : "";
-  if (!(source && source.live === true && SETTLEMENT_READ_ROUTE.test(path))) {
-    return UNKNOWN("", "final state not shown - not a live read of a settlement route");
-  }
+  if (!(source && source.live === true && SETTLEMENT_READ_ROUTE.test(path))) return NOT_A_LIVE_SETTLEMENT_READ();
   return chainPin(record, path) === null ? PENDING_FINALITY() : c;
 }
 

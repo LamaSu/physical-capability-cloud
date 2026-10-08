@@ -23,7 +23,7 @@ import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
   classifySettlementRead, SETTLEMENT_READ_ROUTE, chainPin, SETTLEMENT_NETWORKS, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
-  idText, hexText, timeText, traceText, nameText, fieldDefaultText,
+  idText, hexText, timeText, traceText, nameText, fieldDefaultText, ESCROW_SERVICE_REPORTS, NOT_CONFIRMED_ON_CHAIN,
 } from "../money/money-status.js";
 import { foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD } from "../money/plain-text-claims.js";
 import { PLAIN_TEXT_CASES, PLAIN_TIME_ACCEPTED, PLAIN_TIME_REJECTED, FIELD_DEFAULT_CASES, PLAIN_CLAIM_CASES } from "./plain-text-fixtures.js";
@@ -45,7 +45,9 @@ type KitRegion = {
   moneyStatusClass: (s: unknown) => string;
   settlementLabel: (s: unknown) => string | null;
   isMoneyData: (bindingPath: unknown, row: unknown) => boolean;
-  dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown) => string;
+  dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown) => string;
+  dataStatusText: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown) => { readonly t: string };
+  chainPin: (o: unknown, bindingPath: unknown) => unknown;
   VNEXT_UNIT_STATES: readonly string[];
   VNEXT_STATE_PRESENTATION: Record<string, [string, string]>;
   VNEXT_PHASE: Record<string, string>;
@@ -77,7 +79,7 @@ function extractRegion(): KitRegion {
   // Evaluate the genuine private mints and helpers together, without mounting a DOM.
   // Only the final boot dispatch is replaced; every helper uses the shipped bytes.
   const helperSrc = kitSrc.replace(/  if \(document\.readyState === 'loading'\)[\s\S]*?\n\}\)\(\);\s*$/, "\n" +
-      "window.kitRegion = { MONEY_STATUS, GENERIC_STATES, statusClass, moneyStatusClass, settlementLabel, isMoneyData, dataStatusClass," +
+      "window.kitRegion = { MONEY_STATUS, GENERIC_STATES, statusClass, moneyStatusClass, settlementLabel, isMoneyData, dataStatusClass, dataStatusText," +
       " VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE, settlementRecordClass, settlementReadClass, SETTLEMENT_READ_ROUTE, chainPin, SETTLEMENT_NETWORKS," +
       " SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText, idText, hexText, timeText, traceText, nameText, fieldDefaultText, foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD };\n})();");
   if (helperSrc === kitSrc) throw new Error("plain kit's final boot dispatch not found");
@@ -202,14 +204,14 @@ describe("shipped kit money table == canonical @pcc/spec map", () => {
     expect(kit.dataStatusClass("/api/jobs", { status: "completed" }, "completed")).toBe("st-ack"); // neutral, never green
     expect(kit.dataStatusClass("/api/jobs/j1", { status: "done" }, "done")).toBe("st-ack");
     // ...but a job row that carries money is money data
-    expect(kit.dataStatusClass("/api/jobs", { status: "completed", amount: "5" }, "completed")).toBe("st-waiting");
+    expect(kit.dataStatusClass("/api/jobs", { status: "completed", amount: "5" }, "completed")).toBe("st-unknown"); // R12 r2 D: a flat word on money data is a report, no money tone
     expect(kit.dataStatusClass("/api/jobs", { status: "success", escrowAddress: "0xabc" }, "success")).toBe("st-unknown");
     // lookalike or odd binding paths are money (fail closed)
     for (const b of ["/API/jobs", "/api/jobsX", "/api/jobs%2F..%2Fescrow", null, undefined, 42]) {
       expect(kit.isMoneyData(b, {}), String(b)).toBe(true);
     }
-    // a refund word is never green even on a generic surface
-    expect(kit.statusClass("refunded")).toBe("st-refunded");
+    // a refund word is never green even on a generic surface, and (R12 r2 D) takes no money tone there either
+    expect(kit.statusClass("refunded")).toBe("st-unknown");
   });
 
   it("each classifier is defined exactly once in the shipped kit (no later shadowing definition)", () => {
@@ -276,16 +278,17 @@ async function renderedPill(escrow: Record<string, unknown>) {
 
 describe("shipped kit renders money state honestly (full jsdom boot, receipt window)", () => {
   const NOT_SETTLED: Array<[Record<string, unknown>, string]> = [
-    [{ status: "refunded" }, "st-waiting"] /* R12: a legacy word is the escrow service's report, never a final tone */,
-    [{ status: "SETTLED_REFUNDED" }, "st-waiting"] /* R12: a legacy word is the escrow service's report, never a final tone */,
-    [{ status: "REFUND_ALLOCATED" }, "st-waiting"],
-    [{ status: "RELEASE_ALLOCATED" }, "st-waiting"],
+    // R12 r2 D: a legacy word, in ANY state, is the escrow service's report: attributed, and no money tone.
+    [{ status: "refunded" }, "st-unknown"],
+    [{ status: "SETTLED_REFUNDED" }, "st-unknown"],
+    [{ status: "REFUND_ALLOCATED" }, "st-unknown"],
+    [{ status: "RELEASE_ALLOCATED" }, "st-unknown"],
     [{ status: "underfunded" }, "st-unknown"],
     [{ status: "success" }, "st-unknown"], // off-schema success word on a money surface
     [{ status: "done" }, "st-unknown"],
     [{ status: "settled" }, "st-unknown"], // ambiguous: can mean refunded
     [{ releasedCount: 3 }, "st-unknown"], // rule 12: never infer settlement from a count
-    [{ status: "funded" }, "st-waiting"],
+    [{ status: "funded" }, "st-unknown"],
   ];
 
   it.each(NOT_SETTLED)("%j renders %s, never settled/green", async (escrow, expected) => {
@@ -302,7 +305,7 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
   it("a consistent V-next receipt in a baked SNAPSHOT is not shown as final (astra r2 F1: shape is not provenance)", async () => {
     const r = await renderedPill({ finalState: "SETTLED_RELEASED", isAllocated: false, phase: "settled" }); // the /receipt wire shape
     expect(r.cls).toContain("st-unknown");
-    expect(r.rail).toContain("final state not shown - not a live read of a settlement route");
+    expect(r.rail).toContain("state not shown - not a live read of a settlement route");
     // the LIVE, exact-route case (green, with its direction label) is pinned in the "astra r2" block below
   });
 
@@ -331,7 +334,7 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
 describe("reviewer-bravo F3/F4: 'completed' and generic success words never green money data (full boot)", () => {
   it("a receipt bound to a completed JOB is not a green payment", async () => {
     const r = await renderedPill({ status: "completed" });
-    expect(r.cls).toContain("st-waiting");
+    expect(r.cls).toContain("st-unknown"); // R12 r2 D: the escrow service's report, no money tone
     expect(r.cls).not.toContain("st-settled");
     expect(r.rail).toContain("settlement not confirmed");
   });
@@ -364,7 +367,7 @@ describe("reviewer-bravo F3/F4: 'completed' and generic success words never gree
   it("a JOB list keeps generic tones for non-money rows (completed job = done)", async () => {
     const pills = await listPills("/api/jobs", [{ id: "j1", status: "completed" }, { id: "j2", status: "completed", amount: "5" }]);
     expect(pills[0]).toContain("st-ack"); // a completed job: neutral, never green
-    expect(pills[1]).toContain("st-waiting"); // a paid job row is money data
+    expect(pills[1]).toContain("st-unknown"); // a paid job row is money data: its flat word is a report, no money tone (R12 r2 D)
   });
 });
 
@@ -500,10 +503,11 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
     const LC = "/api/settlement/units/u1/lifecycle";
     const ok = await receiptOf(LC, lifecycle(8));
     expect(ok.cls).toContain("st-unknown"); // named by its ordinal, but a snapshot is never shown as final
-    expect(ok.text).toBe("reported status: SETTLED_RELEASED - settlement unconfirmed"); // nor named as one (astra r4 F6)
+    expect(ok.text).toBe("state not shown - not a live read of a settlement route"); // nor named as one (astra r4 F6)
     const six = await receiptOf(LC, lifecycle(6));
-    expect(six.cls).toContain("st-waiting");
-    expect(six.body).toContain("payout outstanding");
+    expect(six.cls).toContain("st-unknown"); // R12 r2 D: a non-final state needs the live pinned read too
+    expect(six.body).not.toContain("payout outstanding");
+    expect(six.body).not.toContain("RELEASE_ALLOCATED");
     const bad = await receiptOf(LC, { ...lifecycle(8), isAllocated: true });
     expect(bad.cls).toContain("st-unknown");
   });
@@ -520,7 +524,8 @@ describe("receipt and run windows (full boot): schema-aware, nothing invented", 
     const g = await runPill("/api/settlement/units/u1/lifecycle", lifecycle(8));
     expect(g.cls).toContain("st-unknown"); // a snapshot run is never shown as final
     const w = await runPill("/api/settlement/units/u1/lifecycle", lifecycle(7));
-    expect(w.cls).toContain("st-waiting");
+    expect(w.cls).toContain("st-unknown"); // R12 r2 D: nor is a non-final one
+    expect(w.text).toBe("state not shown - not a live read of a settlement route");
   });
 
   it("a run over escrow data with an off-schema success word is not green", async () => {
@@ -904,7 +909,7 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
     await flush();
     const gated = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
     expect(gated.className).toContain("st-unknown");
-    expect(gated.textContent).toBe("final state not shown - not a live read of a settlement route");
+    expect(gated.textContent).toBe("state not shown - not a live read of a settlement route");
     bootRead(run(LC_LIVE), (u) => (new URL(u).pathname === LC_LIVE ? LC8 : null)); // a LIVE read of the exact route
     await flush();
     const verified = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
@@ -916,7 +921,8 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
     bootRead(man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", statusFrom: "status" } }]),
       (u) => (new URL(u).pathname === "/api/escrow" ? [{ id: "e1", status: "funded" }, { id: "e2", status: "released" }] : null));
     await flush();
-    expect(pills()).toEqual(["funds held - not released", "released - not confirmed by a settlement read"]);
+    // R12 r2 D: the honest label is still a report of the bound record, attributed, in ANY state
+    expect(pills()).toEqual(["bound record reports: funds held - not released (not confirmed on chain)", "bound record reports: released - not confirmed by a settlement read (not confirmed on chain)"]);
   });
 
   it("F6 positive control: a VERIFIED final state (live read of the exact route) keeps its plain name", async () => {
@@ -1184,14 +1190,14 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
       (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "REFUNDED" } : null));
     await flush();
     // R12: a bare money word is a report, never a final tone (it was the flat table's st-refunded before).
-    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-waiting");
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).className).toContain("st-unknown"); // R12 r2 D: no money tone
     expect((document.querySelector(".pcc-run-latest") as HTMLElement).textContent).toBe("reported status: REFUNDED - settlement unconfirmed");
 
     bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
       (u) => (new URL(u).pathname === "/api/escrow/e1" ? { status: "REFUNDED", ...LEGACY, events: [{ type: "REFUNDED" }] } : null));
     await flush();
     // R12: the legacy record's REFUNDED is the escrow service's report, so it takes no final tone.
-    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-waiting");
+    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-unknown"); // R12 r2 D: no money tone
     expect(timelineRows()).toEqual(["reported status: REFUNDED - settlement unconfirmed"]);
   });
 
@@ -1397,5 +1403,297 @@ describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify be
     expect(feedLines()).toEqual(["PAID"]);
     await wait(60);
     expect(feedLines()).not.toContain("PAID");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// R12 round 2: ChatGPT runs 1-3 on #599 @aa0b8df6, the orchestrator's UNION A-E (implementer-alpha).
+// Shared LIVE boot: replies by call index; once the script is used up every request stays pending, so
+// no window keeps polling after its test.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+type R2Reply = { status: number; body?: unknown } | "reject";
+const R2_UNIT = "0x" + "ab".repeat(32);
+const R2_OTHER_UNIT = "0x" + "ef".repeat(32);
+const R2_LC = `/api/settlement/units/${R2_UNIT}/lifecycle`;
+const R2_RC = `/api/settlement/units/${R2_UNIT}/receipt`;
+const r2Man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
+function r2BootLive(manifest: string, script: R2Reply[]) {
+  assertKitTextBeforeBoot();
+  document.documentElement.removeAttribute("data-theme");
+  document.head.innerHTML = "";
+  document.body.innerHTML = "";
+  (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+  const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+  const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = manifest;
+  document.body.appendChild(mNode); // no #pcc-snapshot node: LIVE mode
+  let n = 0;
+  (window as unknown as { fetch: unknown }).fetch = () => {
+    const r = script[n++];
+    if (r === undefined) return new Promise(() => {});
+    if (r === "reject") return Promise.reject(new Error("network down"));
+    return Promise.resolve({ ok: r.status >= 200 && r.status < 300, status: r.status, headers: { get: () => null }, json: () => Promise.resolve(r.body ?? {}), text: () => Promise.resolve(JSON.stringify(r.body ?? {})) });
+  };
+  // eslint-disable-next-line no-eval
+  (0, eval)(kitSrc);
+  assertKitTextViolations();
+}
+const r2Wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const r2Ok = (body: unknown): R2Reply => ({ status: 200, body });
+const r2Without = (o: Record<string, unknown>, keys: readonly string[]) => { const c = { ...o }; for (const k of keys) delete c[k]; return c; };
+const r2Name = (n: number) => VNEXT_UNIT_STATES[n]!;
+/** A /lifecycle body for state n (the routes' own field semantics), pinned for R2_UNIT. */
+const r2Lifecycle = (n: number, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  unitState: n, phase: PHASE[n], finalState: n >= 8 ? r2Name(n) : null, isTerminal: n >= 8, isAllocated: n === 6 || n === 7, ...PIN_FIELDS, ...extra,
+});
+/** A /receipt body for state n (no unitState, no isTerminal; network echoes the chain), pinned for R2_UNIT. */
+const r2Receipt = (n: number, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  finalState: n >= 8 ? r2Name(n) : null, phase: PHASE[n], isAllocated: n === 6 || n === 7, network: { chainId: 84532 }, ...PIN_FIELDS, ...extra,
+});
+const R2_PIN_KEYS = ["chainId", "escrow", "unitId", "asOfBlock", "asOfBlockHash", "finality", "network"] as const;
+/** Every way a pin can fail: missing, malformed, another unit, another chain, not finalized. */
+const R2_BROKEN_PINS: Array<[string, (b: Record<string, unknown>) => Record<string, unknown>]> = [
+  ["missing", (b) => r2Without(b, R2_PIN_KEYS)],
+  ["malformed escrow", (b) => ({ ...b, escrow: "0xE" })],
+  ["malformed chainId (a string)", (b) => ({ ...b, chainId: "84532" })],
+  ["malformed asOfBlock (a number)", (b) => ({ ...b, asOfBlock: 12345678 })],
+  ["malformed asOfBlock (a leading zero)", (b) => ({ ...b, asOfBlock: "012345678" })],
+  ["malformed block hash", (b) => ({ ...b, asOfBlockHash: "0x12" })],
+  ["another unit", (b) => ({ ...b, unitId: R2_OTHER_UNIT })],
+  ["another chain (not in the network table)", (b) => ({ ...b, chainId: 1, network: { chainId: 1 } })],
+  ["another chain (network disagrees)", (b) => ({ ...b, network: { chainId: 8453 } })],
+  ["not finalized (safe)", (b) => ({ ...b, finality: "safe" })],
+  ["not finalized (latest)", (b) => ({ ...b, finality: "latest" })],
+  ["not finalized (missing)", (b) => r2Without(b, ["finality"])],
+];
+/** Live reads of the unit's own exact routes (a query such as ?asOf is fine). */
+const R2_LIVE_ROUTES: Array<{ path: string; live: true }> = [{ path: R2_LC, live: true }, { path: R2_RC, live: true }, { path: R2_LC + "?asOf=0x" + "cd".repeat(32), live: true }];
+/** Not a live read of the exact route: a snapshot, a stringly "live", another route, the provenance route, no source. */
+const R2_NOT_LIVE: unknown[] = [{ path: R2_LC, live: false }, { path: R2_RC, live: "true" }, { path: "/api/jobs/j1", live: true },
+  { path: `/api/settlement/units/${R2_UNIT}/provenance`, live: true }, { path: `/api/settlement/units/${R2_OTHER_UNIT}/lifecycle`, live: false }, null, undefined, {}];
+const R2_PENDING = { tone: "waiting", label: "pending - not confirmed at a finalized block" } as const;
+const R2_NOT_SHOWN = { tone: "unknown", label: "state not shown - not a live read of a settlement route" } as const;
+/** Every presentation a V-next state can take (the table, plus the /receipt-only decided and in-flight readings). */
+const R2_STATE_LABELS = [...Object.values(VNEXT_STATE_PRESENTATION).map((e) => e.label), "outcome decided - not yet paid out", "in progress - no outcome decided"];
+
+describe("R12 r2 D (run 2 F1 HIGH): EVERY chain-derived money state needs a live read with a valid pin, not only a final one", () => {
+  const kit = extractRegion();
+  const src = (s: unknown) => s as { path?: unknown; live?: unknown } | null | undefined;
+  /** The spec classifier and BOTH kit classifiers (settlementReadClass, dataStatusClass) agree, and equal `want`. */
+  function expectBoth(body: Record<string, unknown>, source: unknown, want: { tone: string; label: string | null }) {
+    const s = src(source);
+    const tag = JSON.stringify(body) + " @ " + JSON.stringify(source);
+    const spec = classifySettlementRead(body, s);
+    expect({ tone: spec.tone, label: spec.label }, tag).toEqual({ tone: want.tone, label: want.label });
+    const [cls, label] = kit.settlementReadClass(body, s?.path, s?.live);
+    expect([cls, label], tag).toEqual(["st-" + spec.tone, spec.label]);
+    // A V-next row goes through the same gate on every data surface (list rows, run pills).
+    expect(kit.dataStatusClass(s?.path, body, body.finalState, s?.live), tag).toBe("st-" + spec.tone);
+    // ...and its text never names a state the gate did not admit.
+    const text = kit.dataStatusText(s?.path, body, body.finalState, s?.live).t;
+    if (want.tone === "unknown" || want === R2_PENDING) {
+      expect(R2_STATE_LABELS, tag).not.toContain(text);
+      expect([...VNEXT_UNIT_STATES], tag).not.toContain(text);
+      if (kit.isMoneyData(s?.path, body)) expect(text, tag).toBe(want.label);
+    }
+  }
+
+  it("unitState 1..9 x every broken pin x every source, from /lifecycle, /receipt and /receipt+unitState: the spec and the kit agree on the whole matrix", () => {
+    let cases = 0;
+    for (let n = 1; n <= 9; n++) {
+      for (const shape of [r2Lifecycle(n), r2Receipt(n), r2Receipt(n, { unitState: n })]) {
+        const own = classifySettlementRecord(shape);
+        expect(own.known, JSON.stringify(shape)).toBe(true); // a consistent record: only the gate decides
+        // a live read of the exact route WITH a valid pin: the state itself, final or not
+        for (const s of R2_LIVE_ROUTES) { expectBoth(shape, s, { tone: own.tone, label: own.label }); cases++; }
+        // a live read of the exact route with a missing, malformed, other-unit, other-chain or unfinalized pin: pending
+        for (const [, broken] of R2_BROKEN_PINS) for (const s of R2_LIVE_ROUTES) { expectBoth(broken(shape), s, R2_PENDING); cases++; }
+        // not a live read of the exact route (snapshot-only, another route, no source): unknown, pinned or not
+        for (const body of [shape, ...R2_BROKEN_PINS.map(([, broken]) => broken(shape))]) for (const s of R2_NOT_LIVE) { expectBoth(body, s, R2_NOT_SHOWN); cases++; }
+      }
+    }
+    expect(cases).toBe(9 * 3 * (3 + 12 * 3 + 13 * 8));
+  });
+
+  it("states 1..7 are gated exactly like 8 and 9: no non-final presentation without the pin (the reviewer's class, by state)", () => {
+    for (let n = 1; n <= 7; n++) {
+      const label = classifySettlementRecord(r2Lifecycle(n)).label!;
+      for (const [name, broken] of R2_BROKEN_PINS) {
+        const live = classifySettlementRead(broken(r2Lifecycle(n)), { path: R2_LC, live: true });
+        expect(live.label, n + " " + name).not.toBe(label);
+        expect(live.tone, n + " " + name).toBe("waiting");
+      }
+      const snap = classifySettlementRead(r2Lifecycle(n), { path: R2_LC, live: false }); // snapshot-only, even with a valid pin
+      expect(snap.label, n + " snapshot").toBe(R2_NOT_SHOWN.label);
+    }
+  });
+
+  it("run 2's exact body {unitState:1, finalState:null, isAllocated:false, phase:\"active\"} never shows 'active - funds committed, no outcome yet'", () => {
+    const body = { unitState: 1, finalState: null, isAllocated: false, phase: "active" };
+    expect(classifySettlementRecord(body).label).toBe("active - funds committed, no outcome yet"); // its FIELDS are consistent...
+    for (const s of R2_LIVE_ROUTES) expectBoth(body, s, R2_PENDING); // ...but it carries no chain reference: pending
+    for (const s of R2_NOT_LIVE) expectBoth(body, s, R2_NOT_SHOWN);
+  });
+
+  it("run 2's exact body, rendered (run, receipt and list windows, live; and a snapshot): pending or not shown, never the state", async () => {
+    const body = { unitState: 1, finalState: null, isAllocated: false, phase: "active" };
+    const docText = () => document.body.textContent || "";
+    r2BootLive(r2Man([{ kind: "run", binding: { path: R2_LC }, statusFrom: "finalState" }]), [r2Ok(body)]);
+    await flush();
+    const runPill = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+    expect(runPill.className).toContain("st-waiting");
+    expect(runPill.textContent).toBe("pending - not confirmed at a finalized block");
+    expect(docText()).not.toContain("funds committed");
+    r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_LC } }]), [r2Ok(body)]);
+    await flush();
+    const rcPill = document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+    expect(rcPill.className).toContain("st-waiting");
+    expect(rcPill.textContent).toBe("pending - not confirmed at a finalized block");
+    expect(docText()).not.toContain("funds committed");
+    expect(docText()).not.toContain("FUNDED_ACTIVE");
+    r2BootLive(r2Man([{ kind: "list", binding: { path: "/api/settlement/units" }, item: { title: "phase", statusFrom: "unitState" } }]), [r2Ok([{ ...body, ...PIN_FIELDS }])]);
+    await flush();
+    const rowPill = document.querySelector(".pcc-list-row .pcc-pill") as HTMLElement;
+    expect(rowPill.className).toContain("st-unknown"); // a row is never a live read of its own route, pinned or not
+    expect(rowPill.textContent).toBe("state not shown - not a live read of a settlement route");
+    boot({}, r2Man([{ kind: "run", binding: { path: R2_LC }, statusFrom: "finalState" }]), { _ts: "2026-09-24T00:00:00Z", [R2_LC]: { ...body, ...PIN_FIELDS } });
+    await flush();
+    expect((document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement).textContent).toBe("state not shown - not a live read of a settlement route");
+    expect(docText()).not.toContain("funds committed");
+  });
+
+  it("DOM property: for every state 1..9, no window shows a state, its label or a money tone without THIS read's pin; once pinned, the same windows do", async () => {
+    const docText = () => document.body.textContent || "";
+    const pills = () => Array.from(document.querySelectorAll(".pcc-pill")).map((p) => [(p as HTMLElement).className, (p.textContent || "").trim()] as const);
+    const MONEY_TONE = /st-(settled|refunded|running|failed)/;
+    for (let n = 1; n <= 9; n++) {
+      const label = classifySettlementRecord(r2Lifecycle(n)).label!;
+      const tone = classifySettlementRecord(r2Lifecycle(n)).tone;
+      for (const [name, broken] of [["no pin", (b: Record<string, unknown>) => r2Without(b, R2_PIN_KEYS)], ["not finalized", (b: Record<string, unknown>) => ({ ...b, finality: "safe" })]] as const) {
+        for (const [manifest, body] of [
+          [r2Man([{ kind: "run", binding: { path: R2_LC }, statusFrom: "finalState" }]), broken(r2Lifecycle(n))],
+          [r2Man([{ kind: "receipt", binding: { path: R2_LC } }]), broken(r2Lifecycle(n))],
+          [r2Man([{ kind: "receipt", binding: { path: R2_RC } }]), broken(r2Receipt(n))],
+        ] as const) {
+          r2BootLive(manifest, [r2Ok(body)]);
+          await flush();
+          const tag = n + " " + name + " " + manifest;
+          expect(docText(), tag).not.toContain(label);
+          for (const [cls, text] of pills()) {
+            expect(cls, tag).not.toMatch(MONEY_TONE);
+            if (cls.includes("st-waiting")) expect(text, tag).toBe("pending - not confirmed at a finalized block");
+            expect([...VNEXT_UNIT_STATES], tag).not.toContain(text);
+          }
+          expect(document.querySelector(".pcc-pin-ref"), tag).toBeNull();
+        }
+      }
+      // positive control: the same live read, pinned, shows the state's own tone and label
+      r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_LC } }]), [r2Ok(r2Lifecycle(n))]);
+      await flush();
+      expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className, "pinned " + n).toContain("st-" + tone);
+      expect(docText(), "pinned " + n).toContain(label);
+      expect(document.querySelector(".pcc-pin-ref"), "pinned " + n).not.toBeNull();
+    }
+  });
+
+  it("a legacy escrow record's word, in ANY state, is the escrow service's report: attributed, no money tone (spec == kit, every flat word x source)", () => {
+    const sources: unknown[] = [{ path: "/api/escrow/e1", live: true }, { path: "/api/escrow/e1", live: false }, { path: R2_RC, live: true }, null];
+    for (const k of Object.keys(MONEY_STATUS_MAP)) {
+      for (const rec of [{ status: k, contractAddress: "0x1" }, { status: k.toLowerCase(), totalAmount: "5" }, { status: k, milestones: [] }]) {
+        for (const s of sources) {
+          const tag = JSON.stringify(rec) + " @ " + JSON.stringify(s);
+          const spec = classifySettlementRead(rec, src(s));
+          expect(spec.tone, tag).toBe("unknown");
+          expect(spec.label, tag).toBe(ESCROW_SERVICE_REPORTS + MONEY_STATUS_MAP[k]!.label + NOT_CONFIRMED_ON_CHAIN);
+          expect(kit.settlementReadClass(rec, src(s)?.path, src(s)?.live), tag).toEqual(["st-unknown", spec.label, rec.status]);
+        }
+      }
+    }
+    // an unknown legacy word stays unknown, with no label to attribute (the receipt pill attributes the raw word)
+    for (const w of ["underfunded", "success", "RELEASED?", ""]) {
+      const rec = { status: w, contractAddress: "0x1" };
+      expect(classifySettlementRead(rec, { path: "/api/escrow/e1", live: true })).toMatchObject({ tone: "unknown", label: null });
+      expect(kit.settlementReadClass(rec, "/api/escrow/e1", true).slice(0, 2)).toEqual(["st-unknown", null]);
+    }
+  });
+
+  it("a flat money word on ANY data surface takes no money tone and is attributed to its source (list rows, run pills, non-money reads)", () => {
+    for (const k of Object.keys(MONEY_STATUS_MAP)) {
+      const label = MONEY_STATUS_MAP[k]!.label;
+      // money data: a legacy-shaped row is the escrow service's report, any other row the bound record's
+      expect(kit.dataStatusClass("/api/escrow", { id: "e1", status: k }, k, true), k).toBe("st-unknown");
+      expect(kit.dataStatusText("/api/escrow", { id: "e1", status: k }, k, true).t, k).toBe("bound record reports: " + label + NOT_CONFIRMED_ON_CHAIN);
+      expect(kit.dataStatusText("/api/escrow", { id: "e1", status: k, contractAddress: "0x1" }, k, false).t, k).toBe(ESCROW_SERVICE_REPORTS + label + NOT_CONFIRMED_ON_CHAIN);
+      expect(kit.dataStatusClass("/api/jobs", { status: k, amount: "5" }, k, true), k).toBe("st-unknown");
+      // a NON-money read: the generic states only, so a money word is neutral, and its text is qualified
+      if (!Object.prototype.hasOwnProperty.call(kit.GENERIC_STATES, k)) {
+        expect(kit.statusClass(k), k).toBe("st-unknown");
+        expect(kit.dataStatusClass("/api/jobs", { status: k }, k, true), k).toBe("st-unknown");
+      }
+    }
+    // the generic job states keep their (non-money) tones on a non-money read
+    expect(kit.dataStatusClass("/api/jobs", { status: "running" }, "running", true)).toBe("st-running");
+    expect(kit.dataStatusClass("/api/jobs", { status: "failed" }, "failed", true)).toBe("st-failed");
+    expect(kit.dataStatusClass("/api/jobs", { status: "done" }, "done", true)).toBe("st-ack");
+  });
+
+  it("legacy and flat words, rendered: receipt, list and run windows show them attributed in a neutral pill, in ANY state", async () => {
+    for (const k of ["FUNDED", "LOCKED", "DISPUTED", "PENDING", "CREATED", "ACTIVE", "RELEASING", "MILESTONE_MET", "EXPIRED", "SLASHED"]) {
+      const label = MONEY_STATUS_MAP[k]!.label;
+      r2BootLive(r2Man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]), [r2Ok({ id: "e1", status: k, contractAddress: "0x" + "11".repeat(20), totalAmount: "5" })]);
+      await flush();
+      const pill = document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+      expect(pill.className, k).toContain("st-unknown");
+      expect(pill.textContent, k).toBe("PCC escrow service reports: " + k);
+      expect(document.querySelector(".pcc-receipt-rail")!.textContent, k).toContain(ESCROW_SERVICE_REPORTS + label + NOT_CONFIRMED_ON_CHAIN);
+      r2BootLive(r2Man([{ kind: "list", binding: { path: "/api/escrow" }, item: { title: "id", statusFrom: "status" } }]), [r2Ok([{ id: "e1", status: k }])]);
+      await flush();
+      const row = document.querySelector(".pcc-list-row .pcc-pill") as HTMLElement;
+      expect(row.className, k).toContain("st-unknown");
+      expect(row.textContent, k).toBe("bound record reports: " + label + NOT_CONFIRMED_ON_CHAIN);
+      r2BootLive(r2Man([{ kind: "run", binding: { path: "/api/escrow/e1" }, statusFrom: "status" }]), [r2Ok({ status: k })]);
+      await flush();
+      const run = document.querySelector(".pcc-win-head .pcc-pill") as HTMLElement;
+      expect(run.className, k).toContain("st-unknown");
+      expect(run.textContent, k).toBe("bound record reports: " + label + NOT_CONFIRMED_ON_CHAIN);
+    }
+    // a money word on a NON-money read (a job): neutral pill, qualified text
+    r2BootLive(r2Man([{ kind: "list", binding: { path: "/api/jobs" }, item: { title: "id", statusFrom: "status" } }]),
+      [r2Ok([{ id: "j1", status: "refunded" }, { id: "j2", status: "funded" }, { id: "j3", status: "locked" }, { id: "j4", status: "running" }])]);
+    await flush();
+    const rows = Array.from(document.querySelectorAll(".pcc-list-row .pcc-pill")).map((p) => [(p as HTMLElement).className, p.textContent]);
+    expect(rows).toEqual([
+      ["pcc-pill st-unknown", "reported status: refunded - status unverified"],
+      ["pcc-pill st-unknown", "reported status: funded - status unverified"],
+      ["pcc-pill st-unknown", "reported status: locked - status unverified"],
+      ["pcc-pill st-running", "running"],
+    ]);
+  });
+});
+
+describe("R12 r2 D (the same class, receipt sinks): a pinned read whose fields disagree states no money fact", () => {
+  const ECON = { amount: "1000000", feeAmount: "23500", recipient: "0x" + "34".repeat(20), token: "0x" + "56".repeat(20), assuranceTier: 1 };
+  it("a pinned live body with an inconsistent state: the pill refuses, the amount and the payee are not shown as facts", async () => {
+    for (const bad of [r2Lifecycle(8, { isAllocated: true, economics: ECON }), r2Receipt(8, { phase: "allocated", economics: ECON }), r2Lifecycle(8, { unitState: 0, economics: ECON })]) {
+      r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_RC } }]), [r2Ok(bad)]);
+      await flush();
+      const pill = document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement;
+      const tag = JSON.stringify(bad);
+      expect(pill.className, tag).toContain("st-unknown");
+      const body = document.querySelector(".pcc-win-body")!.textContent!;
+      expect(body, tag).toContain("amount not shown - the settlement record is not readable");
+      expect(body, tag).toContain("payee not shown");
+      expect(body, tag).not.toContain("1000000 base units");
+      expect(body, tag).not.toContain(ECON.recipient);
+      // the read itself is still referenced, so the reader can check what the chain says
+      expect(document.querySelector(".pcc-pin-ref"), tag).not.toBeNull();
+    }
+  });
+  it("positive control: the same body, consistent, shows its amount and payee as facts with the reference", async () => {
+    r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_RC } }]), [r2Ok(r2Receipt(8, { economics: ECON }))]);
+    await flush();
+    const body = document.querySelector(".pcc-win-body")!.textContent!;
+    expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className).toContain("st-settled");
+    expect(body).toContain("1000000 base units (decimals not reported)");
+    expect(body).toContain(ECON.recipient);
   });
 });

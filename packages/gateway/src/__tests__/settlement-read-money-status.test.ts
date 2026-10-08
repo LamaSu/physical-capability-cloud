@@ -28,20 +28,22 @@ const SNAP_HASH = "0x" + "cd".repeat(32);
 const ESCROW = "0x" + "e5".repeat(20);
 const UNIT = "0x" + "ab".repeat(32);
 
-function kitClassifier(): (r: unknown) => [string, string | null, string] {
+type KitClass = [string, string | null, string];
+function kitClassifiers(): { record: (r: unknown) => KitClass; read: (r: unknown, path: unknown, live: unknown) => KitClass } {
   const m = kitSrc.match(/\/\/ <status-map v2>[^\n]*\n([\s\S]*?)\/\/ <\/status-map v2>/);
   if (!m) throw new Error("<status-map v2> markers not found in pcc-ui.js");
   const ctx: Record<string, unknown> = {};
-  vm.runInNewContext(m[1] + "\nthis.settlementRecordClass = settlementRecordClass;", ctx);
-  return ctx.settlementRecordClass as (r: unknown) => [string, string | null, string];
+  vm.runInNewContext(m[1] + "\nthis.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass;", ctx);
+  return { record: ctx.settlementRecordClass as (r: unknown) => KitClass, read: ctx.settlementReadClass as (r: unknown, path: unknown, live: unknown) => KitClass };
 }
-const kit = kitClassifier();
+const kitFns = kitClassifiers();
+const kit = kitFns.record;
 
-function reader(state: UnitState): SettlementUnitReader {
+function reader(state: UnitState, binding: { chainId: number; escrow: string } = { chainId: 84532, escrow: ESCROW }): SettlementUnitReader {
   // A consistent same-block read: terminal -> no claims left; allocated -> one claim outstanding.
   const remainingClaimCount = state >= UnitState.SETTLED_RELEASED ? 0n : state >= UnitState.RELEASE_ALLOCATED ? 1n : undefined;
   return {
-    binding: () => ({ chainId: 84532, escrow: ESCROW }),
+    binding: () => binding,
     windows: () => ({ challengeWindow: 3600n, appealWindow: 7200n }),
     pinSnapshot: async () => ({ asOfBlock: 100n, asOfBlockHash: SNAP_HASH, finality: "finalized" as const, logCompleteness: "complete" as const }),
     readAnchors: async () => ({ state, remainingClaimCount }),
@@ -53,8 +55,8 @@ function reader(state: UnitState): SettlementUnitReader {
     readOwnerTenant: async () => null,
   };
 }
-async function bodies(state: UnitState): Promise<{ lifecycle: Record<string, unknown>; receipt: Record<string, unknown> }> {
-  setSettlementUnitReader(reader(state));
+async function bodies(state: UnitState, binding?: { chainId: number; escrow: string }): Promise<{ lifecycle: Record<string, unknown>; receipt: Record<string, unknown> }> {
+  setSettlementUnitReader(reader(state, binding));
   const app: FastifyInstance = Fastify();
   app.addHook("onRequest", async (req) => { (req as unknown as { tenantId: string | null }).tenantId = "tenant-a"; });
   await app.register(settlementReadRoutes);
@@ -125,8 +127,9 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
         if (final) expect(classifySettlementRead({ ...(body as object), escrow: "0xEsCrOw" }, { path, live: true }).tone, `${leaf} ${s} bad pin`).toBe("waiting");
         const offline = classifySettlementRead(body, { path, live: false });
         const elsewhere = classifySettlementRead(body, { path: "/api/jobs/j1", live: true });
-        expect(offline.tone, `${leaf} ${s} snapshot`).toBe(final ? "unknown" : live.tone);
-        expect(elsewhere.tone, `${leaf} ${s} other route`).toBe(final ? "unknown" : live.tone);
+        // R12 r2 D: not only a final state -- NO state is shown without a live read of the unit's own route.
+        expect(offline.tone, `${leaf} ${s} snapshot`).toBe("unknown");
+        expect(elsewhere.tone, `${leaf} ${s} other route`).toBe("unknown");
       }
     }
   });
@@ -153,5 +156,45 @@ describe("#313 classifies the settlement routes' REAL bodies (spec and shipped k
     const six = await bodies(UnitState.RELEASE_ALLOCATED);
     expect(both({ ...six.receipt, finalState: "SETTLED_RELEASED" }).tone).toBe("unknown");
     expect(both({ ...six.lifecycle, isAllocated: false }).tone).toBe("unknown");
+  });
+
+  // R12 r2 D (ChatGPT run 2 F1 HIGH on #599 @aa0b8df6): EVERY chain-derived state needs the live pin, not
+  // only 8 and 9. The bodies below come from the routes themselves; each broken pin is the real producer's
+  // own output where it can produce one (a placeholder escrow, a chain outside the network table, a read
+  // classified under another unit's route), and a hand edit of a real body where the route refuses to (it
+  // never answers 200 for a non-finalized head; a missing pin models a non-conforming producer).
+  it("R12 r2 D: every state 1..9 of the REAL bodies, from both routes, shows only from a live read of its own route with a valid pin (spec == kit)", async () => {
+    const OTHER_UNIT = "0x" + "ef".repeat(32);
+    const PIN_KEYS = ["chainId", "escrow", "unitId", "asOfBlock", "asOfBlockHash", "finality", "network"];
+    const strip = (o: Record<string, unknown>) => { const c = { ...o }; for (const k of PIN_KEYS) delete c[k]; return c; };
+    const agree = (body: unknown, path: string, live: unknown, want: { tone: string; label: string | null }, tag: string) => {
+      const spec = classifySettlementRead(body, { path, live });
+      expect({ tone: spec.tone, label: spec.label }, tag).toEqual(want);
+      const [cls, label] = kitFns.read(body, path, live);
+      expect([cls, label], tag).toEqual(["st-" + spec.tone, spec.label]);
+    };
+    const PENDING = { tone: "waiting", label: "pending - not confirmed at a finalized block" };
+    const NOT_SHOWN = { tone: "unknown", label: "state not shown - not a live read of a settlement route" };
+    for (const s of [1, 2, 3, 4, 5, 6, 7, 8, 9] as UnitState[]) {
+      const real = await bodies(s);
+      const placeholder = await bodies(s, { chainId: 84532, escrow: "0xEsCrOw" }); // the routes' own test fixture escrow
+      const otherChain = await bodies(s, { chainId: 1, escrow: ESCROW }); // Ethereum mainnet: not a settlement network
+      for (const leaf of ["lifecycle", "receipt"] as const) {
+        const path = `/api/settlement/units/${UNIT}/${leaf}`;
+        const own = classifySettlementRecord(real[leaf]);
+        expect(own.known, `${leaf} ${s}`).toBe(true);
+        agree(real[leaf], path, true, { tone: own.tone, label: own.label }, `${leaf} ${s} pinned live`);
+        for (const [name, body, p] of [
+          ["placeholder escrow", placeholder[leaf], path], ["chain 1", otherChain[leaf], path],
+          ["another unit's route", real[leaf], `/api/settlement/units/${OTHER_UNIT}/${leaf}`],
+          ["no pin", strip(real[leaf]), path], ["safe head", { ...real[leaf], finality: "safe" }, path],
+        ] as Array<[string, Record<string, unknown>, string]>) {
+          agree(body, p, true, PENDING, `${leaf} ${s} ${name}`);
+        }
+        for (const [name, p, live] of [["snapshot", path, false], ["a job route", "/api/jobs/j1", true], ["provenance", `/api/settlement/units/${UNIT}/provenance`, true]] as Array<[string, string, unknown]>) {
+          agree(real[leaf], p, live, NOT_SHOWN, `${leaf} ${s} ${name}`);
+        }
+      }
+    }
   });
 });

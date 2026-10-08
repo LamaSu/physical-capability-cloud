@@ -690,12 +690,13 @@
     ERROR: 'st-failed', FAILED: 'st-failed', DENIED: 'st-failed', CANCELLED: 'st-failed', CANCELED: 'st-failed', REJECTED: 'st-failed',
     DONE: 'st-ack', COMPLETE: 'st-ack', COMPLETED: 'st-ack', OK: 'st-ack', SUCCESS: 'st-ack', SUCCEEDED: 'st-ack', RESOLVED: 'st-ack', READY: 'st-ack'
   });
-  // NON-money data only (a job, a kernel): generic run/action states first, then the flat money
-  // table (which has no green). Callers route money data away from here (dataStatusClass).
+  // NON-money data only (a job, a kernel): the generic run/action states, and nothing else. A money word
+  // on such a record ("refunded", "funded", "locked") is a report, not a money state, so it takes NO money
+  // tone (R12 r2 D): it is neutral, like every other unmapped word. Callers route money data away from
+  // here (dataStatusClass).
   function statusClass(s) {
     var k = normStatus(s);
     if (k !== '' && Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return GENERIC_STATES[k];
-    if (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return MONEY_STATUS[k][0];
     return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
   }
   // A BARE money word: the flat table only (never green). A generic success word ("done",
@@ -786,33 +787,43 @@
     }
     return false;
   }
-  // The only routes whose LIVE reads may present a FINAL settlement state (mirrors the spec's
+  // The only routes whose LIVE reads may present a settlement state, final or not (mirrors the spec's
   // SETTLEMENT_READ_ROUTE; the unit id is the route's own UNIT_ID_RE).
   var SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
   // DISPLAY class of a settlement record given where it came from -> [pillClass, label, text]. Mirrors
-  // classifySettlementRead: a FINAL V-next state (settled 8, refunded 9) needs a LIVE read of an exact
-  // per-unit settlement route. Field shape is not provenance (astra r2 on #313, F1): a baked snapshot,
-  // a fallback, a stream event or a settled-shaped body from any other route is unknown.
-  // R12 (operator 10/06): a final tone needs a LIVE read of the unit's own settlement route whose body
-  // carries a valid pin (chainPin); a live read without one is pending, and a legacy escrow record's
-  // word is the escrow service's report, never a final tone. Mirrors classifySettlementRead.
+  // classifySettlementRead (the conformance test compares them over records x pins x sources). Field shape
+  // is not provenance (astra r2 on #313, F1).
+  //  - R12, and R12 r2 D: a V-next record shows ANY chain-derived state (1-7 as much as 8 and 9) only from
+  //    a LIVE read of the unit's own settlement route whose body carries a valid pin (chainPin). A live read
+  //    of that route without one is pending; a baked snapshot, a fallback, a stream event, a projection or
+  //    another route is unknown.
+  //  - R12 rule 4 (r2 D, the same class): a legacy escrow record's word, in ANY state, is the escrow
+  //    service's report: attributed, and no money tone (st-unknown).
+  var ESCROW_SERVICE_REPORTS = 'PCC escrow service reports: ';
+  var BOUND_RECORD_REPORTS = 'bound record reports: ';
+  var NOT_CONFIRMED_ON_CHAIN = ' (not confirmed on chain)';
   function isLegacyEscrowRecord(o) {
     return !!o && typeof o === 'object' && !Array.isArray(o) && typeof o.status === 'string' && (ownKey(o, 'contractAddress') || ownKey(o, 'escrowAddress') || Array.isArray(o.milestones) || ownKey(o, 'cwmId') || ownKey(o, 'totalAmount'));
   }
   function settlementReadClass(o, bindingPath, live) {
     var rc = settlementRecordClass(o);
-    if (rc[0] !== 'st-settled' && rc[0] !== 'st-refunded') return rc;
-    if (!isVNextRecord(o)) return ['st-waiting', 'PCC escrow service reports: ' + (rc[1] || rc[2]) + ' (not confirmed on chain)', rc[2]];
+    if (!isVNextRecord(o)) {
+      // settlementRecordClass labels no word outside a legacy escrow record, so a label here is exactly
+      // "a legacy record with a flat-table word".
+      return rc[1] !== null && isLegacyEscrowRecord(o) ? ['st-unknown', ESCROW_SERVICE_REPORTS + rc[1] + NOT_CONFIRMED_ON_CHAIN, rc[2]] : rc;
+    }
     var p = typeof bindingPath === 'string' ? bindingPath.split('?')[0] : '';
-    if (!(live === true && SETTLEMENT_READ_ROUTE.test(p))) return ['st-unknown', 'final state not shown - not a live read of a settlement route', rc[2]];
+    if (!(live === true && SETTLEMENT_READ_ROUTE.test(p))) return ['st-unknown', 'state not shown - not a live read of a settlement route', rc[2]];
     if (chainPin(o, p) === null) return ['st-waiting', 'pending - not confirmed at a finalized block', rc[2]];
     return rc;
   }
+  // The pill class of a DATA surface (list rows, run status). A V-next read model goes through the display
+  // classifier above (schema AND source AND pin); any other money data is a flat word, which is a report and
+  // never a money tone (R12 r2 D); non-money data takes the generic states only.
   function dataStatusClass(bindingPath, row, s, live) {
     if (!isMoneyData(bindingPath, row)) return statusClass(s);
-    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0]; // a read model: schema AND source
-    var c = moneyStatusClass(s); // a bare money word is a report, never a final tone (R12)
-    return c === 'st-settled' || c === 'st-refunded' ? 'st-waiting' : c;
+    if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0];
+    return 'st-unknown';
   }
   // The pin of a settlement read (R12), or null; mirrors the spec's chainPin (the conformance test
   // compares them). A pin is registered in PINS, so only chainPin can hand one to chainFactText.
@@ -881,16 +892,22 @@
     if (verified || t === '') return mintText(t);
     return mintText('reported: ' + t + (money ? UNCONFIRMED_SUFFIX : ''));
   }
-  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
-  // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
-  // its plain name. Anything else is the value itself, qualified when it claims money moved.
+  // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass.
+  //  - A V-next read model: a PINNED final state keeps its plain name and a pinned non-final state its honest
+  //    label; anything else is the classifier's refusal (pending, not shown, fields disagree), never a state.
+  //  - Any other money data: a flat-table word is a report (R12 rule 4; r2 D): attributed to its source --
+  //    the PCC escrow service for a legacy escrow record, else the bound record -- in ANY state. Any other
+  //    word takes the closed money vocabulary.
+  //  - Non-money data: the closed status vocabulary.
   function dataStatusText(bindingPath, row, s, live) {
     if (isMoneyData(bindingPath, row)) {
-      var vnext = isVNextRecord(row);
-      var rc = vnext ? settlementReadClass(row, bindingPath, live) : [moneyStatusClass(s), settlementLabel(s), s];
-      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return mintText(String(rc[2]));
-      if (!vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return statusPillText(s, false, true); // R12: a report, not a chain read
-      if (rc[1]) return mintText(rc[1]);
+      if (isVNextRecord(row)) {
+        var rc = settlementReadClass(row, bindingPath, live);
+        if (rc[0] === 'st-settled' || rc[0] === 'st-refunded') return mintText(String(rc[2]));
+        return rc[1] ? mintText(rc[1]) : statusPillText(s, false, true);
+      }
+      var label = settlementLabel(s);
+      if (label !== null) return mintText((isLegacyEscrowRecord(row) ? ESCROW_SERVICE_REPORTS : BOUND_RECORD_REPORTS) + label + NOT_CONFIRMED_ON_CHAIN);
       return statusPillText(s, false, true);
     }
     return statusPillText(s, false, false);
@@ -2063,17 +2080,23 @@
       var liveRead = !r.stale && ctx.mode !== 'snapshot' && recTopLevel;
       var vnext = isVNextRecord(e);
       var legacy = !vnext && isLegacyEscrowRecord(e);
-      // R12: a money FACT (the amount, the payee, a final tone) comes only from a live, pinned, finalized
-      // read of this unit's own settlement route; anything else money-shaped is attributed.
+      // R12: a money FACT (the amount, the payee, a state) comes only from a live, pinned, finalized read of
+      // this unit's own settlement route; anything else money-shaped is attributed.
       var pin = vnext && liveRead ? chainPin(e, bpath) : null;
+      // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record, or "not a
+      // settlement record"), never by a bare status word. Never inferred from a count or from the receipt's
+      // existence (contract rule 12). R12 r2 D: a V-next state, final or not, shows only with THIS read's pin,
+      // and only a readable record's facts are facts: statePin is the pin of a pinned read whose fields agree.
+      var rec = settlementReadClass(e, bpath, liveRead);
+      var statePin = vnext && pin !== null && rec[0] !== 'st-unknown' ? pin : null;
       if (legacy) wrap._body.appendChild(el('p', 'pcc-muted pcc-receipt-source', kitText('Reported by the PCC escrow service - not a chain read.')));
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
       var amtRow = el('div', 'pcc-receipt-amount pcc-tnum');
       if (vnext) {
         // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
         if (econ.amount == null) amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
-        else if (pin) amtRow.appendChild(moneyFactEl('span', 'pcc-receipt-num', chainFactText(baseUnitsText(econ.amount, econ.tokenDecimals), pin)));
-        else amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount pending - not confirmed at a finalized block')));
+        else if (statePin) amtRow.appendChild(moneyFactEl('span', 'pcc-receipt-num', chainFactText(baseUnitsText(econ.amount, econ.tokenDecimals), statePin)));
+        else amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', pin ? kitText('amount not shown - the settlement record is not readable') : kitText('amount pending - not confirmed at a finalized block')));
       } else {
         var amount = e.totalAmount != null ? e.totalAmount : e.amount;
         if (amount != null && amount !== '') {
@@ -2092,28 +2115,27 @@
       if (vnext) {
         // The payee is a money fact: economics.recipient from the same pinned response (contract rule 16).
         if (econ.recipient == null) pay.appendChild(el('span', 'pcc-mono pcc-muted', kitText('payee not reported')));
-        else if (pin && typeof econ.recipient === 'string' && PLAIN_HEX_RE.test(econ.recipient)) pay.appendChild(moneyFactEl('span', 'pcc-mono', chainFactText(hexText(econ.recipient), pin)));
-        else if (pin) pay.appendChild(el('span', 'pcc-mono pcc-muted', hexText(econ.recipient)));
-        else pay.appendChild(el('span', 'pcc-mono pcc-muted', kitText('payee pending')));
+        else if (statePin && typeof econ.recipient === 'string' && PLAIN_HEX_RE.test(econ.recipient)) pay.appendChild(moneyFactEl('span', 'pcc-mono', chainFactText(hexText(econ.recipient), statePin)));
+        else if (statePin) pay.appendChild(el('span', 'pcc-mono pcc-muted', hexText(econ.recipient)));
+        else pay.appendChild(el('span', 'pcc-mono pcc-muted', pin ? kitText('payee not shown') : kitText('payee pending')));
       } else {
         var payee = e.payee || e.provider;
         pay.appendChild(el('span', 'pcc-mono', payee ? partyText(payee) : kitText('payee not reported')));
       }
       wrap._body.appendChild(pay);
-      // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
-      // or "not a settlement record"), never by a bare status word. Never inferred from a count or
-      // from the receipt's existence (contract rule 12).
-      var rec = settlementReadClass(e, bpath, liveRead);
       var railRow = el('div', 'pcc-receipt-rail');
-      // A final tone exists only with a pin (settlementReadClass), and its pill is a money fact. The pill
-      // text may not claim more than the class (F6); "no settlement state" is PCC's own text.
-      var recVerified = vnext && pin !== null && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
-      var payeePaid = recVerified && rec[0] === 'st-settled'; // secondary text: payee payment only
-      if (recVerified) railRow.appendChild(moneyFactEl('span', 'pcc-pill ' + rec[0], chainFactText(statusPillText(rec[2], true, true), pin)));
+      // With statePin the pill and its caption are money facts. Without it the pill is the classifier's
+      // refusal (pending, not shown, fields disagree) and names no state. A legacy word is attributed to the
+      // escrow service; anything else is neutral. The pill text may not claim more than the class (F6); "no
+      // settlement state" is PCC's own text.
+      var payeePaid = statePin !== null && rec[0] === 'st-settled'; // secondary text: payee payment only
+      if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-pill ' + rec[0], chainFactText(statusPillText(rec[2], true, true), statePin)));
+      else if (vnext) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], settlementCaptionText(e, bpath, liveRead)));
       else if (legacy) railRow.appendChild(el('span', 'pcc-pill ' + rec[0], joinText(kitText('PCC escrow service reports: '), idText(e.status))));
-      else railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], !vnext && e.status == null, true)));
+      else railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], e.status == null, true)));
       if (pin) { var badge = assetBadgeText(e.assetReality); if (badge) railRow.appendChild(el('span', 'pcc-pill st-unknown pcc-asset-badge', badge)); }
-      if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead))));
+      if (statePin) railRow.appendChild(moneyFactEl('span', 'pcc-muted pcc-settle-label', chainFactText(joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead)), statePin)));
+      else if (!vnext && rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, bpath, liveRead))));
       if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), idText(e.rail))));
       wrap._body.appendChild(railRow);
       if (pin) {
