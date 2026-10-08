@@ -854,6 +854,24 @@
     PINS.add(pin);
     return pin;
   }
+  // R12 r2 C: the asset classification, CLOSED, mirroring the spec's assetRealityClass (the conformance test
+  // compares them). 'real' or 'test' only for the route's own registry envelope -- exactly its five own keys,
+  // source "registry", a contract address or registry id, a non-negative safe-integer revision, attests
+  // "identity-not-liveness". Anything else, a bare or forged "real" included, is 'unknown'.
+  var ASSET_REALITY_ENVELOPE_KEYS = Object.freeze(['value', 'source', 'contractOrRegistryId', 'revision', 'attests']);
+  var ASSET_REGISTRY_ID_RE = /^(?:0x[0-9a-fA-F]{40}|[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/;
+  function assetRealityClass(ar) {
+    if (!ar || typeof ar !== 'object' || Array.isArray(ar)) return 'unknown';
+    if (Object.getOwnPropertyNames(ar).length !== ASSET_REALITY_ENVELOPE_KEYS.length) return 'unknown';
+    for (var i = 0; i < ASSET_REALITY_ENVELOPE_KEYS.length; i++) if (!ownKey(ar, ASSET_REALITY_ENVELOPE_KEYS[i])) return 'unknown';
+    var v = ar.value;
+    if (v !== 'real' && v !== 'test') return 'unknown';
+    if (ar.source !== 'registry') return 'unknown';
+    if (typeof ar.contractOrRegistryId !== 'string' || !ASSET_REGISTRY_ID_RE.test(ar.contractOrRegistryId)) return 'unknown';
+    if (typeof ar.revision !== 'number' || !Number.isSafeInteger(ar.revision) || ar.revision < 0) return 'unknown';
+    if (ar.attests !== 'identity-not-liveness') return 'unknown';
+    return v;
+  }
   // Pill TEXT (astra r4 on #313, F6; astra r5 on #313, F7-F9). The class decides the colour, and the text
   // may not claim more. Fails CLOSED over a CLOSED safe vocabulary (no blacklist to miss a spelling, and
   // no blacklist to over-qualify a non-money surface, astra r5 F7/F9): unverified text is shown as-is
@@ -1171,11 +1189,13 @@
     parent.appendChild(el('div', 'pcc-mono pcc-muted pcc-pin-ref', pinReferenceText(pin)));
     parent.appendChild(pinDetails(pin));
   }
-  // Contract rules 11 and 15: only a registry-confirmed real asset goes unmarked.
+  // Contract rules 11 and 15: only a registry-confirmed real asset goes unmarked, and only the closed
+  // classifier decides it (R12 r2 C). Rule 26: "real" is identity, never liveness, so its only effect is
+  // that this badge is absent; nothing else on the receipt changes.
   function assetBadgeText(ar) {
-    var v = ar && typeof ar === 'object' && !Array.isArray(ar) ? ar.value : null;
-    if (v === 'real') return null;
-    return v === 'test' ? kitText('TEST ASSET') : kitText('ASSET NOT VERIFIED');
+    var c = assetRealityClass(ar);
+    if (c === 'real') return null;
+    return c === 'test' ? kitText('TEST ASSET') : kitText('ASSET NOT VERIFIED');
   }
   // Contract rule 21: refundReason and finalizedBlock come from event logs (reorg-exposed), so they never
   // render like a staticcall fact. "UNKNOWN" (or an empty marker) is "not reported".

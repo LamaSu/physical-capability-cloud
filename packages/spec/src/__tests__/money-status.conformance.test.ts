@@ -24,6 +24,7 @@ import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
   classifySettlementRead, SETTLEMENT_READ_ROUTE, chainPin, SETTLEMENT_NETWORKS, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
   idText, hexText, timeText, traceText, nameText, fieldDefaultText, ESCROW_SERVICE_REPORTS, NOT_CONFIRMED_ON_CHAIN,
+  assetRealityClass, ASSET_REALITY_ENVELOPE_KEYS, ASSET_REGISTRY_ID_RE,
 } from "../money/money-status.js";
 import { foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD } from "../money/plain-text-claims.js";
 import { PLAIN_TEXT_CASES, PLAIN_TIME_ACCEPTED, PLAIN_TIME_REJECTED, FIELD_DEFAULT_CASES, PLAIN_CLAIM_CASES } from "./plain-text-fixtures.js";
@@ -33,6 +34,10 @@ import { assertKitTextBeforeBoot, assertKitTextViolations, flushKitText, checkKi
 // fixtures carry one, so the liveness, exact-route and polling tests below keep testing what they test.
 const PIN_FIELDS = Object.freeze({ chainId: 84532, escrow: "0x" + "12".repeat(20), unitId: "0x" + "ab".repeat(32),
   asOfBlock: "12345678", asOfBlockHash: "0x" + "cd".repeat(32), finality: "finalized" });
+// R12 r2 C: the /receipt route's own registry envelopes (settlement-read.ts `assetIdentity`; the registry ids
+// and revisions of its registry readers in settlement-read-routes.test.ts).
+const VALID_REAL_ASSET = Object.freeze({ value: "real", source: "registry", contractOrRegistryId: "circle-usdc", revision: 7, attests: "identity-not-liveness" });
+const VALID_TEST_ASSET = Object.freeze({ value: "test", source: "registry", contractOrRegistryId: "reg-1", revision: 3, attests: "identity-not-liveness" });
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitPath = path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js");
@@ -48,6 +53,9 @@ type KitRegion = {
   dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown) => string;
   dataStatusText: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown) => { readonly t: string };
   chainPin: (o: unknown, bindingPath: unknown) => unknown;
+  assetRealityClass: (ar: unknown) => string;
+  ASSET_REALITY_ENVELOPE_KEYS: readonly string[];
+  ASSET_REGISTRY_ID_RE: RegExp;
   VNEXT_UNIT_STATES: readonly string[];
   VNEXT_STATE_PRESENTATION: Record<string, [string, string]>;
   VNEXT_PHASE: Record<string, string>;
@@ -81,6 +89,7 @@ function extractRegion(): KitRegion {
   const helperSrc = kitSrc.replace(/  if \(document\.readyState === 'loading'\)[\s\S]*?\n\}\)\(\);\s*$/, "\n" +
       "window.kitRegion = { MONEY_STATUS, GENERIC_STATES, statusClass, moneyStatusClass, settlementLabel, isMoneyData, dataStatusClass, dataStatusText," +
       " VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE, settlementRecordClass, settlementReadClass, SETTLEMENT_READ_ROUTE, chainPin, SETTLEMENT_NETWORKS," +
+      " assetRealityClass, ASSET_REALITY_ENVELOPE_KEYS, ASSET_REGISTRY_ID_RE," +
       " SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText, idText, hexText, timeText, traceText, nameText, fieldDefaultText, foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD };\n})();");
   if (helperSrc === kitSrc) throw new Error("plain kit's final boot dispatch not found");
   vm.runInNewContext(
@@ -581,7 +590,7 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
   }
 
   it("R12: a live, pinned, finalized receipt shows its money facts and the visible reference", async () => {
-    const r = await liveReceipt(pinnedReceipt({ assetReality: { value: "real", source: "registry" } }));
+    const r = await liveReceipt(pinnedReceipt({ assetReality: VALID_REAL_ASSET })); // R12 r2 C: the route's whole registry envelope
     expect(r.cls).toContain("st-settled");
     expect(r.body).toContain("1000000 base units (decimals not reported)"); // base units, never a sum, never an invented currency
     expect(r.body).not.toContain("1,000,000");
@@ -608,7 +617,8 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
   });
 
   it("R12: a test or unverified asset is marked, so a test-USDC settlement never looks real", async () => {
-    for (const [ar, badge] of [[{ value: "test" }, "TEST ASSET"], [{ value: "unknown" }, "ASSET NOT VERIFIED"], [null, "ASSET NOT VERIFIED"], [undefined, "ASSET NOT VERIFIED"]] as Array<[unknown, string]>) {
+    // R12 r2 C: TEST ASSET needs the route's whole envelope too; a bare {value:"test"} is not verified either.
+    for (const [ar, badge] of [[VALID_TEST_ASSET, "TEST ASSET"], [{ value: "test" }, "ASSET NOT VERIFIED"], [{ value: "unknown" }, "ASSET NOT VERIFIED"], [null, "ASSET NOT VERIFIED"], [undefined, "ASSET NOT VERIFIED"]] as Array<[unknown, string]>) {
       await liveReceipt(pinnedReceipt({ assetReality: ar }));
       expect(document.querySelector(".pcc-asset-badge")?.textContent, JSON.stringify(ar)).toBe(badge);
     }
@@ -1998,5 +2008,116 @@ describe("R12 r2 B (run 3 F2 HIGH = run 2 F3 MEDIUM): every other receipt party 
     await flush();
     expect(Array.from(document.querySelectorAll(".pcc-receipt-parties > *")).map((n) => n.textContent))
       .toEqual(["bound record reports payer: " + RUN2_PARTIES.payer, "→", PAYEE]);
+  });
+});
+
+// ── R12 r2 C (run 2 F2 HIGH = run 3 F3 MEDIUM): the asset badge trusts only the route's closed registry envelope ──
+describe("R12 r2 C (run 2 F2 HIGH = run 3 F3 MEDIUM): a closed, validated asset classification, spec == kit", () => {
+  const kit = extractRegion();
+  const drop = (o: Record<string, unknown>, k: string) => { const c = { ...o }; delete c[k]; return c; };
+  const R: Record<string, unknown> = { ...VALID_REAL_ASSET };
+  const nonEnumerableExtra = (() => { const o: Record<string, unknown> = { ...VALID_REAL_ASSET }; Object.defineProperty(o, "verified", { value: true, enumerable: false }); return o; })();
+  const halfInherited = (() => { const o = Object.create({ revision: 7 }) as Record<string, unknown>; for (const k of ["value", "source", "contractOrRegistryId", "attests"]) o[k] = R[k]; return o; })();
+  // [name, envelope, expected class]
+  const MATRIX: Array<[string, unknown, "real" | "test" | "unknown"]> = [
+    ["valid real (the route's own envelope)", VALID_REAL_ASSET, "real"],
+    ["valid test (the route's own envelope)", VALID_TEST_ASSET, "test"],
+    ["valid real, a contract-address id", { ...R, contractOrRegistryId: "0x" + "aB".repeat(20) }, "real"],
+    ["valid real, revision 0", { ...R, revision: 0 }, "real"],
+    ["valid real, a 1-char id", { ...R, contractOrRegistryId: "a" }, "real"],
+    ["valid real, a 64-char id", { ...R, contractOrRegistryId: "a" + "-b".repeat(31) + "c" }, "real"],
+    // forged real: the source is untrusted, unrecognized or missing (run 1's and run 3's exact fragments first)
+    ["forged real: run 1's {value:'real', source:'untrusted'}", { value: "real", source: "untrusted" }, "unknown"],
+    ["forged real: run 3's {value:'real', source:'unrecognized'}", { value: "real", source: "unrecognized" }, "unknown"],
+    ["forged real: the old test fixture {value:'real', source:'registry'}", { value: "real", source: "registry" }, "unknown"],
+    ["forged real: a bare {value:'real'}", { value: "real" }, "unknown"],
+    ["forged real: source untrusted", { ...R, source: "untrusted" }, "unknown"],
+    ["forged real: source unrecognized", { ...R, source: "unrecognized" }, "unknown"],
+    ["forged real: source missing", drop(R, "source"), "unknown"],
+    ["forged real: source 'Registry'", { ...R, source: "Registry" }, "unknown"],
+    // the registry id: missing or odd
+    ["id missing", drop(R, "contractOrRegistryId"), "unknown"],
+    ["id empty", { ...R, contractOrRegistryId: "" }, "unknown"],
+    ["id with a space", { ...R, contractOrRegistryId: "circle usdc" }, "unknown"],
+    ["id uppercase", { ...R, contractOrRegistryId: "CIRCLE-USDC" }, "unknown"],
+    ["id with an underscore", { ...R, contractOrRegistryId: "circle_usdc" }, "unknown"],
+    ["id leading hyphen", { ...R, contractOrRegistryId: "-circle" }, "unknown"],
+    ["id trailing hyphen", { ...R, contractOrRegistryId: "circle-" }, "unknown"],
+    ["id 65 chars", { ...R, contractOrRegistryId: "a".repeat(65) }, "unknown"],
+    ["id a 39-hex address", { ...R, contractOrRegistryId: "0x" + "a".repeat(39) + "G" }, "unknown"],
+    ["id prose", { ...R, contractOrRegistryId: "verified real USDC" }, "unknown"],
+    ["id a number", { ...R, contractOrRegistryId: 42 }, "unknown"],
+    ["id null", { ...R, contractOrRegistryId: null }, "unknown"],
+    // the revision: missing, negative, float, string or unsafe
+    ["revision missing (the route omits revision?: undefined)", drop(R, "revision"), "unknown"],
+    ["revision negative", { ...R, revision: -1 }, "unknown"],
+    ["revision float", { ...R, revision: 1.5 }, "unknown"],
+    ["revision a string", { ...R, revision: "7" }, "unknown"],
+    ["revision unsafe", { ...R, revision: 2 ** 53 }, "unknown"],
+    ["revision NaN", { ...R, revision: Number.NaN }, "unknown"],
+    ["revision Infinity", { ...R, revision: Number.POSITIVE_INFINITY }, "unknown"],
+    ["revision null", { ...R, revision: null }, "unknown"],
+    // attests: missing or other
+    ["attests missing", drop(R, "attests"), "unknown"],
+    ["attests 'identity'", { ...R, attests: "identity" }, "unknown"],
+    ["attests 'identity-and-liveness'", { ...R, attests: "identity-and-liveness" }, "unknown"],
+    ["attests 'liveness'", { ...R, attests: "liveness" }, "unknown"],
+    // an extra key, inherited keys, an array, null and other non-envelopes
+    ["an extra key", { ...R, chain: 84532 }, "unknown"],
+    ["an extra 'verified' key", { ...R, verified: true }, "unknown"],
+    ["an extra non-enumerable key", nonEnumerableExtra, "unknown"],
+    ["every key inherited", Object.create(VALID_REAL_ASSET), "unknown"],
+    ["one key (revision) inherited", halfInherited, "unknown"],
+    ["an array", [VALID_REAL_ASSET], "unknown"],
+    ["an empty array", [], "unknown"],
+    ["null", null, "unknown"],
+    ["undefined", undefined, "unknown"],
+    ["a bare 'real' string", "real", "unknown"],
+    ["true", true, "unknown"],
+    // a malformed envelope whose value says "test" is not verified either
+    ["malformed test: a bare {value:'test'}", { value: "test" }, "unknown"],
+    ["malformed test: source untrusted", { ...VALID_TEST_ASSET, source: "untrusted" }, "unknown"],
+    ["malformed test: revision missing", drop({ ...VALID_TEST_ASSET }, "revision"), "unknown"],
+    // the value itself
+    ["value 'unknown' in a valid envelope", { ...R, value: "unknown" }, "unknown"],
+    ["value 'REAL'", { ...R, value: "REAL" }, "unknown"],
+    ["value 'real '", { ...R, value: "real " }, "unknown"],
+    ["value true", { ...R, value: true }, "unknown"],
+  ];
+
+  it("the kit mirrors the validator: same key set and same id grammar", () => {
+    expect([...kit.ASSET_REALITY_ENVELOPE_KEYS]).toEqual([...ASSET_REALITY_ENVELOPE_KEYS]);
+    expect(kit.ASSET_REGISTRY_ID_RE.source).toBe(ASSET_REGISTRY_ID_RE.source);
+    expect(Object.isFrozen(kit.ASSET_REALITY_ENVELOPE_KEYS)).toBe(true);
+  });
+
+  it.each(MATRIX)("%s: spec and kit both say %s", (_name, envelope, want) => {
+    expect(assetRealityClass(envelope)).toBe(want);
+    expect(kit.assetRealityClass(envelope)).toBe(want);
+  });
+
+  const ECON = { amount: "1000000", feeAmount: "23500", recipient: "0x" + "34".repeat(20), token: "0x" + "56".repeat(20), assuranceTier: 1 };
+  const receipt = (n: number, assetReality: unknown) => r2Receipt(n, { economics: ECON, assetReality });
+  async function badgeOf(assetReality: unknown, n = 8) {
+    r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_RC } }]), [r2Ok(receipt(n, assetReality))]);
+    await flush();
+    return document.querySelector(".pcc-asset-badge")?.textContent ?? null;
+  }
+
+  it("rendered on a pinned live receipt: only the route's envelope removes ASSET NOT VERIFIED; every other row of the matrix keeps it", async () => {
+    for (const [name, envelope, want] of MATRIX) {
+      const badge = await badgeOf(envelope);
+      expect(badge, name).toBe(want === "real" ? null : want === "test" ? "TEST ASSET" : "ASSET NOT VERIFIED");
+    }
+  });
+
+  it("rule 26: a real asset is identity, never liveness -- it removes the badge and changes nothing else (it never upgrades a state)", async () => {
+    for (const n of [1, 6, 7, 8, 9]) {
+      const withReal = (await (async () => { r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_RC } }]), [r2Ok(receipt(n, VALID_REAL_ASSET))]); await flush(); return { pill: (document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className, text: document.querySelector(".pcc-win-body")!.textContent! }; })());
+      const withUnknown = (await (async () => { r2BootLive(r2Man([{ kind: "receipt", binding: { path: R2_RC } }]), [r2Ok(receipt(n, { ...VALID_REAL_ASSET, value: "unknown" }))]); await flush(); return { pill: (document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className, text: document.querySelector(".pcc-win-body")!.textContent! }; })());
+      expect(withReal.pill, "state " + n).toBe(withUnknown.pill); // the same state, the same tone
+      expect(withReal.text, "state " + n).toBe(withUnknown.text.replace("ASSET NOT VERIFIED", "")); // only the badge differs
+      expect(withReal.text, "state " + n).not.toMatch(/will settle|guarantee|can move|available to|settlement possible|liveness/i);
+    }
   });
 });

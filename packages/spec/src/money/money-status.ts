@@ -320,6 +320,41 @@ export function chainPin(read: unknown, routePath: unknown): SettlementPin | nul
   return Object.freeze({ chainId, network: SETTLEMENT_NETWORKS[chainId]!, escrow, unitId, asOfBlock, asOfBlockHash, finality: "finalized" as const });
 }
 
+// ── R12 r2 C: the asset classification, closed and validated at the read-model boundary ──────────────
+/** What a renderer may say about a settlement's asset (contract rules 11, 15, 25, 26). "real" attests the
+ *  asset's IDENTITY only, never that funds can move or will settle (rule 26). */
+export type AssetRealityClass = "real" | "test" | "unknown";
+/** The exact own keys of the registry envelope the /receipt route emits (settlement-read.ts, `assetIdentity`:
+ *  `{value, source: "registry", contractOrRegistryId, revision, attests: "identity-not-liveness"}`). */
+export const ASSET_REALITY_ENVELOPE_KEYS: readonly string[] = Object.freeze(["value", "source", "contractOrRegistryId", "revision", "attests"]);
+/** `contractOrRegistryId`: a contract address (the field's contract form, as the route's log envelopes use it
+ *  for the escrow), or a registry id in the grammar of the producer's registry readers ("circle-usdc",
+ *  "reg-1": lowercase letters and digits joined by hyphens), at most 64 characters. Bounded and linear. */
+export const ASSET_REGISTRY_ID_RE = /^(?:0x[0-9a-fA-F]{40}|[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)$/;
+
+/**
+ * The asset classification of a settlement read's `assetReality`, CLOSED: "real" or "test" only for the
+ * route's own registry envelope -- exactly the five own properties above (none inherited, no extra key, not
+ * an array), `value` "real" or "test", `source` "registry", `contractOrRegistryId` in ASSET_REGISTRY_ID_RE,
+ * `revision` a non-negative safe integer (rule 25: an off-chain registry pins its own revision), and `attests`
+ * "identity-not-liveness" (rule 26). Anything else is "unknown" -- a bare or forged "real", an incomplete
+ * envelope, and a malformed one whose value says "test" -- which renders "ASSET NOT VERIFIED" (rules 11, 15:
+ * only the gateway's registry may call an asset real; the UI never infers it from a bare value).
+ */
+export function assetRealityClass(envelope: unknown): AssetRealityClass {
+  if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) return "unknown";
+  const o = envelope as Record<string, unknown>;
+  if (Object.getOwnPropertyNames(o).length !== ASSET_REALITY_ENVELOPE_KEYS.length) return "unknown";
+  for (const k of ASSET_REALITY_ENVELOPE_KEYS) if (!has(o, k)) return "unknown";
+  const { value, source, contractOrRegistryId, revision, attests } = o;
+  if (value !== "real" && value !== "test") return "unknown";
+  if (source !== "registry") return "unknown";
+  if (typeof contractOrRegistryId !== "string" || !ASSET_REGISTRY_ID_RE.test(contractOrRegistryId)) return "unknown";
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return "unknown";
+  if (attests !== "identity-not-liveness") return "unknown";
+  return value;
+}
+
 /** A LIVE read of a settlement route whose pin is missing, malformed, for another unit or chain, or not
  *  finalized: R12 "pending before finality" (rule 5). It shows no state at all, final or not. */
 const PENDING_FINALITY = (): MoneyStatusClassification =>
