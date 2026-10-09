@@ -35,6 +35,7 @@ import {
   acceptScope,
   basePolicy,
   db,
+  fundingStatusNow,
   installActivationTerms,
   iso,
   paidScope,
@@ -326,6 +327,20 @@ describe("the accept route and reconcilePaidScope", () => {
     expect(accepted.json()).toMatchObject({ status: "active", activation: { kind: "activated", expiresAt: iso(T0 + 7 * MIN + 2 * 24 * 60 * MIN) } });
     expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 7 * MIN + 2 * 24 * 60 * MIN) });
     expect(TERMS.postActivationTtlMs).not.toBe(2 * 24 * 60 * MIN);
+  });
+
+  it("(dto-q3b) the review's Q3b: a scope awaiting acceptance whose bound record's row reads created is not funded_verified, and the accept does not activate it", async () => {
+    const store = installTestFundingRecordStore();
+    installActivationTerms();
+    const res = await submit(f);
+    const { scopeId, escrowId } = res.json() as { scopeId: string; escrowId: string };
+    setEscrow(escrowId, { contractAddress: ESCROW_A, status: "created" });
+    db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    expect(fundingStatusNow(store, scopeId)).toMatchObject({ state: "unknown", binding: "bound", scope: { sourceStatus: "awaiting_acceptance" } });
+    const accepted = await acceptScope(f, scopeId);
+    expect(accepted.json()).toMatchObject({ status: "awaiting_funding", fundingRefusal: "escrow_not_funded" });
+    expect(accepted.json().activation).toBeUndefined();
+    expect(fundingStatusNow(store, scopeId)).toMatchObject({ state: "unknown", binding: "bound", scope: { sourceStatus: "awaiting_funding" } });
   });
 
   it("(neg-accept-atomic) a failure inside the activation rolls the accept back too: 500, nothing changed", async () => {

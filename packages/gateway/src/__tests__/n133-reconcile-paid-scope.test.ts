@@ -38,6 +38,7 @@ import {
   acceptScope,
   basePolicy,
   db,
+  fundingStatusNow,
   iso,
   paidScope,
   revokeScope,
@@ -701,6 +702,53 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     const again = await acceptScope(f, scopeId);
     expect(again.statusCode).toBe(409);
     expect(again.json()).toMatchObject({ error: "already_decided", status: "active" });
+  });
+});
+
+describe("ruling 1: the DTO and reconcile use the same rule", () => {
+  /** A contract address of its own for case `i`, so that records of different cases never share a key. */
+  const contract = (i: number) => "0x" + (0xc0000 + i).toString(16).padStart(40, "0");
+
+  it("(dto-agrees) before activation the DTO reads funded_verified exactly when reconcile activates, over rows, records and chains (stop clear, buyer unblocked)", async () => {
+    const records: Array<[string, (scopeId: string, own: string, other: string) => object]> = [
+      ["good", (id, own) => verification(id, { escrowAddress: own })],
+      ["other chain", (id, own) => verification(id, { escrowAddress: own, chainId: 545 })],
+      ["other escrow", (id, _own, other) => verification(id, { escrowAddress: other })],
+      ["other buyer", (id, own) => verification(id, { escrowAddress: own, buyer: OTHER })],
+      ["unfinalized", (id, own) => ({ ...verification(id, { escrowAddress: own }), finality: "latest" })],
+    ];
+    const both: string[] = [];
+    let i = 0;
+    for (const rowStatus of ["funded", "active", "created", "completed", ""]) {
+      for (const [name, make] of records) {
+        const own = contract(i++);
+        const other = contract(i++);
+        const { scopeId, escrowId } = await paidScope(f, { real: own });
+        setEscrow(escrowId, { status: rowStatus });
+        const record = make(scopeId, own, other);
+        store.plant(record); // the verifier's write; an unfinalized row stays invisible
+        const dto = fundingStatusNow(store, scopeId);
+        const result = reconcilePaidScope(scopeId, record as never, TERMS);
+        const label = `${rowStatus || "''"} ${name}: DTO ${dto.state}, reconcile ${result.kind === "refused" ? result.reason : result.kind}`;
+        expect(dto.state === "funded_verified", label).toBe(result.kind === "activated");
+        if (result.kind === "activated") both.push(`${rowStatus} ${name}`);
+      }
+    }
+    // The control: both say yes for the good record on a funded or active row, and only there.
+    expect(both).toEqual(["funded good", "active good"]);
+  });
+
+  it("(dto-q3a) the review's Q3a: an accepted scope whose bound record's row reads created is not funded_verified, as reconcile refuses escrow_not_funded", async () => {
+    const { scopeId, escrowId } = await paidScope(f);
+    setEscrow(escrowId, { status: "created" });
+    db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    expect(fundingStatusNow(store, scopeId)).toMatchObject({ state: "unknown", binding: "bound" });
+    expect(fundingStatusNow(store, scopeId).verification).not.toBeNull();
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("escrow_not_funded"));
+    // S1.2 writes the row funded with the record (ruling 2): then both say yes.
+    setEscrow(escrowId, { status: "funded" });
+    expect(fundingStatusNow(store, scopeId).state).toBe("funded_verified");
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
   });
 });
 

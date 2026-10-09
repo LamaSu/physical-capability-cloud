@@ -33,9 +33,9 @@
  * must be the scope's buyer, and its escrow must be the scope's job's escrow (found the way the
  * accept route and the relay find it),
  * whose row passes the same preconditions as at the accept (escrowRowRefusal). These are the binding
- * rule's checks (funding-binding.ts, shared with the funding-status DTO), plus the row's status
- * (funded or active), which only an activation needs. So the same buyer's escrow for another job
- * is refused. One funding activates one scope: a record of an escrow the
+ * rule's checks plus the row's status (funded or active): activationRefusal (funding-binding.ts), the
+ * function the funding-status DTO reads funded_verified by before activation. So the same buyer's
+ * escrow for another job is refused. One funding activates one scope: a record of an escrow the
  * store already binds to another scope, or for a scope it binds to other funding, is refused. A
  * funding is (chain, escrow) (the steward's ruling 4): the store keys it so, and the port hands the
  * store the escrow address folded to lower case (fundingEscrowKey), for the lookup and in the
@@ -59,9 +59,9 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
 import { emergencyStopState } from "../routes/device-relay.js";
-import { recordEscrowRefusal, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
+import { activationRefusal, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
-import { acceptanceFor, escrowForJob, escrowRowRefusal, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
+import { acceptanceFor, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
 import { fundingRecordStore, sameAddress, type FundingTx, type FundingVerificationRecord } from "./funding-record-port.js";
 import type { PaidScopeActivationTerms } from "./paid-scope-activation-terms.js";
 
@@ -228,12 +228,12 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
         return { kind: "already_active", scopeId, escrowAddress: keptForThis.escrowAddress, expiresAt: scope.expiresAt, record: keptForThis };
       }
 
-      // The job's escrow row: escrowForJob reads through the same connection, so inside this transaction.
+      // The job's escrow row: escrowForJob reads through the same connection, so inside this
+      // transaction. activationRefusal is the ONE rule the funding-status DTO also reads
+      // funded_verified by before activation (ruling 1): the binding, and the row's status (c).
       const escrow = escrowForJob(scope.jobId);
-      const rowRefusal = escrowRowRefusal(escrow, scope.createdBy);
-      if (rowRefusal !== null || !escrow) return refused(rowRefusal ?? "escrow_missing");
-      const escrowRefusal = recordEscrowRefusal(record, escrow);
-      if (escrowRefusal !== null) return refused(escrowRefusal);
+      const notReady = activationRefusal(record, scope, escrow, expectedChainId);
+      if (notReady !== null || !escrow) return refused(notReady ?? "escrow_missing");
 
       // One funding, one scope. The funding is (chain, escrow) (ruling 4); the port folds the address
       // for the lookup and the insert, so a store that matches letter case exactly cannot bind it twice.

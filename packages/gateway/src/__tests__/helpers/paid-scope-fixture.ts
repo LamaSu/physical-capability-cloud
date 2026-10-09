@@ -12,8 +12,13 @@ import { deviceRelayRoutes } from "../../routes/device-relay.js";
 import { operatorRoutes } from "../../routes/operator.js";
 import { initStore, closeStore, getStore, getRepos } from "../../db.js";
 import { actAsJobParty } from "./job-read-party.js";
-import { __setFundingRecordStoreForTest, type FundingVerificationRecord } from "../../services/funding-record-port.js";
-import { PAID_SCOPE_TTL_MS } from "../../services/scope-acceptance.js";
+import {
+  __setFundingRecordStoreForTest,
+  type FundingRecordStore,
+  type FundingVerificationRecord,
+} from "../../services/funding-record-port.js";
+import { escrowForJob, PAID_SCOPE_TTL_MS } from "../../services/scope-acceptance.js";
+import { projectFundingStatus, type FundingStatusDTO } from "../../readmodels/funding-status.js";
 import {
   __setPaidScopeActivationTermsForTest,
   type PaidScopeActivationTerms,
@@ -179,6 +184,22 @@ export async function paidScope(
     if (accepted.statusCode !== 200) throw new Error(`accept answered ${accepted.statusCode}`);
   }
   return { scopeId, jobId, escrowId };
+}
+
+/**
+ * The funding-status DTO a route would build now from the database: the scope row, the record the
+ * store keeps for it, the escrow row of its job, the expected chain, and the clock's now.
+ */
+export function fundingStatusNow(store: FundingRecordStore, scopeId: string, expectedChainId: number | null = CHAIN_ID): FundingStatusDTO {
+  const s = scopeRow(scopeId);
+  const escrow = escrowForJob(s.jobId) ?? null;
+  return projectFundingStatus(
+    { id: s.id, jobId: s.jobId, createdBy: s.createdBy, status: s.status, createdAt: s.createdAt, expiresAt: s.expiresAt },
+    store.findByScope(db(), scopeId),
+    escrow ? { contractAddress: escrow.contractAddress, payer: escrow.payer, status: escrow.status } : null,
+    expectedChainId,
+    new Date().toISOString(),
+  );
 }
 
 /** The verifier's finalized record of BUYER's funding of ESCROW_A for `scopeId`, at the clock's now. */

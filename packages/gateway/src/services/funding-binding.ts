@@ -13,9 +13,12 @@
  *   6. the row's payer label is the scope's buyer, or escrow_payer_not_buyer;
  *   7. the record's escrow is the row's contract (sameAddress), or record_escrow_not_scope_escrow.
  *
- * None of these reads the escrow row's status. It flips to completed at settlement (paid-job-flow,
- * settlement-keeper), and a binding does not end there. To ACTIVATE a scope, reconcilePaidScope also
- * requires the status to be funded or active (escrowRowRefusal); the DTO, which only reports, does not.
+ * None of these reads the escrow row's status: it flips to completed at settlement (paid-job-flow,
+ * settlement-keeper), and a binding does not end there. ACTIVATION also needs the row's status to be
+ * funded or active, precondition (c), which the verifier (S1.2) sets with the record (the steward's
+ * ruling 2): activationRefusal is the binding rule with that status check between checks 6 and 7,
+ * the ONE function reconcilePaidScope activates by and the funding-status DTO reads funded_verified by
+ * before activation (ruling 1).
  *
  * Pure: nothing here reads a clock, a database or the environment.
  */
@@ -28,15 +31,21 @@ export interface BindingScope {
   createdBy: string;
 }
 
-/** The escrow row fields the rule reads. Its status is not one of them. */
+/** The escrow row fields the binding rule reads. Its status is not one of them. */
 export interface BindingEscrow {
   contractAddress: string;
   payer: string;
 }
 
+/** The escrow row fields activationRefusal reads: the binding's, and the status. */
+export interface BindingEscrowRow extends BindingEscrow {
+  status: string;
+}
+
 export type RecordRefusal = "record_malformed" | "record_chain_mismatch";
 export type RecordScopeRefusal = RecordRefusal | "record_scope_mismatch" | "record_buyer_not_scope_buyer";
 export type EscrowLabelRefusal = "escrow_missing" | "escrow_payer_not_buyer";
+export type EscrowRowRefusal = EscrowLabelRefusal | "escrow_not_funded";
 export type RecordEscrowRefusal = "record_escrow_not_scope_escrow";
 
 /**
@@ -68,6 +77,18 @@ export function escrowLabelRefusal(escrow: BindingEscrow | null | undefined, buy
   return null;
 }
 
+/**
+ * The escrow row's own preconditions, for a mock and a real escrow alike: checks 5 and 6, then its
+ * status is funded or active, precondition (c) (ruling 2). None of this is proof of funding (the payer
+ * column is a label and the status a DB flag); a real escrow needs its verification record besides.
+ */
+export function escrowRowRefusal(escrow: BindingEscrowRow | null | undefined, buyer: string): EscrowRowRefusal | null {
+  const label = escrowLabelRefusal(escrow, buyer);
+  if (label !== null || !escrow) return label ?? "escrow_missing";
+  if (escrow.status !== "funded" && escrow.status !== "active") return "escrow_not_funded";
+  return null;
+}
+
 /** Check 7: the record's escrow is the row's contract, in any letter case, or why not. */
 export function recordEscrowRefusal(record: FundingVerificationRecord, escrow: BindingEscrow): RecordEscrowRefusal | null {
   return sameAddress(escrow.contractAddress, record.escrowAddress) ? null : "record_escrow_not_scope_escrow";
@@ -91,5 +112,28 @@ export function fundingBindingRefusal(
   if (own !== null) return own;
   const labelRefusal = escrowLabelRefusal(escrow, scope.createdBy);
   if (labelRefusal !== null || !escrow) return labelRefusal ?? "escrow_missing";
+  return recordEscrowRefusal(record, escrow);
+}
+
+export type ActivationRefusal = RecordScopeRefusal | EscrowRowRefusal | RecordEscrowRefusal;
+
+/**
+ * Whether `record` can activate `scope` as far as the record, the scope's buyer and its job's escrow
+ * row `escrow` say: checks 1 to 6 of the binding rule, then the row's status (funded or active), then
+ * check 7; null when all pass, else the first that fails. reconcilePaidScope activates by this and
+ * the funding-status DTO reads funded_verified before activation by this (ruling 1), so the two agree.
+ * What it does not cover is reconcile's own: the scope's status and window, the emergency stop, the
+ * block list, and the one-funding-one-scope keys.
+ */
+export function activationRefusal(
+  record: FundingVerificationRecord,
+  scope: BindingScope,
+  escrow: BindingEscrowRow | null | undefined,
+  expectedChainId: number | null,
+): ActivationRefusal | null {
+  const own = recordScopeRefusal(record, scope, expectedChainId);
+  if (own !== null) return own;
+  const rowRefusal = escrowRowRefusal(escrow, scope.createdBy);
+  if (rowRefusal !== null || !escrow) return rowRefusal ?? "escrow_missing";
   return recordEscrowRefusal(record, escrow);
 }
