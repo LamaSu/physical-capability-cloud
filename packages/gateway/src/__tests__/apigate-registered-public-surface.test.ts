@@ -30,8 +30,10 @@ const { registered } = vi.hoisted(() => ({ registered: [] as RegisteredRoute[] }
 // for the HEAD route Fastify adds for every GET (exposeHeadRoute). No production code changes.
 vi.mock("fastify", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fastify")>();
-  const wrapped = (...args: Parameters<typeof actual.default>) => {
-    const instance = actual.default(...args);
+  // The factory is overloaded (so Parameters<> of it is never): forward its arguments as they come.
+  const factory = actual.default as unknown as (...args: unknown[]) => FastifyInstance;
+  const wrapped = (...args: unknown[]) => {
+    const instance = factory(...args);
     instance.addHook("onRoute", (route: { method: string | string[]; url: string }) => {
       const methods = Array.isArray(route.method) ? route.method : [route.method];
       for (const m of methods) registered.push({ method: m, url: route.url });
