@@ -205,10 +205,9 @@ class TestRunDaemonLoop:
              mock.patch("pcc_node.ui_server.start_ui_server"), \
              mock.patch.object(daemon_module, "_write_state") as write_state, \
              mock.patch.object(daemon_module.time, "sleep", side_effect=KeyboardInterrupt):
-            try:
+            # ChatGPT r3 F1: the refusal is raised (after the cleanup), not returned as a normal stop.
+            with pytest.raises(RegistrationError):
                 daemon_module.run_daemon(self._config())
-            except (KeyboardInterrupt, SystemExit):
-                pass
         MockClient.assert_not_called()   # no gateway client / no "online" heartbeat
         write_state.assert_not_called()  # no running state written
 
@@ -229,7 +228,8 @@ class TestRunDaemonLoop:
              mock.patch.object(daemon_module, "detect_camera_device", return_value=None), \
              mock.patch("pcc_node.daemon.PCCGatewayClient") as MockClient, \
              mock.patch("pcc_node.ui_server.start_ui_server"):
-            daemon_module.run_daemon(self._config())
+            with pytest.raises(RegistrationError):  # ChatGPT r3 F1: raised after the cleanup
+                daemon_module.run_daemon(self._config())
         # The daemon never started, so it must leave no live-looking footprint: a subsequent `status`
         # keys off read_pid()/read_state(), so both must be gone.
         assert daemon_module.read_pid() is None, "PID file left behind after a refused registration"

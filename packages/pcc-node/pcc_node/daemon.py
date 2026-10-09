@@ -142,13 +142,24 @@ def _build_capabilities_from_devices(devices):
     return capabilities
 
 
-def run_daemon(config: NodeConfig):
+def run_daemon(config: NodeConfig, *, on_running=None):
     """Run the main daemon loop with the real PCC protocol.
 
     Parameters
     ----------
     config : NodeConfig
         Fully populated node configuration (must have pcc_api_key set).
+    on_running : callable, optional
+        Called once with no arguments when the daemon is up: its own kernel registration
+        succeeded and its first heartbeat went out. ``pcc-node start`` prints "Node running"
+        from here, never before (ChatGPT r3 finding 1). An error it raises is logged, not fatal.
+
+    Raises
+    ------
+    RegistrationError
+        When the gateway refuses the kernel registration. The daemon never ran: the PID file
+        and any state file are removed first, so no caller can mistake it for a daemon that
+        ran and stopped.
     """
     running = True
 
@@ -219,7 +230,9 @@ def run_daemon(config: NodeConfig):
             os.remove(STATE_FILE)
         except OSError:
             pass
-        return
+        # Propagate the refusal (ChatGPT r3 finding 1): a normal return here let `pcc-node start`
+        # exit 0 for a node that never ran. The CLI turns it into exit 1; a direct caller sees it too.
+        raise
     except Exception as e:
         log.warning(f"Kernel registration failed: {e}")
 
@@ -289,6 +302,13 @@ def run_daemon(config: NodeConfig):
 
     # Send initial heartbeat
     gateway_client.send_heartbeat("online", accepting_jobs=False)
+
+    # The daemon is up: only now may a caller say the node is running (ChatGPT r3 finding 1).
+    if on_running is not None:
+        try:
+            on_running()
+        except Exception as e:  # a banner that cannot be printed must not stop the node
+            log.warning(f"Could not report that the daemon is running: {e}")
 
     while running:
         try:
