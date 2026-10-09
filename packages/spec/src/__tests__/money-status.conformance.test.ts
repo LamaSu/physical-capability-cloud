@@ -50,8 +50,8 @@ type KitRegion = {
   moneyStatusClass: (s: unknown) => string;
   settlementLabel: (s: unknown) => string | null;
   isMoneyData: (bindingPath: unknown, row: unknown) => boolean;
-  dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown) => string;
-  dataStatusText: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown) => { readonly t: string };
+  dataStatusClass: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown, money?: unknown) => string;
+  dataStatusText: (bindingPath: unknown, row: unknown, s: unknown, live?: unknown, money?: unknown) => { readonly t: string };
   chainPin: (o: unknown, bindingPath: unknown) => unknown;
   assetRealityClass: (ar: unknown) => string;
   ASSET_REALITY_ENVELOPE_KEYS: readonly string[];
@@ -2698,5 +2698,72 @@ describe("R12 r2d g1 (lane review, MEDIUM): on money data 'pending' and 'expired
       expect(statusPillText(w, false, false), "spec non-money " + w).toBe(w);
       expect(kit.statusPillText(w, false, false).t, "kit non-money " + w).toBe(w);
     }
+  });
+});
+
+// ── R12 r2d g2 (lane review gap, LOW-MEDIUM): a list row's status PILL judged money by the row's own top-level keys only,
+// while r2c N3's title and meta judge it on the whole way to the value, so a status nested in a row's money record (or a
+// row inside a money record) took the generic table and showed bare ────────────────────────────────────────────────────
+describe("R12 r2d g2 (lane review, LOW-MEDIUM): a list row's status pill judges money on the whole way to its status, as the title and meta do", () => {
+  const pillTexts = () => r2dTexts(".pcc-list-row .pcc-pill");
+  const pillClasses = () => Array.from(document.querySelectorAll(".pcc-list-row .pcc-pill")).map((n) => n.className);
+  const COMPLETED_ON_MONEY = "bound record reports: completed - settlement not confirmed (not confirmed on chain)";
+
+  it("the lane review's repro (live and snapshot): on a jobs list, a row whose payment is nested (statusFrom payment.status) reads the money table's attributed label, st-unknown, never 'completed' (st-ack); its meta was already a report", async () => {
+    const ROW = { id: "j1", status: "running", payment: { amount: 250, currency: "USDC", status: "completed" } };
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/jobs", "id", ["payment.amount", "payment.status"], "payment.status")], { "/api/jobs": [ROW] }, mode);
+      expect(r2dTexts(".pcc-list-meta"), "meta " + mode).toEqual([r2dRep("250") + " · reported status: completed - settlement unconfirmed"]);
+      expect(pillTexts(), "pill " + mode).toEqual([COMPLETED_ON_MONEY]);
+      expect(pillClasses(), "pill class " + mode).toEqual(["pcc-pill st-unknown"]);
+    }
+  });
+
+  it("every status word a payment could carry (live and snapshot): the pill of a status nested in a row's money record reads exactly like the same word at a money row's top, text and class, and never takes a tone", async () => {
+    const WORDS = ["completed", "approved", "success", "done", "resolved", "active", "pending", "expired", "released", "paid", "settled", "funded", "locked", "running", "failed"];
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/jobs", "id", [], "payment.status")], { "/api/jobs": WORDS.map((w, i) => ({ id: "j" + i, payment: { amount: 250, currency: "USDC", status: w } })) }, mode);
+      const nested = { texts: pillTexts(), classes: pillClasses() };
+      await r2dPaint([r2dList("/api/jobs", "id", [], "status")], { "/api/jobs": WORDS.map((w, i) => ({ id: "j" + i, amount: 250, currency: "USDC", status: w })) }, mode);
+      expect(nested.texts.length, "every row has its pill " + mode).toBe(WORDS.length);
+      expect(nested, "nested == at a money row's top " + mode).toEqual({ texts: pillTexts(), classes: pillClasses() });
+      expect(nested.classes, "no tone " + mode).toEqual(WORDS.map(() => "pcc-pill st-unknown"));
+    }
+  });
+
+  it("rows inside a money record (live and snapshot): a list over a money record's rows, by its first array or by a binding.select projection, gives each row's pill the money table, st-unknown", async () => {
+    const PARTIES = { id: "j1", amount: 250, currency: "USDC", parties: [{ partyId: "kernel_1", status: "completed" }] };
+    const STEPS = { id: "j1", amount: 250, currency: "USDC", job: { steps: [{ stepId: "s1", status: "completed" }] } };
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/jobs/j1", "partyId", ["status"], "status")], { "/api/jobs/j1": PARTIES }, mode);
+      expect(r2dTexts(".pcc-list-title"), "first array title (a report since N3) " + mode).toEqual([r2dRep("kernel_1")]);
+      expect(pillTexts(), "first array pill " + mode).toEqual([COMPLETED_ON_MONEY]);
+      expect(pillClasses(), "first array pill class " + mode).toEqual(["pcc-pill st-unknown"]);
+      await r2dPaint([{ kind: "list", binding: { path: "/api/jobs/j1", select: "job.steps" }, item: { title: "stepId", meta: [], statusFrom: "status" } }], { "/api/jobs/j1": STEPS }, mode);
+      expect(pillTexts(), "projection pill " + mode).toEqual([COMPLETED_ON_MONEY]);
+      expect(pillClasses(), "projection pill class " + mode).toEqual(["pcc-pill st-unknown"]);
+    }
+  });
+
+  it("controls (they pass before and after): non-money rows keep the generic table, a status nested in a non-money record included; a row carrying its money at its top is unchanged", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/jobs", "id", [], "status")], { "/api/jobs": [{ id: "j1", status: "completed" }, { id: "j2", status: "running" }] }, mode);
+      expect([pillTexts(), pillClasses()], "jobs " + mode).toEqual([["completed", "running"], ["pcc-pill st-ack", "pcc-pill st-running"]]);
+      await r2dPaint([r2dList("/api/jobs", "id", [], "progress.status")], { "/api/jobs": [{ id: "j1", progress: { status: "running", pct: 40 } }] }, mode);
+      expect([pillTexts(), pillClasses()], "a nested non-money record " + mode).toEqual([["running"], ["pcc-pill st-running"]]);
+      await r2dPaint([r2dList("/api/jobs", "id", [], "status")], { "/api/jobs": [{ id: "j1", amount: 250, currency: "USDC", status: "completed" }] }, mode);
+      expect([pillTexts(), pillClasses()], "a money row " + mode).toEqual([[COMPLETED_ON_MONEY], ["pcc-pill st-unknown"]]);
+    }
+  });
+
+  it("the classifiers: a caller's money judgment (the optional 5th argument) forces the money table and can only add money, never remove it; without it a row is judged by its own keys, as the run window still calls them", () => {
+    const kit = extractRegion();
+    const JOB = { status: "completed" }, PAID_JOB = { status: "completed", amount: 5 };
+    expect(kit.dataStatusClass("/api/jobs", JOB, "completed")).toBe("st-ack");
+    expect(kit.dataStatusText("/api/jobs", JOB, "completed").t).toBe("completed");
+    expect(kit.dataStatusClass("/api/jobs", JOB, "completed", false, true)).toBe("st-unknown");
+    expect(kit.dataStatusText("/api/jobs", JOB, "completed", false, true).t).toBe(COMPLETED_ON_MONEY);
+    expect(kit.dataStatusClass("/api/jobs", PAID_JOB, "completed", false, false)).toBe("st-unknown");
+    expect(kit.dataStatusText("/api/jobs", PAID_JOB, "completed", false, false).t).toBe(COMPLETED_ON_MONEY);
   });
 });

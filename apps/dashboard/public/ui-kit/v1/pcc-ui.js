@@ -824,9 +824,11 @@
   }
   // The pill class of a DATA surface (list rows, run status). A V-next read model goes through the display
   // classifier above (schema AND source AND pin); any other money data is a flat word, which is a report and
-  // never a money tone (R12 r2 D); non-money data takes the generic states only.
-  function dataStatusClass(bindingPath, row, s, live) {
-    if (!isMoneyData(bindingPath, row)) return statusClass(s);
+  // never a money tone (R12 r2 D); non-money data takes the generic states only. R12 r2d g2: `money` is the
+  // caller's structural judgment (a list row's pill: the response and every record on the way to its status);
+  // true forces the money table, and it only ever ADDS money: a row carrying money is money whatever it says.
+  function dataStatusClass(bindingPath, row, s, live, money) {
+    if (!money && !isMoneyData(bindingPath, row)) return statusClass(s);
     if (isVNextRecord(row)) return settlementReadClass(row, bindingPath, live)[0];
     return 'st-unknown';
   }
@@ -923,8 +925,9 @@
   //    the PCC escrow service for a legacy escrow record, else the bound record -- in ANY state. Any other
   //    word takes the closed money vocabulary.
   //  - Non-money data: the closed status vocabulary.
-  function dataStatusText(bindingPath, row, s, live) {
-    if (isMoneyData(bindingPath, row)) {
+  // `money` as in dataStatusClass (R12 r2d g2): true forces the money branch; it never removes money.
+  function dataStatusText(bindingPath, row, s, live, money) {
+    if (money || isMoneyData(bindingPath, row)) {
       if (isVNextRecord(row)) {
         var rc = settlementReadClass(row, bindingPath, live);
         if (rc[0] === 'st-settled' || rc[0] === 'st-refunded') return mintText(String(rc[2]));
@@ -1742,8 +1745,14 @@
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
           // A row is an element of a collection, never the top-level record a settlement route returns, so
-          // it is never a verified read, however live the fetch (astra r7 F13).
-          if (st != null) li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(w.binding && w.binding.path, row, st, false), dataStatusText(w.binding && w.binding.path, row, st, false)));
+          // it is never a verified read, however live the fetch (astra r7 F13). R12 r2d g2: the pill judges money
+          // as the title and meta do (r2c N3): the response through binding.select, then the row and each record
+          // on the statusFrom path, so a status nested in a row's money record, or a row inside a money record,
+          // takes the money table, never the row's own top-level keys alone.
+          if (st != null) {
+            var pillMoney = listMoney || selectsMoney(lpath, row, w.item.statusFrom);
+            li.appendChild(el('span', 'pcc-pill ' + dataStatusClass(lpath, row, st, false, pillMoney), dataStatusText(lpath, row, st, false, pillMoney)));
+          }
         }
         listNode.appendChild(li);
       }
