@@ -169,8 +169,9 @@ export interface FundingStatusDTO {
   asOf: string;
   scopeId: string;
   jobId: string | null;
+  /** Where the funding stands: the first state of FUNDING_STATES' total order that holds. */
   state: FundingState;
-  /** How the record stands against this scope and its job's escrow row (FUNDING_BINDINGS). */
+  /** How the record stands against this scope, its job's escrow row and the expected chain (FUNDING_BINDINGS). */
   binding: FundingBinding;
   /** The scope row, as read. */
   scope: {
@@ -180,14 +181,15 @@ export interface FundingStatusDTO {
     createdAt: string;
     /**
      * execution_scopes.expires_at, unchanged. Before the scope goes live it ends the window in
-     * which it may still be accepted and funded (mint + the TTL); once reconcilePaidScope makes it
-     * live, it ends the scope's write time (activation + the TTL).
+     * which it may still be accepted and funded (mint + the 1 h mint window); once
+     * reconcilePaidScope makes it live, it ends the scope's write time (activation + the
+     * post-activation TTL reconcile was given).
      */
     expiresAt: string;
   };
   /**
    * The verification, as recorded, whenever the record is bound, whatever the state (an expired,
-   * revoked or rejected scope included). Null when the binding is anything else.
+   * cancelled or unknown scope included). Null when the binding is anything else.
    */
   verification: {
     escrowAddress: string;
