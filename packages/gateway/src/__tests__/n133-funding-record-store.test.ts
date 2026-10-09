@@ -13,6 +13,7 @@ import {
 } from "./helpers/funding-record-store-conformance.js";
 import {
   installCaseExactFundingRecordStore,
+  installChainBlindFundingRecordStore,
   installFinalityBlindFundingRecordStore,
   installTestFundingRecordStore,
 } from "./helpers/test-funding-record-store.js";
@@ -31,13 +32,17 @@ const outcomes = (makeStore: () => ConformanceStore) =>
   });
 
 describe("the conformance suite is not vacuous", () => {
-  it("(neg-conformance-case) a store that matches escrow letter case exactly, with no unique escrow key, fails the two checks that need one record per escrow, and only them", () => {
-    // The per-escrow check (any letter case), and the finalized-uniqueness check's "a second finalized
-    // record for the escrow throws".
-    expect(outcomes(installCaseExactFundingRecordStore)).toEqual(["passed", "failed", "passed", "passed", "failed"]);
+  it("(neg-conformance-case) a store that matches escrow letter case exactly, with no unique escrow key, fails the three checks that need one record per escrow, and only them", () => {
+    // The per-escrow check (any letter case), the finalized-uniqueness check's "a second finalized
+    // record for the escrow throws", and the chain-key check's "the key is still unique, in any case".
+    expect(outcomes(installCaseExactFundingRecordStore)).toEqual(["passed", "failed", "passed", "passed", "failed", "failed"]);
   });
 
   it("(neg-conformance-finality) a store that ignores finality fails the two finalized-only checks, and only them (ruling 3)", () => {
-    expect(outcomes(installFinalityBlindFundingRecordStore)).toEqual(["passed", "passed", "passed", "failed", "failed"]);
+    expect(outcomes(installFinalityBlindFundingRecordStore)).toEqual(["passed", "passed", "passed", "failed", "failed", "passed"]);
+  });
+
+  it("(neg-conformance-chain) a store that keys the escrow by its address alone fails the chain-key check, and only it (ruling 4)", () => {
+    expect(outcomes(installChainBlindFundingRecordStore)).toEqual(["passed", "passed", "passed", "passed", "passed", "failed"]);
   });
 });

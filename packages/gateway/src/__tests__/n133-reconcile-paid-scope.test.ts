@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabase, sql } from "@pcc/store";
 import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
-import { __setFundingRecordStoreForTest, isWellFormedFundingRecord } from "../services/funding-record-port.js";
+import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import {
   installCaseExactFundingRecordStore,
   installFinalityBlindFundingRecordStore,
@@ -486,6 +486,33 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
       expect(scopeRow(two.scopeId).status).toBe("awaiting_funding");
     }
     expect(store.count()).toBe(2); // one record per contract
+  });
+
+  it("(port-fold) the port keeps every record folded, whatever case a writer hands it: over a case-exact store, a checksummed pre-stored record binds one scope only (NIT-3)", async () => {
+    store = installCaseExactFundingRecordStore();
+    const upper = "0x" + ESCROW_A.slice(2).toUpperCase();
+    const one = await paidScope(f, { real: ESCROW_A });
+    const two = await paidScope(f, { real: ESCROW_A });
+    // The verifier stores one's record through the port, the escrow in upper case.
+    db().transaction((tx) => fundingRecordStore()!.insert(tx, verification(one.scopeId, { escrowAddress: upper })));
+    expect(store.findByScope(db(), one.scopeId)?.escrowAddress).toBe(ESCROW_A); // kept folded
+    expect(fundingRecordStore()!.findByEscrow(db(), 84532, upper)?.scopeId).toBe(one.scopeId); // looked up folded
+    const insert = vi.spyOn(store, "insert");
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId)).kind).toBe("activated");
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId))).toEqual(refused("escrow_bound_to_other_scope"));
+    expect(insert).not.toHaveBeenCalled();
+    expect(store.count()).toBe(1);
+  });
+
+  it("(fund-two-chains) one escrow address on two chains is two fundings: each activates its own scope (ruling 4)", async () => {
+    // Two jobs whose escrow rows name one contract address: one funded on Base Sepolia, one on another chain.
+    const one = await paidScope(f, { real: ESCROW_A });
+    const two = await paidScope(f, { real: ESCROW_A });
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { chainId: 84532 })).kind).toBe("activated");
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { chainId: 545 })).kind).toBe("activated");
+    expect(store.count()).toBe(2);
+    expect(store.findByEscrow(db(), 84532, ESCROW_A)?.scopeId).toBe(one.scopeId);
+    expect(store.findByEscrow(db(), 545, ESCROW_A)?.scopeId).toBe(two.scopeId);
   });
 
   it("(neg-kept-record) over a store that breaks the finalized-only contract, a kept record that is not well formed blocks the activation", async () => {

@@ -1,8 +1,8 @@
 /**
  * Buyer funding plan, Stage 2 (research/buyer-funding-plan-20261008.md):
- *   - S2.1: buyerFundingVerdict passes a REAL escrow only on the finalized verification record of
- *     (escrow, buyer) that names the scope. No record store (production until Q9) refuses it, as
- *     before; the mock rule is unchanged.
+ *   - S2.1: buyerFundingVerdict passes a REAL escrow only on the finalized verification record kept
+ *     for the scope, of this escrow and this buyer. No record store (production until Q9) refuses
+ *     it, as before; the mock rule is unchanged.
  *   - The accept route calls reconcilePaidScope when that record exists, in the accept's own
  *     transaction. With no store nothing observable changes.
  * Negatives are tagged (neg-...) for the mutation runner.
@@ -62,16 +62,17 @@ const escrow = (over: Partial<{ payer: string; status: string; contractAddress: 
 });
 const SCOPE = "scope_s21";
 
-describe("S2.1 buyerFundingVerdict: a real escrow passes only on its finalized record of this buyer, naming this scope", () => {
+describe("S2.1 buyerFundingVerdict: a real escrow passes only on the scope's finalized record, of this escrow and this buyer", () => {
   it("(neg-gate-nostore) no store (production wiring): every real escrow is refused escrow_not_buyer_funded, as before", () => {
     expect(fundingRecordStore()).toBeNull();
     expect(buyerFundingVerdict(escrow(), BUYER, SCOPE)).toEqual({ kind: "refused", reason: "escrow_not_buyer_funded" });
     expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
   });
 
-  it("(neg-gate-norecord) a store with no record of the escrow: escrow_not_buyer_funded", () => {
+  it("(neg-gate-norecord) a store with no record of this escrow for the scope: escrow_not_buyer_funded", () => {
     const store = installTestFundingRecordStore();
-    store.plant(verification(SCOPE, { escrowAddress: ESCROW_B })); // another escrow's record
+    expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
+    store.plant(verification(SCOPE, { escrowAddress: ESCROW_B })); // the scope's record is another escrow's
     expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
   });
 
@@ -83,9 +84,9 @@ describe("S2.1 buyerFundingVerdict: a real escrow passes only on its finalized r
     expect(buyerFundingRefusal(escrow({ contractAddress: ESCROW_A.toUpperCase().replace("0X", "0x") }), BUYER, SCOPE)).toBeNull();
   });
 
-  it("(gate-escrow-case) the gate looks the record up by the folded address, as reconcilePaidScope keeps it", () => {
-    // Over a store that matches letter case exactly: the record is kept in lower case (escrowKey),
-    // and the escrow row names the contract in upper case.
+  it("(gate-escrow-case) the gate matches the scope's record to the escrow row in any letter case", () => {
+    // Over a store that matches letter case exactly: the record is kept in lower case (the port folds
+    // it), and the escrow row names the contract in upper case.
     const store = installCaseExactFundingRecordStore();
     const record = verification(SCOPE);
     store.plant(record);
@@ -93,11 +94,18 @@ describe("S2.1 buyerFundingVerdict: a real escrow passes only on its finalized r
     expect(buyerFundingVerdict(escrow({ contractAddress: upper }), BUYER, SCOPE)).toEqual({ kind: "record_funded", record });
   });
 
-  it("(neg-gate-scope) a record naming another scope does not fund this one; without a scope id (the mint) none does", () => {
+  it("(neg-gate-scope) a record of this escrow naming another scope does not fund this one; without a scope id (the mint) none does", () => {
     const store = installTestFundingRecordStore();
     store.plant(verification("scope_elsewhere"));
-    expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("funding_record_scope_mismatch");
+    // The gate reads the scope's own record (an escrow lookup would need the expected chain, ruling 4).
+    expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
     expect(buyerFundingRefusal(escrow(), BUYER)).toBe("funding_record_scope_mismatch");
+  });
+
+  it("(neg-gate-scope-store) a store answering for this scope with another scope's record is not believed", () => {
+    const real = installTestFundingRecordStore();
+    __setFundingRecordStoreForTest({ ...real, findByScope: () => verification("scope_elsewhere") });
+    expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("funding_record_scope_mismatch");
   });
 
   it("(neg-gate-buyer) a record whose verified payer is another buyer is not this buyer's funding", () => {
@@ -112,12 +120,12 @@ describe("S2.1 buyerFundingVerdict: a real escrow passes only on its finalized r
     expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
   });
 
-  it("(neg-gate-wrongescrow) a store answering with another escrow's record is not believed", () => {
+  it("(neg-gate-wrongescrow) a store answering for the scope with another escrow's record is not believed", () => {
     const real = installTestFundingRecordStore();
     const lying: FundingRecordStore = {
       insert: real.insert,
-      findByScope: real.findByScope,
-      findByEscrow: () => verification(SCOPE, { escrowAddress: ESCROW_B }),
+      findByEscrow: real.findByEscrow,
+      findByScope: () => verification(SCOPE, { escrowAddress: ESCROW_B }),
     };
     __setFundingRecordStoreForTest(lying);
     expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
@@ -292,7 +300,7 @@ describe("the accept route and reconcilePaidScope", () => {
     const second = await paidScope(f, { real: ESCROW_B, accept: false });
     store.plant(verification(second.scopeId, { escrowAddress: ESCROW_A })); // ESCROW_A's record names the other scope
     const accepted = await acceptScope(f, first.scopeId);
-    expect(accepted.json()).toMatchObject({ status: "awaiting_funding", fundingRefusal: "funding_record_scope_mismatch" });
+    expect(accepted.json()).toMatchObject({ status: "awaiting_funding", fundingRefusal: "escrow_not_buyer_funded" });
     expect(accepted.json().activation).toBeUndefined();
     expect(scopeRow(first.scopeId).status).toBe("awaiting_funding");
   });

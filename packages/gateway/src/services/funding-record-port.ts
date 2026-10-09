@@ -61,29 +61,61 @@ export interface FundingVerificationRecord {
  *   - Lookups return FINALIZED records only (finality "finalized"). A row in any other state, such as
  *     an unfinalized observation another writer left in Q9's append-only table, is invisible to
  *     findByEscrow and findByScope (the steward's ruling 3).
- *   - At most one finalized record per scope and at most one per escrow address (one funding
- *     activates one scope). An insert that would make a second for either throws, and the caller's
- *     transaction then rolls back. Uniqueness applies to finalized records only, as a partial unique
- *     index in Q9's DDL: a row in any other state never blocks a finalized insert.
- *   - Escrow addresses compare without letter case. The gateway's callers also fold the address
- *     (escrowKey) before a store sees it, so one funding cannot bind two scopes even through a store
- *     that matches letter case exactly.
+ *   - At most one finalized record per scope and at most one per escrow key (one funding activates
+ *     one scope). The escrow key is (chainId, escrow address) (the steward's ruling 4): one funding
+ *     address on two chains is two fundings. An insert that would make a second for either throws,
+ *     and the caller's transaction then rolls back. Uniqueness applies to finalized records only, as a
+ *     partial unique index in Q9's DDL: a row in any other state never blocks a finalized insert.
+ *   - Escrow addresses compare without letter case. fundingRecordStore() also hands every store the
+ *     address folded (fundingEscrowKey), for each insert and each escrow lookup, so one funding cannot
+ *     bind two scopes even through a store that matches letter case exactly, whoever the writer is.
  * The checks a store must pass are __tests__/helpers/funding-record-store-conformance.ts.
  */
 export interface FundingRecordStore {
   insert(tx: FundingTx, record: FundingVerificationRecord): void;
-  findByEscrow(handle: FundingDbHandle, escrowAddress: string): FundingVerificationRecord | null;
+  /** The finalized record of the escrow at `escrowAddress` on chain `chainId`, or null. */
+  findByEscrow(handle: FundingDbHandle, chainId: number, escrowAddress: string): FundingVerificationRecord | null;
+  /** The finalized record kept for scope `scopeId`, or null. */
   findByScope(handle: FundingDbHandle, scopeId: string): FundingVerificationRecord | null;
 }
 
 let testStore: FundingRecordStore | null = null;
 
 /**
+ * The key a store keeps and finds a funding record by: its chain and its escrow address, folded to
+ * lower case (fund-s2 review LOW-1 and NIT-3; the steward's ruling 4). The one place an escrow
+ * address is normalised for a store.
+ */
+export function fundingEscrowKey(chainId: number, escrowAddress: string): { chainId: number; escrowAddress: string } {
+  return { chainId, escrowAddress: escrowAddress.toLowerCase() };
+}
+
+/**
+ * `store`, with every insert and escrow lookup normalised through fundingEscrowKey, so that no
+ * writer or reader (reconcilePaidScope, the Stage-1 verifier) has to remember to fold the address.
+ */
+function normalised(store: FundingRecordStore): FundingRecordStore {
+  return {
+    insert(tx, record) {
+      store.insert(tx, { ...record, escrowAddress: fundingEscrowKey(record.chainId, record.escrowAddress).escrowAddress });
+    },
+    findByEscrow(handle, chainId, escrowAddress) {
+      const key = fundingEscrowKey(chainId, escrowAddress);
+      return store.findByEscrow(handle, key.chainId, key.escrowAddress);
+    },
+    findByScope(handle, scopeId) {
+      return store.findByScope(handle, scopeId);
+    },
+  };
+}
+
+/**
  * The store records are read from and written to, or null when there is none. Outside a test
- * process there is none (no table until Q9), whatever was installed.
+ * process there is none (no table until Q9), whatever was installed. Every insert and escrow lookup
+ * through it is normalised (fundingEscrowKey).
  */
 export function fundingRecordStore(): FundingRecordStore | null {
-  return isTestProcess() ? testStore : null;
+  return isTestProcess() && testStore ? normalised(testStore) : null;
 }
 
 /**
@@ -101,15 +133,6 @@ const BLOCK_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 const BLOCK_NUMBER_RE = /^(0|[1-9][0-9]{0,19})$/;
 /** 2^64 - 1: 20-digit decimals above it pass BLOCK_NUMBER_RE and are refused by this bound. */
 const UINT64_MAX = 18446744073709551615n;
-
-/**
- * The form in which the gateway hands an escrow address to a store, for a lookup and in an inserted
- * record: lower case (fund-s2 review LOW-1). Records some other writer kept may be in any case, so
- * they are still compared with sameAddress.
- */
-export function escrowKey(escrowAddress: string): string {
-  return escrowAddress.toLowerCase();
-}
 
 /** The same 0x address, in any letter case. Anything that is not a 0x address never matches. */
 export function sameAddress(a: unknown, b: unknown): boolean {

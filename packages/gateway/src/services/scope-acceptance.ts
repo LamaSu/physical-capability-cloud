@@ -26,7 +26,6 @@ import { sameIdentity } from "../auth/buyer-identity.js";
 import { mockFundsWrites } from "./settlement-mode.js";
 import { escrowLabelRefusal, type EscrowLabelRefusal } from "./funding-binding.js";
 import {
-  escrowKey,
   fundingRecordStore,
   isWellFormedFundingRecord,
   sameAddress,
@@ -99,9 +98,10 @@ export type BuyerFundingRefusal =
 /**
  * Whether an escrow is the buyer's own, real funding of a scope, and what proves it:
  *   - mock_funded: a mock escrow, in a test process with mock settlement on (mockFundsWrites);
- *   - record_funded: a real escrow whose finalized verification record (funding-record-port.ts)
- *     names this escrow, this buyer and this scope. The scope goes live on it only through
- *     reconcilePaidScope, which starts its TTL at that activation;
+ *   - record_funded: a real escrow whose scope's finalized verification record (funding-record-port.ts)
+ *     is of this escrow and this buyer. The scope goes live on it only through reconcilePaidScope,
+ *     which also checks the record's chain and that no other scope holds this funding, and starts
+ *     the scope's TTL at that activation;
  *   - refused, with the reason.
  */
 export type FundingVerdict =
@@ -117,12 +117,15 @@ const refusedFunding = (reason: BuyerFundingRefusal): FundingVerdict => ({ kind:
  * createEscrowV3), V3 mode A funds it from the gateway's own key at creation, and POST
  * /api/escrow/chain/:address/fund funds from the gateway signer too. So a real escrow is the
  * buyer's own funding only on a finalized verification record of it (buyer funding plan S2.1): the
- * one record kept for the escrow, whose verified payer is `buyer` and which names `scopeId`. No
- * record store is configured outside a test process (Q9), so there every real escrow is refused
+ * one record kept for `scopeId`, of this escrow (any letter case), whose verified payer is `buyer`.
+ * The record is found by its scope, not by its escrow: a store keys an escrow by (chainId, address)
+ * (the steward's ruling 4), and the expected chain is reconcilePaidScope's input, which checks it.
+ * No record store is configured outside a test process (Q9), so there every real escrow is refused
  * escrow_not_buyer_funded, as before. Without a `scopeId` (the mint, when the scope does not exist
- * yet) no record can name the scope, so a real escrow never passes there. A mock escrow counts
- * only in a test process with mock settlement on (mockFundsWrites; N133 r1, astra HIGH): never in
- * production, and never in a development gateway either. That rule is unchanged.
+ * yet) no record can name the scope, so a real escrow never passes there
+ * (funding_record_scope_mismatch). A mock escrow counts only in a test process with mock
+ * settlement on (mockFundsWrites; N133 r1, astra HIGH): never in production, and never in a
+ * development gateway either. That rule is unchanged.
  */
 export function buyerFundingVerdict(
   escrow: FundingEscrow | undefined | null,
@@ -136,11 +139,10 @@ export function buyerFundingVerdict(
   }
   const store = fundingRecordStore();
   if (!store) return refusedFunding("escrow_not_buyer_funded");
-  // Folded before the store sees it, as reconcilePaidScope looks up and keeps it (escrowKey).
-  const record = store.findByEscrow(getStore().db, escrowKey(escrow.contractAddress));
+  if (typeof scopeId !== "string") return refusedFunding("funding_record_scope_mismatch");
+  const record = store.findByScope(getStore().db, scopeId);
   // A record proves funding only when there is one, well formed and finalized, it is this escrow's
-  // (the store answers by escrow; checked again, defence in depth) and its verified payer is this
-  // buyer. (isWellFormedFundingRecord is false for null.)
+  // and its verified payer is this buyer. (isWellFormedFundingRecord is false for null.)
   if (
     !isWellFormedFundingRecord(record) ||
     !sameAddress(record.escrowAddress, escrow.contractAddress) ||
@@ -148,7 +150,8 @@ export function buyerFundingVerdict(
   ) {
     return refusedFunding("escrow_not_buyer_funded");
   }
-  if (typeof scopeId !== "string" || record.scopeId !== scopeId) return refusedFunding("funding_record_scope_mismatch");
+  // The store answers by scope; checked again (defence in depth).
+  if (record.scopeId !== scopeId) return refusedFunding("funding_record_scope_mismatch");
   return { kind: "record_funded", record };
 }
 
