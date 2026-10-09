@@ -511,12 +511,22 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
   });
 
-  it("(neg-prodstore) in a production process a store left installed is never consulted", async () => {
+  it("(neg-prodstore) outside a test process (production, development, NODE_ENV unset, or no VITEST) a store left installed is never consulted, nor installable", async () => {
     const { scopeId } = await paidScope(f);
-    process.env.NODE_ENV = "production";
-    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("funding_record_store_unavailable"));
-    expect(() => __setFundingRecordStoreForTest(store)).toThrow();
-    process.env.NODE_ENV = "test";
+    const saved = { NODE_ENV: process.env.NODE_ENV, VITEST: process.env.VITEST };
+    const set = (k: string, v: string | undefined) => (v === undefined ? delete process.env[k] : (process.env[k] = v));
+    try {
+      for (const [nodeEnv, vitest] of [["production", "true"], ["development", "true"], [undefined, "true"], ["test", undefined]] as const) {
+        set("NODE_ENV", nodeEnv);
+        set("VITEST", vitest);
+        const label = `NODE_ENV=${nodeEnv} VITEST=${vitest}`;
+        expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS), label).toEqual(refused("funding_record_store_unavailable"));
+        expect(() => __setFundingRecordStoreForTest(store), label).toThrow();
+      }
+    } finally {
+      set("NODE_ENV", saved.NODE_ENV);
+      set("VITEST", saved.VITEST);
+    }
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
   });

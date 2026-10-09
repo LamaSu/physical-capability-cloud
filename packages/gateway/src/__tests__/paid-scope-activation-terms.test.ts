@@ -122,6 +122,10 @@ describe("vnextRecordChainId: the pinned V-next deployment record (ruling 4)", (
     ]) {
       expect(vnextRecordChainId(root, network, label), `${network} ${label}`).toBeNull();
     }
+    // Only the slug check refuses this one (r3 review NIT-2): the label "x/../run1" would form the path
+    // <network>/run1.json, and a record there carrying that very label passes every later check.
+    const traversed = packageRoot("base-sepolia", "run1.json", recordJson({ label: "x/../run1" }));
+    expect(vnextRecordChainId(traversed, "base-sepolia", "x/../run1")).toBeNull();
   });
 
   it("(neg-record-symlink) a symlink at the record or any directory on its path: null", () => {
@@ -219,12 +223,27 @@ describe("a test-installed source", () => {
     expect(paidScopeActivationTerms({ id: "scope_b", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 2000 });
   });
 
-  it("(neg-terms-prod) is never consulted in a production process, and cannot be installed there", () => {
+  it("(neg-terms-prod) is never consulted outside a test process (production, development, NODE_ENV unset, or no VITEST), and cannot be installed there", () => {
     __setPaidScopeActivationTermsForTest(() => ({ expectedChainId: 84532, postActivationTtlMs: 1000 }));
-    process.env.NODE_ENV = "production";
-    expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: null, postActivationTtlMs: null });
-    expect(() => __setPaidScopeActivationTermsForTest(null)).toThrow();
-    process.env.NODE_ENV = "test";
+    const saved = { NODE_ENV: process.env.NODE_ENV, VITEST: process.env.VITEST, NET: process.env.PCC_VNEXT_RECORD_NETWORK, LABEL: process.env.PCC_VNEXT_RECORD_LABEL };
+    const set = (k: string, v: string | undefined) => (v === undefined ? delete process.env[k] : (process.env[k] = v));
+    delete process.env.PCC_VNEXT_RECORD_NETWORK;
+    delete process.env.PCC_VNEXT_RECORD_LABEL;
+    try {
+      // isTestProcess() needs NODE_ENV "test" AND VITEST "true" (r3 review NIT-3: both conditions).
+      for (const [nodeEnv, vitest] of [["production", "true"], ["development", "true"], [undefined, "true"], ["test", undefined], ["test", "false"]] as const) {
+        set("NODE_ENV", nodeEnv);
+        set("VITEST", vitest);
+        const label = `NODE_ENV=${nodeEnv} VITEST=${vitest}`;
+        expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" }), label).toEqual({ expectedChainId: null, postActivationTtlMs: null });
+        expect(() => __setPaidScopeActivationTermsForTest(null), label).toThrow();
+      }
+    } finally {
+      set("NODE_ENV", saved.NODE_ENV);
+      set("VITEST", saved.VITEST);
+      set("PCC_VNEXT_RECORD_NETWORK", saved.NET);
+      set("PCC_VNEXT_RECORD_LABEL", saved.LABEL);
+    }
     expect(paidScopeActivationTerms({ id: "scope_a", jobId: null, kernelId: "k" })).toEqual({ expectedChainId: 84532, postActivationTtlMs: 1000 });
   });
 });
