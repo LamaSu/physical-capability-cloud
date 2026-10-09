@@ -23,7 +23,9 @@ only part that touches the device, and it keeps these promises:
    answer is capped in size. A watchdog shuts the request's socket the moment
    the run is cancelled, its lease is lost, or the operation's total deadline
    passes: a header wait, a stalled read or a slow connect never outlives
-   them. A run id of "." or ".." is refused before it can change a path.
+   them. A read the watch ended, or an answer short of its Content-Length, is
+   never taken for a whole answer. A run id of "." or ".." is refused before
+   it can change a path.
 5. **The result says whether the device may be running.** Once any byte of the
    start request has left the node, every failure is labelled
    ``<reason>:device_state_unknown``: a lost connection, any answer that is not
@@ -33,8 +35,9 @@ only part that touches the device, and it keeps these promises:
    is only a 4xx the operation's binding declares in ``request.refusals``: the
    device's own promise that it sends that answer before any side effect. A stop
    before anything was sent is ``<reason>:not_started``, and a device that could
-   not be reached is ``device_unreachable``. A cancel or a lost lease that
-   interrupts the log fetch, after the run finished, is ``<reason>:run_finished``.
+   not be reached is ``device_unreachable``. A cancel, a lost lease or the
+   deadline that interrupts the log fetch, after the run finished, is
+   ``<reason>:run_finished``: never success (verdict 117d).
 6. **Each job is its own log chain**, starting at GENESIS, so every job's
    evidence verifies on its own.
 
@@ -388,19 +391,30 @@ def _connect(host: str, port: int, tls: bool, watch: _Watch) -> socket.socket:
 
 
 def _read_bounded(resp: http.client.HTTPResponse, max_bytes: int, watch: _Watch) -> str:
-    """Read an answer in pieces, never more than max_bytes, never past the watch."""
+    """Read an answer in pieces, never more than max_bytes, never past the watch.
+
+    The watch is checked after every read as well as before it. A socket the watch shut on a stop
+    reads as empty, exactly like a device ending its answer, so an empty read ends the answer only
+    if the watch has no reason to stop. An answer that ends before its Content-Length did not
+    arrive whole: http.client's read1 ends there without saying so, and this raises IncompleteRead
+    instead of returning the shorter answer (ChatGPT r3 finding 3).
+    """
     read1 = getattr(resp, "read1", None)
     chunks, total = [], 0
     while True:
         watch.check()
         chunk = read1(65536) if read1 is not None else resp.read(min(65536, max_bytes + 1 - total))
+        watch.check()  # EOF included: a stop that shut the socket must not pass for the answer's end
         if not chunk:
             break
         total += len(chunk)
         if total > max_bytes:
             raise _Abort("device_response_too_large")
         chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", "replace")
+    raw = b"".join(chunks)
+    if resp.length:  # what the Content-Length still promised (None when the answer named none)
+        raise http.client.IncompleteRead(raw, resp.length)
+    return raw.decode("utf-8", "replace")
 
 
 def _request(method: str, url: str, body: Any = None, *, deadline: float, clock: Callable[[], float],
@@ -671,8 +685,9 @@ class AdapterRuntime:
                 if fetched.status == 200 and fetched.body is not None:
                     log_text = fetched.body if isinstance(fetched.body, str) else canonicalize(fetched.body)
             except _Abort as halt:
-                if halt.reason in ("cancelled", "lease_lost"):
-                    # Control was lost after the run finished: say so, never report success (verdict 117c).
+                if halt.reason in ("cancelled", "lease_lost", "timeout"):
+                    # Control or the deadline was lost after the run finished: say so, never report
+                    # success (verdicts 117c and 117d).
                     return RunResult(False, output=record, evidence=self._evidence(operation, run_id, record, None, claim),
                                      error=f"{halt.reason}:run_finished")
                 log.warning("run %s: log not fetched (%s)", run_id, halt.reason)  # the log is optional
@@ -680,6 +695,12 @@ class AdapterRuntime:
             return RunResult(False, output=record, error="record_not_portable")
         evidence = self._evidence(operation, run_id, record, log_text, claim)
         if state in binding.done:
+            reason = _stop_reason(deadline, self._clock, stop)
+            if reason:
+                # The device finished, but a cancel, a lost lease or the deadline landed while the
+                # terminal response was decoded or the log and evidence were built. This post-I/O
+                # window must not report success either (verdict 117e).
+                return RunResult(False, output=record, evidence=evidence, error=f"{reason}:run_finished")
             return RunResult(True, output=record, evidence=evidence)
         return RunResult(False, output=record, evidence=evidence, error=f"run_{state}")
 
