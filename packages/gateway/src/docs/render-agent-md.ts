@@ -72,14 +72,33 @@ const http = (text: string) => text.replace(
   (route) => `\`${route}\``,
 );
 /**
- * Prose outside code spans: wrap routes, then placeholders outside the new route spans. An existing
- * code span passes through whole; an odd number of backticks is an unbalanced span and throws.
+ * agent.md's code-span contract (ChatGPT r1 L4): the only backticks in a line are single-backtick code spans,
+ * "`" + content + "`", whose content is nonempty and holds no backtick and no line break. A CommonMark reader then
+ * pairs the backticks exactly as a split on "`" does. A run of two or more backticks, a backslash before a backtick
+ * and an unmatched backtick all throw, because CommonMark would pair them differently (or not at all).
+ * Returns the text split at its spans: [prose, code, prose, ..., prose]. The visibility test parses with this too.
+ */
+export function splitCodeSpans(text: string): string[] {
+  const refuse = (what: string) => {
+    throw new Error(`${what} in agent.md text; only single-backtick code spans are allowed: ${text}`);
+  };
+  if (text.includes("``")) refuse("A run of backticks");
+  if (text.includes("\\`")) refuse("An escaped backtick");
+  const parts = text.split("`");
+  if (parts.length % 2 === 0) refuse("Unbalanced backticks");
+  if (parts.some((part, index) => index % 2 === 1 && part.includes("\n"))) refuse("A line break inside a code span");
+  return parts;
+}
+/**
+ * Prose outside code spans: wrap routes, then placeholders outside the new route spans. An existing code span passes
+ * through whole. Source and output both hold to splitCodeSpans' contract: a wrapped route or placeholder that would
+ * touch an existing span (a double run) throws instead of rendering.
  */
 const prose = (text: string) => {
-  const parts = text.split("`");
-  if (parts.length % 2 === 0) throw new Error(`Unbalanced backticks in agent.md source text: ${text}`);
-  return parts.map((part, index) => (index % 2 ? part : http(part).split("`")
+  const rendered = splitCodeSpans(text).map((part, index) => (index % 2 ? part : http(part).split("`")
     .map((piece, inner) => (inner % 2 ? piece : placeholders(piece))).join("`"))).join("`");
+  splitCodeSpans(rendered);
+  return rendered;
 };
 
 function renderAction(action: Action): string[] {

@@ -83,11 +83,35 @@ describe("generated agent golden path", () => {
     expect(rendered).not.toBe(read(artifactPath));
   });
 
-  it("keeps every angle-bracket placeholder inside code, where rendered Markdown shows it", () => {
-    const outsideCode = read(artifactPath)
-      .replace(/^```[\s\S]*?^```.*$/gm, "")
-      .replace(/`[^`\n]+`/g, "");
-    expect(outsideCode).not.toMatch(/<[^>\n]+>/);
+  /**
+   * The prose of a Markdown text outside fenced blocks and code spans. Spans are found by the renderer's own rule
+   * (splitCodeSpans), so a malformed delimiter run throws here instead of being stripped (ChatGPT r1 L4).
+   */
+  const outsideCode = async (markdown: string) => {
+    const { splitCodeSpans } = await import("../docs/render-agent-md.js");
+    const prose: string[] = [];
+    let fenced = false;
+    for (const line of markdown.split("\n")) {
+      if (line.startsWith("```")) fenced = !fenced;
+      else if (!fenced) prose.push(splitCodeSpans(line).filter((_, index) => index % 2 === 0).join(""));
+    }
+    return prose.join("\n");
+  };
+
+  it("keeps every angle-bracket placeholder inside code, where rendered Markdown shows it", async () => {
+    expect(await outsideCode(read(artifactPath))).not.toMatch(/<[^>\n]+>/);
+  });
+
+  it("finds code spans by the renderer's rule, so a malformed run fails instead of hiding a placeholder (ChatGPT r1 L4)", async () => {
+    // ChatGPT r1 L4's second counterexample as 8d147b82 rendered it: a 3-backtick run, the placeholder, a 1-backtick
+    // run. Stripping /`[^`\n]+`/ removed "`<phase>`"; CommonMark pairs neither run, so <phase> renders as a raw tag.
+    await expect(outsideCode("See ```<phase>`")).rejects.toThrow(/run of backticks/);
+    await expect(outsideCode("Then ``GET /api/x`` here.")).rejects.toThrow(/run of backticks/);
+    await expect(outsideCode("Use \\`<phase>\\` here.")).rejects.toThrow(/escaped backtick/);
+    await expect(outsideCode("Run `curl <base> once.")).rejects.toThrow(/Unbalanced backticks/);
+    expect(await outsideCode("Keys `<phase>` and `GET /api/x/<id>`.")).toBe("Keys  and .");
+    expect(await outsideCode("Keys <phase> here.")).toMatch(/<[^>\n]+>/);
+    expect(await outsideCode(["```bash", "echo `<x>` ``", "```", "ok"].join("\n"))).toBe("ok");
   });
 
   it("wraps prose placeholders in code without splitting a route's code span", async () => {
@@ -148,6 +172,25 @@ describe("generated agent golden path", () => {
     it("refuses unbalanced backticks instead of rendering a broken span", async () => {
       await expect(render(({ buyer }) => { buyer.steps[0].actions[0].request = "Run `curl once."; }))
         .rejects.toThrow(/Unbalanced backticks/);
+    });
+
+    it("keeps an already formatted route whole, its placeholder included (ChatGPT r1 L4)", async () => {
+      const rendered = await render(({ index }) => { index.about = "See `GET /api/x/<id>` first."; });
+      expect(rendered).toContain("\nSee `GET /api/x/<id>` first.\n");
+    });
+
+    it("refuses backtick runs, escaped backticks and spans that would touch, which CommonMark reads differently (ChatGPT r1 L4)", async () => {
+      const about = (text: string) => render(({ index }) => { index.about = text; });
+      // ChatGPT r1 L4's counterexample: a double run read as an empty span rendered as "See ```<phase>`".
+      await expect(about("See ``<phase>")).rejects.toThrow(/run of backticks/);
+      // Matching runs make a valid CommonMark span and mismatched runs do not; the source contract allows neither.
+      await expect(about("See ``GET /api/x`` first.")).rejects.toThrow(/run of backticks/);
+      await expect(about("See ``code` here.")).rejects.toThrow(/run of backticks/);
+      // An escaped backtick is a literal one in Markdown, never a delimiter.
+      await expect(about("Use \\`GET /api/x\\` literally.")).rejects.toThrow(/escaped backtick/);
+      // A placeholder or route wrapped right next to an existing span would render a double run.
+      await expect(about("Keys <id>`code` here.")).rejects.toThrow(/run of backticks/);
+      await expect(about("Call GET /api/x`code` here.")).rejects.toThrow(/run of backticks/);
     });
   });
 
