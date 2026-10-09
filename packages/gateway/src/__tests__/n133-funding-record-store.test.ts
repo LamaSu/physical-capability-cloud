@@ -5,6 +5,8 @@
  * it breaks, so the suite is not vacuous.
  */
 import { describe, it, expect } from "vitest";
+import { sql } from "@pcc/store";
+import { closeStore, getStore, initStore } from "../db.js";
 import {
   describeFundingRecordStoreConformance,
   FUNDING_RECORD_STORE_CONTRACT,
@@ -44,5 +46,29 @@ describe("the conformance suite is not vacuous", () => {
 
   it("(neg-conformance-chain) a store that keys the escrow by its address alone fails the chain-key check, and only it (ruling 4)", () => {
     expect(outcomes(installChainBlindFundingRecordStore)).toEqual(["passed", "passed", "passed", "passed", "passed", "failed"]);
+  });
+});
+
+describe("withFreshFundingRecordStore", () => {
+  it("(neg-conformance-open) refuses to run over a store that is already open, and leaves that store as it was (review NIT-2)", () => {
+    const saved = process.env.PCC_DB_PATH;
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
+    try {
+      const open = getStore();
+      open.db.run(sql`CREATE TEMP TABLE nit2_marker (x INTEGER)`);
+      open.db.run(sql`INSERT INTO nit2_marker (x) VALUES (7)`);
+      expect(() => withFreshFundingRecordStore(installTestFundingRecordStore, () => "ran")).toThrow(/already open/);
+      // The open store is the same one, still open, its data intact.
+      expect(getStore()).toBe(open);
+      expect(open.db.get<{ x: number }>(sql`SELECT x FROM nit2_marker`).x).toBe(7);
+    } finally {
+      closeStore();
+      if (saved === undefined) delete process.env.PCC_DB_PATH;
+      else process.env.PCC_DB_PATH = saved;
+    }
+    // With no store open it runs, and closes its own after.
+    expect(withFreshFundingRecordStore(installTestFundingRecordStore, () => "ran")).toBe("ran");
+    expect(() => getStore()).toThrow();
   });
 });

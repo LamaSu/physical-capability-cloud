@@ -218,8 +218,19 @@ export const FUNDING_RECORD_STORE_CONTRACT: readonly StoreContractCheck[] = [
 
 const ENV = ["PCC_DB_PATH", "DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH"] as const;
 
-/** Runs `fn` on a fresh in-memory database and a store from `makeStore`; closes it and restores the environment after. */
+/**
+ * Runs `fn` on a fresh in-memory database and a store from `makeStore`; closes it and restores the
+ * environment after. Throws, touching nothing, when a store is already open: initStore would hand
+ * back that store, with its data, and the close after would take it from its owner (review NIT-2).
+ */
 export function withFreshFundingRecordStore<T>(makeStore: () => ConformanceStore, fn: (store: ConformanceStore) => T): T {
+  let alreadyOpen = true;
+  try {
+    getStore();
+  } catch {
+    alreadyOpen = false;
+  }
+  if (alreadyOpen) throw new Error("withFreshFundingRecordStore: a store is already open; close it first");
   const saved: Record<string, string | undefined> = {};
   for (const k of ENV) saved[k] = process.env[k];
   delete process.env.DATABASE_URL;

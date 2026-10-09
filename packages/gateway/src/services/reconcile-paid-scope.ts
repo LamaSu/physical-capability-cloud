@@ -42,7 +42,9 @@
  * inserted record, so that holds even over a store that matches letter case exactly.
  *
  * Idempotent on (scopeId, escrow): once the scope is active on this escrow's record, a repeat
- * returns that activation (already_active) and inserts nothing and moves no TTL. The answer comes
+ * returns that activation (already_active) and inserts nothing and moves no TTL. already_active
+ * means "activated on this funding", not "live now": a scope past its TTL whose status still reads
+ * active gets it with its past expiresAt, and the relay refuses its writes (review NIT-5). The answer comes
  * before anything that reads the escrow row, so it still holds after settlement, when the row reads
  * completed (fund-s2 review LOW-3). It needs the record's own checks (well formed, the expected
  * chain, this scope, this buyer), the scope active, and the kept record being this scope's buyer's
@@ -67,7 +69,13 @@ import { emergencyStopState } from "../routes/device-relay.js";
 import { activationRefusal, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
 import { acceptanceFor, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
-import { fundingRecordStore, sameAddress, type FundingTx, type FundingVerificationRecord } from "./funding-record-port.js";
+import {
+  fundingEscrowKey,
+  fundingRecordStore,
+  sameAddress,
+  type FundingTx,
+  type FundingVerificationRecord,
+} from "./funding-record-port.js";
 import type { PaidScopeActivationTerms } from "./paid-scope-activation-terms.js";
 
 const { executionScopes, operatorPolicies } = schema;
@@ -127,7 +135,10 @@ export const RECONCILE_REFUSALS = [
 export type ReconcileRefusal = (typeof RECONCILE_REFUSALS)[number];
 
 export type ReconcileResult =
-  /** This call made the scope live. `record` is the record kept for it. */
+  /**
+   * This call made the scope live. `record` is the record kept for it, as kept; `escrowAddress` is
+   * its escrow folded (fundingEscrowKey), whatever case the record carries (review NIT-6).
+   */
   | {
       kind: "activated";
       scopeId: string;
@@ -136,7 +147,10 @@ export type ReconcileResult =
       expiresAt: string;
       record: FundingVerificationRecord;
     }
-  /** The scope was already live on this escrow's record: nothing was written. */
+  /**
+   * The scope was already activated on this escrow's record (it may have lapsed since: expiresAt
+   * says when its write time ends or ended): nothing was written. `escrowAddress` is folded.
+   */
   | { kind: "already_active"; scopeId: string; escrowAddress: string; expiresAt: string; record: FundingVerificationRecord }
   /** Nothing was written. */
   | { kind: "refused"; reason: ReconcileRefusal }
@@ -152,6 +166,8 @@ class ActivationConflict extends Error {
 }
 
 const refused = (reason: ReconcileRefusal): ReconcileResult => ({ kind: "refused", reason });
+/** An answer's escrow address: the record's, folded, whatever case it carries (review NIT-6). */
+const answerAddress = (record: FundingVerificationRecord): string => fundingEscrowKey(record.chainId, record.escrowAddress).escrowAddress;
 
 /** A chain id a record can carry: a positive safe integer. */
 const isChainId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
@@ -230,7 +246,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       // the row says now (it reads completed after settlement). Nothing is written, no TTL moves.
       // Every refusal stays on the path below.
       if (scope.status === "active" && keptForThis) {
-        return { kind: "already_active", scopeId, escrowAddress: keptForThis.escrowAddress, expiresAt: scope.expiresAt, record: keptForThis };
+        return { kind: "already_active", scopeId, escrowAddress: answerAddress(keptForThis), expiresAt: scope.expiresAt, record: keptForThis };
       }
 
       // The job's escrow row: escrowForJob reads through the same connection, so inside this
@@ -280,7 +296,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
         .run();
       if (changes !== 1) throw new ActivationConflict();
       const activation = kept ?? record;
-      return { kind: "activated", scopeId, escrowAddress: activation.escrowAddress, activatedAt: now.toISOString(), expiresAt, record: activation };
+      return { kind: "activated", scopeId, escrowAddress: answerAddress(activation), activatedAt: now.toISOString(), expiresAt, record: activation };
     }, { behavior: "immediate" });
   } catch (err) {
     if (err instanceof ActivationConflict) return refused("activation_conflict");

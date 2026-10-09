@@ -133,9 +133,27 @@ describe("S2.2 accept: a paid scope goes from awaiting_funding to active exactly
     db().transaction((tx) => store.insert(tx, verification(scopeId, { escrowAddress: checksummed })));
     expect(store.findByScope(db(), scopeId)?.escrowAddress).toBe(checksummed);
     const insert = vi.spyOn(store, "insert");
-    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toMatchObject({ kind: "activated", escrowAddress: checksummed });
+    // The answer's address is the folded form (NIT-6); the record is the one kept, as kept.
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toMatchObject({
+      kind: "activated",
+      escrowAddress: ESCROW_A,
+      record: { escrowAddress: checksummed },
+    });
     expect(insert).not.toHaveBeenCalled();
     expect(store.count()).toBe(1);
+  });
+
+  it("(answer-case) the answer carries the escrow address folded, whatever case the record or the kept record has (NIT-6)", async () => {
+    const checksummed = getAddress(ESCROW_A);
+    const { scopeId } = await paidScope(f);
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: checksummed }), TERMS)).toMatchObject({
+      kind: "activated",
+      escrowAddress: ESCROW_A,
+    });
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: checksummed }), TERMS)).toMatchObject({
+      kind: "already_active",
+      escrowAddress: ESCROW_A,
+    });
   });
 
   it("a record the verifier stored first is activated on, not inserted twice (pre-stored)", async () => {
@@ -351,8 +369,8 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   });
 
   // reconcilePaidScope is synchronous on the gateway's one connection, so two calls in one process
-  // run one after the other: these two tests are sequential and in-process, not races. The
-  // cross-connection case is neg-two-connections, below.
+  // run one after the other: neg-twice and neg-other-funding are sequential and in-process, not
+  // races. The cross-connection case is neg-two-connections, below.
   it("(neg-twice) two sequential, in-process reconciles of one scope with the same funding: the first activates, the second is already_active", async () => {
     const { scopeId } = await paidScope(f);
     const first = reconcilePaidScope(scopeId, verification(scopeId), TERMS);
@@ -362,30 +380,20 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(store.count()).toBe(1);
   });
 
-  it("(neg-race-escrow) two sequential, in-process reconciles of one scope, each record of the job's escrow at its turn: the second is refused", async () => {
+  it("(neg-other-funding) a live scope's record is never replaced by another escrow's, even when the job's row is re-pointed to it between two sequential calls", async () => {
+    // Merged with round 2's neg-race-escrow (reviewer-hotel's NIT-1): the same scenario; its one
+    // extra assertion, exactly one insert, is kept here.
     const { scopeId, escrowId } = await paidScope(f);
     const insert = vi.spyOn(store, "insert");
-    const first = reconcilePaidScope(scopeId, verification(scopeId), TERMS); // the job's escrow is ESCROW_A
-    // Between the calls the job's escrow row is re-pointed to ESCROW_B, so the second record IS the
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated"); // the job's escrow is ESCROW_A
+    // The job's escrow row is re-pointed to ESCROW_B (a replacement), so the second record IS the
     // job's escrow's at its turn: it is refused because the scope is bound to ESCROW_A's funding,
     // not because ESCROW_B is some other job's escrow.
-    setEscrow(escrowId, { contractAddress: ESCROW_B });
-    const second = reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }), TERMS);
-    expect(first.kind).toBe("activated");
-    expect(second).toEqual(refused("scope_bound_to_other_funding"));
-    expect(insert).toHaveBeenCalledTimes(1);
-    expect(store.count()).toBe(1);
-    expect(store.findByScope(db(), scopeId)?.escrowAddress).toBe(ESCROW_A);
-  });
-
-  it("(neg-other-funding) a live scope's record is never replaced by another escrow's", async () => {
-    const { scopeId, escrowId } = await paidScope(f);
-    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
-    // The job's escrow row is re-pointed to another contract (a replacement), and its record arrives.
     setEscrow(escrowId, { contractAddress: ESCROW_B });
     expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }), TERMS)).toEqual(
       refused("scope_bound_to_other_funding"),
     );
+    expect(insert).toHaveBeenCalledTimes(1);
     expect(store.count()).toBe(1);
     expect(store.findByScope(db(), scopeId)?.escrowAddress).toBe(ESCROW_A);
   });
