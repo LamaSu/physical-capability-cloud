@@ -9,6 +9,7 @@
   retried; device responses had no size or time bound.
 """
 
+import http.client
 import json
 import threading
 import time
@@ -212,35 +213,52 @@ class TestAcknowledgements:
 
 
 class Device:
-    """A scripted generic-HTTP device: answers POST /runs with a run id, polls with a state."""
+    """A scripted generic-HTTP device: answers POST /runs with a run id, polls with a state.
 
-    def __init__(self, run_id="run-1", poll_body=None, drip=None):
+    Each phase is controlled on its own (ChatGPT r3 F6): ``start_drip`` and ``poll_drip`` send that
+    answer one byte at a time, that many seconds apart, and ``start_partial`` answers the start with
+    no Content-Length and only those bytes, then holds the connection open. A dripping or held answer
+    ends when the node hangs up or the device is closed.
+    """
+
+    def __init__(self, run_id="run-1", poll_body=None, start_drip=None, poll_drip=None, start_partial=None):
         self.requests = []
+        self.closed = threading.Event()
         dev = self
 
         class Handler(BaseHTTPRequestHandler):
-            def _send(self, code, raw):
+            def _send(self, code, raw, drip=None, length=True):
                 self.send_response(code)
-                self.send_header("Content-Length", str(len(raw)))
+                if length:
+                    self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
-                if drip:
-                    for i in range(len(raw)):
-                        self.wfile.write(raw[i:i + 1])
-                        self.wfile.flush()
-                        time.sleep(drip)
-                else:
-                    self.wfile.write(raw)
+                try:
+                    if drip:
+                        for i in range(len(raw)):
+                            if dev.closed.is_set():
+                                return
+                            self.wfile.write(raw[i:i + 1])
+                            self.wfile.flush()
+                            dev.closed.wait(drip)
+                    else:
+                        self.wfile.write(raw)
+                except OSError:
+                    pass  # the node hung up
 
             def do_GET(self):
                 dev.requests.append(("GET", self.path))
                 body = poll_body if poll_body is not None else json.dumps({"id": run_id, "status": "succeeded"}).encode()
-                self._send(200, body)
+                self._send(200, body, drip=poll_drip)
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", "0"))
                 self.rfile.read(length)
                 dev.requests.append(("POST", self.path))
-                self._send(201, json.dumps({"id": run_id}).encode())
+                if start_partial is not None:
+                    self._send(201, start_partial, length=False)
+                    dev.closed.wait(10)
+                    return
+                self._send(201, json.dumps({"id": run_id}).encode(), drip=start_drip)
 
             def log_message(self, *args):
                 pass
@@ -250,8 +268,36 @@ class Device:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def close(self):
+        self.closed.set()
         self.server.shutdown()
         self.server.server_close()
+
+
+class Clock:
+    """An injected monotonic clock: the deadline passes only when a test moves it."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _expire_when_the_reader_waits_again(monkeypatch, clock):
+    """Move the clock past every deadline at one exact point: the reader holds part of an answer and
+    calls read1 again for the rest, after its check before the read. The watch then shuts the socket
+    and that read returns empty, the race the earlier dripping test lost at random (ChatGPT r3 F6)."""
+    original = http.client.HTTPResponse.read1
+
+    def read1(self, n=-1):
+        if getattr(self, "_test_holds_bytes", False):
+            clock.now += 3600.0
+        data = original(self, n)
+        if data:
+            self._test_holds_bytes = True
+        return data
+
+    monkeypatch.setattr(http.client.HTTPResponse, "read1", read1)
 
 
 def _profile(url, timeout_s=5, poll_path="/runs/{runId}"):
@@ -305,16 +351,62 @@ class TestBoundedDeviceIO:
         finally:
             dev.close()
 
-    def test_a_dripping_response_cannot_outlast_the_deadline(self):
-        dev = Device(poll_body=json.dumps({"id": "run-1", "status": "succeeded"}).encode(), drip=0.2)
+    # ChatGPT r3 F6: the earlier test dripped every answer, so its 1 s deadline landed in the start
+    # answer (15 bytes, 0.2 s apart), and whether the watch's shutdown or a check caught it decided
+    # the label: 1 run in 10 alone, 3 in 6 under load, ended no_run_id:device_state_unknown. Each
+    # phase now has its own test, and each asserts the one label it must give.
+
+    def test_a_dripping_poll_cannot_outlast_the_deadline(self):
+        # The start answer is immediate and whole; only the poll drips (38 bytes, 0.2 s apart), so the
+        # 1 s deadline always lands in the first poll.
+        dev = Device(poll_drip=0.2)
         try:
             runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=1), *_keys())
             started = time.monotonic()
             result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
-            assert time.monotonic() - started < 2.2  # the 1 s deadline, not the device's pace
-            assert result.ok is False and result.error.startswith("timeout")
+            elapsed = time.monotonic() - started
         finally:
             dev.close()
+        assert elapsed < 2.2  # the 1 s deadline, not the device's pace
+        assert result.ok is False and result.error.startswith("timeout"), result.error
+        assert result.error == "timeout:device_state_unknown", result.error
+        assert [method for method, _ in dev.requests] == ["POST", "GET"]
+
+    def test_a_start_answer_still_arriving_at_the_deadline_is_a_timeout(self):
+        # The deadline lands in the start answer itself (15 bytes, 0.2 s apart): the device may have
+        # started, and the reason is the deadline, not a missing run id.
+        dev = Device(start_drip=0.2)
+        try:
+            runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=1), *_keys())
+            started = time.monotonic()
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
+            elapsed = time.monotonic() - started
+        finally:
+            dev.close()
+        assert elapsed < 2.2
+        assert result.ok is False and result.error.startswith("timeout"), result.error
+        assert result.error == "timeout:device_state_unknown", result.error
+        assert [method for method, _ in dev.requests] == ["POST"]
+
+    def test_a_socket_the_watch_shut_is_not_the_end_of_the_start_answer(self, monkeypatch):
+        # The start answer has no Content-Length, so only the device closing would end it. The device
+        # sends '{"id"' and holds; the deadline passes while the reader waits for the rest, the watch
+        # shuts the socket, and that read returns empty. At e7e6f821 the empty read ended the answer,
+        # and the partial '{"id"' gave no_run_id:device_state_unknown: the flaky test's wrong label.
+        clock = Clock()
+        _expire_when_the_reader_waits_again(monkeypatch, clock)
+        dev = Device(start_partial=b'{"id"')
+        try:
+            runtime = AdapterRuntime.from_profile(_profile(dev.url, timeout_s=30), *_keys(), clock=clock)
+            started = time.monotonic()
+            result = runtime.run("read_absorbance", {"wavelengthNm": 450}, claim=CLAIM)
+            elapsed = time.monotonic() - started
+        finally:
+            dev.close()
+        assert elapsed < 5  # the watch acts within a slice of the clock passing the deadline
+        assert result.ok is False and result.error.startswith("timeout"), result.error
+        assert result.error == "timeout:device_state_unknown", result.error
+        assert [method for method, _ in dev.requests] == ["POST"]
 
     def test_a_run_can_be_cancelled(self):
         dev = Device(poll_body=json.dumps({"id": "run-1", "status": "running"}).encode())
