@@ -137,12 +137,16 @@ export function contractsPackageRoot(): string | null {
   }
 }
 
-/** The expected chain from the configured record (PCC_VNEXT_RECORD_NETWORK, PCC_VNEXT_RECORD_LABEL; no default), or null. */
-export function configuredVNextChainId(): number | null {
+/**
+ * The expected chain from the configured record (PCC_VNEXT_RECORD_NETWORK, PCC_VNEXT_RECORD_LABEL; no
+ * default), or null. The record is looked for under `packageRoot`, by default the @pcc/contracts
+ * package; a test gives its own, so the no-default rule is checked against a record that exists.
+ */
+export function configuredVNextChainId(packageRoot?: string | null): number | null {
   const network = process.env.PCC_VNEXT_RECORD_NETWORK;
   const label = process.env.PCC_VNEXT_RECORD_LABEL;
   if (typeof network !== "string" || typeof label !== "string") return null;
-  const root = contractsPackageRoot();
+  const root = packageRoot === undefined ? contractsPackageRoot() : packageRoot;
   return root === null ? null : vnextRecordChainId(root, network, label);
 }
 

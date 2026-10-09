@@ -10,7 +10,7 @@
  * Negatives are tagged (neg-...) for the mutation runner.
  */
 import { describe, it, expect, afterAll, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -182,20 +182,28 @@ describe("the configured sources today", () => {
     }
   });
 
-  it("(neg-config-default) the chain has no default: unset config is null, and so is config naming a record nobody committed", () => {
+  it("(neg-config-default) the chain has no default: with no config it is null, even where a valid record exists (r3 review NIT-5)", () => {
     for (const k of ENV) delete process.env[k];
-    expect(configuredVNextChainId()).toBeNull();
+    const root = packageRoot(); // a broadcast PROVISIONAL-run1.json on base-sepolia (84532)
+    expect(configuredVNextChainId(root)).toBeNull();
+    expect(configuredVNextChainId()).toBeNull(); // the real package, whatever records it holds
     process.env.PCC_VNEXT_RECORD_NETWORK = "base-sepolia";
-    expect(configuredVNextChainId()).toBeNull(); // no label
+    expect(configuredVNextChainId(root)).toBeNull(); // no label
+    delete process.env.PCC_VNEXT_RECORD_NETWORK;
     process.env.PCC_VNEXT_RECORD_LABEL = "run1";
-    expect(configuredVNextChainId()).toBeNull(); // deployments/vnext holds only its README
-    // The control: it looks in the real @pcc/contracts package, whose deployments/vnext holds only the README.
-    // (Compared by realpath: after an lstat of a FIFO, as neg-record-fifo does, Node's require.resolve
-    // can return the package's node_modules link instead; the package reached is the same.)
-    const root = contractsPackageRoot();
-    expect(realpathSync.native(root!)).toMatch(/[/\\]packages[/\\]contracts$/);
-    expect(existsSync(join(root!, "deployments", "vnext", "README.md"))).toBe(true);
-    expect(readdirSync(join(root!, "deployments", "vnext"))).toEqual(["README.md"]);
+    expect(configuredVNextChainId(root)).toBeNull(); // no network
+    // The control: configured for the record, it reads it.
+    process.env.PCC_VNEXT_RECORD_NETWORK = "base-sepolia";
+    expect(configuredVNextChainId(root)).toBe(84532);
+    // Configured for a record that does not exist: null.
+    process.env.PCC_VNEXT_RECORD_LABEL = "run2";
+    expect(configuredVNextChainId(root)).toBeNull();
+    // By default it looks in the real @pcc/contracts package. Compared by realpath: after an lstat of a
+    // FIFO, as neg-record-fifo does, Node's require.resolve can return the package's node_modules link
+    // instead; the package reached is the same.
+    const real = contractsPackageRoot();
+    expect(realpathSync.native(real!)).toMatch(/[/\\]packages[/\\]contracts$/);
+    expect(existsSync(join(real!, "deployments", "vnext", "README.md"))).toBe(true);
   });
 
   it("(neg-ttl-default) the TTL comes from S1.1's prepared terms, which do not exist yet: null", () => {
