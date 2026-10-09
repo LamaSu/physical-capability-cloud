@@ -50,12 +50,30 @@ function seedKernel(id: string, operatorAddress: string) {
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 const PENDING = "/api/relay/kernel-a/tool-call/pending";
 
+// N126 (dc6d3833): opening or revoking a scope is a decision, which needs the admin or the
+// kernel's PROVEN operator wallet. The operator's real key is a claimed identity until WP-A, so
+// those calls keep the operator's key and add the admin key.
+const ADMIN = "n31b-apigate-admin";
+let prevAdminKey: string | undefined;
+const asOperatorAdmin = () => ({ ...bearer(operatorKey), "x-admin-key": ADMIN });
+// DECISIONS 00:53 (73c93f5f): the camera, like the rest of the relay's human-facing side, needs
+// PROOF or the admin. WP-A (#326), which sets req.provenWallet for a proven wallet, has not
+// merged, so x-test-proven-wallet stands in for it, as in n31-relay-and-heartbeat-ownership. It
+// sets only the proven wallet: the principal still comes from apiGate (a key or a session).
+const PROVEN = "x-test-proven-wallet";
+
 beforeAll(async () => {
+  prevAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   process.env.DATABASE_URL = ":memory:";
   closeStore();
   initStore({ seed: false });
 
   app = Fastify({ logger: false }); // the router defaults server.ts uses
+  app.addHook("onRequest", async (req) => {
+    const proven = req.headers[PROVEN];
+    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+  });
   await app.register(cors, { origin: true, methods: ["GET", "POST", "OPTIONS"] });
   await app.register(apiGate);
   // Sibling plugins on either side of the relay: the relay's guard must not reach them.
@@ -89,6 +107,8 @@ beforeAll(async () => {
 afterAll(async () => {
   await app.close();
   closeStore();
+  if (prevAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = prevAdminKey;
 });
 
 beforeEach(() => {
@@ -267,16 +287,19 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
     base = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   });
 
-  function openStream(token: string) {
+  /** Open the camera stream on `token`, with `extra` headers (DECISIONS 00:53: proof or the admin key). */
+  function openStream(token: string, extra: Record<string, string> = {}) {
     const chunks: string[] = [];
     let ended = false;
-    const req = http.get(`${base}/api/relay/kernel-a/camera/stream`, { headers: bearer(token) }, (res) => {
+    let status = 0;
+    const req = http.get(`${base}/api/relay/kernel-a/camera/stream`, { headers: { ...bearer(token), ...extra } }, (res) => {
+      status = res.statusCode ?? 0;
       res.setEncoding("utf8");
       res.on("data", (chunk: string) => chunks.push(chunk));
       res.on("end", () => { ended = true; });
     });
     req.on("error", () => { ended = true; });
-    return { text: () => chunks.join(""), ended: () => ended, close: () => req.destroy() };
+    return { text: () => chunks.join(""), ended: () => ended, status: () => status, close: () => req.destroy() };
   }
 
   async function until(done: () => boolean, ms = 3_000) {
@@ -296,10 +319,13 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
   }
 
   async function grant(holder: string): Promise<string> {
-    const res = await app.inject({
-      method: "POST", url: "/api/relay/kernel-a/scope", headers: bearer(operatorKey),
-      payload: { createdBy: holder, allowedTools: ["run_create"] },
-    });
+    const payload = { createdBy: holder, allowedTools: ["run_create"] };
+    // N126: the operator's real key alone is refused the mint (a decision) and mints nothing.
+    const claimed = await app.inject({ method: "POST", url: "/api/relay/kernel-a/scope", headers: bearer(operatorKey), payload });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(executionScopes).where(eq(executionScopes.createdBy, holder)).all()).toHaveLength(0);
+    const res = await app.inject({ method: "POST", url: "/api/relay/kernel-a/scope", headers: asOperatorAdmin(), payload });
     expect(res.statusCode).toBe(201);
     return res.json().id;
   }
@@ -314,8 +340,18 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
   it("control: a live scope holder and the operator both receive frames", async () => {
     const viewer = provisionApiKey({ operatorId: "viewer-live" }).rawKey;
     await grant("viewer-live");
-    const holder = openStream(viewer);
-    const operator = openStream(operatorKey);
+    // DECISIONS 00:53: the holder's real key alone, a claimed identity, is refused the stream.
+    const claimed = openStream(viewer);
+    try {
+      await until(() => claimed.ended());
+      expect(claimed.status()).toBe(403);
+      expect(claimed.text()).toContain("operator_proof_required");
+    } finally {
+      claimed.close();
+    }
+    // The holder's proven wallet and the operator's key with the admin key watch.
+    const holder = openStream(viewer, { [PROVEN]: "viewer-live" });
+    const operator = openStream(operatorKey, { "x-admin-key": ADMIN });
     try {
       await until(() => holder.text().includes("event: connected") && operator.text().includes("event: connected"));
       const frame = await pushFrame();
@@ -329,9 +365,10 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
   it("revoking the holder's scope ends its stream, and later frames never reach it", async () => {
     const viewer = provisionApiKey({ operatorId: "viewer-revoked" }).rawKey;
     const scope = await grant("viewer-revoked");
-    const stream = openStream(viewer);
+    const stream = openStream(viewer, { [PROVEN]: "viewer-revoked" }); // DECISIONS 00:53: proven
     try {
       await until(() => stream.text().includes("event: connected"));
+      // A revoke takes the stop tier (#6677): the operator's own key, as on #400.
       const res = await app.inject({ method: "POST", url: `/api/relay/kernel-a/scope/${scope}/revoke`, headers: bearer(operatorKey) });
       expect(res.statusCode).toBe(200);
       expect(await frameReaches(stream)).toBe(false);
@@ -344,7 +381,7 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
   it("an expired scope gets no later frame, and its stream ends", async () => {
     const viewer = provisionApiKey({ operatorId: "viewer-expired" }).rawKey;
     const scope = await grant("viewer-expired");
-    const stream = openStream(viewer);
+    const stream = openStream(viewer, { [PROVEN]: "viewer-expired" }); // DECISIONS 00:53: proven
     try {
       await until(() => stream.text().includes("event: connected"));
       getStore().db.update(executionScopes)
@@ -361,7 +398,7 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
   it("a revoked API key's stream gets no later frame, even with its scope still live", async () => {
     const viewer = provisionApiKey({ operatorId: "viewer-keyrevoked" });
     await grant("viewer-keyrevoked");
-    const stream = openStream(viewer.rawKey);
+    const stream = openStream(viewer.rawKey, { [PROVEN]: "viewer-keyrevoked" }); // DECISIONS 00:53: proven
     try {
       await until(() => stream.text().includes("event: connected"));
       getRepos().apiKeys.revoke(viewer.record!.id);
@@ -380,8 +417,9 @@ describe("N4b-gw behind the real apiGate: a camera stream never outlives its aut
       expiresAt: new Date(now.getTime() + 3_600_000).toISOString(), lastActiveAt: now.toISOString(),
     });
     // The SIWE wallet is kernel-siwe's operator; give it a scope on kernel-a to view this camera.
+    // DECISIONS 00:53: the session's wallet is its proven wallet (what WP-A will set).
     await grant(SIWE_ADDRESS);
-    const stream = openStream(token);
+    const stream = openStream(token, { [PROVEN]: SIWE_ADDRESS });
     try {
       await until(() => stream.text().includes("event: connected"));
       getRepos().sessions.deleteByToken(token);

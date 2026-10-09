@@ -163,11 +163,20 @@ function validateManifest(body: unknown): {
 // Admin gate — simple shared-secret auth for verify + suspend
 // ---------------------------------------------------------------------------
 
+/** Who registered each digital-kernel manifest: the authenticated principal of the register call. */
+const manifestRegistrants = new Map<string, string>();
+
+/** The caller's authenticated principal (its API key's operator id, or its session's address). */
+function principalOf(req: FastifyRequest): string | null {
+  const r = req as unknown as { operatorId?: unknown; userId?: unknown };
+  for (const v of [r.operatorId, r.userId]) if (typeof v === "string" && v.trim().length > 0) return v.trim();
+  return null;
+}
+
 /**
- * Returns true if the request carries a matching admin key. In dev (no
- * PCC_ADMIN_KEY env var set), self-verification is allowed — the builder
- * may verify their own kernel via the builder.agentId. In production,
- * PCC_ADMIN_KEY MUST be set.
+ * Returns true if the request carries a matching admin key, or comes from the principal that
+ * registered the manifest (self-verification). In dev (no PCC_ADMIN_KEY env var set and not
+ * production), any caller passes. In production, PCC_ADMIN_KEY MUST be set.
  */
 function isAdminAuthorized(
   req: FastifyRequest,
@@ -178,19 +187,17 @@ function isAdminAuthorized(
   // In test + dev, allow the request if either:
   //   - no admin key is configured (open mode — test-only)
   //   - the provided X-Admin-Key matches
-  //   - the caller's agentId matches the manifest's builder.agentId
+  //   - the caller is the principal that registered the manifest
   const provided = (req.headers["x-admin-key"] as string | undefined) ?? undefined;
 
   if (expected && provided === expected) return true;
 
-  // Self-verification: builder can verify their own kernel
+  // Self-verification: the principal that registered this manifest may verify it. (N31b: this
+  // used to trust an x-agent-id header any caller can send, so anyone could verify any manifest.)
   if (manifest) {
-    const callerAgentId =
-      (req as unknown as { callerAgentId?: string }).callerAgentId ??
-      (req.headers["x-agent-id"] as string | undefined);
-    if (callerAgentId && callerAgentId === manifest.builder.agentId) {
-      return true;
-    }
+    const caller = principalOf(req);
+    const registrant = manifestRegistrants.get(manifest.kernelId);
+    if (caller !== null && registrant !== undefined && caller === registrant) return true;
   }
 
   // No admin key configured AND no builder self-auth — allow in test/dev only
@@ -292,6 +299,8 @@ export async function kernelMarketplaceRoutes(app: FastifyInstance) {
     manifest.registeredAt = new Date().toISOString();
     manifest.status = "pending";
     manifestRegistry.set(manifest.kernelId, manifest);
+    const registrant = principalOf(req);
+    if (registrant !== null) manifestRegistrants.set(manifest.kernelId, registrant);
 
     return reply.status(201).send({
       kernelId: manifest.kernelId,
