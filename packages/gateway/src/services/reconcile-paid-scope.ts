@@ -31,11 +31,10 @@
  *
  * Binding: the record must be verified on the expected chain, name this scope, its verified payer
  * must be the scope's buyer, and its escrow must be the scope's job's escrow (found the way the
- * accept route and the relay find it),
- * whose row passes the same preconditions as at the accept (escrowRowRefusal). These are the binding
- * rule's checks plus the row's status (funded or active): activationRefusal (funding-binding.ts), the
- * function the funding-status DTO reads funded_verified by before activation. So the same buyer's
- * escrow for another job is refused. One funding activates one scope: a record of an escrow the
+ * accept route and the relay find it), whose row passes the same preconditions as at the accept
+ * (escrowRowRefusal). These are the binding rule's checks plus the row's status (funded or active):
+ * activationRefusal (funding-binding.ts), the function the funding-status DTO reads funded_verified
+ * by before activation. So the same buyer's escrow for another job is refused. One funding activates one scope: a record of an escrow the
  * store already binds to another scope, or for a scope it binds to other funding, is refused. A
  * funding is (chain, escrow) (the steward's ruling 4): the store keys it so, and the port hands the
  * store the escrow address folded to lower case (fundingEscrowKey), for the lookup and in the
@@ -44,13 +43,13 @@
  * Idempotent on (scopeId, escrow): once the scope is active on this escrow's record, a repeat
  * returns that activation (already_active) and inserts nothing and moves no TTL. already_active
  * means "activated on this funding", not "live now": a scope past its TTL whose status still reads
- * active gets it with its past expiresAt, and the relay refuses its writes (review NIT-5). The answer comes
- * before anything that reads the escrow row, so it still holds after settlement, when the row reads
- * completed (fund-s2 review LOW-3). It needs the record's own checks (well formed, the expected
- * chain, this scope, this buyer), the scope active, and the kept record being this scope's buyer's
- * well-formed record of this escrow on the expected chain. A record for a scope that is active on
- * anything else is refused. One funding never activates a scope twice: a scope that lapsed after
- * activation is never awaiting_funding again (ruling 5).
+ * active gets it with its past expiresAt, and the relay refuses its writes (review NIT-5). The
+ * answer comes before anything that reads the escrow row, so it still holds after settlement, when
+ * the row reads completed (fund-s2 review LOW-3). It needs the record's own checks (well formed,
+ * the expected chain, this scope, this buyer), the scope active, and the kept record being this
+ * scope's buyer's well-formed record of this escrow on the expected chain. A record for a scope
+ * that is active on anything else is refused. One funding never activates a scope twice: a scope
+ * that lapsed after activation is never awaiting_funding again (ruling 5).
  *
  * Mock settlement is never consulted here: a scope goes live only on a finalized record bound to its
  * escrow row, and a mock row's "mock-escrow-..." contract is never a 0x address, so no record binds
@@ -136,8 +135,9 @@ export type ReconcileRefusal = (typeof RECONCILE_REFUSALS)[number];
 
 export type ReconcileResult =
   /**
-   * This call made the scope live. `record` is the record kept for it, as kept; `escrowAddress` is
-   * its escrow folded (fundingEscrowKey), whatever case the record carries (review NIT-6).
+   * This call made the scope live. `record` is the record kept for it, as the store keeps it (the
+   * port folds the escrow address of a record it inserts); `escrowAddress` is its escrow folded
+   * (fundingEscrowKey), whatever case the record carries (review NIT-6).
    */
   | {
       kind: "activated";
@@ -295,7 +295,8 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
         )
         .run();
       if (changes !== 1) throw new ActivationConflict();
-      const activation = kept ?? record;
+      // What the store now keeps: the record found, or the one just inserted, folded by the port.
+      const activation = kept ?? { ...record, escrowAddress: answerAddress(record) };
       return { kind: "activated", scopeId, escrowAddress: answerAddress(activation), activatedAt: now.toISOString(), expiresAt, record: activation };
     }, { behavior: "immediate" });
   } catch (err) {
