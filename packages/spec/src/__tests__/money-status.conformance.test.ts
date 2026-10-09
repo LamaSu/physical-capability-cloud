@@ -2481,3 +2481,107 @@ describe("R12 r2c N3 (lane, MEDIUM): every value a list or metric window paints 
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+// R12 round 2d: the lane review of #599 @49ead9d4 (reviewer-foxtrot): blocker F1 and gaps g1 and g2
+// (implementer-india). Each item's tests failed on 49ead9d4 at the assertion that encodes the finding.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════
+type R2dWin = Record<string, unknown>;
+const r2dRep = (v: string) => "reported: " + v + " - settlement unconfirmed";
+const r2dMetric = (path: string, select: string): R2dWin => ({ kind: "metric", label: "Value", binding: { path }, select });
+const r2dList = (path: string, title: string, meta: string[], statusFrom?: string): R2dWin =>
+  ({ kind: "list", binding: { path }, item: { title, meta, ...(statusFrom === undefined ? {} : { statusFrom }) } });
+/** Boot `windows` LIVE (each window's read answered, in window order, with the body of its own path) or from a
+ * baked SNAPSHOT holding every body. */
+async function r2dPaint(windows: R2dWin[], bodies: Record<string, unknown>, mode: "live" | "snapshot") {
+  if (mode === "live") r2BootLive(r2Man(windows), windows.map((w) => r2Ok(bodies[(w.binding as { path: string }).path])));
+  else boot({}, r2Man(windows), { _ts: "2026-09-24T00:00:00Z", ...bodies });
+  await flush();
+}
+const r2dTexts = (selector: string) => Array.from(document.querySelectorAll(selector)).map((n) => n.textContent);
+/** The lane review's repro record (r12-599-r2bc-review-outputs/tools/probe_findings.cjs `ESC`): a legacy escrow record. */
+const r2dEsc = (extra: Record<string, unknown>) => ({ id: "esc-1", totalAmount: 250, currency: "USDC", contractAddress: "0x" + "11".repeat(20), ...extra });
+const R2D_NAME_WITHHELD = "name withheld: stated money or verification";
+
+// The SHIPPED IR kit (apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js, generated from the gateway's dashboard-ir.ts;
+// check:ir-kit pins the bundle byte for byte to a fresh build), evaluated without its boot like the plain kit's
+// helpers above: the real bytes the IR view runs. The IR binds a name as a "text" field (dashboard-ir.ts
+// LIST_FIELD_KINDS `name: "text"`), painted by reportedFieldText: WITHHELD_FIELD when boundValueText withholds it
+// (astra r2 F2: "a capability NAMED 'Paid $1M - verified' would read as a payment fact"), else "reported: <name>".
+const irKitPath = path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js");
+type IrKitRegion = { reportedFieldText: (field: string, value: string) => string; WITHHELD_FIELD: string };
+function irKitRegion(): IrKitRegion {
+  const src = readFileSync(irKitPath, "utf8");
+  const bootTail = /  if \(typeof window !== "undefined" && typeof document !== "undefined"\) boot\(\);\n\}\)\(\);\s*$/;
+  const helperSrc = src.replace(bootTail, "  globalThis.irKitRegion = { reportedFieldText, WITHHELD_FIELD };\n})();");
+  if (helperSrc === src) throw new Error("the IR kit's final boot dispatch not found");
+  const ctx: Record<string, unknown> = {};
+  vm.runInNewContext(helperSrc, ctx);
+  return ctx.irKitRegion as IrKitRegion;
+}
+
+// ── R12 r2d F1 (lane review, MEDIUM, introduced by r2c 49ead9d4): on money data a NAME that states money or
+// verification was printed, attributed, before nameText's withholding could run ─────────────────────────────
+describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verification is withheld on money data too, as on non-money data and in the IR kit", () => {
+  // The lane review's repro, verbatim (verify/probe-findings.txt F1): a money list's title and meta, and money metrics
+  // whose names state payment, an amount and PCC's own notice word.
+  const REPRO_ROW = r2dEsc({ status: "funded", name: "Paid in full - verified $250", payeeName: "Payment received" });
+  const REPRO_REC = r2dEsc({ status: "funded", name: "Paid in full - verified $250", displayName: "250 USDC settled", payeeName: "withheld: stated money or verification" });
+
+  it("the lane review's repro (live and snapshot): on money data a list's title and meta and a metric naming money or verification read 'name withheld: stated money or verification', never the name attributed", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/escrow", "name", ["payeeName"])], { "/api/escrow": [REPRO_ROW] }, mode);
+      expect(r2dTexts(".pcc-list-title"), "money list title " + mode).toEqual([R2D_NAME_WITHHELD]);
+      expect(r2dTexts(".pcc-list-meta"), "money list meta " + mode).toEqual([R2D_NAME_WITHHELD]);
+      await r2dPaint(["name", "displayName", "payeeName"].map((f) => r2dMetric("/api/escrow/e1", f)), { "/api/escrow/e1": REPRO_REC }, mode);
+      expect(r2dTexts(".pcc-metric-amount"), "money metrics " + mode).toEqual([R2D_NAME_WITHHELD, R2D_NAME_WITHHELD, R2D_NAME_WITHHELD]);
+    }
+  });
+
+  it("the same names on non-money data (live and snapshot) are withheld the same way (a control: it passes before and after)", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/kernels", "name", ["ownerName"])], { "/api/kernels": [{ id: "k1", name: "Paid in full - verified $250", ownerName: "Payment received" }] }, mode);
+      expect(r2dTexts(".pcc-list-title"), "kernel list title " + mode).toEqual([R2D_NAME_WITHHELD]);
+      expect(r2dTexts(".pcc-list-meta"), "kernel list meta " + mode).toEqual([R2D_NAME_WITHHELD]);
+      await r2dPaint(["kernel.name", "kernel.displayName", "kernel.ownerName"].map((f) => r2dMetric("/api/kernels/k1", f)),
+        { "/api/kernels/k1": { kernel: { id: "k1", name: "Paid in full - verified $250", displayName: "250 USDC settled", ownerName: "withheld: stated money or verification" } } }, mode);
+      expect(r2dTexts(".pcc-metric-amount"), "kernel metrics " + mode).toEqual([R2D_NAME_WITHHELD, R2D_NAME_WITHHELD, R2D_NAME_WITHHELD]);
+    }
+  });
+
+  // The review's names, the IR's own documented example, and the two shared corpora both kits' detectors are pinned to.
+  const PARITY_NAMES: readonly string[] = [...new Set([
+    "Paid in full - verified $250", "Payment received", "250 USDC settled", "withheld: stated money or verification", "Paid $1M - verified",
+    ...PLAIN_TEXT_CASES.nameText.map(([raw]) => raw).filter((raw): raw is string => typeof raw === "string" && raw !== ""),
+    ...PLAIN_CLAIM_CASES.map(([raw]) => raw),
+  ])];
+
+  it("parity with the shipped IR kit (live and snapshot): over the review's names, the IR's own example and the shared claim corpus, the plain kit withholds a name exactly when the IR kit does, on money and on non-money data, in a metric and in both list slots; a name both kits show keeps its tier's text", async () => {
+    const ir = irKitRegion();
+    const irWithholds = (v: string) => ir.reportedFieldText("name", v) === ir.WITHHELD_FIELD;
+    for (const v of PARITY_NAMES) expect(ir.reportedFieldText("name", v), "IR " + v).toBe(irWithholds(v) ? "withheld: stated money or verification" : "reported: " + v);
+    for (const v of ["Paid in full - verified $250", "Payment received", "250 USDC settled", "withheld: stated money or verification", "Paid $1M - verified"]) {
+      expect(irWithholds(v), "the IR withholds the review's name " + v).toBe(true);
+    }
+    const shown = PARITY_NAMES.filter((v) => !irWithholds(v));
+    expect(shown.length, "the corpus holds names both kits show").toBeGreaterThan(0);
+    expect(shown.length, "the corpus holds names both kits withhold").toBeLessThan(PARITY_NAMES.length);
+    const onMoney = (v: string) => (irWithholds(v) ? R2D_NAME_WITHHELD : r2dRep(v)); // a name that passes is a report
+    const offMoney = (v: string) => (irWithholds(v) ? R2D_NAME_WITHHELD : "name: " + v); // ... and framed off money data
+    const rows = (extra: (i: number) => Record<string, unknown>) => PARITY_NAMES.map((v, i) => ({ ...extra(i), name: v, payeeName: v }));
+    const names = PARITY_NAMES.map((v) => ({ name: v }));
+    const metrics = (p: string) => PARITY_NAMES.map((_, i) => r2dMetric(p, "names." + i + ".name"));
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dList("/api/escrow", "name", ["payeeName"])], { "/api/escrow": rows(() => ({ totalAmount: 250 })) }, mode);
+      expect(r2dTexts(".pcc-list-title"), "money list titles " + mode).toEqual(PARITY_NAMES.map(onMoney));
+      expect(r2dTexts(".pcc-list-meta"), "money list metas " + mode).toEqual(PARITY_NAMES.map(onMoney));
+      await r2dPaint(metrics("/api/escrow/e1"), { "/api/escrow/e1": { totalAmount: 250, names } }, mode);
+      expect(r2dTexts(".pcc-metric-amount"), "money metrics " + mode).toEqual(PARITY_NAMES.map(onMoney));
+      await r2dPaint([r2dList("/api/kernels", "name", ["payeeName"])], { "/api/kernels": rows((i) => ({ id: "k" + i })) }, mode);
+      expect(r2dTexts(".pcc-list-title"), "kernel list titles " + mode).toEqual(PARITY_NAMES.map(offMoney));
+      expect(r2dTexts(".pcc-list-meta"), "kernel list metas " + mode).toEqual(PARITY_NAMES.map(offMoney));
+      await r2dPaint(metrics("/api/kernels/k1"), { "/api/kernels/k1": { names } }, mode);
+      expect(r2dTexts(".pcc-metric-amount"), "kernel metrics " + mode).toEqual(PARITY_NAMES.map(offMoney));
+    }
+  });
+});

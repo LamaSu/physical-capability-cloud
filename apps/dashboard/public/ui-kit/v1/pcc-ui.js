@@ -1610,10 +1610,14 @@
   // allowlist of fields shown bare from money data is empty (the conformance test enumerates it), so money data
   // never reaches the name/id/type lines after the money one. Only non-money data keeps a name, an id or a type
   // typed. Never verified: these windows read collections, snapshots or single values, not a live settlement read.
+  // R12 r2d F1: nameText's withholding wins on every path. A name that states money or verification is withheld
+  // on money data exactly as on non-money data and in the IR kit; money attribution applies only to a value that
+  // passes it (a non-string name is never prose, so it is reported as sent).
   function boundText(path, v, money) {
     if (isStatusPath(path)) return statusPillText(v, false, money);
-    if (money) return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, true);
     var field = typeof path === 'string' ? path.split('.').pop() : '';
+    if (/name$/i.test(field) && typeof v === 'string' && isProseClaim(v)) return nameText(v);
+    if (money) return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, true);
     if (/name$/i.test(field)) return nameText(v);
     if (/id$|type$/i.test(field)) return idText(v);
     return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, money);
