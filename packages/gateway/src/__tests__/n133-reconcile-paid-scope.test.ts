@@ -11,6 +11,7 @@
  * test's own connection, so its inserts roll back with the transaction.
  */
 import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import { getAddress } from "viem";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,6 +109,33 @@ describe("S2.2 accept: a paid scope goes from awaiting_funding to active exactly
     expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_A.toUpperCase().replace("0X", "0x") }), TERMS).kind).toBe(
       "activated",
     );
+  });
+
+  // reviewer-hotel's LOW-1: a verifier built on viem sends checksummed (mixed-case) addresses, while
+  // the port keeps them folded; the idempotent and pre-stored paths must compare without letter case.
+  it("(case-idem) a duplicate carrying the checksummed escrow of a live scope is already_active, nothing written", async () => {
+    const checksummed = getAddress(ESCROW_A);
+    expect(checksummed).not.toBe(ESCROW_A);
+    const { scopeId } = await paidScope(f);
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
+    const after = scopeRow(scopeId);
+    vi.setSystemTime(T0 + 5 * MIN);
+    const insert = vi.spyOn(store, "insert");
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: checksummed }), TERMS).kind).toBe("already_active");
+    expect(insert).not.toHaveBeenCalled();
+    expect(scopeRow(scopeId)).toEqual(after);
+  });
+
+  it("(case-prestored) a record another writer kept checksummed activates the scope on a lower-case notification, with no second insert", async () => {
+    const checksummed = getAddress(ESCROW_A);
+    const { scopeId } = await paidScope(f);
+    // Straight into the store, not through the port (which would fold it): kept checksummed.
+    db().transaction((tx) => store.insert(tx, verification(scopeId, { escrowAddress: checksummed })));
+    expect(store.findByScope(db(), scopeId)?.escrowAddress).toBe(checksummed);
+    const insert = vi.spyOn(store, "insert");
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toMatchObject({ kind: "activated", escrowAddress: checksummed });
+    expect(insert).not.toHaveBeenCalled();
+    expect(store.count()).toBe(1);
   });
 
   it("a record the verifier stored first is activated on, not inserted twice (pre-stored)", async () => {
