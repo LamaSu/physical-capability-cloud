@@ -17,6 +17,9 @@ import { join } from "node:path";
 import { createDatabase, eq, schema, sql } from "@pcc/store";
 import { MAX_POST_ACTIVATION_TTL_MS, reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFundingRecord } from "../services/funding-record-port.js";
+import { isMockSettlement, mockFundsWrites } from "../services/settlement-mode.js";
+import { escrowForJob } from "../services/scope-acceptance.js";
+import { projectFundingStatus } from "../readmodels/funding-status.js";
 import {
   installCaseExactFundingRecordStore,
   installFinalityBlindFundingRecordStore,
@@ -797,6 +800,55 @@ describe("what Stage 2 must not write or read (rulings 2 and 7; gateway's condit
       expect(fundingStatusNow(store, scopeId), milestones).toMatchObject({ state: "unknown", binding: "bound" });
       expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: own }), TERMS), milestones).toEqual(refused("escrow_not_funded"));
     }
+  });
+});
+
+describe("gateway's condition (iii), accepted in bulletin 7195: mock settlement never stands in for the record", () => {
+  it("(mock-never-funds) with mock settlement ON, a buyer-payer escrow whose row mock settlement created funded, and no record: reconcile refuses, and the DTO never reads funded_verified", async () => {
+    // ON under master's rule (anything but "false") and under #591's (exactly "true", not production).
+    process.env.MOCK_SETTLEMENT = "true";
+    expect(isMockSettlement()).toBe(true);
+    expect(mockFundsWrites()).toBe(true);
+    // The buyer's job, its escrow row as mock settlement creates it: a mock-escrow-... contract,
+    // funded, the buyer as payer. Accepted while mock settlement was off, so it waits for funding.
+    const { scopeId, jobId } = await paidScope(f, { real: null, accept: false });
+    const mockRow = escrowForJob(jobId)!;
+    expect(mockRow).toMatchObject({ status: "funded", payer: BUYER });
+    expect(mockRow.contractAddress).toMatch(/^mock-escrow-/);
+    process.env.MOCK_SETTLEMENT = "false";
+    expect((await acceptScope(f, scopeId)).json()).toMatchObject({ status: "awaiting_funding", fundingRefusal: "mock_escrow" });
+    process.env.MOCK_SETTLEMENT = "true";
+    expect(mockFundsWrites()).toBe(true);
+    expect(store.findByScope(db(), scopeId)).toBeNull(); // no record
+
+    // Reconcile: no record, a record of a real escrow, or a "record" naming the mock contract.
+    expect(reconcilePaidScope(scopeId, null as never, TERMS)).toEqual(refused("record_malformed"));
+    expect(reconcilePaidScope(scopeId, undefined as never, TERMS)).toEqual(refused("record_malformed"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("record_escrow_not_scope_escrow"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: mockRow.contractAddress }), TERMS)).toEqual(refused("record_malformed"));
+    expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+    expect(store.count()).toBe(0);
+    expect((await writeAs(f, scopeId)).statusCode).toBe(403);
+
+    // The DTO: no record reads awaiting_funding; a real escrow's record does not bind to the mock row.
+    expect(fundingStatusNow(store, scopeId)).toMatchObject({ state: "awaiting_funding", binding: "no_record", verification: null });
+    const s = scopeRow(scopeId);
+    const scopeIn = { id: s.id, jobId: s.jobId, createdBy: s.createdBy, status: s.status, createdAt: s.createdAt, expiresAt: s.expiresAt };
+    const rowIn = { contractAddress: mockRow.contractAddress, payer: mockRow.payer, status: mockRow.status };
+    expect(projectFundingStatus(scopeIn, verification(scopeId), rowIn, CHAIN_ID, new Date().toISOString())).toMatchObject({
+      state: "unknown",
+      binding: "record_escrow_not_scope_escrow",
+      verification: null,
+    });
+
+    // A scope the test-only mock rule made live at the accept: still no record, so the DTO reads
+    // unknown, and reconcile never turns it into a record activation.
+    const live = await paidScope(f, { real: null });
+    expect(scopeRow(live.scopeId).status).toBe("active");
+    expect(fundingStatusNow(store, live.scopeId)).toMatchObject({ state: "unknown", binding: "no_record" });
+    expect(reconcilePaidScope(live.scopeId, null as never, TERMS)).toEqual(refused("record_malformed"));
+    expect(reconcilePaidScope(live.scopeId, verification(live.scopeId), TERMS)).toEqual(refused("record_escrow_not_scope_escrow"));
+    expect(store.count()).toBe(0);
   });
 });
 

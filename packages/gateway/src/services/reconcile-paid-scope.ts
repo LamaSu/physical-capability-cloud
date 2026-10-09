@@ -50,6 +50,11 @@
  * anything else is refused. One funding never activates a scope twice: a scope that lapsed after
  * activation is never awaiting_funding again (ruling 5).
  *
+ * Mock settlement is never consulted here: a scope goes live only on a finalized record bound to its
+ * escrow row, and a mock row's "mock-escrow-..." contract is never a 0x address, so no record binds
+ * to it whatever isMockSettlement() says (gateway's condition (iii), accepted in bulletin 7195). The
+ * test-only mock rule at the accept (scope-acceptance.ts mockFundsWrites) is not this path.
+ *
  * Fails closed: no record store (production, until Q9) is funding_record_store_unavailable, and
  * nothing is read or written; nor is anything when an input is unusable. The result is a typed
  * discriminated union; nothing reads an error's message, and no request value is written to any log

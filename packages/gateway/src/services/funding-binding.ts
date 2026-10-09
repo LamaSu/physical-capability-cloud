@@ -20,6 +20,10 @@
  * the ONE function reconcilePaidScope activates by and the funding-status DTO reads funded_verified by
  * before activation (ruling 1).
  *
+ * No mock branch: nothing here reads the settlement mode, and check 7 needs both addresses to be 0x
+ * addresses (sameAddress), so a mock row ("mock-escrow-...") never binds to a record and never passes
+ * activationRefusal (gateway's condition (iii), accepted in bulletin 7195).
+ *
  * Pure: nothing here reads a clock, a database or the environment.
  */
 import { sameIdentity } from "../auth/buyer-identity.js";
