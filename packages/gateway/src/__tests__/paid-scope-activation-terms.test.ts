@@ -61,6 +61,8 @@ describe("vnextRecordChainId: the pinned V-next deployment record (ruling 4)", (
     expect(vnextRecordChainId(anvil, "anvil", "local_2")).toBe(31337);
     const other = packageRoot("chain-545", "PROVISIONAL-run1.json", recordJson({ chainId: 545 }));
     expect(vnextRecordChainId(other, "chain-545", "run1")).toBe(545);
+    const sepolia = packageRoot("chain-11155111", "PROVISIONAL-run1.json", recordJson({ chainId: 11155111 }));
+    expect(vnextRecordChainId(sepolia, "chain-11155111", "run1")).toBe(11155111);
   });
 
   it("networkSlug is VNextDeploySpec.networkSlug's", () => {
@@ -97,6 +99,9 @@ describe("vnextRecordChainId: the pinned V-next deployment record (ruling 4)", (
       const root = packageRoot("base-sepolia", "PROVISIONAL-run1.json", recordJson({ chainId }));
       expect(vnextRecordChainId(root, "base-sepolia", "run1"), String(chainId)).toBeNull();
     }
+    // A chain id past a safe integer, in the very directory its slug names: still null.
+    const big = 2 ** 53;
+    expect(vnextRecordChainId(packageRoot(`chain-${big}`, "PROVISIONAL-run1.json", recordJson({ chainId: big })), `chain-${big}`, "run1")).toBeNull();
     // Base Sepolia's record under base/ (or the other way round) is in the wrong place.
     expect(vnextRecordChainId(packageRoot("base", "PROVISIONAL-run1.json", recordJson()), "base", "run1")).toBeNull();
     expect(vnextRecordChainId(packageRoot("base-sepolia", "PROVISIONAL-run1.json", recordJson({ chainId: 8453 })), "base-sepolia", "run1")).toBeNull();
