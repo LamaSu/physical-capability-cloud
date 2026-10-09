@@ -1,12 +1,13 @@
 /**
  * PGTR Relay routes -- Payment-Gated Transaction Relay (ERC-8194).
  *
- * POST /api/pgtr/relay   -- DISABLED: answers 501 to every request (PGTR_RELAY_DISABLED_REFUSAL)
- * GET  /api/pgtr/status   -- Check PGTR relay availability and config
+ * POST /api/pgtr/relay   -- DISABLED: answers 501 to every request that reaches it (PGTR_RELAY_DISABLED_REFUSAL)
+ * GET  /api/pgtr/status   -- enabled: false, plus the forwarder address and whether a relayer key is set
  *
- * The relay endpoint accepts an EIP-3009 signed payment authorization bundled
- * with target contract call data. It verifies the request, then calls
- * PCCForwarder.relay() on-chain via the configured relayer wallet.
+ * The relay is disabled. Its old handler, still below the guard, only shape-checked the
+ * request (an EIP-3009 payment authorization bundled with target call data) before it called
+ * PCCForwarder.relay() from the relayer wallet. It is kept unreachable for a redesign that
+ * binds the target and the calldata to the payer's signature.
  */
 
 import type { FastifyInstance } from "fastify";

@@ -276,3 +276,162 @@ describe("behind the real apiGate: any API key or SIWE session gets the 501", ()
     expect({ status: res.statusCode, work: relayWork() }).toEqual({ status: 401, work: NO_RELAY_WORK });
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// The guard must hold while the 501 is still being sent.
+//
+// Production wraps the relay route in ROOT async onSend hooks (report_hint at server.ts:267 and
+// irCorsReadProjection at :314, both added before the plugin registers at :728, at e20bd239), so a
+// 501 sent from onRequest is still in flight when send() returns. The guard returns reply, so its promise adopts reply.then, which settles
+// only when the raw response ends or closes (Fastify 4.29.1 lib/reply.js:491-510); only then does
+// the hook runner go on (lib/hooks.js:244-250). Once the response has ended, reply.sent is true and
+// runPreParsing stops (lib/route.js:600-601). A guard that calls send() without returning reply
+// resolves at once, while reply.sent (lib/reply.js:104-108: hijacked or raw.writableEnded) is still
+// false, so the request goes on into preParsing, the body parser and the handler. The fixtures above
+// have no onSend hook: their send() ends the response at once, so they cannot tell the two apart.
+// This fixture holds the 501 in an async onSend hook until the test opens a gate.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** A promise and the function that resolves it. */
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * Lets queued work run for `turns` setImmediate turns, draining the nextTick and promise queues
+ * between them. Microtasks alone are not enough: light-my-request delivers the body in a setImmediate.
+ */
+async function settle(turns = 20) {
+  for (let i = 0; i < turns; i++) await new Promise<void>((r) => setImmediate(r));
+}
+
+/** Rejects with `message` if `promise` has not settled within `ms`, so a stuck request fails the test instead of hanging it. */
+async function within<T>(promise: PromiseLike<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+describe("with a root async onSend hook holding the 501, as in production, the request never gets past onRequest", () => {
+  const RELAY_URL = "/api/pgtr/relay";
+  const CONTROL_URL = "/__lifecycle-control";
+  let app: FastifyInstance;
+  let stages: string[] = [];
+  let onSendEntered = deferred();
+  let gate = deferred();
+
+  beforeAll(async () => {
+    app = Fastify({ logger: false });
+
+    // ROOT hooks, added before the relay plugin registers, so they wrap its route as server.ts's root hooks do.
+    // The hold, for the relay route only: an async onSend hook, like server.ts:267 and :314.
+    app.addHook("onSend", async (request, _reply, payload) => {
+      if (request.routeOptions.url !== RELAY_URL) return payload;
+      onSendEntered.resolve();
+      await gate.promise;
+      return payload;
+    });
+    // Stage spies: each records that a request reached its stage.
+    app.addHook("preParsing", async (_request, _reply, payload) => {
+      stages.push("preParsing");
+      return payload;
+    });
+    app.removeContentTypeParser("application/json");
+    app.addContentTypeParser<string>("application/json", { parseAs: "string" }, (_request, body, done) => {
+      stages.push("parse");
+      try {
+        done(null, JSON.parse(body));
+      } catch (err) {
+        done(err as Error);
+      }
+    });
+    app.addHook("preValidation", async () => {
+      stages.push("preValidation");
+    });
+    app.addHook("preHandler", async () => {
+      stages.push("preHandler");
+    });
+
+    await app.register(pgtrRelayRoutes);
+    // The live control: an unguarded route in its own plugin, as the relay route is, under the same root hooks.
+    await app.register(async (sibling) => {
+      sibling.post(CONTROL_URL, async () => ({ ok: true }));
+    });
+    await app.ready();
+  });
+
+  beforeEach(() => {
+    stages = [];
+    onSendEntered = deferred();
+    gate = deferred();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it.each(["0", "1000000"])(
+    "a well-formed relay with amount %s and both env vars set gets 501, and no request stage, env read or relay work starts while onSend holds it",
+    async (amount) => {
+      setPgtrEnv();
+      watchPgtrEnvReads();
+
+      const pending = app.inject({ method: "POST", url: RELAY_URL, payload: relayBody(amount) });
+      let responded = false;
+      void pending.then(
+        () => {
+          responded = true;
+        },
+        () => {
+          responded = true;
+        },
+      );
+      try {
+        await within(onSendEntered.promise, 2_000, "the relay request never reached the onSend hook");
+        await settle();
+
+        // The 501 is still held in onSend, and nothing after onRequest has started.
+        expect({ responded, stages: [...stages], work: relayWork() }).toEqual({
+          responded: false,
+          stages: [],
+          work: NO_RELAY_WORK,
+        });
+
+        gate.resolve();
+        const res = await within(pending, 2_000, "the relay request never finished after the gate opened");
+        expect({ status: res.statusCode, body: res.json() }).toEqual({ status: 501, body: PGTR_RELAY_DISABLED_REFUSAL });
+        expect(res.json()).toMatchObject({ code: "PGTR_RELAY_DISABLED", error: "not_implemented" });
+
+        // Nor once the response has gone.
+        await settle();
+        expect({ stages: [...stages], work: relayWork() }).toEqual({ stages: [], work: NO_RELAY_WORK });
+      } finally {
+        // Never leave the request held: a failed assertion must not leave it pending into the next test or app.close().
+        gate.resolve();
+        await within(pending, 2_000, "the relay request never finished").catch(() => undefined);
+      }
+    },
+  );
+
+  it("control: an unguarded sibling route under the same hooks runs preParsing, parse, preValidation and preHandler, in order", async () => {
+    const res = await app.inject({ method: "POST", url: CONTROL_URL, payload: { probe: true } });
+
+    expect({ status: res.statusCode, body: res.json(), stages: [...stages] }).toEqual({
+      status: 200,
+      body: { ok: true },
+      stages: ["preParsing", "parse", "preValidation", "preHandler"],
+    });
+  });
+});
