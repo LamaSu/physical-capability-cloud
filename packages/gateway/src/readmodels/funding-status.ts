@@ -28,7 +28,9 @@
  *
  * No route serves this yet (none sits next to an existing readmodels route trivially: a read needs
  * its own object authorization, the buyer, the kernel's operator or the admin), so it is the
- * projection only. It reads no clock, database or environment: the same inputs give the same DTO.
+ * projection only. A route that serves it passes paidScopeActivationTerms(scope).expectedChainId as
+ * the expected chain: the input the accept route gives reconcilePaidScope, so the two read the same
+ * chain. It reads no clock, database or environment: the same inputs give the same DTO.
  */
 import {
   activationRefusal,
@@ -96,8 +98,9 @@ export type FundingBinding = (typeof FUNDING_BINDINGS)[number];
  *   3. funded_verified   (a) status awaiting_acceptance or awaiting_funding, window open, and
  *                        reconcilePaidScope could activate on the record: it is bound AND the escrow
  *                        row's status is funded or active. This says the funding is verified; whether the
- *                        activation then happens is reconcile's (the stop, the block list) and the
- *                        operator's acceptance, which this projection does not read.
+ *                        activation then happens is reconcile's (the record store, the post-activation
+ *                        TTL, the scope's status, the stop, the block list, the one-funding-one-scope
+ *                        keys) and the operator's acceptance, which this projection does not read.
  *                        (b) status active, expired (an active scope past its TTL) or suspended_rogue
  *                        (ONCE_LIVE), and the record is bound, whatever the row's status now (it reads
  *                        completed after settlement). Whether the scope may still write is its own

@@ -12,6 +12,11 @@
  *     at most MAX_POST_ACTIVATION_TTL_MS; a missing or unusable one is activation_ttl_unavailable,
  *     before anything is read. The mint's 1 h window (PAID_SCOPE_TTL_MS, #591) is not this.
  *
+ * Before anything is read, in this order (RECONCILE_REFUSALS' order): the record store
+ * (funding_record_store_unavailable), then the expected chain (expected_chain_unavailable), then the
+ * TTL (activation_ttl_unavailable), then the record's own checks (record_malformed,
+ * record_chain_mismatch, record_scope_mismatch). Production has no store, so it answers the first.
+ *
  * One synchronous SQLite transaction (BEGIN IMMEDIATE; better-sqlite3 runs nothing else on the
  * connection until it ends, and holds the write lock against any other connection):
  *   a. re-read what allows the activation: the scope (not revoked, awaiting_funding, its

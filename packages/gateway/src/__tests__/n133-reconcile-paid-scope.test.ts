@@ -174,6 +174,31 @@ describe("rulings 4 and 5: the expected chain and the post-activation TTL are re
     return [vi.spyOn(store, "findByScope"), vi.spyOn(store, "findByEscrow"), vi.spyOn(store, "insert")];
   }
 
+  it("(refusal-order) before anything is read, reconcile checks the store, then the expected chain, then the TTL, then the record (RECONCILE_REFUSALS' order)", async () => {
+    const { scopeId } = await paidScope(f);
+    const findByScope = vi.spyOn(store, "findByScope");
+    const malformed = { ...verification(scopeId), finality: "latest" } as never;
+    const none = { expectedChainId: null, postActivationTtlMs: null };
+    // Each case also fails every later check, so each answer is the first check that fails.
+    __setFundingRecordStoreForTest(null);
+    expect(reconcilePaidScope(scopeId, malformed, none)).toEqual(refused("funding_record_store_unavailable"));
+    __setFundingRecordStoreForTest(store);
+    expect(reconcilePaidScope(scopeId, malformed, none)).toEqual(refused("expected_chain_unavailable"));
+    expect(reconcilePaidScope(scopeId, malformed, { ...none, expectedChainId: CHAIN_ID })).toEqual(refused("activation_ttl_unavailable"));
+    expect(reconcilePaidScope(scopeId, malformed, TERMS)).toEqual(refused("record_malformed"));
+    expect(reconcilePaidScope(scopeId, verification("scope_elsewhere", { chainId: 545 }), TERMS)).toEqual(refused("record_chain_mismatch"));
+    expect(reconcilePaidScope(scopeId, verification("scope_elsewhere"), TERMS)).toEqual(refused("record_scope_mismatch"));
+    expect(findByScope).not.toHaveBeenCalled(); // all of it before any read
+    // The documented order is RECONCILE_REFUSALS' own.
+    expect(RECONCILE_REFUSALS.slice(0, 5)).toEqual([
+      "funding_record_store_unavailable",
+      "expected_chain_unavailable",
+      "activation_ttl_unavailable",
+      "record_malformed",
+      "record_chain_mismatch",
+    ]);
+  });
+
   it("(neg-chain-input) no usable expected chain is expected_chain_unavailable, before anything is read or written", async () => {
     const { scopeId } = await paidScope(f);
     const before = scopeRow(scopeId);
@@ -504,10 +529,14 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(scopeRow(scopeId).status).toBe("active");
   });
 
-  it("(neg-nostore) no record store: the fail-closed reason, and nothing changes", async () => {
+  it("(neg-nostore) no record store: the fail-closed reason, ahead of the inputs, and nothing changes", async () => {
     const { scopeId } = await paidScope(f);
     __setFundingRecordStoreForTest(null);
     expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("funding_record_store_unavailable"));
+    // The store is checked before the activation terms (production, which has no store, answers this).
+    expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null })).toEqual(
+      refused("funding_record_store_unavailable"),
+    );
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
   });
 
@@ -521,6 +550,9 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
         set("VITEST", vitest);
         const label = `NODE_ENV=${nodeEnv} VITEST=${vitest}`;
         expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS), label).toEqual(refused("funding_record_store_unavailable"));
+        expect(reconcilePaidScope(scopeId, verification(scopeId), { expectedChainId: null, postActivationTtlMs: null }), label).toEqual(
+          refused("funding_record_store_unavailable"),
+        );
         expect(() => __setFundingRecordStoreForTest(store), label).toThrow();
       }
     } finally {

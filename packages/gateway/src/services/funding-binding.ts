@@ -133,8 +133,9 @@ export type ActivationRefusal = RecordScopeRefusal | EscrowRowRefusal | RecordEs
  * row `escrow` say: checks 1 to 7 of the binding rule, then the row's status (funded or active), then
  * check 8; null when all pass, else the first that fails. reconcilePaidScope activates by this and
  * the funding-status DTO reads funded_verified before activation by this (ruling 1), so the two agree.
- * What it does not cover is reconcile's own: the scope's status and window, the emergency stop, the
- * block list, and the one-funding-one-scope keys.
+ * The expected chain is its check 1 (and 3). What it does not cover is reconcile's own: the record
+ * store, the post-activation TTL, the scope's status and window, the emergency stop, the block list,
+ * and the one-funding-one-scope keys (r3 review NIT-4).
  */
 export function activationRefusal(
   record: FundingVerificationRecord,
