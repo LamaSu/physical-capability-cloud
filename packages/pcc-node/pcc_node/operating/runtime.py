@@ -515,7 +515,6 @@ class AdapterRuntime:
         *,
         source: str = "device",
         clock: Callable[[], float] = time.monotonic,
-        sleep: Optional[Callable[[float], None]] = None,
     ) -> None:
         self._base = _check_base_url(url)
         self._signer = LogCapture(public_hex, secret_hex).signer  # fails closed without Ed25519
@@ -524,7 +523,6 @@ class AdapterRuntime:
         self._bindings = dict(bindings)
         self._source = source
         self._clock = clock
-        self._sleep = sleep
         # Generation-scoped cancel (verdict 117b): a cancel names the run in progress, or the
         # next run if none is, and no run can erase it.
         self._gen_lock = threading.Lock()
@@ -711,10 +709,8 @@ class AdapterRuntime:
     def _wait(self, seconds: float, deadline: float, stop: Stop) -> None:
         """The pause between polls, in slices, cut short by a cancel, a lost lease or the deadline.
 
-        An injected ``sleep`` is called for one slice at a time too, so it cannot carry a run past
-        any of them (verdict 117c).
+        There is no sleep hook: an injected callable could block past all of them (verdict 117d).
         """
-        nap = self._sleep or time.sleep
         end = self._clock() + seconds
         while True:
             reason = _stop_reason(deadline, self._clock, stop)
@@ -725,7 +721,7 @@ class AdapterRuntime:
                 if self._clock() >= deadline:
                     raise _Abort("timeout", True)
                 return
-            nap(min(_WATCH_S, left))
+            time.sleep(min(_WATCH_S, left))
 
     def _evidence(self, operation: str, run_id: str, record: Any, log_text: Optional[str], claim: Any) -> Optional[dict]:
         """The device's own account of the run, as signed log-chain entries bound to the claim.
