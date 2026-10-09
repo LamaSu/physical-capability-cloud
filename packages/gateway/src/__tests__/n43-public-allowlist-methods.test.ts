@@ -215,24 +215,32 @@ async function dhtState() {
 }
 
 describe("N43 (d): POST /api/dht/announce stays refused and nothing is stored", () => {
+  // Each test compares the response AND the registry in one assertion, so a failure shows both what
+  // the caller got and what was stored.
   it("an anonymous caller is refused by apiGate itself (401 api_key_required), before the route", async () => {
     const before = await dhtState();
-    const res = await send("anonymous", { method: "POST", url: "/api/dht/announce", payload: ANNOUNCEMENT });
-    expect({ status: res.statusCode, error: body(res).error }).toEqual({ status: 401, error: "api_key_required" });
-    expect(await dhtState()).toEqual(before);
     expect(before.probeTypeResults).toBe(0);
+    const res = await send("anonymous", { method: "POST", url: "/api/dht/announce", payload: ANNOUNCEMENT });
+    expect({ status: res.statusCode, error: body(res).error, registry: await dhtState() }).toEqual({
+      status: 401,
+      error: "api_key_required",
+      registry: before,
+    });
   });
 
   it.each(["an API key", "a SIWE session"] as const)(
     "%s passes apiGate and gets the route's explicit refusal (501 DHT_ANNOUNCE_DISABLED); nothing is stored",
     async (caller) => {
+      // announcementsEverStored counts every store, even one that overwrites an entry, so any store shows.
       const before = await dhtState();
       const res = await send(caller, { method: "POST", url: "/api/dht/announce", payload: ANNOUNCEMENT });
-      expect(res.statusCode).toBe(501);
-      expect(body(res)).toMatchObject({ error: "not_implemented", code: "DHT_ANNOUNCE_DISABLED" });
+      expect({ status: res.statusCode, error: body(res).error, code: body(res).code, registry: await dhtState() }).toEqual({
+        status: 501,
+        error: "not_implemented",
+        code: "DHT_ANNOUNCE_DISABLED",
+        registry: before,
+      });
       expect(typeof body(res).message).toBe("string");
-      expect(await dhtState()).toEqual(before);
-      expect(before.probeTypeResults).toBe(0);
     },
   );
 
@@ -244,8 +252,11 @@ describe("N43 (d): POST /api/dht/announce stays refused and nothing is stored", 
       headers: { "content-type": "text/plain" },
       payload: "not json",
     });
-    expect({ status: res.statusCode, code: body(res).code }).toEqual({ status: 501, code: "DHT_ANNOUNCE_DISABLED" });
-    expect(await dhtState()).toEqual(before);
+    expect({ status: res.statusCode, code: body(res).code, registry: await dhtState() }).toEqual({
+      status: 501,
+      code: "DHT_ANNOUNCE_DISABLED",
+      registry: before,
+    });
   });
 
   it("DHT discovery stays public: an anonymous GET of query, peers and metrics is 200", async () => {
