@@ -192,7 +192,9 @@ describe("rulings 4 and 5: the expected chain and the post-activation TTL are re
     const { scopeId } = await paidScope(f);
     const before = scopeRow(scopeId);
     const spies = spyStore();
-    for (const postActivationTtlMs of [null, undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "3600000", MAX_POST_ACTIVATION_TTL_MS + 1]) {
+    // MAX + 1, and the same bound as a literal: 356 days + 1 ms, and reclaimAt's 365-day ceiling itself.
+    const DAY = 24 * 60 * MIN;
+    for (const postActivationTtlMs of [null, undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "3600000", MAX_POST_ACTIVATION_TTL_MS + 1, 356 * DAY + 1, 365 * DAY]) {
       const terms = { ...TERMS, postActivationTtlMs } as never;
       expect(reconcilePaidScope(scopeId, verification(scopeId), terms), String(postActivationTtlMs)).toEqual(refused("activation_ttl_unavailable"));
     }
