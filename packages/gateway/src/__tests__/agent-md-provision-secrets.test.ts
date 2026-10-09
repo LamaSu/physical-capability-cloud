@@ -9,6 +9,12 @@
  *   The check is by value, so a copy under another name counts. A new secret that copies neither is
  *   caught only by the classification above, which a human decides.
  * - The supply runbook must name each of those secret paths.
+ * - Each buyer store-only entry, word for word, states a condition that the test also holds as a predicate;
+ *   every predicate is checked against what the route returns in each variant (ChatGPT r1 L3).
+ * - The supply runbook's own request (it always sends publicKey) goes through the route in each identity
+ *   outcome; every secret it gets back must be one step 4 names, on the condition step 4 states.
+ * - In-suite negative controls feed a reversed condition, a reversed predicate and a supply runbook with a
+ *   secret dropped to the same checks, which must fail.
  */
 
 import { execFile, spawnSync } from "node:child_process";
@@ -193,6 +199,55 @@ const SUPPLY_ED25519 =
   "so this response carries neither.";
 /** The recipe prints the error fields, then exactly the fields to read. */
 const ERROR_FIELDS = ["error", "message", "retry_after_seconds"];
+
+/** The value at a dotted path, or undefined. */
+const valueAt = (body: unknown, path: string): unknown => path.split(".").reduce<unknown>(
+  (value, key) => (value !== null && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined), body);
+/** Whether a response carries a nonempty string at the path. */
+const carries = (body: unknown, path: string) => {
+  const value = valueAt(body, path);
+  return typeof value === "string" && value.length > 0;
+};
+
+/** One provisioning call: how the identity write went, and whether the request sent publicKey. */
+interface Variant { outcome: IdentityOutcome; publicKey: boolean }
+/** This call registered the identity and generated the wallet (provision.ts:190-234); the assignment may fail after. */
+const walletGenerated = ({ outcome }: Variant) => outcome === "assignment-rejected" || outcome === "assigned";
+type Condition = [entry: string, path: string, when: (variant: Variant) => boolean];
+/**
+ * ChatGPT r1 L3: each buyer store-only entry word for word, with the condition it states as a predicate. Each
+ * predicate is checked against the real route's responses below, so a wrong condition fails twice: once as text and
+ * once against what the route returns.
+ */
+const STORE_ONLY_CONDITIONS: Condition[] = [
+  ["api_key", "api_key", () => true],
+  ["usage.header (holds api_key)", "usage.header", () => true],
+  ["usage.example (holds api_key)", "usage.example", () => true],
+  ["ed25519.private_key (only when publicKey was omitted)", "ed25519.private_key", (variant) => !variant.publicKey],
+  ["ed25519.private_key_pkcs8_base64 (only when publicKey was omitted)", "ed25519.private_key_pkcs8_base64", (variant) => !variant.publicKey],
+  ["operator_wallet.private_key (when operator_wallet.source is server-minted)", "operator_wallet.private_key", walletGenerated],
+];
+
+/** Throws unless the store-only entries are exactly the documented conditions, word for word and in order. */
+function checkStoreOnlyText(storeOnlyFields: string[] | undefined): void {
+  expect(storeOnlyFields).toEqual(STORE_ONLY_CONDITIONS.map(([entry]) => entry));
+}
+
+/** Throws unless the response carries each secret exactly when its documented condition holds. */
+function checkConditions(body: Record<string, any>, variant: Variant, conditions = STORE_ONLY_CONDITIONS): void {
+  const label = `identity ${variant.outcome}, publicKey ${variant.publicKey ? "sent" : "omitted"}`;
+  for (const [entry, path, when] of conditions) expect(carries(body, path), `${entry}, ${label}`).toBe(when(variant));
+  expect(body.usage.header, "usage.header (holds api_key)").toContain(body.api_key);
+  expect(body.usage.example, "usage.example (holds api_key)").toContain(body.api_key);
+  expect(body.operator_wallet.source === "server-minted", `operator_wallet.source, ${label}`)
+    .toBe(carries(body, "operator_wallet.private_key"));
+}
+
+/** Throws unless the supply runbook's step 4 names each secret path its own request got back, in its own words. */
+function checkSupplyNames(step: string, returned: string[]): void {
+  for (const path of returned) expect(step, `00-prerequisites.md step 4 must name ${path}`).toContain("`" + path + "`");
+  for (const sentence of [SUPPLY_API_KEY, SUPPLY_WALLET, SUPPLY_ED25519]) expect(step).toContain(sentence);
+}
 
 /** Every emitted path must be a documented response field and named in the request prose. */
 function expectDocumented(paths: string[]): void {
@@ -420,6 +475,85 @@ describe("every leaf of every 201 the route returns is classified, and every sec
     for (const path of SECRET_PATHS) expect(step, `00-prerequisites.md step 4 must name ${path}`).toContain("`" + path + "`");
     expect(step).toContain(SUPPLY_API_KEY);
     expect(step).toContain(SUPPLY_ED25519);
+  });
+});
+
+describe("each documented secret condition holds on the real route, for the buyer path and the supply runbook (ChatGPT r1 L3)", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    if (app) await app.close();
+    closeStore();
+  });
+
+  it("the buyer path's store-only entries state exactly these conditions, word for word", () => {
+    checkStoreOnlyText(provisionAction().storeOnlyFields);
+  });
+
+  for (const outcome of IDENTITY_OUTCOMES) {
+    it(`identity ${outcome}: each secret comes back exactly when its condition holds, and the wallet key does not depend on publicKey`, async () => {
+      const walletKeys: boolean[] = [];
+      for (const publicKey of [false, true]) {
+        mockIdentity(outcome);
+        const res = await provisionFrom(app, {
+          email: `conditions-${outcome}-${publicKey ? "sent" : "omitted"}@example.com`,
+          ...(publicKey ? { publicKey: localEd25519PublicKeyHex() } : {}),
+        });
+        expect(res.statusCode).toBe(201);
+        const body = res.json();
+        checkConditions(body, { outcome, publicKey });
+        walletKeys.push(carries(body, "operator_wallet.private_key"));
+      }
+      // BUYER_WALLET says "Whether or not you send publicKey".
+      expect(walletKeys[0]).toBe(walletKeys[1]);
+    });
+  }
+
+  it("the supply runbook's own request gets back only the secrets its step 4 names, on the conditions it states", async () => {
+    const step = supplyStep4();
+    // Step 4 builds its request from the node's public key, the email and the name.
+    expect(step).toContain("print(json.dumps({\"publicKey\": open(\".pcc/node-public-key\").read().strip(),");
+    for (const outcome of IDENTITY_OUTCOMES) {
+      mockIdentity(outcome);
+      const res = await provisionFrom(app, {
+        publicKey: localEd25519PublicKeyHex(), email: `supply-${outcome}@example.org`, name: "Bench plate reader",
+      });
+      expect(res.statusCode).toBe(201);
+      const body = res.json();
+      const returned = SECRET_PATHS.filter((path) => carries(body, path));
+      // SUPPLY_API_KEY: three copies of the key; SUPPLY_WALLET: the wallet key on its condition; SUPPLY_ED25519: neither Ed25519 key.
+      expect(returned, outcome).toEqual([...API_KEY_PATHS, ...(walletGenerated({ outcome, publicKey: true }) ? ["operator_wallet.private_key"] : [])]);
+      for (const holder of expectSecretValuesStoreOnly(body)) expect(returned, `${holder} holds a secret value`).toContain(holder);
+      checkSupplyNames(step, returned);
+    }
+  });
+
+  it("negative controls: a reversed condition, a reversed predicate and a secret dropped from the supply runbook all fail", async () => {
+    const entries = provisionAction().storeOnlyFields ?? [];
+    expect(() => checkStoreOnlyText(entries.map((entry) => entry.replace("publicKey was omitted", "publicKey was supplied")))).toThrow();
+    expect(() => checkStoreOnlyText(entries.map((entry) => (entry.startsWith("operator_wallet.private_key")
+      ? "operator_wallet.private_key (only when publicKey was omitted)" : entry)))).toThrow();
+
+    mockIdentity("assigned");
+    const res = await provisionFrom(app, { email: "negative-controls@example.com", publicKey: localEd25519PublicKeyHex() });
+    const body = res.json();
+    const variant: Variant = { outcome: "assigned", publicKey: true };
+    checkConditions(body, variant);
+    const reversed = (path: string, when: Condition[2]): Condition[] => STORE_ONLY_CONDITIONS
+      .map(([entry, candidate, original]): Condition => [entry, candidate, candidate === path ? when : original]);
+    expect(() => checkConditions(body, variant, reversed("ed25519.private_key_pkcs8_base64", (v) => v.publicKey))).toThrow();
+    expect(() => checkConditions(body, variant, reversed("operator_wallet.private_key", (v) => !v.publicKey))).toThrow();
+
+    const step = supplyStep4();
+    const returned = [...API_KEY_PATHS, "operator_wallet.private_key"];
+    checkSupplyNames(step, returned);
+    expect(() => checkSupplyNames(step.replace(" and `usage.example`", ""), returned)).toThrow();
+    expect(() => checkSupplyNames(step.replace("`operator_wallet.private_key`", "the wallet key"), returned)).toThrow();
   });
 });
 
