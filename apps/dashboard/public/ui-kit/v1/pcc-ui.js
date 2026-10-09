@@ -893,9 +893,10 @@
     BIDDING: true, ASSIGNED: true, PROPOSED: true, OVER_BUDGET: true, NO_PATH_FOUND: true, APPROVED: true, EXPIRED: true,
     ACTIVE: true, INACTIVE: true, REVOKED: true, IDLE: true, BUSY: true, DRAFT: true, DEPRECATED: true, RESERVED: true, LIVE: true, STUB: true, PLANNED: true
   });
+  // R12 r2d g1: no money-table word is on the money list (PENDING and EXPIRED were): on money data they are attributed.
   var SAFE_MONEY_STATUS_WORDS = Object.freeze({
-    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, PENDING: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true,
-    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true, EXPIRED: true, UNKNOWN: true
+    RUNNING: true, IN_PROGRESS: true, PROGRESS: true, QUEUED: true, WAITING: true, PAUSED: true, REVIEW: true,
+    ERROR: true, FAILED: true, DENIED: true, CANCELLED: true, CANCELED: true, REJECTED: true, UNKNOWN: true
   });
   var UNCONFIRMED_SUFFIX = ' - settlement unconfirmed';
   var UNVERIFIED_SUFFIX = ' - status unverified';

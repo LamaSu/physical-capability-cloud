@@ -324,7 +324,8 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
   });
 
   it("the pill text is the raw server value when the surface's safe vocabulary covers it", async () => {
-    // EXPIRED is on SAFE_MONEY_STATUS_WORDS (astra r5): a word the safe list affirms is shown as-is.
+    // R12 r2d g1: EXPIRED is no longer on SAFE_MONEY_STATUS_WORDS (it is a money-table word). This legacy escrow pill
+    // never consults that list (R12 rule 4): it shows the escrow service's word as sent, attributed, so its text is unchanged.
     const r = await renderedPill({ status: "EXPIRED" });
     // R12 rule 4: a legacy escrow record's status is attributed to the service that reported it.
     expect(r.text).toBe("PCC escrow service reports: EXPIRED");
@@ -949,6 +950,15 @@ describe("astra r4 (#313): the pill-text rule, kit == spec", () => {
   it("the same safe-status vocabularies", () => {
     expect(Object.keys(kit.SAFE_STATUS_WORDS).sort()).toEqual([...SAFE_STATUS_WORDS].sort());
     expect(Object.keys(kit.SAFE_MONEY_STATUS_WORDS).sort()).toEqual([...SAFE_MONEY_STATUS_WORDS].sort());
+    // R12 r2d g1: a word the money table labels is a money state ("pending - not yet funded", "expired - not
+    // released"), so on a money surface it is never shown bare: the safe MONEY vocabulary holds no money-table word,
+    // in the spec or in the kit's mirror. PENDING and EXPIRED were the two such words; both lists dropped them together.
+    for (const w of ["PENDING", "EXPIRED"]) {
+      expect([...SAFE_MONEY_STATUS_WORDS], "spec " + w).not.toContain(w);
+      expect(Object.keys(kit.SAFE_MONEY_STATUS_WORDS), "kit " + w).not.toContain(w);
+    }
+    expect(SAFE_MONEY_STATUS_WORDS.filter((w) => Object.prototype.hasOwnProperty.call(MONEY_STATUS_MAP, w)), "spec words in the money table").toEqual([]);
+    expect(Object.keys(kit.SAFE_MONEY_STATUS_WORDS).filter((w) => Object.prototype.hasOwnProperty.call(kit.MONEY_STATUS, w)), "kit words in the money table").toEqual([]);
   });
   it("astra r5: SAFE_STATUS_WORDS (non-money) contains no payment-final or money-movement word", () => {
     const forbidden = ["PAID", "PAIDOUT", "PAYOUT", "SETTLED", "SETTLEMENT", "RELEASED", "REFUNDED", "DISBURSED", "CREDITED", "TRANSFERRED", "RECEIVED", "FUNDED"];
@@ -1167,13 +1177,14 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
   it("F8 residual (HIGH): a receipt timeline entry from ev.type or ev.name is qualified, never bare", async () => {
     bootRead(man([{ kind: "receipt", binding: { path: "/api/escrow/e1" } }]),
       (u) => (new URL(u).pathname === "/api/escrow/e1"
-        ? { status: "funded", ...LEGACY, events: [{ type: "PAYOUT_SENT" }, { name: "released" }, { type: "pending" }, {}] }
+        ? { status: "funded", ...LEGACY, events: [{ type: "PAYOUT_SENT" }, { name: "released" }, { type: "pending" }, { type: "running" }, {}] }
         : null));
     await flush();
     expect(timelineRows()).toEqual([
       "reported status: PAYOUT_SENT - settlement unconfirmed",
       "reported status: released - settlement unconfirmed",
-      "pending", // a money-safe word stays plain
+      "reported status: pending - settlement unconfirmed", // R12 r2d g1: a money-table word ("pending - not yet funded") is attributed
+      "running", // a money-safe word stays plain
       "event", // PCC's own placeholder, not a server claim
     ]);
   });
@@ -2499,6 +2510,31 @@ async function r2dPaint(windows: R2dWin[], bodies: Record<string, unknown>, mode
   await flush();
 }
 const r2dTexts = (selector: string) => Array.from(document.querySelectorAll(selector)).map((n) => n.textContent);
+/** A LIVE boot whose only answered request is ONE server-sent event carrying `payload` on `ssePath`, delivered through a
+ * real ReadableStream that then closes (the astra r5 block's bootSSE, at module level). */
+function r2dBootSse(windows: R2dWin[], ssePath: string, payload: unknown) {
+  assertKitTextBeforeBoot();
+  document.documentElement.removeAttribute("data-theme");
+  document.head.innerHTML = "";
+  document.body.innerHTML = "";
+  (window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__ = false;
+  const main = document.createElement("main"); main.id = "pcc-root"; document.body.appendChild(main);
+  const mNode = document.createElement("script"); mNode.type = "application/json"; mNode.id = "pcc-manifest"; mNode.textContent = r2Man(windows);
+  document.body.appendChild(mNode); // LIVE mode, no snapshot
+  const frame = "data: " + JSON.stringify(payload) + "\n\n";
+  (window as unknown as { fetch: unknown }).fetch = (url: unknown) => {
+    if (new URL(String(url)).pathname !== ssePath) return new Promise(() => {}); // not this test's
+    const enc = new TextEncoder();
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { if (!sent) { sent = true; controller.enqueue(enc.encode(frame)); } else controller.close(); },
+    });
+    return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, body });
+  };
+  // eslint-disable-next-line no-eval
+  (0, eval)(kitSrc);
+  assertKitTextViolations();
+}
 /** The lane review's repro record (r12-599-r2bc-review-outputs/tools/probe_findings.cjs `ESC`): a legacy escrow record. */
 const r2dEsc = (extra: Record<string, unknown>) => ({ id: "esc-1", totalAmount: 250, currency: "USDC", contractAddress: "0x" + "11".repeat(20), ...extra });
 const R2D_NAME_WITHHELD = "name withheld: stated money or verification";
@@ -2582,6 +2618,85 @@ describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verifica
       expect(r2dTexts(".pcc-list-meta"), "kernel list metas " + mode).toEqual(PARITY_NAMES.map(offMoney));
       await r2dPaint(metrics("/api/kernels/k1"), { "/api/kernels/k1": { names } }, mode);
       expect(r2dTexts(".pcc-metric-amount"), "kernel metrics " + mode).toEqual(PARITY_NAMES.map(offMoney));
+    }
+  });
+});
+
+// ── R12 r2d g1 (lane review gap, MEDIUM, the class of r2 D): PENDING ("pending - not yet funded") and EXPIRED
+// ("expired - not released") are money-table words, yet they were on the closed safe MONEY vocabulary, so on money data
+// every status label that takes that vocabulary showed them bare ─────────────────────────────────────────────────────
+describe("R12 r2d g1 (lane review, MEDIUM): on money data 'pending' and 'expired' are attributed in every status-label sink, never shown bare", () => {
+  const repStatus = (w: string) => "reported status: " + w + " - settlement unconfirmed";
+  const LABEL: Record<string, string> = { expired: "expired - not released", pending: "pending - not yet funded" };
+  const runWin = (p: string, extra: R2dWin = {}): R2dWin => ({ kind: "run", binding: { path: p }, statusFrom: "status", ...extra });
+
+  it("the lane review's repro (live and snapshot): a legacy escrow record whose status is expired or pending: the metric, the list meta and the run window's latest line read 'reported status: <word> - settlement unconfirmed', beside the list pill and the run pill, which already attributed the word (unchanged)", async () => {
+    for (const w of ["expired", "pending"]) {
+      for (const mode of ["live", "snapshot"] as const) {
+        await r2dPaint([r2dMetric("/api/escrow/e1", "status"), r2dList("/api/escrow", "id", ["status"], "status"), runWin("/api/escrow/e1", { latestFrom: "status" })],
+          { "/api/escrow/e1": r2dEsc({ status: w }), "/api/escrow": [r2dEsc({ status: w })] }, mode);
+        const at = w + " " + mode;
+        expect(r2dTexts(".pcc-metric-amount"), "metric " + at).toEqual([repStatus(w)]);
+        expect(r2dTexts(".pcc-list-meta"), "list meta " + at).toEqual([repStatus(w)]);
+        expect(r2dTexts(".pcc-run-latest"), "run latest " + at).toEqual([repStatus(w)]);
+        const pill = "PCC escrow service reports: " + LABEL[w] + " (not confirmed on chain)";
+        expect(r2dTexts(".pcc-list-row .pcc-pill"), "list pill " + at).toEqual([pill]);
+        expect(r2dTexts(".pcc-win-head .pcc-pill"), "run pill " + at).toEqual([pill]);
+      }
+    }
+  });
+
+  it("the escrow DTO's own field names (live and snapshot): a metric selecting its escrowStatus or a milestone's state on a money route reads 'reported status: <word> - settlement unconfirmed'", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([r2dMetric("/api/escrow/e1", "escrowStatus"), r2dMetric("/api/escrow/e1", "milestones.0.state")],
+        { "/api/escrow/e1": r2dEsc({ status: "funded", escrowStatus: "expired", milestones: [{ id: "m1", state: "pending", amount: 100 }] }) }, mode);
+      expect(r2dTexts(".pcc-metric-amount"), mode).toEqual([repStatus("expired"), repStatus("pending")]);
+    }
+  });
+
+  it("the receipt (live and snapshot): a legacy escrow record's milestone timeline labels are attributed (its pill and caption are unchanged); a non-settlement record's pill reads 'reported status: <word> - settlement unconfirmed', st-unknown", async () => {
+    const receipt = (p: string): R2dWin => ({ kind: "receipt", binding: { path: p } });
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([receipt("/api/escrow/e1")], { "/api/escrow/e1": r2dEsc({ status: "expired", milestones: [{ status: "pending" }, { status: "expired" }] }) }, mode);
+      expect(r2dTexts(".pcc-timeline-type"), "legacy timeline " + mode).toEqual([repStatus("pending"), repStatus("expired")]);
+      expect(r2dTexts(".pcc-receipt-rail .pcc-pill"), "legacy pill " + mode).toEqual(["PCC escrow service reports: expired"]);
+      expect(r2dTexts(".pcc-settle-label"), "legacy caption " + mode).toEqual([" PCC escrow service reports: expired - not released (not confirmed on chain)"]);
+      for (const w of ["expired", "pending"]) {
+        await r2dPaint([receipt("/api/jobs/j1")], { "/api/jobs/j1": { status: w, amount: "250", currency: "USDC", payee: R2B_PAYEE } }, mode);
+        const at = w + " " + mode;
+        expect(r2dTexts(".pcc-win-title"), "record title " + at).toEqual(["Record"]);
+        expect(r2dTexts(".pcc-receipt-rail .pcc-pill"), "record pill " + at).toEqual([repStatus(w)]);
+        expect((document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className, "record pill class " + at).toBe("pcc-pill st-unknown");
+      }
+    }
+  });
+
+  it("the run window's other label sinks on money data: the live poll's timeline feed, a snapshot's timeline feed and latest line, and a stream event's feed line each read 'reported status: <word> - settlement unconfirmed'", async () => {
+    const feed = () => r2dTexts(".pcc-feed-line");
+    const body = r2dEsc({ status: "funded", timeline: [{ type: "pending" }, { type: "expired" }] });
+    await r2dPaint([runWin("/api/escrow/e1")], { "/api/escrow/e1": body }, "live");
+    expect(feed(), "live poll feed").toEqual([repStatus("pending"), repStatus("expired")]);
+    await r2dPaint([runWin("/api/escrow/e1")], { "/api/escrow/e1": body }, "snapshot");
+    expect(feed(), "snapshot feed").toEqual([repStatus("pending"), repStatus("expired")]);
+    expect(r2dTexts(".pcc-run-latest"), "snapshot latest (the last entry)").toEqual([repStatus("expired")]);
+    const ssePath = "/sse/stream/escrow/e1";
+    for (const w of ["pending", "expired"]) {
+      r2dBootSse([{ kind: "run", binding: { path: "/api/escrow/e1", sse: ssePath }, statusFrom: "status" }], ssePath, { status: w });
+      await flush();
+      await flush();
+      expect(feed(), "stream feed " + w).toEqual([repStatus(w)]);
+    }
+  });
+
+  it("the rule, spec and kit alike: statusPillText attributes PENDING and EXPIRED on money data in every spelling the vocabulary normalizes; verified text and non-money surfaces keep the word", () => {
+    const kit = extractRegion();
+    for (const w of ["pending", "PENDING", "Pending ", "expired", "EXPIRED", " Expired"]) {
+      expect(statusPillText(w, false, true), "spec money " + w).toBe(repStatus(w));
+      expect(kit.statusPillText(w, false, true).t, "kit money " + w).toBe(repStatus(w));
+      expect(statusPillText(w, true, true), "spec verified " + w).toBe(w);
+      expect(kit.statusPillText(w, true, true).t, "kit verified " + w).toBe(w);
+      expect(statusPillText(w, false, false), "spec non-money " + w).toBe(w);
+      expect(kit.statusPillText(w, false, false).t, "kit non-money " + w).toBe(w);
     }
   });
 });

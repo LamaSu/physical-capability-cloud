@@ -431,10 +431,13 @@ export const SAFE_STATUS_WORDS: readonly string[] = Object.freeze([
 // A money-surface value that is not on this list is always qualified, even a non-final, merely-decided
 // word like RELEASE_ALLOCATED: astra r4's honest-label lookup (dataStatusText / settlementLabel) is the
 // path that names those by their own direction-explicit label; this function has no such table to
-// consult, so it stays conservative.
+// consult, so it stays conservative. R12 r2d g1: nor is any word of the money table here (MONEY_STATUS_MAP,
+// which this list must not intersect): PENDING ("pending - not yet funded") and EXPIRED ("expired - not
+// released") are money states, and a bare "pending" on an escrow reads as funded, so on a money surface they
+// are attributed like any other unaffirmed word. The kit mirrors this list (the conformance test compares them).
 export const SAFE_MONEY_STATUS_WORDS: readonly string[] = Object.freeze([
-  "RUNNING", "IN_PROGRESS", "PROGRESS", "PENDING", "QUEUED", "WAITING", "PAUSED", "REVIEW",
-  "ERROR", "FAILED", "DENIED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED", "UNKNOWN",
+  "RUNNING", "IN_PROGRESS", "PROGRESS", "QUEUED", "WAITING", "PAUSED", "REVIEW",
+  "ERROR", "FAILED", "DENIED", "CANCELLED", "CANCELED", "REJECTED", "UNKNOWN",
 ]);
 
 export const UNCONFIRMED_SUFFIX = " - settlement unconfirmed";
