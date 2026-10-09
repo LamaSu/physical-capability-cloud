@@ -159,6 +159,43 @@ function expectDocumented(paths: string[]): void {
   }
 }
 
+/** How the mocked ERC-8004 identity write goes for one provisioning call (provision.ts:181-318). */
+type IdentityOutcome = "off" | "registration-rejected" | "wallet-rejected" | "assignment-rejected" | "assigned";
+const IDENTITY_OUTCOMES: IdentityOutcome[] = ["off", "registration-rejected", "wallet-rejected", "assignment-rejected", "assigned"];
+const REGISTRY = "0x8004A818BFB912233c491871b3d84c89A494BD9e";
+
+/** Sets the identity-write mocks for one outcome; returns the fake operator wallet (built at runtime). */
+function mockIdentity(outcome: IdentityOutcome): { address: string; privateKey: string } {
+  const wallet = { address: "0x" + "cd".repeat(20), privateKey: "0x" + "ab".repeat(32) };
+  mockIsIdentityWriteEnabled.mockReturnValue(outcome !== "off");
+  if (outcome === "registration-rejected") mockRegisterAgentOnChain.mockRejectedValue(new Error("registration rejected in tests"));
+  else mockRegisterAgentOnChain.mockResolvedValue({ agentId: 42n, txHash: "0x" + "de".repeat(32), registryAddress: REGISTRY, chainId: 84532 });
+  if (outcome === "wallet-rejected") mockGenerateOperatorWallet.mockRejectedValue(new Error("wallet generation rejected in tests"));
+  else mockGenerateOperatorWallet.mockResolvedValue(wallet);
+  if (outcome === "assigned") {
+    mockSetAgentWalletOnChain.mockResolvedValue({ txHash: "0x" + "ee".repeat(32), registryAddress: REGISTRY, chainId: 84532, agentWallet: wallet.address });
+  } else mockSetAgentWalletOnChain.mockRejectedValue(new Error("assignment rejected in tests"));
+  return wallet;
+}
+
+let lastAddress = 0;
+/** POST /api/auth/provision from a fresh TEST-NET address: the 5-per-IP-per-hour limit is module state. */
+function provisionFrom(app: FastifyInstance, payload: Record<string, unknown>) {
+  lastAddress += 1;
+  return app.inject({ method: "POST", url: "/api/auth/provision", payload, remoteAddress: `198.51.100.${lastAddress}` });
+}
+
+/** ChatGPT r1 L2: the wallet key's condition, word for word, in the supply runbook and the buyer path. */
+const SUPPLY_WALLET =
+  "It may also contain `operator_wallet.private_key`, a wallet key the gateway mints and keeps for the account: " +
+  "only when this call registers the account's on-chain identity and the gateway then generates the wallet. " +
+  "A failed on-chain assignment of that wallet afterwards does not remove the key. This runbook never uses it.";
+const BUYER_WALLET =
+  "Whether or not you send publicKey, the response may also carry operator_wallet.private_key, an EVM wallet key: " +
+  "only when this call registers an on-chain identity for you and the gateway then generates the wallet; " +
+  "a failed on-chain assignment of that wallet afterwards does not remove the key. " +
+  "operator_wallet.source reads server-minted exactly when the key is there. It stays in the same private 0600 file and is never printed.";
+
 describe("agent golden path names every private key the provision response carries", () => {
   let app: FastifyInstance;
 
@@ -225,6 +262,64 @@ describe("agent golden path names every private key the provision response carri
   });
 });
 
+describe("the wallet key comes back only when this call registered the identity and generated the wallet (ChatGPT r1 L2)", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    if (app) await app.close();
+    closeStore();
+  });
+
+  it("registration rejected: a 201 with no wallet key and the identity still pending", async () => {
+    mockIdentity("registration-rejected");
+    const res = await provisionFrom(app, { email: "registration-rejected@example.com", publicKey: localEd25519PublicKeyHex() });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(mockRegisterAgentOnChain).toHaveBeenCalledTimes(1);
+    expect(mockGenerateOperatorWallet).not.toHaveBeenCalled();
+    expect(body.onchain.status).toBe("pending");
+    expect(body.operator_wallet).toEqual({ source: "none" });
+  });
+
+  it("wallet generation rejected after the registration: a 201 with no wallet key", async () => {
+    mockIdentity("wallet-rejected");
+    const res = await provisionFrom(app, { email: "wallet-rejected@example.com" });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.onchain.status).toBe("written");
+    expect(mockGenerateOperatorWallet).toHaveBeenCalledTimes(1);
+    expect(mockSetAgentWalletOnChain).not.toHaveBeenCalled();
+    expect(body.operator_wallet).toEqual({ source: "none" });
+  });
+
+  it("assignment rejected after both: the generated wallet key still comes back", async () => {
+    const wallet = mockIdentity("assignment-rejected");
+    const res = await provisionFrom(app, { email: "assignment-rejected@example.com", publicKey: localEd25519PublicKeyHex() });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().operator_wallet).toMatchObject({ source: "server-minted", private_key: wallet.privateKey, onchain_status: "failed" });
+  });
+
+  it("assignment written: the wallet key comes back as well", async () => {
+    const wallet = mockIdentity("assigned");
+    const res = await provisionFrom(app, { email: "assigned@example.com" });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().operator_wallet).toMatchObject({ source: "server-minted", private_key: wallet.privateKey, onchain_status: "written" });
+  });
+
+  it("the supply runbook and the buyer path say the wallet key may come back, on exactly that condition", () => {
+    const runbook = read("starter/runbook/00-prerequisites.md");
+    expect(runbook).toContain(SUPPLY_WALLET);
+    expect(runbook).not.toMatch(/also contains `operator_wallet\.private_key`/);
+    expect(provisionAction().request).toContain(BUYER_WALLET);
+    expect(provisionAction().request).not.toContain("the gateway mints when it writes an on-chain identity");
+  });
+});
+
 describe("agent golden path provisions over direct HTTP, never through a tool (Opus r1 F1)", () => {
   it("no buyer action names provision_api_key, and agent.md renders the get-key step as direct HTTP", () => {
     const buyer = JSON.parse(read("starter/buyer/buyer-path.json")) as {
@@ -273,7 +368,7 @@ describe("agent golden path captures the provision response without leaking it (
     expect(doc).toContain(
       "Store only, never read into the conversation: api_key, usage.header (holds api_key), usage.example (holds api_key), " +
       "ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), " +
-      "operator_wallet.private_key (when present).",
+      "operator_wallet.private_key (when operator_wallet.source is server-minted).",
     );
     expect(doc).toContain("Keep API keys, private keys and transcripts out of logs, chat, reports and version control.");
   });
