@@ -57,12 +57,18 @@ export interface FundingVerificationRecord {
  * the activation's transaction sees that transaction, and `insert` takes part in it: a rollback
  * undoes the insert.
  *
- * Contract: at most one record per scope and at most one per escrow address (one funding activates
- * one scope). An insert that would make a second for either throws, and the caller's transaction
- * then rolls back. Escrow addresses compare without letter case. The gateway's callers also fold
- * the address (escrowKey) before a store sees it, so one funding cannot bind two scopes even
- * through a store that matches letter case exactly. The checks a store must pass are
- * __tests__/helpers/funding-record-store-conformance.ts.
+ * Contract:
+ *   - Lookups return FINALIZED records only (finality "finalized"). A row in any other state, such as
+ *     an unfinalized observation another writer left in Q9's append-only table, is invisible to
+ *     findByEscrow and findByScope (the steward's ruling 3).
+ *   - At most one finalized record per scope and at most one per escrow address (one funding
+ *     activates one scope). An insert that would make a second for either throws, and the caller's
+ *     transaction then rolls back. Uniqueness applies to finalized records only, as a partial unique
+ *     index in Q9's DDL: a row in any other state never blocks a finalized insert.
+ *   - Escrow addresses compare without letter case. The gateway's callers also fold the address
+ *     (escrowKey) before a store sees it, so one funding cannot bind two scopes even through a store
+ *     that matches letter case exactly.
+ * The checks a store must pass are __tests__/helpers/funding-record-store-conformance.ts.
  */
 export interface FundingRecordStore {
   insert(tx: FundingTx, record: FundingVerificationRecord): void;

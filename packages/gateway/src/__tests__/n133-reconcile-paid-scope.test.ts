@@ -19,6 +19,7 @@ import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-pa
 import { __setFundingRecordStoreForTest, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import {
   installCaseExactFundingRecordStore,
+  installFinalityBlindFundingRecordStore,
   installTestFundingRecordStore,
   type TestFundingRecordStore,
 } from "./helpers/test-funding-record-store.js";
@@ -306,14 +307,24 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     const { scopeId } = await paidScope(f);
     const record = verification(scopeId);
     expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
-    // The kept record replaced by one that is not this funding: unfinalized, then another buyer's.
-    for (const bad of [{ ...record, finality: "latest" }, { ...record, buyer: OTHER }]) {
-      db().run(sql`DELETE FROM test_funding_records`);
-      store.plant(bad);
-      expect(reconcilePaidScope(scopeId, record), JSON.stringify(bad)).toEqual(refused("scope_bound_to_other_funding"));
-    }
+    // The kept record replaced by another buyer's.
+    db().run(sql`DELETE FROM test_funding_records`);
+    store.plant({ ...record, buyer: OTHER });
+    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
     // A store answering for this scope with another scope's record.
     __setFundingRecordStoreForTest({ ...store, findByScope: () => verification("scope_elsewhere") });
+    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
+    expect(scopeRow(scopeId).status).toBe("active");
+  });
+
+  it("(neg-active-kept-unfinalized) over a store that breaks the finalized-only contract, an unfinalized kept record of a live scope is never already_active", async () => {
+    // A conformant store never shows this row (ruling 3); reconcile's own check is defence in depth.
+    store = installFinalityBlindFundingRecordStore();
+    const { scopeId } = await paidScope(f);
+    const record = verification(scopeId);
+    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    db().run(sql`DELETE FROM test_funding_records_blind`);
+    store.plant({ ...record, finality: "latest" });
     expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("active");
   });
@@ -477,11 +488,25 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     expect(store.count()).toBe(2); // one record per contract
   });
 
-  it("(neg-kept-record) a kept record that is not this buyer's well-formed record blocks the activation", async () => {
+  it("(neg-kept-record) over a store that breaks the finalized-only contract, a kept record that is not well formed blocks the activation", async () => {
+    // A conformant store never shows this row (ruling 3); reconcile's own check is defence in depth.
+    store = installFinalityBlindFundingRecordStore();
     const { scopeId } = await paidScope(f);
     store.plant({ ...verification(scopeId), finality: "latest" }); // some other writer's unfinalized row
     expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+  });
+
+  it("(fin-unfinalized-no-block) an unfinalized observation of this scope's funding never blocks its finalized activation (ruling 3)", async () => {
+    const { scopeId } = await paidScope(f);
+    // Rows another writer left, not finalized: for this scope and this escrow, and for another scope and this escrow.
+    store.plant({ ...verification(scopeId), finality: "latest" });
+    store.plant({ ...verification("scope_elsewhere"), finality: "safe" });
+    const record = verification(scopeId);
+    expect(reconcilePaidScope(scopeId, record)).toMatchObject({ kind: "activated", record });
+    expect(scopeRow(scopeId).status).toBe("active");
+    expect(store.findByScope(db(), scopeId)).toEqual(record); // the finalized one is the record kept
+    expect(store.count()).toBe(3); // two unfinalized rows, untouched, and the finalized record
   });
 
   it("(neg-kept-buyer) a kept record of this scope and escrow whose verified payer is another buyer blocks the activation", async () => {

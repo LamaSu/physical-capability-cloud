@@ -4,10 +4,13 @@
  *
  * The records live in a TEMP table on the test's own in-memory SQLite connection, the connection
  * every gateway query runs on. So an insert takes part in the caller's transaction exactly as a
- * real table's would: a rollback undoes it. UNIQUE keys hold the port's contract: one record per
- * scope, and one per escrow address in any letter case. It passes the conformance suite
- * (funding-record-store-conformance.ts). installCaseExactFundingRecordStore, below, is a
- * deliberately broken store for the tests that show the suite and reconcilePaidScope catch one.
+ * real table's would: a rollback undoes it. Partial UNIQUE indexes hold the port's contract over
+ * FINALIZED rows only (the steward's ruling 3): one finalized record per scope, and one per escrow
+ * address in any letter case. Its lookups return finalized rows only, and `plant` may leave rows in
+ * any other state (another writer's observations). It passes the conformance suite
+ * (funding-record-store-conformance.ts). installCaseExactFundingRecordStore and
+ * installFinalityBlindFundingRecordStore, below, are deliberately broken stores for the tests that
+ * show the suite and reconcilePaidScope catch one.
  */
 import { sql } from "@pcc/store";
 import { getStore } from "../../db.js";
@@ -63,8 +66,8 @@ function insertRow(handle: FundingDbHandle, row: object): void {
 export function installTestFundingRecordStore(): TestFundingRecordStore {
   const { db } = getStore();
   db.run(sql`CREATE TEMP TABLE IF NOT EXISTS test_funding_records (
-    scope_id TEXT NOT NULL UNIQUE,
-    escrow_key TEXT NOT NULL UNIQUE,
+    scope_id TEXT NOT NULL,
+    escrow_key TEXT NOT NULL,
     escrow_address TEXT NOT NULL,
     buyer TEXT NOT NULL,
     chain_id INTEGER NOT NULL,
@@ -74,18 +77,26 @@ export function installTestFundingRecordStore(): TestFundingRecordStore {
     verified_at TEXT NOT NULL,
     finality TEXT NOT NULL
   )`);
+  // Uniqueness over finalized rows only, as Q9's DDL will carry it (partial unique indexes).
+  db.run(sql`CREATE UNIQUE INDEX IF NOT EXISTS temp.test_funding_records_finalized_scope
+    ON test_funding_records (scope_id) WHERE finality = 'finalized'`);
+  db.run(sql`CREATE UNIQUE INDEX IF NOT EXISTS temp.test_funding_records_finalized_escrow
+    ON test_funding_records (escrow_key) WHERE finality = 'finalized'`);
   const store: TestFundingRecordStore = {
     insert(tx, record) {
       insertRow(tx, record);
     },
     findByEscrow(handle, escrowAddress) {
       const row = handle.get<Row | undefined>(
-        sql`SELECT * FROM test_funding_records WHERE escrow_key = ${String(escrowAddress).toLowerCase()}`,
+        sql`SELECT * FROM test_funding_records
+          WHERE escrow_key = ${String(escrowAddress).toLowerCase()} AND finality = 'finalized'`,
       );
       return row ? toRecord(row) : null;
     },
     findByScope(handle, scopeId) {
-      const row = handle.get<Row | undefined>(sql`SELECT * FROM test_funding_records WHERE scope_id = ${scopeId}`);
+      const row = handle.get<Row | undefined>(
+        sql`SELECT * FROM test_funding_records WHERE scope_id = ${scopeId} AND finality = 'finalized'`,
+      );
       return row ? toRecord(row) : null;
     },
     count() {
@@ -100,23 +111,70 @@ export function installTestFundingRecordStore(): TestFundingRecordStore {
 }
 
 /**
+ * TEST ONLY, and deliberately BROKEN: a store that ignores finality, as round 2's store did. Its
+ * lookups return a row whatever its finality, and its unique keys cover every row. It breaks the port's
+ * finalized-only contract (the steward's ruling 3), so the conformance suite must fail it on exactly
+ * the two finality checks. reconcilePaidScope's defence-in-depth checks of a kept record (well formed,
+ * this buyer's, this scope's) are pinned over it, since a conformant store never shows such a row.
+ */
+export function installFinalityBlindFundingRecordStore(): TestFundingRecordStore {
+  const { db } = getStore();
+  db.run(sql`CREATE TEMP TABLE IF NOT EXISTS test_funding_records_blind (
+    scope_id TEXT NOT NULL UNIQUE,
+    escrow_key TEXT NOT NULL UNIQUE,
+    body TEXT NOT NULL
+  )`);
+  const insertBlind = (handle: FundingDbHandle, row: object) => {
+    const r = row as Record<string, unknown>;
+    handle.run(sql`INSERT INTO test_funding_records_blind (scope_id, escrow_key, body)
+      VALUES (${r.scopeId as string}, ${String(r.escrowAddress).toLowerCase()}, ${JSON.stringify(row)})`);
+  };
+  const parse = (row: { body: string } | undefined) => (row ? (JSON.parse(row.body) as FundingVerificationRecord) : null);
+  const store: TestFundingRecordStore = {
+    insert(tx, record) {
+      insertBlind(tx, record);
+    },
+    findByEscrow(handle, escrowAddress) {
+      return parse(handle.get<{ body: string } | undefined>(
+        sql`SELECT body FROM test_funding_records_blind WHERE escrow_key = ${String(escrowAddress).toLowerCase()}`,
+      ));
+    },
+    findByScope(handle, scopeId) {
+      return parse(handle.get<{ body: string } | undefined>(sql`SELECT body FROM test_funding_records_blind WHERE scope_id = ${scopeId}`));
+    },
+    count() {
+      return db.get<{ n: number }>(sql`SELECT count(*) AS n FROM test_funding_records_blind`).n;
+    },
+    plant(record) {
+      insertBlind(db, record);
+    },
+  };
+  __setFundingRecordStoreForTest(store);
+  return store;
+}
+
+/**
  * TEST ONLY, and deliberately BROKEN: a store that matches escrow addresses exactly as given (an
  * ordinary `WHERE escrow_address = ?`) and keeps no unique key on the escrow, only on the scope. It
  * breaks the port's contract (one record per escrow, in any letter case), as the fund-s2 review's
- * probe P10 store did. The conformance suite must fail it, and reconcilePaidScope must still let one
- * funding activate only one scope over it (it folds the address before the store sees it).
+ * probe P10 store did, and keeps the rest of it (finalized-only lookups and scope key). The
+ * conformance suite must fail it on exactly that check, and reconcilePaidScope must still let one
+ * funding activate only one scope over it (the address is folded before the store sees it).
  */
 export function installCaseExactFundingRecordStore(): TestFundingRecordStore {
   const { db } = getStore();
   db.run(sql`CREATE TEMP TABLE IF NOT EXISTS test_funding_records_case_exact (
-    scope_id TEXT NOT NULL UNIQUE,
+    scope_id TEXT NOT NULL,
     escrow_address TEXT NOT NULL,
+    finality TEXT NOT NULL,
     body TEXT NOT NULL
   )`);
+  db.run(sql`CREATE UNIQUE INDEX IF NOT EXISTS temp.test_funding_records_case_exact_scope
+    ON test_funding_records_case_exact (scope_id) WHERE finality = 'finalized'`);
   const insertExact = (handle: FundingDbHandle, row: object) => {
     const r = row as Record<string, unknown>;
-    handle.run(sql`INSERT INTO test_funding_records_case_exact (scope_id, escrow_address, body)
-      VALUES (${r.scopeId as string}, ${r.escrowAddress as string}, ${JSON.stringify(row)})`);
+    handle.run(sql`INSERT INTO test_funding_records_case_exact (scope_id, escrow_address, finality, body)
+      VALUES (${r.scopeId as string}, ${r.escrowAddress as string}, ${String(r.finality)}, ${JSON.stringify(row)})`);
   };
   const parse = (row: { body: string } | undefined) => (row ? (JSON.parse(row.body) as FundingVerificationRecord) : null);
   const store: TestFundingRecordStore = {
@@ -125,11 +183,13 @@ export function installCaseExactFundingRecordStore(): TestFundingRecordStore {
     },
     findByEscrow(handle, escrowAddress) {
       return parse(handle.get<{ body: string } | undefined>(
-        sql`SELECT body FROM test_funding_records_case_exact WHERE escrow_address = ${escrowAddress}`,
+        sql`SELECT body FROM test_funding_records_case_exact WHERE escrow_address = ${escrowAddress} AND finality = 'finalized'`,
       ));
     },
     findByScope(handle, scopeId) {
-      return parse(handle.get<{ body: string } | undefined>(sql`SELECT body FROM test_funding_records_case_exact WHERE scope_id = ${scopeId}`));
+      return parse(handle.get<{ body: string } | undefined>(
+        sql`SELECT body FROM test_funding_records_case_exact WHERE scope_id = ${scopeId} AND finality = 'finalized'`,
+      ));
     },
     count() {
       return db.get<{ n: number }>(sql`SELECT count(*) AS n FROM test_funding_records_case_exact`).n;

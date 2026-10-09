@@ -6,13 +6,18 @@
  *   - one record per escrow, in ANY letter case: a lookup in any case finds the record, and an
  *     insert of the same address for another scope throws, in the same case or another;
  *   - an insert takes part in the caller's transaction, a savepoint included (reconcilePaidScope
- *     runs inside the accept's transaction): that transaction's reads see it, and a rollback undoes it.
- * Not in it yet: that lookups return finalized records only (review LOW-4), which waits for the
- * ruling on Q9's append-only table.
+ *     runs inside the accept's transaction): that transaction's reads see it, and a rollback undoes it;
+ *   - lookups return FINALIZED records only: a row in any other state (one another writer left, e.g.
+ *     an unfinalized observation in Q9's append-only table) is invisible to every lookup;
+ *   - uniqueness applies to finalized records only (a partial unique index): an unfinalized row
+ *     never blocks a finalized insert, and is never blocked itself (the steward's ruling 3).
  *
  * Each check runs on a fresh in-memory database (initStore) with a store from the caller's factory,
- * which may create its table there. FUNDING_RECORD_STORE_CONTRACT holds the checks as functions that
- * throw, so a test can also show that a store breaking the contract fails them.
+ * which may create its table there. The store also gives `plant`, a store-native hook that writes a
+ * row as another writer left it (unchecked, outside any transaction); the checks plant only rows that
+ * are not finalized, which the port's own insert is never given. FUNDING_RECORD_STORE_CONTRACT holds
+ * the checks as functions that throw, so a test can also show that a store breaking the contract
+ * fails them.
  */
 import { describe, expect, it } from "vitest";
 import { closeStore, getStore, initStore } from "../../db.js";
@@ -56,9 +61,17 @@ function expectKept(found: FundingVerificationRecord | null, expected: FundingVe
 const insert = (store: FundingRecordStore, r: FundingVerificationRecord) =>
   getStore().db.transaction((tx) => store.insert(tx, r));
 
+/** A store under test, with the store-native hook that writes a row as another writer left it. */
+export interface ConformanceStore extends FundingRecordStore {
+  plant(row: object): void;
+}
+
+/** `record` as another writer may leave it: the same fields, but not finalized. */
+const unfinalized = (r: FundingVerificationRecord, finality = "latest"): object => ({ ...r, finality });
+
 export interface StoreContractCheck {
   name: string;
-  run(store: FundingRecordStore): void;
+  run(store: ConformanceStore): void;
 }
 
 export const FUNDING_RECORD_STORE_CONTRACT: readonly StoreContractCheck[] = [
@@ -126,12 +139,55 @@ export const FUNDING_RECORD_STORE_CONTRACT: readonly StoreContractCheck[] = [
       expectKept(store.findByEscrow(db, A), r);
     },
   },
+  {
+    name: "lookups return finalized records only: an unfinalized row is invisible to every lookup",
+    run(store) {
+      const db = getStore().db;
+      // Rows another writer left for one scope and escrow, none finalized ("FINALIZED" is not the word).
+      store.plant(unfinalized(record("scope_u1", A)));
+      store.plant(unfinalized(record("scope_u1", A_UPPER), "safe"));
+      store.plant(unfinalized(record("scope_u1", A), "FINALIZED"));
+      expect(store.findByScope(db, "scope_u1")).toBeNull();
+      for (const lookup of [A, A_UPPER, mixedCase(A)]) expect(store.findByEscrow(db, lookup), lookup).toBeNull();
+      db.transaction((tx) => {
+        expect(store.findByScope(tx, "scope_u1")).toBeNull();
+        expect(store.findByEscrow(tx, A)).toBeNull();
+      });
+    },
+  },
+  {
+    name: "uniqueness applies to finalized records only: an unfinalized row never blocks a finalized insert, nor is blocked by one",
+    run(store) {
+      const db = getStore().db;
+      // 1. Unfinalized rows for (scope X, escrow E), the escrow in two letter cases.
+      store.plant(unfinalized(record("scope_u2", B)));
+      store.plant(unfinalized(record("scope_u2", B_UPPER)));
+      // 2. Both lookups miss them.
+      expect(store.findByScope(db, "scope_u2")).toBeNull();
+      expect(store.findByEscrow(db, B)).toBeNull();
+      // 3. A finalized insert for (X, E) succeeds, and 4. both lookups now return it.
+      const kept = record("scope_u2", B);
+      insert(store, kept);
+      expectKept(store.findByScope(db, "scope_u2"), kept);
+      expectKept(store.findByEscrow(db, B_UPPER), kept);
+      // 5. A second finalized insert for X, or for E, still throws.
+      expect(() => insert(store, record("scope_u2", A))).toThrow();
+      expect(() => insert(store, record("scope_u3", B))).toThrow();
+      // 6. Further unfinalized rows for X and for E are not blocked, and change no answer.
+      store.plant(unfinalized(record("scope_u2", A)));
+      store.plant(unfinalized(record("scope_u4", B)));
+      expectKept(store.findByScope(db, "scope_u2"), kept);
+      expectKept(store.findByEscrow(db, B), kept);
+      expect(store.findByScope(db, "scope_u4")).toBeNull();
+      expect(store.findByEscrow(db, A)).toBeNull();
+    },
+  },
 ];
 
 const ENV = ["PCC_DB_PATH", "DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH"] as const;
 
 /** Runs `fn` on a fresh in-memory database and a store from `makeStore`; closes it and restores the environment after. */
-export function withFreshFundingRecordStore<T>(makeStore: () => FundingRecordStore, fn: (store: FundingRecordStore) => T): T {
+export function withFreshFundingRecordStore<T>(makeStore: () => ConformanceStore, fn: (store: ConformanceStore) => T): T {
   const saved: Record<string, string | undefined> = {};
   for (const k of ENV) saved[k] = process.env[k];
   delete process.env.DATABASE_URL;
@@ -151,7 +207,7 @@ export function withFreshFundingRecordStore<T>(makeStore: () => FundingRecordSto
 }
 
 /** Registers one test per contract check for the stores `makeStore` makes. */
-export function describeFundingRecordStoreConformance(label: string, makeStore: () => FundingRecordStore): void {
+export function describeFundingRecordStoreConformance(label: string, makeStore: () => ConformanceStore): void {
   describe(`FundingRecordStore conformance: ${label}`, () => {
     for (const check of FUNDING_RECORD_STORE_CONTRACT) {
       it(check.name, () => withFreshFundingRecordStore(makeStore, (store) => check.run(store)));

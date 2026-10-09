@@ -178,10 +178,10 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       const recordRefusal = recordScopeRefusal(record, scope);
       if (recordRefusal !== null) return refused(recordRefusal);
 
-      // The record kept for this scope, if any. It counts as this funding only when it is this
-      // buyer's well-formed record of this scope (the binding rule's checks 1 to 3; that it names
-      // this scope holds by the store's contract, checked again as defence in depth) and of this
-      // record's escrow.
+      // The record kept for this scope, if any: a conformant store shows finalized records only
+      // (ruling 3). It counts as this funding only when it is this buyer's well-formed record of
+      // this scope (the binding rule's checks 1 to 3; that it is finalized and names this scope holds
+      // by the store's contract, checked again as defence in depth) and of this record's escrow.
       const kept = store.findByScope(tx, scopeId);
       const keptForThis =
         kept !== null && recordScopeRefusal(kept, scope) === null && sameAddress(kept.escrowAddress, record.escrowAddress)
