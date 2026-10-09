@@ -3,6 +3,7 @@
  *
  * - GET /ws/dht                — WebSocket endpoint for DHT peer connections
  * - GET /api/dht/query         — REST fallback for querying capabilities
+ * - POST /api/dht/announce     — DISABLED: answers 501 to every request (DHT_ANNOUNCE_DISABLED_REFUSAL)
  * - GET /api/dht/peers         — List connected DHT peers + registry stats
  * - GET /api/dht/metrics       — Snapshot of DHT telemetry counters + recent events
  * - GET /api/dht/events/stream — SSE stream of live DHT metric events
@@ -12,6 +13,24 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { DHTNode, dhtTelemetry } from "@pcc/dht";
 import { pipelineTelemetry } from "../telemetry.js";
 import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-hardening.js";
+
+/**
+ * POST /api/dht/announce is disabled (board N43, gate half).
+ *
+ * The handler below stores and gossips a caller-chosen kernelId, DID, endpoints and TTL, with no check
+ * that the caller owns the kernel. It was dead while apiGate treated "/api/dht/" as public for every
+ * method: apiGate skipped the route, never set req.apiKeyId or req.userId, and the handler answered
+ * 401 to everyone. N43 makes "/api/dht/" public for GET only, so apiGate now authenticates the POST,
+ * and any API key or SIWE session would reach the handler and could announce ANY kernel, poisoning the
+ * registry. Until an announcement is bound to its kernel's owner (the design of WP-A 8dbb8e3b), the
+ * route's onRequest hook answers every request with this 501. apiGate's onRequest hook runs before a
+ * route-level one, so a caller with no credentials gets apiGate's 401 first.
+ */
+export const DHT_ANNOUNCE_DISABLED_REFUSAL = {
+  error: "not_implemented",
+  code: "DHT_ANNOUNCE_DISABLED",
+  message: "DHT announce is disabled until an announcement is bound to the owner of its kernel.",
+} as const;
 
 let gatewayDHTNode: DHTNode | null = null;
 
@@ -75,8 +94,13 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
     return { results, count: results.length };
   });
 
-  // ── REST: announce capabilities ─────────────────────────────────────
-  app.post("/api/dht/announce", async (req, reply) => {
+  // ── REST: announce capabilities (DISABLED: DHT_ANNOUNCE_DISABLED_REFUSAL) ──
+  app.post("/api/dht/announce", {
+    // This hook answers every request before any content-type parser reads the body. Returning reply
+    // ends the request stage, so the handler below never runs: nothing is stored or gossiped. The
+    // handler is kept unchanged for the owner-bound redesign.
+    onRequest: async (_req, reply) => reply.code(501).send(DHT_ANNOUNCE_DISABLED_REFUSAL),
+  }, async (req, reply) => {
     // Require authentication — prevents DHT registry poisoning with fake kernels
     const apiKeyId = (req as any).apiKeyId;
     const operatorId = (req as any).operatorId;
