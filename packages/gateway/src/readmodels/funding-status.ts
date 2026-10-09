@@ -89,16 +89,13 @@ export type FundingBinding = (typeof FUNDING_BINDINGS)[number];
  *                     ONCE_LIVE, so their terminal state wins over a bound record; the verification
  *                     stays visible.
  *
- *   confirming        RESERVED (ruling (b) pending). It means the buyer's funding transaction is seen
- *                     and its block is not finalized yet. No source can say that: a record is written
- *                     only at a finalized block, and an unfinalized observation belongs to the parked
- *                     escrow_funding table (the operator's decision Q9) and the Stage-1 verifier.
- *                     This projection never produces it.
+ * There is no state for a funding transaction that is seen but not finalized yet: no source can say
+ * that (a record is written only at a finalized block), so it is left out until the operator's Q9
+ * table gives it one, and added in the change that produces it (the steward's ruling 6).
  */
 export const FUNDING_STATES = [
   "prepared",
   "awaiting_funding",
-  "confirming",
   "funded_verified",
   "expired",
   "unknown",

@@ -182,15 +182,15 @@ describe("FundingStatusDTO states", () => {
     for (const [r, e, binding] of cases) expect(fundingBindingOf(scope(), r, e), binding).toBe(binding);
   });
 
-  it("confirming is reserved: no input produces it", () => {
+  it("(neg-dto-members) the states are exactly these: no `confirming` until Q9 gives it a source (ruling 6), and every input gives one of them", () => {
+    expect([...FUNDING_STATES]).toEqual(["prepared", "awaiting_funding", "funded_verified", "expired", "unknown"]);
+    expect(FUNDING_STATES as readonly string[]).not.toContain("confirming");
     const statuses = ["awaiting_acceptance", "awaiting_funding", "active", "revoked", "rejected", "expired", "garbage"];
     const records = [null, record(), record({ finality: "latest" as never }), record({ scopeId: "x" })];
     const escrows: FundingEscrowRow[] = [ROW, null, row({ contractAddress: OTHER_ESCROW }), row({ payer: OTHER })];
     const times = [BEFORE_END, WINDOW_END, "not a time"];
     for (const status of statuses) for (const r of records) for (const e of escrows) for (const t of times) {
-      const state = fundingStateOf(scope({ status }), r, e, t);
-      expect(FUNDING_STATES).toContain(state);
-      expect(state).not.toBe("confirming");
+      expect(FUNDING_STATES).toContain(fundingStateOf(scope({ status }), r, e, t));
     }
   });
 });
