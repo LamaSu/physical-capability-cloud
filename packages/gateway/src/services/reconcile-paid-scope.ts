@@ -3,6 +3,15 @@
  * research/buyer-funding-plan-20261008.md): reconcilePaidScope, the one place a paid write scope
  * goes live on its buyer's verified funding of a real escrow.
  *
+ * Its caller gives two REQUIRED inputs besides the record (the steward's rulings 4 and 5;
+ * paid-scope-activation-terms.ts says where the accept route gets them):
+ *   - expectedChainId: the chain of the pinned V-next deployment record. A record verified on any
+ *     other chain is refused (record_chain_mismatch); a missing or unusable one is
+ *     expected_chain_unavailable, before anything is read.
+ *   - postActivationTtlMs: how long the scope stays live once activated, a positive safe integer of
+ *     at most MAX_POST_ACTIVATION_TTL_MS; a missing or unusable one is activation_ttl_unavailable,
+ *     before anything is read. The mint's 1 h window (PAID_SCOPE_TTL_MS, #591) is not this.
+ *
  * One synchronous SQLite transaction (BEGIN IMMEDIATE; better-sqlite3 runs nothing else on the
  * connection until it ends, and holds the write lock against any other connection):
  *   a. re-read what allows the activation: the scope (not revoked, awaiting_funding, its
@@ -16,12 +25,13 @@
  *   b. insert the verification record through the funding-record port, unless the store already
  *      keeps this scope's record of this escrow (the Stage-1 verifier may have stored it first);
  *   c. compare-and-set the scope from awaiting_funding to active, with expiresAt = now +
- *      PAID_SCOPE_TTL_MS: the TTL starts at activation, not at the mint. A compare-and-set that
+ *      postActivationTtlMs: the TTL starts at activation, not at the mint. A compare-and-set that
  *      changes anything but exactly one row throws, the transaction rolls back, and the insert is
  *      undone with it.
  *
- * Binding: the record must name this scope, its verified payer must be the scope's buyer, and its
- * escrow must be the scope's job's escrow (found the way the accept route and the relay find it),
+ * Binding: the record must be verified on the expected chain, name this scope, its verified payer
+ * must be the scope's buyer, and its escrow must be the scope's job's escrow (found the way the
+ * accept route and the relay find it),
  * whose row passes the same preconditions as at the accept (escrowRowRefusal). These are the binding
  * rule's checks (funding-binding.ts, shared with the funding-status DTO), plus the row's status
  * (funded or active), which only an activation needs. So the same buyer's escrow for another job
@@ -34,43 +44,51 @@
  * Idempotent on (scopeId, escrow): once the scope is active on this escrow's record, a repeat
  * returns that activation (already_active) and inserts nothing and moves no TTL. The answer comes
  * before anything that reads the escrow row, so it still holds after settlement, when the row reads
- * completed (fund-s2 review LOW-3). It needs the record's own checks (well formed, this scope, this
- * buyer), the scope active, and the kept record being this scope's buyer's well-formed record of
- * this escrow. A record for a scope that is active on anything else is refused.
+ * completed (fund-s2 review LOW-3). It needs the record's own checks (well formed, the expected
+ * chain, this scope, this buyer), the scope active, and the kept record being this scope's buyer's
+ * well-formed record of this escrow on the expected chain. A record for a scope that is active on
+ * anything else is refused. One funding never activates a scope twice: a scope that lapsed after
+ * activation is never awaiting_funding again (ruling 5).
  *
  * Fails closed: no record store (production, until Q9) is funding_record_store_unavailable, and
- * nothing is read or written. The result is a typed discriminated union; nothing reads an error's
- * message, and no request value is written to any log or error.
+ * nothing is read or written; nor is anything when an input is unusable. The result is a typed
+ * discriminated union; nothing reads an error's message, and no request value is written to any log
+ * or error.
  */
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
 import { emergencyStopState } from "../routes/device-relay.js";
-import { recordEscrowRefusal, recordScopeRefusal } from "./funding-binding.js";
+import { recordEscrowRefusal, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
-import {
-  acceptanceFor,
-  escrowForJob,
-  escrowRowRefusal,
-  PAID_SCOPE_TTL_MS,
-  SCOPE_AWAITING_FUNDING,
-} from "./scope-acceptance.js";
-import {
-  fundingRecordStore,
-  isWellFormedFundingRecord,
-  sameAddress,
-  type FundingTx,
-  type FundingVerificationRecord,
-} from "./funding-record-port.js";
+import { acceptanceFor, escrowForJob, escrowRowRefusal, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
+import { fundingRecordStore, sameAddress, type FundingTx, type FundingVerificationRecord } from "./funding-record-port.js";
+import type { PaidScopeActivationTerms } from "./paid-scope-activation-terms.js";
 
 const { executionScopes, operatorPolicies } = schema;
+
+/**
+ * The longest post-activation TTL reconcilePaidScope accepts: 356 days (ruling 5). A V-next escrow's
+ * reclaimAt is at most funding + VNextSettlementLib.MAX_RECLAIM_DELAY (365 days), and its primary
+ * verdict is due at reclaimAt - (CHALLENGE_WINDOW + APPEAL_WINDOW + BACKUP_WINDOW) = reclaimAt - 9
+ * days. A scope activates at or after its funding, so no TTL above 365 - 9 days can end before that
+ * verdict is due. The prepare step (S1.1) supplies a tighter value from the job; this bound only
+ * refuses what cannot be right.
+ */
+export const MAX_POST_ACTIVATION_TTL_MS = (365 - 9) * 24 * 60 * 60_000;
 
 /** Every reason reconcilePaidScope refuses, in the order it checks them. */
 export const RECONCILE_REFUSALS = [
   /** No record store is configured (production until Q9): nothing can be recorded. */
   "funding_record_store_unavailable",
+  /** No usable expected chain was given (no pinned V-next deployment record; or not a positive safe integer). */
+  "expected_chain_unavailable",
+  /** No usable post-activation TTL was given (no prepared terms; or not a positive safe integer of at most MAX_POST_ACTIVATION_TTL_MS). */
+  "activation_ttl_unavailable",
   /** The record is not a well-formed, finalized verification record. */
   "record_malformed",
+  /** The record was verified on another chain than the expected one (ruling 4). */
+  "record_chain_mismatch",
   /** The record names another scope. */
   "record_scope_mismatch",
   "scope_not_found",
@@ -130,6 +148,12 @@ class ActivationConflict extends Error {
 
 const refused = (reason: ReconcileRefusal): ReconcileResult => ({ kind: "refused", reason });
 
+/** A chain id a record can carry: a positive safe integer. */
+const isChainId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+/** A post-activation TTL reconcilePaidScope accepts: a positive safe integer of at most MAX_POST_ACTIVATION_TTL_MS. */
+const isActivationTtl = (v: unknown): v is number =>
+  typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= MAX_POST_ACTIVATION_TTL_MS;
+
 /**
  * Whether the policy has a block list (blockedAgents present) that is not an array of strings: a
  * string, null, a number, an object, or an array holding anything but strings. Such a list cannot
@@ -160,13 +184,20 @@ function blockRefusal(tx: FundingTx, kernelId: string, buyer: string): "buyer_bl
 
 /**
  * Makes scope `scopeId` live on `record`, its buyer's finalized verification of the escrow that pays
- * for it, or says why not. See the module comment for the guarantees.
+ * for it, for `terms.postActivationTtlMs` from now, if the record was verified on chain
+ * `terms.expectedChainId`; or says why not. See the module comment for the guarantees.
  */
-export function reconcilePaidScope(scopeId: string, record: FundingVerificationRecord): ReconcileResult {
+export function reconcilePaidScope(scopeId: string, record: FundingVerificationRecord, terms: PaidScopeActivationTerms): ReconcileResult {
   const store = fundingRecordStore();
   if (!store) return refused("funding_record_store_unavailable");
-  // The binding rule's checks 1 and 2 (funding-binding.ts), before any read; check 3 needs the scope.
-  if (!isWellFormedFundingRecord(record)) return refused("record_malformed");
+  // Rulings 4 and 5: the activation's own inputs, before anything is read.
+  const expectedChainId = terms?.expectedChainId;
+  const ttlMs = terms?.postActivationTtlMs;
+  if (!isChainId(expectedChainId)) return refused("expected_chain_unavailable");
+  if (!isActivationTtl(ttlMs)) return refused("activation_ttl_unavailable");
+  // The binding rule's checks 1 to 3 (funding-binding.ts), before any read; check 4 needs the scope.
+  const own = recordRefusal(record, expectedChainId);
+  if (own !== null) return refused(own);
   if (record.scopeId !== scopeId) return refused("record_scope_mismatch");
   try {
     return getStore().db.transaction((tx): ReconcileResult => {
@@ -175,16 +206,17 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       if (!scope) return refused("scope_not_found");
 
       // Bound to this scope: the binding rule (funding-binding.ts), shared with the funding-status DTO.
-      const recordRefusal = recordScopeRefusal(record, scope);
-      if (recordRefusal !== null) return refused(recordRefusal);
+      const bound = recordScopeRefusal(record, scope, expectedChainId);
+      if (bound !== null) return refused(bound);
 
       // The record kept for this scope, if any: a conformant store shows finalized records only
       // (ruling 3). It counts as this funding only when it is this buyer's well-formed record of
-      // this scope (the binding rule's checks 1 to 3; that it is finalized and names this scope holds
-      // by the store's contract, checked again as defence in depth) and of this record's escrow.
+      // this scope on the expected chain (the binding rule's checks 1 to 4; that it is finalized and
+      // names this scope holds by the store's contract, checked again as defence in depth), and of
+      // this record's escrow: the same (chain, escrow) funding.
       const kept = store.findByScope(tx, scopeId);
       const keptForThis =
-        kept !== null && recordScopeRefusal(kept, scope) === null && sameAddress(kept.escrowAddress, record.escrowAddress)
+        kept !== null && recordScopeRefusal(kept, scope, expectedChainId) === null && sameAddress(kept.escrowAddress, record.escrowAddress)
           ? kept
           : null;
 
@@ -229,7 +261,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
       if (!kept) store.insert(tx, record);
 
       // (c) The compare-and-set, from the exact row read above; the TTL starts now.
-      const expiresAt = new Date(now.getTime() + PAID_SCOPE_TTL_MS).toISOString();
+      const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
       const { changes } = tx
         .update(executionScopes)
         .set({ status: "active", expiresAt })

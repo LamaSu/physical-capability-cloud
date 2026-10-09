@@ -40,10 +40,11 @@ export const SCOPE_AWAITING_FUNDING = "awaiting_funding";
 export const SCOPE_REJECTED = "rejected";
 
 /**
- * A paid write scope's lifetime: one hour. createJobFromSession sets expiresAt = mint + this, which
- * for a scope that is not live yet is the window in which it may still be accepted and funded.
- * reconcilePaidScope, which makes a scope live on its buyer's verified funding, sets expiresAt =
- * activation + this: the scope's write time starts when it goes live, not at the mint.
+ * A paid write scope's mint window: one hour (#591). createJobFromSession sets expiresAt = mint +
+ * this, which for a scope that is not live yet is the window in which it may still be accepted and
+ * funded. It is not the scope's write time once live: reconcilePaidScope, which makes a scope live
+ * on its buyer's verified funding, sets expiresAt = activation + the post-activation TTL its caller
+ * gives (the steward's ruling 5), so the write time starts when the scope goes live.
  */
 export const PAID_SCOPE_TTL_MS = 60 * 60_000;
 

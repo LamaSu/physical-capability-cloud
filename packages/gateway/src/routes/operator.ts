@@ -6,6 +6,7 @@ import { schema, eq, and } from "@pcc/store";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 import { SCOPE_AWAITING_ACCEPTANCE, SCOPE_AWAITING_FUNDING, scopeFundingVerdict } from "../services/scope-acceptance.js";
 import { reconcileAnswer, reconcileFundingRefusal, reconcilePaidScope, type ReconcileResult } from "../services/reconcile-paid-scope.js";
+import { paidScopeActivationTerms } from "../services/paid-scope-activation-terms.js";
 import { emergencyStopState, stopRefusal } from "./device-relay.js";
 import { scopeExpiryMs } from "../services/scope-expiry.js";
 
@@ -516,9 +517,12 @@ export async function operatorRoutes(app: FastifyInstance) {
    * awaiting_funding, then reconcilePaidScope activates it and starts its TTL; the answer then
    * carries the reconcile outcome as `activation`, without the verification record
    * (reconcileAnswer: an activation is {kind, activatedAt, expiresAt, escrowAddress}). If
-   * reconcilePaidScope refuses, the accept stands and the scope waits in awaiting_funding. No
-   * record store is configured in production (Q9), so there no record exists and this answers
-   * exactly what it answered before.
+   * reconcilePaidScope refuses, the accept stands and the scope waits in awaiting_funding.
+   * reconcilePaidScope is given the expected chain and the post-activation TTL as
+   * paidScopeActivationTerms reads them (the steward's rulings 4 and 5). Until S0.1 pins a V-next
+   * deployment record and S1.1 prepares the TTL, both are null and the activation is refused
+   * (expected_chain_unavailable). No record store is configured in production (Q9), so there no
+   * record exists, neither input is read, and this answers exactly what it answered before.
    */
   app.post<{ Params: { scopeId: string } }>("/api/operator/scopes/:scopeId/accept", async (req, reply) => {
     const authority = authorityOf(req);
@@ -549,7 +553,9 @@ export async function operatorRoutes(app: FastifyInstance) {
           .where(and(eq(executionScopes.id, scope.id), eq(executionScopes.status, SCOPE_AWAITING_ACCEPTANCE)))
           .run();
         const activated: ReconcileResult | null =
-          accepted.changes === 1 && funding.kind === "record_funded" ? reconcilePaidScope(scope.id, funding.record) : null;
+          accepted.changes === 1 && funding.kind === "record_funded"
+            ? reconcilePaidScope(scope.id, funding.record, paidScopeActivationTerms(scope))
+            : null;
         return { changes: accepted.changes, activation: activated };
       });
       if (changes === 0) {

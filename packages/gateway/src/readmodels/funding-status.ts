@@ -1,6 +1,8 @@
 /**
  * FundingStatusDTO: where a paid write scope's buyer funding stands, for the UI (buyer funding plan
- * S2.4, research/buyer-funding-plan-20261008.md). A pure projection of three sources the caller read:
+ * S2.4, research/buyer-funding-plan-20261008.md). A pure projection of three sources the caller read,
+ * and the expected chain (the pinned V-next deployment record's, paid-scope-activation-terms.ts;
+ * null when none is pinned, and then no record binds):
  *   - the scope row (execution_scopes): its status and its own createdAt and expiresAt;
  *   - the funding verification record that names the scope (FundingRecordStore.findByScope), or
  *     null when there is none;
@@ -39,6 +41,8 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  *
  *   no_record                       no record was given.
  *   record_malformed                the record is not a well-formed, finalized verification record.
+ *   record_chain_mismatch           it was verified on another chain than the expected one, or no
+ *                                   usable expected chain was given (the steward's ruling 4).
  *   record_scope_mismatch           it names another scope.
  *   record_buyer_not_scope_buyer    its verified payer is not the scope's buyer.
  *   escrow_missing                  the scope's job has no escrow row: never funded_verified.
@@ -54,6 +58,7 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
 export const FUNDING_BINDINGS = [
   "no_record",
   "record_malformed",
+  "record_chain_mismatch",
   "record_scope_mismatch",
   "record_buyer_not_scope_buyer",
   "escrow_missing",
@@ -172,10 +177,15 @@ function windowOpen(asOf: string, expiresAt: string): boolean {
   return Date.parse(asOf) < scopeExpiryMs(expiresAt);
 }
 
-/** How `record` stands against `scope` and its job's escrow row `escrow`. See FUNDING_BINDINGS. */
-export function fundingBindingOf(scope: FundingScopeRow, record: FundingVerificationRecord | null, escrow: FundingEscrowRow): FundingBinding {
+/** How `record` stands against `scope`, its job's escrow row `escrow` and chain `expectedChainId`. See FUNDING_BINDINGS. */
+export function fundingBindingOf(
+  scope: FundingScopeRow,
+  record: FundingVerificationRecord | null,
+  escrow: FundingEscrowRow,
+  expectedChainId: number | null,
+): FundingBinding {
   if (record === null) return "no_record";
-  return fundingBindingRefusal(record, scope, escrow) ?? "bound";
+  return fundingBindingRefusal(record, scope, escrow, expectedChainId) ?? "bound";
 }
 
 /** The state from the scope row, the binding and asOf: the precedence, in one place. See FUNDING_STATES. */
@@ -191,14 +201,18 @@ function stateOf(scope: FundingScopeRow, binding: FundingBinding, asOf: string):
   return binding === "bound" && ONCE_LIVE.has(scope.status) ? "funded_verified" : "unknown";
 }
 
-/** The funding state of `scope`, given the record that names it and its job's escrow row (or nulls). See FUNDING_STATES. */
+/**
+ * The funding state of `scope`, given the record that names it and its job's escrow row (or nulls),
+ * and the expected chain. See FUNDING_STATES.
+ */
 export function fundingStateOf(
   scope: FundingScopeRow,
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
+  expectedChainId: number | null,
   asOf: string,
 ): FundingState {
-  return stateOf(scope, fundingBindingOf(scope, record, escrow), asOf);
+  return stateOf(scope, fundingBindingOf(scope, record, escrow, expectedChainId), asOf);
 }
 
 /** The DTO: the state and the binding, with the sources' own values beside them. */
@@ -206,9 +220,10 @@ export function projectFundingStatus(
   scope: FundingScopeRow,
   record: FundingVerificationRecord | null,
   escrow: FundingEscrowRow,
+  expectedChainId: number | null,
   asOf: string,
 ): FundingStatusDTO {
-  const binding = fundingBindingOf(scope, record, escrow);
+  const binding = fundingBindingOf(scope, record, escrow, expectedChainId);
   return {
     schemaId: FUNDING_STATUS_SCHEMA_ID,
     asOf,

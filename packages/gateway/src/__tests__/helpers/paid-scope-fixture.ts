@@ -14,14 +14,27 @@ import { initStore, closeStore, getStore, getRepos } from "../../db.js";
 import { actAsJobParty } from "./job-read-party.js";
 import { __setFundingRecordStoreForTest, type FundingVerificationRecord } from "../../services/funding-record-port.js";
 import { PAID_SCOPE_TTL_MS } from "../../services/scope-acceptance.js";
+import {
+  __setPaidScopeActivationTermsForTest,
+  type PaidScopeActivationTerms,
+} from "../../services/paid-scope-activation-terms.js";
 
 export const KERNEL = "kernel-nyc"; // operator 0x1111…, default (manual) policy
 export const BUYER = "0x5555555555555555555555555555555555555555";
 export const OTHER = "0x6666666666666666666666666666666666666666";
 export const ESCROW_A = "0x" + "a1".repeat(20);
 export const ESCROW_B = "0x" + "b2".repeat(20);
+/** The mint's window: a scope not live yet may be accepted and funded until mint + this (1 h, #591). */
 export const TTL = PAID_SCOPE_TTL_MS;
 export const MIN = 60_000;
+/** The chain the tests' records are verified on (Base Sepolia), and the post-activation TTL they pass. */
+export const CHAIN_ID = 84532;
+export const ACTIVATION_TTL = 6 * 60 * MIN;
+/** reconcilePaidScope's required inputs (rulings 4 and 5), as the tests give them explicitly. */
+export const TERMS: PaidScopeActivationTerms = { expectedChainId: CHAIN_ID, postActivationTtlMs: ACTIVATION_TTL };
+/** Installs the accept route's source of the expected chain and TTL (none by default: both null). */
+export const installActivationTerms = (terms: PaidScopeActivationTerms = TERMS) =>
+  __setPaidScopeActivationTermsForTest(() => terms);
 /** The fake clock's start: every scope in these tests is minted at T0. */
 export const T0 = Date.parse("2026-10-08T12:00:00.000Z");
 export const iso = (ms: number) => new Date(ms).toISOString();
@@ -94,9 +107,10 @@ export async function setUpFixture(opts: { dbPath?: string } = {}): Promise<Fixt
 /** afterEach. */
 export async function tearDownFixture(f: Fixture): Promise<void> {
   await f.app.close();
-  // Before NODE_ENV is restored: the setter refuses outside a test process.
+  // Before NODE_ENV is restored: the setters refuse outside a test process.
   process.env.NODE_ENV = "test";
   __setFundingRecordStoreForTest(null);
+  __setPaidScopeActivationTermsForTest(null);
   closeStore();
   vi.useRealTimers();
   for (const k of ENV) {

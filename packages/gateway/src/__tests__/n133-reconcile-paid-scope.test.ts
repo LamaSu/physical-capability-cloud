@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDatabase, sql } from "@pcc/store";
-import { reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
+import { MAX_POST_ACTIVATION_TTL_MS, reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import {
   installCaseExactFundingRecordStore,
@@ -24,13 +24,16 @@ import {
   type TestFundingRecordStore,
 } from "./helpers/test-funding-record-store.js";
 import {
+  ACTIVATION_TTL,
   BUYER,
+  CHAIN_ID,
   ESCROW_A,
   ESCROW_B,
   KERNEL,
   MIN,
   OTHER,
   T0,
+  TERMS,
   TTL,
   acceptScope,
   basePolicy,
@@ -70,35 +73,35 @@ describe("S2.2 accept: a paid scope goes from awaiting_funding to active exactly
     // The buyer funds; the verifier reads the finalized block 20 minutes after the mint.
     vi.setSystemTime(T0 + 20 * MIN);
     const record = verification(scopeId);
-    expect(reconcilePaidScope(scopeId, record)).toEqual({
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual({
       kind: "activated",
       scopeId,
       escrowAddress: ESCROW_A,
       activatedAt: iso(T0 + 20 * MIN),
-      expiresAt: iso(T0 + 20 * MIN + TTL), // not the mint's T0 + TTL
+      expiresAt: iso(T0 + 20 * MIN + ACTIVATION_TTL), // the caller's TTL from activation, not the mint's T0 + TTL
       record,
     });
-    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 20 * MIN + TTL) });
+    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 20 * MIN + ACTIVATION_TTL) });
     expect(store.count()).toBe(1);
     expect(store.findByScope(db(), scopeId)).toEqual(record);
     expect((await writeAs(f, scopeId)).statusCode).toBe(201);
 
     // Exactly once: a later reconcile of the same funding is already_active, with the kept record.
     vi.setSystemTime(T0 + 30 * MIN);
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual({
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual({
       kind: "already_active",
       scopeId,
       escrowAddress: ESCROW_A,
-      expiresAt: iso(T0 + 20 * MIN + TTL),
+      expiresAt: iso(T0 + 20 * MIN + ACTIVATION_TTL),
       record,
     });
-    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 20 * MIN + TTL) });
+    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 20 * MIN + ACTIVATION_TTL) });
     expect(store.count()).toBe(1);
   });
 
   it("an escrow address in another letter case is the same escrow", async () => {
     const { scopeId } = await paidScope(f);
-    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_A.toUpperCase().replace("0X", "0x") })).kind).toBe(
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_A.toUpperCase().replace("0X", "0x") }), TERMS).kind).toBe(
       "activated",
     );
   });
@@ -109,8 +112,138 @@ describe("S2.2 accept: a paid scope goes from awaiting_funding to active exactly
     db().transaction((tx) => store.insert(tx, stored));
     vi.setSystemTime(T0 + 5 * MIN);
     const insert = vi.spyOn(store, "insert");
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toMatchObject({ kind: "activated", record: stored, expiresAt: iso(T0 + 5 * MIN + TTL) });
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toMatchObject({ kind: "activated", record: stored, expiresAt: iso(T0 + 5 * MIN + ACTIVATION_TTL) });
     expect(insert).not.toHaveBeenCalled();
+    expect(store.count()).toBe(1);
+  });
+});
+
+describe("rulings 4 and 5: the expected chain and the post-activation TTL are required inputs", () => {
+  /** Spies on every store read and write, to show a refusal read and wrote nothing. */
+  function spyStore() {
+    return [vi.spyOn(store, "findByScope"), vi.spyOn(store, "findByEscrow"), vi.spyOn(store, "insert")];
+  }
+
+  it("(neg-chain-input) no usable expected chain is expected_chain_unavailable, before anything is read or written", async () => {
+    const { scopeId } = await paidScope(f);
+    const before = scopeRow(scopeId);
+    const spies = spyStore();
+    for (const expectedChainId of [null, undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, "84532"]) {
+      const terms = { ...TERMS, expectedChainId } as never;
+      expect(reconcilePaidScope(scopeId, verification(scopeId), terms), String(expectedChainId)).toEqual(refused("expected_chain_unavailable"));
+    }
+    expect(reconcilePaidScope(scopeId, verification(scopeId), undefined as never)).toEqual(refused("expected_chain_unavailable"));
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    expect(scopeRow(scopeId)).toEqual(before);
+    expect(store.count()).toBe(0);
+  });
+
+  it("(neg-ttl-input) no usable post-activation TTL is activation_ttl_unavailable, before anything is read or written", async () => {
+    const { scopeId } = await paidScope(f);
+    const before = scopeRow(scopeId);
+    const spies = spyStore();
+    for (const postActivationTtlMs of [null, undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "3600000", MAX_POST_ACTIVATION_TTL_MS + 1]) {
+      const terms = { ...TERMS, postActivationTtlMs } as never;
+      expect(reconcilePaidScope(scopeId, verification(scopeId), terms), String(postActivationTtlMs)).toEqual(refused("activation_ttl_unavailable"));
+    }
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    expect(scopeRow(scopeId)).toEqual(before);
+    expect(store.count()).toBe(0);
+  });
+
+  it("(ttl-bound) the TTL bound is 356 days, reclaimAt's 365-day ceiling less the 9 days before the primary verdict; the bound itself and 1 ms activate", async () => {
+    expect(MAX_POST_ACTIVATION_TTL_MS).toBe(356 * 24 * 60 * MIN);
+    const one = await paidScope(f, { real: ESCROW_A });
+    const two = await paidScope(f, { real: ESCROW_B });
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId), { ...TERMS, postActivationTtlMs: MAX_POST_ACTIVATION_TTL_MS })).toMatchObject({
+      kind: "activated",
+      expiresAt: iso(T0 + MAX_POST_ACTIVATION_TTL_MS),
+    });
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { escrowAddress: ESCROW_B }), { ...TERMS, postActivationTtlMs: 1 })).toMatchObject({
+      kind: "activated",
+      expiresAt: iso(T0 + 1),
+    });
+  });
+
+  it("(ttl-from-input) the scope's write time is the caller's TTL from activation, not the mint's 1 h", async () => {
+    const one = await paidScope(f, { real: ESCROW_A });
+    const two = await paidScope(f, { real: ESCROW_B });
+    vi.setSystemTime(T0 + 20 * MIN);
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId), { ...TERMS, postActivationTtlMs: 3 * 24 * 60 * MIN })).toMatchObject({
+      kind: "activated",
+      expiresAt: iso(T0 + 20 * MIN + 3 * 24 * 60 * MIN),
+    });
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { escrowAddress: ESCROW_B }), { ...TERMS, postActivationTtlMs: 90 * MIN })).toMatchObject({
+      kind: "activated",
+      expiresAt: iso(T0 + 20 * MIN + 90 * MIN),
+    });
+    expect(scopeRow(one.scopeId).expiresAt).toBe(iso(T0 + 20 * MIN + 3 * 24 * 60 * MIN));
+    expect(scopeRow(two.scopeId).expiresAt).toBe(iso(T0 + 20 * MIN + 90 * MIN));
+  });
+
+  it("(neg-record-chain) a record from any chain but the expected one is record_chain_mismatch, and nothing is written", async () => {
+    const { scopeId } = await paidScope(f);
+    // A record on 84532 while the expected chain is another id, and the other way round.
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { chainId: 84532 }), { ...TERMS, expectedChainId: 8453 })).toEqual(
+      refused("record_chain_mismatch"),
+    );
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { chainId: 545 }), TERMS)).toEqual(refused("record_chain_mismatch"));
+    expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+    expect(store.count()).toBe(0);
+    // The control: the expected chain's record activates.
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { chainId: CHAIN_ID }), TERMS).kind).toBe("activated");
+  });
+
+  it("(neg-kept-chain) a kept record from another chain is not this funding: a live scope's repeat is never already_active on it", async () => {
+    const { scopeId } = await paidScope(f);
+    const record = verification(scopeId);
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
+    db().run(sql`DELETE FROM test_funding_records`);
+    store.plant(verification(scopeId, { chainId: 545 })); // the same escrow address, kept for this scope, on another chain
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("scope_bound_to_other_funding"));
+    expect(scopeRow(scopeId).status).toBe("active");
+  });
+
+  it("(neg-reactivate-expired) a scope that lapsed after activation is never activated again on the same funding", async () => {
+    const { scopeId } = await paidScope(f);
+    const record = verification(scopeId);
+    const terms = { ...TERMS, postActivationTtlMs: 30 * MIN };
+    expect(reconcilePaidScope(scopeId, record, terms)).toMatchObject({ kind: "activated", expiresAt: iso(T0 + 30 * MIN) });
+    vi.setSystemTime(T0 + 31 * MIN);
+    // GET scope moves a live scope past its TTL to expired (device-relay.ts GET /scope/:scopeId).
+    expect((await f.app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}` })).json()).toMatchObject({ status: "expired" });
+    const after = scopeRow(scopeId);
+    const insert = vi.spyOn(store, "insert");
+    expect(reconcilePaidScope(scopeId, record, terms)).toEqual(refused("scope_not_awaiting_funding"));
+    expect(reconcilePaidScope(scopeId, record, { ...terms, postActivationTtlMs: 24 * 60 * MIN })).toEqual(refused("scope_not_awaiting_funding"));
+    expect(insert).not.toHaveBeenCalled();
+    expect(scopeRow(scopeId)).toEqual(after);
+    expect(store.count()).toBe(1);
+    expect((await writeAs(f, scopeId)).statusCode).toBe(403);
+  });
+
+  it("(neg-reactivate-lapsed-active) a scope past its TTL that still reads active gets already_active with its old expiry: nothing moves, and it cannot write", async () => {
+    const { scopeId } = await paidScope(f);
+    const record = verification(scopeId);
+    expect(reconcilePaidScope(scopeId, record, { ...TERMS, postActivationTtlMs: 30 * MIN }).kind).toBe("activated");
+    vi.setSystemTime(T0 + 31 * MIN);
+    const after = scopeRow(scopeId);
+    expect(after.status).toBe("active");
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toMatchObject({ kind: "already_active", expiresAt: iso(T0 + 30 * MIN) });
+    expect(scopeRow(scopeId)).toEqual(after);
+    expect((await writeAs(f, scopeId)).statusCode).toBe(403);
+  });
+
+  it("(neg-reactivate-second-scope) one funding never activates a second scope, before or after the first one's TTL lapses", async () => {
+    const one = await paidScope(f, { real: ESCROW_A });
+    const two = await paidScope(f, { real: ESCROW_A });
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId), { ...TERMS, postActivationTtlMs: 30 * MIN }).kind).toBe("activated");
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId), TERMS)).toEqual(refused("escrow_bound_to_other_scope"));
+    vi.setSystemTime(T0 + 31 * MIN);
+    await f.app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${one.scopeId}` }); // one lapses to expired
+    expect(scopeRow(one.scopeId).status).toBe("expired");
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId), TERMS)).toEqual(refused("escrow_bound_to_other_scope"));
+    expect(scopeRow(two.scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(1);
   });
 });
@@ -121,26 +254,26 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     const policy = basePolicy();
     const record = verification(scopeId); // verified ...
     setPolicy(KERNEL, { ...policy, emergencyStop: true }); // ... then the stop lands
-    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("kernel_emergency_stopped"));
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("kernel_emergency_stopped"));
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
     expect(store.count()).toBe(0);
 
     // A policy that cannot be read cannot show the stop clear.
     db().run(sql`INSERT OR REPLACE INTO operator_policies (kernel_id, policy, updated_at, updated_by)
       VALUES (${KERNEL}, ${"[]"}, ${new Date().toISOString()}, ${"test"})`);
-    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("policy_unavailable"));
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("policy_unavailable"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
 
     // Cleared while the window is open, the same funding activates it.
     setPolicy(KERNEL, policy);
-    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
   });
 
   it("(neg-blocked) a buyer blocked since the accept is refused; nothing recorded", async () => {
     const { scopeId } = await paidScope(f);
     setPolicy(KERNEL, { ...basePolicy(), blockedAgents: [BUYER.toUpperCase().replace("0X", "0x")] });
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("buyer_blocked"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("buyer_blocked"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
@@ -153,7 +286,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     // blocked); then a null, a number, and an array holding a non-string.
     for (const blockedAgents of [BUYER, null, 42, [OTHER, 7]]) {
       setPolicy(KERNEL, { ...policy, blockedAgents });
-      expect(reconcilePaidScope(scopeId, verification(scopeId)), JSON.stringify(blockedAgents)).toEqual(refused("policy_unavailable"));
+      expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS), JSON.stringify(blockedAgents)).toEqual(refused("policy_unavailable"));
       expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
       expect(store.count()).toBe(0);
     }
@@ -163,15 +296,15 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     delete noList.blockedAgents;
     setPolicy(KERNEL, noList);
     const other = await paidScope(f, { real: ESCROW_B });
-    expect(reconcilePaidScope(other.scopeId, verification(other.scopeId, { escrowAddress: ESCROW_B })).kind).toBe("activated");
+    expect(reconcilePaidScope(other.scopeId, verification(other.scopeId, { escrowAddress: ESCROW_B }), TERMS).kind).toBe("activated");
     setPolicy(KERNEL, { ...policy, blockedAgents: [OTHER] });
-    expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
   });
 
   it("(neg-revoked) a scope the operator revoked never activates", async () => {
     const { scopeId } = await paidScope(f);
     expect((await revokeScope(f, scopeId)).statusCode).toBe(200);
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_revoked"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("scope_revoked"));
     expect(scopeRow(scopeId).status).toBe("revoked");
     expect(store.count()).toBe(0);
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
@@ -180,7 +313,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   it("(neg-unaccepted) funding never skips the operator's acceptance: a scope awaiting it is refused", async () => {
     const { scopeId } = await paidScope(f, { accept: false });
     expect(scopeRow(scopeId).status).toBe("awaiting_acceptance");
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_not_awaiting_funding"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("scope_not_awaiting_funding"));
     expect(scopeRow(scopeId).status).toBe("awaiting_acceptance");
     expect(store.count()).toBe(0);
   });
@@ -190,8 +323,8 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   // cross-connection case is neg-two-connections, below.
   it("(neg-twice) two sequential, in-process reconciles of one scope with the same funding: the first activates, the second is already_active", async () => {
     const { scopeId } = await paidScope(f);
-    const first = reconcilePaidScope(scopeId, verification(scopeId));
-    const second = reconcilePaidScope(scopeId, verification(scopeId));
+    const first = reconcilePaidScope(scopeId, verification(scopeId), TERMS);
+    const second = reconcilePaidScope(scopeId, verification(scopeId), TERMS);
     expect([first.kind, second.kind]).toEqual(["activated", "already_active"]);
     expect(scopeRow(scopeId).status).toBe("active");
     expect(store.count()).toBe(1);
@@ -200,12 +333,12 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   it("(neg-race-escrow) two sequential, in-process reconciles of one scope, each record of the job's escrow at its turn: the second is refused", async () => {
     const { scopeId, escrowId } = await paidScope(f);
     const insert = vi.spyOn(store, "insert");
-    const first = reconcilePaidScope(scopeId, verification(scopeId)); // the job's escrow is ESCROW_A
+    const first = reconcilePaidScope(scopeId, verification(scopeId), TERMS); // the job's escrow is ESCROW_A
     // Between the calls the job's escrow row is re-pointed to ESCROW_B, so the second record IS the
     // job's escrow's at its turn: it is refused because the scope is bound to ESCROW_A's funding,
     // not because ESCROW_B is some other job's escrow.
     setEscrow(escrowId, { contractAddress: ESCROW_B });
-    const second = reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }));
+    const second = reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }), TERMS);
     expect(first.kind).toBe("activated");
     expect(second).toEqual(refused("scope_bound_to_other_funding"));
     expect(insert).toHaveBeenCalledTimes(1);
@@ -215,10 +348,10 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
 
   it("(neg-other-funding) a live scope's record is never replaced by another escrow's", async () => {
     const { scopeId, escrowId } = await paidScope(f);
-    expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
     // The job's escrow row is re-pointed to another contract (a replacement), and its record arrives.
     setEscrow(escrowId, { contractAddress: ESCROW_B });
-    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }))).toEqual(
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }), TERMS)).toEqual(
       refused("scope_bound_to_other_funding"),
     );
     expect(store.count()).toBe(1);
@@ -229,7 +362,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     const { scopeId, escrowId } = await paidScope(f, { real: null }); // the mock escrow, accepted: live
     expect(scopeRow(scopeId).status).toBe("active");
     setEscrow(escrowId, { contractAddress: ESCROW_A });
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_active_other_funding"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("scope_active_other_funding"));
     expect(store.count()).toBe(0);
     expect(scopeRow(scopeId).expiresAt).toBe(iso(T0 + TTL));
   });
@@ -237,20 +370,20 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   it("(neg-expired) the acceptance window lapsed: expired, and the scope never activates", async () => {
     const { scopeId } = await paidScope(f);
     vi.setSystemTime(T0 + TTL); // the window ends at T0 + TTL
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual({ kind: "expired", scopeId, windowEndedAt: iso(T0 + TTL) });
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual({ kind: "expired", scopeId, windowEndedAt: iso(T0 + TTL) });
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
     expect(store.count()).toBe(0);
     // A millisecond before the end it would still have activated.
     vi.setSystemTime(T0);
     const other = await paidScope(f, { real: ESCROW_B });
     vi.setSystemTime(T0 + TTL - 1);
-    expect(reconcilePaidScope(other.scopeId, verification(other.scopeId, { escrowAddress: ESCROW_B })).kind).toBe("activated");
+    expect(reconcilePaidScope(other.scopeId, verification(other.scopeId, { escrowAddress: ESCROW_B }), TERMS).kind).toBe("activated");
   });
 
   it("(neg-unreadable-window) a window that cannot be read counts as lapsed", async () => {
     const { scopeId } = await paidScope(f);
     db().run(sql`UPDATE execution_scopes SET expires_at = ${"not a time"} WHERE id = ${scopeId}`);
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toMatchObject({ kind: "expired" });
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toMatchObject({ kind: "expired" });
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
   });
@@ -258,7 +391,7 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   it("(neg-other-job) the same buyer's escrow for a different job is refused", async () => {
     const one = await paidScope(f, { real: ESCROW_A });
     const two = await paidScope(f, { real: ESCROW_B });
-    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { escrowAddress: ESCROW_B }))).toEqual(
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { escrowAddress: ESCROW_B }), TERMS)).toEqual(
       refused("record_escrow_not_scope_escrow"),
     );
     expect(scopeRow(one.scopeId).status).toBe("awaiting_funding");
@@ -269,11 +402,11 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   it("(neg-duplicate) a duplicate notification is a no-op: the record count and the TTL do not change", async () => {
     const { scopeId } = await paidScope(f);
     const record = verification(scopeId);
-    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
     const after = scopeRow(scopeId);
     vi.setSystemTime(T0 + 10 * MIN);
     const insert = vi.spyOn(store, "insert");
-    expect(reconcilePaidScope(scopeId, record)).toMatchObject({ kind: "already_active", expiresAt: after.expiresAt });
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toMatchObject({ kind: "already_active", expiresAt: after.expiresAt });
     expect(insert).not.toHaveBeenCalled();
     expect(store.count()).toBe(1);
     expect(scopeRow(scopeId)).toEqual(after);
@@ -282,12 +415,12 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
   it("(neg-settled-repeat) a duplicate after settlement is already_active, nothing written: the escrow row's status is not read for it (P6)", async () => {
     const { scopeId, escrowId } = await paidScope(f);
     const record = verification(scopeId);
-    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
     const after = scopeRow(scopeId);
     setEscrow(escrowId, { status: "completed" }); // the job settled (paid-job-flow, settlement-keeper)
     vi.setSystemTime(T0 + 10 * MIN);
     const insert = vi.spyOn(store, "insert");
-    expect(reconcilePaidScope(scopeId, record)).toEqual({
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual({
       kind: "already_active",
       scopeId,
       escrowAddress: ESCROW_A,
@@ -298,22 +431,22 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(store.count()).toBe(1);
     expect(scopeRow(scopeId)).toEqual(after);
     // The refusals stay: another buyer's record, and another escrow's record, of this scope.
-    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: OTHER }))).toEqual(refused("record_buyer_not_scope_buyer"));
-    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }))).toEqual(refused("escrow_not_funded"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: OTHER }), TERMS)).toEqual(refused("record_buyer_not_scope_buyer"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: ESCROW_B }), TERMS)).toEqual(refused("escrow_not_funded"));
     expect(insert).not.toHaveBeenCalled();
   });
 
   it("(neg-active-kept) for a live scope, a repeat is already_active only on its buyer's own well-formed kept record", async () => {
     const { scopeId } = await paidScope(f);
     const record = verification(scopeId);
-    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
     // The kept record replaced by another buyer's.
     db().run(sql`DELETE FROM test_funding_records`);
     store.plant({ ...record, buyer: OTHER });
-    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("scope_bound_to_other_funding"));
     // A store answering for this scope with another scope's record.
     __setFundingRecordStoreForTest({ ...store, findByScope: () => verification("scope_elsewhere") });
-    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("active");
   });
 
@@ -322,24 +455,24 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     store = installFinalityBlindFundingRecordStore();
     const { scopeId } = await paidScope(f);
     const record = verification(scopeId);
-    expect(reconcilePaidScope(scopeId, record).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
     db().run(sql`DELETE FROM test_funding_records_blind`);
     store.plant({ ...record, finality: "latest" });
-    expect(reconcilePaidScope(scopeId, record)).toEqual(refused("scope_bound_to_other_funding"));
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("active");
   });
 
   it("(neg-nostore) no record store: the fail-closed reason, and nothing changes", async () => {
     const { scopeId } = await paidScope(f);
     __setFundingRecordStoreForTest(null);
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("funding_record_store_unavailable"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("funding_record_store_unavailable"));
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
   });
 
   it("(neg-prodstore) in a production process a store left installed is never consulted", async () => {
     const { scopeId } = await paidScope(f);
     process.env.NODE_ENV = "production";
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("funding_record_store_unavailable"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("funding_record_store_unavailable"));
     expect(() => __setFundingRecordStoreForTest(store)).toThrow();
     process.env.NODE_ENV = "test";
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
@@ -353,12 +486,12 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     db().run(sql`CREATE TEMP TRIGGER test_block_activation BEFORE UPDATE OF status ON main.execution_scopes
       WHEN NEW.status = 'active' BEGIN SELECT RAISE(IGNORE); END`);
     const insert = vi.spyOn(store, "insert");
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("activation_conflict"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("activation_conflict"));
     expect(insert).toHaveBeenCalledTimes(1); // the record WAS inserted ...
     expect(store.count()).toBe(0); // ... and rolled back with the transaction
     expect(scopeRow(scopeId)).toEqual(before);
     db().run(sql`DROP TRIGGER temp.test_block_activation`);
-    expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
   });
 });
 
@@ -377,7 +510,7 @@ describe("S2.2 the compare-and-set moves only the exact row the checks read", ()
   it("(neg-cas-status) a status changed inside the transaction is not activated; everything rolls back", async () => {
     const { scopeId } = await paidScope(f);
     writerInside(sql`UPDATE execution_scopes SET status = 'revoked' WHERE id = ${scopeId}`);
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("activation_conflict"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("activation_conflict"));
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
     expect(store.count()).toBe(0);
   });
@@ -385,7 +518,7 @@ describe("S2.2 the compare-and-set moves only the exact row the checks read", ()
   it("(neg-cas-expiry) a window changed inside the transaction is not activated; everything rolls back", async () => {
     const { scopeId } = await paidScope(f);
     writerInside(sql`UPDATE execution_scopes SET expires_at = ${iso(T0 + 2 * TTL)} WHERE id = ${scopeId}`);
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("activation_conflict"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("activation_conflict"));
     expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
     expect(store.count()).toBe(0);
   });
@@ -395,13 +528,13 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
   it("(neg-record-scope) a record naming another scope is refused", async () => {
     const one = await paidScope(f, { real: ESCROW_A });
     const two = await paidScope(f, { real: ESCROW_B });
-    expect(reconcilePaidScope(one.scopeId, verification(two.scopeId))).toEqual(refused("record_scope_mismatch"));
+    expect(reconcilePaidScope(one.scopeId, verification(two.scopeId), TERMS)).toEqual(refused("record_scope_mismatch"));
     expect(store.count()).toBe(0);
   });
 
   it("(neg-record-buyer) a record whose verified payer is not the scope's buyer is refused", async () => {
     const { scopeId } = await paidScope(f);
-    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: OTHER }))).toEqual(refused("record_buyer_not_scope_buyer"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: OTHER }), TERMS)).toEqual(refused("record_buyer_not_scope_buyer"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
   });
@@ -424,9 +557,9 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     ];
     for (const over of bad) {
       const record = { ...verification(scopeId), ...over } as never;
-      expect(reconcilePaidScope(scopeId, record), JSON.stringify(over)).toEqual(refused("record_malformed"));
+      expect(reconcilePaidScope(scopeId, record, TERMS), JSON.stringify(over)).toEqual(refused("record_malformed"));
     }
-    expect(reconcilePaidScope(scopeId, null as never)).toEqual(refused("record_malformed"));
+    expect(reconcilePaidScope(scopeId, null as never, TERMS)).toEqual(refused("record_malformed"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
   });
@@ -435,24 +568,24 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     const { scopeId } = await paidScope(f);
     for (const blockNumber of ["18446744073709551616", "99999999999999999999"]) {
       expect(isWellFormedFundingRecord(verification(scopeId, { blockNumber })), blockNumber).toBe(false);
-      expect(reconcilePaidScope(scopeId, verification(scopeId, { blockNumber })), blockNumber).toEqual(refused("record_malformed"));
+      expect(reconcilePaidScope(scopeId, verification(scopeId, { blockNumber }), TERMS), blockNumber).toEqual(refused("record_malformed"));
     }
     expect(store.count()).toBe(0);
     const max = verification(scopeId, { blockNumber: "18446744073709551615" });
     expect(isWellFormedFundingRecord(max)).toBe(true);
-    expect(reconcilePaidScope(scopeId, max).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, max, TERMS).kind).toBe("activated");
   });
 
   it("(neg-escrow-row) the scope's escrow row must exist, be the buyer's and be funded", async () => {
     const { scopeId, escrowId } = await paidScope(f);
     setEscrow(escrowId, { status: "created" });
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("escrow_not_funded"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("escrow_not_funded"));
     setEscrow(escrowId, { status: "funded", payer: OTHER });
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("escrow_payer_not_buyer"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("escrow_payer_not_buyer"));
     // A scope bound to no job has no escrow.
     db().run(sql`INSERT INTO execution_scopes (id, kernel_id, job_id, created_by, status, allowed_tools, max_commands, command_count, max_retries, retry_count, created_at, expires_at)
       VALUES (${"scope_nojob"}, ${KERNEL}, ${null}, ${BUYER}, ${"awaiting_funding"}, ${"[]"}, ${10}, ${0}, ${1}, ${0}, ${iso(T0)}, ${iso(T0 + TTL)})`);
-    expect(reconcilePaidScope("scope_nojob", verification("scope_nojob"))).toEqual(refused("escrow_missing"));
+    expect(reconcilePaidScope("scope_nojob", verification("scope_nojob"), TERMS)).toEqual(refused("escrow_missing"));
     expect(store.count()).toBe(0);
   });
 
@@ -460,8 +593,8 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     // Two jobs whose escrow rows name the same contract (a reused address).
     const one = await paidScope(f, { real: ESCROW_A });
     const two = await paidScope(f, { real: ESCROW_A });
-    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId)).kind).toBe("activated");
-    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId))).toEqual(refused("escrow_bound_to_other_scope"));
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId), TERMS).kind).toBe("activated");
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId), TERMS)).toEqual(refused("escrow_bound_to_other_scope"));
     expect(scopeRow(two.scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(1);
   });
@@ -479,8 +612,8 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     ]) {
       const one = await paidScope(f, { real: first });
       const two = await paidScope(f, { real: second });
-      expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { escrowAddress: first })).kind).toBe("activated");
-      expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { escrowAddress: second })), second).toEqual(
+      expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { escrowAddress: first }), TERMS).kind).toBe("activated");
+      expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { escrowAddress: second }), TERMS), second).toEqual(
         refused("escrow_bound_to_other_scope"),
       );
       expect(scopeRow(two.scopeId).status).toBe("awaiting_funding");
@@ -496,10 +629,10 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     // The verifier stores one's record through the port, the escrow in upper case.
     db().transaction((tx) => fundingRecordStore()!.insert(tx, verification(one.scopeId, { escrowAddress: upper })));
     expect(store.findByScope(db(), one.scopeId)?.escrowAddress).toBe(ESCROW_A); // kept folded
-    expect(fundingRecordStore()!.findByEscrow(db(), 84532, upper)?.scopeId).toBe(one.scopeId); // looked up folded
+    expect(fundingRecordStore()!.findByEscrow(db(), CHAIN_ID, upper)?.scopeId).toBe(one.scopeId); // looked up folded
     const insert = vi.spyOn(store, "insert");
-    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId)).kind).toBe("activated");
-    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId))).toEqual(refused("escrow_bound_to_other_scope"));
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId), TERMS).kind).toBe("activated");
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId), TERMS)).toEqual(refused("escrow_bound_to_other_scope"));
     expect(insert).not.toHaveBeenCalled();
     expect(store.count()).toBe(1);
   });
@@ -508,11 +641,17 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     // Two jobs whose escrow rows name one contract address: one funded on Base Sepolia, one on another chain.
     const one = await paidScope(f, { real: ESCROW_A });
     const two = await paidScope(f, { real: ESCROW_A });
-    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { chainId: 84532 })).kind).toBe("activated");
-    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { chainId: 545 })).kind).toBe("activated");
+    const onOther = { ...TERMS, expectedChainId: 545 }; // the other chain's deployment
+    expect(reconcilePaidScope(one.scopeId, verification(one.scopeId, { chainId: CHAIN_ID }), TERMS).kind).toBe("activated");
+    // Each record activates only where its chain is the expected one.
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { chainId: 545 }), TERMS)).toEqual(refused("record_chain_mismatch"));
+    expect(reconcilePaidScope(two.scopeId, verification(two.scopeId, { chainId: 545 }), onOther).kind).toBe("activated");
     expect(store.count()).toBe(2);
-    expect(store.findByEscrow(db(), 84532, ESCROW_A)?.scopeId).toBe(one.scopeId);
+    expect(store.findByEscrow(db(), CHAIN_ID, ESCROW_A)?.scopeId).toBe(one.scopeId);
     expect(store.findByEscrow(db(), 545, ESCROW_A)?.scopeId).toBe(two.scopeId);
+    // And on either chain the funding still binds one scope.
+    const three = await paidScope(f, { real: ESCROW_A });
+    expect(reconcilePaidScope(three.scopeId, verification(three.scopeId, { chainId: 545 }), onOther)).toEqual(refused("escrow_bound_to_other_scope"));
   });
 
   it("(neg-kept-record) over a store that breaks the finalized-only contract, a kept record that is not well formed blocks the activation", async () => {
@@ -520,7 +659,7 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     store = installFinalityBlindFundingRecordStore();
     const { scopeId } = await paidScope(f);
     store.plant({ ...verification(scopeId), finality: "latest" }); // some other writer's unfinalized row
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_bound_to_other_funding"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
   });
 
@@ -530,7 +669,7 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     store.plant({ ...verification(scopeId), finality: "latest" });
     store.plant({ ...verification("scope_elsewhere"), finality: "safe" });
     const record = verification(scopeId);
-    expect(reconcilePaidScope(scopeId, record)).toMatchObject({ kind: "activated", record });
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toMatchObject({ kind: "activated", record });
     expect(scopeRow(scopeId).status).toBe("active");
     expect(store.findByScope(db(), scopeId)).toEqual(record); // the finalized one is the record kept
     expect(store.count()).toBe(3); // two unfinalized rows, untouched, and the finalized record
@@ -539,7 +678,7 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
   it("(neg-kept-buyer) a kept record of this scope and escrow whose verified payer is another buyer blocks the activation", async () => {
     const { scopeId } = await paidScope(f);
     store.plant(verification(scopeId, { buyer: OTHER }));
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_bound_to_other_funding"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
   });
 
@@ -547,18 +686,18 @@ describe("S2.2 binding: the record is this scope's buyer's funding of this scope
     const { scopeId } = await paidScope(f);
     const other = verification("scope_elsewhere");
     __setFundingRecordStoreForTest({ ...store, findByScope: () => other });
-    expect(reconcilePaidScope(scopeId, verification(scopeId))).toEqual(refused("scope_bound_to_other_funding"));
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("scope_bound_to_other_funding"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
   });
 
   it("an unknown scope is refused", () => {
-    expect(reconcilePaidScope("scope_unknown", verification("scope_unknown"))).toEqual(refused("scope_not_found"));
+    expect(reconcilePaidScope("scope_unknown", verification("scope_unknown"), TERMS)).toEqual(refused("scope_not_found"));
   });
 
   it("the accept route still answers 409 for a scope that went live through reconcile", async () => {
     const { scopeId } = await paidScope(f);
-    expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
     const again = await acceptScope(f, scopeId);
     expect(again.statusCode).toBe(409);
     expect(again.json()).toMatchObject({ error: "already_decided", status: "active" });
@@ -597,7 +736,7 @@ describe("S2.2 across connections: one database file, two connections (as two ga
       },
     });
     try {
-      expect(reconcilePaidScope(scopeId, verification(scopeId)).kind).toBe("activated");
+      expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
       expect(seen).toEqual(["awaiting_funding", "SQLITE_BUSY"]);
       expect(statusOf()).toBe("active");
     } finally {

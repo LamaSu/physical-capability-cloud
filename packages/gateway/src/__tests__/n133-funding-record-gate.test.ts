@@ -21,17 +21,21 @@ import {
   type TestFundingRecordStore,
 } from "./helpers/test-funding-record-store.js";
 import {
+  ACTIVATION_TTL,
   BUYER,
+  CHAIN_ID,
   ESCROW_A,
   ESCROW_B,
   KERNEL,
   MIN,
   OTHER,
   T0,
+  TERMS,
   TTL,
   acceptScope,
   basePolicy,
   db,
+  installActivationTerms,
   iso,
   paidScope,
   scopeRow,
@@ -184,8 +188,9 @@ describe("the accept route and reconcilePaidScope", () => {
     }
   });
 
-  it("(neg-accept-prod) in a production process a store left installed is never consulted, even with a matching record", async () => {
+  it("(neg-accept-prod) in a production process a store and activation terms left installed are never consulted, even with a matching record", async () => {
     const store = installTestFundingRecordStore();
+    installActivationTerms();
     const res = await submit(f);
     const { scopeId, jobId, escrowId } = res.json() as { scopeId: string; jobId: string; escrowId: string };
     setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
@@ -212,6 +217,7 @@ describe("the accept route and reconcilePaidScope", () => {
     vi.setSystemTime(T0 + 3 * MIN);
     const record = verification(scopeId);
     db().transaction((tx) => store.insert(tx, record)); // the verifier's own write
+    installActivationTerms(); // the expected chain and the TTL (rulings 4 and 5)
     vi.setSystemTime(T0 + 10 * MIN); // the operator accepts later
     const accepted = await acceptScope(f, scopeId);
     expect(accepted.statusCode).toBe(200);
@@ -226,13 +232,13 @@ describe("the accept route and reconcilePaidScope", () => {
       activation: {
         kind: "activated",
         activatedAt: iso(T0 + 10 * MIN),
-        expiresAt: iso(T0 + 10 * MIN + TTL),
+        expiresAt: iso(T0 + 10 * MIN + ACTIVATION_TTL),
         escrowAddress: ESCROW_A,
       },
     });
     expect(accepted.payload).not.toContain(record.blockHash);
     expect(accepted.payload).not.toContain(record.verifierVersion);
-    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 10 * MIN + TTL) });
+    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 10 * MIN + ACTIVATION_TTL) });
     expect(store.count()).toBe(1);
     expect((await writeAs(f, scopeId)).statusCode).toBe(201);
   });
@@ -245,6 +251,7 @@ describe("the accept route and reconcilePaidScope", () => {
     const { scopeId, jobId, escrowId } = res.json() as { scopeId: string; jobId: string; escrowId: string };
     setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
     db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    installActivationTerms();
     db().run(sql`CREATE TEMP TRIGGER test_live_at_accept AFTER UPDATE OF status ON main.execution_scopes
       WHEN NEW.status = 'awaiting_funding' BEGIN UPDATE execution_scopes SET status = 'active' WHERE id = NEW.id; END`);
     const accepted = await acceptScope(f, scopeId);
@@ -267,6 +274,7 @@ describe("the accept route and reconcilePaidScope", () => {
     const { scopeId, escrowId } = res.json() as { scopeId: string; escrowId: string };
     setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
     db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    installActivationTerms();
     setPolicy(KERNEL, { ...basePolicy(), blockedAgents: [BUYER] });
     const accepted = await acceptScope(f, scopeId);
     expect(accepted.statusCode).toBe(200);
@@ -276,12 +284,57 @@ describe("the accept route and reconcilePaidScope", () => {
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
   });
 
+  it("(neg-accept-noterms) a stored record, but no expected chain or TTL installed (today's default): the accept stands, the activation is refused, nothing else is written", async () => {
+    const store = installTestFundingRecordStore();
+    for (const [terms, reason] of [
+      [null, "expected_chain_unavailable"], // nothing installed: neither value
+      [{ expectedChainId: null, postActivationTtlMs: ACTIVATION_TTL }, "expected_chain_unavailable"],
+      [{ expectedChainId: CHAIN_ID, postActivationTtlMs: null }, "activation_ttl_unavailable"],
+    ] as const) {
+      if (terms) installActivationTerms(terms);
+      const res = await submit(f);
+      const { scopeId, jobId, escrowId } = res.json() as { scopeId: string; jobId: string; escrowId: string };
+      setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
+      db().run(sql`DELETE FROM test_funding_records`);
+      db().transaction((tx) => store.insert(tx, verification(scopeId)));
+      const accepted = await acceptScope(f, scopeId);
+      expect(accepted.statusCode).toBe(200);
+      expect(accepted.json(), reason).toEqual({
+        accepted: true,
+        scopeId,
+        kernelId: KERNEL,
+        jobId,
+        status: "awaiting_funding",
+        fundingRefusal: reason,
+        activation: { kind: "refused", reason },
+      });
+      expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", expiresAt: iso(T0 + TTL) });
+      expect(store.count()).toBe(1); // only the verifier's record
+      expect((await writeAs(f, scopeId)).statusCode).toBe(403);
+    }
+  });
+
+  it("(accept-ttl) the TTL the source gives for the scope sets its write time from the activation", async () => {
+    const store = installTestFundingRecordStore();
+    const res = await submit(f);
+    const { scopeId, escrowId } = res.json() as { scopeId: string; escrowId: string };
+    setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
+    db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    installActivationTerms({ expectedChainId: CHAIN_ID, postActivationTtlMs: 2 * 24 * 60 * MIN });
+    vi.setSystemTime(T0 + 7 * MIN);
+    const accepted = await acceptScope(f, scopeId);
+    expect(accepted.json()).toMatchObject({ status: "active", activation: { kind: "activated", expiresAt: iso(T0 + 7 * MIN + 2 * 24 * 60 * MIN) } });
+    expect(scopeRow(scopeId)).toMatchObject({ status: "active", expiresAt: iso(T0 + 7 * MIN + 2 * 24 * 60 * MIN) });
+    expect(TERMS.postActivationTtlMs).not.toBe(2 * 24 * 60 * MIN);
+  });
+
   it("(neg-accept-atomic) a failure inside the activation rolls the accept back too: 500, nothing changed", async () => {
     const store = installTestFundingRecordStore();
     const res = await submit(f);
     const { scopeId, escrowId } = res.json() as { scopeId: string; escrowId: string };
     setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
     db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    installActivationTerms();
     const failing: TestFundingRecordStore = {
       ...store,
       findByScope: () => {
