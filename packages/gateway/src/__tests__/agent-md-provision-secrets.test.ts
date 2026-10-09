@@ -74,7 +74,7 @@ vi.mock("../services/erc8004-identity-write.js", () => ({
 
 import { provisionRoutes } from "../routes/provision.js";
 import { traceIdPlugin } from "../middleware/trace-id.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 
 const root = new URL("../../../../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), "utf8");
@@ -554,6 +554,85 @@ describe("each documented secret condition holds on the real route, for the buye
     checkSupplyNames(step, returned);
     expect(() => checkSupplyNames(step.replace(" and `usage.example`", ""), returned)).toThrow();
     expect(() => checkSupplyNames(step.replace("`operator_wallet.private_key`", "the wallet key"), returned)).toThrow();
+  });
+});
+
+/**
+ * ChatGPT r1 gap 1: which publicKey values mint, store or refuse, as the buyer path states it. The route's type guard
+ * (provision.ts:65-67) refuses a non-string; provisionApiKey() (api-key-auth.ts:159-171) mints only when publicKey is
+ * undefined and otherwise stores normalizePublicKeyHex()'s result or throws invalid_public_key (ed25519.ts:89-95).
+ */
+const BUYER_PUBLIC_KEY =
+  "publicKey is optional: only a body with no publicKey field gets a minted key pair, and then the response carries " +
+  "ed25519.private_key once (the same key again as ed25519.private_key_pkcs8_base64); store it with the API key in the " +
+  "private 0600 file and never print it. A publicKey that is present is never replaced by a minted key: 64 hex characters " +
+  "(optional 0x prefix) are stored, a non-string such as null gets 400 invalid_type, and any other string, including an " +
+  "empty one, whitespace or base64, gets 400 invalid_public_key; neither 400 issues a key.";
+
+describe("only a body with no publicKey field gets a minted Ed25519 key (ChatGPT r1 gap 1)", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    if (app) await app.close();
+    closeStore();
+  });
+
+  const OMIT = Symbol("no publicKey field");
+  const hex = localEd25519PublicKeyHex();
+  const raw = Buffer.from(hex, "hex");
+  const cases: Array<[label: string, value: unknown, outcome: "minted" | "stored" | "invalid_type" | "invalid_public_key", storedAs?: string]> = [
+    ["omitted", OMIT, "minted"],
+    ["null", null, "invalid_type"],
+    ["a number", 64, "invalid_type"],
+    ["an object", { hex }, "invalid_type"],
+    ["an empty string", "", "invalid_public_key"],
+    ["whitespace", "   ", "invalid_public_key"],
+    ["64 hex and a trailing newline", `${hex}\n`, "invalid_public_key"],
+    ["a space and 64 hex", ` ${hex}`, "invalid_public_key"],
+    ["base64 of the 32 raw bytes", raw.toString("base64"), "invalid_public_key"],
+    ["malformed base64", `${raw.toString("base64").slice(0, 40)}!!`, "invalid_public_key"],
+    ["62 hex characters", hex.slice(2), "invalid_public_key"],
+    ["66 hex characters", `${hex}ab`, "invalid_public_key"],
+    ["64 characters, one not hex", `${hex.slice(1)}g`, "invalid_public_key"],
+    ["0x alone", "0x", "invalid_public_key"],
+    ["64 hex", hex, "stored", hex],
+    ["0x and 64 hex", `0x${hex}`, "stored", hex],
+    ["0X and 64 upper-case hex", `0X${hex.toUpperCase()}`, "stored", hex],
+    ["64 hex the gateway does not check as a curve point", "f".repeat(64), "stored", "f".repeat(64)],
+  ];
+
+  cases.forEach(([label, value, outcome, storedAs], index) => {
+    it(`publicKey ${label}: ${outcome}`, async () => {
+      mockIdentity("off");
+      const email = `public-key-${index}@example.com`;
+      const res = await provisionFrom(app, { email, ...(value === OMIT ? {} : { publicKey: value }) });
+      const body = res.json();
+      const stored = getRepos().apiKeys.findByOperator(email).map((row) => row.publicKey);
+      if (outcome === "minted") {
+        expect(res.statusCode).toBe(201);
+        expect(body.ed25519.source).toBe("server-minted");
+        expect(carries(body, "ed25519.private_key") && carries(body, "ed25519.private_key_pkcs8_base64")).toBe(true);
+        expect(stored).toEqual([body.ed25519.public_key]);
+      } else if (outcome === "stored") {
+        expect(res.statusCode).toBe(201);
+        expect(body.ed25519).toEqual({ public_key: storedAs, source: "byok" });
+        expect(stored).toEqual([storedAs]);
+      } else {
+        expect(res.statusCode).toBe(400);
+        expect(body.error).toBe(outcome);
+        expect(body).not.toHaveProperty("api_key");
+        expect(stored).toEqual([]);
+      }
+    });
+  });
+
+  it("the buyer path says so, word for word", () => {
+    expect(provisionAction().request).toContain(BUYER_PUBLIC_KEY);
   });
 });
 
