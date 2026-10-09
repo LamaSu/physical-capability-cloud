@@ -111,18 +111,31 @@ describe("FundingStatusDTO states", () => {
     }
   });
 
-  it("(neg-dto-chain) a record from another chain than the expected one is never funded_verified, and says so (ruling 4)", () => {
+  it("(neg-dto-chain) with the chain pinned, a record from another chain is never funded_verified, and says record_chain_mismatch (ruling 4)", () => {
     for (const status of ["awaiting_acceptance", "awaiting_funding", "active", "expired", "suspended_rogue"]) {
       const dto = projectFundingStatus(scope({ status }), record({ chainId: 545 }), ROW, CHAIN, BEFORE_END);
       expect(dto, status).toMatchObject({ state: "unknown", binding: "record_chain_mismatch", verification: null });
     }
-    // No usable expected chain (no pinned deployment record) binds no record: fail closed.
-    for (const expected of [null, Number.NaN, 0, -1, 84532.5, "84532"]) {
-      expect(fundingBindingOf(scope(), record(), ROW, expected as never), String(expected)).toBe("record_chain_mismatch");
-      expect(fundingStateOf(scope({ status: "active" }), record(), ROW, expected as never, BEFORE_END), String(expected)).toBe("unknown");
-    }
     // The control: the same record on the expected chain is bound.
     expect(fundingBindingOf(scope(), record(), ROW, CHAIN)).toBe("bound");
+  });
+
+  it("(neg-dto-nochain) with no usable expected chain, no record binds, and the binding says expected_chain_unavailable, reconcile's name for it (r3 review LOW-1)", () => {
+    // No pinned deployment record (null), or a value that is not a positive safe integer.
+    for (const expected of [null, undefined, Number.NaN, 0, -1, 84532.5, "84532"]) {
+      for (const status of ["awaiting_acceptance", "awaiting_funding", "active", "expired", "suspended_rogue"]) {
+        const dto = projectFundingStatus(scope({ status }), record(), ROW, expected as never, BEFORE_END);
+        expect(dto, `${String(expected)} ${status}`).toMatchObject({ state: "unknown", binding: "expected_chain_unavailable", verification: null });
+      }
+      // Ahead of every check of the record: a malformed record, or one from another chain, says the same.
+      expect(fundingBindingOf(scope(), record({ finality: "latest" as never }), ROW, expected as never), String(expected)).toBe("expected_chain_unavailable");
+      expect(fundingBindingOf(scope(), record({ chainId: 545 }), ROW, expected as never), String(expected)).toBe("expected_chain_unavailable");
+      // Without a record there is nothing to bind, and the state does not change.
+      expect(projectFundingStatus(scope(), null, ROW, expected as never, BEFORE_END), String(expected)).toMatchObject({
+        state: "awaiting_funding",
+        binding: "no_record",
+      });
+    }
   });
 
   it("(neg-dto-escrow-payer) an escrow row whose payer label is another buyer is never funded_verified", () => {
@@ -245,19 +258,21 @@ describe("FundingStatusDTO states", () => {
   });
 
   it("each binding member, by its exact condition, in order", () => {
-    const cases: Array<[FundingVerificationRecord | null, FundingEscrowRow, string]> = [
-      [null, null, "no_record"],
-      [record({ finality: "latest" as never }), null, "record_malformed"],
-      [record({ chainId: 545, scopeId: "scope_other" }), null, "record_chain_mismatch"],
-      [record({ scopeId: "scope_other" }), null, "record_scope_mismatch"],
-      [record({ buyer: OTHER }), null, "record_buyer_not_scope_buyer"],
-      [record(), null, "escrow_missing"],
-      [record(), row({ payer: OTHER, contractAddress: OTHER_ESCROW }), "escrow_payer_not_buyer"],
-      [record(), row({ contractAddress: OTHER_ESCROW }), "record_escrow_not_scope_escrow"],
-      [record(), row({ status: "completed" }), "bound"],
+    // Each case also fails every later check, so a member reads only where the rule puts it.
+    const cases: Array<[FundingVerificationRecord | null, FundingEscrowRow, number | null, string]> = [
+      [null, null, null, "no_record"],
+      [record({ finality: "latest" as never }), null, null, "expected_chain_unavailable"],
+      [record({ finality: "latest" as never }), null, CHAIN, "record_malformed"],
+      [record({ chainId: 545, scopeId: "scope_other" }), null, CHAIN, "record_chain_mismatch"],
+      [record({ scopeId: "scope_other" }), null, CHAIN, "record_scope_mismatch"],
+      [record({ buyer: OTHER }), null, CHAIN, "record_buyer_not_scope_buyer"],
+      [record(), null, CHAIN, "escrow_missing"],
+      [record(), row({ payer: OTHER, contractAddress: OTHER_ESCROW }), CHAIN, "escrow_payer_not_buyer"],
+      [record(), row({ contractAddress: OTHER_ESCROW }), CHAIN, "record_escrow_not_scope_escrow"],
+      [record(), row({ status: "completed" }), CHAIN, "bound"],
     ];
-    expect(cases.map(([, , b]) => b)).toEqual([...FUNDING_BINDINGS]);
-    for (const [r, e, binding] of cases) expect(fundingBindingOf(scope(), r, e, CHAIN), binding).toBe(binding);
+    expect(cases.map(([, , , b]) => b)).toEqual([...FUNDING_BINDINGS]);
+    for (const [r, e, chain, binding] of cases) expect(fundingBindingOf(scope(), r, e, chain), binding).toBe(binding);
   });
 
   it("(neg-dto-members) the states are exactly these: no `confirming` until Q9 gives it a source (ruling 6), and every input gives one of them", () => {

@@ -779,6 +779,17 @@ describe("ruling 1: the DTO and reconcile use the same rule", () => {
     expect(both).toEqual(["funded good", "active good"]);
   });
 
+  it("(dto-agrees-nochain) with no expected chain, the DTO and reconcile say the same: expected_chain_unavailable (r3 review LOW-1)", async () => {
+    const { scopeId } = await paidScope(f);
+    const record = verification(scopeId);
+    store.plant(record); // the verifier's write
+    expect(fundingStatusNow(store, scopeId, null)).toMatchObject({ state: "unknown", binding: "expected_chain_unavailable", verification: null });
+    expect(reconcilePaidScope(scopeId, record, { ...TERMS, expectedChainId: null })).toEqual(refused("expected_chain_unavailable"));
+    // Pinned: both say yes.
+    expect(fundingStatusNow(store, scopeId, CHAIN_ID)).toMatchObject({ state: "funded_verified", binding: "bound" });
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
+  });
+
   it("(dto-q3a) the review's Q3a: an accepted scope whose bound record's row reads created is not funded_verified, as reconcile refuses escrow_not_funded", async () => {
     const { scopeId, escrowId } = await paidScope(f);
     setEscrow(escrowId, { status: "created" });

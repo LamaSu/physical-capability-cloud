@@ -65,7 +65,7 @@ import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { schema, eq, and } from "@pcc/store";
 import { getStore } from "../db.js";
 import { emergencyStopState } from "../routes/device-relay.js";
-import { activationRefusal, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
+import { activationRefusal, isChainId, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
 import { acceptanceFor, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
 import {
@@ -169,8 +169,6 @@ const refused = (reason: ReconcileRefusal): ReconcileResult => ({ kind: "refused
 /** An answer's escrow address: the record's, folded, whatever case it carries (review NIT-6). */
 const answerAddress = (record: FundingVerificationRecord): string => fundingEscrowKey(record.chainId, record.escrowAddress).escrowAddress;
 
-/** A chain id a record can carry: a positive safe integer. */
-const isChainId = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 /** A post-activation TTL reconcilePaidScope accepts: a positive safe integer of at most MAX_POST_ACTIVATION_TTL_MS. */
 const isActivationTtl = (v: unknown): v is number =>
   typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= MAX_POST_ACTIVATION_TTL_MS;
@@ -216,7 +214,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
   const ttlMs = terms?.postActivationTtlMs;
   if (!isChainId(expectedChainId)) return refused("expected_chain_unavailable");
   if (!isActivationTtl(ttlMs)) return refused("activation_ttl_unavailable");
-  // The binding rule's checks 1 to 3 (funding-binding.ts), before any read; check 4 needs the scope.
+  // The binding rule's checks 1 to 4 (funding-binding.ts), before any read; check 5 needs the scope.
   const own = recordRefusal(record, expectedChainId);
   if (own !== null) return refused(own);
   if (record.scopeId !== scopeId) return refused("record_scope_mismatch");
@@ -232,7 +230,7 @@ export function reconcilePaidScope(scopeId: string, record: FundingVerificationR
 
       // The record kept for this scope, if any: a conformant store shows finalized records only
       // (ruling 3). It counts as this funding only when it is this buyer's well-formed record of
-      // this scope on the expected chain (the binding rule's checks 1 to 4; that it is finalized and
+      // this scope on the expected chain (the binding rule's checks 1 to 5; that it is finalized and
       // names this scope holds by the store's contract, checked again as defence in depth), and of
       // this record's escrow: the same (chain, escrow) funding.
       const kept = store.findByScope(tx, scopeId);

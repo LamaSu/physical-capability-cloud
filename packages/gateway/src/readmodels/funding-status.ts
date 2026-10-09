@@ -47,9 +47,12 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  * binding check that fails (services/funding-binding.ts, checked in this order), or `bound`.
  *
  *   no_record                       no record was given.
+ *   expected_chain_unavailable      no usable expected chain was given (no V-next deployment record is
+ *                                   pinned, or not a positive safe integer): no record can be bound.
+ *                                   reconcilePaidScope refuses the same case by the same name (the
+ *                                   steward's ruling 4; r3 review LOW-1).
  *   record_malformed                the record is not a well-formed, finalized verification record.
- *   record_chain_mismatch           it was verified on another chain than the expected one, or no
- *                                   usable expected chain was given (the steward's ruling 4).
+ *   record_chain_mismatch           it was verified on another chain than the expected one (ruling 4).
  *   record_scope_mismatch           it names another scope.
  *   record_buyer_not_scope_buyer    its verified payer is not the scope's buyer.
  *   escrow_missing                  the scope's job has no escrow row: never funded_verified.
@@ -62,10 +65,12 @@ export const FUNDING_STATUS_SCHEMA_ID = "pcc.funding-status/v1" as const;
  *
  * funded_verified needs `bound` (and, before activation, the escrow row's status: FUNDING_STATES), and
  * only `bound` shows the verification. The members are reconcilePaidScope's refusal names, in the
- * binding rule's order; record_chain_mismatch is the steward's ruling 4's (a 9th member).
+ * binding rule's order; expected_chain_unavailable and record_chain_mismatch are the steward's ruling
+ * 4's (the 9th and 10th members, pending the steward's acceptance).
  */
 export const FUNDING_BINDINGS = [
   "no_record",
+  "expected_chain_unavailable",
   "record_malformed",
   "record_chain_mismatch",
   "record_scope_mismatch",
