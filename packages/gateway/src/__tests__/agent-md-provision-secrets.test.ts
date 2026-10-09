@@ -1,8 +1,14 @@
 /**
- * The agent golden path must name every private key POST /api/auth/provision
- * can return. These tests drive the real route with the ERC-8004 identity-write
- * service mocked (nothing touches a chain), collect every private-key field in
- * the 201 body, and check the buyer path and the supply runbook against them.
+ * What the buyer path and the supply runbook say about the POST /api/auth/provision response, checked
+ * against the real route with the ERC-8004 identity-write service mocked (nothing touches a chain).
+ * The guards, and their limits:
+ * - Every leaf of every 201 variant the route returns (identity write off; on with the registration,
+ *   the wallet generation or the assignment rejected; on and assigned; publicKey omitted or sent) must
+ *   be a buyer field to read or store-only. A new response field fails until someone classifies it.
+ * - Every leaf holding the API key or a value of a field named like private_key must be store-only.
+ *   The check is by value, so a copy under another name counts. A new secret that copies neither is
+ *   caught only by the classification above, which a human decides.
+ * - The supply runbook must name each of those secret paths.
  */
 
 import { execFile, spawnSync } from "node:child_process";
@@ -61,6 +67,7 @@ vi.mock("../services/erc8004-identity-write.js", () => ({
 }));
 
 import { provisionRoutes } from "../routes/provision.js";
+import { traceIdPlugin } from "../middleware/trace-id.js";
 import { initStore, closeStore } from "../db.js";
 
 const root = new URL("../../../../", import.meta.url);
@@ -94,6 +101,8 @@ async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   initStore({ seed: true });
   const app = Fastify({ logger: false });
+  // server.ts registers it before the routes; without it the 201 has no trace_id.
+  await app.register(traceIdPlugin);
   await app.register(provisionRoutes);
   await app.ready();
   return app;
@@ -141,6 +150,49 @@ function expectSecretValuesStoreOnly(body: Record<string, unknown>): string[] {
   }
   return holders;
 }
+
+/**
+ * Dotted path of every leaf of a body. An array of plain values is one leaf; an array of objects
+ * becomes "path[].child".
+ */
+function leafPaths(value: unknown, path = ""): string[] {
+  if (Array.isArray(value) && value.some((item) => item !== null && typeof item === "object"))
+    return [...new Set(value.flatMap((item) => leafPaths(item, `${path}[]`)))];
+  if (value !== null && typeof value === "object" && !Array.isArray(value))
+    return Object.entries(value).flatMap(([key, child]) => leafPaths(child, path ? `${path}.${key}` : key));
+  return [path];
+}
+
+/**
+ * ChatGPT r1 L1: every leaf of a 201 body is listed in the buyer path either as a field to read or
+ * as store-only, never both. A new response field fails here until someone classifies it.
+ */
+function expectEveryLeafClassified(body: Record<string, unknown>): void {
+  const provision = provisionAction();
+  for (const path of leafPaths(body)) {
+    const toRead = names(provision.responseFields, path);
+    const storeOnly = names(provision.storeOnlyFields, path);
+    expect(toRead || storeOnly, `${path} is unclassified: list it as a field to read or as store-only`).toBe(true);
+    expect(toRead && storeOnly, `${path} is listed both as a field to read and as store-only`).toBe(false);
+  }
+}
+
+/** Every credential-bearing path a 201 can carry: the API key, its two copies, and the three private keys. */
+const SECRET_PATHS = [...API_KEY_PATHS, "ed25519.private_key", "ed25519.private_key_pkcs8_base64", "operator_wallet.private_key"];
+/** The supply runbook's step 4, where it describes the provision response. */
+const supplyStep4 = () => {
+  const runbook = read("starter/runbook/00-prerequisites.md");
+  return runbook.slice(runbook.indexOf("## 4. "), runbook.indexOf("## 5. "));
+};
+/** ChatGPT r1 L1: the supply runbook names the API key's copies and the Ed25519 keys, word for word. */
+const SUPPLY_API_KEY =
+  "The response contains your **API key** three times: in `api_key`, and again inside `usage.header` and `usage.example`.";
+const SUPPLY_ED25519 =
+  "A request without a `publicKey` would also get back a server-made Ed25519 private key, twice " +
+  "(`ed25519.private_key` and `ed25519.private_key_pkcs8_base64`); the request below always sends your node's public key, " +
+  "so this response carries neither.";
+/** The recipe prints the error fields, then exactly the fields to read. */
+const ERROR_FIELDS = ["error", "message", "retry_after_seconds"];
 
 /** Every emitted path must be a documented response field and named in the request prose. */
 function expectDocumented(paths: string[]): void {
@@ -196,7 +248,7 @@ const BUYER_WALLET =
   "a failed on-chain assignment of that wallet afterwards does not remove the key. " +
   "operator_wallet.source reads server-minted exactly when the key is there. It stays in the same private 0600 file and is never printed.";
 
-describe("agent golden path names every private key the provision response carries", () => {
+describe("the buyer path documents the private-key fields of two provisioning responses, by name", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
@@ -320,6 +372,57 @@ describe("the wallet key comes back only when this call registered the identity 
   });
 });
 
+describe("every leaf of every 201 the route returns is classified, and every secret copy is named (ChatGPT r1 L1)", () => {
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    app = await buildApp();
+  });
+
+  afterEach(async () => {
+    if (app) await app.close();
+    closeStore();
+  });
+
+  for (const outcome of IDENTITY_OUTCOMES) {
+    for (const sent of [false, true]) {
+      it(`identity ${outcome}, publicKey ${sent ? "sent" : "omitted"}: each leaf is a field to read or store-only, each secret copy store-only`, async () => {
+        mockIdentity(outcome);
+        const res = await provisionFrom(app, {
+          email: `${outcome}-${sent ? "sent" : "omitted"}@example.com`,
+          ...(sent ? { publicKey: localEd25519PublicKeyHex() } : {}),
+        });
+        expect(res.statusCode).toBe(201);
+        const body = res.json();
+        expect(typeof body.trace_id).toBe("string");
+        expectEveryLeafClassified(body);
+        expect(expectSecretValuesStoreOnly(body)).toEqual(expect.arrayContaining(API_KEY_PATHS));
+      });
+    }
+  }
+
+  it("marks every secret path store-only and lists each field to read once", () => {
+    const provision = provisionAction();
+    for (const path of SECRET_PATHS) expect(names(provision.storeOnlyFields, path), path).toBe(true);
+    expect(new Set(provision.responseFields).size).toBe(provision.responseFields.length);
+  });
+
+  it("the recipe prints the error fields, then exactly the fields to read", () => {
+    const reader = (provisionAction().recipe ?? []).find((line) => line.includes("for f in ("));
+    expect(reader, "the recipe's field reader").toBeDefined();
+    const printed = [...(reader ?? "").slice((reader ?? "").indexOf("for f in (")).matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    expect(printed).toEqual([...ERROR_FIELDS, ...provisionAction().responseFields]);
+  });
+
+  it("the supply runbook names every secret copy the route can return", () => {
+    const step = supplyStep4();
+    for (const path of SECRET_PATHS) expect(step, `00-prerequisites.md step 4 must name ${path}`).toContain("`" + path + "`");
+    expect(step).toContain(SUPPLY_API_KEY);
+    expect(step).toContain(SUPPLY_ED25519);
+  });
+});
+
 describe("agent golden path provisions over direct HTTP, never through a tool (Opus r1 F1)", () => {
   it("no buyer action names provision_api_key, and agent.md renders the get-key step as direct HTTP", () => {
     const buyer = JSON.parse(read("starter/buyer/buyer-path.json")) as {
@@ -364,7 +467,7 @@ describe("agent golden path captures the provision response without leaking it (
     const doc = read("apps/dashboard/public/.well-known/agent.md");
     expect(doc).toContain(["```bash", ...(provisionAction().recipe ?? []), "```"].join("\n"));
     expect(doc).toContain(["```bash", ...(validateAction().recipe ?? []), "```"].join("\n"));
-    expect(doc).toContain("Read response fields: key_id, operator_id, trace_id, ed25519.public_key.");
+    expect(doc).toContain(`Read response fields: ${provisionAction().responseFields.join(", ")}.`);
     expect(doc).toContain(
       "Store only, never read into the conversation: api_key, usage.header (holds api_key), usage.example (holds api_key), " +
       "ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), " +
@@ -418,8 +521,11 @@ describe("agent golden path captures the provision response without leaking it (
           for (const secret of secrets) expect(typeof secret === "string" && secret.length >= 32).toBe(true);
           const printed = provision.stdout + provision.stderr + validate.stdout + validate.stderr;
           secrets.forEach((secret, index) => expect(printed.includes(secret), `secret #${index} was printed`).toBe(false));
-          expect(provision.stdout).toContain("'error': None");
-          expect(provision.stdout).toContain(body.key_id);
+          expect(provision.stdout).toContain("error: None");
+          expect(provision.stdout).toContain(`key_id: ${body.key_id}`);
+          // One "name: value" line per field: the error fields, then exactly the fields to read (ChatGPT r1 L1).
+          const printedNames = provision.stdout.trim().split("\n").map((line) => line.slice(0, line.indexOf(": ")));
+          expect(printedNames).toEqual([...ERROR_FIELDS, ...provisionAction().responseFields]);
           expect(JSON.parse(validate.stdout)).toMatchObject({ valid: true });
           expect(statSync(join(dir, ".pcc")).mode & 0o777).toBe(0o700);
           for (const file of ["provision.json", "auth.header"])

@@ -57,7 +57,7 @@ chmod 600 .pcc/node-keys.json
 
 Write the human's answer into `.pcc/operator.json` with your file-writing tool, not with `echo` or `printf`: a command's text can be read by other users of this machine while it runs (`ps`). For example: `{"email": "operator@example.org", "name": "Bench plate reader"}`. The request below is built from that file, sent from a private file, and deleted.
 
-The response contains your **API key**. It may also contain `operator_wallet.private_key`, a wallet key the gateway mints and keeps for the account: only when this call registers the account's on-chain identity and the gateway then generates the wallet. A failed on-chain assignment of that wallet afterwards does not remove the key. This runbook never uses it. Write the whole response straight to a private file, and **never print it, echo it, or paste it into the conversation**.
+The response contains your **API key** three times: in `api_key`, and again inside `usage.header` and `usage.example`. It may also contain `operator_wallet.private_key`, a wallet key the gateway mints and keeps for the account: only when this call registers the account's on-chain identity and the gateway then generates the wallet. A failed on-chain assignment of that wallet afterwards does not remove the key. This runbook never uses it. A request without a `publicKey` would also get back a server-made Ed25519 private key, twice (`ed25519.private_key` and `ed25519.private_key_pkcs8_base64`); the request below always sends your node's public key, so this response carries neither. Write the whole response straight to a private file, and **never print it, echo it, or paste it into the conversation**.
 
 ```bash
 umask 077
