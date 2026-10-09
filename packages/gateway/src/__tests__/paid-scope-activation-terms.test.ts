@@ -10,7 +10,8 @@
  * Negatives are tagged (neg-...) for the mutation runner.
  */
 import { describe, it, expect, afterAll, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -142,6 +143,30 @@ describe("vnextRecordChainId: the pinned V-next deployment record (ruling 4)", (
   });
 });
 
+describe("the record is read only from a regular file (r3 review NIT-1)", () => {
+  it.skipIf(process.platform === "win32")("(neg-record-fifo) a FIFO at the record's path is refused without being opened: null at once, never a block", () => {
+    const root = packageRoot("base-sepolia", "unrelated.json", "{}");
+    const fifo = join(root, "deployments", "vnext", "base-sepolia", "PROVISIONAL-run1.json");
+    execFileSync("mkfifo", [fifo]);
+    // The guard: opening a FIFO to read blocks until a writer opens it, and a synchronous open cannot be
+    // timed out from this thread. So a separate process opens the write end after 3 s (non-blocking; it
+    // gives up if no reader waits): a resolver that blocked is released then, the test cannot hang, and
+    // the elapsed time shows the block.
+    const helper = spawn(
+      process.execPath,
+      ["-e", `setTimeout(() => { const fs = require("node:fs"); try { fs.closeSync(fs.openSync(${JSON.stringify(fifo)}, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); } catch {} }, 3000)`],
+      { stdio: "ignore" },
+    );
+    try {
+      const started = Date.now();
+      expect(vnextRecordChainId(root, "base-sepolia", "run1")).toBeNull();
+      expect(Date.now() - started).toBeLessThan(1000);
+    } finally {
+      helper.kill();
+    }
+  });
+});
+
 describe("the configured sources today", () => {
   const ENV = ["PCC_VNEXT_RECORD_NETWORK", "PCC_VNEXT_RECORD_LABEL"] as const;
   const saved: Record<string, string | undefined> = {};
@@ -161,8 +186,10 @@ describe("the configured sources today", () => {
     process.env.PCC_VNEXT_RECORD_LABEL = "run1";
     expect(configuredVNextChainId()).toBeNull(); // deployments/vnext holds only its README
     // The control: it looks in the real @pcc/contracts package, whose deployments/vnext holds only the README.
+    // (Compared by realpath: after an lstat of a FIFO, as neg-record-fifo does, Node's require.resolve
+    // can return the package's node_modules link instead; the package reached is the same.)
     const root = contractsPackageRoot();
-    expect(root).toMatch(/[/\\]packages[/\\]contracts$/);
+    expect(realpathSync.native(root!)).toMatch(/[/\\]packages[/\\]contracts$/);
     expect(existsSync(join(root!, "deployments", "vnext", "README.md"))).toBe(true);
     expect(readdirSync(join(root!, "deployments", "vnext"))).toEqual(["README.md"]);
   });

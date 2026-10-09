@@ -70,10 +70,15 @@ function realDirectory(path: string): boolean {
   }
 }
 
-/** The text of the regular file at `path`, never through a symlink, or null. */
+/**
+ * The text of the regular file at `path`, never through a symlink, or null. Anything but a regular
+ * file is refused before it is opened: opening a FIFO to read blocks until a writer comes, and the
+ * read is synchronous, so it would stall the gateway (r3 review NIT-1).
+ */
 function readRegularFile(path: string): string | null {
   try {
-    if (lstatSync(path).isSymbolicLink()) return null;
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || !st.isFile()) return null;
     // O_NOFOLLOW where the platform has it: a link swapped in after the lstat is refused by open.
     const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     try {
@@ -92,12 +97,13 @@ function readRegularFile(path: string): string | null {
  * or null when anything is missing, unreadable or inconsistent (fail closed):
  *   - `network` or `label` is not a slug the deploy script writes, so no path is formed from it;
  *   - deployments, deployments/vnext or the network directory is a symlink or not a directory, or
- *     the record is a symlink or not a regular file (the directory README's rule);
+ *     the record is a symlink or not a regular file (the directory README's rule), checked before
+ *     the record is opened, so a FIFO there is refused, not waited on;
  *   - the record is not a JSON object written by a broadcast PROVISIONAL run with this label:
  *     `broadcast` true (a dry run's tuple says false, and lives under a DRYRUN- name this never
  *     forms), `mode` "PROVISIONAL", `label` this label;
  *   - its `chainId` is not a positive safe integer, or not the chain whose directory it sits in.
- * Not covered (as in the README): a link swapped in for a directory between the check and the read.
+ * Not covered (as in the README): a link or a FIFO swapped in between the checks and the open.
  */
 export function vnextRecordChainId(packageRoot: string, network: string, label: string): number | null {
   if (!NETWORK_RE.test(network) || !LABEL_RE.test(label)) return null;
