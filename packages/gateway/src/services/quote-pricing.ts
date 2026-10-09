@@ -275,3 +275,194 @@ export function exactQuoteTotal(subtotalCents: bigint, applicable: readonly Vali
   const totalCents = (n + 50_000_000n) / 100_000_000n;
   return { totalCents, adjustments };
 }
+
+// ── N100: the shared evaluator every quote path (discovery, negotiation, A2A) ──
+// goes through, so the registered price, validated rules, and exact bond math are
+// never re-implemented (and re-broken) per route.
+
+/** The minimal capabilities-repo shape selectRegisteredCapability needs. */
+export interface CapabilitiesRepoLike {
+  findById(id: string): { id: string; kernelId: string; type: string; pricing: unknown } | undefined;
+  findByKernel(kernelId: string): Array<{ id: string; kernelId: string; type: string; pricing: unknown }>;
+}
+
+export type SelectCapabilityResult<C> =
+  | { ok: true; capability: C }
+  | { ok: false; status: number; error: string; message: string };
+
+/**
+ * Resolve the ONE registered capability a quote prices against — the same rule
+ * discovery always used, now shared by negotiation and A2A (N100).
+ *
+ *   - capabilityId given: it must exist (404 capability_not_found), be the
+ *     session's TYPE (409 capability_type_mismatch), and be on the session's
+ *     KERNEL (409 capability_kernel_mismatch) — the N98 gap where a session on
+ *     kernel A, given kernel B's capability id of the same type, was quoted at
+ *     B's price.
+ *   - capabilityId absent: exactly one capability of the type on the kernel.
+ *     0 is 404 capability_not_found; more than 1 is 409 capability_ambiguous.
+ */
+export function selectRegisteredCapability<C extends { id: string; kernelId: string; type: string; pricing: unknown }>(
+  capabilities: { findById(id: string): C | undefined; findByKernel(kernelId: string): C[] },
+  { kernelId, capabilityType, capabilityId }: { kernelId: string; capabilityType: string; capabilityId?: string | null },
+): SelectCapabilityResult<C> {
+  if (capabilityId) {
+    const row = capabilities.findById(capabilityId);
+    if (!row) {
+      return { ok: false, status: 404, error: "capability_not_found", message: `Capability ${capabilityId} not found.` };
+    }
+    if (row.type !== capabilityType) {
+      return { ok: false, status: 409, error: "capability_type_mismatch", message: `Capability ${capabilityId} is type "${row.type}", not "${capabilityType}".` };
+    }
+    if (row.kernelId !== kernelId) {
+      return { ok: false, status: 409, error: "capability_kernel_mismatch", message: `Capability ${capabilityId} is not registered on kernel ${kernelId}.` };
+    }
+    return { ok: true, capability: row };
+  }
+  const candidates = capabilities.findByKernel(kernelId).filter((c) => c.type === capabilityType);
+  if (candidates.length === 0) {
+    return { ok: false, status: 404, error: "capability_not_found", message: `No ${capabilityType} capability is registered on this kernel.` };
+  }
+  if (candidates.length > 1) {
+    return { ok: false, status: 409, error: "capability_ambiguous", message: `This kernel registers more than one ${capabilityType} capability, so no single price applies.` };
+  }
+  return { ok: true, capability: candidates[0]! };
+}
+
+export type ComputeQuoteResult =
+  | {
+      ok: true;
+      basePrice: string;
+      adjustments: ExactAdjustment[];
+      totalPrice: string;
+      totalCents: bigint;
+      currency: string;
+      unquotedUsage?: Record<string, string>;
+    }
+  | { ok: false; status: number; body: Record<string, unknown> };
+
+/**
+ * The registered price x quantity (floored at the operator's minimum), adjusted
+ * only by VALIDATED rules whose condition holds on the facts given — discovery's
+ * current sequence (#498), unchanged and moved here so negotiation and A2A share
+ * it exactly (N100).
+ */
+export function computeRegisteredQuote({
+  capability,
+  quantity,
+  material,
+  rules,
+}: {
+  capability: { pricing: unknown };
+  quantity: unknown;
+  material: unknown;
+  rules: unknown;
+}): ComputeQuoteResult {
+  const registered = registeredQuotePrice(capability.pricing);
+  if (!registered.ok) {
+    if (registered.reason === "unsupported-currency") {
+      return {
+        ok: false,
+        status: 422,
+        body: {
+          error: "capability_price_unsupported_currency",
+          currency: registered.currency,
+          settlementCurrency: SETTLEMENT_CURRENCY,
+          message: `This capability is registered in ${registered.currency}, but this gateway settles only in ${SETTLEMENT_CURRENCY}. There is no conversion.`,
+        },
+      };
+    }
+    return {
+      ok: false,
+      status: 422,
+      body: { error: "capability_price_undeclared", reason: registered.reason, message: "This capability declares no usable price, so it cannot be quoted." },
+    };
+  }
+
+  if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_QUOTE_QUANTITY) {
+    return {
+      ok: false,
+      status: 400,
+      body: { error: "invalid_quantity", message: `quantity must be a whole number from 1 to ${MAX_QUOTE_QUANTITY}.` },
+    };
+  }
+
+  const rulesValidation = validatePricingRules(rules);
+  if (!rulesValidation.ok) {
+    return {
+      ok: false,
+      status: 422,
+      body: {
+        error: "operator_pricing_policy_invalid",
+        ruleIndex: rulesValidation.ruleIndex,
+        ...(rulesValidation.ruleId !== undefined ? { ruleId: rulesValidation.ruleId } : {}),
+        reason: rulesValidation.reason,
+      },
+    };
+  }
+
+  let subtotalCents = registered.cents * BigInt(quantity);
+  if (registered.minimumCents !== null && subtotalCents < registered.minimumCents) subtotalCents = registered.minimumCents;
+  const applicableRules = pricingRulesThatApply(rulesValidation.rules, { quantity, material });
+  const { totalCents, adjustments } = exactQuoteTotal(subtotalCents, applicableRules);
+
+  return {
+    ok: true,
+    basePrice: centsToDecimal(registered.cents),
+    adjustments,
+    totalPrice: centsToDecimal(totalCents),
+    totalCents,
+    currency: registered.currency,
+    ...(Object.keys(registered.usage).length > 0 ? { unquotedUsage: registered.usage } : {}),
+  };
+}
+
+/**
+ * An operator-policy override whose contract (operator-policy.ts: challengeWindowOverride,
+ * bondPercentOverride) is a NUMBER in which 0 means "use the assurance tier's default". An absent field
+ * is the default too. Any other present value is returned UNCHANGED, so the caller's own validator
+ * refuses it. `override || tierDefault` used to turn a malformed false, "" or null into the tier default
+ * (astra 234 F1).
+ */
+export function overrideOrTierDefault(override: unknown, tierDefault: number): unknown {
+  return override === undefined || override === 0 ? tierDefault : override;
+}
+
+export type ChallengeWindowResult =
+  | { ok: true; seconds: number }
+  | { ok: false; status: 422; error: "operator_pricing_policy_invalid"; reason: "invalid-challenge-window" };
+
+/** A challenge window: operator policy data, so it must be a non-negative safe integer number of seconds. */
+export function validChallengeWindowSeconds(v: unknown): ChallengeWindowResult {
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) {
+    return { ok: false, status: 422, error: "operator_pricing_policy_invalid", reason: "invalid-challenge-window" };
+  }
+  return { ok: true, seconds: v };
+}
+
+/** A bond percent: a finite number in [0, 100] whose String() is a canonical amount (at most 6 decimals). */
+const BOND_PERCENT_PATTERN = /^(0|[1-9][0-9]{0,2})(\.[0-9]{1,6})?$/;
+
+export type ExactBondResult =
+  | { ok: true; bondCents: bigint; bondAmount: string }
+  | { ok: false; status: 422; error: "operator_pricing_policy_invalid"; reason: "invalid-bond-percent" };
+
+/**
+ * The bond: totalCents x bondPercent / 100, computed exactly in scaled bigint
+ * (the same 10^-8-cent scale exactQuoteTotal uses) and rounded HALF UP once to
+ * cents. `bondPercent` is untrusted operator policy data (an override, or a
+ * tier default), so it is validated before it ever multiplies money (N100).
+ */
+export function exactBondCents(totalCents: bigint, bondPercent: unknown): ExactBondResult {
+  const refuse = (): ExactBondResult => ({ ok: false, status: 422, error: "operator_pricing_policy_invalid", reason: "invalid-bond-percent" });
+  if (typeof bondPercent !== "number" || !Number.isFinite(bondPercent) || bondPercent < 0 || bondPercent > 100) return refuse();
+  const text = String(bondPercent);
+  if (!BOND_PERCENT_PATTERN.test(text)) return refuse();
+  const parsed = parseExactValue(text);
+  if (parsed === null) return refuse();
+  // bondPercent is unsigned (validated >= 0 above), so HALF UP and HALF AWAY
+  // FROM ZERO coincide — roundHalfAwayFromZero is exact for this case.
+  const amount8 = totalCents * parsed.scaled;
+  const bondCents = roundHalfAwayFromZero(amount8);
+  return { ok: true, bondCents, bondAmount: centsToDecimal(bondCents) };
+}

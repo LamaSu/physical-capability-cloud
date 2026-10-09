@@ -34,10 +34,16 @@
 
 import crypto from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { getStore } from "../db.js";
+import { getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { getTemplate, TemplateResolver } from "@pcc/contract-builder";
-import { applyPricingRules } from "@pcc/kernel";
+import {
+  selectRegisteredCapability,
+  computeRegisteredQuote,
+  exactBondCents,
+  overrideOrTierDefault,
+  validChallengeWindowSeconds,
+} from "../services/quote-pricing.js";
 import {
   DEFAULT_OPERATOR_POLICY,
   SESSION_TTL_MS,
@@ -290,6 +296,55 @@ export async function createPccQuote(
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
   const selections = params.selections ?? {};
 
+  // N100: the quote is the operator's REGISTERED price, through the SAME shared
+  // evaluator discovery and negotiation use (quote-pricing.ts) — never the
+  // template hint, never 10. Computed BEFORE the session insert (moved from
+  // after it, below) so a refusal creates no session row. capabilityId (if
+  // given) is checked against both the TYPE and the KERNEL.
+  const sel = selectRegisteredCapability(getRepos().capabilities, {
+    kernelId: params.kernelId,
+    capabilityType: params.capabilityType,
+    capabilityId: params.capabilityId ?? undefined,
+  });
+  if (!sel.ok) throw new Error(sel.error);
+
+  // Facts: quantity and material only, as in discovery/negotiation. This path
+  // takes no authenticated buyer history and no start time, so rush, offpeak
+  // and loyalty rules NEVER apply.
+  const quantityRaw = selections.quantity;
+  const quantity = quantityRaw === undefined ? 1 : quantityRaw;
+  const cq = computeRegisteredQuote({ capability: sel.capability, quantity, material: selections.material, rules: policy.pricingRules });
+  if (!cq.ok) throw new Error((cq.body as { error: string }).error);
+
+  const evidenceTier = selections.evidenceTier;
+  const assuranceTier =
+    evidenceTier === "full" ? 2 : evidenceTier === "basic" ? 1 : 0;
+  // Both overrides are validated BEFORE defaulting: 0 or absent means the tier default; any other value
+  // must be valid, or the quote is refused before any session row exists (astra 234 F1).
+  const cw = validChallengeWindowSeconds(
+    overrideOrTierDefault(policy.challengeWindowOverride, [0, 3600, 7200, 14400][assuranceTier] || 3600),
+  );
+  if (!cw.ok) throw new Error(cw.error);
+  const challengeWindowSeconds = cw.seconds;
+  const bond = exactBondCents(cq.totalCents, overrideOrTierDefault(policy.bondPercentOverride, [0, 5, 15, 25][assuranceTier]));
+  if (!bond.ok) throw new Error(bond.error);
+
+  const quote = {
+    basePrice: cq.basePrice,
+    adjustments: cq.adjustments,
+    totalPrice: cq.totalPrice,
+    currency: cq.currency,
+    ...(cq.unquotedUsage ? { unquotedUsage: cq.unquotedUsage } : {}),
+    bondAmount: bond.bondAmount,
+    challengeWindowSeconds,
+    // Persist the agreed assurance tier (derived from evidenceTier above) so the
+    // commit path copies it verbatim instead of re-deriving it from the bond
+    // dollar amount — the wrong tier otherwise propagates on-chain as the
+    // milestone's requiredTier (N3). Mirrors the negotiation /quote route.
+    assuranceTier,
+    validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
+  };
+
   db.insert(negotiationSessions).values({
     id: sessionId,
     status: "created" as SessionStatus,
@@ -317,40 +372,6 @@ export async function createPccQuote(
     expiresAt,
     committedAt: null,
   } as any).run();
-
-  const basePrice = template?.basePricingHints?.basePrice
-    ? parseFloat(template.basePricingHints.basePrice)
-    : 10;
-  const quantity = (selections.quantity as number) ?? 1;
-  const { adjustedPrice, adjustments } = applyPricingRules(
-    basePrice * quantity,
-    policy.pricingRules.filter((r) => r.enabled),
-  );
-  const evidenceTier = selections.evidenceTier;
-  const assuranceTier =
-    evidenceTier === "full" ? 2 : evidenceTier === "basic" ? 1 : 0;
-  const bondPercent = policy.bondPercentOverride || [0, 5, 15, 25][assuranceTier] || 0;
-  const challengeWindowSeconds =
-    policy.challengeWindowOverride || [0, 3600, 7200, 14400][assuranceTier] || 3600;
-
-  const quote = {
-    basePrice: basePrice.toFixed(2),
-    adjustments: adjustments.map((a) => ({
-      ruleId: a.ruleId,
-      label: a.label,
-      impact: a.amount.toFixed(2),
-    })),
-    totalPrice: adjustedPrice.toFixed(2),
-    currency: template?.basePricingHints?.currency ?? "USDC",
-    bondAmount: ((adjustedPrice * bondPercent) / 100).toFixed(2),
-    challengeWindowSeconds,
-    // Persist the agreed assurance tier (derived from evidenceTier above) so the
-    // commit path copies it verbatim instead of re-deriving it from the bond
-    // dollar amount — the wrong tier otherwise propagates on-chain as the
-    // milestone's requiredTier (N3). Mirrors the negotiation /quote route.
-    assuranceTier,
-    validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
-  };
 
   const scheduling = {
     earliestAvailable: new Date(Date.now() + 5 * 60_000).toISOString(),

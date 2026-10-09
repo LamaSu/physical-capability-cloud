@@ -37,13 +37,8 @@ import { PricingCalculator } from "@pcc/contract-builder";
 import { sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
 import {
-  SETTLEMENT_CURRENCY,
-  MAX_QUOTE_QUANTITY,
-  centsToDecimal,
-  registeredQuotePrice,
-  validatePricingRules,
-  pricingRulesThatApply,
-  exactQuoteTotal,
+  selectRegisteredCapability,
+  computeRegisteredQuote,
 } from "../services/quote-pricing.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
@@ -774,61 +769,33 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sanitizedSelections[key] = typeof value === "string" ? sanitizeText(value) : value;
       }
 
-      // The quote is the operator's REGISTERED price for the selected capability (N98): never a
-      // template hint, never a default. Exactly one capability of this type on this kernel; job
+      // The quote is the operator's REGISTERED price for the selected capability (N98), through the
+      // SAME shared evaluator negotiation and A2A use (N100): never a template hint, never a default.
+      // Exactly one capability of this type on this kernel (no capabilityId on this route); job
       // creation (createJobFromSession) then resolves the same one.
-      const candidates = getRepos().capabilities.findByKernel(kernelId).filter((c) => c.type === capabilityType);
-      if (candidates.length === 0) {
-        return reply.status(404).send({ error: "capability_not_found", message: `No ${capabilityType} capability is registered on this kernel.` });
-      }
-      if (candidates.length > 1) {
-        return reply.status(409).send({ error: "capability_ambiguous", message: `This kernel registers more than one ${capabilityType} capability, so no single price applies.` });
-      }
-      const registered = registeredQuotePrice(candidates[0]!.pricing);
-      if (!registered.ok) {
-        if (registered.reason === "unsupported-currency") {
-          return reply.status(422).send({
-            error: "capability_price_unsupported_currency",
-            currency: registered.currency,
-            settlementCurrency: SETTLEMENT_CURRENCY,
-            message: `This capability is registered in ${registered.currency}, but this gateway settles only in ${SETTLEMENT_CURRENCY}. There is no conversion.`,
-          });
-        }
-        return reply.status(422).send({ error: "capability_price_undeclared", reason: registered.reason, message: "This capability declares no usable price, so it cannot be quoted." });
+      const sel = selectRegisteredCapability(getRepos().capabilities, { kernelId, capabilityType });
+      if (!sel.ok) {
+        return reply.status(sel.status).send({ error: sel.error, message: sel.message });
       }
       const quantityRaw = sanitizedSelections.quantity;
       const quantity = quantityRaw === undefined ? 1 : quantityRaw;
-      if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_QUOTE_QUANTITY) {
-        return reply.status(400).send({ error: "invalid_quantity", message: `quantity must be a whole number from 1 to ${MAX_QUOTE_QUANTITY}.` });
+      // computeRegisteredQuote runs, in order: registeredQuotePrice (F2 currency / declared-price
+      // checks), quantity (400 invalid_quantity), validatePricingRules (F4 — every rule validated
+      // before any rule is applied, whether enabled or not, all before any side effect: no session
+      // row exists yet), then pricingRulesThatApply + exactQuoteTotal (F1 — bigint end to end).
+      const cq = computeRegisteredQuote({ capability: sel.capability, quantity, material: sanitizedSelections.material, rules: policy.pricingRules });
+      if (!cq.ok) {
+        return reply.status(cq.status).send(cq.body);
       }
-      // F4: every rule is validated BEFORE any rule is applied, whether enabled or not — a malformed
-      // policy must never reach quoting, let alone money. All before any side effect (no session row
-      // exists yet).
-      const rulesValidation = validatePricingRules(policy.pricingRules);
-      if (!rulesValidation.ok) {
-        return reply.status(422).send({
-          error: "operator_pricing_policy_invalid",
-          ruleIndex: rulesValidation.ruleIndex,
-          ...(rulesValidation.ruleId !== undefined ? { ruleId: rulesValidation.ruleId } : {}),
-          reason: rulesValidation.reason,
-        });
-      }
-      // Exact arithmetic in cents up to the rules: the registered price times the quantity, never
-      // below the operator's declared minimum. exactQuoteTotal works entirely in bigint (F1): no
-      // money value ever passes through `Number`.
-      let subtotalCents = registered.cents * BigInt(quantity);
-      if (registered.minimumCents !== null && subtotalCents < registered.minimumCents) subtotalCents = registered.minimumCents;
-      const applicableRules = pricingRulesThatApply(rulesValidation.rules, { quantity, material: sanitizedSelections.material });
-      const { totalCents, adjustments } = exactQuoteTotal(subtotalCents, applicableRules);
 
       const quote = {
-        basePrice: centsToDecimal(registered.cents),
-        adjustments,
-        totalPrice: centsToDecimal(totalCents),
-        currency: registered.currency,
+        basePrice: cq.basePrice,
+        adjustments: cq.adjustments,
+        totalPrice: cq.totalPrice,
+        currency: cq.currency,
         // Rates the registered pricing declares per unit of usage, which a discovery quote cannot
         // measure: shown so the buyer sees them, and not charged by this quote.
-        ...(Object.keys(registered.usage).length > 0 ? { unquotedUsage: registered.usage } : {}),
+        ...(cq.unquotedUsage ? { unquotedUsage: cq.unquotedUsage } : {}),
         bondAmount: "0.00",
         challengeWindowSeconds: 0,
         validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
