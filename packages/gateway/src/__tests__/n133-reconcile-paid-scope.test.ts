@@ -14,7 +14,7 @@ import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vites
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createDatabase, sql } from "@pcc/store";
+import { createDatabase, eq, schema, sql } from "@pcc/store";
 import { MAX_POST_ACTIVATION_TTL_MS, reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import {
@@ -749,6 +749,54 @@ describe("ruling 1: the DTO and reconcile use the same rule", () => {
     setEscrow(escrowId, { status: "funded" });
     expect(fundingStatusNow(store, scopeId).state).toBe("funded_verified");
     expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
+  });
+});
+
+describe("what Stage 2 must not write or read (rulings 2 and 7; gateway's condition (ii), accepted in bulletin 7195)", () => {
+  const jobRow = (jobId: string) => db().select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
+  const escrowRows = (escrowId: string) => ({
+    escrow: db().select().from(schema.escrows).where(eq(schema.escrows.id, escrowId)).get(),
+    milestones: db().select().from(schema.escrowMilestones).where(eq(schema.escrowMilestones.escrowId, escrowId)).all(),
+  });
+  const setMilestones = (escrowId: string, status: string) =>
+    db().update(schema.escrowMilestones).set({ status }).where(eq(schema.escrowMilestones.escrowId, escrowId)).run();
+  /** A contract address of its own for case `i`, so that records of different cases never share a key. */
+  const contract = (i: number) => "0x" + (0xd0000 + i).toString(16).padStart(40, "0");
+
+  it("(no-job-write) an activation writes neither the job row nor the escrow row or its milestones: no job status, no second writer of funded (rulings 7 and 2)", async () => {
+    const { scopeId, jobId, escrowId } = await paidScope(f);
+    const job = jobRow(jobId);
+    const escrow = escrowRows(escrowId);
+    expect(job).toBeDefined();
+    expect(escrow.milestones.length).toBeGreaterThan(0);
+    vi.setSystemTime(T0 + 5 * MIN);
+    expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS).kind).toBe("activated");
+    expect(jobRow(jobId)).toEqual(job);
+    expect(escrowRows(escrowId)).toEqual(escrow);
+  });
+
+  it("(milestones-unread) milestone rows that disagree with the escrow row change neither reconcile's answer nor the DTO's", async () => {
+    let i = 0;
+    // The escrow row funded, its milestones anything: activation-ready, as with funded milestones.
+    for (const milestones of ["funded", "pending", "released", "disputed", "refunded", ""]) {
+      const own = contract(i++);
+      const { scopeId, escrowId } = await paidScope(f, { real: own });
+      setMilestones(escrowId, milestones);
+      store.plant(verification(scopeId, { escrowAddress: own }));
+      expect(fundingStatusNow(store, scopeId).state, milestones).toBe("funded_verified");
+      expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: own }), TERMS).kind, milestones).toBe("activated");
+      expect(fundingStatusNow(store, scopeId).state, milestones).toBe("funded_verified");
+    }
+    // The escrow row created, its milestones anything (funded included): not activation-ready.
+    for (const milestones of ["funded", "pending"]) {
+      const own = contract(i++);
+      const { scopeId, escrowId } = await paidScope(f, { real: own });
+      setEscrow(escrowId, { status: "created" });
+      setMilestones(escrowId, milestones);
+      store.plant(verification(scopeId, { escrowAddress: own }));
+      expect(fundingStatusNow(store, scopeId), milestones).toMatchObject({ state: "unknown", binding: "bound" });
+      expect(reconcilePaidScope(scopeId, verification(scopeId, { escrowAddress: own }), TERMS), milestones).toEqual(refused("escrow_not_funded"));
+    }
   });
 });
 

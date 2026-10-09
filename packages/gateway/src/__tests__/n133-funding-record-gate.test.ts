@@ -8,7 +8,7 @@
  * Negatives are tagged (neg-...) for the mutation runner.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { sql } from "@pcc/store";
+import { eq, schema, sql } from "@pcc/store";
 import {
   buyerFundingRefusal,
   buyerFundingVerdict,
@@ -219,8 +219,11 @@ describe("the accept route and reconcilePaidScope", () => {
     const record = verification(scopeId);
     db().transaction((tx) => store.insert(tx, record)); // the verifier's own write
     installActivationTerms(); // the expected chain and the TTL (rulings 4 and 5)
+    const jobRow = () => db().select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).get();
+    const job = jobRow();
     vi.setSystemTime(T0 + 10 * MIN); // the operator accepts later
     const accepted = await acceptScope(f, scopeId);
+    expect(jobRow()).toEqual(job); // no job-row write, no job status (ruling 7)
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json()).toEqual({
       accepted: true,
