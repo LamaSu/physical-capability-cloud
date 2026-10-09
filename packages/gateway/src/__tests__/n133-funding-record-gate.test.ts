@@ -104,7 +104,18 @@ describe("S2.1 buyerFundingVerdict: a real escrow passes only on the scope's fin
     store.plant(verification("scope_elsewhere"));
     // The gate reads the scope's own record (an escrow lookup would need the expected chain, ruling 4).
     expect(buyerFundingRefusal(escrow(), BUYER, SCOPE)).toBe("escrow_not_buyer_funded");
-    expect(buyerFundingRefusal(escrow(), BUYER)).toBe("funding_record_scope_mismatch");
+    expect(buyerFundingRefusal(escrow(), BUYER)).toBe("escrow_not_buyer_funded");
+  });
+
+  it("(gate-mint) at the mint (no scope id) a real escrow is escrow_not_buyer_funded, store or none, record or none, as in production (r3 review NIT-6)", () => {
+    expect(buyerFundingRefusal(escrow(), BUYER)).toBe("escrow_not_buyer_funded"); // no store: production
+    const store = installTestFundingRecordStore();
+    expect(buyerFundingRefusal(escrow(), BUYER)).toBe("escrow_not_buyer_funded"); // no record
+    store.plant(verification("scope_elsewhere")); // this escrow's record, for another scope
+    expect(buyerFundingRefusal(escrow(), BUYER)).toBe("escrow_not_buyer_funded");
+    expect(buyerFundingRefusal(escrow(), BUYER, null)).toBe("escrow_not_buyer_funded");
+    // The row's own preconditions still come first.
+    expect(buyerFundingRefusal(escrow({ status: "created" }), BUYER)).toBe("escrow_not_funded");
   });
 
   it("(neg-gate-scope-store) a store answering for this scope with another scope's record is not believed", () => {

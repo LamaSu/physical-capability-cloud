@@ -113,10 +113,10 @@ const refusedFunding = (reason: BuyerFundingRefusal): FundingVerdict => ({ kind:
  * (the steward's ruling 4), and the expected chain is reconcilePaidScope's input, which checks it.
  * No record store is configured outside a test process (Q9), so there every real escrow is refused
  * escrow_not_buyer_funded, as before. Without a `scopeId` (the mint, when the scope does not exist
- * yet) no record can name the scope, so a real escrow never passes there
- * (funding_record_scope_mismatch). A mock escrow counts only in a test process with mock
- * settlement on (mockFundsWrites; N133 r1, astra HIGH): never in production, and never in a
- * development gateway either. That rule is unchanged.
+ * yet) no record can name the scope, so a real escrow never passes there: escrow_not_buyer_funded,
+ * the answer production gives, store or not (r3 review NIT-6). A mock escrow counts only in a test
+ * process with mock settlement on (mockFundsWrites; N133 r1, astra HIGH): never in production, and
+ * never in a development gateway either. That rule is unchanged.
  */
 export function buyerFundingVerdict(
   escrow: FundingEscrow | undefined | null,
@@ -130,7 +130,7 @@ export function buyerFundingVerdict(
   }
   const store = fundingRecordStore();
   if (!store) return refusedFunding("escrow_not_buyer_funded");
-  if (typeof scopeId !== "string") return refusedFunding("funding_record_scope_mismatch");
+  if (typeof scopeId !== "string") return refusedFunding("escrow_not_buyer_funded");
   const record = store.findByScope(getStore().db, scopeId);
   // A record proves funding only when there is one, well formed and finalized, it is this escrow's
   // and its verified payer is this buyer. (isWellFormedFundingRecord is false for null.)
