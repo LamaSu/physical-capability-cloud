@@ -436,7 +436,11 @@ def _request(method: str, url: str, body: Any = None, *, deadline: float, clock:
     send_headers.update(headers or {})
     payload = None
     if body is not None:
-        payload = json.dumps(body).encode("utf-8")
+        try:
+            # Standard JSON only: NaN and the infinities are not JSON (verdict 117d).
+            payload = json.dumps(body, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            raise _Abort("body_not_json")  # nothing has been sent
         send_headers["Content-Type"] = "application/json"
     if payload is not None or method in _METHODS:
         send_headers["Content-Length"] = str(len(payload or b""))  # putrequest does not add it
@@ -623,7 +627,7 @@ class AdapterRuntime:
                             stop=stop, max_bytes=max_bytes, headers=headers)
 
         try:
-            json.dumps(body)
+            json.dumps(body, allow_nan=False)  # standard JSON only: no NaN or infinities (verdict 117d)
         except (TypeError, ValueError):
             return RunResult(False, error="param_not_json:not_started")
         key = idempotency_key(claim.job_id, claim.kernel_id, claim.claim_token)
