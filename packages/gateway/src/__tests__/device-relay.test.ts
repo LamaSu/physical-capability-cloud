@@ -34,6 +34,28 @@ const asSiwe = (address: string) => ({ "x-test-siwe": address });
 // The operator's executor, as current pcc-node runs it: it takes the execution
 // lease (N4b-gw r7 F3), so it sends X-PCC-Lease: 1 on the pending poll.
 const op = { ...asKey(OPERATOR), "x-pcc-lease": "1" };
+// N126: a DECISION (opening or revoking a scope, a chat instruction, a write tool
+// call) needs the admin or a PROVEN operator wallet; a claimed key gets 403
+// operator_proof_required, and a scope grant never makes one. Where #400's suite
+// made a decision as setup or as the action under test, the call keeps #400's
+// caller and adds the admin key, which is what authorizes it: the operator's
+// becomes opAdmin, operator-2's op2Admin, a holder's adminFor(holder). Every
+// other call is unchanged, so a kernel's operator is still refused on another
+// kernel. Keeping the caller keeps each write in its caller's bucket of the
+// safety governor's rate limit (60 a minute per caller), where #400 had it.
+const adminFor = (id: string) => ({ ...asKey(id), "x-admin-key": N31_ADMIN });
+const opAdmin = { ...op, "x-admin-key": N31_ADMIN };
+const op2Admin = adminFor(OPERATOR_2);
+// DECISIONS 00:53 (the steward's #6711, 73c93f5f): the relay's human- and agent-facing side needs
+// PROOF or the admin: every tool call (safe ones too), the manifest, the camera and chat reads, and
+// result, scope and audit reads. The device's own side (the pending poll, start, result posting,
+// frame upload, chat/pending and chat/respond) keeps the claimed key. So the kernel's operator
+// makes its human-facing calls as opAdmin (its key with the admin key; operator-1 is not a wallet,
+// so it can't be a proven operator), and a scope holder as asProven(holder): its key plus that
+// same identity as its PROVEN wallet (WP-A, simulated by x-test-proven-wallet as in
+// n31-relay-and-heartbeat-ownership). The relay compares the scope's createdBy with the principal
+// and the proven wallet as exact strings, so "agent-1" proves "agent-1".
+const asProven = (id: string) => ({ ...asKey(id), "x-test-proven-wallet": id });
 
 function seedKernel(id: string, operatorAddress: string) {
   getStore().db.insert(shopKernels).values({
@@ -71,6 +93,9 @@ beforeAll(async () => {
     } else if (typeof siwe === "string") {
       req.userId = siwe as `0x${string}`;
     }
+    // WP-A's proven wallet, simulated (DECISIONS 00:53): see asProven above.
+    const proven = req.headers["x-test-proven-wallet"];
+    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
   });
 
   await app.register(deviceRelayRoutes);
@@ -112,9 +137,9 @@ beforeEach(() => {
   db.run(sql`DELETE FROM ot2_chat_messages`);
 });
 
-/** The operator of kernel-test-1 mints a scope held by `holder`. */
+/** The operator of kernel-test-1 mints a scope held by `holder` (a decision: the admin key, N126). */
 async function mintScope(holder: string, allowedTools: string[] = ["run_create"], kernelId = "kernel-test-1") {
-  const headers = kernelId === "kernel-test-2" ? asKey(OPERATOR_2) : op;
+  const headers = kernelId === "kernel-test-2" ? op2Admin : opAdmin;
   const res = await app.inject({
     method: "POST",
     url: `/api/relay/${kernelId}/scope`,
@@ -125,14 +150,32 @@ async function mintScope(holder: string, allowedTools: string[] = ["run_create"]
   return res.json().id as string;
 }
 
-/** The operator posts a safe tool call and its executor claims it. */
+/**
+ * The steward's #6771: every tool call names a scope whose allowedTools lists the tool, the kernel
+ * operator's own included, and nothing bypasses that list, the command budget or escrow. A
+ * manifest's safeTools is a hint for clients, never an authorization. So where #400's suite made a
+ * scope-free operator call ("health", "home") as setup, the call now names this: the operator's own
+ * scope on kernel-test-1 listing `tools`, granted through the real route (mintScope, as opAdmin),
+ * with the route's default budget of 100 commands.
+ */
+function operatorScope(tools: string[] = ["health"]): Promise<string> {
+  return mintScope(OPERATOR, tools);
+}
+
+/**
+ * The operator posts a tool call under its own scope (#6771) and its executor claims it. The call
+ * faces people and agents (DECISIONS 00:53), so it is opAdmin's; the claim is the device's own (op).
+ */
 async function createAndClaim(toolName = "health"): Promise<string> {
+  const scopeId = await operatorScope([toolName]);
   const createRes = await app.inject({
     method: "POST",
     url: "/api/relay/kernel-test-1/tool-call",
-    headers: op,
-    payload: { toolName },
+    headers: opAdmin,
+    payload: { scopeId, toolName },
   });
+  // A refused call would leave callId undefined, and the tests built on it would pass vacuously.
+  expect(createRes.statusCode).toBe(201);
   const callId = createRes.json().id;
   await app.inject({
     method: "GET",
@@ -143,13 +186,16 @@ async function createAndClaim(toolName = "health"): Promise<string> {
 }
 
 /** Claim a call and take its execution lease, as a lease-capable executor does
- * before it runs anything (F3): only a started call's report is a device outcome. */
+ * before it runs anything (F3): only a started call's report is a device outcome.
+ * The call is opAdmin's (DECISIONS 00:53), under the operator's own scope (#6771);
+ * the claim and the start are the device's (op). */
 async function createClaimAndStart(toolName = "health"): Promise<string> {
+  const scopeId = await operatorScope([toolName]);
   const createRes = await app.inject({
     method: "POST",
     url: "/api/relay/kernel-test-1/tool-call",
-    headers: op,
-    payload: { toolName },
+    headers: opAdmin,
+    payload: { scopeId, toolName },
   });
   const callId = createRes.json().id as string;
   const pending = await app.inject({
@@ -174,10 +220,14 @@ async function createClaimAndStart(toolName = "health"): Promise<string> {
 
 describe("GET /api/relay/:kernelId/manifest", () => {
   it("returns the manifest for a known kernel", async () => {
+    // DECISIONS 00:53: the manifest needs proof; the kernel's claimed key alone is refused.
+    const claimed = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/manifest", headers: op });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/manifest",
-      headers: op,
+      headers: opAdmin,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -189,10 +239,11 @@ describe("GET /api/relay/:kernelId/manifest", () => {
   });
 
   it("returns the generic manifest for a kernel without a known device", async () => {
+    // DECISIONS 00:53: the manifest needs proof (the admin key, as operator-2).
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-2/manifest",
-      headers: asKey(OPERATOR_2),
+      headers: op2Admin,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -205,7 +256,9 @@ describe("GET /api/relay/:kernelId/manifest", () => {
       url: "/api/relay/kernel-unknown/manifest",
       headers: op,
     });
-    expect(res.statusCode).toBe(403);
+    // N126: the shared guard answers an unregistered kernel 404 for a non-admin (was 403).
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe("kernel_not_found");
   });
 });
 
@@ -214,15 +267,39 @@ describe("GET /api/relay/:kernelId/manifest", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("POST /api/relay/:kernelId/tool-call", () => {
-  it("accepts a safe tool without scope from the kernel operator", async () => {
-    const res = await app.inject({
+  it("refuses the kernel operator's scope-free safe tool: 403 scope_required, nothing queued (#6771)", async () => {
+    // DECISIONS 00:53: every tool call needs proof, a safe one too. The kernel's claimed key alone
+    // is refused and queues nothing.
+    const claimed = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: op,
       payload: { toolName: "health" },
     });
-    expect(res.statusCode).toBe(201);
-    const body = res.json();
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    // #6771: with proof (the admin key) the operator still names a scope that lists the tool; the
+    // manifest calling "health" safe authorizes nothing. Without one: refused, nothing queued.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: opAdmin,
+      payload: { toolName: "health" },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("scope_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    // Naming its own scope that lists the tool, the operator's call is accepted.
+    const scopeId = await operatorScope(["health"]);
+    const scoped = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
+    });
+    expect(scoped.statusCode).toBe(201);
+    const body = scoped.json();
     expect(body.toolName).toBe("health");
     expect(body.status).toBe("pending");
     expect(body.kernelId).toBe("kernel-test-1");
@@ -230,10 +307,11 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
   });
 
   it("rejects a non-safe tool without scope", async () => {
+    // N126: a write tool call is a decision, so the admin key reaches the scope rule.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
+      headers: opAdmin,
       payload: { toolName: "protocol_upload" },
     });
     expect(res.statusCode).toBe(403);
@@ -242,39 +320,93 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
   });
 
   it("requires toolName", async () => {
+    // N126: a call that names no tool is guarded as a write (a decision), so the admin key reaches validation.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
+      headers: opAdmin,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
   });
 
-  it("accepts a scoped write tool from the scope's holder", async () => {
+  it("refuses a scoped write from the scope's holder, and accepts it from the admin naming the scope", async () => {
     const scopeId = await mintScope("agent-1", ["protocol_upload", "run_create"]);
+    const payload = {
+      scopeId,
+      toolName: "protocol_upload",
+      args: { filename: "test.py", content: "print('hello')" },
+    };
+    const commandsUsed = () =>
+      getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.commandCount;
 
-    const res = await app.inject({
+    // N126: a write tool call is a decision, and a scope grant (a claimed identity) never makes one.
+    const byHolder = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
       headers: asKey("agent-1"),
-      payload: {
-        scopeId,
-        toolName: "protocol_upload",
-        args: { filename: "test.py", content: "print('hello')" },
-      },
+      payload,
+    });
+    expect(byHolder.statusCode).toBe(403);
+    expect(byHolder.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    expect(commandsUsed()).toBe(0);
+
+    // The same key with the admin secret is the admin: accepted, and the scope counts the write.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: adminFor("agent-1"),
+      payload,
     });
     expect(res.statusCode).toBe(201);
     expect(res.json().toolName).toBe("protocol_upload");
+    expect(res.json().scopeId).toBe(scopeId);
+    expect(commandsUsed()).toBe(1);
+  });
+
+  it("holds the admin's scoped write to the scope's command budget and expiry (N126)", async () => {
+    const write = (scopeId: string) =>
+      app.inject({
+        method: "POST",
+        url: "/api/relay/kernel-test-1/tool-call",
+        headers: adminFor("agent-1"),
+        payload: { scopeId, toolName: "run_create" },
+      });
+
+    const minted = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/scope",
+      headers: opAdmin,
+      payload: { createdBy: "agent-1", allowedTools: ["run_create"], maxCommands: 1 },
+    });
+    expect(minted.statusCode).toBe(201);
+    const budgeted = minted.json().id as string;
+    expect((await write(budgeted)).statusCode).toBe(201);
+    const overBudget = await write(budgeted);
+    expect(overBudget.statusCode).toBe(403);
+    expect(overBudget.json().reason).toBe("max_commands_reached");
+
+    const expiring = await mintScope("agent-1", ["run_create"]);
+    getStore().db.update(executionScopes)
+      .set({ expiresAt: new Date(Date.now() - 1_000).toISOString() })
+      .where(eq(executionScopes.id, expiring))
+      .run();
+    const expired = await write(expiring);
+    expect(expired.statusCode).toBe(403);
+    expect(expired.json().reason).toBe("scope_expired");
+    const pending = getStore().db.select().from(toolCallRelay).all().filter((c) => c.status === "pending");
+    expect(pending).toHaveLength(1);
   });
 
   it("rejects a tool not in scope's allowedTools", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
 
+    // N126: the holder can't write at all; the admin naming the scope is still held to allowedTools.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: {
         scopeId,
         toolName: "shell",
@@ -285,10 +417,11 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
   });
 
   it("rejects when scope not found", async () => {
+    // N126: a write tool call is a decision, so the admin key reaches the scope lookup.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
+      headers: opAdmin,
       payload: {
         scopeId: "scope_nonexistent",
         toolName: "protocol_upload",
@@ -300,12 +433,14 @@ describe("POST /api/relay/:kernelId/tool-call", () => {
 
 describe("GET /api/relay/:kernelId/tool-call/pending", () => {
   it("returns pending calls and marks them as claimed", async () => {
-    // Insert a pending tool call
+    // Insert a pending tool call (DECISIONS 00:53: a tool call needs proof, so opAdmin; the poll is
+    // the device's own side, on its claimed key). #6771: it names the operator's own scope.
+    const scopeId = await operatorScope(["health"]);
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
-      payload: { toolName: "health" },
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
     });
 
     const res = await app.inject({
@@ -330,11 +465,12 @@ describe("GET /api/relay/:kernelId/tool-call/pending", () => {
 
 describe("POST /api/relay/:kernelId/tool-result", () => {
   it("completes a tool call with result", async () => {
+    const scopeId = await operatorScope(["health"]); // #6771: every call names a scope
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
-      payload: { toolName: "health" },
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -349,11 +485,12 @@ describe("POST /api/relay/:kernelId/tool-result", () => {
   });
 
   it("marks a tool call as failed with error", async () => {
+    const scopeId = await operatorScope(["health"]); // #6771: every call names a scope
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
-      payload: { toolName: "health" },
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -483,11 +620,12 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
     expect(failSpy).not.toHaveBeenCalled();
     expect(okSpy).not.toHaveBeenCalled();
 
-    // The call is untouched (still claimable/in-flight), not marked terminal.
+    // The call is untouched (still claimable/in-flight), not marked terminal. (A result read needs
+    // proof, DECISIONS 00:53: opAdmin.)
     const check = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/tool-result/${callId}`,
-      headers: op,
+      headers: opAdmin,
     });
     expect(check.json().status).toBe("claimed");
 
@@ -540,11 +678,14 @@ describe("POST /api/relay/:kernelId/tool-result — caller ownership (F2)", () =
 
 describe("GET /api/relay/:kernelId/tool-result/:id", () => {
   it("returns a completed tool call with parsed result", async () => {
+    // DECISIONS 00:53: the call needs proof (opAdmin); the result post is the device's own (op).
+    // #6771: the call names the operator's own scope.
+    const scopeId = await operatorScope(["health"]);
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
-      payload: { toolName: "health" },
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -555,10 +696,14 @@ describe("GET /api/relay/:kernelId/tool-result/:id", () => {
       payload: { callId, result: { healthy: true } },
     });
 
+    // A result read needs proof too: the kernel's claimed key alone is refused it.
+    const claimed = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${callId}`, headers: op });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().error).toBe("tool_result_not_yours");
     const res = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/tool-result/${callId}`,
-      headers: op,
+      headers: opAdmin,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -580,12 +725,13 @@ describe("GET /api/relay/:kernelId/tool-result/:id", () => {
 // EXECUTION SCOPES
 // ═══════════════════════════════════════════════════════════════════════════
 
+// N126: opening a scope is a decision, so these calls (validation included) send the admin key.
 describe("POST /api/relay/:kernelId/scope", () => {
   it("creates an execution scope", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
-      headers: op,
+      headers: opAdmin,
       payload: {
         createdBy: "agent-1",
         allowedTools: ["run_create", "run_action"],
@@ -607,7 +753,7 @@ describe("POST /api/relay/:kernelId/scope", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
-      headers: op,
+      headers: opAdmin,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -617,7 +763,7 @@ describe("POST /api/relay/:kernelId/scope", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
-      headers: op,
+      headers: opAdmin,
       payload: { createdBy: "agent-1", allowedTools: [] },
     });
     expect(res.statusCode).toBe(400);
@@ -627,7 +773,7 @@ describe("POST /api/relay/:kernelId/scope", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
-      headers: op,
+      headers: opAdmin,
       payload: { allowedTools: ["run_create"] },
     });
     expect(res.statusCode).toBe(201);
@@ -638,7 +784,7 @@ describe("POST /api/relay/:kernelId/scope", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
-      headers: op,
+      headers: opAdmin,
       payload: { createdBy: OPERATOR, allowedTools: ["run_create"], jobId: "job-does-not-exist" },
     });
     expect(res.statusCode).toBe(400);
@@ -648,10 +794,11 @@ describe("POST /api/relay/:kernelId/scope", () => {
 
 describe("GET /api/relay/:kernelId/scope/:scopeId", () => {
   it("returns scope details with remaining counts", async () => {
+    // N126: opening a scope is a decision (the admin key).
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/scope",
-      headers: op,
+      headers: opAdmin,
       payload: {
         createdBy: "agent-1",
         allowedTools: ["run_create"],
@@ -660,11 +807,15 @@ describe("GET /api/relay/:kernelId/scope/:scopeId", () => {
     });
     const scopeId = createRes.json().id;
 
-    // The holder reads its own scope.
+    // The holder reads its own scope. DECISIONS 00:53: a scope read needs proof, so the holder's
+    // claimed key alone is refused it; its proven wallet reads it.
+    const claimed = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/scope/${scopeId}`, headers: asKey("agent-1") });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().error).toBe("scope_not_yours");
     const res = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/scope/${scopeId}`,
-      headers: asKey("agent-1"),
+      headers: asProven("agent-1"),
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -686,11 +837,12 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
   it("revokes a scope and rejects pending calls", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
 
-    // Create a pending tool call under this scope
+    // Create a pending tool call under this scope. N126: a scoped write is a
+    // decision the holder can't make, so the admin names the holder's scope.
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: {
         scopeId,
         toolName: "run_create",
@@ -698,7 +850,7 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
       },
     });
 
-    // Revoke (the operator's emergency stop)
+    // Revoke (the operator's emergency stop: the stop tier, so the kernel's own key, #6677)
     const res = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
@@ -712,12 +864,13 @@ describe("POST /api/relay/:kernelId/scope/:scopeId/revoke", () => {
   it("returns 409 for already revoked scope", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
 
-    // Revoke twice (the holder may give up its own scope)
-    await app.inject({
+    // Revoke twice (the holder may give up its own scope: a revoke takes the stop tier, #6677)
+    const res1 = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
       headers: asKey("agent-1"),
     });
+    expect(res1.statusCode).toBe(200);
     const res2 = await app.inject({
       method: "POST",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`,
@@ -731,11 +884,11 @@ describe("GET /api/relay/:kernelId/scope/:scopeId/audit", () => {
   it("returns tool call audit trail for a scope", async () => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
 
-    // Make a tool call
+    // Make a tool call (N126: the admin names the holder's scope; the holder can't write)
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: {
         scopeId,
         toolName: "run_create",
@@ -743,10 +896,11 @@ describe("GET /api/relay/:kernelId/scope/:scopeId/audit", () => {
       },
     });
 
+    // An audit read needs proof (DECISIONS 00:53): opAdmin.
     const res = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/scope/${scopeId}/audit`,
-      headers: op,
+      headers: opAdmin,
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -827,10 +981,11 @@ describe("GET /api/relay/:kernelId/camera/latest", () => {
   });
 
   it("returns 404 when no frames exist", async () => {
+    // A camera read needs proof (DECISIONS 00:53): opAdmin.
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
-      headers: op,
+      headers: opAdmin,
     });
     expect(res.statusCode).toBe(404);
   });
@@ -840,10 +995,15 @@ describe("camera auth: operator access", () => {
   it("allows kernel operator to view camera", async () => {
     await pushFrame();
 
+    // DECISIONS 00:53: the camera needs proof. The kernel's claimed key alone is refused (its
+    // operatorAddress is public); with the admin key it watches.
+    const claimed = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/camera/latest", headers: op });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
-      headers: op,
+      headers: opAdmin,
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-type"]).toBe("image/jpeg");
@@ -855,10 +1015,14 @@ describe("camera auth: scope-holder access", () => {
     await pushFrame();
     await mintScope("agent-viewer", ["run_create"]);
 
+    // DECISIONS 00:53: a holder's claimed key alone is refused the camera; its proven wallet watches.
+    const claimed = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/camera/latest", headers: asKey("agent-viewer") });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/camera/latest",
-      headers: asKey("agent-viewer"),
+      headers: asProven("agent-viewer"),
     });
     expect(res.statusCode).toBe(200);
   });
@@ -868,12 +1032,14 @@ describe("camera auth: scope-holder access", () => {
 // CHAT RELAY
 // ═══════════════════════════════════════════════════════════════════════════
 
+// N126: a chat instruction is a decision (the device agent may act on it), so these calls, validation
+// included, send the admin key.
 describe("POST /api/relay/:kernelId/chat", () => {
   it("sends a chat message", async () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
-      headers: op,
+      headers: opAdmin,
       payload: { message: "Hello, robot!" },
     });
     expect(res.statusCode).toBe(201);
@@ -888,7 +1054,7 @@ describe("POST /api/relay/:kernelId/chat", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
-      headers: op,
+      headers: opAdmin,
       payload: {},
     });
     expect(res.statusCode).toBe(400);
@@ -898,7 +1064,7 @@ describe("POST /api/relay/:kernelId/chat", () => {
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
-      headers: op,
+      headers: opAdmin,
       payload: { message: "x".repeat(10_001) },
     });
     expect(res.statusCode).toBe(400);
@@ -908,23 +1074,38 @@ describe("POST /api/relay/:kernelId/chat", () => {
 describe("GET /api/relay/:kernelId/chat/messages", () => {
   it("returns conversation history", async () => {
     await mintScope("agent-1");
-    await app.inject({
+    // N126: a chat instruction is a decision, so the scope holder's own message is
+    // refused and stored nowhere; the admin sends the two messages it reads back.
+    const byHolder = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
       headers: asKey("agent-1"),
+      payload: { message: "msg 0" },
+    });
+    expect(byHolder.statusCode).toBe(403);
+    expect(byHolder.json().reason).toBe("operator_proof_required");
+    await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/chat",
+      headers: adminFor("agent-1"),
       payload: { message: "msg 1" },
     });
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: { message: "msg 2" },
     });
 
+    // DECISIONS 00:53: a chat read needs proof; the holder's claimed key alone is refused it, and
+    // its proven wallet reads the history.
+    const claimed = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/chat/messages", headers: asKey("agent-1") });
+    expect(claimed.statusCode).toBe(403);
+    expect(claimed.json().reason).toBe("operator_proof_required");
     const res = await app.inject({
       method: "GET",
       url: "/api/relay/kernel-test-1/chat/messages",
-      headers: asKey("agent-1"),
+      headers: asProven("agent-1"),
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().count).toBe(2);
@@ -933,10 +1114,11 @@ describe("GET /api/relay/:kernelId/chat/messages", () => {
 
 describe("GET /api/relay/:kernelId/chat/pending", () => {
   it("returns pending messages and marks them as processing", async () => {
+    // N126: the message is a chat instruction, a decision (the admin key).
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
-      headers: op,
+      headers: opAdmin,
       payload: { message: "pending msg" },
     });
 
@@ -960,12 +1142,14 @@ describe("GET /api/relay/:kernelId/chat/pending", () => {
 
 describe("POST /api/relay/:kernelId/chat/respond", () => {
   it("posts an agent response", async () => {
+    // N126: the message is a chat instruction, a decision (the admin key).
     const msgRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/chat",
-      headers: op,
+      headers: opAdmin,
       payload: { message: "Hello?" },
     });
+    expect(msgRes.statusCode).toBe(201);
     const messageId = msgRes.json().id;
 
     const res = await app.inject({
@@ -1002,12 +1186,14 @@ describe("POST /api/relay/:kernelId/chat/respond", () => {
 // again. The caller resubmits if it still wants the work.
 describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout (at-most-once)", () => {
   it("closes a claim that was never reported as failed/claim_timeout, and never redelivers it", async () => {
-    // Create a tool call
+    // Create a tool call (DECISIONS 00:53: the call and the result read need proof, opAdmin; the
+    // polls are the device's own, op). #6771: it names the operator's own scope.
+    const scopeId = await operatorScope(["health"]);
     const createRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
-      payload: { toolName: "health" },
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
     });
     const callId = createRes.json().id;
 
@@ -1055,7 +1241,7 @@ describe("GET /api/relay/:kernelId/tool-call/pending — claim timeout (at-most-
     const seen = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/tool-result/${callId}`,
-      headers: op,
+      headers: opAdmin,
     });
     expect(seen.json()).toMatchObject({ id: callId, status: "failed", error: "claim_timeout" });
 
@@ -1139,11 +1325,12 @@ describe("N4b-gw: no principal, no relay", () => {
 describe("N4b-gw: an authenticated stranger is refused on every route", () => {
   it.each(ROUTES)("$key answers 403 to a key that is neither operator nor grant holder", async ({ method, pattern }) => {
     // Real objects on kernel-test-1, so object-addressed routes reach their owner check.
+    // N126: the scoped write is a decision the holder can't make; the admin names its scope.
     const scopeId = await mintScope("agent-1", ["run_create"]);
     const callRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: { scopeId, toolName: "run_create", args: {} },
     });
     const callId = callRes.json().id as string;
@@ -1196,10 +1383,11 @@ describe("N4b-gw: the device side is the kernel operator's alone", () => {
 
   it.each(DEVICE_SIDE)("$key refuses a grant holder (scope holders command, never act as the device)", async ({ method, pattern }) => {
     const scopeId = await mintScope("agent-1", ["run_create"]);
+    // N126: the scoped write is a decision the holder can't make; the admin names its scope.
     const callRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: { scopeId, toolName: "run_create", args: {} },
     });
     const callId = callRes.json().id as string;
@@ -1215,11 +1403,14 @@ describe("N4b-gw: the device side is the kernel operator's alone", () => {
   });
 
   it("refuses a cross-kernel claim: operator-2 cannot claim kernel-test-1's calls", async () => {
+    // The call needs proof (DECISIONS 00:53: opAdmin) and names the operator's own scope (#6771);
+    // the claims below are the device side's.
+    const scopeId = await operatorScope(["health"]);
     await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: op,
-      payload: { toolName: "health" },
+      headers: opAdmin,
+      payload: { scopeId, toolName: "health" },
     });
     const res = await app.inject({
       method: "GET",
@@ -1252,10 +1443,11 @@ describe("N4b-gw: the device side is the kernel operator's alone", () => {
     expect(res.json().error).toBe("tool_result_not_yours");
     expect(failSpy).not.toHaveBeenCalled();
 
+    // A result read needs proof (DECISIONS 00:53): opAdmin.
     const check = await app.inject({
       method: "GET",
       url: `/api/relay/kernel-test-1/tool-result/${callId}`,
-      headers: op,
+      headers: opAdmin,
     });
     expect(check.json().status).toBe("claimed");
     failSpy.mockRestore();
@@ -1282,12 +1474,14 @@ describe("N4b-gw: the device side is the kernel operator's alone", () => {
   });
 
   it("answers chat only for this kernel's messages", async () => {
+    // N126: a chat instruction is a decision (the admin key, as operator-2).
     const other = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-2/chat",
-      headers: asKey(OPERATOR_2),
+      headers: op2Admin,
       payload: { message: "for kernel 2" },
     });
+    expect(other.statusCode).toBe(201);
     const otherId = other.json().id as string;
 
     await app.inject({
@@ -1328,10 +1522,11 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
     const scope1 = await mintScope("agent-1", ["run_create"]);
     await mintScope("agent-2", ["run_create"]);
 
+    // N126: the scoped write is a decision agent-1 can't make; the admin names agent-1's scope.
     const callRes = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: adminFor("agent-1"),
       payload: { scopeId: scope1, toolName: "run_create", args: {} },
     });
     const callId = callRes.json().id as string;
@@ -1343,8 +1538,10 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
       { method: "GET" as const, url: `/api/relay/kernel-test-1/scope/${scope1}/audit` },
       { method: "POST" as const, url: `/api/relay/kernel-test-1/scope/${scope1}/revoke` },
     ];
+    // DECISIONS 00:53: agent-2 is PROVEN, so each refusal is about agent-1's scope, not a missing
+    // proof (a claimed key is refused all of these anyway).
     for (const c of cases) {
-      const res = await app.inject({ ...c, headers: asKey("agent-2") });
+      const res = await app.inject({ ...c, headers: asProven("agent-2") });
       expect(res.statusCode, `${c.method} ${c.url}`).toBe(403);
     }
     const row = getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scope1)).get();
@@ -1370,36 +1567,107 @@ describe("N4b-gw: scopes are the operator's to grant", () => {
     expect(revoke.statusCode).toBe(404);
   });
 
-  it("makes a grant holder name its scope, even for a safe tool", async () => {
-    await mintScope("agent-1", ["run_create"]);
+  it("makes a grant holder name a scope that lists even a safe tool: unlisted, 403 tool_not_allowed and nothing queued (#6771)", async () => {
+    const scopeId = await mintScope("agent-1", ["run_create"]);
+    // DECISIONS 00:53: the guard admits a proven holder's tool call only under the scope the call
+    // names, so a scope-less safe call is refused there (operator_proof_required), before the
+    // handler's scope_required, which no holder reaches any more.
     const res = await app.inject({
       method: "POST",
       url: "/api/relay/kernel-test-1/tool-call",
-      headers: asKey("agent-1"),
+      headers: asProven("agent-1"),
       payload: { toolName: "health" },
     });
     expect(res.statusCode).toBe(403);
-    expect(res.json().error).toBe("scope_required");
+    expect(res.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    // #6771: naming its scope is not enough. The scope must list the tool, a safe one too (the
+    // manifest calling "health" safe authorizes nothing): refused, recorded as rejected and never
+    // queued, its budget untouched, and nothing for the executor's poll.
+    const named = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asProven("agent-1"),
+      payload: { scopeId, toolName: "health" },
+    });
+    expect(named.statusCode).toBe(403);
+    expect(named.json().reason).toBe("tool_not_allowed");
+    expect(getStore().db.select().from(toolCallRelay).all().map((c) => [c.status, c.error])).toEqual([["rejected", "tool_not_allowed"]]);
+    expect(getStore().db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.commandCount).toBe(0);
+    const poll = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/tool-call/pending", headers: op });
+    expect(poll.json().count).toBe(0);
+    // Under a scope that lists it, the holder's safe call is admitted.
+    const listed = await mintScope("agent-1", ["health"]);
+    const admitted = await app.inject({
+      method: "POST",
+      url: "/api/relay/kernel-test-1/tool-call",
+      headers: asProven("agent-1"),
+      payload: { scopeId: listed, toolName: "health" },
+    });
+    expect(admitted.statusCode).toBe(201);
   });
 
   it("grants nothing once the scope has expired or been revoked", async () => {
     await pushFrame();
     const scopeId = await mintScope("agent-1", ["run_create"]);
     const { db } = getStore();
+    // DECISIONS 00:53: the holder is PROVEN, so it watches while its scope is live, and each 403
+    // below comes from the scope's end, not from a missing proof.
+    const camera = () => app.inject({ method: "GET", url: "/api/relay/kernel-test-1/camera/latest", headers: asProven("agent-1") });
+    expect((await camera()).statusCode).toBe(200);
 
     db.update(executionScopes)
       .set({ expiresAt: new Date(Date.now() - 1000).toISOString() })
       .where(eq(executionScopes.id, scopeId))
       .run();
     for (const url of ["/api/relay/kernel-test-1/camera/latest", "/api/relay/kernel-test-1/manifest"]) {
-      const res = await app.inject({ method: "GET", url, headers: asKey("agent-1") });
+      const res = await app.inject({ method: "GET", url, headers: asProven("agent-1") });
       expect(res.statusCode, url).toBe(403);
     }
 
     const scope2 = await mintScope("agent-1", ["run_create"]);
+    expect((await camera()).statusCode).toBe(200);
     await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope2}/revoke`, headers: op });
-    const res = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/camera/latest", headers: asKey("agent-1") });
+    const res = await camera();
     expect(res.statusCode).toBe(403);
+  });
+});
+
+// N126: the kernel's own claimed key (the identity its operatorAddress records, #400's operator)
+// still runs the kernel's device side, but makes no decision: that needs the admin or a PROVEN
+// operator wallet. DECISIONS 00:53: nor may it make a safe tool call, which faces people and
+// agents. A revoke is not a decision: it takes the stop tier (#6677), so that key may revoke.
+describe("N126: the kernel's own claimed key is refused every relay decision", () => {
+  it("refuses its scope mint, chat instruction, writes and safe call, changing nothing; its device side and its revoke still run", async () => {
+    const scopeId = await mintScope("agent-1", ["run_create"]);
+    const decisions: Array<{ url: string; payload?: Record<string, unknown> }> = [
+      { url: "/api/relay/kernel-test-1/scope", payload: { createdBy: OPERATOR, allowedTools: ["run_create"] } },
+      { url: "/api/relay/kernel-test-1/chat", payload: { message: "start the run" } },
+      { url: "/api/relay/kernel-test-1/tool-call", payload: { scopeId, toolName: "run_create" } },
+      { url: "/api/relay/kernel-test-1/tool-call", payload: { toolName: "run_create" } },
+      // DECISIONS 00:53: a safe call needs proof too (was 201).
+      { url: "/api/relay/kernel-test-1/tool-call", payload: { toolName: "health" } },
+    ];
+    for (const { url, payload } of decisions) {
+      const res = await app.inject({ method: "POST", url, headers: op, ...(payload ? { payload } : {}) });
+      expect(res.statusCode, url).toBe(403);
+      expect(res.json().reason, url).toBe("operator_proof_required");
+    }
+    const { db } = getStore();
+    expect(db.select().from(executionScopes).all().map((s) => s.status)).toEqual(["active"]);
+    expect(db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.commandCount).toBe(0);
+    expect(db.select().from(toolCallRelay).all()).toHaveLength(0);
+    expect(db.select().from(ot2ChatMessages).all()).toHaveLength(0);
+
+    // It still runs the kernel's device side on that key: the executor's poll answers.
+    const poll = await app.inject({ method: "GET", url: "/api/relay/kernel-test-1/tool-call/pending", headers: op });
+    expect(poll.statusCode).toBe(200);
+    expect(poll.json().count).toBe(0);
+
+    // And it may revoke the scope (the stop tier, #6677): revoking only removes authority.
+    const revoke = await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scopeId}/revoke`, headers: op });
+    expect(revoke.statusCode).toBe(200);
+    expect(db.select().from(executionScopes).where(eq(executionScopes.id, scopeId)).get()!.status).toBe("revoked");
   });
 });
 
@@ -1427,15 +1695,18 @@ describe("N4b-gw: a call linked to another kernel's scope stays on its own kerne
 
   it("the other kernel's scope holder can't read the call's result; the operator can", async () => {
     const { id } = await crossLinkedCall("completed");
-    const holder = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${id}`, headers: asKey("holder-2") });
+    // DECISIONS 00:53: the holder is PROVEN, so its refusal is the cross-kernel link's, not a
+    // missing proof; the operator reads with proof (opAdmin).
+    const holder = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${id}`, headers: asProven("holder-2") });
     expect(holder.statusCode).toBe(403);
-    const operator = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${id}`, headers: op });
+    const operator = await app.inject({ method: "GET", url: `/api/relay/kernel-test-1/tool-result/${id}`, headers: opAdmin });
     expect(operator.statusCode).toBe(200);
   });
 
   it("the scope's audit on its own kernel does not list the other kernel's call", async () => {
     const { id, foreignScope } = await crossLinkedCall("completed");
-    const res = await app.inject({ method: "GET", url: `/api/relay/kernel-test-2/scope/${foreignScope}/audit`, headers: asKey("holder-2") });
+    // An audit read needs proof (DECISIONS 00:53): the holder's proven wallet.
+    const res = await app.inject({ method: "GET", url: `/api/relay/kernel-test-2/scope/${foreignScope}/audit`, headers: asProven("holder-2") });
     expect(res.statusCode).toBe(200);
     expect(JSON.stringify(res.json())).not.toContain(id);
     expect(JSON.stringify(res.json())).not.toContain("kernel-test-1 data");
@@ -1485,11 +1756,18 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
     }).run();
   }
 
-  /** Queue a write through the admission route, as the scope's holder. */
+  /**
+   * Queue a write through the admission route under the holder's scope. N126: a write tool call is
+   * a decision, so the holder's own key is refused and queues nothing; the admin names the scope.
+   */
   async function admit(holder: string, scopeId: string, toolName = "run_create") {
-    const res = await app.inject({
-      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: asKey(holder), payload: { scopeId, toolName },
-    });
+    const url = "/api/relay/kernel-test-1/tool-call";
+    const rowsBefore = getStore().db.select().from(toolCallRelay).all().length;
+    const byHolder = await app.inject({ method: "POST", url, headers: asKey(holder), payload: { scopeId, toolName } });
+    expect(byHolder.statusCode).toBe(403);
+    expect(byHolder.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(rowsBefore);
+    const res = await app.inject({ method: "POST", url, headers: adminFor(holder), payload: { scopeId, toolName } });
     expect(res.statusCode).toBe(201);
     return res.json().id as string;
   }
@@ -1544,21 +1822,22 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
     expect(row("tc-noscope")).toMatchObject({ status: "rejected", error: "scope_required" });
   });
 
-  it("still hands out the operator's scope-free safe call and a live scope's allowed write", async () => {
+  it("refuses the operator's scope-free safe call at dispatch (scope_required, never handed out), and still hands out a live scope's allowed write (#6771)", async () => {
     queue("tc-safe", "health", null, new Date(Date.now() - 10).toISOString());
     const scope = await mintScope("agent-q", ["run_create"]);
     const write = await admit("agent-q", scope);
     const body = await poll();
-    expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-safe", write]);
-    expect(row("tc-safe").status).toBe("claimed");
+    expect(body.calls.map((c: { id: string }) => c.id)).toEqual([write]);
+    expect(row("tc-safe")).toMatchObject({ status: "rejected", error: "scope_required", claimedAt: null });
     expect(row(write).status).toBe("claimed");
   });
 
   it("refused calls at the head of the queue do not hold back a valid one", async () => {
     const foreign = await mintScope("holder-2", ["run_create"], "kernel-test-2");
+    const own = await operatorScope(["health"]); // #6771: the valid call names the operator's own scope
     const t0 = Date.now() - 1_000;
     for (let i = 0; i < 6; i++) queue(`tc-bad-${i}`, "run_create", foreign, new Date(t0 + i).toISOString());
-    queue("tc-good", "health", null, new Date(t0 + 10).toISOString());
+    queue("tc-good", "health", own, new Date(t0 + 10).toISOString());
     const body = await poll();
     expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-good"]);
     for (let i = 0; i < 6; i++) expect(row(`tc-bad-${i}`).status).toBe("rejected");
@@ -1606,8 +1885,9 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
     }
 
     async function jobScope(holder: string, jobId: string) {
+      // N126: opening a scope is a decision (the admin key).
       const res = await app.inject({
-        method: "POST", url: "/api/relay/kernel-test-1/scope", headers: op,
+        method: "POST", url: "/api/relay/kernel-test-1/scope", headers: opAdmin,
         payload: { createdBy: holder, allowedTools: ["run_create"], jobId },
       });
       expect(res.statusCode).toBe(201);
@@ -1644,13 +1924,22 @@ describe("N4b-gw: dispatch re-checks each queued call's authority", () => {
 // Astra r2 finding 3 noted that object-owner routes do not require an ACTIVE
 // scope. That is the policy: a scope's creator keeps its own records (its
 // calls' results, the scope and its audit) and may still revoke it after the
-// scope ends. Nothing that commands or observes the device stays open to it.
+// scope ends (a revoke takes the stop tier, #6677). Nothing that commands or
+// observes the device stays open to it.
 describe("N4b-gw: a scope's creator keeps its own records after the scope ends", () => {
   it("reads its call's result, the scope and its audit, and may revoke; it can't queue, watch or chat", async () => {
     const scope = await mintScope("agent-past", ["run_create"]);
     const who = asKey("agent-past");
-    const call = await app.inject({
+    // N126: a scoped write is a decision, so the creator's own is refused and queues nothing;
+    // the admin queues the call under the creator's scope.
+    const own = await app.inject({
       method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: who, payload: { scopeId: scope, toolName: "run_create" },
+    });
+    expect(own.statusCode).toBe(403);
+    expect(own.json().reason).toBe("operator_proof_required");
+    expect(getStore().db.select().from(toolCallRelay).all()).toHaveLength(0);
+    const call = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: adminFor("agent-past"), payload: { scopeId: scope, toolName: "run_create" },
     });
     expect(call.statusCode).toBe(201);
     getStore().db.update(executionScopes)
@@ -1658,18 +1947,22 @@ describe("N4b-gw: a scope's creator keeps its own records after the scope ends",
       .where(eq(executionScopes.id, scope))
       .run();
 
-    const get = (url: string) => app.inject({ method: "GET", url, headers: who });
+    // DECISIONS 00:53: its records are read with proof, so by its proven wallet; and that proven
+    // wallet is refused the camera, the chat and a call, so those refusals come from the ended scope.
+    const proven = asProven("agent-past");
+    const get = (url: string) => app.inject({ method: "GET", url, headers: proven });
     expect((await get(`/api/relay/kernel-test-1/tool-result/${call.json().id}`)).statusCode).toBe(200);
     expect((await get(`/api/relay/kernel-test-1/scope/${scope}`)).statusCode).toBe(200);
     expect((await get(`/api/relay/kernel-test-1/scope/${scope}/audit`)).statusCode).toBe(200);
 
     const queued = await app.inject({
-      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: who, payload: { scopeId: scope, toolName: "health" },
+      method: "POST", url: "/api/relay/kernel-test-1/tool-call", headers: proven, payload: { scopeId: scope, toolName: "health" },
     });
     expect(queued.statusCode).toBe(403);
     expect((await get("/api/relay/kernel-test-1/camera/snapshot")).statusCode).toBe(403);
     expect((await get("/api/relay/kernel-test-1/chat/messages")).statusCode).toBe(403);
 
+    // A revoke takes the stop tier (#6677): the creator's own key.
     const revoke = await app.inject({ method: "POST", url: `/api/relay/kernel-test-1/scope/${scope}/revoke`, headers: who });
     expect(revoke.statusCode).toBe(200);
   });
@@ -1708,16 +2001,20 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     expect(rowOf("tc-safe-scoped")).toMatchObject({ status: "rejected", error: "scope_expired" });
   });
 
-  it("F2 control: the operator's scope-free safe call still dispatches", async () => {
+  it("F2 (#6771): the operator's scope-free safe call does not dispatch (rejected scope_required, never handed out); under its live scope that lists the tool, it does", async () => {
     seedCall("tc-safe-free", "home", null);
+    const scope = await operatorScope(["home"]);
+    seedCall("tc-safe-listed", "home", scope); // the control: the same call under the operator's live scope
     const body = await poll();
-    expect(body.calls.map((c: { id: string }) => c.id)).toContain("tc-safe-free");
-    expect(rowOf("tc-safe-free").status).toBe("claimed");
+    expect(body.calls.map((c: { id: string }) => c.id)).toEqual(["tc-safe-listed"]);
+    expect(rowOf("tc-safe-free")).toMatchObject({ status: "rejected", error: "scope_required", claimedAt: null });
+    expect(rowOf("tc-safe-listed").status).toBe("claimed");
   });
 
   it("F3: a legacy row cannot exceed maxCommands (budget re-derived from rows)", async () => {
+    // N126: opening a scope is a decision (the admin key).
     const res = await app.inject({
-      method: "POST", url: "/api/relay/kernel-test-1/scope", headers: op,
+      method: "POST", url: "/api/relay/kernel-test-1/scope", headers: opAdmin,
       payload: { createdBy: "agent-q", allowedTools: ["run_create"], maxCommands: 1 },
     });
     const scope = res.json().id as string;
@@ -1725,6 +2022,18 @@ describe("N4b-gw r4: dispatch re-checks safety, e-stop, live scope and budget", 
     seedCall("tc-legacy", "run_create", scope, "pending");  // an uncounted legacy row
     expect((await poll()).count).toBe(0);
     expect(rowOf("tc-legacy")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
+  });
+
+  it("F3 (#6771): a dispatched SAFE call counts too, so a legacy row behind it can't exceed maxCommands", async () => {
+    const res = await app.inject({
+      method: "POST", url: "/api/relay/kernel-test-1/scope", headers: opAdmin,
+      payload: { createdBy: "agent-q", allowedTools: ["health"], maxCommands: 1 },
+    });
+    const scope = res.json().id as string;
+    seedCall("tc-counted-safe", "health", scope, "claimed"); // one safe call already dispatched
+    seedCall("tc-legacy-safe", "health", scope, "pending");  // an uncounted legacy row
+    expect((await poll()).count).toBe(0);
+    expect(rowOf("tc-legacy-safe")).toMatchObject({ status: "rejected", error: "max_commands_reached" });
   });
 
   it("F1: an open circuit breaker blocks dispatch of an admitted call", async () => {
@@ -1800,12 +2109,18 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   const OTHER_KERNEL = "kernel-test-2";
   const HOLDER = "agent-r6";
 
-  const submit = (payload: Record<string, unknown>, headers: Record<string, string> = op) =>
+  // DECISIONS 00:53: a tool call needs proof, a safe one too, so the operator submits as opAdmin;
+  // the pending poll is the device's own side, on its claimed key (op). #6771: and every call names
+  // a scope that lists its tool, the operator's own included (operatorScope). No scope is minted
+  // while the stop is engaged or the policy unreadable, so each is minted before the stop.
+  const submit = (payload: Record<string, unknown>, headers: Record<string, string> = opAdmin) =>
     app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers, payload });
   const poll = () =>
     app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
+  // N126: opening a scope is a decision, and so is a scoped write: the holder can't make either, so
+  // this suite's mints send opAdmin and its scoped writes adminFor(HOLDER), naming the holder's scope.
   const mint = (payload: Record<string, unknown> = { createdBy: HOLDER, allowedTools: ["run_create"] }) =>
-    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: op, payload });
+    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: opAdmin, payload });
   // N31 (#575): the stop and the resume now need operator authority (a resume is a decision:
   // the admin or the proven operator wallet), so this suite sends the admin key.
   const stopRoute = (path: "emergency-stop" | "emergency-resume") =>
@@ -1877,8 +2192,9 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   // ── submit ────────────────────────────────────────────────────────────────
   describe("submit: POST /tool-call", () => {
     it("while stopped answers 409 kernel_emergency_stopped and queues nothing", async () => {
+      const scopeId = await operatorScope();
       engageStop();
-      const res = await submit({ toolName: "health" });
+      const res = await submit({ scopeId, toolName: "health" });
       expect(res.statusCode).toBe(409);
       expect(res.json()).toEqual({ error: "kernel_emergency_stopped" });
       expect(relayRows()).toHaveLength(0);
@@ -1887,7 +2203,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     it("while stopped refuses a scoped write before it spends the scope's budget", async () => {
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       engageStop();
-      const res = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+      const res = await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("kernel_emergency_stopped");
       expect(relayRows()).toHaveLength(0);
@@ -1904,18 +2220,26 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       });
       expect(unauthenticated.statusCode).toBe(401);
       expect((await submit({ toolName: "health" }, asKey("mallory"))).statusCode).toBe(403);
-      expect((await submit({})).statusCode).toBe(400);
-      // A holder that names no scope is refused for that, not told about the stop.
+      // N126: a call that names no tool is guarded as a write (a decision), so the admin key reaches validation.
+      expect((await submit({}, opAdmin)).statusCode).toBe(400);
+      // A holder that names no scope is refused, not told about the stop. N126: its write is a
+      // decision no grant makes, refused by the guard before the scope check (was scope_required).
+      // DECISIONS 00:53: so is its safe call, even proven: the guard admits a proven holder only
+      // under the scope its call names (was scope_required, which no holder reaches any more).
       const noScope = await submit({ toolName: "run_create" }, asKey(HOLDER));
       expect(noScope.statusCode).toBe(403);
-      expect(noScope.json().error).toBe("scope_required");
+      expect(noScope.json().reason).toBe("operator_proof_required");
+      const noScopeSafe = await submit({ toolName: "health" }, asProven(HOLDER));
+      expect(noScopeSafe.statusCode).toBe(403);
+      expect(noScopeSafe.json().reason).toBe("operator_proof_required");
       expect(relayRows()).toHaveLength(0);
     });
 
     it("a stop that lands while the safety governor is consulted still refuses the call (the read and the insert are one synchronous section)", async () => {
+      const scopeId = await operatorScope();
       const spy = governorThatRuns(() => engageStop());
       try {
-        const res = await submit({ toolName: "health" });
+        const res = await submit({ scopeId, toolName: "health" });
         expect(res.statusCode).toBe(409);
         expect(res.json().error).toBe("kernel_emergency_stopped");
         expect(relayRows()).toHaveLength(0);
@@ -1928,7 +2252,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       const spy = governorThatRuns(() => engageStop());
       try {
-        const res = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        const res = await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
         expect(res.statusCode).toBe(409);
         expect(res.json().error).toBe("kernel_emergency_stopped");
         expect(relayRows()).toHaveLength(0);
@@ -1944,12 +2268,12 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
         async () => ({ allowed: false, reason: "governor_denied" }) as never,
       );
       try {
-        expect((await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).statusCode).toBe(403);
+        expect((await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER))).statusCode).toBe(403);
       } finally {
         denied.mockRestore();
       }
       expect(scopeRows()[0].commandCount).toBe(0);
-      const queued = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+      const queued = await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
       expect(queued.statusCode).toBe(201);
       expect(scopeRows()[0].commandCount).toBe(1);
     });
@@ -1958,7 +2282,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       getStore().db.run(sql`CREATE TRIGGER r8_no_insert BEFORE INSERT ON tool_call_relay BEGIN SELECT RAISE(ABORT, 'r8 test'); END`);
       try {
-        const res = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        const res = await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
         expect(res.statusCode).toBeGreaterThanOrEqual(500);
       } finally {
         getStore().db.run(sql`DROP TRIGGER IF EXISTS r8_no_insert`);
@@ -1978,8 +2302,8 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
         return { allowed: true, executed: false } as never;
       });
       try {
-        const a = submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
-        const b = submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+        const a = submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
+        const b = submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
         while (consulted < 2) await new Promise((resolve) => setTimeout(resolve, 5));
         release();
         const codes = [(await a).statusCode, (await b).statusCode].sort();
@@ -1992,9 +2316,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a policy that turns unreadable while the safety governor is consulted refuses the call 503", async () => {
+      const scopeId = await operatorScope();
       const spy = governorThatRuns(() => setPolicyText("{not json"));
       try {
-        const res = await submit({ toolName: "health" });
+        const res = await submit({ scopeId, toolName: "health" });
         expect(res.statusCode).toBe(503);
         expect(res.json()).toEqual({ error: "policy_unavailable" });
         expect(relayRows()).toHaveLength(0);
@@ -2004,7 +2329,8 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("control: with no policy row for the kernel, submit queues the call and pending dispatches it", async () => {
-      const queued = await submit({ toolName: "health" });
+      const scopeId = await operatorScope();
+      const queued = await submit({ scopeId, toolName: "health" });
       expect(queued.statusCode).toBe(201);
       expect(rowOf(queued.json().id).status).toBe("pending");
 
@@ -2020,22 +2346,25 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       ["null", null],
       ['""', ""],
     ])("control: emergencyStop %s is not a stop", async (_label, value) => {
+      const scopeId = await operatorScope();
       setPolicy({ version: 1, emergencyStop: value });
-      expect((await submit({ toolName: "health" })).statusCode).toBe(201);
+      expect((await submit({ scopeId, toolName: "health" })).statusCode).toBe(201);
     });
 
     it("control: a policy without an emergencyStop key is not a stop", async () => {
+      const scopeId = await operatorScope();
       setPolicy({ version: 1 });
-      expect((await submit({ toolName: "health" })).statusCode).toBe(201);
+      expect((await submit({ scopeId, toolName: "health" })).statusCode).toBe(201);
     });
   });
 
   // ── pending ───────────────────────────────────────────────────────────────
   describe("pending: GET /tool-call/pending", () => {
     it("while stopped withholds: 200 with calls [] and emergencyStop true, and the calls queued before the stop end rejected", async () => {
-      const safe = (await submit({ toolName: "health" })).json().id as string;
+      const opScopeId = await operatorScope();
+      const safe = (await submit({ scopeId: opScopeId, toolName: "health" })).json().id as string;
       const scopeId = await mintScope(HOLDER, ["run_create"]);
-      const scoped = (await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).json().id as string;
+      const scoped = (await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER))).json().id as string;
       engageStop();
 
       const res = await poll();
@@ -2060,7 +2389,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a stop that lands while the poll awaits the safety governor rejects the row being checked instead of claiming it", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const spy = governorThatRuns(() => engageStop());
       try {
         const res = await poll();
@@ -2073,9 +2402,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a stop that lands mid-poll rejects that row and every row behind it; a row claimed before the stop is returned", async () => {
-      seedCall("tc-1");
-      seedCall("tc-2");
-      seedCall("tc-3");
+      const scopeId = await operatorScope(["home"]);
+      seedCall("tc-1", { scopeId });
+      seedCall("tc-2", { scopeId });
+      seedCall("tc-3", { scopeId });
       const spy = governorThatRuns((n) => {
         if (n === 2) engageStop();
       });
@@ -2092,9 +2422,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a policy that turns unreadable mid-poll leaves that row and every later row queued, even if it reads again; a row claimed before it is returned", async () => {
-      seedCall("tc-1");
-      seedCall("tc-2");
-      seedCall("tc-3");
+      const scopeId = await operatorScope(["home"]);
+      seedCall("tc-1", { scopeId });
+      seedCall("tc-2", { scopeId });
+      seedCall("tc-3", { scopeId });
       const spy = governorThatRuns((n) => {
         if (n === 2) setPolicyText("{not json");
         // Were the poll to go on past tc-2, the policy reads clear again here.
@@ -2152,14 +2483,14 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     }
 
     it("control: with nothing changed while the governor is held, the call is claimed and returned", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const res = await pollWhileGovernorIsHeld(() => {});
       expect(idsOf(res)).toEqual(["tc-a"]);
       expect(rowOf("tc-a").status).toBe("claimed");
     });
 
     it("an emergency stop that lands while the governor is held is seen before the claim", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const res = await pollWhileGovernorIsHeld(engageStop);
       expect(res.statusCode).toBe(200);
       expect(res.json().calls).toEqual([]);
@@ -2196,7 +2527,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("a circuit breaker that opens while the governor is held does not dispatch its call", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const gateway = getSafetyGateway();
       gateway.resetCircuit(KERNEL);
       const res = await pollWhileGovernorIsHeld(() => {
@@ -2219,7 +2550,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("control: a breaker whose cooldown elapsed lets its test command through (half-open is not open)", async () => {
-      seedCall("tc-a");
+      seedCall("tc-a", { scopeId: await operatorScope(["home"]) });
       const gateway = getSafetyGateway();
       gateway.resetCircuit(KERNEL);
       for (let failure = 0; failure < 3; failure++) gateway.recordDeviceFailure(KERNEL);
@@ -2250,8 +2581,9 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     });
 
     it("serves the queue behind a timed-out claim without handing the timed-out call out again", async () => {
-      seedCall("tc-stale", { status: "claimed", claimedAt: ago(130_000) });
-      seedCall("tc-next");
+      const scopeId = await operatorScope(["home"]);
+      seedCall("tc-stale", { status: "claimed", claimedAt: ago(130_000), scopeId });
+      seedCall("tc-next", { scopeId });
       const res = await poll();
       expect(idsOf(res)).toEqual(["tc-next"]);
       expect(rowOf("tc-stale")).toMatchObject({ status: "failed", error: "claim_timeout" });
@@ -2387,9 +2719,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       expect(revoke.statusCode).toBe(200);
       expect(revoke.json().status).toBe("revoked");
 
-      const read = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}`, headers: op });
+      // Reads need proof (DECISIONS 00:53): opAdmin. The result post below is the device's own (op).
+      const read = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}`, headers: opAdmin });
       expect(read.statusCode).toBe(200);
-      const audit = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}/audit`, headers: op });
+      const audit = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}/audit`, headers: opAdmin });
       expect(audit.statusCode).toBe(200);
 
       // The device still reports what an in-flight call did.
@@ -2403,7 +2736,7 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
       expect(result.json().status).toBe("completed");
 
       // No frame was ever pushed, so the camera answers 404: not 409 or 503.
-      const camera = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/camera/snapshot`, headers: op });
+      const camera = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/camera/snapshot`, headers: opAdmin });
       expect(camera.statusCode).toBe(404);
     });
   });
@@ -2419,7 +2752,12 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     beforeEach(() => setPolicy({ version: 1, emergencyStop: value }));
 
     it("submit answers 409", async () => {
-      const res = await submit({ toolName: "health" });
+      // #6771: the call names the operator's scope, and none is minted while stopped, so it dates
+      // from before the stop: lift this group's stop for the mint, then engage it again.
+      getStore().db.run(sql`DELETE FROM operator_policies`);
+      const scopeId = await operatorScope();
+      setPolicy({ version: 1, emergencyStop: value });
+      const res = await submit({ scopeId, toolName: "health" });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("kernel_emergency_stopped");
       expect(relayRows()).toHaveLength(0);
@@ -2454,7 +2792,12 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     beforeEach(() => setPolicyText(text));
 
     it("submit answers 503 policy_unavailable and queues nothing", async () => {
-      const res = await submit({ toolName: "health" });
+      // #6771: the call names the operator's scope, and none is minted while the policy is
+      // unreadable, so it dates from before: lift this group's row for the mint, then write it again.
+      getStore().db.run(sql`DELETE FROM operator_policies`);
+      const scopeId = await operatorScope();
+      setPolicyText(text);
+      const res = await submit({ scopeId, toolName: "health" });
       expect(res.statusCode).toBe(503);
       expect(res.json()).toEqual({ error: "policy_unavailable" });
       expect(relayRows()).toHaveLength(0);
@@ -2487,9 +2830,10 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
   // ── the stop route, and a resume ──────────────────────────────────────────
   describe("the stop route and a resume", () => {
     it("rejects the calls still queued, so a resume cannot restart them even though the node never polled during the stop", async () => {
-      const queuedSafe = (await submit({ toolName: "health" })).json().id as string;
+      const opScopeId = await operatorScope();
+      const queuedSafe = (await submit({ scopeId: opScopeId, toolName: "health" })).json().id as string;
       const scopeId = await mintScope(HOLDER, ["run_create"]);
-      const queuedScoped = (await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).json().id as string;
+      const queuedScoped = (await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER))).json().id as string;
       seedCall("tc-inflight", { status: "claimed", claimedAt: new Date().toISOString() });
       seedCall("tc-elsewhere", { kernelId: OTHER_KERNEL });
 
@@ -2521,13 +2865,13 @@ describe("N4b-gw r6: the emergency stop reaches the relay", () => {
     it("refuses submit and mint while stopped, and after the resume a new call and the scope minted before the stop work again", async () => {
       const scopeId = await mintScope(HOLDER, ["run_create"]);
       expect((await stopRoute("emergency-stop")).statusCode).toBe(200);
-      expect((await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER))).statusCode).toBe(409);
+      expect((await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER))).statusCode).toBe(409);
       expect((await mint()).statusCode).toBe(409);
       expect(relayRows()).toHaveLength(0);
 
       expect((await stopRoute("emergency-resume")).statusCode).toBe(200);
 
-      const scoped = await submit({ scopeId, toolName: "run_create", args: {} }, asKey(HOLDER));
+      const scoped = await submit({ scopeId, toolName: "run_create", args: {} }, adminFor(HOLDER));
       expect(scoped.statusCode).toBe(201);
       expect((await mint()).statusCode).toBe(201);
       expect(idsOf(await poll())).toEqual([scoped.json().id]);
@@ -2552,8 +2896,13 @@ describe("N4b-gw r7 F3: the execution lease", () => {
     app.inject({ method: "POST", url: `/api/relay/${kernel}/tool-call/${callId}/start`, headers, payload: { claimToken } });
   const sha256 = (t: string) => createHash("sha256").update(t, "utf8").digest("hex");
 
+  /**
+   * The operator's call needs proof (DECISIONS 00:53: opAdmin) and names its own scope that lists the
+   * tool (#6771); the polls and starts below are the device's (op).
+   */
   async function submit(toolName = "health"): Promise<string> {
-    const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: op, payload: { toolName } });
+    const scopeId = await operatorScope([toolName]);
+    const res = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: opAdmin, payload: { scopeId, toolName } });
     expect(res.statusCode).toBe(201);
     return res.json().id as string;
   }
@@ -2645,8 +2994,9 @@ describe("N4b-gw r7 F3: the execution lease", () => {
   });
 
   it("a scope that expired after the claim refuses the start", async () => {
-    const scope = await mintScope("agent-f3", ["run_create"]);
-    const res0 = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: asKey("agent-f3"), payload: { toolName: "home", scopeId: scope } });
+    // home is a physical safe_control, so the scope must allow it (#579 r1); it needs proof too (DECISIONS 00:53).
+    const scope = await mintScope("agent-f3", ["run_create", "home"]);
+    const res0 = await app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers: asProven("agent-f3"), payload: { toolName: "home", scopeId: scope } });
     expect(res0.statusCode).toBe(201);
     const id = res0.json().id as string;
     const poll = await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op });
@@ -2694,8 +3044,9 @@ describe("N4b-gw r7 F3: the execution lease", () => {
   });
 
   it("an executing call counts against its scope's command budget", async () => {
+    // N126: opening a scope is a decision (the admin key).
     const res = await app.inject({
-      method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: op,
+      method: "POST", url: `/api/relay/${KERNEL}/scope`, headers: opAdmin,
       payload: { createdBy: "agent-budget", allowedTools: ["run_create"], maxCommands: 1 },
     });
     const scope = res.json().id as string;

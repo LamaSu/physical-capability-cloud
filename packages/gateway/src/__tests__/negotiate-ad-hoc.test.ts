@@ -28,9 +28,19 @@ import { schema } from "@pcc/store";
 
 const { shopKernels, capabilities } = schema;
 
+// N133 (the steward's DECISIONS 01:01): a session's buyer is the caller's proven wallet, or the
+// gateway admin acts for it, and only the buyer or the admin commits it. This suite has no caller
+// stand-in and its buyer ("test-agent") is not a wallet, so the admin creates and commits each
+// session, and the up-front 4xx checks (missing kernel, wrong kernel) are reached past the buyer.
+const ADMIN = "negotiate-ad-hoc-admin";
+const asAdmin = { "x-admin-key": ADMIN };
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: false });
 
   // Seed kernels + capabilities to match the live demo fixtures
@@ -132,6 +142,8 @@ describe("Ad-hoc capability negotiate + build/options", () => {
   afterEach(async () => {
     if (app) await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   // ════════════════════════════════════════════════════════════════════
@@ -143,6 +155,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asAdmin,
         payload: {
           userAgentId: "test-agent",
           kernelId: "kernel_mqfmpq8u_pk81",
@@ -169,6 +182,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asAdmin,
         payload: {
           userAgentId: "test-agent",
           kernelId: "kernel_mqfm6xuw_1151",
@@ -191,6 +205,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asAdmin,
         payload: {
           userAgentId: "test-agent",
           kernelId: "kernel-does-not-exist",
@@ -206,6 +221,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asAdmin,
         payload: {
           userAgentId: "test-agent",
           kernelId: "kernel_mqfmpq8u_pk81",
@@ -223,6 +239,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const create = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asAdmin,
         payload: {
           userAgentId: "test-agent",
           kernelId: "kernel_mqfmpq8u_pk81",
@@ -252,6 +269,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const commit = await app.inject({
         method: "POST",
         url: `/api/negotiate/session/${sessionId}/commit`,
+        headers: asAdmin,
       });
       if (commit.statusCode !== 200) console.error("[commit]", commit.statusCode, commit.body);
       expect(commit.statusCode).toBe(200);
@@ -272,6 +290,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const create = await app.inject({
         method: "POST",
         url: "/api/negotiate/session",
+        headers: asAdmin,
         payload: {
           userAgentId: "test-agent",
           kernelId: "kernel_mqfm6xuw_1151",
@@ -301,6 +320,7 @@ describe("Ad-hoc capability negotiate + build/options", () => {
       const commit = await app.inject({
         method: "POST",
         url: `/api/negotiate/session/${sessionId}/commit`,
+        headers: asAdmin,
       });
       if (commit.statusCode !== 200) console.error("[pizza commit]", commit.statusCode, commit.body);
       expect(commit.statusCode).toBe(200);

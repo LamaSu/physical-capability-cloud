@@ -26,6 +26,7 @@ import {
   __resetA2ATasksForTest,
 } from "../routes/a2a-tasks.js";
 import { initStore, closeStore, getStore } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
 import { schema, eq } from "@pcc/store";
 
 const { negotiationSessions, shopKernels, capabilities } = schema;
@@ -33,11 +34,23 @@ const { negotiationSessions, shopKernels, capabilities } = schema;
 const KERNEL = "kernel-a2a-test";
 const CAP = "fdm";
 
+// N133 (the steward's DECISIONS 01:01): pcc-quote/pcc-submit bind the session's buyer to the
+// caller's proven identity (its SIWE session's wallet), or the gateway admin acts for it. These
+// buyers are labels, not wallets, so the admin acts for them: the admin secret, with a key, as
+// A2A's own gate wants a key or a SIWE session (PCC_A2A_AUTH_DISABLED waives that gate here).
+const ADMIN = "a2a-commit-correctness-admin";
+let savedAdminKey: string | undefined;
+let asAdmin: Record<string, string> = {};
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.PCC_A2A_AUTH_DISABLED = "true";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
+  const key = provisionApiKey({ operatorId: "a2a-commit-correctness-admin-console" }).rawKey;
+  asAdmin = { authorization: `Bearer ${key}`, "x-admin-key": ADMIN };
 
   const { db } = getStore();
   const now = new Date().toISOString();
@@ -90,7 +103,7 @@ async function sendSkill(
     method: "POST",
     url: "/a2a/tasks/send",
     payload: rpcRequest(id, "tasks/send", { skill, params }),
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...asAdmin },
   });
 }
 
@@ -110,6 +123,8 @@ describe("A2A commit-path correctness (finding #1 / A-1)", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   // ── A-1a/b/c — liveness gate on the A2A commit path ──────────────────────
