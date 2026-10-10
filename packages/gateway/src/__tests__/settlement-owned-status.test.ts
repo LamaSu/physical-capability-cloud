@@ -11,7 +11,7 @@
  *
  * Who may write a job's status (owner checks) is gateway's N85(b), in WP-C.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { afterAll, describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
@@ -23,6 +23,21 @@ import { closeWorkflowStore } from "../workflow-store.js";
 import { isWriteEnabled } from "../contracts/escrow-client.js";
 import { initStore, closeStore, getRepos, getStore } from "../db.js";
 import { schema } from "@pcc/store";
+
+// N31c (#575 stack; the steward's #6540): capability create, device registration, the operator
+// heartbeat, evidence and job status now take the kernel-ownership guard. This suite tests the
+// routes' own logic, so its apps act with the admin key unless a request sets its own.
+const N31C_ADMIN = "n31c-test-admin-secret";
+const PREV_N31C_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31C_ADMIN;
+afterAll(() => {
+  if (PREV_N31C_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N31C_ADMIN;
+});
+const asN31cAdmin = async (req: { headers: Record<string, unknown> }) => {
+  if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N31C_ADMIN;
+};
+
 
 // The same I/O mocks as paid-job-flow.test.ts: evidence storage (IPFS), the
 // escrow client and batch settlement. None of them decides a job's status.
@@ -75,6 +90,7 @@ beforeEach(async () => {
   initStore({ seed: true });
   resetSettlementService();
   app = Fastify({ logger: false });
+  app.addHook("onRequest", asN31cAdmin);
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
   // The legacy OT-2 relay and scope routes are retired (N4b-gw, #400); no test here calls them.

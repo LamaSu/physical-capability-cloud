@@ -850,6 +850,7 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/operator/policy/kernel-cvp-4",
+      headers: ADMIN_HEADERS, // N31c (#6488): the policy read takes the guard
     });
     expect(res.statusCode).toBe(200);
     expect(res.json().policy.minCaptureClass).toBe("CC4");

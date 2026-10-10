@@ -622,7 +622,11 @@ describe("verdict 102g: offers are claims, the report schema is contract v1, and
     expect(rows()).toBe(before);
     const listed = await app.inject({ method: "GET", url: `/api/capabilities/by-kernel/${kernelId}`, headers: auth });
     expect(JSON.stringify(listed.json())).not.toContain("lab.absorbance");
-    // create_capability's route stores a capability that can be read back.
+    // create_capability's route stores a capability that can be read back. N31c: a capability is
+    // published only on a registered kernel by its operator, so the same key registers the kernel.
+    const registered = await app.inject({ method: "POST", url: "/api/kernels", headers: auth,
+      payload: { id: "kernel_create_probe", name: "create probe", location: { lat: 1, lng: 1 }, physicalAddress: "x" } });
+    expect(registered.statusCode, registered.body).toBeLessThan(300);
     const created = await app.inject({ method: "POST", url: tool("create_capability").endpoint.path, headers: auth,
       payload: { kernelId: "kernel_create_probe", type: "lab.absorbance", name: "probe capability" } });
     expect(created.statusCode, created.body).toBeLessThan(300);

@@ -20,6 +20,7 @@ import { extractNodeSignedBundle } from "../services/device-evidence-settlement.
 import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -119,6 +120,11 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           timestamp: new Date().toISOString(),
         };
       }
+
+      // N31c (the steward's #6540: decision-level, evidence feeds the money path): only the admin
+      // or the job's kernel's PROVEN operator wallet may store evidence for the job. Any key could.
+      const refusal = refuseKernelRequest(req, typeof job.kernelId === "string" ? job.kernelId : "", "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       // The stored bundle belongs to the job's kernel. A body naming another kernel is
       // refused, never stored under it (N80: stored evidence tells the truth).
@@ -250,9 +256,13 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
     const { kernelId, status = "online", capabilities, timestamp } = req.body ?? {};
 
-    if (!kernelId) {
+    if (!kernelId || typeof kernelId !== "string") {
       return reply.code(400).send({ error: "kernelId required" });
     }
+    // N31c: a heartbeat sets the kernel's status and upserts its capabilities: the kernel's own
+    // principal, its proven wallet or the admin (same rule as POST /api/kernels/:kernelId/heartbeat).
+    const refusal = refuseKernelRequest(req, kernelId, "operate");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
     return sendResult(reply, result);
@@ -284,6 +294,14 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         error: "invalid_status",
         valid: [...JOB_STATUSES],
       });
+    }
+
+    // N31c: a job's status is its kernel's to report: the kernel's own principal, its proven
+    // wallet or the admin. Any key could set any job's status. An unknown job keeps its answer.
+    const target = getRepos().jobs.findById(jobId) as { kernelId?: unknown } | undefined;
+    if (target) {
+      const refusal = refuseKernelRequest(req, typeof target.kernelId === "string" ? target.kernelId : "", "operate");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
     }
 
     try {

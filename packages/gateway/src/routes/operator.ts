@@ -3,7 +3,14 @@ import type { OperatorPolicy } from "@pcc/spec";
 import { DEFAULT_OPERATOR_POLICY } from "@pcc/spec";
 import { getStore } from "../db.js";
 import { schema, eq, and } from "@pcc/store";
-import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import {
+  AUTHENTICATION_REQUIRED,
+  authorityOf,
+  isAnonymous,
+  kernelsOperatedByProvenWallet,
+  refuseKernelAction,
+  refuseKernelRequest,
+} from "../auth/kernel-authority.js";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay } = schema;
 
@@ -91,6 +98,11 @@ export async function operatorRoutes(app: FastifyInstance) {
   app.get<{ Params: { kernelId: string } }>(
     "/api/operator/policy/:kernelId",
     async (req, reply) => {
+      // N122 (#6488): the kernel's own (claimed) principal, a proven operator wallet or the admin.
+      // The stop flag is the operator's to read (the starter runbook reads it with its own key);
+      // it used to be served for any kernel to any key.
+      const refusal = refuseKernelRequest(req, req.params.kernelId, "stop_or_submit");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
       let row;
       try {
         const { db } = getStore();
@@ -370,6 +382,30 @@ export async function operatorRoutes(app: FastifyInstance) {
     const kernelId = query.kernelId as string | undefined;
     const status = query.status as string | undefined;
 
+    // N122 (#6488): approvals carry job parameters, so only the admin or a PROVEN wallet reads
+    // them, and a proven wallet only its own kernels' (a list never counts or shows another
+    // operator's). Any key used to read every kernel's approvals.
+    const authority = authorityOf(req);
+    if (isAnonymous(authority)) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    let readable: Set<string> | null = null;
+    if (!authority.admin) {
+      if (authority.provenWallet === null) {
+        return reply.code(403).send({
+          error: "identity_unverified",
+          message: "Approvals carry job parameters: they are shown only to the gateway admin or a wallet you proved (wallet sign-in proof, WP-A).",
+        });
+      }
+      try {
+        readable = kernelsOperatedByProvenWallet(authority.provenWallet);
+      } catch (err) {
+        req.log.warn({ err }, "operator approvals: kernel ownership read failed");
+        return reply.code(503).send({ error: "read_failed", message: "The approvals could not be read. Try again shortly." });
+      }
+      if (kernelId !== undefined && !readable.has(kernelId)) {
+        return reply.code(404).send({ error: "kernel_not_found", message: "No kernel with this id is registered." });
+      }
+    }
+
     try {
       const { db } = getStore();
       let rows;
@@ -390,7 +426,7 @@ export async function operatorRoutes(app: FastifyInstance) {
         rows = db.select().from(pendingApprovals).all();
       }
 
-      return { approvals: rows };
+      return { approvals: readable === null ? rows : rows.filter((r) => readable!.has(r.kernelId)) };
     } catch (err) {
       // A failed read is not "no approvals": an empty list here would hide recorded
       // approvals during an outage. Same refusal as the operator policy read above.

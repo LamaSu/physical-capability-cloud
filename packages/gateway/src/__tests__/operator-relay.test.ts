@@ -15,6 +15,21 @@ import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
 
+// N31c (#575 stack; the steward's #6540): capability create, device registration, the operator
+// heartbeat, evidence and job status now take the kernel-ownership guard. This suite tests the
+// routes' own logic, so its apps act with the admin key unless a request sets its own.
+const N31C_ADMIN = "n31c-test-admin-secret";
+const PREV_N31C_ADMIN = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31C_ADMIN;
+afterAll(() => {
+  if (PREV_N31C_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_N31C_ADMIN;
+});
+const asN31cAdmin = async (req: { headers: Record<string, unknown> }) => {
+  if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N31C_ADMIN;
+};
+
+
 /** A real device-signed (#236) evidence bundle in the wire form the node produces (hex Ed25519
  *  sig, truncated EVM-looking signer): LO-EV events, and the bundle hash computed from them and
  *  signed, as kernel-sdk's job-handler does. */
@@ -57,6 +72,7 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+  app.addHook("onRequest", asN31cAdmin);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);

@@ -16,6 +16,7 @@ interface BatchSlotClaim {
   amount: string; escrowAddress?: string; claimedAt: string;
 }
 import { batchTracker } from "../services.js";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 import {
   gateJobRead,
@@ -230,6 +231,12 @@ export async function batchRoutes(app: FastifyInstance) {
     if (kernels.kernels !== null && !kernels.kernels.has(body.kernelId)) {
       return reply.status(403).send({ error: "forbidden", message: "Only the kernel's operator or an admin may open a shared batch on it." });
     }
+
+    // N31c (the body/query inventory; the steward's #6540): a shared batch offers slots on the kernel it names, at a price, so it needs that kernel's
+    // operator's DECISION (DECISIONS 01:25: acting as the operator, or spending a paid resource):
+    // the admin or the PROVEN operator wallet, never a claimed key.
+    const refusal = refuseKernelRequest(req, String(body.kernelId), "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const batch: SharedBatch = {
       id: `sbatch-${crypto.randomUUID().slice(0, 12)}`,

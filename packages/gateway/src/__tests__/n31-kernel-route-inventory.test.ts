@@ -120,6 +120,29 @@ const COMPUTED_PATHS: Record<string, string> = {
   "POST routes/template-session.ts:`${prefix}/:id/build-agent`": "a template session (:id is the session); no kernel id",
 };
 
+/**
+ * N31c (the steward's #6540): mutating routes that name their kernel in the BODY or the QUERY,
+ * which check B cannot see. Each must be guarded (its answer used), or EXACTLY one entry here.
+ * This inventory found 18. Five that wrote kernel-owned state for any kernel now take the guard
+ * (batches/shared, compliance/profiles, dht/announce, lit/provision, operator/support). These 13
+ * await a witnessed classification or a guard; each comment is the owner's preliminary reading.
+ */
+const KNOWN_UNCLASSIFIED_BODY: Record<string, string> = {
+  "POST /api/carrier/shipments": "money: buys a shipping label; its own ownership check, not the shared guard",
+  "POST /api/jobs/submit": "buyer_action: the caller (actorId) buys from the kernel",
+  "POST /api/jobs/submit-from-discovery": "buyer_action, but it mints a write scope for any userAgentId (escalated HIGH, #6727)",
+  "POST /api/lob/letters": "money: buys a letter on the deployment's balance; its own ownership check",
+  "POST /api/negotiate/session": "buyer_action, but userAgentId comes from the body unbound",
+  "POST /api/orchestrator/workflows": "no_kernel_write: a stub that returns an id and stores nothing",
+  "POST /api/print-and-mail/:jobId/handoff": "caller_owned_record: the driver's own handoff attestation",
+  "POST /api/protocols/:id/runs": "no_kernel_write: mints a run id it never stores",
+  "POST /api/protocols/:id/validate": "no_kernel_write: validates a protocol against the kernel",
+  "POST /api/requests": "buyer_action: a request naming a kernel",
+  "POST /api/requests/match": "no_kernel_write: matching",
+  "POST /api/setup/generate-config": "no_kernel_write: computes a config and returns it",
+  "POST /api/templates/machines": "caller_owned_record: the author's template (authorId = caller)",
+};
+
 interface RouteSite {
   key: string;
   file: string;
@@ -129,6 +152,8 @@ interface RouteSite {
   computed: boolean;
   /** The handler reads req.params.kernelId. */
   readsKernelParam: boolean;
+  /** The handler reads a kernelId from req.body or req.query (N31c). */
+  readsKernelBody: boolean;
 }
 
 interface Scan {
@@ -350,6 +375,38 @@ function readsKernelParam(handler: ts.Node): boolean {
   return found;
 }
 
+/**
+ * N31c (the steward's #6540): whether a handler reads a kernelId from req.body or req.query, directly
+ * (req.body.kernelId, req.query["kernelId"]), by destructuring (const { kernelId } = req.body ?? {}),
+ * or through a local alias of the body or query (const body = req.body as X; body.kernelId).
+ */
+function readsKernelBodyOrQuery(handler: ts.Node): boolean {
+  const aliases = new Set<string>();
+  const strip = (e: ts.Expression): ts.Expression => {
+    for (let s = unwrap(e); ; ) {
+      if (ts.isBinaryExpression(s) && s.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) s = unwrap(s.left);
+      else return s;
+    }
+  };
+  const isBodyOrQuery = (e: ts.Expression): boolean => {
+    const s = strip(e);
+    if (ts.isPropertyAccessExpression(s) && (s.name.text === "body" || s.name.text === "query")) return true;
+    return ts.isIdentifier(s) && aliases.has(s.text);
+  };
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isVariableDeclaration(n) && n.initializer && ts.isIdentifier(n.name) && isBodyOrQuery(n.initializer)) aliases.add(n.name.text);
+    if (ts.isPropertyAccessExpression(n) && n.name.text === "kernelId" && isBodyOrQuery(n.expression)) found = true;
+    else if (ts.isElementAccessExpression(n) && ts.isStringLiteralLike(n.argumentExpression) && n.argumentExpression.text === "kernelId" && isBodyOrQuery(n.expression)) found = true;
+    else if (ts.isVariableDeclaration(n) && ts.isObjectBindingPattern(n.name) && n.initializer && isBodyOrQuery(n.initializer) &&
+      n.name.elements.some((el) => (el.propertyName ?? el.name).getText() === "kernelId")) found = true;
+    else ts.forEachChild(n, visit);
+  };
+  visit(handler);
+  return found;
+}
+
 /** The name a table reference uses: an identifier, `x.table`, or `x["table"]`. */
 function tableName(e: ts.Expression): string | null {
   const u = unwrap(e);
@@ -478,6 +535,7 @@ function scanSource(fileName: string, text: string): Scan {
               (hookAt !== undefined && hookAt < n.getStart(sf)),
             computed: resolved === undefined,
             readsKernelParam: readsKernelParam(handlerNode(last)),
+            readsKernelBody: readsKernelBodyOrQuery(handlerNode(last)),
           };
           routes.push(site);
           routeOf.set(n, site);
@@ -804,6 +862,13 @@ describe("N31 route inventory: packages/gateway/src", () => {
     expect(computed.filter((r) => r.readsKernelParam).map((r) => r.key)).toEqual([]);
   });
 
+  it("C (N31c): every mutating route that names a kernel in its body or query is guarded, or exactly KNOWN_UNCLASSIFIED_BODY", () => {
+    const bodyRoutes = scan.routes.filter((r) => !isKernelRoute(r) && r.readsKernelBody);
+    expect(bodyRoutes.length, "the scan found the body/query kernel routes").toBeGreaterThan(20);
+    const unguarded = bodyRoutes.filter((r) => !r.guarded).map((r) => r.key).sort();
+    expect(unguarded).toEqual(Object.keys(KNOWN_UNCLASSIFIED_BODY).sort());
+  });
+
   it("B: every mutating kernel route is guarded, or exactly one of KNOWN_UNGUARDED or CLASSIFIED", () => {
     const kernelRoutes = scan.routes.filter(isKernelRoute);
     const unguarded = kernelRoutes.filter((r) => !r.guarded && !(r.key in CLASSIFIED)).map((r) => r.key).sort();
@@ -895,5 +960,34 @@ describe("N31 route inventory: the CLASSIFIED witnesses", () => {
       payload: {},
     });
     expect(res.statusCode).toBe(401);
+  });
+});
+
+
+describe("N31c body/query inventory: the scanner sees what it must (probe)", () => {
+  const probe = scanSource(
+    "probe-body.ts",
+    [
+      'import { refuseKernelRequest } from "../auth/kernel-authority.js";',
+      "export async function r(app: any) {",
+      '  app.post("/p/direct", async (req: any) => { db.insert(x).values({ k: req.body.kernelId }); });',
+      '  app.post("/p/destructured", async (req: any) => { const { kernelId } = (req.body ?? {}) as any; use(kernelId); });',
+      '  app.post("/p/alias", async (req: any) => { const body = req.body as any; use(body.kernelId); });',
+      '  app.put("/p/query", async (req: any) => { use(req.query["kernelId"]); });',
+      '  app.post("/p/guarded", async (req: any, reply: any) => { const { kernelId } = req.body; const r = refuseKernelRequest(req, kernelId, "operate"); if (r) return reply.code(r.status).send(r.body); });',
+      '  app.post("/p/ignored", async (req: any) => { const { kernelId } = req.body; refuseKernelRequest(req, kernelId, "operate"); });',
+      '  app.post("/p/unrelated", async (req: any) => { const { jobId } = req.body; use(jobId); });',
+      "}",
+    ].join("\n"),
+  );
+  it("finds direct, destructured, aliased and query reads, and counts only a guard whose answer is used", () => {
+    expect(Object.fromEntries(probe.routes.filter((r) => r.readsKernelBody).map((r) => [r.key, r.guarded]))).toEqual({
+      "POST /p/direct": false,
+      "POST /p/destructured": false,
+      "POST /p/alias": false,
+      "PUT /p/query": false,
+      "POST /p/guarded": true,
+      "POST /p/ignored": false,
+    });
   });
 });

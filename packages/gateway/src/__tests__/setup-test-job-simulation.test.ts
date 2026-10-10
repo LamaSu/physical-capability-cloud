@@ -52,7 +52,9 @@ import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 // ---------------------------------------------------------------------------
 
 const KERNEL_ID = "kernel-n59r3-real";
-const OWNER = "op-n59r3-real-owner";
+// N31c (the steward's #6540): a test job actuates the device, so it is a decision for the admin or
+// the PROVEN operator wallet. The owner is a wallet, and this suite's caller proves it.
+const OWNER = "0x5e7000000000000000000000000000000000593a";
 const CAP_ID = "cap-n59r3-real";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -335,6 +337,9 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
         (req as { userId?: string }).userId = key;
         (req as { operatorId?: string }).operatorId = key;
       }
+      // WP-A's proven wallet, simulated.
+      const proven = req.headers["x-test-proven-wallet"];
+      if (typeof proven === "string") (req as { provenWallet?: string }).provenWallet = proven;
     });
     await app.register(setupRoutes);
     await app.ready();
@@ -357,7 +362,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
   });
 
   const post = (payload: unknown) =>
-    app.inject({ method: "POST", url: "/api/setup/test-job", headers: { "x-test-key": OWNER }, payload });
+    app.inject({ method: "POST", url: "/api/setup/test-job", headers: { "x-test-key": OWNER, "x-test-proven-wallet": OWNER }, payload });
 
   // ── 1. IPP, no adapterConfig -> defaults to mock ─────────────────────────
 

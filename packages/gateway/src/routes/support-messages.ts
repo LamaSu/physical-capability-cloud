@@ -15,6 +15,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { v4 as uuidv4 } from "uuid";
+import { refuseKernelRequest } from "../auth/kernel-authority.js";
 
 // Discord webhook for #bug-reports notifications
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL ?? "";
@@ -167,6 +168,12 @@ export async function supportMessageRoutes(app: FastifyInstance) {
     if (!kernelId) {
       return reply.code(400).send({ error: "kernelId required" });
     }
+    // N31c (the body/query inventory; the steward's #6540): a message joins the kernel's open support thread as from its
+    // operator, so a stranger must not post into it, so it needs that kernel's
+    // operator's DECISION (DECISIONS 01:25: acting as the operator, or spending a paid resource):
+    // the admin or the PROVEN operator wallet, never a claimed key.
+    const refusal = refuseKernelRequest(req, String(kernelId), "decide");
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     if (!message) {
       return reply.code(400).send({ error: "message required" });
     }
