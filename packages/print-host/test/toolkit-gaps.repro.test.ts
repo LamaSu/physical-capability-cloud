@@ -20,12 +20,18 @@ import { FakeMachineAdapter } from "../src/index.js";
 const gap = (name: string, fn: () => Promise<void>) =>
   process.env.PRINT_HOST_SHOW_GAPS === "1" ? it(name, fn) : it.fails(name, fn);
 
-const kernelId = "n144-print-host";
-const deviceId = "n144-printer";
 const timeoutMs = 300;
 const cleanups: Array<() => Promise<void>> = [];
 
-function harness() {
+function testIds(testId: string) {
+  return {
+    kernelId: `n144-print-host-${testId}`,
+    deviceId: `n144-printer-${testId}`,
+  };
+}
+
+function harness(testId: string) {
+  const { kernelId, deviceId } = testIds(testId);
   const adapter = new FakeMachineAdapter(deviceId, kernelId);
   const signer = makeKernelEd25519Signer();
   const emitter = new EvidenceEmitter(kernelId, signer.signFn);
@@ -76,7 +82,7 @@ afterEach(async () => {
 
 describe("N144 print-host toolkit gap repros", () => {
   it("the scripted adapter completes a print through runPrintJob", async () => {
-    const setup = harness();
+    const setup = harness("harness-check");
     const result = await completingPrint(setup, job("harness-check"), 100);
     expect(result.success).toBe(true);
     expect(result.bundle).toBeDefined();
@@ -91,13 +97,12 @@ describe("N144 print-host toolkit gap repros", () => {
     await setup.adapter.quiesceEvidence();
   });
 
-  gap("GAP-1 real mode never silently simulates", async () => {
+  gap("GAP-1 real mode never simulates", async () => {
     vi.useFakeTimers();
-    const warnings = vi.spyOn(console, "warn");
     let kernel: IppPrintKernel;
     try {
       kernel = createIppPrintKernel({
-        kernelId, deviceId, mockMode: false, uri: "ipp://127.0.0.1:9/ipp/print",
+        ...testIds("gap-1"), mockMode: false, uri: "ipp://127.0.0.1:9/ipp/print",
       });
     } catch (error) {
       // Explicit real-mode unavailability may be refused at construction.
@@ -105,6 +110,8 @@ describe("N144 print-host toolkit gap repros", () => {
       return;
     }
     cleanups.push(() => kernel.dispose());
+    // Contain the constructor's optional IPP import, without waiting for a warning.
+    await vi.dynamicImportSettled();
     const pending = kernel.print({
       ...job("real-required"),
       documentData: Buffer.from("N144 test document"),
@@ -115,20 +122,14 @@ describe("N144 print-host toolkit gap repros", () => {
     const simulatedEvents = result.events.filter(
       (event) => event.source.simulated === true || event.payload.mock === true,
     );
-    const reportsNotReal = result.completion?.simulated === true || kernel.adapter.source.simulated === true ||
-      warnings.mock.calls.some((args) => args.some((arg) => /MOCK|simulation/i.test(String(arg))));
-    expect(
-      !result.success || simulatedEvents.length === 0 || reportsNotReal,
-      "a real-mode refusal or downgrade must be reported",
-    ).toBe(true);
     expect(
       !result.success || simulatedEvents.length === 0,
-      "mockMode:false must refuse the print or record no simulated/mock events",
+      "mockMode:false must refuse the print or record no simulated/mock events: a reported downgrade still yields simulated evidence, which cannot settle",
     ).toBe(true);
   });
 
   gap("GAP-2 a print's evidence holds only its own job's events (N106)", async () => {
-    const setup = harness();
+    const setup = harness("gap-2");
     const first = job("print-A");
     const resultA = await completingPrint(setup, first, 101);
     expect(resultA.success).toBe(true);
@@ -141,7 +142,7 @@ describe("N144 print-host toolkit gap repros", () => {
   });
 
   gap("GAP-3 a reported failure returns a SIGNED execution_failed bundle", async () => {
-    const setup = harness();
+    const setup = harness("gap-3");
     setup.adapter.scriptStart({ outcome: "success", jobId: 103 });
     const started = setup.adapter.started();
     const pending = runPrintJob({ ...job("reported-failure"), ...setup });
@@ -159,7 +160,7 @@ describe("N144 print-host toolkit gap repros", () => {
 
   gap("GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle", async () => {
     vi.useFakeTimers();
-    const setup = harness();
+    const setup = harness("gap-4");
     setup.adapter.scriptStart({ outcome: "success", jobId: 104 });
     const started = setup.adapter.started();
     const pending = runPrintJob({ ...job("timed-out"), ...setup });
@@ -167,12 +168,13 @@ describe("N144 print-host toolkit gap repros", () => {
     setup.adapter.emit("execution_started", { ippJobId: 104 });
     const result = await drainPrintJob(pending);
     expect(result.success).toBe(false);
-    // A bare stop addresses this adapter's sole active job; explicit IDs must match it.
-    const canceled = setup.adapter.commands.some((command) =>
-      ["stop", "cancel"].includes(command.type) &&
-      (command.payload?.ippJobId ?? command.payload?.jobId ?? 104) === 104,
-    );
-    expect(canceled, "a timed-out device job must receive cancel or stop").toBe(true);
+    expect(
+      setup.adapter.cancels, "a timed-out device job must be canceled with cancelJob(104)",
+    ).toEqual([104]);
+    expect(
+      setup.adapter.commands.some((command) => command.type === "stop"),
+      "never 'stop': it ends polling before the canceled state",
+    ).toBe(false);
     expect(result.bundle, "a timeout must return a signed failure bundle").toBeDefined();
     const bundle = result.bundle!;
     expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
@@ -180,39 +182,51 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
   });
 
-  gap("GAP-5 stopping a print yields a terminal failure event", async () => {
+  gap("GAP-5 an abort input cancels the device job and returns a SIGNED execution_failed bundle", async () => {
     vi.useFakeTimers();
-    const kernel = createIppPrintKernel({ kernelId, deviceId, mockMode: true });
-    const options = { ...job("stopped"), totalPages: 2, timeoutMs: 10_000 };
+    const setup = harness("gap-5");
+    const controller = new AbortController();
+    // Requested host input: pcc-adk chooses the abort input's API shape.
+    const options = {
+      ...job("aborted"), timeoutMs: 10_000, signal: controller.signal,
+    } as Omit<PrintJobOptions, "adapter" | "emitter">;
+    setup.adapter.scriptStart({ outcome: "success", jobId: 105 });
+    const started = setup.adapter.started();
     let result: PrintJobResult | undefined;
-    const pending = kernel.print(options).then((value) => { result = value; return value; });
+    const pending = runPrintJob({ ...options, ...setup }).then((value) => {
+      result = value;
+      return value;
+    });
     try {
-      await vi.advanceTimersByTimeAsync(500);
-      expect(await kernel.adapter.getProgress()).toBe(50);
-      expect((await kernel.adapter.execute({ type: "stop" })).success).toBe(true);
-      // addEvent hashes asynchronously; allow it to store any actual terminal event.
-      await vi.waitFor(() => {
-        const failedEvents = kernel.emitter.getEvents(options.jobId, options.stepId!).filter(
-          (event) => event.type === "execution_failed",
-        );
-        expect(failedEvents, "stop must record execution_failed promptly").toHaveLength(1);
-        expect(result, "runPrintJob must resolve before its timeout after stop").toBeDefined();
-      }, { timeout: timeoutMs, interval: 10 });
-      expect(result!.success).toBe(false);
-      expect(result!.durationMs).toBeLessThan(options.timeoutMs);
-      expect(result!.events.some((event) => event.type === "execution_failed")).toBe(true);
-    } finally {
-      // Drain timeout and evidence waits even when the prompt-failure assertion fails.
-      try {
-        await drainPrintJob(pending);
-      } finally {
-        await kernel.dispose();
+      await started;
+      setup.adapter.emit("execution_started", { ippJobId: 105 });
+      controller.abort();
+      for (let elapsedMs = 0; !result && elapsedMs < 9_000; elapsedMs += 100) {
+        await vi.advanceTimersByTimeAsync(100);
       }
+      expect(
+        setup.adapter.cancels, "an aborted device job must be canceled with cancelJob(105)",
+      ).toEqual([105]);
+      expect(
+        setup.adapter.commands.some((command) => command.type === "stop"),
+        "never 'stop': it ends polling before the canceled state",
+      ).toBe(false);
+      expect(result, "an aborted print must settle before its 10_000 ms timeout").toBeDefined();
+      expect(result!.durationMs).toBeLessThan(10_000);
+      expect(result!.success).toBe(false);
+      expect(result!.bundle, "an abort must return a signed failure bundle").toBeDefined();
+      const bundle = result!.bundle!;
+      expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
+      expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
+      expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
+    } finally {
+      // Drain timeout and evidence waits even when the toolkit ignores the signal.
+      await drainPrintJob(pending);
     }
   });
 
   gap("GAP-6 the unit fields reach every event", async () => {
-    const setup = harness();
+    const setup = harness("gap-6");
     const unit = {
       settlementUnitId: `0x${"a".repeat(64)}`,
       challengeNonce: `0x${"b".repeat(64)}`,
@@ -231,7 +245,7 @@ describe("N144 print-host toolkit gap repros", () => {
   gap("GAP-7 a success bundle is signed by a delegated session key", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-09T00:00:00.000Z"));
-    const setup = harness(); // The host supplies its device signer to EvidenceEmitter.
+    const setup = harness("gap-7"); // The host supplies its device signer to EvidenceEmitter.
     const operator = "0x" + "11".repeat(20);
     const parentAgentId = `eip155:84532:${operator}`;
     const expiresAt = Math.floor(Date.now() / 1_000) + 3 * 24 * 60 * 60;
@@ -276,7 +290,7 @@ describe("N144 print-host toolkit gap repros", () => {
   });
 
   gap("GAP-8 a busy refusal is reported as busy and emits no failure (N127)", async () => {
-    const setup = harness();
+    const setup = harness("gap-8");
     setup.adapter.scriptStart({ outcome: "busy" });
     const result = await runPrintJob({ ...job("busy-refusal"), ...setup });
     expect(result.success).toBe(false);

@@ -18,15 +18,17 @@ type PrintEventType =
   | "execution_completed"
   | "execution_failed";
 
-/** A scripted printer: commands are recorded and only the test emits evidence. */
+/** A scripted printer: tests drive evidence, and cancellation models the state-7 poll. */
 export class FakeMachineAdapter implements MachineAdapter {
   readonly type = "ipp-2d";
   readonly source: EvidenceSource;
   readonly commands: MachineCommand[] = [];
+  readonly cancels: number[] = [];
 
   private status: MachineStatus = "idle";
   private progress = 0;
   private active = false;
+  private activeJobId: number | undefined;
   private disposed = false;
   private eventNumber = 0;
   private readonly starts: FakeStartOutcome[] = [];
@@ -96,11 +98,23 @@ export class FakeMachineAdapter implements MachineAdapter {
       this.status = "busy";
       this.progress = 0;
       this.active = true;
+      this.activeJobId = outcome.jobId;
       return { success: true, data: { jobId: outcome.jobId, ippJobId: outcome.jobId } };
     }
 
     if (command.type === "stop") this.finishWork();
     return { success: true };
+  }
+
+  async cancelJob(jobId: number): Promise<void> {
+    this.cancels.push(jobId);
+    if (this.disposed || !this.active || this.activeJobId !== jobId) return;
+    // The next IPP poll observes job-state 7; cancellation does not stop polling.
+    await Promise.resolve().then(() => {
+      if (!this.disposed && this.active && this.activeJobId === jobId) {
+        this.emit("execution_failed", { ippJobId: jobId, state: "canceled" });
+      }
+    });
   }
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
@@ -138,6 +152,7 @@ export class FakeMachineAdapter implements MachineAdapter {
 
   private finishWork(): void {
     this.active = false;
+    this.activeJobId = undefined;
     this.status = "idle";
     for (const resolve of this.quiesceWaiters.splice(0)) resolve();
   }
