@@ -36,6 +36,8 @@ export interface MachineCommand {
 /** Result of a machine command */
 export interface MachineCommandResult {
   success: boolean;
+  /** The device refused because it is busy; no job was accepted. */
+  busy?: true;
   message?: string;
   data?: Record<string, unknown>;
 }
@@ -51,6 +53,9 @@ export interface MachineAdapter {
 
   /** Send a command to the machine */
   execute(command: MachineCommand): Promise<MachineCommandResult>;
+
+  /** Cancel the named job while continuing to report it, so its terminal state arrives as evidence. */
+  cancelJob?(jobId: string | number): Promise<void>;
 
   /** Get current progress (0-100) */
   getProgress(): Promise<number>;

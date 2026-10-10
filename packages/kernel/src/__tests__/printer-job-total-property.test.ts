@@ -10,7 +10,8 @@
  * never reaches the failure path's own sites (close(), cleanup()), so each of those prints records
  * the sites it touched after its fault, and a second pass throws at the first fault and then
  * again at each of those. Every injected print must resolve with a PrintJobResult, must not report
- * success without its device job's completion in its bundle, and must leave nothing unhandled;
+ * success without its device job's completion in its bundle, must keep every failure eventless
+ * except an exact signed terminal failure, and must leave nothing unhandled;
  * then the same step must print again on the same collaborators and succeed (after at most two
  * "quiescing" refusals, which a rejected hook earns by design), so no lease, session or printer
  * is left held.
@@ -106,8 +107,10 @@ function instrumentEmitter(emitter: EvidenceEmitter, inj: Injector): void {
 function rig(caseId: string, inj: Injector) {
   const source: EvidenceSource = { deviceId: `p-${caseId}`, deviceType: "controller", kernelId: KERNEL_ID };
   const listeners: Array<(e: Emitted) => void> = [];
+  const observed: Emitted[] = [];
   const emit = (type: Emitted["type"], payload: Record<string, unknown>) => {
     const e: Emitted = { type, timestamp: new Date().toISOString(), source, payload };
+    observed.push(e);
     for (const l of [...listeners]) l(e);
   };
   let nextJob = 100;
@@ -146,7 +149,37 @@ function rig(caseId: string, inj: Injector) {
     evidenceQuiesceTimeoutMs: 500,
     evidenceSettleTimeoutMs: 500,
   };
-  return { opts: instrument("opts", opts, inj) };
+  // This rig has no cancelJob: neither a timeout nor an abort can qualify for a signed
+  // cancellation failure. Check against the events actually emitted, never just the
+  // result's claimed failure.kind (which would weaken the eventless-failure oracle).
+  return { opts: instrument("opts", opts, inj), observed };
+}
+
+/** The exact signed-failure exceptions this completion-only, non-cancelable rig can earn. */
+function exactSignedFailure(result: PrintJobResult, observed: readonly Emitted[], jobId: string): boolean {
+  const failure = result.failure;
+  const bundle = result.bundle;
+  if (result.success || failure === undefined || bundle === undefined) return false;
+  const completed = observed.some((event) => event.type === "execution_completed" && event.payload.ippJobId === 100);
+  const failed = observed.some((event) => event.type === "execution_failed" && event.payload.ippJobId === 100);
+  // Timeout/abort require an actual cancelJob call. This adapter has none, so both remain
+  // eventless, as do foreign, unrecorded, quiesce and settle failures.
+  if (failure.origin !== "device" || result.cancelRequested !== undefined || !failed) return false;
+  if (failure.kind !== (completed ? "contradiction" : "device_reported")) return false;
+  if (bundle.jobId !== jobId || bundle.stepId !== jobId || bundle.kernelId !== KERNEL_ID) return false;
+  if (result.events !== bundle.events || bundle.events.length !== observed.length) return false;
+  if (bundle.kernelSignature.algorithm !== "secp256k1"
+    || bundle.kernelSignature.signer !== "0x0000000000000000000000000000000000000000"
+    || bundle.kernelSignature.value !== `test_sig_${bundle.bundleHash.slice(0, 16)}`) return false;
+  // Every signed event must correspond, in order, to evidence the adapter really emitted;
+  // only the emitter's PCC job commitment is added to that original payload.
+  return bundle.events.every((event, index) => {
+    const original = observed[index];
+    return original !== undefined && event.payload.ippJobId === 100 && event.payload.jobId === jobId
+      && event.type === original.type && event.timestamp === original.timestamp
+      && JSON.stringify(event.source) === JSON.stringify(original.source)
+      && JSON.stringify(event.payload) === JSON.stringify({ ...original.payload, jobId });
+  });
 }
 
 /** Runs `body`, and collects every rejection Node reports as unhandled meanwhile. */
@@ -170,7 +203,9 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("runPrintJob: whatever one collaborator throws, wherever, the print resolves and releases what it holds (steward #5604)", () => {
   /** The faults to try at `site`: a throw; and a rejection too, where the call returns a promise. */
@@ -182,7 +217,7 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
   /** Runs one plan; returns what went wrong (empty when nothing did), and the sites touched after its first fault. */
   async function check(plan: Fault[], caseId: string): Promise<{ failures: string[]; afterFirst: string[] }> {
     const inj = injector(plan);
-    const { opts } = rig(caseId, inj);
+    const { opts, observed } = rig(caseId, inj);
     const label = plan.map((f) => `${f.how} at ${f.site}`).join(", then ");
     const failures: string[] = [];
     const out = await catchingUnhandled(() => runPrintJob(opts));
@@ -193,10 +228,15 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
     if (result !== undefined) {
       if (typeof result.success !== "boolean" || typeof result.durationMs !== "number" || !Array.isArray(result.events)) failures.push(`${label}: not a PrintJobResult`);
       if (!result.success && typeof result.error !== "string") failures.push(`${label}: a failure with no text`);
-      if (!result.success && result.events.length > 0) failures.push(`${label}: a failure with events`);
+      if (!result.success && !exactSignedFailure(result, observed, `print-${caseId}`)) {
+        if (result.events.length > 0) failures.push(`${label}: an ineligible failure with events`);
+        if (result.bundle !== undefined) failures.push(`${label}: an ineligible failure with a bundle`);
+        if (result.failure !== undefined) failures.push(`${label}: an ineligible failure with a signed verdict`);
+      }
       if (result.success && !result.events.some((e) => e.type === "execution_completed" && e.payload.ippJobId === result.completion?.printerJobId)) {
         failures.push(`${label}: success without its device job's completion`);
       }
+      if (result.success && result.events.some((e) => e.type === "execution_failed")) failures.push(`${label}: success with a device job's failure`);
     }
     if (out.unhandled > 0) failures.push(`${label}: ${out.unhandled} unhandled rejection(s)`);
     // Every fault has fired once; the same step prints again on the same collaborators.

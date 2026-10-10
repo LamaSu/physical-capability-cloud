@@ -59,8 +59,10 @@
  *   - Quiesce, close, then finalize: once its device job has ended, the print waits, still
  *     recording, for the adapter's quiesceEvidence() (bounded), then stops accepting
  *     evidence, waits (bounded) for every bound event to be recorded, and finalizes.
- *   - Every exit quiesces (bounded) and closes the session. A failed print also seals its
- *     chain, detaches its step (emitter.cleanup) and returns no events. The step lease is
+ *   - Every exit quiesces (bounded) and closes the session. Device failures, contradictions,
+ *     and cancel outcomes finalize signed failure evidence after settling; other failures
+ *     finalize nothing. Every failed print seals its chain and detaches its step
+ *     (emitter.cleanup); returned bundle events survive that detach. The step lease is
  *     released last. A printer whose hook is still pending stays quiescing until it answers.
  */
 
@@ -166,6 +168,13 @@ export interface PrintJobOptions {
   assuranceTier?: AssuranceTier;
   /** Guard timeout waiting for the device's completion event (default 120s). */
   timeoutMs?: number;
+  /** Abort before start refuses the print; after start it requests cancelJob, retaining evidence. */
+  signal?: AbortSignal;
+  /** Wait for terminal evidence after cancelJob, before recording a kernel failure. Default 30 s. */
+  cancelWindowMs?: number;
+  /** Escrow settlement unit and challenge nonce: supply both, as 0x + 64 lowercase hex. */
+  settlementUnitId?: string;
+  challengeNonce?: string;
   /**
    * How long the print waits for the adapter's quiesceEvidence() once its device job has
    * ended, and on every failure, before it fails and finalizes nothing. Default 15 s, as
@@ -199,28 +208,44 @@ export interface PrintCompletion {
   jobName: string;
 }
 
+/** Signed failure verdict; binding, recording or handshake failures have no verdict or bundle. */
+export type PrintJobFailure =
+  | { kind: "device_reported" | "contradiction"; origin: "device" }
+  | { kind: "timeout" | "aborted"; origin: "device" | "kernel" };
+
+/** A session/step refusal, or a device that refused start without accepting a job. */
+export type PrintJobBusy = NonNullable<JobResult["busy"]> | { reason: "device"; adapterId: string; jobId: string };
+
 export interface PrintJobResult {
   success: boolean;
-  /** The kernel-signed evidence bundle (present on success). */
+  /** Kernel-signed evidence on success and on the failures described by `failure`. */
   bundle?: EvidenceBundle;
   /** Normalised {jobId, pageCount, printerId, simulated} completion. */
   completion?: PrintCompletion;
   /**
-   * On success, the bundle's events (verbatim, hashed). Empty on failure: a failed print
-   * finalizes nothing and its step is detached; `error` says why.
+   * The bundle's events when a bundle exists; otherwise empty. A failed print's step is
+   * detached even when it returns a bundle, so callers keep these events.
    */
   events: EvidenceEvent[];
   error?: string;
+  failure?: PrintJobFailure;
   /**
-   * Set when the print was refused before it started, as JobResult.busy: nothing was sent
-   * to the printer, no step was registered and nothing was recorded. The printer is not at
-   * fault, so a caller should queue or retry the print, never count a device failure.
+   * Present on every result whose cancelJob path ran, including an eventless failure.
+   * A completion that wins after cancel is ordinary success with this field retained.
+   * Absent when no cancel was sent, including adapters without cancelJob.
+   */
+  cancelRequested?: "timeout" | "aborted";
+  /**
+   * Set when the print was refused before it started. Session and step refusals send no
+   * command and register no step; a device refusal follows start and detaches its step.
+   * Nothing is recorded, so a caller should queue or retry rather than count a device failure.
    *   - "adapter": the printer of adapter `adapterId` is recording job `jobId`'s evidence;
    *   - "quiescing": that adapter has not yet confirmed, through its quiesceEvidence(),
    *     that job `jobId`'s work is done, so what it emits now could still be that job's;
    *   - "step": this print's (jobId, stepId) is already running on this evidence emitter.
+   *   - "device": the device refused start as busy and accepted no job; its step is detached.
    */
-  busy?: JobResult["busy"];
+  busy?: PrintJobBusy;
   durationMs: number;
 }
 
@@ -228,19 +253,28 @@ export interface PrintJobResult {
  * Run one print job through a machine adapter and return a kernel-signed bundle.
  *
  * Event-driven: it waits for the device's own `execution_completed` (or
- * `execution_failed`) for this print's device job rather than fabricating a completion,
- * so a bundle only exists when the device actually reported this print done. The
- * evidence binding (session, step lease, device job, recording, quiesce) is described at
+ * `execution_failed`) for this print's device job rather than fabricating a completion.
+ * A success bundle requires completion without failure. Device failures and contradictions
+ * also return signed bundles. Timeout or abort sends cancelJob once, keeps admitting evidence,
+ * and signs a kernel failure only if no terminal evidence arrives within cancelWindowMs.
+ * Completion after cancel is success carrying cancelRequested; every cancel result carries it.
+ * The evidence binding (session, step lease, device job, recording, quiesce) is described at
  * the top of this file.
  */
 export async function runPrintJob(opts: PrintJobOptions): Promise<PrintJobResult> {
   // It always resolves with a result, never rejects, whatever a collaborator throws: the caller's
   // options included, and the cleanup's own releases (astra packs 210 and 213, steward #5604).
   const startTime = Date.now();
+  const cancellation: { requested?: "timeout" | "aborted"; error?: string } = {};
   try {
-    return await printOnce(opts, startTime);
+    return await printOnce(opts, startTime, cancellation);
   } catch (err) {
-    return { success: false, events: [], error: failureText(err), durationMs: Date.now() - startTime };
+    return {
+      success: false, events: [],
+      error: [failureText(err), cancellation.error].filter(Boolean).join("; "),
+      ...(cancellation.requested ? { cancelRequested: cancellation.requested } : {}),
+      durationMs: Date.now() - startTime,
+    };
   }
 }
 
@@ -262,7 +296,11 @@ function release(jobId: string, what: string, step: () => void): void {
   }
 }
 
-async function printOnce(opts: PrintJobOptions, startTime: number): Promise<PrintJobResult> {
+async function printOnce(
+  opts: PrintJobOptions,
+  startTime: number,
+  cancellation: { requested?: "timeout" | "aborted"; error?: string },
+): Promise<PrintJobResult> {
   const {
     adapter,
     emitter,
@@ -273,15 +311,20 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
     documentData,
     assuranceTier = 0,
     timeoutMs = 120_000,
+    signal,
+    cancelWindowMs = 30_000,
+    settlementUnitId,
+    challengeNonce,
     evidenceQuiesceTimeoutMs = 15_000,
     evidenceSettleTimeoutMs = 30_000,
   } = opts;
 
-  // Every unsuccessful result: no bundle, no events.
+  // Fail-closed results: no bundle, no events. Signed verdicts are returned only after finalization.
   const failure = (error: string, busy?: PrintJobResult["busy"]): PrintJobResult => ({
     success: false,
     events: [],
-    error,
+    error: [error, cancellation.error].filter(Boolean).join("; "),
+    ...(cancellation.requested ? { cancelRequested: cancellation.requested } : {}),
     ...(busy ? { busy } : {}),
     durationMs: Date.now() - startTime,
   });
@@ -291,9 +334,13 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
   if (typeof jobId !== "string" || typeof stepId !== "string") return failure("the print's job id and step id must be text");
   // Each timeout arms a timer, and a delay that cannot be one could make settle() reject in the
   // final release, after the step was registered: refused before anything is held (astra pack 216).
-  for (const [name, ms] of [["timeoutMs", timeoutMs], ["evidenceQuiesceTimeoutMs", evidenceQuiesceTimeoutMs], ["evidenceSettleTimeoutMs", evidenceSettleTimeoutMs]] as const) {
+  for (const [name, ms] of [["timeoutMs", timeoutMs], ["evidenceQuiesceTimeoutMs", evidenceQuiesceTimeoutMs], ["evidenceSettleTimeoutMs", evidenceSettleTimeoutMs], ["cancelWindowMs", cancelWindowMs]] as const) {
     if (!isTimerDelay(ms)) return failure(`the print's ${name} must be a number of milliseconds from 0 to 2147483647`);
   }
+  if ((settlementUnitId === undefined) !== (challengeNonce === undefined)) {
+    return failure("the print's settlementUnitId and challengeNonce must be supplied together");
+  }
+  if (signal?.aborted) return failure(`print job ${jobId} aborted before start`);
 
   // Every refusal below comes before the start command, and before registerStep, which
   // would overwrite the step of a print already running under the same ids. The checks,
@@ -429,7 +476,8 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
   const session = opened.session;
   const releaseStep = leaseStep(emitter, jobId, stepId);
   try {
-    emitter.registerStep(jobId, stepId, assuranceTier);
+    emitter.registerStep(jobId, stepId, assuranceTier,
+      settlementUnitId !== undefined && challengeNonce !== undefined ? { settlementUnitId, challengeNonce } : undefined);
   } catch (err) {
     // Nothing was sent to the printer: release what this print took, and fail with a result. Each
     // release is attempted even if another throws, and the lease is always released (astra pack
@@ -458,8 +506,21 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
   let settleTimedOut = false;
   // Set once the print has asked its adapter to quiesce (after its device job ended, or in the finally).
   let quiesceAsked = false;
+  let abortListenerAttached = false;
+  let notifyAbort!: () => void;
+  const aborted = new Promise<"aborted">((resolve) => {
+    notifyAbort = () => resolve("aborted");
+  });
+  // Identity, not a device-controlled payload field, distinguishes our synthetic event.
+  let kernelFailure: EmittedEvidence | null = null;
 
   const print = async (): Promise<PrintJobResult> => {
+    if (signal) {
+      // Mark first so even a collaborator throwing while installing the listener gets a removal attempt.
+      abortListenerAttached = true;
+      signal.addEventListener("abort", notifyAbort, { once: true });
+      if (signal.aborted) return failure(`print job ${jobId} aborted before start`);
+    }
     // Kick off the print. Mock mode uses {jobName, totalPages}; real IPP mode also
     // needs documentData (the adapter fails start() without it — we surface that
     // honestly rather than pretending a print happened).
@@ -471,7 +532,10 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
         ...(documentData !== undefined ? { documentData } : {}),
       },
     });
-    if (!startResult.success) return failure(startResult.message ?? "print start failed");
+    if (!startResult.success) {
+      return failure(startResult.message ?? "print start failed",
+        startResult.busy === true ? { reason: "device", adapterId: adapter.id, jobId } : undefined);
+    }
 
     // The printer's own id for this print's job. Without it no event can be bound to the
     // print, so it fails closed.
@@ -484,17 +548,59 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
 
     // Wait for the device job's own terminal event, or another job's event. No polling —
     // the adapter drives it.
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<boolean>((resolve) => {
-      timer = setTimeout(() => resolve(false), timeoutMs);
-      (timer as unknown as { unref?: () => void })?.unref?.();
-    });
-    try {
-      if (!(await Promise.race([decided.then(() => true), timedOut]))) {
-        return failure(`print job ${jobId} timed out after ${timeoutMs}ms`);
+    let requested: "timeout" | "aborted" | "terminal";
+    if (signal?.aborted) {
+      // An abort during execute waits for its result and cancels the job it actually accepted.
+      requested = "aborted";
+    } else {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+        (timer as unknown as { unref?: () => void })?.unref?.();
+      });
+      try {
+        requested = await Promise.race([decided.then(() => "terminal" as const), timedOut, aborted]);
+      } finally {
+        clearTimeout(timer);
       }
-    } finally {
-      clearTimeout(timer);
+    }
+    if (requested !== "terminal") {
+      const reason = requested;
+      const error = reason === "timeout" ? `print job ${jobId} timed out after ${timeoutMs}ms` : `print job ${jobId} aborted`;
+      const cancelJob = adapter.cancelJob;
+      if (typeof cancelJob !== "function") {
+        return failure(`${error}; adapter ${adapter.id} cannot cancel: it has no cancelJob()`);
+      }
+      cancellation.requested = reason;
+      let cancelTimer: ReturnType<typeof setTimeout> | undefined;
+      const cancelExpired = new Promise<void>((resolve) => {
+        cancelTimer = setTimeout(resolve, cancelWindowMs);
+        (cancelTimer as unknown as { unref?: () => void })?.unref?.();
+      });
+      try {
+        // A rejected (or pending) cancel does not end the evidence wait: the printer can still report.
+        const cancelFailed = (err: unknown): void => {
+          cancellation.error = `cancelJob failed: ${failureText(err)}`;
+        };
+        try {
+          void Promise.resolve(cancelJob.call(adapter, id)).catch(cancelFailed);
+        } catch (err) {
+          cancelFailed(err);
+        }
+        await Promise.race([decided, cancelExpired]);
+        if (deviceJob.completed === null && deviceJob.failed === null && deviceJob.foreign === null) {
+          kernelFailure = {
+            type: "execution_failed",
+            timestamp: new Date().toISOString(),
+            source: { ...adapter.source },
+            payload: { ippJobId: id, reason, origin: "kernel" },
+          };
+          // The same binding and recording chain commits jobId and the settlement unit.
+          admit(kernelFailure);
+        }
+      } finally {
+        clearTimeout(cancelTimer);
+      }
     }
     const foreignBefore = foreignJob();
     if (foreignBefore !== null) return failure(foreignBefore);
@@ -513,10 +619,6 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
     session.close();
     const foreign = foreignJob();
     if (foreign !== null) return failure(foreign);
-    const completed = deviceJob.completed;
-    if (completed === null) {
-      return failure(`printer reported failure: ${JSON.stringify(deviceJob.failed?.payload ?? {})}`);
-    }
     if (!(await settle())) {
       settleTimedOut = true;
       return failure(`evidence recording did not settle within ${evidenceSettleTimeoutMs} ms`);
@@ -527,11 +629,34 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
     if (lost !== null) {
       return failure(`a ${lost.type} event of this job could not be recorded (${lost.error}), so its evidence is incomplete`);
     }
+    const completed = deviceJob.completed;
+    const failed = deviceJob.failed;
+    if (completed === null && failed === null) return failure("the printer reported no terminal event for this job");
 
     // Finalise + sign — the one and only signing step, identical to every other device
     // bundle in the kernel: hashBundle(events) → signFn → kernelSignature. The chain is
     // closed and settled, so the step cannot change while the bundle is hashed and signed.
     const bundle = await emitter.finalizeBundle(jobId, stepId);
+
+    if (failed !== null) {
+      const verdict: PrintJobFailure = completed !== null
+        ? { kind: "contradiction", origin: "device" }
+        : cancellation.requested
+          ? { kind: cancellation.requested, origin: failed === kernelFailure ? "kernel" : "device" }
+          : { kind: "device_reported", origin: "device" };
+      const error = completed !== null
+        ? `printer reported both completion and failure for device job ${String(id)}`
+        : cancellation.requested === "timeout"
+          ? `print job ${jobId} timed out after ${timeoutMs}ms`
+          : cancellation.requested === "aborted"
+            ? `print job ${jobId} aborted`
+            : `printer reported failure: ${JSON.stringify(failed.payload ?? {})}`;
+      return {
+        ...failure(error), bundle, events: bundle.events, failure: verdict,
+      };
+    }
+    // No failure, and the terminal check above ensures this device job completed.
+    if (completed === null) return failure("the printer reported no completion for this job");
 
     const cp: Record<string, unknown> = (completed.payload as Record<string, unknown> | undefined) ?? {};
     const pageCount =
@@ -562,6 +687,8 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
       bundle,
       completion,
       events: bundle.events,
+      ...(cancellation.requested ? { cancelRequested: cancellation.requested } : {}),
+      ...(cancellation.error ? { error: cancellation.error } : {}),
       durationMs: Date.now() - startTime,
     };
   };
@@ -573,6 +700,9 @@ async function printOnce(opts: PrintJobOptions, startTime: number): Promise<Prin
   } catch (err) {
     return failure(failureText(err));
   } finally {
+    if (abortListenerAttached) {
+      release(jobId, "removing the abort listener", () => signal!.removeEventListener("abort", notifyAbort));
+    }
     // Every exit quiesces before it releases, as in JobRunner. A print that ended before its
     // device job did (a refused or failed start, a timeout, another job's event) waits,
     // bounded, for the adapter's word that its work is done; events of its device job that

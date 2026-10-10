@@ -146,7 +146,7 @@ describe("IppAdapter — execute()", () => {
     const adapter = makeAdapter();
     await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 3 }));
     const second = await adapter.execute(makeCommand("start", { jobName: "b.pdf", totalPages: 1 }));
-    expect(second.success).toBe(false);
+    expect(second).toMatchObject({ success: false, busy: true });
     await adapter.dispose();
   });
 
@@ -328,11 +328,32 @@ describe("IppAdapter — getCapabilities()", () => {
 // ---------------------------------------------------------------------------
 
 describe("IppAdapter — cancelJob()", () => {
-  it("cancels a mock job without error", async () => {
+  it("cancels a mock job and reports its failure before quiescing", async () => {
     const adapter = makeAdapter();
+    const failures: Array<Record<string, unknown>> = [];
+    adapter.onEvidence((event) => {
+      if (event.type === "execution_failed") failures.push(event.payload);
+    });
     await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 5 }));
+    const quiesced = adapter.quiesceEvidence().then(() => {
+      expect(failures).toEqual([{ ippJobId: 1000, jobName: "a.pdf", state: "canceled", mock: true }]);
+    });
     await expect(adapter.cancelJob(1000)).resolves.toBeUndefined();
+    await quiesced;
+    await adapter.cancelJob(1000);
+    expect(failures).toHaveLength(1);
     expect(await adapter.getStatus()).toBe("idle");
+    await adapter.dispose();
+  });
+
+  it("canceling a different mock job emits nothing and leaves the active job running", async () => {
+    const adapter = makeAdapter();
+    const events: string[] = [];
+    adapter.onEvidence((event) => events.push(event.type));
+    await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 5 }));
+    await adapter.cancelJob(1001);
+    expect(events).toEqual(["execution_started"]);
+    expect(await adapter.getStatus()).toBe("busy");
     await adapter.dispose();
   });
 });

@@ -288,7 +288,19 @@ export class IppAdapter implements MachineAdapter {
       }
     }
     if (this.config.mockMode || !this.ippAvailable) {
-      this.cancelMockJob();
+      const job = this.mockJobState;
+      if (!job || job.jobId !== jobId) return;
+      try {
+        this.emit({
+          type: "execution_failed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { ippJobId: job.jobId, jobName: job.jobName, state: "canceled", mock: true },
+        });
+      } finally {
+        // Emit before ending outstanding work: quiesceEvidence covers the terminal event.
+        this.cancelMockJob();
+      }
       return;
     }
 
@@ -307,7 +319,7 @@ export class IppAdapter implements MachineAdapter {
     switch (command.type) {
       case "start": {
         if (this.mockStatus === "busy") {
-          return { success: false, message: "Printer already processing a job" };
+          return { success: false, busy: true, message: "Printer already processing a job" };
         }
 
         const jobName = (command.payload?.jobName as string | undefined) ?? "document.pdf";

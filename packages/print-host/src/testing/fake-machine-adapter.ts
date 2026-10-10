@@ -88,7 +88,7 @@ export class FakeMachineAdapter implements MachineAdapter {
       if (!outcome) return { success: false, message: "no scripted start result" };
       if (outcome.outcome === "busy") {
         this.status = "busy";
-        return { success: false, message: "device is busy", data: { busy: true, code: "busy" } };
+        return { success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" } };
       }
       if (outcome.outcome === "error") {
         this.status = "error";

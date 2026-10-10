@@ -520,7 +520,7 @@ describe("D3: a print quiesces before it finalizes", () => {
 });
 
 describe("D4: a failed print's step is detached", () => {
-  it("a print its printer reports failed returns no bundle, and its step is empty once it returned", async () => {
+  it("a print its printer reports failed returns a signed bundle, and its step is empty once it returned", async () => {
     const printer = testPrinter("jam-d4");
     const { emitter, bundles } = recordingEmitter();
     const run = runPrintJob({ adapter: printer, emitter, jobId: "print-d4", jobName: "a.pdf", totalPages: 1 });
@@ -530,11 +530,15 @@ describe("D4: a failed print's step is detached", () => {
 
     expect.soft(result, "the print's result").toEqual({
       success: false,
-      events: [],
+      bundle: expect.objectContaining({ kernelSignature: expect.objectContaining({ algorithm: "secp256k1", value: expect.stringMatching(/^sig_/) }) }),
+      events: result.bundle?.events,
       error: 'printer reported failure: {"ippJobId":100,"state":"aborted"}',
+      failure: { kind: "device_reported", origin: "device" },
       durationMs: expect.any(Number),
     });
-    expect.soft(bundles, "bundles finalized").toEqual([]);
+    expect.soft(result.events, "the result keeps its signed bundle's events").toBe(result.bundle?.events);
+    expect.soft(tags(result.events), "the failure's evidence").toEqual(["execution_started#100", "execution_failed#100"]);
+    expect.soft(bundles, "bundles finalized").toEqual([result.bundle]);
     expect.soft(vi.getTimerCount(), "timers left pending once it returned").toBe(0);
     expect(tags(emitter.getEvents("print-d4", "print-d4")), "the failed print's step once it returned").toEqual([]);
   });
@@ -550,7 +554,7 @@ describe("D5: a print that timed out records nothing after it returned", () => {
     printer.complete(100);
     await vi.advanceTimersByTimeAsync(0);
 
-    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: "print job print-d5 timed out after 1000ms", durationMs: expect.any(Number) });
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: "print job print-d5 timed out after 1000ms; adapter slow-d5 cannot cancel: it has no cancelJob()", durationMs: expect.any(Number) });
     expect.soft(atReturn, "its step when it returned").toEqual([]);
     expect(tags(emitter.getEvents("print-d5", "print-d5")), "its step after the printer reported").toEqual([]);
   });
@@ -921,8 +925,17 @@ describe("IppAdapter names its device job on every event, so a print excludes no
     const result = await drive(runPrintJob({ adapter, emitter, jobId: "print-real-aborted", jobName: "a.pdf", totalPages: 1, documentData: "%PDF-1.4" }));
     await adapter.dispose();
 
-    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: 'printer reported failure: {"ippJobId":43,"state":"aborted"}', durationMs: expect.any(Number) });
-    expect(bundles, "bundles finalized").toEqual([]);
+    expect.soft(result, "the print's result").toEqual({
+      success: false,
+      bundle: expect.objectContaining({ kernelSignature: expect.objectContaining({ algorithm: "secp256k1", value: expect.stringMatching(/^sig_/) }) }),
+      events: result.bundle?.events,
+      error: 'printer reported failure: {"ippJobId":43,"state":"aborted"}',
+      failure: { kind: "device_reported", origin: "device" },
+      durationMs: expect.any(Number),
+    });
+    expect.soft(result.events, "the result keeps its signed bundle's events").toBe(result.bundle?.events);
+    expect.soft(tags(result.events), "the aborted job's evidence").toEqual(["execution_started#43", "execution_failed#43"]);
+    expect(bundles, "bundles finalized").toEqual([result.bundle]);
   });
 
   it("mock mode: every event the adapter emits for a print is in its bundle, and none is excluded", async () => {
@@ -949,6 +962,7 @@ describe("every exit releases the printer, the step key and the step", () => {
     then?: (printer: TestPrinter) => void;
     options?: Partial<PrintJobOptions>;
     error: unknown;
+    signedFailure?: true;
   }> = [
     { exit: "the printer refuses the start", first: () => ({ success: false, message: "Printer already processing a job" }), error: "Printer already processing a job" },
     {
@@ -964,8 +978,9 @@ describe("every exit releases the printer, the step key and the step", () => {
       first: accept,
       then: (p) => p.emit(p.event("execution_failed", { ippJobId: 100, state: "aborted" })),
       error: 'printer reported failure: {"ippJobId":100,"state":"aborted"}',
+      signedFailure: true,
     },
-    { exit: "the print times out", first: accept, options: { timeoutMs: 1_000 }, error: "print job print-exit timed out after 1000ms" },
+    { exit: "the print times out", first: accept, options: { timeoutMs: 1_000 }, error: "print job print-exit timed out after 1000ms; adapter exit-the-print-times-out cannot cancel: it has no cancelJob()" },
     {
       exit: "another device job drives the printer",
       first: accept,
@@ -987,7 +1002,7 @@ describe("every exit releases the printer, the step key and the step", () => {
     },
   ];
 
-  it.each(EXITS)("$exit: the print fails, then a retry of its step on the same printer runs", async ({ exit, first, then, options, error }) => {
+  it.each(EXITS)("$exit: the print fails, then a retry of its step on the same printer runs", async ({ exit, first, then, options, error, signedFailure }) => {
     const printer = testPrinter(`exit-${exit.replace(/\W+/g, "-")}`, { start: (p, n, job) => (n === 1 ? first(p, job) : accept(p, job)) });
     const { emitter, bundles } = recordingEmitter();
     const job = { adapter: printer, emitter, jobId: "print-exit", jobName: "a.pdf", totalPages: 1 };
@@ -1002,10 +1017,20 @@ describe("every exit releases the printer, the step key and the step", () => {
     printer.complete(retryJob);
     const ok = await drive(retry);
 
-    expect.soft(failed, "the failed print's result").toEqual({ success: false, events: [], error, durationMs: expect.any(Number) });
+    expect.soft(failed, "the failed print's result").toEqual({
+      success: false,
+      ...(signedFailure ? { bundle: expect.objectContaining({ kernelSignature: expect.any(Object) }), failure: { kind: "device_reported", origin: "device" } } : {}),
+      events: signedFailure ? failed.bundle?.events : [],
+      error,
+      durationMs: expect.any(Number),
+    });
+    if (signedFailure) {
+      expect.soft(failed.events, "the result keeps its signed bundle's events").toBe(failed.bundle?.events);
+      expect.soft(tags(failed.events), "the failure's evidence").toEqual(["execution_started#100", "execution_failed#100"]);
+    }
     expect.soft(stepAtReturn, "its step once it returned").toEqual([]);
     expect.soft(ok.success, "the retry succeeded").toBe(true);
-    expect.soft(bundles.map((bundle) => bundle.jobId), "bundles finalized").toEqual(["print-exit"]);
+    expect.soft(bundles.map((bundle) => bundle.jobId), "bundles finalized").toEqual(signedFailure ? ["print-exit", "print-exit"] : ["print-exit"]);
     expect(tags(ok.bundle?.events ?? []), "the retry's bundle").toEqual([`execution_started#${retryJob}`, `execution_completed#${retryJob}`]);
   });
 });
@@ -1102,7 +1127,7 @@ describe("sealed: a failed print never writes an event still queued", () => {
     other.complete(700);
     const ok = await drive(later);
 
-    expect.soft(failed, "the failed print's result").toEqual({ success: false, events: [], error: "print job print-sealed timed out after 1000ms", durationMs: expect.any(Number) });
+    expect.soft(failed, "the failed print's result").toEqual({ success: false, events: [], error: "print job print-sealed timed out after 1000ms; adapter sealed cannot cancel: it has no cancelJob()", durationMs: expect.any(Number) });
     expect(tags(ok.bundle?.events ?? []), "the later print's bundle").toEqual(["execution_started#700", "execution_completed#700"]);
   });
 });

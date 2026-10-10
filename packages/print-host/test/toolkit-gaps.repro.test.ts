@@ -128,7 +128,7 @@ describe("N144 print-host toolkit gap repros", () => {
     ).toBe(true);
   });
 
-  gap("GAP-2 a print's evidence holds only its own job's events (N106)", async () => {
+  it("GAP-2 a print's evidence holds only its own job's events (N106)", async () => {
     const setup = harness("gap-2");
     const first = job("print-A");
     const resultA = await completingPrint(setup, first, 101);
@@ -141,7 +141,7 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(foreignEvents, "print A must contain none of print B's events").toEqual([]);
   });
 
-  gap("GAP-3 a reported failure returns a SIGNED execution_failed bundle", async () => {
+  it("GAP-3 a reported failure returns a SIGNED execution_failed bundle", async () => {
     const setup = harness("gap-3");
     setup.adapter.scriptStart({ outcome: "success", jobId: 103 });
     const started = setup.adapter.started();
@@ -158,7 +158,7 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
   });
 
-  gap("GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle", async () => {
+  it("GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle", async () => {
     vi.useFakeTimers();
     const setup = harness("gap-4");
     setup.adapter.scriptStart({ outcome: "success", jobId: 104 });
@@ -182,7 +182,7 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
   });
 
-  gap("GAP-5 an abort input cancels the device job and returns a SIGNED execution_failed bundle", async () => {
+  it("GAP-5 an abort input cancels the device job and returns a SIGNED execution_failed bundle", async () => {
     vi.useFakeTimers();
     const setup = harness("gap-5");
     const controller = new AbortController();
@@ -225,7 +225,7 @@ describe("N144 print-host toolkit gap repros", () => {
     }
   });
 
-  gap("GAP-6 the unit fields reach every event", async () => {
+  it("GAP-6 the unit fields reach every event", async () => {
     const setup = harness("gap-6");
     const unit = {
       settlementUnitId: `0x${"a".repeat(64)}`,
@@ -289,7 +289,7 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(verifyBundleSignature(result.bundle!, sessionPublicKey)).toBe(true);
   });
 
-  gap("GAP-8 a busy refusal is reported as busy and emits no failure (N127)", async () => {
+  it("GAP-8 a busy refusal is reported as busy and emits no failure (N127)", async () => {
     const setup = harness("gap-8");
     setup.adapter.scriptStart({ outcome: "busy" });
     const result = await runPrintJob({ ...job("busy-refusal"), ...setup });
