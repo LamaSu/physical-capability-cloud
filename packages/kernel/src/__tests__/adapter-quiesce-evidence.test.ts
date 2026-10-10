@@ -294,23 +294,23 @@ describe("IppAdapter", () => {
   });
 
   it("(real mode) resolves only once the poll loop has reported the completion and stopped", async () => {
-    const ipp = new IppAdapter("ipp-q-real", { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 2_000 });
-    await vi.dynamicImportSettled(); // the optional 'ipp' package is not installed: it routes to mock, then we inject a client
+    const { FakeIppPrinter, jobResponse, printerResponse } = await import("./helpers/fake-ipp-printer.js");
+    const { IPP_OPERATION } = await import("../adapters/ipp-codec.js");
     const requests: string[] = [];
     let jobDoneAt = Number.POSITIVE_INFINITY;
-    class Printer {
-      execute(op: string, _msg: unknown, _data: unknown, cb: (err: Error | null, res: Record<string, unknown>) => void) {
-        requests.push(op);
-        if (op === "Print-Job") {
-          jobDoneAt = Date.now() + 5_000;
-          queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-id": 77 } }));
-        } else if (op === "Get-Job-Attributes") {
-          const done = Date.now() >= jobDoneAt;
-          queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-state": done ? 9 : 5, "job-impressions-completed": done ? 3 : 1 } }));
-        } else queueMicrotask(() => cb(null, {}));
+    const printer = new FakeIppPrinter((request) => {
+      requests.push(String(request.code));
+      if (request.code === IPP_OPERATION.PRINT_JOB) {
+        jobDoneAt = Date.now() + 5_000;
+        return jobResponse(request, { jobId: 77 });
       }
-    }
-    Object.assign(ipp, { ippClient: { Printer }, ippAvailable: true });
+      if (request.code === IPP_OPERATION.GET_JOB_ATTRIBUTES) {
+        const done = Date.now() >= jobDoneAt;
+        return jobResponse(request, { jobId: 77, jobState: done ? 9 : 5, impressionsCompleted: done ? 3 : 1, jobStateReasons: ["job-completed-successfully"] });
+      }
+      return printerResponse(request);
+    });
+    const ipp = new IppAdapter("ipp-q-real", { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 2_000, transport: printer.transport });
     const events = record(ipp);
 
     await ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } });

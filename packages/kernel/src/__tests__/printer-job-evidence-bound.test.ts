@@ -883,23 +883,35 @@ describe("astra pack 192 HIGH 2: only events bound to the print's device job are
  * (RFC 8011 job-state: 5 processing, 8 aborted, 9 completed).
  */
 function realModeIpp(id: string, job: number, polls: Array<{ state: number; sheets?: number }>): IppAdapter {
-  // Built in mock mode, so it never imports `ipp`; it runs in real mode from here on.
-  const config: IppAdapterConfig = { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: true, pollIntervalMs: 100 };
-  const adapter = new IppAdapter(id, config);
-  config.mockMode = false;
   const answers = [...polls];
-  class Printer {
-    execute(operation: string, _msg: unknown, _data: unknown, callback: (err: Error | null, res: Record<string, unknown>) => void): void {
-      if (operation === "Print-Job") {
-        callback(null, { "job-attributes-tag": { "job-id": job } });
-        return;
+  const attribute = (tag: number, name: string, value: number | string | boolean): Buffer => {
+    const bytes = typeof value === "string" ? Buffer.from(value) : typeof value === "boolean" ? Buffer.from([Number(value)]) : Buffer.alloc(4);
+    if (typeof value === "number") bytes.writeInt32BE(value);
+    const head = Buffer.alloc(3);
+    head[0] = tag;
+    head.writeInt16BE(Buffer.byteLength(name), 1);
+    const length = Buffer.alloc(2);
+    length.writeInt16BE(bytes.length);
+    return Buffer.concat([head, Buffer.from(name), length, bytes]);
+  };
+  const config: IppAdapterConfig = {
+    uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 100,
+    transport: (raw) => {
+      const header = Buffer.from(raw.body.slice(0, 8));
+      const operation = header.readUInt16BE(2);
+      header.writeUInt16BE(0, 2);
+      const group: Buffer[] = [];
+      if (operation === 0x000b) group.push(Buffer.from([0x04]), attribute(0x23, "printer-state", 3), attribute(0x44, "printer-state-reasons", "none"), attribute(0x22, "printer-is-accepting-jobs", true));
+      if (operation === 0x0002 || operation === 0x0009) group.push(Buffer.from([0x02]), attribute(0x21, "job-id", job));
+      if (operation === 0x0009) {
+        const next = answers.shift() ?? { state: 5 };
+        group.push(attribute(0x23, "job-state", next.state), attribute(0x44, "job-state-reasons", "job-completed-successfully"));
+        if (next.sheets !== undefined) group.push(attribute(0x21, "job-impressions-completed", next.sheets));
       }
-      const next = answers.shift() ?? { state: 5 };
-      callback(null, { "job-attributes-tag": { "job-state": next.state, "job-impressions-completed": next.sheets } });
-    }
-  }
-  Object.assign(adapter as unknown as Record<string, unknown>, { ippClient: { Printer }, ippAvailable: true });
-  return adapter;
+      return Promise.resolve({ ok: true, httpStatus: 200, body: Buffer.concat([header, ...group, Buffer.from([0x03])]) });
+    },
+  };
+  return new IppAdapter(id, config);
 }
 
 describe("IppAdapter names its device job on every event, so a print excludes none of them (astra pack 192 HIGH 2)", () => {

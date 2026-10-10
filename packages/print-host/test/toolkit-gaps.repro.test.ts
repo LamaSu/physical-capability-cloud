@@ -97,7 +97,7 @@ describe("N144 print-host toolkit gap repros", () => {
     await setup.adapter.quiesceEvidence();
   });
 
-  gap("GAP-1 real mode never simulates", async () => {
+  it("GAP-1 real mode never simulates", async () => {
     vi.useFakeTimers();
     let kernel: IppPrintKernel;
     try {

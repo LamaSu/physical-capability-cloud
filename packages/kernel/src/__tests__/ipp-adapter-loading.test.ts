@@ -1,304 +1,141 @@
 /**
- * IppAdapter while its optional `ipp` import is still loading (astra pack 467, steward #5495).
- *
- * A real-configured adapter (mockMode:false) cannot tell, until the import settles, whether it
- * will run real IPP or fall back to the mock. So it is marked simulated until the import
- * succeeds, and every call waits for the import: no call takes the mock path unmarked, an import
- * that fails marks the adapter before any mock answer, and only a loaded `ipp` says
- * simulated:false. A real-configured adapter never answers with the mock printer's data.
- *
- * The `ipp` package is not installed here: each test holds `import("ipp")` pending with its own
- * gated mock of it. Events are recorded as they were when emitted, since they share the
- * adapter's `source` object and a later marker would otherwise show on them too.
+ * The optional-module loading lifecycle no longer exists. These tests preserve
+ * its disposal/quiescence guarantees at the actual HTTP request boundaries.
  */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IppAdapter } from "../adapters/ipp-adapter.js";
+import { IPP_OPERATION } from "../adapters/ipp-codec.js";
+import type { IppTransportResult } from "../adapters/ipp-transport.js";
+import { FakeIppPrinter, deferred, jobResponse, printerResponse } from "./helpers/fake-ipp-printer.js";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { EvidenceEvent } from "@pcc/spec";
-
-import type { IppAdapter as IppAdapterClass } from "../adapters/ipp-adapter.js";
-
-type Emitted = Omit<EvidenceEvent, "id" | "hash">;
-type Answer = [Error | null, Record<string, unknown>];
-
-const KERNEL_ID = "kernel-ipp-loading";
-const URI = "ipp://printer.test/ipp/print";
-
-afterEach(() => {
-  vi.doUnmock("ipp");
-  vi.resetModules();
-  vi.restoreAllMocks();
-});
-
-/** A fake IPP printer: each operation answers from `answers` (an empty success by default), and is recorded. */
-function fakePrinter(requests: string[], answers: Record<string, () => Answer> = {}) {
-  return class Printer {
-    constructor(readonly uri: string) {}
-    execute(op: string, _msg: unknown, _data: unknown, cb: (err: Error | null, res: Record<string, unknown>) => void): void {
-      requests.push(op);
-      const [err, res] = answers[op]?.() ?? [null, {}];
-      queueMicrotask(() => cb(err, res));
-    }
-  };
+const adapters: IppAdapter[] = [];
+const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+function adapter(printer = new FakeIppPrinter()) {
+  const value = new IppAdapter("ipp-fence", { uri: "ipp://printer.test/ipp/print", kernelId: "k", mockMode: false, pollIntervalMs: 50, transport: printer.transport });
+  adapters.push(value);
+  return value;
 }
+const start = (ipp: IppAdapter) => ipp.execute({ type: "start", payload: { documentData: "%PDF", jobName: "doc" } });
+beforeEach(() => { vi.useFakeTimers(); });
+afterEach(async () => { for (const ipp of adapters.splice(0)) await ipp.dispose(); vi.useRealTimers(); });
 
-/**
- * A fresh IppAdapter class whose `import("ipp")` stays pending until the test settles it:
- * `resolve()` loads a module with `Printer`, `reject()` fails as an uninstalled package does.
- */
-async function gatedIpp(Printer?: unknown): Promise<{ IppAdapter: typeof IppAdapterClass; resolve: () => void; reject: () => void }> {
-  let open!: () => void;
-  const opened = new Promise<void>((r) => {
-    open = r;
-  });
-  let fails = false;
-  vi.resetModules();
-  vi.doMock("ipp", async () => {
-    await opened;
-    if (fails) throw new Error("Cannot find package 'ipp'");
-    return { Printer };
-  });
-  const { IppAdapter } = await import("../adapters/ipp-adapter.js");
-  return {
-    IppAdapter,
-    resolve: () => open(),
-    reject: () => {
-      fails = true;
-      open();
-    },
-  };
-}
-
-/** Each event as it was when emitted. */
-function record(ipp: IppAdapterClass): Emitted[] {
-  const events: Emitted[] = [];
-  ipp.onEvidence((e) => events.push(structuredClone(e)));
-  return events;
-}
-
-function settle<T>(call: Promise<T>): Promise<{ value?: T; error?: string }> {
-  return call.then(
-    (value) => ({ value }),
-    (err: unknown) => ({ error: err instanceof Error ? err.message : String(err) }),
-  );
-}
-
-/** Lets pending microtasks and short timers run, as a caller waiting on its own work would. */
-const pause = () => new Promise((r) => setTimeout(r, 20));
-
-describe("IppAdapter while its optional `ipp` import loads (astra pack 467)", () => {
-  it("is marked simulated until the import settles: simulated:false once `ipp` loaded, simulated:true if it failed", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    const ok = await gatedIpp(fakePrinter([]));
-    const real = new ok.IppAdapter("ipp-load-ok", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-    expect.soft(real.source.simulated, "while `ipp` loads").toBe(true);
-    ok.resolve();
-    await vi.dynamicImportSettled();
-    await pause();
-    expect.soft(real.source.simulated, "once `ipp` loaded").toBe(false);
-
-    const failing = await gatedIpp();
-    const downgraded = new failing.IppAdapter("ipp-load-fails", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-    expect.soft(downgraded.source.simulated, "while `ipp` loads").toBe(true);
-    failing.reject();
-    await vi.dynamicImportSettled();
-    await pause();
-    expect.soft(downgraded.source.simulated, "once `ipp` failed to load").toBe(true);
+describe("IPP construction and disposal fences (replaces optional-module loading)", () => {
+  it("marks real mode immediately, performs no construction I/O, and has no downgrade", async () => {
+    const printer = new FakeIppPrinter();
+    const ipp = adapter(printer);
+    expect(ipp.source.simulated).toBe(false);
+    expect(printer.requests).toEqual([]);
+    expect(await start(ipp)).toMatchObject({ success: true, data: { jobId: 77 } });
+    expect(ipp.source.simulated).toBe(false);
   });
 
-  it("a start while `ipp` loads waits for it, then prints on the real printer: nothing mock, and its events say simulated:false", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(fakePrinter(requests, { "Print-Job": () => [null, { "job-attributes-tag": { "job-id": 42 } }] }));
-    const ipp = new g.IppAdapter("ipp-load-start", { uri: URI, kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 60_000 });
-    const events = record(ipp);
-
-    const started = settle(ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } }));
-    await pause();
-    expect.soft(events, "events while `ipp` loads").toEqual([]);
-    expect.soft(requests, "printer requests while `ipp` loads").toEqual([]);
-
-    g.resolve();
-    const result = await started;
-    expect.soft(result.value, "the start").toMatchObject({ success: true, data: { jobId: 42 } });
-    expect.soft(requests, "printer requests").toEqual(["Print-Job"]);
-    expect.soft(events.map((e) => [e.type, e.source.simulated, e.payload.mock]), "events, as emitted").toEqual([["execution_started", false, undefined]]);
-    await ipp.dispose();
+  it("reads status/capabilities and cancels using real operations", async () => {
+    const printer = new FakeIppPrinter();
+    const ipp = adapter(printer);
+    expect(await ipp.getStatus()).toBe("idle");
+    expect((await ipp.getCapabilities()).makeModel).toBe("Unknown Printer");
+    await ipp.cancelJob(7);
+    expect(printer.requests.map(r => r.code)).toEqual([11, 11, 8]);
   });
 
-  it("an import that fails marks the adapter before any mock answer: a start while it loads then runs the mock, and every event says simulated:true", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const g = await gatedIpp();
-    const ipp = new g.IppAdapter("ipp-load-downgrade", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-    const events = record(ipp);
-
-    const started = settle(ipp.execute({ type: "start", payload: { jobName: "doc", totalPages: 1 } }));
-    await pause();
-    expect.soft(events, "events while `ipp` loads").toEqual([]);
-
-    g.reject();
-    const result = await started;
-    expect.soft(result.value?.success, "the start, on the mock").toBe(true);
-    expect.soft(events.map((e) => [e.type, e.source.simulated, e.payload.mock]), "events, as emitted").toEqual([["execution_started", true, true]]);
-    expect.soft(warn, "the downgrade warning").toHaveBeenCalledTimes(1);
-    await ipp.dispose();
-  });
-
-  it("status, capabilities and cancel while `ipp` loads wait for it, then answer from the real printer, not the mock", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(
-      fakePrinter(requests, {
-        "Get-Printer-Attributes": () => [null, { "printer-attributes-tag": { "printer-state": 4, "printer-make-and-model": "HP OfficeJet Pro 9015e" } }],
-      }),
-    );
-    const ipp = new g.IppAdapter("ipp-load-reads", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-
-    const status = settle(ipp.getStatus());
-    const caps = settle(ipp.getCapabilities());
-    const cancel = settle(ipp.cancelJob(7));
-    await pause();
-    expect.soft(requests, "printer requests while `ipp` loads").toEqual([]);
-
-    g.resolve();
-    expect.soft((await status).value, "the status: processing").toBe("busy");
-    expect.soft((await caps).value?.makeModel, "the capabilities").toBe("HP OfficeJet Pro 9015e");
-    expect.soft((await cancel).error, "the cancel").toBeUndefined();
-    expect.soft([...requests].sort(), "printer requests").toEqual(["Cancel-Job", "Get-Printer-Attributes", "Get-Printer-Attributes"]);
-  });
-
-  it("quiesceEvidence() while a start waits for `ipp` waits for that start, and nothing is emitted after it answers", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(
-      fakePrinter(requests, {
-        "Print-Job": () => [null, { "job-attributes-tag": { "job-id": 43 } }],
-        "Get-Job-Attributes": () => [null, { "job-attributes-tag": { "job-state": 9, "job-impressions-completed": 1 } }],
-      }),
-    );
-    const ipp = new g.IppAdapter("ipp-load-quiesce", { uri: URI, kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 10 });
-    const events = record(ipp);
-
-    const started = settle(ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } }));
-    const hook = { resolved: false, seen: -1 };
-    void ipp.quiesceEvidence().then(() => {
-      hook.resolved = true;
-      hook.seen = events.length;
-    });
-    await pause();
-    expect.soft(hook.resolved, "quiesceEvidence() while the start waits for `ipp`").toBe(false);
-
-    g.resolve();
-    await started;
-    await vi.waitFor(() => expect(hook.resolved).toBe(true), { timeout: 2_000 });
-    expect.soft(events.map((e) => e.type), "events").toEqual(["execution_started", "execution_completed"]);
-    expect.soft(hook.seen, "events emitted when it answered").toBe(events.length);
-    await pause();
-    expect.soft(events.length, "events after it answered").toBe(hook.seen);
-    await ipp.dispose();
-  });
-
-  it("a start while `ipp` loads, then dispose: once `ipp` loads, that start runs nothing", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(fakePrinter(requests, { "Print-Job": () => [null, { "job-attributes-tag": { "job-id": 44 } }] }));
-    const ipp = new g.IppAdapter("ipp-load-dispose", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-    const events = record(ipp);
-
-    const started = settle(ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } }));
-    await pause();
-    await ipp.dispose();
-    g.resolve();
-    const result = await started;
-    expect.soft(result.value?.success, "the start").toBe(false);
-    expect.soft(result.value?.message ?? "", "why").toMatch(/disposed while the 'ipp' package loaded: start not run/);
-    expect.soft(requests, "printer requests").toEqual([]);
-    expect.soft(events, "events").toEqual([]);
+  it("quiesce waits for a pending start and the entire poll chain, then settles after completion", async () => {
+    const printer = new FakeIppPrinter();
+    const gate = deferred<IppTransportResult>();
+    printer.setHandler(IPP_OPERATION.PRINT_JOB, () => gate.promise);
+    printer.setHandler(IPP_OPERATION.GET_JOB_ATTRIBUTES, r => jobResponse(r, { jobState: 9 }));
+    const ipp = adapter(printer);
+    const events: string[] = [];
+    ipp.onEvidence(e => events.push(e.type));
+    const pending = start(ipp);
+    await flush();
     let quiet = false;
-    void ipp.quiesceEvidence().then(() => (quiet = true));
-    await pause();
-    expect.soft(quiet, "quiesceEvidence(), once that start settled").toBe(true);
+    void ipp.quiesceEvidence().then(() => { quiet = true; });
+    expect(quiet).toBe(false);
+    gate.resolve(jobResponse(printer.requests[1]));
+    await pending;
+    await flush();
+    expect(quiet).toBe(false);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(quiet).toBe(true);
+    expect(events).toEqual(["execution_started", "execution_completed"]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(events).toHaveLength(2);
   });
 
-  it("a cancel while `ipp` loads, then dispose: once `ipp` loads, that cancel sends nothing (astra pack 201)", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(fakePrinter(requests));
-    const ipp = new g.IppAdapter("ipp-load-cancel-dispose", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-
-    const cancel = settle(ipp.cancelJob(7));
-    await pause();
+  it("dispose between readiness and Print-Job prevents submission and quiesce settles", async () => {
+    const printer = new FakeIppPrinter();
+    const gate = deferred<IppTransportResult>();
+    printer.setHandler(IPP_OPERATION.GET_PRINTER_ATTRIBUTES, () => gate.promise);
+    const ipp = adapter(printer);
+    const pending = start(ipp);
+    await flush();
     await ipp.dispose();
-    g.resolve();
-    const result = await cancel;
-    expect.soft(result.error ?? "resolved", "the cancel").toMatch(/disposed/);
-    expect.soft(requests, "printer requests").toEqual([]);
+    gate.resolve(printerResponse(printer.requests[0]));
+    expect(await pending).toMatchObject({ success: false, message: expect.stringContaining("disposed") });
+    expect(printer.requests.map(r => r.code)).toEqual([11]);
+    await ipp.quiesceEvidence();
   });
 
-  it("once disposed, a loaded real adapter sends nothing: a start or a cancel asked after dispose is refused (astra pack 201)", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(fakePrinter(requests, { "Print-Job": () => [null, { "job-attributes-tag": { "job-id": 45 } }] }));
-    const ipp = new g.IppAdapter("ipp-disposed-loaded", { uri: URI, kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 60_000 });
-    const events = record(ipp);
-    g.resolve();
-    await vi.dynamicImportSettled();
-    await pause();
+  it("once disposed, all commands, cancel, and reads start no requests", async () => {
+    const printer = new FakeIppPrinter();
+    const ipp = adapter(printer);
     await ipp.dispose();
-
-    const started = await settle(ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } }));
-    const cancelled = await settle(ipp.cancelJob(45));
-    expect.soft(started.value?.success, "the start").toBe(false);
-    expect.soft(started.value?.message ?? "", "why").toMatch(/disposed/);
-    expect.soft(cancelled.error ?? "resolved", "the cancel").toMatch(/disposed/);
-    expect.soft(requests, "printer requests").toEqual([]);
-    expect.soft(events, "events").toEqual([]);
-    await ipp.dispose();
+    expect((await start(ipp)).success).toBe(false);
+    await expect(ipp.cancelJob(7)).rejects.toThrow("disposed");
+    for (const type of ["pause", "resume", "stop", "status", "load_gcode"] as const) expect((await ipp.execute({ type })).success).toBe(false);
+    expect(await ipp.getStatus()).toBe("offline");
+    expect(await ipp.getProgress()).toBe(0);
+    await expect(ipp.getCapabilities()).rejects.toThrow("disposed");
+    expect(printer.requests).toEqual([]);
+    await ipp.quiesceEvidence();
   });
 
-  it("a real start whose Print-Job answer arrives after dispose: it succeeded, but the job is not followed (monitored: false), nothing polls, and quiesceEvidence() resolves (astra packs 203 and 205)", async () => {
-    const requests: string[] = [];
-    let answerPrint!: () => void;
-    const Printer = class {
-      constructor(readonly uri: string) {}
-      execute(op: string, _msg: unknown, _data: unknown, cb: (err: Error | null, res: Record<string, unknown>) => void): void {
-        requests.push(op);
-        if (op === "Print-Job") {
-          answerPrint = () => cb(null, { "job-attributes-tag": { "job-id": 46 } });
-          return;
-        }
-        queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-state": 5, "job-impressions-completed": 1 } }));
-      }
-    };
-    const g = await gatedIpp(Printer);
-    const ipp = new g.IppAdapter("ipp-late-print", { uri: URI, kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 10 });
-    g.resolve();
-    await vi.dynamicImportSettled();
-    await pause();
-
-    const started = settle(ipp.execute({ type: "start", payload: { documentData: "%PDF-1.4", jobName: "doc" } }));
-    await vi.waitFor(() => expect(requests).toContain("Print-Job"));
+  it("a Print-Job answer after dispose succeeds unmonitored, starts no polls, and quiesces", async () => {
+    const printer = new FakeIppPrinter();
+    const gate = deferred<IppTransportResult>();
+    printer.setHandler(IPP_OPERATION.PRINT_JOB, () => gate.promise);
+    const ipp = adapter(printer);
+    const events: unknown[] = [];
+    ipp.onEvidence(e => events.push(e));
+    const pending = start(ipp);
+    await flush();
     await ipp.dispose();
-    answerPrint();
-    const result = await started;
-    await new Promise((r) => setTimeout(r, 60)); // several poll intervals
+    gate.resolve(jobResponse(printer.requests[1], { jobId: 46 }));
+    expect(await pending).toMatchObject({ success: true, data: { jobId: 46, monitored: false }, message: expect.stringContaining("not monitored") });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(printer.requests.map(r => r.code)).toEqual([11, 2]);
+    expect(events).toEqual([]);
+    await ipp.quiesceEvidence();
+  });
+
+  it("an in-flight poll after dispose emits nothing, schedules nothing, and remains outstanding until its answer", async () => {
+    const printer = new FakeIppPrinter();
+    const gate = deferred<IppTransportResult>();
+    printer.setHandler(IPP_OPERATION.GET_JOB_ATTRIBUTES, () => gate.promise);
+    const ipp = adapter(printer);
+    const events: string[] = [];
+    ipp.onEvidence(e => events.push(e.type));
+    await start(ipp);
+    await vi.advanceTimersByTimeAsync(50);
+    await ipp.dispose();
     let quiet = false;
-    void ipp.quiesceEvidence().then(() => (quiet = true));
-    await pause();
-
-    // The printer accepted the job: the start succeeded, so no caller retries it into a second
-    // print (astra pack 205). It is not monitored, and says so.
-    expect.soft(result.value?.success, "the start").toBe(true);
-    expect.soft(result.value?.message ?? "", "why").toMatch(/IPP job 46 was submitted, but .* was disposed meanwhile, so the job is not monitored/);
-    expect.soft(result.value?.data, "the job it names, unmonitored").toEqual({ jobId: 46, monitored: false });
-    expect.soft(requests, "printer requests").toEqual(["Print-Job"]);
-    expect.soft(quiet, "quiesceEvidence() after dispose").toBe(true);
+    void ipp.quiesceEvidence().then(() => { quiet = true; });
+    await flush();
+    expect(quiet).toBe(false);
+    gate.resolve(jobResponse(printer.requests[2], { jobState: 9 }));
+    await flush();
+    expect(quiet).toBe(true);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(printer.requests).toHaveLength(3);
+    expect(events).toEqual(["execution_started"]);
   });
 
-  it("a loaded real adapter whose printer query fails rejects getCapabilities(): it never answers with the mock printer's capabilities", async () => {
-    const requests: string[] = [];
-    const g = await gatedIpp(fakePrinter(requests, { "Get-Printer-Attributes": () => [new Error("connect ECONNREFUSED 192.0.2.10:631"), {}] }));
-    const ipp = new g.IppAdapter("ipp-caps-fails", { uri: URI, kernelId: KERNEL_ID, mockMode: false });
-    g.resolve();
-    await vi.dynamicImportSettled();
-    await pause();
-
-    const caps = await settle(ipp.getCapabilities());
-    expect.soft(caps.value?.makeModel, "capabilities answered").toBeUndefined();
-    expect.soft(caps.error ?? "resolved", "the refusal").toMatch(/ECONNREFUSED/);
-    expect.soft(requests, "printer requests").toEqual(["Get-Printer-Attributes"]);
+  it("a failed query rejects capabilities and returns offline, never mock data", async () => {
+    const printer = new FakeIppPrinter();
+    printer.setHandler(IPP_OPERATION.GET_PRINTER_ATTRIBUTES, () => ({ ok: false, kind: "connect", sent: false, message: "refused" }));
+    const ipp = adapter(printer);
+    await expect(ipp.getCapabilities()).rejects.toThrow("connect");
+    expect(await ipp.getStatus()).toBe("offline");
+    expect(ipp.source.simulated).toBe(false);
   });
 });

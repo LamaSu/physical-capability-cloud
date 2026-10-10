@@ -251,16 +251,15 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     // octoprint, explicit mockMode:true -> OctoPrintAdapter stays named
     // "OctoPrintAdapter" but is a simulator.
     seedDevice("dev-octoprint-mock", KERNEL_ID, "octoprint", { mockMode: true });
-    // ipp, explicit mockMode:false -> IppAdapter attempts the real transport
-    // and (see beforeAll below) downgrades to mock at runtime.
-    seedDevice("dev-ipp-downgrade", KERNEL_ID, "ipp", { mockMode: false });
+    // Explicit real mode is marked real immediately and never serves mock answers.
+    seedDevice("dev-ipp-downgrade", KERNEL_ID, "ipp", { mockMode: false, uri: "ipp://127.0.0.1:9/ipp/print" });
     // An adapterType with NO registered factory on purpose — see the
     // "install manually" step below for why.
     seedDevice("dev-bench-neutral", KERNEL_ID, "bench-neutral-test-double");
     // Round 4: an IPP default-mock device whose adapter is replaced mid-run.
     seedDevice("dev-ipp-swap", KERNEL_ID, "ipp");
-    // Round 5: an IPP configured for real transport whose optional import has not settled.
-    seedDevice("dev-ipp-loading", KERNEL_ID, "ipp", { mockMode: false });
+    // A second explicitly real IPP adapter exercises start refusal without a document.
+    seedDevice("dev-ipp-loading", KERNEL_ID, "ipp", { mockMode: false, uri: "ipp://127.0.0.1:9/ipp/print" });
     // Round 4: a registered extension whose source omits the marker.
     registerMachineAdapter(UNMARKED_EXTENSION_TYPE, (device, _cfg, kernelId) => new UnmarkedBenchAdapter(device.id, kernelId));
     seedDevice("dev-unmarked-ext", KERNEL_ID, UNMARKED_EXTENSION_TYPE);
@@ -299,16 +298,8 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     (svc as unknown as { completedBundles: typeof noSettlementBundles }).completedBundles =
       noSettlementBundles;
 
-    // The 'ipp' optional peer dependency is NOT installed in this workspace
-    // (confirmed via `require.resolve("ipp")` from the kernel package before
-    // writing this test — MODULE_NOT_FOUND; it is not even listed in
-    // packages/kernel/package.json). So for dev-ipp-downgrade,
-    // IppAdapter's constructor-time `import("ipp")` genuinely rejects on its
-    // own — no stubbing required to force the downgrade. We just give that
-    // rejection (a real microtask-queue async operation) time to land and
-    // noteMockRouting() to set source.simulated=true before any test uses
-    // the device, so the "sanity" check below isn't racing construction.
-    await sleep(800);
+    // Real IPP construction performs no I/O or asynchronous import. JobRunner sends
+    // no documentData, so these real test jobs refuse start before any request.
 
     // dev-bench-neutral's DB row uses an adapterType with no registered
     // factory, so loadDbDevicesIntoRuntime()'s attempt to build it throws
@@ -417,19 +408,22 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     }, 20_000);
   });
 
-  // ── 3. IPP, mockMode:false, but the optional 'ipp' package is missing ───
+  // ── 3. Explicit real IPP refuses test jobs without documentData ───
 
-  describe("IPP machine with mockMode:false, live downgrade (optional 'ipp' package unavailable)", () => {
-    it("sanity: the real->mock downgrade already landed by request time", () => {
+  describe("IPP machine with mockMode:false", () => {
+    it("is real from construction", () => {
       const machine = svcInternals.machines.get("dev-ipp-downgrade");
-      expect(machine?.source.simulated).toBe(true);
+      expect(machine?.source.simulated).toBe(false);
     });
 
-    it("[F] the downgraded run is reported simulated:true, passed:false (N59 F2 repro #3)", async () => {
-      const res = await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-downgrade", assuranceTier: 0 });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body).toMatchObject({ ran: true, status: "completed", simulated: true, passed: false });
+    it("a real test job refuses start and reports simulated:false, passed:false", async () => {
+      const { vi } = await import("vitest");
+      const machine = svcInternals.machines.get("dev-ipp-downgrade") as IppAdapter;
+      const client = (machine as unknown as { ippClient: { config: { transport: () => Promise<unknown> } } }).ippClient;
+      const transport = vi.spyOn(client.config, "transport");
+      const body = (await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-downgrade", assuranceTier: 0 })).json();
+      expect(body).toMatchObject({ ran: true, status: "failed", simulated: false, passed: false });
+      expect(transport).not.toHaveBeenCalled();
     }, 20_000);
   });
 
@@ -451,24 +445,16 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     }, 20_000);
   });
 
-  // ── 3b'. Round 5: IPP still loading its transport serves mock answers ────
+  // ── 3b'. Real IPP has no transport-loading or simulation fallback ────
 
-  describe("an IPP configured for real transport whose 'ipp' import has not settled (round 5, NEW HIGH)", () => {
-    it("[F] the mock run it serves while loading is reported simulated:true, passed:false", async () => {
-      // Hold the adapter in its loading state for the whole job: an import slower than the run.
-      const proto = IppAdapter.prototype as unknown as { tryLoadIpp: () => void };
-      const realLoad = proto.tryLoadIpp;
-      proto.tryLoadIpp = () => {};
-      try {
-        expect(svc.refreshDeviceFromDb("dev-ipp-loading")).toEqual({ installed: true });
-      } finally {
-        proto.tryLoadIpp = realLoad;
-      }
+  describe("an IPP configured for real transport", () => {
+    it("refuses a document-free test job as simulated:false, passed:false", async () => {
+      expect(svc.refreshDeviceFromDb("dev-ipp-loading")).toEqual({ installed: true });
       const machine = svcInternals.machines.get("dev-ipp-loading");
       expect(Object.getPrototypeOf(machine)).toBe(IppAdapter.prototype);
-      expect("simulated" in (machine?.source ?? {})).toBe(false); // loading: no marker yet
+      expect(machine?.source.simulated).toBe(false);
       const body = (await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-loading", assuranceTier: 0 })).json();
-      expect(body).toMatchObject({ ran: true, status: "completed", simulated: true, passed: false });
+      expect(body).toMatchObject({ ran: true, status: "failed", simulated: false, passed: false });
     }, 20_000);
   });
 
@@ -521,11 +507,11 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       expect(adapterIsSimulated(adapter)).toBe(false);
     });
 
-    it("[F] an exact IppAdapter with no marker is simulated: it can serve mock answers while its import is pending (round 5)", () => {
+    it("an exact real IppAdapter is marked simulated:false from construction", () => {
       const adapter = new IppAdapter("dev-unit-ipp", { uri: "ipp://127.0.0.1:9/ipp/print", kernelId: KERNEL_ID, mockMode: false });
       try {
-        expect("simulated" in adapter.source).toBe(false); // nothing has settled yet
-        expect(adapterIsSimulated(adapter)).toBe(true);
+        expect(adapter.source.simulated).toBe(false);
+        expect(adapterIsSimulated(adapter)).toBe(false);
       } finally {
         void adapter.dispose();
       }
