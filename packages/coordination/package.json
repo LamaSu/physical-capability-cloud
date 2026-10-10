@@ -1,0 +1,33 @@
+{
+  "name": "@pcc/coordination",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PCC autonomous-org coordination backend — draft-first Brain supervisor, durable human-in-the-loop queue, org event bus, and a reaction rule engine. Additive-only vertical slice: reads gateway/store/a2a/workflow public interfaces, writes only within this package.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@pcc/a2a": "workspace:*",
+    "@pcc/workflow": "workspace:*",
+    "better-sqlite3": "^11.8.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.1"
+  }
+}
