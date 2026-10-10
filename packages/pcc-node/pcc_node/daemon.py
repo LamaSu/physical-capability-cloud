@@ -160,6 +160,9 @@ def run_daemon(config: NodeConfig, *, on_running=None):
         When registration is refused, malformed or raises unexpectedly. The daemon never ran: the PID file
         and any state file are removed first, so no caller can mistake it for a daemon that
         ran and stopped.
+    Exception
+        When the first heartbeat raises, the PID and state files are also removed
+        before the same exception propagates.
     """
     running = True
 
@@ -301,7 +304,16 @@ def run_daemon(config: NodeConfig, *, on_running=None):
     )
 
     # Send initial heartbeat
-    gateway_client.send_heartbeat("online", accepting_jobs=False)
+    try:
+        gateway_client.send_heartbeat("online", accepting_jobs=False)
+    except Exception as e:
+        log.error(f"Initial heartbeat failed ({e}); daemon not started.")
+        _remove_pid()
+        try:
+            os.remove(STATE_FILE)
+        except OSError:
+            pass
+        raise
 
     # The daemon is up: only now may a caller say the node is running (ChatGPT r3 finding 1).
     if on_running is not None:

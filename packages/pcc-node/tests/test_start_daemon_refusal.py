@@ -302,3 +302,40 @@ def test_complete_wire_registration_starts_normally(surroundings, tmp_path, monk
     assert result.exit_code == 0, result.output
     assert BANNER in result.output
     assert gateway.paths()[:3] == [KERNELS, KERNELS, "/api/operator/heartbeat"]
+
+
+@pytest.mark.parametrize("heartbeat", [
+    pytest.param(_wire_answer(200, b'{"ok":true}', 100), id="truncated-success"),
+    pytest.param(_wire_answer(401, b'{"error":"denied"}', 100), id="truncated-refusal"),
+])
+def test_unreadable_first_heartbeat_cleans_up_and_never_runs(surroundings, monkeypatch, heartbeat):
+    pid_file, state_file = surroundings
+    with open(state_file, "w") as f:
+        json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
+    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'), heartbeat)
+    running = []
+    with pytest.raises(http.client.HTTPException) as unreadable:
+        daemon.run_daemon(_config(gateway), on_running=lambda: running.append(True))
+    assert isinstance(unreadable.value, http.client.IncompleteRead)
+    assert running == []
+    assert gateway.paths() == [KERNELS, "/api/operator/heartbeat"]
+    assert not os.path.exists(pid_file)
+    assert not os.path.exists(state_file)
+
+
+@pytest.mark.parametrize("heartbeat", [
+    pytest.param(_wire_answer(200, b'{"ok":true}', 100), id="truncated-success"),
+    pytest.param(_wire_answer(401, b'{"error":"denied"}', 100), id="truncated-refusal"),
+])
+def test_unreadable_first_heartbeat_stops_start(surroundings, tmp_path, monkeypatch, heartbeat):
+    pid_file, state_file = surroundings
+    with open(state_file, "w") as f:
+        json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
+    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
+                          _wire_answer(201, b'{"id":"k1"}'), heartbeat)
+    result = _start(tmp_path, gateway)
+    assert result.exit_code == 1, result.output
+    assert BANNER not in result.output, result.output
+    assert gateway.paths() == [KERNELS, KERNELS, "/api/operator/heartbeat"]
+    assert not os.path.exists(pid_file)
+    assert not os.path.exists(state_file)
