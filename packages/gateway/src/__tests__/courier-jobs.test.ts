@@ -643,7 +643,7 @@ describe("background sweep", () => {
   });
 
   it("auto-cancels jobs whose sourceVerifyUrl starts failing after post", async () => {
-    verifyResponses.set("https://src/order", "ok");
+    verifyResponses.set("https://src.example.com/order", "ok");
     const app = await buildApp();
     try {
       await app.inject({
@@ -652,11 +652,11 @@ describe("background sweep", () => {
           deliveryId: "rv",
           pickup: { name: "A" },
           dropoff: { name: "B" },
-          sourceVerifyUrl: "https://src/order",
+          sourceVerifyUrl: "https://src.example.com/order",
         },
       });
       // Flip the source to fail and advance past the early re-verify window
-      verifyResponses.set("https://src/order", "fail-404");
+      verifyResponses.set("https://src.example.com/order", "fail-404");
       advance(2 * 60 * 1000);
       const store = (await import("../services/courier-jobs-store.js")).getCourierJobsStore();
       const result = await store.sweep();

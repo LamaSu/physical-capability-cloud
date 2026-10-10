@@ -26,9 +26,13 @@
  *     of them, so a defect in layer 2 still cannot make the dialer connect to
  *     a blocked address.
  *
- * Redirects are never followed: any 3xx is a failure. Responses are never
- * returned to the caller (only status and headers) and are read only up to a
- * byte cap. The whole exchange, name resolution included, has a deadline.
+ * Redirects are never followed: any 3xx is a failure. By default responses are
+ * never returned to the caller (only status and headers) and are read only up
+ * to a byte cap. A caller that must read a verdict out of the body (the
+ * source-verify check) or relay a proxied result (aggregator invoke) opts in
+ * with `captureBody`: the first `maxResponseBytes` bytes come back to GATEWAY
+ * CODE, and it is that code's job never to forward them to whoever supplied the
+ * URL. The whole exchange, name resolution included, has a deadline.
  *
  * Transport: Node core http/https, not undici. `undici` is not a dependency of
  * this package and adding one is out of scope; the property that matters (the
@@ -332,6 +336,8 @@ export interface OutboundTransportRequest {
   maxResponseBytes: number;
   /** Aborted when the overall deadline passes. */
   signal: AbortSignal;
+  /** Set only when the caller opted in: also hand back the first `maxResponseBytes` bytes of the body. */
+  captureBody?: boolean;
 }
 
 export interface OutboundTransportResponse {
@@ -340,6 +346,8 @@ export interface OutboundTransportResponse {
   bytesRead: number;
   /** True when the body was cut short (byte cap or deadline); the status is still valid. */
   truncated: boolean;
+  /** Present only when the request set captureBody; never longer than maxResponseBytes. */
+  body?: Buffer;
 }
 
 /** One raw HTTP exchange. Policy lives in guardedFetch(); a transport only moves bytes. */
@@ -383,6 +391,12 @@ export interface GuardedFetchInit {
   timeoutMs?: number;
   /** Response bytes read before the connection is dropped. Default 64 KiB. */
   maxResponseBytes?: number;
+  /**
+   * Opt in to receiving the (capped) response body in `GuardedFetchResponse.body`.
+   * Default false: the operator-channel send needs only the status. Whoever sets
+   * this owns the rule that the body is never reflected to the URL's supplier.
+   */
+  captureBody?: boolean;
 }
 
 export interface GuardedFetchResponse {
@@ -391,6 +405,8 @@ export interface GuardedFetchResponse {
   ok: boolean;
   headers: Record<string, string | string[] | undefined>;
   truncated: boolean;
+  /** Only when the caller set captureBody: at most maxResponseBytes bytes (possibly empty). */
+  body?: Buffer;
 }
 
 export const DEFAULT_TIMEOUT_MS = 5_000;
@@ -534,6 +550,9 @@ export const nodeTransport: OutboundTransport = (req) =>
     let settled = false;
     let received: { status: number; headers: http.IncomingHttpHeaders } | null = null;
     let bytes = 0;
+    // Body bytes kept for a captureBody caller; never more than maxResponseBytes.
+    const kept: Buffer[] = [];
+    let keptBytes = 0;
     let clientReq: http.ClientRequest | undefined;
 
     const onAbort = () => expire();
@@ -546,7 +565,13 @@ export const nodeTransport: OutboundTransport = (req) =>
     const succeed = (truncated: boolean) => {
       if (settled || !received) return;
       cleanup();
-      resolve({ status: received.status, headers: received.headers, bytesRead: bytes, truncated });
+      resolve({
+        status: received.status,
+        headers: received.headers,
+        bytesRead: bytes,
+        truncated,
+        ...(req.captureBody ? { body: Buffer.concat(kept, keptBytes) } : {}),
+      });
       clientReq?.destroy();
     };
     const fail = (err: unknown) => {
@@ -581,6 +606,12 @@ export const nodeTransport: OutboundTransport = (req) =>
     clientReq.on("response", (res) => {
       received = { status: res.statusCode ?? 0, headers: res.headers };
       res.on("data", (chunk: Buffer) => {
+        if (req.captureBody && keptBytes < req.maxResponseBytes) {
+          const room = req.maxResponseBytes - keptBytes;
+          const piece = chunk.length > room ? chunk.subarray(0, room) : chunk;
+          kept.push(piece);
+          keptBytes += piece.length;
+        }
         bytes += chunk.length;
         if (bytes > req.maxResponseBytes) succeed(true);
       });
@@ -710,6 +741,8 @@ export async function guardedFetch(
         timeoutMs: remaining(),
         maxResponseBytes,
         signal: controller.signal,
+        // Only present when asked for, so a transport that predates the option sees the same request as before.
+        ...(init.captureBody === true ? { captureBody: true } : {}),
       }),
       remaining(),
       () => {
@@ -730,5 +763,16 @@ export async function guardedFetch(
       status: res.status,
     });
   }
-  return { status: res.status, ok: res.status >= 200 && res.status < 300, headers: res.headers, truncated: res.truncated };
+  const response: GuardedFetchResponse = {
+    status: res.status,
+    ok: res.status >= 200 && res.status < 300,
+    headers: res.headers,
+    truncated: res.truncated,
+  };
+  // Without the opt-in the response carries no body property at all, whatever a transport returned.
+  if (init.captureBody === true) {
+    const body = Buffer.isBuffer(res.body) ? res.body : Buffer.alloc(0);
+    response.body = body.length > maxResponseBytes ? body.subarray(0, maxResponseBytes) : body;
+  }
+  return response;
 }

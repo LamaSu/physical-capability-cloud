@@ -106,11 +106,19 @@ async function handleCreate(
     postedBy: poster,
   });
   if (!result.ok) {
+    // SSRF: the URL itself was refused. Nothing was fetched and nothing was written.
+    if (result.reason === "invalid_source_verify_url") {
+      return reply.code(400).send({
+        error: "invalid_source_verify_url",
+        reason: result.urlRefusal ?? "invalid_url",
+        message: "sourceVerifyUrl must be a public https URL: no credentials, no private, loopback or internal address.",
+      });
+    }
+    // A status or a verdict, never the remote body (it used to be echoed as sourceBody).
     return reply.code(400).send({
       error: "source_verify_failed",
       reason: result.reason,
       sourceStatus: result.status ?? null,
-      sourceBody: result.body ?? null,
     });
   }
   if (!result.created) {

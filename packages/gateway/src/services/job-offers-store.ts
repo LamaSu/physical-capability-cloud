@@ -33,7 +33,22 @@
  * standalone service had no auth, so it trusted the header).
  *   - PATCH/DELETE/heartbeat require poster === current operatorId.
  *   - claim/events/get are open to any authenticated caller (operator agents).
+ *
+ * SSRF: sourceVerifyUrl is caller-supplied and the gateway fetches it, at
+ * creation and again from the sweeper. Both fetches go through
+ * services/outbound-url-guard.ts (resolve once, refuse any private answer, dial
+ * only the validated addresses, no redirects, deadline, byte cap), the URL is
+ * refused before anything is written, and the remote response body is NEVER
+ * carried out of the verify function: callers see a status or a verdict only.
  */
+
+import {
+  checkOutboundUrl,
+  guardedFetch,
+  OutboundError,
+  type GuardedFetchResponse,
+  type OutboundUrlRefusal,
+} from "./outbound-url-guard.js";
 
 // Structural type for the raw better-sqlite3 handle we get from
 // drizzle's `db.$client`. Avoiding a direct better-sqlite3 import keeps
@@ -273,63 +288,97 @@ export function extractRequirementsCoords(
 // Verify against external source. Same semantics as v0.2:
 //   ok=true if HTTP 2xx (treats non-JSON 2xx as alive),
 //   ok=false on non-2xx, on placed:false/valid:false, on fetch error.
+// New: a URL the outbound guard refuses is "invalid_source_verify_url" and is
+// never fetched, and redirects are not followed (a 3xx is http_non_2xx).
 export type VerifyOk = { ok: true; body: unknown };
 export type VerifyFail = {
   ok: false;
-  reason: "http_non_2xx" | "source_says_not_real" | "verify_request_failed";
+  reason:
+    | "http_non_2xx"
+    | "source_says_not_real"
+    | "verify_request_failed"
+    | "invalid_source_verify_url";
   status?: number;
+  /**
+   * GATEWAY-INTERNAL, never forwarded to a caller: a verify function may attach
+   * what it saw for logging, but no route reads this field. The default verify
+   * never sets it.
+   */
   body?: unknown;
+  /** Generic internal diagnostic (an outbound error code), never a remote message. */
   error?: string;
+  /** invalid_source_verify_url only: which syntactic rule refused the URL. */
+  urlRefusal?: OutboundUrlRefusal;
 };
 export type VerifyResult = VerifyOk | VerifyFail;
 
 export type VerifyFn = (url: string) => Promise<VerifyResult>;
 
-const defaultVerifyFn: VerifyFn = async (url) => {
+/** Deadline for one source check, name resolution included. */
+const VERIFY_TIMEOUT_MS = 8_000;
+/** A status document is small; anything past this is not read (and is not a verdict). */
+const VERIFY_MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * The syntactic SSRF check for a source URL, as a typed verify failure (or null
+ * when the URL is acceptable). Pure and DNS-free, so the answer depends only on
+ * the string: it cannot be used to probe the gateway's network.
+ */
+function refuseSourceVerifyUrl(url: unknown): VerifyFail | null {
+  const check = checkOutboundUrl(url);
+  if (check.ok) return null;
+  return { ok: false, reason: "invalid_source_verify_url", urlRefusal: check.reason };
+}
+
+/** The documented body verdict: a JSON object with placed:false or valid:false says "not real". */
+function sourceSaysNotReal(body: Buffer | undefined): boolean {
+  if (!body || body.length === 0) return false;
+  let parsed: unknown;
   try {
-    const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), 8000);
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: "GET",
-        headers: { accept: "application/json" },
-        signal: ac.signal,
-      });
-    } finally {
-      clearTimeout(t);
-    }
-    if (!res.ok) {
-      let body: string | null = null;
-      try { body = await res.text(); } catch { /* ignore */ }
-      return {
-        ok: false,
-        reason: "http_non_2xx",
-        status: res.status,
-        body: body?.slice(0, 500) ?? null,
-      };
-    }
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      return { ok: true, body: null };
-    }
-    if (
-      body && typeof body === "object" &&
-      ((body as Record<string, unknown>).placed === false ||
-       (body as Record<string, unknown>).valid === false)
-    ) {
-      return { ok: false, reason: "source_says_not_real", status: res.status, body };
-    }
-    return { ok: true, body };
-  } catch (err) {
-    return {
-      ok: false,
-      reason: "verify_request_failed",
-      error: err instanceof Error ? err.message : String(err),
-    };
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return false; // non-JSON 2xx (or a body cut at the cap) counts as alive, as it always did
   }
+  if (!parsed || typeof parsed !== "object") return false;
+  const o = parsed as Record<string, unknown>;
+  return o.placed === false || o.valid === false;
+}
+
+const defaultVerifyFn: VerifyFn = async (url) => {
+  let res: GuardedFetchResponse;
+  try {
+    res = await guardedFetch(url, {
+      method: "GET",
+      headers: { accept: "application/json", "user-agent": "pcc-gateway" },
+      timeoutMs: VERIFY_TIMEOUT_MS,
+      maxResponseBytes: VERIFY_MAX_BODY_BYTES,
+      // The body is read ONLY to compute the placed/valid verdict below; it is
+      // dropped here and never returned.
+      captureBody: true,
+    });
+  } catch (err) {
+    if (err instanceof OutboundError) {
+      if (err.code === "invalid_url") {
+        return { ok: false, reason: "invalid_source_verify_url", urlRefusal: err.reason as OutboundUrlRefusal | undefined };
+      }
+      // A redirect is never followed: the source must be given as its final URL.
+      if (err.code === "redirect_not_followed") {
+        return { ok: false, reason: "http_non_2xx", status: err.status };
+      }
+      // blocked_destination / dns_failure / timeout / request_failed are folded into
+      // one generic failure so the result cannot be used to probe internal names.
+      return { ok: false, reason: "verify_request_failed", error: err.code };
+    }
+    return { ok: false, reason: "verify_request_failed", error: "request_failed" };
+  }
+  if (!res.ok) {
+    // Status only. The body of a non-2xx answer is never carried out of here.
+    return { ok: false, reason: "http_non_2xx", status: res.status };
+  }
+  if (sourceSaysNotReal(res.body)) {
+    return { ok: false, reason: "source_says_not_real", status: res.status };
+  }
+  return { ok: true, body: null };
 };
 
 // ── Store ──────────────────────────────────────────────────────────────────
@@ -485,6 +534,14 @@ export class JobOffersStore {
     | (VerifyFail & { ok: false })
     | { ok: false; reason: "schema_validation_failed"; error: string }
   > {
+    // SSRF: a source URL the guard refuses ends the request here, before the
+    // idempotency lookup, the schema check, any fetch and any write. A falsy
+    // value still means "no source to verify", exactly as before.
+    if (input.sourceVerifyUrl) {
+      const refused = refuseSourceVerifyUrl(input.sourceVerifyUrl);
+      if (refused) return refused;
+    }
+
     // Idempotency check 1: caller-supplied id
     if (input.id && this.offers.has(input.id)) {
       return { ok: true, offer: this.offers.get(input.id)!, created: false };
@@ -835,7 +892,10 @@ export class JobOffersStore {
         const inEarlyWindow = now - postedMs < REVERIFY_EARLY_WINDOW_MS;
         const interval = inEarlyWindow ? REVERIFY_EARLY_INTERVAL_MS : REVERIFY_LATE_INTERVAL_MS;
         if (now - lastVMs >= interval) {
-          const v = await this.verify(o.sourceVerifyUrl);
+          // A stored row whose URL no longer passes the guard (stored before the
+          // rule existed) is never fetched: it fails as unverified like any other
+          // verify failure, and no remote status or body ever reaches its events.
+          const v = refuseSourceVerifyUrl(o.sourceVerifyUrl) ?? (await this.verify(o.sourceVerifyUrl));
           o.lastVerifyAt = this.nowIso();
           if (!v.ok) {
             o.status = "cancelled";
