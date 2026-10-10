@@ -189,16 +189,21 @@ describe("SafetyGovernor", () => {
       expect(rateCheck?.passed).toBe(false);
     });
 
-    it("rate limit is per-agent (different agentDid has independent count)", async () => {
+    it("rate limit is per device (a different agentDid on the same device shares the count; N86 G6)", async () => {
       const gov = new SafetyGovernor({ maxCommandRate: 2 });
-      // Exhaust agent-A
+      // Exhaust dev-001 from agent-A
       await gov.validateCommand(makeCmd({ class: "read", agentDid: "agent-A" }));
       await gov.validateCommand(makeCmd({ class: "read", agentDid: "agent-A" }));
-      // agent-B is independent — should still be allowed
-      const verdict = await gov.validateCommand(
+      // agent-B on the same device gets no second budget
+      const sameDevice = await gov.validateCommand(
         makeCmd({ class: "read", agentDid: "agent-B" }),
       );
-      expect(verdict.allowed).toBe(true);
+      expect(sameDevice.allowed).toBe(false);
+      // another device has its own count
+      const otherDevice = await gov.validateCommand(
+        makeCmd({ class: "read", agentDid: "agent-A", deviceId: "dev-002" }),
+      );
+      expect(otherDevice.allowed).toBe(true);
     });
 
     it("rate limit window is 60 seconds (commands older than 60s don't count)", async () => {
@@ -263,15 +268,23 @@ describe("SafetyGovernor", () => {
       expect(check?.passed).toBe(false);
     });
 
-    it("velocity check: skipped when params.velocity is not a number", async () => {
+    it("velocity check: refused when params.velocity is present but not a number (N86 G4)", async () => {
       const gov = new SafetyGovernor({ maxVelocity: 100 });
       const verdict = await gov.validateCommand(
         makeCmd({ class: "read", params: { velocity: "fast" } }),
       );
-      // Should still be allowed (velocity check skipped)
-      expect(verdict.allowed).toBe(true);
+      // Never skipped: an unchecked value would reach the device
+      expect(verdict.allowed).toBe(false);
       const check = verdict.checks.find((c) => c.name === "velocity_envelope");
-      expect(check).toBeUndefined(); // not added at all
+      expect(check?.passed).toBe(false);
+      expect(check?.detail).toBe('Velocity must be a finite number (got "fast")');
+    });
+
+    it("velocity check: not added when the command does not set velocity", async () => {
+      const gov = new SafetyGovernor({ maxVelocity: 100 });
+      const verdict = await gov.validateCommand(makeCmd({ class: "read", params: {} }));
+      expect(verdict.allowed).toBe(true);
+      expect(verdict.checks.find((c) => c.name === "velocity_envelope")).toBeUndefined();
     });
 
     it("temperature check: passes when params.temperature <= maxTemperature", async () => {
@@ -469,5 +482,127 @@ describe("SafetyGovernor", () => {
       // Internal state should be unchanged
       expect(gov.getHardwareState().isEStopEngaged).toBe(false);
     });
+  });
+});
+
+// ── N86 (Gate A, P0 physical safety): envelope gaps reproduced on master ac86a404 ──
+// Repro: /mnt/sparkbulk/tmp/sensors/r8/governor-repro-2.mts. Each test failed on master before the fix.
+
+describe("SafetyGovernor: N86 envelope gaps", () => {
+  const move = (params: Record<string, unknown>, overrides: Partial<PhysicalCommand> = {}) =>
+    makeCmd({ class: "safe", type: "move", params, ...overrides });
+
+  it("G1: a limit of 0 is a bound, not 'no limit'", async () => {
+    expect((await new SafetyGovernor({ maxVelocity: 0 }).validateCommand(move({ velocity: 1000 }))).allowed).toBe(false);
+    expect((await new SafetyGovernor({ maxVelocity: 0 }).validateCommand(move({ velocity: 0 }))).allowed).toBe(true);
+    expect((await new SafetyGovernor({ maxTemperature: 0 }).validateCommand(move({ temperature: 900 }))).allowed).toBe(false);
+    expect((await new SafetyGovernor({ maxForce: 0 }).validateCommand(move({ force: 5 }))).allowed).toBe(false);
+  });
+
+  it("G1: an explicit undefined does not remove a limit; the default still applies", async () => {
+    const gov = new SafetyGovernor({ maxVelocity: undefined, maxTemperature: undefined, maxForce: undefined });
+    const fast = await gov.validateCommand(move({ velocity: 600 }));
+    expect(fast.allowed).toBe(false);
+    expect(fast.reason).toBe("Velocity 600 exceeds max 500");
+    expect((await gov.validateCommand(move({ velocity: 100 }))).allowed).toBe(true);
+    expect((await gov.validateCommand(move({ temperature: 900 }))).allowed).toBe(false);
+    expect((await gov.validateCommand(move({ force: 900 }))).allowed).toBe(false);
+  });
+
+  it("G4: a checked parameter that is present but not a finite number is refused", async () => {
+    const gov = new SafetyGovernor({ maxVelocity: 100, maxTemperature: 60, maxForce: 10 });
+    for (const params of [{ temperature: "900" }, { velocity: { value: 1000 } }, { force: null }, { velocity: Number.NaN }, { temperature: [900] }]) {
+      const verdict = await gov.validateCommand(move(params));
+      expect(verdict.allowed, JSON.stringify(params)).toBe(false);
+      expect(verdict.reason, JSON.stringify(params)).toMatch(/must be a finite number/);
+    }
+    expect((await gov.validateCommand(move({ other: "x" }))).allowed).toBe(true);
+  });
+
+  it("G5: velocity and force are bounded by magnitude; temperature stays signed", async () => {
+    const gov = new SafetyGovernor({ maxVelocity: 500, maxForce: 100, maxTemperature: 300 });
+    expect((await gov.validateCommand(move({ velocity: -1000 }))).allowed).toBe(false);
+    expect((await gov.validateCommand(move({ velocity: -400 }))).allowed).toBe(true);
+    expect((await gov.validateCommand(move({ force: -1000 }))).allowed).toBe(false);
+    expect((await gov.validateCommand(move({ temperature: -20 }))).allowed).toBe(true);
+  });
+
+  it("G6: the rate limit is per device, whichever agent sends", async () => {
+    const gov = new SafetyGovernor({ maxCommandRate: 1 });
+    expect((await gov.validateCommand(move({}, { agentDid: "did:a", deviceId: "dev-1" }))).allowed).toBe(true);
+    const second = await gov.validateCommand(move({}, { agentDid: "did:b", deviceId: "dev-1" }));
+    expect(second.allowed).toBe(false);
+    expect(second.checks.find((c) => c.name === "rate_limit")?.passed).toBe(false);
+    expect((await gov.validateCommand(move({}, { agentDid: "did:a", deviceId: "dev-2" }))).allowed).toBe(true);
+  });
+
+  it("G7: a forbidden pattern with the g or y flag refuses every matching command", async () => {
+    for (const pattern of [/"mode":"unsafe"/g, /"mode":"unsafe"/y, /"mode":"unsafe"/gi]) {
+      const gov = new SafetyGovernor({ forbiddenPatterns: [pattern], maxCommandRate: 100 });
+      const verdicts: boolean[] = [];
+      for (let i = 0; i < 4; i++) verdicts.push((await gov.validateCommand(move({ mode: "unsafe" }))).allowed);
+      expect(verdicts, String(pattern)).toEqual([false, false, false, false]);
+    }
+  });
+
+  it("G8: a declared allowedGcodes list is refused at construction, since nothing here enforces it", () => {
+    expect(() => new SafetyGovernor({ allowedGcodes: ["G28"] })).toThrow(/allowedGcodes is not enforced/);
+    // Round 2 (astra pack 113): an empty list is refused too; see the round-2 block.
+    expect(() => new SafetyGovernor({ allowedGcodes: undefined })).not.toThrow();
+  });
+});
+
+// ── N86 round 2 (astra pack 113, gpt-5.6-sol): what the checks read is what the executor reads ──
+describe("SafetyGovernor: N86 round 2, params are plain data", () => {
+  const move = (params: Record<string, unknown>) => makeCmd({ class: "safe", type: "move", params });
+
+  it("G4: a bounded parameter present with the value undefined is refused, not skipped", async () => {
+    const verdict = await new SafetyGovernor({ maxVelocity: 100 }).validateCommand(move({ velocity: undefined }));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/Velocity must be a finite number \(got undefined\)/);
+  });
+
+  it("a getter cannot show one value to the checks and another to the executor", async () => {
+    let reads = 0;
+    const params: Record<string, unknown> = {};
+    Object.defineProperty(params, "velocity", { enumerable: true, get: () => (++reads === 1 ? 1 : 1000) });
+    const verdict = await new SafetyGovernor({ maxVelocity: 100 }).validateCommand(move(params));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.reason).toMatch(/getter/);
+  });
+
+  it("a getter on an unbounded parameter cannot slip past a forbidden pattern", async () => {
+    let reads = 0;
+    const params: Record<string, unknown> = {};
+    Object.defineProperty(params, "mode", { enumerable: true, get: () => (++reads === 1 ? "safe" : "unsafe") });
+    const verdict = await new SafetyGovernor({ forbiddenPatterns: [/unsafe/] }).validateCommand(move(params));
+    expect(verdict.allowed).toBe(false);
+  });
+
+  it("a bigint anywhere in params is a structured denial, not a thrown error", async () => {
+    const gov = new SafetyGovernor({ forbiddenPatterns: [/x/] });
+    const verdict = await gov.validateCommand(move({ count: 10n }));
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.checks.find((c) => c.name === "params_plain_data")?.passed).toBe(false);
+  });
+
+  it("G8: a declared allowedGcodes is refused even when empty (an empty list must not read as deny-all)", () => {
+    expect(() => new SafetyGovernor({ allowedGcodes: [] })).toThrow(/allowedGcodes is not enforced/);
+  });
+
+  it("a bounded value inherited from a polluted prototype is refused, never read through inheritance", async () => {
+    Object.defineProperty(Object.prototype, "velocity", { value: 50, configurable: true, writable: true, enumerable: false });
+    try {
+      const verdict = await new SafetyGovernor({ maxVelocity: 100 }).validateCommand(move({}));
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.reason).toMatch(/inherited/);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).velocity;
+    }
+  });
+
+  it("plain JSON params still pass (nested objects, arrays, null)", async () => {
+    const verdict = await new SafetyGovernor().validateCommand(move({ velocity: 10, path: [{ x: 1, y: 2 }], note: null, tool: { id: "t1" } }));
+    expect(verdict.allowed).toBe(true);
   });
 });
