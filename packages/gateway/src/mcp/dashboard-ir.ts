@@ -257,8 +257,9 @@ const MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|
 export function isMoneyState(value: string): boolean {
   return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
 }
-export function recordValueText(field: string, value: string): KitText {
-  return (value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value) as KitText;
+/** Legacy formatting only; its raw result is deliberately not display text. */
+export function recordValueText(field: string, value: string): string {
+  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
 }
 
 // ── A CLOSED safe vocabulary for bound status values (astra r3 H1) ───────────────────────
@@ -291,7 +292,7 @@ function isSafeStatusWord(value: string): boolean { return SAFE_STATUS_WORDS.has
 // states an amount or mentions the notice is WITHHELD_FIELD; (2) a SAFE_STATUS_WORDS word is shown
 // bare; (3) a money state (isMoneyState) gets RECORD_STATUS_NOTE; (4) ANY other value gets
 // RECORD_CLAIM_NOTE — never shown bare just because it wasn't independently recognised as a claim.
-// A non-status field is unchanged: a claim becomes WITHHELD_FIELD, using the stronger detector. Only
+// A non-status field is attributed: a claim becomes WITHHELD_FIELD, using the stronger detector. Only
 // a PCC card's own money fields (the price and its currency) show money, and they never pass through
 // here — they are now type-validated instead (dashboard-ir-renderer.ts readField).
 export const RECORD_CLAIM_NOTE = kitText(" - reported by the record, not confirmed by PCC");
@@ -314,7 +315,7 @@ export function boundStatusText(value: string): KitText {
 export function boundValueText(field: string, value: string): KitText {
   if (value === "") return kitText("");
   if (/(^|\.)status$/.test(field)) return boundStatusText(value);
-  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value as KitText;
+  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : (REPORTED_PREFIX + value) as KitText;
 }
 
 // ── Attributed free text (astra r5 F1; same rule astra accepted on #313's F12) ───────────
@@ -1141,8 +1142,8 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     if (n.bind !== undefined) {
       if (spec.noBind || !spec.bindKey) return `${n.type} must not bind`;
       if (!isPlain(n.bind) || !onlyKeys(n.bind, ["path", "select", "query", "pollMs", "sse", "schema"])) return "bind shape";
-      const bk = policyKeyOf(n as unknown as IrNode) as string; // ONE resolution, shared with provenanceOf
-      const reason = bindMatchesPolicy(n.bind as unknown as IrBind, bk); if (reason) return `bind: ${reason}`;
+      const bk = policyKeyOf(n as Record<string, unknown> & IrNode) as string; // ONE resolution, shared with provenanceOf
+      const reason = bindMatchesPolicy(n.bind as Record<string, unknown> & IrBind, bk); if (reason) return `bind: ${reason}`;
       if (++bindCount > LIM.boundWindowsTotal) return "bound-window budget"; // poll-amplification cap (mirrors adapter)
     } else if (spec.needsBind) return `${n.type} requires a bind`;
     // stat (metric) label is PCC-OWNED — must equal the fixed label for its ALLOWLISTED
@@ -1197,7 +1198,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
   const e1 = walk(doc.title, 0); if (e1) return { ok: false, reason: `title: ${e1}` };
   const e2 = walk(doc.root, 0); if (e2) return { ok: false, reason: e2 };
   // a claim may not be split across prose (mirror of withholdSplitClaims) on the now well-formed tree
-  const sections = (doc.root as unknown as IrNode).children ?? [];
-  if (splitClaim([doc.title as unknown as IrNode, ...sections].flatMap((n) => agentProse(n)))) return { ok: false, reason: "agent prose states a claim across nodes" };
+  const sections = (doc.root as Record<string, unknown> & IrNode).children ?? [];
+  if (splitClaim([doc.title as Record<string, unknown> & IrNode, ...sections].flatMap((n) => agentProse(n)))) return { ok: false, reason: "agent prose states a claim across nodes" };
   return { ok: true };
 }

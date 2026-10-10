@@ -162,3 +162,11 @@ export function isProseClaim(text: string): boolean {
   return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
 }
 
+
+// Identifiers can spell prose. Match the IR's unbounded noun/generic pair rule.
+const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
+const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
+export function isIdentifierClaim(value: string): boolean {
+  if (isMoneyClaim(value) || mentionsWithheld(value)) return true;
+  return views(foldForClaims(value)).some((v) => IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v));
+}

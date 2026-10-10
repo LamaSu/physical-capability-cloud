@@ -104,7 +104,7 @@ function buildHostTransport(fetchMock: FetchMock, key: string | null): HostTx {
     `var API_ORIGIN = new URL(API_DEFAULT).origin;`,
     `var __KEY__ = ${JSON.stringify(key)};`,
     `function getKey(){ return __KEY__; }`,
-    extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
+    extractFn(PCC_UI_SRC, "dataAt"), extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
     extractFn(PCC_UI_SRC, "safeApiPath"),
     sliceRegion(
       PCC_UI_SRC,

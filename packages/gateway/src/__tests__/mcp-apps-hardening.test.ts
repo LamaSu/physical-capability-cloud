@@ -85,7 +85,7 @@ const kit: KitFns = (() => {
     `var API_DEFAULT = ${JSON.stringify(PCC_ORIGIN)};`,
     `var API_ORIGIN = new URL(API_DEFAULT).origin;`,
     nonMoneyWrites[0],
-    extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
+    extractFn(PCC_UI_SRC, "dataAt"), extractFn(PCC_UI_SRC, "isAbsoluteOrSchemeUrl"),
     extractFn(PCC_UI_SRC, "safeApiPath"),
     extractFn(PCC_UI_SRC, "resolveApiBase"),
     extractFn(PCC_UI_SRC, "pinnedUrl"),

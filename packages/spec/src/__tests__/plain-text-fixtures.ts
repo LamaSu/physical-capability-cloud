@@ -1,7 +1,7 @@
 /** Shared accepted/rejected inputs for the canonical helpers and their shipped JS mirrors. */
 export const PLAIN_TEXT_CASES: Readonly<Record<"idText" | "hexText" | "traceText" | "nameText", readonly (readonly [unknown, string])[]>> = {
   idText: [
-    ["job-1", "job-1"], ["Kernel:local_1.2", "Kernel:local_1.2"], ["a".repeat(128), "a".repeat(128)],
+    ["job-1", "reported: job-1"], ["Kernel:local_1.2", "reported: Kernel:local_1.2"], ["a".repeat(128), "reported: " + "a".repeat(128)],
     ["a".repeat(129), "reported: " + "a".repeat(129)], ["bad id", "reported: bad id"],
     ["_start", "reported: _start"], ["éclair", "reported: éclair"], ["job\u0000", "reported: job\u0000"],
     [42, "reported: 42"], [false, "reported: false"], [null, ""], [undefined, ""], ["", ""],

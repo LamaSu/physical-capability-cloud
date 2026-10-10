@@ -377,7 +377,7 @@
   function boundValueText(field, value) {
     if (value === "") return kitText("");
     if (/(^|\.)status$/.test(field)) return boundStatusText(value);
-    return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : value;
+    return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : REPORTED_PREFIX + value;
   }
   var REPORTED_PREFIX = kitText("reported: ");
   function reportedFieldText(field, value) {
@@ -1163,7 +1163,8 @@
   function agentEl(doc, cls, text) {
     const n = doc.createElement("div");
     n.className = cls + " " + CLS.agent + " " + CLS.untrusted;
-    n.textContent = text;
+    const agentSlot = n;
+    agentSlot.textContent = text;
     return n;
   }
   var UNAVAILABLE = kitText("\u2014");
@@ -1216,7 +1217,7 @@
       case "capType":
         return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(foundKey, raw) } : { ok: false };
       case "status":
-        return typeof raw === "string" && raw.length > 0 ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+        return typeof raw === "string" && raw.length > 0 ? { ok: true, text: boundStatusText(raw) } : { ok: false };
       case "amount":
         if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && AMOUNT_STR_RE.test(String(raw))) return { ok: true, text: String(raw) };
         if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: raw };
@@ -1400,7 +1401,7 @@
     available: kitText("Available")
   };
   function listFieldLabel(field) {
-    return LIST_FIELD_LABELS[field] ?? UNAVAILABLE;
+    return Object.prototype.hasOwnProperty.call(LIST_FIELD_LABELS, field) ? LIST_FIELD_LABELS[field] : UNAVAILABLE;
   }
   function listFieldHeadingText(field) {
     return joinKitText(listFieldLabel(field), kitText(":"));
@@ -1493,7 +1494,7 @@
       parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
     }
     if (offset === "unknown") parts.push(kitText("offset not shown"));
-    else if (offset > 0) parts.push(joinKitText(kitText("from row "), countText(offset + 1)));
+    else if (offset > 0) parts.push(joinKitText(kitText("from row "), offset === Number.MAX_SAFE_INTEGER ? kitText("9007199254740992") : countText(offset + 1)));
     if (prof?.paged) {
       const paged = prof.paged;
       if (paged.total !== void 0) {
@@ -1780,10 +1781,15 @@
   function setText2(node, text) {
     node.textContent = text;
   }
+  var realElements = /* @__PURE__ */ new WeakMap();
+  function realEl(wrapped) {
+    const real = realElements.get(wrapped);
+    if (!real) throw new Error("Unknown renderer element");
+    return real;
+  }
   function wrapEl(real) {
     const children = [];
     const w = {
-      _el: real,
       children,
       get textContent() {
         return real.textContent ?? "";
@@ -1814,11 +1820,12 @@
         real.removeAttribute(n);
       },
       appendChild(c) {
-        real.appendChild(c._el);
+        real.appendChild(realEl(c));
         children.push(c);
         return c;
       }
     };
+    realElements.set(w, real);
     return w;
   }
   var rdoc = { createElement: (tag) => wrapEl(document.createElement(tag)) };
@@ -2203,11 +2210,11 @@
       inert(mount, kitText("This dashboard could not be verified and was not rendered."));
       return;
     }
-    mount.replaceChildren(container._el);
+    mount.replaceChildren(realEl(container));
     if (painted) {
       liveDoc = r.doc;
-      liveRoot = container._el;
-      startBinds(r.doc, container._el);
+      liveRoot = realEl(container);
+      startBinds(r.doc, realEl(container));
     }
   }
   function boot() {

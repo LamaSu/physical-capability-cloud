@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "lib": ["es2022", "dom", "dom.iterable"]
+  },
+  "include": [
+    "src/__tests__/ir-kit-text-brand.test.ts",
+    "../spec/src/__tests__/ui-kit*.ts"
+  ]
+}

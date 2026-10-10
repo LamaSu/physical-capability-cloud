@@ -467,7 +467,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
   it("F2: every bound sink withholds a claim and qualifies a status word; the price fields are the card's own", () => {
     expect(boundValueText("name", "Paid $1M \u2014 verified")).toBe(WITHHELD_FIELD);
     expect(boundValueText("location.label", "Berlin - funds received")).toBe(WITHHELD_FIELD);
-    expect(boundValueText("id", "cap-7")).toBe("cap-7");
+    expect(boundValueText("id", "cap-7")).toBe("reported: cap-7");
     expect(boundValueText("status", "verified")).toBe("verified" + RECORD_CLAIM_NOTE);
     expect(boundValueText("kernel.status", "pagado")).toBe("pagado" + RECORD_CLAIM_NOTE);
     expect(boundValueText("status", "settled")).toBe("settled" + RECORD_STATUS_NOTE);

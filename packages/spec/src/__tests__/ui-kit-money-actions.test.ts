@@ -1274,7 +1274,7 @@ describe("B: each validation layer is closed on its own (defense in depth)", () 
   }
   // eslint-disable-next-line no-new-func, @typescript-eslint/no-implied-eval
   const kit = new Function([
-    extractFn("isAbsoluteOrSchemeUrl"), extractFn("safeApiPath"), extractFn("canonicalPath"),
+    extractFn("dataAt"), extractFn("isAbsoluteOrSchemeUrl"), extractFn("safeApiPath"), extractFn("canonicalPath"),
     "return { safeApiPath: safeApiPath, canonicalPath: canonicalPath };",
   ].join("\n"))() as { safeApiPath(p: string, host: boolean): string | null; canonicalPath(p: string): string | null };
   const ambiguous = ["/api%2Ffeedback", "/api%2ffeedback", "/api%252Ffeedback", "/api/x%25", "/api/x%5C", "/api/x%5c", "/api/x%3F", "/api/x%23"];
@@ -1359,7 +1359,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     const calls = installFetch(() => ({ status: 200 }));
     boot(act({ path: FUND, body: { amount: 1, totalAmount: 1000000 } }));
     btn("Go").click();
-    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["amount 1.00 (no currency in the request)", "totalAmount 1,000,000.00 (no currency in the request)"]);
+    expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(['reported: "amount" 1.00 (no currency in the request)', 'reported: "totalAmount" 1,000,000.00 (no currency in the request)']);
     gateApproveBtn()!.click();
     await flush();
     expect(posts(calls)[0]!.body).toMatchObject({ amount: 1, totalAmount: 1000000 });
@@ -1369,7 +1369,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     installFetch(() => ({ status: 200 }));
     boot(act({ path: FUND, body: { jobId: "benign", escrowId: "evil" } }));
     btn("Go").click();
-    expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId benign", "escrowId evil"]);
+    expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(['reported: "jobId" benign', 'reported: "escrowId" evil']);
   });
 
   it("the approval window shows every other body field exactly as the wire carries it", async () => {
@@ -1379,7 +1379,7 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     await flush();
     expect(all(".pcc-win .pcc-realreq-amt")).toEqual(["Amount 21.99 (no currency in the request)"]);
     expect(all(".pcc-win .pcc-realreq-ref")).toEqual(["ref esc-1"]);
-    expect(bodyRows(".pcc-win")).toEqual([["payee", 'reported: "0xevil"'], ["split", 'reported: {"a":1}'], ["note", 'reported: "5"'], ["idempotencyKey", "set by the kit when sent"]]);
+    expect(bodyRows(".pcc-win")).toEqual([['reported: "payee"', 'reported: "0xevil"'], ['reported: "split"', 'reported: {"a":1}'], ['reported: "note"', 'reported: "5"'], ["idempotencyKey", "set by the kit when sent"]]);
     btn("Approve").click();
     await flush();
     const { idempotencyKey, ...wire } = posts(calls)[0]!.body!;
@@ -1393,8 +1393,8 @@ describe("B (ruling 3): the display IS the wire -- every field the request sends
     boot(act({ path: FUND, body }));
     btn("Go").click();
     expect(all(".pcc-overlay .pcc-realreq-amt")).toEqual(["Amount 3.00 USDC"]); // amount + its currency
-    expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(["jobId j1", "offerId o1"]);
-    expect(bodyRows(".pcc-overlay")).toEqual([["asset", 'reported: "ETH"'], ["memo", 'reported: "m"'], ["n", "reported: null"], ["deep", 'reported: {"x":[1,2]}'], ["idempotencyKey", "set by the kit when sent"]]);
+    expect(all(".pcc-overlay .pcc-realreq-ref")).toEqual(['reported: "jobId" j1', 'reported: "offerId" o1']);
+    expect(bodyRows(".pcc-overlay")).toEqual([['reported: "asset"', 'reported: "ETH"'], ['reported: "memo"', 'reported: "m"'], ['reported: "n"', "reported: null"], ['reported: "deep"', 'reported: {"x":[1,2]}'], ["idempotencyKey", "set by the kit when sent"]]);
     gateApproveBtn()!.click();
     await flush();
     expect(Object.keys(posts(calls)[0]!.body!).sort()).toEqual([...Object.keys(body), "idempotencyKey"].sort());
@@ -1493,7 +1493,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     boot(act({ path: FUND, body: { amount: 5, currency: "" } }));
     btn("Go").click();
     expect(text(".pcc-overlay .pcc-realreq-amt")).toBe("Amount 5.00 (no currency in the request)");
-    expect(rows(".pcc-overlay")).toContainEqual(["currency", 'reported: ""']);
+    expect(rows(".pcc-overlay")).toContainEqual(['reported: "currency"', 'reported: ""']);
   });
 
   it("F4: a POST's idempotencyKey is shown as the kit's (what the wire carries), never the body's value", async () => {
@@ -1513,7 +1513,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
     const calls = installFetch(() => ({ status: 200 }));
     boot(act({ kind: "patch", path: "/api/jobs/j1/status", body: { status: "done", idempotencyKey: "m" } }));
     btn("Go").click();
-    expect(rows(".pcc-overlay")).toContainEqual(["idempotencyKey", 'reported: "m"']);
+    expect(rows(".pcc-overlay")).toContainEqual(['reported: "idempotencyKey"', 'reported: "m"']);
     expect(all(".pcc-overlay .pcc-args-kit")).toEqual([]);
     gateApproveBtn()!.click();
     await flush();
@@ -1528,7 +1528,7 @@ describe("review charlie (#342 @17a8a7f0): the approval display follows the requ
       btn("Refresh").click();
       expect(overlays()).toBe(1);
       expect(posts(calls).length).toBe(0);
-      expect(rows(".pcc-overlay")).toContainEqual(["visibility", 'reported: "public"']);
+      expect(rows(".pcc-overlay")).toContainEqual(['reported: "visibility"', 'reported: "public"']);
       gateApproveBtn()!.click();
       await flush();
       expect(posts(calls).map((c) => c.url)).toEqual([`${PCC}${p}`]);

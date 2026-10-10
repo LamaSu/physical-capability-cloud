@@ -18,10 +18,10 @@ const browserConfig: TextSinkConfig = {
       matches: (call) => enclosingNamedFunction(call) === "inert" && isMember(call.expression, "mount", "replaceChildren") && call.arguments.length === 1 && isIdentifier(call.arguments[0], "p") && isElementCreation(localConstInitializer(call, "p")),
     },
     {
-      reason: "renderManifest replaces the mount with container._el, the DOM element of a local const wrapEl(document.createElement(...))",
+      reason: "renderManifest replaces the mount with realEl(container), the private DOM element for a local const wrapEl(document.createElement(...))",
       matches: (call) => {
         const origin = localConstInitializer(call, "container");
-        return enclosingNamedFunction(call) === "renderManifest" && isMember(call.expression, "mount", "replaceChildren") && call.arguments.length === 1 && isMember(call.arguments[0], "container", "_el") && !!origin && ts.isCallExpression(origin) && isIdentifier(origin.expression, "wrapEl") && origin.arguments.length === 1 && isElementCreation(origin.arguments[0]);
+        return enclosingNamedFunction(call) === "renderManifest" && isMember(call.expression, "mount", "replaceChildren") && call.arguments.length === 1 && ts.isCallExpression(call.arguments[0]) && isIdentifier(call.arguments[0].expression, "realEl") && call.arguments[0].arguments.length === 1 && isIdentifier(call.arguments[0].arguments[0], "container") && !!origin && ts.isCallExpression(origin) && isIdentifier(origin.expression, "wrapEl") && origin.arguments.length === 1 && isElementCreation(origin.arguments[0]);
       },
     },
     {
@@ -57,6 +57,9 @@ const plainConfig: TextSinkConfig = {
     { function: "collectForm", target: "out", reason: "Collects form data into its fresh plain object; preserves the baseline field and __proto__ semantics" },
     { function: "intentState", target: "INTENT_STATE", reason: "Stores per-request state in the module's fresh null-prototype dictionary; no DOM receiver is reachable" },
   ],
+  allowedComputedReads: [
+    { function: "dataAt", target: "raw", ownKey: "key", reason: "One exact propertyIsEnumerable-guarded read admits only own enumerable fields without per-read copies; numeric array/NodeList reads use slice" },
+  ],
   agentText: { mint: "agentText", sink: "agentEl", reason: "One claim-checking agent mint and one sink that adds the IR's agent and untrusted classes; agent brands cannot enter kit sinks" },
   allowedNameArguments: [
     {
@@ -79,22 +82,22 @@ const plainConfig: TextSinkConfig = {
       { name: "kitText", reason: "PCC copy; all external calls require literal-only arguments" },
       { name: "joinText", reason: "Composes only WeakSet-branded parts; any other part becomes the closed marker" },
       { name: "enumValueText", reason: "Preserves the original enum option's wire value while untrustedLabel attributes its visible text" },
-      { name: "requestValueText", reason: "Preserves existing wire-formatted offer, approval, and exact request terms without presenting them as settlement facts" },
+      { name: "requestValueText", reason: "Preserves exact wire terms only in realRequestNode, the request descriptor display; caller assertions pin that boundary" },
       { name: "requestDestinationText", reason: "Displays only the validated canonical request URL pinned to the PCC origin" },
       { name: "requestReasonText", reason: "Displays the descriptor's kit-owned refusal reason" },
       { name: "apiBaseText", reason: "Displays the resolved pinned API origin in the PCC footer" },
       { name: "numberText", reason: "Admits only finite numbers; it cannot carry arbitrary server prose" },
       { name: "settlementCaptionText", reason: "Admits only the closed classifier's settlement captions" },
       { name: "baseUnitsText", reason: "Formats only decimal base units with checked decimal precision" },
-      { name: "fmtUsd", reason: "Preserves the existing amount formatter, including invalid-input String bytes required by the task" },
-      { name: "fmtTs", reason: "Preserves the existing timestamp formatter; timeText separately checks the canonical UTC grammar" },
+      { name: "fmtUsd", reason: "Formats only finite numbers or decimal strings; invalid inputs become amount not reported" },
+      { name: "fmtTs", reason: "Formats only calendar-valid canonical UTC strings or finite epoch numbers; invalid inputs become time not reported" },
       { name: "fmtVal", reason: "Preserves locale grouping for finite numeric metrics; other values use typed helpers" },
       { name: "statusPillText", reason: "Applies the surface's closed status vocabulary and attributes every other status" },
       { name: "reportedText", reason: "Attributes server prose as reported and qualifies unconfirmed money surfaces" },
       { name: "dataStatusText", reason: "Applies the binding's settlement classifier or closed status vocabulary" },
       { name: "untrustedLabel", reason: "Quotes and attributes manifest-authored labels using the existing presentation" },
       { name: "amountText", reason: "Preserves the existing exact sum formatter or wire JSON request term" },
-      { name: "idText", reason: "Admits the canonical identifier grammar, otherwise uses reportedText" },
+
       { name: "hexText", reason: "Admits only 40- or 64-digit hexadecimal values with a 0x prefix" },
       { name: "timeText", reason: "Admits canonical UTC timestamps through fmtTs, otherwise states time not reported" },
       { name: "traceText", reason: "Admits only the closed 8–64-character trace identifier grammar" },
@@ -112,8 +115,8 @@ const kits: TextSinkConfig[] = [
     attributeMethods: ["setAttribute", "setAttr"],
     allowedAttributes: ["data-tone", "data-source", "data-as-of"],
     allowedNameArguments: [{
-      reason: 'paintProse\'s fourth argument "label" selects a validated IR prose field, rather than a DOM member',
-      matches: (call, argument) => isIdentifier(call.expression, "paintProse") && call.arguments.length === 4 && call.arguments[3] === argument && ts.isStringLiteral(argument) && argument.text === "label",
+      reason: 'paintProse\'s fourth argument "label" or "text" selects a validated IR prose field, rather than a DOM member',
+      matches: (call, argument) => isIdentifier(call.expression, "paintProse") && call.arguments.length === 4 && call.arguments[3] === argument && ts.isStringLiteral(argument) && ["label", "text"].includes(argument.text),
     }],
   },
   browserConfig,
@@ -369,7 +372,7 @@ describe("generic lint guard", () => {
   });
 });
 
-describe("closed computed data writes", () => {
+describe("fresh computed data writes", () => {
   const config: TextSinkConfig = {
     file: "kit.js", scriptKind: ts.ScriptKind.JS, sinks: [],
     allowedComputedWrites: [{ function: "collect", target: "out", reason: "Fresh data object; no DOM receiver is reachable" }],
@@ -414,7 +417,10 @@ describe("closed computed data writes", () => {
     const file = ts.createSourceFile(plainConfig.file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
     const targets: ts.ElementAccessExpression[] = [];
     const visit = (node: ts.Node) => {
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isElementAccessExpression(node.left) && plainConfig.allowedComputedWrites!.some((allowance) => enclosingNamedFunction(node) === allowance.function && isIdentifier(node.left.expression, allowance.target))) targets.push(node.left);
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isElementAccessExpression(node.left)) {
+        const target = node.left;
+        if (plainConfig.allowedComputedWrites!.some((allowance) => enclosingNamedFunction(node) === allowance.function && isIdentifier(target.expression, allowance.target))) targets.push(target);
+      }
       ts.forEachChild(node, visit);
     };
     visit(file);
@@ -438,7 +444,7 @@ describe("closed computed data writes", () => {
     expect(calls).toHaveLength(3);
     for (const call of calls) {
       const target = call.arguments[0];
-      expect(ts.isObjectLiteralExpression(target)).toBe(true);
+      expect(ts.isObjectLiteralExpression(target) || ts.isCallExpression(target) && isMember(target.expression, "Object", "create") && target.arguments[0].kind === ts.SyntaxKind.NullKeyword).toBe(true);
       const mutated = source.slice(0, target.getStart(file)) + 'other' + source.slice(target.end);
       const line = file.getLineAndCharacterOfPosition(call.getStart(file)).line + 1;
       expect(lintTextSinks(mutated, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: "Object.assign target must be a fresh object literal" }));
@@ -446,7 +452,7 @@ describe("closed computed data writes", () => {
   });
 });
 
-describe("closed agent text boundary", () => {
+describe("agent text mint and sink checks", () => {
   const config: TextSinkConfig = {
     file: "kit.js", scriptKind: ts.ScriptKind.JS, sinks: ["agentEl"],
     agentText: { mint: "agentText", sink: "agentEl", reason: "One checked mint and one marked sink" },
@@ -547,5 +553,93 @@ describe("syntactic runtime text mint boundary", () => {
     const source = readFileSync(plainConfig.file, "utf8");
     const prefix = source + "\nfunction injectedMintBypass(raw) {\n";
     expect(lintTextSinks(prefix + bypass + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length }));
+  });
+});
+
+// requestValueText preserves wire terms only in the descriptor display.
+describe("review F1: requestValueText callers", () => {
+  it("names the only permitted caller: realRequestNode", () => {
+    const file = ts.createSourceFile(plainConfig.file, readFileSync(plainConfig.file, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const callers: string[] = [];
+    const walk = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === "requestValueText" && !(ts.isFunctionDeclaration(node.parent) && node.parent.name === node)) {
+        expect(ts.isCallExpression(node.parent) && node.parent.expression === node).toBe(true);
+        callers.push(enclosingNamedFunction(node)!);
+      }
+      ts.forEachChild(node, walk);
+    };
+    walk(file);
+    expect([...new Set(callers)]).toEqual(["realRequestNode"]);
+    expect(callers).toHaveLength(2);
+  });
+});
+
+describe("review F4: named DOM API denylist and computed/constructor reads", () => {
+  const probes = [
+    'n.text = raw;', 'n.setRangeText(raw);', 'n.setCustomValidity(raw); n.reportValidity();',
+    `document.styleSheets[0].insertRule('.x::after{content:"' + raw + '"}', 0);`,
+    "n.getContext('2d').fillText(raw, 0, 10);", "document.execCommand('insertText', false, raw);",
+    'n.appendChild(Document.parseHTMLUnsafe(raw).body);',
+    "({}).constructor.getOwnPropertyDescriptor(Node.prototype, 'text' + 'Content').set.call(n, raw);",
+    "window['Ref' + 'lect'].set(n, 'text' + 'Content', raw);", 'new Notification(raw);',
+    "var a = document.createAttribute('ti' + 'tle'); a.nodeValue; n.attributes.setNamedItem(a);",
+    'sheet.replace(raw);', `sheet.replace(".x::after{content:'PAYMENT RECEIVED'}", "");`, 'sheet.replaceSync(raw);', 'ctx.strokeText(raw, 0, 0);',
+    'window[key].set(n, raw);', 'var api = n.constructor;', 'var { constructor: api } = n;',
+    'var String = function () { return sheet; }; String(raw).replace(raw);', 'n.String(raw).replace(raw);'
+  ];
+  it.each(probes)("catches injection %s on its own line", (code) => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const prefix = source + "\nfunction reviewF4(n, raw, sheet, ctx, key) {\n";
+    const line = prefix.split("\n").length;
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig).filter((issue) => issue.line === line)).not.toEqual([]);
+  });
+});
+
+describe("review F4: computed reads require declared fresh locals", () => {
+  it.each([
+    'function dataAt(raw, key) { var out = raw; return out[key]; }',
+    'function dataAt(raw, key) { var Object = { assign: function () { return raw; }, create: function () { return {}; } }; var out = Object.assign(Object.create(null), raw); return out[key]; }',
+    'function dataAt(raw, key) { var Object = { create: function () { return raw; } }; var out = Object.create(null); return out[key]; }',
+    'function dataAt(raw, key) { var out = Object.assign(Object.create(null), raw); out = n; return out[key]; }',
+    'function dataAt(raw, key) { var out = Object.assign(Object.create(null), raw); return (() => out[key])(); }',
+  ])("rejects nonfresh, reassigned or nested read %s", (source) => {
+    const config: TextSinkConfig = { file: "read.js", scriptKind: ts.ScriptKind.JS, sinks: [],
+      allowedComputedReads: [{ function: "dataAt", target: "out", reason: "Fresh own-data clone" }] };
+    expect(lintTextSinks(source, config).some((issue) => issue.rule.includes("computed") && issue.rule.includes("read"))).toBe(true);
+  });
+});
+
+describe("review N1: the own-data read allowance stays narrow", () => {
+  const ownRead = 'function dataAt(raw, key) { return Object.prototype.propertyIsEnumerable.call(raw, key) ? raw[key] : undefined; }';
+  const config: TextSinkConfig = { file: "own-read.js", scriptKind: ts.ScriptKind.JS, sinks: [],
+    allowedComputedReads: [{ function: "dataAt", target: "raw", ownKey: "key", reason: "One enumerable own-data read after its exact guard" }] };
+  it("accepts one guarded enumerable own-property read", () => {
+    expect(lintTextSinks(ownRead, config)).toEqual([]);
+  });
+  it.each([
+    ownRead.replace('Object.prototype.propertyIsEnumerable.call(raw, key)', 'true'),
+    ownRead.replace('propertyIsEnumerable', 'hasOwnProperty'),
+    ownRead.replace('call(raw, key)', 'call(other, key)'),
+    ownRead.replace('call(raw, key)', 'call(raw, other)'),
+    ownRead.replace('raw[key]', 'raw[other]'),
+    ownRead.replace('raw[key]', '(() => raw[key])()'),
+    ownRead.replace('return ', 'raw = document; return '),
+    ownRead.replace('return ', 'key = other; return '),
+    ownRead.replace('return ', 'var Object = other; return '),
+    ownRead.replace('return ', 'var undefined = other; return '),
+    ownRead.replace('undefined;', 'raw[key];'),
+    ownRead + ' function other(raw, key) { return raw[key]; }',
+    ownRead + ' function dataAt(raw, key) { return raw[key]; }',
+  ])("rejects unguarded, shadowed, reassigned or unrelated reads: %s", (source) => {
+    expect(lintTextSinks(source, config).some((issue) => issue.rule.includes("computed") && issue.rule.includes("read"))).toBe(true);
+  });
+});
+
+describe("review F11: CI type-checks the kit tests", () => {
+  it("runs the kit-test configuration from typecheck:browser", () => {
+    const pkg = JSON.parse(readFileSync(new URL("../../../gateway/package.json", import.meta.url), "utf8")) as { scripts: Record<string, string> };
+    expect(pkg.scripts["typecheck:browser"].split("&&").map((step) => step.trim())).toEqual([
+      "tsc -p tsconfig.browser.json", "tsc -p tsconfig.kit-tests.json",
+    ]);
   });
 });

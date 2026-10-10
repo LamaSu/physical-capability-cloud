@@ -16,10 +16,17 @@ import ts from "typescript";
 import { beforeAll, describe, expect, it } from "vitest";
 import { LIST_PROFILES } from "../mcp/dashboard-ir.js";
 import { listFieldLabel, UNAVAILABLE } from "../mcp/dashboard-ir-renderer.js";
+import { lintTextSinks } from "../../../spec/src/__tests__/ui-kit-text-sinks-lint.js";
 
 const gateway = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const src = join(gateway, "src");
 const IR_FILES = ["dashboard-ir.ts", "dashboard-ir-renderer.ts", "dashboard-ir-browser-entry.ts", "dashboard-ir-binder.ts"] as const;
+const TEXT_SINKS: Record<typeof IR_FILES[number], readonly string[]> = {
+  "dashboard-ir.ts": [],
+  "dashboard-ir-renderer.ts": ["el", "setText", "agentEl"],
+  "dashboard-ir-browser-entry.ts": ["setText"],
+  "dashboard-ir-binder.ts": [],
+};
 const irPaths = IR_FILES.map((file) => join(src, "mcp", file));
 const permittedImporters = new Set([...irPaths, join(src, "mcp/dashboard-ir-text.type-test.ts")]);
 const brands = ["__kitText", "__agentText"];
@@ -30,9 +37,8 @@ const MINTS: readonly MintAllowance[] = [
   { file: "dashboard-ir.ts", function: "kitText", reason: "PCC constants; calls outside approved mints must contain literal-only text." },
   { file: "dashboard-ir.ts", function: "joinKitText", reason: "Composition accepts only already branded KitText parts." },
   { file: "dashboard-ir.ts", function: "identifierText", reason: "boundValueText and identifier claim checks precede the reported attribution prefix." },
-  { file: "dashboard-ir.ts", function: "recordValueText", reason: "Record status claims receive the fixed reported-by-record qualifier." },
   { file: "dashboard-ir.ts", function: "boundStatusText", reason: "Amount/notice checks, closed safe-status vocabulary, and reported qualifiers cover every branch." },
-  { file: "dashboard-ir.ts", function: "boundValueText", reason: "Status treatment or money/withheld-notice content checks precede the cast." },
+  { file: "dashboard-ir.ts", function: "boundValueText", reason: "Status treatment or claim checks plus reported attribution precede the cast." },
   { file: "dashboard-ir.ts", function: "reportedFieldText", reason: "boundValueText withholds claims; remaining free fields receive a reported attribution prefix." },
   { file: "dashboard-ir-binder.ts", function: "httpStatusText", reason: "Transport-owned numeric HTTP status, never response-body text, is formatted with PCC's fixed HTTP prefix." },
   { file: "dashboard-ir-renderer.ts", function: "stamp", reason: "The anchored ISO timestamp grammar extracts only date/time digits and separators." },
@@ -183,6 +189,33 @@ function literalOnly(n: ts.Expression): boolean {
   if (ts.isParenthesizedExpression(n)) return literalOnly(n.expression);
   return ts.isConditionalExpression(n) && literalOnly(n.whenTrue) && literalOnly(n.whenFalse);
 }
+function enclosingFunctionNode(n: ts.Node): ts.Node | undefined {
+  for (let p = n.parent; p; p = p.parent) if (ts.isFunctionLike(p)) return p;
+  return undefined;
+}
+function functionNames(n: ts.Node): string[] {
+  if (!ts.isFunctionLike(n)) return [];
+  const names: string[] = [];
+  const addName = (name: ts.Node | undefined): void => {
+    if (name && (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNoSubstitutionTemplateLiteral(name))) names.push(name.text);
+    if (name && (ts.isComputedPropertyName(name) || ts.isParenthesizedExpression(name) || ts.isAsExpression(name) || ts.isTypeAssertionExpression(name) || ts.isNonNullExpression(name) || ts.isSatisfiesExpression(name))) addName(name.expression);
+  };
+  if ("name" in n) addName(n.name as ts.Node | undefined);
+  if (ts.isArrowFunction(n) || ts.isFunctionExpression(n)) {
+    let binding: ts.Node = n;
+    while (ts.isParenthesizedExpression(binding.parent) || ts.isAsExpression(binding.parent) || ts.isTypeAssertionExpression(binding.parent) || ts.isNonNullExpression(binding.parent) || ts.isSatisfiesExpression(binding.parent)) binding = binding.parent;
+    const parent = binding.parent;
+    if (ts.isVariableDeclaration(parent) || ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent)) addName(parent.name);
+    if (ts.isBinaryExpression(parent) && parent.right === binding && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const target = parent.left;
+      addName(ts.isPropertyAccessExpression(target) ? target.name : ts.isElementAccessExpression(target) ? target.argumentExpression : target);
+    }
+  }
+  return [...new Set(names)];
+}
+function topLevelMint(n: ts.Node, source: ts.SourceFile): boolean {
+  return ts.isFunctionDeclaration(n) && n.parent === source && !!n.body;
+}
 function containingFunction(n: ts.Node): string {
   for (let p = n.parent; p; p = p.parent) {
     if (ts.isFunctionDeclaration(p) || ts.isFunctionExpression(p)) {
@@ -205,7 +238,7 @@ function runtimeExpression(n: ts.Node): boolean {
 }
 function isKitFactory(checker: ts.TypeChecker, n: ts.Expression, seen = new Set<ts.Symbol>()): boolean {
   if (ts.isParenthesizedExpression(n) || ts.isAsExpression(n) || ts.isTypeAssertionExpression(n) || ts.isNonNullExpression(n)) return isKitFactory(checker, n.expression, seen);
-  const declarationIsKitFactory = (d: ts.SignatureDeclaration | undefined): boolean => !!d && ts.isFunctionDeclaration(d) && d.name?.text === "kitText" && d.getSourceFile().fileName === irPaths[0];
+  const declarationIsKitFactory = (d: ts.Node | undefined): boolean => !!d && ts.isFunctionDeclaration(d) && d.name?.text === "kitText" && ts.isSourceFile(d.parent) && d.getSourceFile().fileName === irPaths[0];
   if (checker.getTypeAtLocation(n).getCallSignatures().some((sig) => declarationIsKitFactory(sig.declaration))) return true;
   const symbol = accessSymbol(checker, n);
   if (!symbol || seen.has(symbol)) return false;
@@ -310,9 +343,49 @@ function reflectionViolation(checker: ts.TypeChecker, n: ts.Node): string | unde
     }
   }
 }
+function topLevelBindings(file: ts.SourceFile): Map<string, ts.Expression> {
+  const bindings = new Map<string, ts.Expression>();
+  for (const statement of file.statements) if (ts.isVariableStatement(statement)) {
+    for (const declaration of statement.declarationList.declarations) if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+      if (bindings.has(declaration.name.text)) throw new Error(`Duplicate top-level binding: ${declaration.name.text}`);
+      bindings.set(declaration.name.text, declaration.initializer);
+    }
+  }
+  return bindings;
+}
+function buildInputs(): string[] {
+  const source = readFileSync(join(gateway, "scripts/build-dashboard-ir-kit.mjs"), "utf8");
+  const file = ts.createSourceFile("build.mjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const expected = topLevelBindings(file).get("expected");
+  if (!expected || !ts.isArrayLiteralExpression(expected)) throw new Error("Missing literal build input allowlist");
+  return expected.elements.map((element) => {
+    if (!ts.isStringLiteral(element)) throw new Error("Build input allowlist must be literal");
+    return element.text;
+  });
+}
+function lintTargets(source = readFileSync(join(gateway, "../spec/src/__tests__/ui-kit-text-sinks.lint.test.ts"), "utf8")): string[] {
+  const file = ts.createSourceFile("lint.test.ts", source, ts.ScriptTarget.Latest, true);
+  const bindings = topLevelBindings(file);
+  const kits = bindings.get("kits");
+  if (!kits || !ts.isArrayLiteralExpression(kits)) throw new Error("Missing actual lint kits array");
+  return kits.elements.flatMap((element) => {
+    const config = ts.isIdentifier(element) ? bindings.get(element.text) : element;
+    if (!config || !ts.isObjectLiteralExpression(config)) throw new Error("Lint target config must be a top-level object");
+    const field = config.properties.find((property) => ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === "file");
+    if (!field || !ts.isPropertyAssignment(field)) throw new Error("Lint target missing file");
+    const targets: string[] = [];
+    const walk = (n: ts.Node): void => {
+      if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "URL" && n.arguments && ts.isStringLiteral(n.arguments[0]) && /^dashboard-ir.*\.ts$/.test(n.arguments[0].text)) targets.push(n.arguments[0].text);
+      ts.forEachChild(n, walk);
+    };
+    walk(field.initializer);
+    return targets;
+  });
+}
 function mintKey(file: string, fn: string): string { return `${file}:${fn}`; }
-function audit(p: ts.Program, mints = MINTS, dom = DOM): Audit {
+function audit(p: ts.Program, mints = MINTS, dom = DOM, bundled: readonly string[] = buildInputs(), targets: readonly string[] = lintTargets()): Audit {
   const checker = p.getTypeChecker();
+  const wrappedDomFiles = new Map<string, ts.Node | undefined>([["mcp/dashboard-ir-renderer.ts", undefined]]);
   const result: Audit = { findings: [], minted: new Set(), domUsed: new Set(), domFiles: new Set() };
   const add = (rule: string, n: ts.Node, detail: string): void => {
     const s = n.getSourceFile();
@@ -330,12 +403,45 @@ function audit(p: ts.Program, mints = MINTS, dom = DOM): Audit {
         result.findings.push({ rule: "directive", file: relative(src, path), line: s.getLineAndCharacterOfPosition(scanner.getTokenPos()).line + 1, detail: "Type-check suppression is forbidden in IR sources" });
       }
     }
+    const file = IR_FILES[irPaths.indexOf(path)]!;
+    // Structural recipients can carry DOM setters without a DOM symbol or
+    // RElement reference. Check text writes in every IR file, independent of
+    // the recipient's type, while retaining the exact declared sink bodies.
+    const textIssues = lintTextSinks(s.text, {
+      file: path, scriptKind: ts.ScriptKind.TS, sinks: TEXT_SINKS[file],
+      allowedComputedWrites: file === "dashboard-ir.ts" ? [{
+        function: "mapBind", target: "q", reason: "Copies validated query scalars into a fresh, unreassigned plain object; no DOM recipient",
+      }] : [],
+    }).filter((issue) => issue.rule.startsWith("text property write:") || issue.rule === "dynamic computed property write");
+    for (const issue of textIssues) {
+      result.findings.push({ rule: "text-sink", file: relative(src, path), line: issue.line, detail: issue.rule });
+    }
+    const functions: ts.Node[] = [];
+    const collect = (n: ts.Node): void => { if (ts.isFunctionLike(n)) functions.push(n); ts.forEachChild(n, collect); };
+    collect(s);
+    const declarations = new Map<string, ts.Node>();
+    const permittedNames = new Set(mints.map((entry) => entry.function));
+    for (const entry of mints.filter((entry) => entry.file === file)) {
+      const candidates = functions.filter((n) => functionNames(n).includes(entry.function) && topLevelMint(n, s));
+      if (candidates.length === 1) declarations.set(entry.function, candidates[0]!);
+      else add("mint", candidates[1] ?? s, `Mint requires exactly one top-level declaration: ${entry.function}`);
+    }
+    for (const fn of functions) for (const name of functionNames(fn)) {
+      if (permittedNames.has(name) && declarations.get(name) !== fn) add("mint", fn, `Unapproved function-like node with permitted mint name: ${name}`);
+    }
     const walk = (n: ts.Node): void => {
+      if (ts.isTypeReferenceNode(n) || ts.isImportTypeNode(n)) {
+        const symbol = checker.getTypeAtLocation(n).getSymbol();
+        if (symbol && ["RElement", "RDocument"].includes(symbol.name) && symbol.declarations?.some((d) => d.getSourceFile().fileName === irPaths[1])) wrappedDomFiles.set(relative(src, s.fileName), n);
+      }
       if (runtimeExpression(n) && checker.getTypeAtLocation(n).flags & ts.TypeFlags.Any) add("any", n, `Any-typed expression: ${n.getText(s)}`);
       if (ts.isAsExpression(n) || ts.isTypeAssertionExpression(n)) {
         const target = checker.getTypeAtLocation(n.type);
         if (target.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) add("assertion", n, "Assertions to any or never are forbidden");
         if (unresolvedAssertion(checker, target)) add("assertion", n, "Generic/unevaluated assertion targets can instantiate a text brand and are forbidden");
+        let inner: ts.Expression = n.expression;
+        while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+        if (path !== irPaths[2] && (ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) && inner.type.kind === ts.SyntaxKind.UnknownKeyword && (target.flags & ts.TypeFlags.Object || target.isUnionOrIntersection() && target.types.some((t) => t.flags & ts.TypeFlags.Object))) add("assertion", n, "Double unknown-to-object assertions are forbidden outside the browser adapter");
         if (branded(checker, target)) mint(n, undefined, target);
       }
       if (ts.isCallExpression(n) && nonliteralKitCall(checker, n)) mint(n);
@@ -375,9 +481,16 @@ function audit(p: ts.Program, mints = MINTS, dom = DOM): Audit {
       const agentFunction = file === "dashboard-ir-renderer.ts" && fn === "manifestProseText";
       if (agentMint && !agentFunction) add("mint", n, "AgentText may be minted only by manifestProseText");
       if (kitMint && agentFunction) add("mint", n, "manifestProseText must preserve AgentText authorship and cannot mint KitText");
-      if (!mints.some((entry) => mintKey(entry.file, entry.function) === key)) add("mint", n, `${context}: ${key}`);
+      const owner = ts.isFunctionLike(n) ? n : enclosingFunctionNode(n);
+      if (!owner || declarations.get(fn) !== owner) add("mint", n, `${context}: ${key}`);
     };
     walk(s);
+  }
+  if (JSON.stringify([...IR_FILES].sort()) !== JSON.stringify([...bundled].sort())) result.findings.push({ rule: "inventory", file: "<inventory>", line: 0, detail: "Guard files differ from build metafile input allowlist" });
+  for (const file of new Set([...wrappedDomFiles.keys(), ...result.domFiles])) if (!targets.includes(file.replace(/^mcp\//, ""))) {
+    const node = wrappedDomFiles.get(file);
+    if (node) add("inventory", node, "IR DOM recipient is not a lint target");
+    else result.findings.push({ rule: "inventory", file, line: 0, detail: "IR DOM recipient is not a lint target" });
   }
   for (const entry of mints) if (!result.minted.has(mintKey(entry.file, entry.function))) result.findings.push({ rule: "stale-mint", file: entry.file, line: 0, detail: `Stale mint allowance: ${entry.function}` });
   for (const entry of dom) if (!result.domUsed.has(entry.name)) result.findings.push({ rule: "stale-dom", file: "<allowlist>", line: 0, detail: `Stale DOM allowance: ${entry.name}` });
@@ -438,6 +551,35 @@ function overriddenProgram(overrides: Map<string, string>): ts.Program {
 }
 
 const MUTATIONS = [
+  { name: "F10 X1 structural text write in IR", file: "dashboard-ir.ts", rule: "text-sink", code: 'export function probeSlotWrite(x: { textContent: string }, s: string): void { x.textContent = s; }' },
+  { name: "F10 X1b structural text write in binder", file: "dashboard-ir-binder.ts", rule: "text-sink", code: 'export function probeSlotWrite(x: { textContent: string }, s: string): void { x.textContent = s; }' },
+  { name: "F10 structural text write in renderer", file: "dashboard-ir-renderer.ts", rule: "text-sink", code: 'function probeSlotWrite(x: { textContent: string }, s: string): void { x.textContent = s; }' },
+  { name: "F10 structural text write in browser entry", file: "dashboard-ir-browser-entry.ts", rule: "text-sink", code: 'function probeSlotWrite(x: { textContent: string }, s: string): void { x.textContent = s; }' },
+  { name: "F10 compound structural text write", file: "dashboard-ir.ts", rule: "text-sink", code: 'function probeSlotWrite(x: { textContent: string }, s: string): void { x.textContent += s; }' },
+  { name: "F10 computed literal structural text write", file: "dashboard-ir-binder.ts", rule: "text-sink", code: 'function probeSlotWrite(x: { textContent: string }, s: string): void { x["textContent"] = s; }' },
+  { name: "F10 computed key structural text write", file: "dashboard-ir-binder.ts", rule: "text-sink", code: 'function probeSlotWrite(x: { textContent: string }, s: string): void { const key = "textContent"; x[key] = s; }' },
+  { name: "F10 destructured structural text write", file: "dashboard-ir.ts", rule: "text-sink", code: 'function probeSlotWrite(x: { textContent: string }, s: string): void { [x.textContent] = [s]; }' },
+  { name: "F10 callback cannot inherit setText sink", file: "dashboard-ir-browser-entry.ts", rule: "text-sink", needle: 'export function setText(node: { textContent: string | null }, text: KitText): void {', code: 'export function setText(node: { textContent: string | null }, text: KitText): void { const probeSlotWrite = (x: { textContent: string }, s: string): void => { x.textContent = s; };' },
+  { name: "N3 nested predicate inside approved stamp", file: "dashboard-ir-renderer.ts", rule: "mint", needle: 'function stamp(iso: string): KitText {', code: 'function stamp(iso: string): KitText { const probeIsK = (s: string): s is KitText => s.length > 0;' },
+  { name: "unlinted binder receives DOM wrapper", file: "dashboard-ir-binder.ts", rule: "inventory", code: 'function probeDomWrapper(n: import("./dashboard-ir-renderer.js").RElement) { return n.className; }' },
+  { name: "C1 structural CSSOM escape", file: "dashboard-ir-renderer.ts", rule: "assertion", code: 'function probeC1(n: RElement, raw: string) { (n as unknown as { _el: { ownerDocument: { styleSheets: { item(i: number): { insertRule(r: string, i?: number): void } | null } } } })._el.ownerDocument.styleSheets.item(0)?.insertRule(".pcc-ir::before{content:" + JSON.stringify(raw) + "}", 0); }' },
+  { name: "binder structural object escape", file: "dashboard-ir-binder.ts", rule: "assertion", code: 'function probeObject(raw: unknown) { return raw as unknown as { hidden: string }; }' },
+  { name: "IR structural object escape", file: "dashboard-ir.ts", rule: "assertion", code: 'function probeObject(raw: unknown) { return raw as unknown as { hidden: string }; }' },
+  { name: "B1 nested stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'function probeB1() { function stamp(s: string) { return s as KitText; } return stamp("raw"); }' },
+  { name: "B2 object method readField", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'const probeB2 = { readField(s: string) { return s as KitText; } };' },
+  { name: "B3 local arrow bindScalar", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'function probeB3(s: string) { const bindScalar = (s: string) => s as KitText; return bindScalar(s); }' },
+  { name: "B4 shadowed kitText", file: "dashboard-ir.ts", rule: "mint", code: 'function probeB4(s: string) { const kitText = (s: string) => s as KitText; return kitText(s); }' },
+  { name: "class member stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'class ProbeClass { stamp(s: string) { return s as KitText; } }' },
+  { name: "object arrow stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'const probeArrow = { stamp: (s: string) => s as KitText };' },
+  { name: "class arrow stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'class ProbeArrow { stamp = (s: string) => s as KitText; }' },
+  { name: "getter stamp without mint", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'const probeGetter = { get stamp() { return "raw"; } };' },
+  { name: "setter stamp without mint", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'const probeSetter = { set stamp(s: string) { void s; } };' },
+  { name: "bound function expression stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'function probeExpression(s: string) { const stamp = function (s: string) { return s as KitText; }; return stamp(s); }' },
+  { name: "wrapped local arrow stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: "function probeWrapped() { const stamp = (() => \"raw\"); return stamp(); }" },
+  { name: "wrapped object function stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: "const probeWrapped = { stamp: (function () { return \"raw\"; }) };" },
+  { name: "wrapped class arrow stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: "class ProbeWrapped { stamp = (() => \"raw\"); }" },
+  { name: "wrapped computed method stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: "const probeWrapped = { [(\"stamp\") as const]() { return \"raw\"; } };" },
+  { name: "assigned arrow stamp", file: "dashboard-ir-renderer.ts", rule: "mint", code: "function probeAssigned() { let stamp: () => string; stamp = () => \"raw\"; return stamp(); }" },
   { name: "AgentText mint in kitText", file: "dashboard-ir.ts", rule: "mint", needle: 'return s as KitText;', code: 'const prose = s as AgentText; void prose; return s as KitText;' },
   { name: "KitText mint in manifestProseText", file: "dashboard-ir-renderer.ts", rule: "mint", needle: 'return String(n.props?.[key] ?? "") as AgentText;', code: 'const own = String(n.props?.[key] ?? "") as KitText; void own; return String(n.props?.[key] ?? "") as AgentText;' },
   { name: "raw KitText assertion", file: "dashboard-ir-renderer.ts", rule: "mint", code: 'function rawMint(raw: string) { return raw as KitText; }' },
@@ -529,6 +671,55 @@ describe("IR kit closed text brand and DOM surface", () => {
   });
   it("rejects write/call reflection while retaining read-only ownKeys and descriptor.enumerable", () => {
     expect(baseAudit.findings.filter((f) => f.rule === "reflection")).toEqual([]);
+  });
+  it("F10 permits text-property writes only inside the declared sinks across all four IR files", () => {
+    expect(baseAudit.findings.filter((finding) => finding.rule === "text-sink")).toEqual([]);
+  });
+  it("cross-checks the guard with build inputs and every IR DOM recipient with lint targets", () => {
+    expect(baseAudit.findings.filter((f) => f.rule === "inventory")).toEqual([]);
+    expect([...IR_FILES].sort()).toEqual(buildInputs().sort());
+    const receivers = new Set(["dashboard-ir-renderer.ts", ...[...baseAudit.domFiles].map((file) => file.replace(/^mcp\//, ""))]);
+    for (const file of receivers) expect(lintTargets()).toContain(file);
+  });
+  it("rejects inventory drift when a bundled source is absent from the guard", () => {
+    const result = audit(program, MINTS, DOM, [...buildInputs(), "unscanned.ts"]);
+    expect(result.findings.filter((f) => f.rule === "inventory")).not.toEqual([]);
+  });
+  it("rejects inventory drift when a DOM recipient is absent from the lint", () => {
+    const result = audit(program, MINTS, DOM, buildInputs(), []);
+    expect(result.findings.filter((f) => f.rule === "inventory")).not.toEqual([]);
+  });
+  it("rejects a mint allowance without exactly one declaration", () => {
+    const result = audit(program, [...MINTS, { file: "dashboard-ir-renderer.ts", function: "missingMint", reason: "Deliberately absent declaration" }]);
+    expect(result.findings.some((finding) => finding.rule === "mint" && finding.detail.includes("missingMint"))).toBe(true);
+  });
+  it("binds approved mints only to top-level function declarations", () => {
+    const file = ts.createSourceFile("probe.ts", 'const unrelated = function stamp() { return "raw"; };', ts.ScriptTarget.Latest, true);
+    const statement = file.statements[0]! as ts.VariableStatement;
+    expect(topLevelMint(statement.declarationList.declarations[0]!.initializer!, file)).toBe(false);
+  });
+  it("N3 rejects a mint inside a same-named but different declaration by exact identity", () => {
+    // The separate same-name rejection is insufficient: acceptance must also
+    // reject the cast inside that declaration, even though its mint key is stamp.
+    expect(mutationAudits.get("B1 nested stamp")!.findings).toContainEqual(expect.objectContaining({
+      rule: "mint", detail: "Text mint outside closed function list: dashboard-ir-renderer.ts:stamp",
+    }));
+  });
+  it("N3 rejects a predicate arrow inside the approved declaration by exact identity", () => {
+    expect(mutationAudits.get("N3 nested predicate inside approved stamp")!.findings).toContainEqual(expect.objectContaining({
+      rule: "mint", detail: "Type predicates must not manufacture text brands: dashboard-ir-renderer.ts:stamp",
+    }));
+  });
+  it("rejects removing browserConfig from the actual kits array while its declaration remains", () => {
+    const source = readFileSync(join(gateway, "../spec/src/__tests__/ui-kit-text-sinks.lint.test.ts"), "utf8");
+    const changed = source.replace("  browserConfig,\n", "");
+    expect(changed).not.toBe(source);
+    expect(lintTargets(changed)).not.toContain("dashboard-ir-browser-entry.ts");
+  });
+  it("keeps real DOM elements private to the browser adapter", () => {
+    const source = readFileSync(join(src, "mcp/dashboard-ir-browser-entry.ts"), "utf8");
+    expect(source).not.toMatch(/\b_el\b/);
+    expect(source).toMatch(/new WeakMap/);
   });
   it("covers every list profile field with a PCC-owned label", () => {
     const fields = new Set(Object.values(LIST_PROFILES).flatMap((profile) => [...profile.title, ...profile.meta, ...profile.status]));

@@ -38,6 +38,13 @@ function listNode(bind: { path?: string; query?: Record<string, unknown> } | und
 }
 
 describe("N110 listWindow: unit table (pure, no DOM)", () => {
+  it.each([[Number.MAX_SAFE_INTEGER, "9007199254740992"], [Number.MAX_SAFE_INTEGER - 1, "9007199254740991"]])("maximum boundary offset %s retains master's row position", (offset, row) => {
+    const result = listWindow(listNode({ path: "/api/jobs", query: { offset } }), { jobs: [], total: 0 }, 0);
+    expect(result.note).toBe(`from row ${row} · total not shown`);
+    expect(result.empty).toBe("no rows in this window");
+    expect(result.empty).not.toBe("none");
+    expect(result.note).not.toContain("of 0 returned");
+  });
   it("no query: none, no note", () => {
     expect(listWindow(listNode(undefined), undefined, 0)).toEqual({ empty: "none", note: null });
   });
@@ -213,6 +220,16 @@ const jobsManifest = (query?: Record<string, unknown>) => ({
 const JOB_ROW = { id: "job-001", capabilityId: "cap-nyc-fdm", kernelId: "kernel-nyc", status: "completed" };
 
 describe("N110 end-to-end on the rebuilt pcc-ir-kit.js", () => {
+  it.each([[Number.MAX_SAFE_INTEGER, "9007199254740992"], [Number.MAX_SAFE_INTEGER - 1, "9007199254740991"]])("committed bundle maximum boundary offset %s retains master's row position", async (offset, row) => {
+    const s = scene([{ status: 200, json: { jobs: [], total: 0, asOf: iso(T0) } }], T0);
+    try {
+      s.deliver(jobsManifest({ offset })); await s.settle();
+      expect(s.q(".pcc-list .pcc-window").textContent).toBe(`from row ${row} · total not shown`);
+      expect(s.q(".pcc-list .pcc-empty").textContent).toBe("no rows in this window");
+      expect(s.q(".pcc-list .pcc-empty").textContent).not.toBe("none");
+      expect(s.q(".pcc-list .pcc-window").textContent).not.toContain("of 0 returned");
+    } finally { s.close(); }
+  });
   it("a filtered, timed, empty capabilities list: 'no rows in this window' + a window note, never 'none'", async () => {
     const s = scene([{ status: 200, json: { items: [], total: 0, asOf: iso(T0) } }], T0);
     s.deliver(capsManifest({ type: "pizza" })); await s.settle();

@@ -135,6 +135,7 @@ describe("the shipped plain kit's runtime boundary", () => {
       expect(typeof text.t).toBe("string");
       expect(kit.el("span", null, text).textContent).toBe(text.t);
     }
+    expect(kit.fmtTs("invalid").t).toBe("time not reported");
     expect(kit.errorLine("server error").textContent).toBe("reported: server error Nothing was fabricated.");
     expect(kit.errorLine(kit.kitText("PCC error")).textContent).toBe("PCC error Nothing was fabricated.");
     expect(count()).toBe(0);
@@ -366,11 +367,11 @@ describe("a helper deleted from a mapped sink", () => {
     }
     expect(document.getElementById("pcc-ui-styles")!.textContent).toContain(".pcc-agent");
     expect(Array.from(document.querySelectorAll(".pcc-metric-amount")).map((node) => node.textContent))
-      .toEqual(["job-1", new Date("2026-10-06T00:00:00Z").toLocaleString()]);
+      .toEqual(["reported: job-1", new Date("2026-10-06T00:00:00Z").toLocaleString()]);
     expect(text(".pcc-cap-name")).toBe("name: Printer");
     expect(text(".pcc-cap-desc")).toBe("reported: Prints parts");
     expect(text(".pcc-list-title")).toBe("name: Bench");
-    expect(text(".pcc-list-meta")).toBe("kernel_1 · reported: Analyst note");
+    expect(text(".pcc-list-meta")).toBe("reported: kernel_1 · reported: Analyst note");
     expect(text(".pcc-field-label")).toBe("The dashboard calls this: “Quantity” *");
     const inputs = document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(".pcc-form-fields .pcc-input");
     expect(Array.from(inputs).map((input) => input.value)).toEqual(["", "12.5", "", ""]);
@@ -385,7 +386,7 @@ describe("a helper deleted from a mapped sink", () => {
       .toEqual(["unrecognised value", "0x" + "ab".repeat(20)]);
     expect(text(".pcc-receipt-rail")).toContain(" · reported: bad rail");
     expect(text(".pcc-receipt-tx")).toBe("unrecognised value");
-    expect(text(".pcc-chain-outcome")).toBe("reported: bad type");
+    expect(text(".pcc-chain-outcome")).toBe("bad type");
     const formWindow = document.querySelector(".pcc-form-fields")!.closest(".pcc-win")!;
     (formWindow.querySelector(".pcc-btn") as HTMLButtonElement).click();
     assertKitTextViolations();
@@ -417,7 +418,7 @@ describe("a helper deleted from a mapped sink", () => {
       expect(node.textContent).toBe(irNotice("WITHHELD_FIELD"));
       expect(node.classList.contains("pcc-withheld")).toBe(true);
     }
-    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("job-1");
+    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("reported: job-1");
     (document.querySelector(".pcc-actionbar .pcc-btn") as HTMLButtonElement).click();
     expect(document.querySelector(".pcc-chip")!.textContent).toBe(irNotice("WITHHELD_FIELD"));
     expect(document.querySelector(".pcc-chip .pcc-withheld")).not.toBeNull();
@@ -446,8 +447,8 @@ describe("a helper deleted from a mapped sink", () => {
     for (const selector of [".pcc-section-heading", ".pcc-note-p"]) expect(document.querySelector(selector)!.textContent).toBe(irNotice("WITHHELD_PROSE"));
     for (const selector of [".pcc-win-title", ".pcc-btn-label"]) expect(document.querySelector(selector)!.textContent).toBe(irNotice("WITHHELD_FIELD"));
     expect(Array.from(document.querySelectorAll<HTMLInputElement>(".pcc-form-fields .pcc-input")).map((node) => node.value)).toEqual(["", "12"]);
-    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe("job-1");
-    expect(document.querySelector(".pcc-cap-meta .pcc-tag")!.textContent).toBe("fdm");
+    expect(document.querySelector(".pcc-metric-amount")!.textContent).toBe(irNotice("WITHHELD_FIELD"));
+    expect(document.querySelector(".pcc-cap-meta .pcc-tag")!.textContent).toBe(irNotice("WITHHELD_FIELD"));
     expect(document.querySelector(".pcc-banner")!.textContent).toBe("Snapshot · not live.");
     assertKitTextViolations();
   });

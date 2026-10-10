@@ -23,14 +23,15 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind, KitText, AgentText } from "./dashboard-ir.js";
-import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundValueText, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES } from "./dashboard-ir.js";
+import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES } from "./dashboard-ir.js";
 
 // Minimal structural DOM: the renderer reaches the DOM only through RDocument/RElement,
 // so tests can pass a plain-object fake. ir-kit-text-brand.test.ts fails if the renderer
 // names a DOM symbol.
 // NOTE: intentionally NO innerHTML/insertAdjacentHTML member — a painter cannot set one.
 export interface RElement {
-  textContent: string;
+  get textContent(): string;
+  set textContent(v: KitText);
   className: string;
   readonly children: RElement[];
   setAttr(name: string, value: string): void;
@@ -94,7 +95,8 @@ export function el(doc: RDocument, cls: string, text?: KitText, untrusted?: bool
 export function agentEl(doc: RDocument, cls: string, text: AgentText): RElement {
   const n = doc.createElement("div");
   n.className = cls + " " + CLS.agent + " " + CLS.untrusted;
-  n.textContent = text;
+  const agentSlot: { textContent: string } = n;
+  agentSlot.textContent = text;
   return n;
 }
 
@@ -153,9 +155,9 @@ const SETTLEMENT_NOTICE = Object.freeze({
 });
 
 // Grammars for the typed kinds (astra r3 M3 / #348 r2b F1). `amount` admits a finite non-negative
-// number OR a canonical decimal string; `capType` is a closed identifier grammar (no spaces, no
-// prose); `currency` is the exact spec enum (types/common.ts:27 `Currency`). None of these admit
-// arbitrary text, so a hostile "paid 5 USDC" / "verified" / sentence value can never pass as one.
+// number OR a canonical decimal string; `capType` has an identifier grammar, but identifiers
+// can spell prose, so claim checks and reported attribution still apply. `currency` is the
+// exact spec enum (types/common.ts:27 `Currency`); its displayed words come from that vocabulary.
 const CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
 const CURRENCY_ENUM: ReadonlySet<string> = new Set(["USDC", "ETH", "DAI", "SOL"]);
@@ -167,8 +169,8 @@ type FieldRead = { ok: true; text: KitText } | { ok: false };
  * unavailable marker (not a type error). A present value that does not match its `kind`'s grammar
  * is MISTYPED → `{ok:false}` (the caller fails the WHOLE card closed, never a partial authoritative
  * card built from one mistyped field). A present, well-typed value is shown per its kind:
- * text/capType/status still pass through boundValueText (content-checked, same as any bound
- * value); amount/currency/tiers/bool/percent have no prose grammar, so they are shown as-is. */
+ * text/capType pass through boundValueText with claim checks and reported attribution;
+ * status uses boundStatusText by kind. Amount/currency/tiers/bool/percent show checked values. */
 function readField(data: unknown, f: SchemaField): FieldRead {
   const keys: readonly string[] = Array.isArray(f.key) ? f.key : [f.key as string];
   let raw: unknown;
@@ -190,7 +192,7 @@ function readField(data: unknown, f: SchemaField): FieldRead {
         ? { ok: true, text: identifierText(foundKey, raw) } : { ok: false };
     case "status":
       return typeof raw === "string" && raw.length > 0
-        ? { ok: true, text: boundValueText(foundKey, raw) } : { ok: false };
+        ? { ok: true, text: boundStatusText(raw) } : { ok: false };
     case "amount":
       // A number must ALSO satisfy the canonical string grammar (astra r4 finding 3): the public
       // Amount contract is a string (spec/types/common.ts), so a JS number is only accepted when
@@ -409,7 +411,7 @@ const LIST_FIELD_LABELS: Readonly<Record<string, KitText>> = {
 /** The PCC-owned label for a list field; every profiled field has a label. */
 export function listFieldLabel(field: string): KitText {
   // validateIr restricts fields to LIST_PROFILES; coverage is checked by the brand guard.
-  return LIST_FIELD_LABELS[field] ?? UNAVAILABLE;
+  return Object.prototype.hasOwnProperty.call(LIST_FIELD_LABELS, field) ? LIST_FIELD_LABELS[field]! : UNAVAILABLE;
 }
 function listFieldHeadingText(field: string): KitText { return joinKitText(listFieldLabel(field), kitText(":")); }
 
@@ -573,7 +575,7 @@ export function listWindow(node: IrNode, data: unknown, returned: number): ListW
     parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
   }
   if (offset === "unknown") parts.push(kitText("offset not shown"));
-  else if (offset > 0) parts.push(joinKitText(kitText("from row "), countText(offset + 1)));
+  else if (offset > 0) parts.push(joinKitText(kitText("from row "), offset === Number.MAX_SAFE_INTEGER ? kitText("9007199254740992") : countText(offset + 1)));
 
   if (prof?.paged) {
     const paged = prof.paged;

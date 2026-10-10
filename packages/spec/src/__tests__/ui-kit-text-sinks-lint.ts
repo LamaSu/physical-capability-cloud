@@ -40,6 +40,11 @@ export interface TextComputedWriteAllowance {
   reason: string;
 }
 
+export interface TextComputedReadAllowance extends TextComputedWriteAllowance {
+  /** Optional parameter key for one read guarded by propertyIsEnumerable; otherwise require a fresh local. */
+  ownKey?: string;
+}
+
 export interface AgentTextConfig {
   /** The sole claim-checking agent brand mint and sole marked agent sink. */
   mint: string;
@@ -57,21 +62,24 @@ export interface TextSinkConfig {
   allowedAttributes?: readonly string[];
   allowedNodeCalls?: readonly TextSinkCallAllowance[];
   allowedNameArguments?: readonly TextSinkArgumentAllowance[];
-  /** JS runtime brands need a syntactically closed mint boundary too. */
+  /** JS runtime brands use separate syntactic mint checks. */
   textMints?: TextMintConfig;
   agentText?: AgentTextConfig;
   allowedComputedWrites?: readonly TextComputedWriteAllowance[];
+  /** Computed reads require a reviewed fresh local or one exact enumerable-own-data guard. */
+  allowedComputedReads?: readonly TextComputedReadAllowance[];
 }
 
-const TEXT_PROPERTIES = new Set(["textContent", "innerText", "outerText", "nodeValue", "data", "innerHTML", "outerHTML", "srcdoc", "value", "defaultValue", "label"]);
+const TEXT_PROPERTIES = new Set(["text", "textContent", "innerText", "outerText", "nodeValue", "data", "innerHTML", "outerHTML", "srcdoc", "value", "defaultValue", "label"]);
 const NODE_OR_TEXT_METHODS = new Set(["append", "prepend", "before", "after", "replaceWith", "replaceChildren"]);
 const TEXT_INSERTION_METHODS = new Set(["createTextNode", "insertAdjacentText", "appendData", "insertData", "replaceData", "replaceWholeText"]);
 const HTML_METHODS = new Set(["insertAdjacentHTML", "write", "writeln", "setHTMLUnsafe", "setHTML"]);
-const PARSER_METHODS = new Set(["createContextualFragment", "parseFromString"]);
-const FORBIDDEN_METHODS = new Set([...NODE_OR_TEXT_METHODS, ...TEXT_INSERTION_METHODS, ...HTML_METHODS, ...PARSER_METHODS, "setAttribute", "setAttributeNS", "setAttributeNode"]);
+const PARSER_METHODS = new Set(["createContextualFragment", "parseFromString", "parseHTMLUnsafe"]);
+const NAMED_TEXT_METHODS = new Set(["setRangeText", "setCustomValidity", "insertRule", "replaceSync", "fillText", "strokeText", "execCommand", "setNamedItem"]);
+const FORBIDDEN_METHODS = new Set([...NODE_OR_TEXT_METHODS, ...TEXT_INSERTION_METHODS, ...HTML_METHODS, ...PARSER_METHODS, ...NAMED_TEXT_METHODS, "replace", "setAttribute", "setAttributeNS", "setAttributeNode"]);
 const OBJECT_REFLECTION_METHODS = new Set(["defineProperty", "defineProperties", "setPrototypeOf", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors"]);
 const SETTER_METHODS = new Set(["__defineSetter__", "__lookupSetter__"]);
-const TEXT_CONSTRUCTORS = new Set(["Text", "Option", "DOMParser"]);
+const TEXT_CONSTRUCTORS = new Set(["Text", "Option", "DOMParser", "Notification"]);
 const DIALOGS = new Set(["alert", "confirm", "prompt"]);
 const REFLECTION_REFERENCES = new Set(["Reflect", "Proxy", "eval", "Function", "Object"]);
 
@@ -211,7 +219,7 @@ function nearestFunction(node: ts.Node): ts.Node | undefined {
 
 function variableScope(node: ts.VariableDeclaration): ts.Node {
   const lexical = ts.isVariableDeclarationList(node.parent) && !!(node.parent.flags & ts.NodeFlags.BlockScoped);
-  for (let p = node.parent; p; p = p.parent) {
+  for (let p: ts.Node | undefined = node.parent; p; p = p.parent) {
     if (ts.isSourceFile(p) || ts.isFunctionLike(p) || (lexical && ts.isBlock(p))) return p;
   }
   return node.getSourceFile();
@@ -253,13 +261,6 @@ function bindingResolver(file: ts.SourceFile): (node: ts.Node, name: string) => 
     }
     return undefined;
   };
-}
-
-function isFreshObject(node: ts.Node | undefined): boolean {
-  if (!node) return false;
-  node = unwrap(node);
-  return (ts.isObjectLiteralExpression(node) && node.properties.length === 0) ||
-    (ts.isCallExpression(node) && isMember(node.expression, "Object", "create") && node.arguments.length === 1 && node.arguments[0].kind === ts.SyntaxKind.NullKeyword);
 }
 
 function isReassignmentIdentifier(node: ts.Identifier): boolean {
@@ -306,10 +307,10 @@ export function isElementCreation(node: ts.Node | undefined): boolean {
   return ts.isCallExpression(node) && isMember(node.expression, "document", "createElement");
 }
 
-/** Parse TS or JS; sink bodies are the only general exemptions. All insertion
- * methods that accept strings are forbidden unless a reviewed, Node-only call
- * has a small explicit allowance. This avoids guessing whether an argument is
- * safe from its spelling or treating every identifier as a Node. */
+/** Named DOM API denylist, plus computed-read/write and .constructor rules.
+ * It does not prove closure over all DOM APIs. Sink bodies are the general
+ * exemptions; named string-capable insertion calls need reviewed Node-only allowances.
+ * Type-aware IR checks additionally reject unresolved/any expressions. */
 export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkIssue[] {
   const file = ts.createSourceFile(config.file, source, ts.ScriptTarget.Latest, true, config.scriptKind);
   const issues: TextSinkIssue[] = [];
@@ -364,6 +365,13 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     for (const [name, nodes] of agentDefinitions) if (nodes.length !== 1) report(nodes[1] ?? file, `agent text function ${name} must have exactly one definition (found ${nodes.length})`);
   }
   const resolveBinding = bindingResolver(file);
+  function isFreshObject(node: ts.Node | undefined): boolean {
+    if (!node) return false;
+    node = unwrap(node);
+    return (ts.isObjectLiteralExpression(node) && node.properties.length === 0) ||
+      (ts.isCallExpression(node) && isMember(node.expression, "Object", "create") && !resolveBinding(node, "Object") && node.arguments.length === 1 && node.arguments[0].kind === ts.SyntaxKind.NullKeyword);
+  }
+
   const reassignedBindings = new Set<ts.Node>();
   const findReassignments = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && isReassignmentIdentifier(node)) {
@@ -394,6 +402,49 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     const declarations = resolveBinding(receiver, receiver.text);
     if (allFunctions.get(allowance.function)?.length !== 1 || declarations?.length !== 1 || !ts.isVariableDeclaration(declarations[0]) || declarations[0].pos >= node.pos || !isFreshObject(declarations[0].initializer) || reassignedBindings.has(declarations[0])) {
       report(node, `computed write target must be a fresh unreassigned object: ${allowance.function}.${allowance.target}`);
+      return false;
+    }
+    return true;
+  };
+  const readAllowances = config.allowedComputedReads ?? [];
+  const usedReadAllowances = new Set<TextComputedWriteAllowance>();
+  const isAllowedComputedRead = (node: ts.ElementAccessExpression): boolean => {
+    if (isAllowedComputedWrite(node)) return true;
+    const receiver = unwrap(node.expression);
+    const owner = nearestFunction(node);
+    if (!ts.isIdentifier(receiver) || !owner) return false;
+    const allowance = readAllowances.find((entry) => entry.function === functionName(owner) && entry.target === receiver.text && entry.reason.trim());
+    if (!allowance) return false;
+    usedReadAllowances.add(allowance);
+    const declarations = resolveBinding(receiver, receiver.text);
+    if (allowance.ownKey !== undefined) {
+      const key = node.argumentExpression;
+      const conditional = node.parent;
+      const guard = ts.isConditionalExpression(conditional) && conditional.whenTrue === node && isIdentifier(conditional.whenFalse, "undefined") ? conditional.condition : undefined;
+      const call = guard && ts.isCallExpression(guard) ? guard : undefined;
+      const member = call && ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === "call" ? call.expression.expression : undefined;
+      const enumerable = member && ts.isPropertyAccessExpression(member) && member.name.text === "propertyIsEnumerable" && isMember(member.expression, "Object", "prototype") && !resolveBinding(member, "Object");
+      const keyDeclarations = key && ts.isIdentifier(key) ? resolveBinding(key, key.text) : undefined;
+      const parameters = ts.isFunctionDeclaration(owner) ? owner.parameters : undefined;
+      if (allFunctions.get(allowance.function)?.length !== 1 || parameters?.length !== 2 ||
+          !isIdentifier(parameters[0].name, allowance.target) || !isIdentifier(parameters[1].name, allowance.ownKey) ||
+          declarations?.length !== 1 || declarations[0] !== parameters[0] ||
+          keyDeclarations?.length !== 1 || keyDeclarations[0] !== parameters[1] ||
+          reassignedBindings.has(parameters[0]) || reassignedBindings.has(parameters[1]) ||
+          !ts.isReturnStatement(conditional.parent) || !enumerable || !call || call.arguments.length !== 2 ||
+          !isIdentifier(call.arguments[0], allowance.target) || !isIdentifier(call.arguments[1], allowance.ownKey) ||
+          !isIdentifier(key, allowance.ownKey) || !ts.isConditionalExpression(conditional) ||
+          resolveBinding(conditional.whenFalse, "undefined")) {
+        report(node, `computed read requires the exact enumerable own-data guard: ${allowance.function}.${allowance.target}`);
+        return false;
+      }
+      return true;
+    }
+    const declaration = declarations?.length === 1 && ts.isVariableDeclaration(declarations[0]) ? declarations[0] : undefined;
+    const initializer = declaration?.initializer && unwrap(declaration.initializer);
+    const clone = initializer && ts.isCallExpression(initializer) && isMember(initializer.expression, "Object", "assign") && !resolveBinding(initializer, "Object") && initializer.arguments.length === 2 && isFreshObject(initializer.arguments[0]);
+    if (allFunctions.get(allowance.function)?.length !== 1 || !declaration || declaration.pos >= node.pos || reassignedBindings.has(declaration) || !(isFreshObject(initializer) || clone)) {
+      report(node, `computed read target must be a fresh unreassigned object: ${allowance.function}.${allowance.target}`);
       return false;
     }
     return true;
@@ -476,12 +527,16 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
       if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
         const name = literalName(node.propertyName ?? node.name);
         if (node.propertyName && ts.isComputedPropertyName(node.propertyName) && !isLiteralKey(node.propertyName.expression)) report(node, "dynamic method destructuring");
+        if (name === "constructor") report(node, "forbidden .constructor destructuring read");
         if (name && forbiddenMethods.has(name)) report(node, `forbidden method destructuring: ${name}`);
         if (name && (OBJECT_REFLECTION_METHODS.has(name) || SETTER_METHODS.has(name) || REFLECTION_REFERENCES.has(name))) report(node, `forbidden reflection destructuring: ${name}`);
         if (name && (TEXT_CONSTRUCTORS.has(name) || DIALOGS.has(name))) report(node, `forbidden display API destructuring: ${name}`);
       }
       if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
         const method = memberName(node);
+        const writeTarget = ts.isBinaryExpression(node.parent) && node.parent.left === node && node.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
+        if (config.scriptKind === ts.ScriptKind.JS && ts.isElementAccessExpression(node) && !isLiteralKey(node.argumentExpression) && !writeTarget && !isAllowedComputedRead(node)) report(node, "dynamic computed property read");
+        if (method === "constructor" && !writeTarget) report(node, "forbidden .constructor read");
         if (method && forbiddenMethods.has(method) && !isDirectCallTarget(node)) report(node, `forbidden method read: ${method}`);
         if (method && SETTER_METHODS.has(method)) report(node, `forbidden setter reflection: ${method}`);
         if (isBuiltinReference(node.expression, "Reflect") && !isAllowedOwnKeys(node)) report(node, "forbidden Reflect access");
@@ -512,6 +567,13 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         if (method && TEXT_INSERTION_METHODS.has(method)) report(node, `text insertion call: ${method}`);
         if (method && HTML_METHODS.has(method)) report(node, `HTML insertion call: ${method}`);
         if (method && PARSER_METHODS.has(method)) report(node, `text parser call: ${method}`);
+        if (method && NAMED_TEXT_METHODS.has(method)) report(node, `named text API call: ${method}`);
+        // Only an explicit String(...) or literal receiver distinguishes string data
+        // manipulation from CSSStyleSheet.replace; extra arguments do not do so.
+        const receiver = (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) ? unwrap(node.expression.expression) : undefined;
+        const stringReceiver = receiver && (ts.isStringLiteral(receiver) || ts.isNoSubstitutionTemplateLiteral(receiver)
+          || (ts.isCallExpression(receiver) && isIdentifier(receiver.expression, "String") && !resolveBinding(receiver.expression, "String") && receiver.arguments.length === 1));
+        if (method === "replace" && !stringReceiver) report(node, "stylesheet text call: replace");
         if (method === "setAttributeNode") report(node, "attribute node insertion call: setAttributeNode");
         if (method && DIALOGS.has(method)) report(node, `text dialog call: ${method}`);
         if (method && NODE_OR_TEXT_METHODS.has(method) && !(config.allowedNodeCalls ?? []).some((allowance) => allowance.reason.trim() && allowance.matches(node))) report(node, `string-capable insertion call: ${method}`);
@@ -533,7 +595,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
           // The first argument is the sole write target. An inline object literal
           // is fresh and cannot be a DOM node; every other target fails closed.
           const target = node.arguments[0];
-          if (!target || !ts.isObjectLiteralExpression(unwrap(target))) report(node, "Object.assign target must be a fresh object literal");
+          if (!target || !(ts.isObjectLiteralExpression(unwrap(target)) || isFreshObject(target))) report(node, "Object.assign target must be a fresh object literal");
         }
       }
     }
@@ -544,5 +606,6 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     if (!usedMintHelpers.has(helper.name)) report(mintHelpers.get(helper.name) ?? file, `stale text mint helper allowance: ${helper.name}`);
   }
   for (const allowance of computedAllowances) if (!usedComputedAllowances.has(allowance)) report(file, `stale computed write allowance: ${allowance.function}.${allowance.target}`);
+  for (const allowance of readAllowances) if (!usedReadAllowances.has(allowance)) report(file, `stale computed read allowance: ${allowance.function}.${allowance.target}`);
   return issues;
 }

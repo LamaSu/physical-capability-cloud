@@ -55,11 +55,16 @@ function pccApiOrigin(): string | null {
 // ── real DOM wrapped in the renderer's minimal RElement (fresh detached container per render) ──
 /** Browser text sink: all actual DOM text writes receive already-typed display text. */
 export function setText(node: { textContent: string | null }, text: KitText): void { node.textContent = text; }
-interface Wrapped extends RElement { _el: HTMLElement }
-function wrapEl(real: HTMLElement): Wrapped {
+const realElements = new WeakMap<RElement, HTMLElement>();
+function realEl(wrapped: RElement): HTMLElement {
+  const real = realElements.get(wrapped);
+  if (!real) throw new Error("Unknown renderer element");
+  return real;
+}
+function wrapEl(real: HTMLElement): RElement {
   const children: RElement[] = [];
   const w = {
-    _el: real, children,
+    children,
     get textContent(): string { return real.textContent ?? ""; },
     set textContent(v: KitText) { setText(real, v); },
     get className() { return real.className; },
@@ -74,11 +79,12 @@ function wrapEl(real: HTMLElement): Wrapped {
       }
     },
     removeAttr(n: string) { real.removeAttribute(n); },
-    appendChild(c: Wrapped) { real.appendChild(c._el); children.push(c); return c; },
+    appendChild(c: RElement) { real.appendChild(realEl(c)); children.push(c); return c; },
   };
-  return w as unknown as Wrapped;
+  realElements.set(w, real);
+  return w;
 }
-const rdoc: RDocument = { createElement: (tag: string) => wrapEl(document.createElement(tag)) as unknown as RElement };
+const rdoc: RDocument = { createElement: (tag: string) => wrapEl(document.createElement(tag)) };
 function inert(mount: HTMLElement, msg: KitText): void {
   const p = document.createElement("p");
   p.className = "pcc-invalid";
@@ -440,8 +446,8 @@ function renderManifest(manifest: unknown): void {
   let painted = false;
   try { painted = bootIrView(rdoc, container as unknown as RElement, r.doc, validateIr); } // in-browser re-validate + paint
   catch { inert(mount, kitText("This dashboard could not be verified and was not rendered.")); return; }
-  mount.replaceChildren(container._el);
-  if (painted) { liveDoc = r.doc; liveRoot = container._el; startBinds(r.doc, container._el); }
+  mount.replaceChildren(realEl(container));
+  if (painted) { liveDoc = r.doc; liveRoot = realEl(container); startBinds(r.doc, realEl(container)); }
 }
 
 // ── read-only MCP Apps lifecycle (no bridge, no outbound calls) ──────────────────
