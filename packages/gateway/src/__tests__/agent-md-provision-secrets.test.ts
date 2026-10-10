@@ -22,7 +22,7 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, si
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -453,7 +453,14 @@ describe("the wallet key comes back only when this call registered the identity 
   });
 });
 
-describe("every leaf of every 201 the route returns is classified, and every secret copy is named (ChatGPT r1 L1)", () => {
+/** CI images carry all four; elsewhere the run-it-as-written case needs them on PATH. */
+const recipeTools = spawnSync("sh", ["-c", "command -v bash && command -v curl && command -v python3 && command -v git"]).status === 0;
+const captureToolsRequired = recipeTools || process.env.CI === "true";
+if (!captureToolsRequired) console.info("Capture recipe tests skipped: bash, curl, python3 and git are required locally.");
+const tmpdirInGit = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: tmpdir(), stdio: "ignore" }).status === 0;
+if (tmpdirInGit) console.info("Outside-repository tests skipped: the temporary directory is inside a Git repository.");
+
+describe.runIf(captureToolsRequired)("every leaf of every 201 the route returns is classified, and every secret copy is named (ChatGPT r1 L1)", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
@@ -685,8 +692,6 @@ describe("agent golden path provisions over direct HTTP, never through a tool (O
 });
 
 const run = promisify(execFile);
-/** CI images carry all four; elsewhere the run-it-as-written case needs them on PATH. */
-const recipeTools = spawnSync("sh", ["-c", "command -v bash && command -v curl && command -v python3 && command -v git"]).status === 0;
 
 describe("agent golden path captures the provision response without leaking it (Opus r1 F2)", () => {
   it("makes .pcc private and git-ignored before the request, writes the response and header to files, and validates from the header file", () => {
@@ -848,7 +853,7 @@ sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
   return { dir, body, executable, run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-describe("F2: capture fails closed and never overwrites credentials", () => {
+describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwrites credentials", () => {
   it.each([undefined, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#frag", "https://x.example/white space"])("N3: refuses invalid PCC_BASE %s before creating private state", (base) => {
     const f = captureFixture();
     try {
@@ -1231,7 +1236,7 @@ describe("F2: capture fails closed and never overwrites credentials", () => {
   });
 });
 
-describe("F1: every credential destination is untracked and effectively ignored", () => {
+describe.runIf(captureToolsRequired)("F1: every credential destination is untracked and effectively ignored", () => {
   it("L8: the tracked-file fixture resolves Git from PATH", () => {
     expect(read("packages/gateway/src/__tests__/agent-md-provision-secrets.test.ts")).not.toContain(["/usr/bin", "git"].join("/"));
   });
@@ -1269,7 +1274,7 @@ describe("F1: every credential destination is untracked and effectively ignored"
     } finally { f.cleanup(); }
   });
 
-  it("L6: captures privately outside a Git repository and prints one fixed note", () => {
+  it.skipIf(tmpdirInGit)("L6: captures privately outside a Git repository and prints one fixed note", () => {
     const f = captureFixture();
     try {
       rmSync(join(f.dir, ".git"), { recursive: true });
@@ -1286,7 +1291,7 @@ describe("F1: every credential destination is untracked and effectively ignored"
     } finally { f.cleanup(); }
   });
 
-  it("L6: existing-key import also works privately outside Git", () => {
+  it.skipIf(tmpdirInGit)("L6: existing-key import also works privately outside Git", () => {
     const f = captureFixture();
     try {
       rmSync(join(f.dir, ".git"), { recursive: true });
@@ -1309,7 +1314,7 @@ describe("F1: every credential destination is untracked and effectively ignored"
     } finally { f.cleanup(); }
   });
 
-  it("L6: import and archive work outside a repository even without a Git executable", () => {
+  it.skipIf(tmpdirInGit)("L6: import and archive work outside a repository even without a Git executable", () => {
     const f = captureFixture();
     try {
       rmSync(join(f.dir, ".git"), { recursive: true });
@@ -1331,6 +1336,9 @@ describe("F1: every credential destination is untracked and effectively ignored"
 });
 
 type KeyProvider = "python" | "pynacl" | "openssl" | "node";
+function fixturePythonPath(dir: string): string {
+  return [join(dir, "bin"), process.env.PYTHONPATH].filter(Boolean).join(delimiter);
+}
 type ProviderProbe = (command: string, args: string[]) => { status: number | null; stdout: string };
 function providerSkipReason(provider: KeyProvider, probe: ProviderProbe = (command, args) => {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000 });
@@ -1352,7 +1360,26 @@ function providerSkipReason(provider: KeyProvider, probe: ProviderProbe = (comma
   return undefined;
 }
 
-describe("F5: buyer generates and sends its own Ed25519 key", () => {
+describe.runIf(captureToolsRequired)("F5: buyer generates and sends its own Ed25519 key", () => {
+  it("N5: provider isolation preserves imports from inherited PYTHONPATH", () => {
+    const f = captureFixture();
+    const inherited = process.env.PYTHONPATH;
+    try {
+      const modules = join(f.dir, "inherited-modules");
+      mkdirSync(modules);
+      writeFileSync(join(modules, "inherited_marker.py"), "value = 'inherited import works'\n");
+      process.env.PYTHONPATH = modules;
+      f.executable("sitecustomize.py", "import inherited_marker\nfrom pathlib import Path\nPath('inherited-pythonpath').write_text(inherited_marker.value)\n");
+      expect(f.run({ PYTHONPATH: fixturePythonPath(f.dir) }).status).toBe(0);
+      expect(existsSync(join(f.dir, "inherited-pythonpath"))).toBe(true);
+      expect(readFileSync(join(f.dir, "inherited-pythonpath"), "utf8")).toBe("inherited import works");
+    } finally {
+      if (inherited === undefined) delete process.env.PYTHONPATH;
+      else process.env.PYTHONPATH = inherited;
+      f.cleanup();
+    }
+  });
+
   it("M4: constructs PEM armor at runtime in the published recipe", () => {
     const recipe = (provisionAction().recipe ?? []).join("\n");
     expect(recipe).not.toContain(["PRIVATE", "KEY"].join(" "));
@@ -1379,7 +1406,7 @@ describe("F5: buyer generates and sends its own Ed25519 key", () => {
       if (provider !== "openssl") f.executable("openssl", "#!/bin/sh\nexit 1\n");
       if (provider !== "node") f.executable("node", "#!/bin/sh\nexit 1\n");
       else f.executable("node", `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' "$@"\n`);
-      const result = f.run({ PYTHONPATH: join(f.dir, "bin") });
+      const result = f.run({ PYTHONPATH: fixturePythonPath(f.dir) });
       expect(result.status, "local generation must succeed").toBe(0);
       const sent = JSON.parse(readFileSync(join(f.dir, "sent.json"), "utf8"));
       expect(sent.publicKey, "every buyer request requires publicKey").toMatch(/^[0-9a-f]{64}$/);
@@ -1404,7 +1431,7 @@ describe("F5: buyer generates and sends its own Ed25519 key", () => {
     try {
       f.executable("sitecustomize.py", 'import builtins\noriginal = builtins.__import__\ndef guarded(name, *args, **kwargs):\n    if name.split(".")[0] in ("cryptography", "nacl"): raise ImportError("fixture")\n    return original(name, *args, **kwargs)\nbuiltins.__import__ = guarded\n');
       for (const command of ["openssl", "node"]) f.executable(command, "#!/bin/sh\nexit 1\n");
-      const result = f.run({ PYTHONPATH: join(f.dir, "bin") });
+      const result = f.run({ PYTHONPATH: fixturePythonPath(f.dir) });
       expect(result.status, "must never request a server-minted Ed25519 key").not.toBe(0);
       expect(result.stderr).toContain("No Ed25519 generator available");
       expect(existsSync(join(f.dir, "requested"))).toBe(false);
@@ -1424,7 +1451,7 @@ describe("F5: buyer generates and sends its own Ed25519 key", () => {
   });
 });
 
-describe("F3: diagnostics stay private and output uses fixed classifications", () => {
+describe.runIf(captureToolsRequired)("F3: diagnostics stay private and output uses fixed classifications", () => {
   it.each([500, 502, 429])("N4: HTTP %s prints advice for that status", (status) => {
     const f = captureFixture();
     try {

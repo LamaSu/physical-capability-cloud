@@ -456,7 +456,8 @@ os.link = record_link
         response_path = self.private / "test-response.json"
         response_path.write_text(json.dumps(self.response if response is None else response))
         env = dict(self.os.environ, PATH=str(self.bin) + self.os.pathsep + self.os.environ["PATH"],
-                   PYTHONPATH=str(self.bin), MOCK_RESPONSE=str(response_path), MOCK_STATUS=status, **extras)
+                   PYTHONPATH=self.os.pathsep.join(filter(None, (str(self.bin), self.os.environ.get("PYTHONPATH")))),
+                   MOCK_RESPONSE=str(response_path), MOCK_STATUS=status, **extras)
         result = self.subprocess.run(["bash", "-c", self.recipe], cwd=self.cwd, env=env,
                                      capture_output=True, text=True, timeout=20)
         for secret in (self.key, self.wallet_key):
@@ -474,6 +475,24 @@ os.link = record_link
     def assert_not_published(self):
         for name in ("provision.json", "api-key", "auth.header"):
             self.assertFalse((self.private / name).exists(), name)
+
+    def require_outside_git_temp(self):
+        import tempfile
+        probe = self.subprocess.run([self.git, "-C", tempfile.gettempdir(), "rev-parse", "--git-dir"], capture_output=True)
+        if probe.returncode == 0:
+            self.skipTest("Temporary directory is inside a Git repository; outside-repository recipe test skipped")
+
+    def test_capture_sitecustomize_preserves_inherited_pythonpath(self):
+        from unittest import mock
+        inherited = self.cwd / "inherited-python"
+        inherited.mkdir()
+        (inherited / "inherited_provider_marker.py").write_text('from pathlib import Path\nPath(".pcc/inherited-path-used").write_text("yes")\n')
+        sitecustomize = self.bin / "sitecustomize.py"
+        sitecustomize.write_text(sitecustomize.read_text() + "\nimport inherited_provider_marker\n")
+        with mock.patch.dict(self.os.environ, {"PYTHONPATH": str(inherited)}):
+            result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.private / "inherited-path-used").exists())
 
     def test_success_checks_status_and_publishes_ignored_0600_files_atomically(self):
         result = self.run_capture()
@@ -738,6 +757,7 @@ os.link = record_link
 
     def test_outside_git_continues_with_a_fixed_note(self):
         import shutil
+        self.require_outside_git_temp()
         shutil.rmtree(self.cwd / ".git")
         result = self.run_capture()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -763,6 +783,7 @@ os.link = record_link
 
     def test_empty_git_directory_is_not_treated_as_a_repository(self):
         import shutil
+        self.require_outside_git_temp()
         shutil.rmtree(self.cwd / ".git")
         (self.cwd / ".git").mkdir()
         result = self.run_capture()
@@ -811,6 +832,7 @@ os.link = record_link
 
     def test_exact_archive_without_git_outside_a_repository(self):
         import shutil
+        self.require_outside_git_temp()
         result = self.run_capture()
         self.assertEqual(result.returncode, 0, result.stderr)
         shutil.rmtree(self.cwd / ".git")
