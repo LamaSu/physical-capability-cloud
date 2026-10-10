@@ -275,7 +275,8 @@ function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
  * a block, a switch to manual or a stop that lands while the escrow is created is honoured.
  *   - The buyer is on the kernel's block list: rejected (dead).
  *   - The kernel's operator has not accepted this buyer per its policy (manual, the default; policy
- *     mode and not trusted; a policy that is missing, garbled or cannot be read): awaiting_acceptance.
+ *     mode and not trusted; a block list that is present but not an array of strings, whatever the
+ *     mode; a policy that is missing, garbled or cannot be read): awaiting_acceptance.
  *   - The stop is engaged or cannot be read: awaiting_acceptance too, even for an auto policy. The
  *     relay's POST /scope mints nothing then, and the accept route refuses then.
  *   - Accepted: active on the buyer's own, real funding, else awaiting_funding. At the mint that

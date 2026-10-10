@@ -7,7 +7,8 @@
  *     "policy" policy accepts its trusted agents; anything else, a manual policy, a missing or
  *     unreadable one included, waits in `awaiting_acceptance` for the operator's decision (POST
  *     /api/operator/scopes/:scopeId/accept, a decision; refusing it is a revoke). A buyer on the
- *     kernel's block list gets a dead (`rejected`) scope.
+ *     kernel's block list gets a dead (`rejected`) scope; a block list the gateway can't read
+ *     (present but not an array of strings) makes the scope wait, whatever the mode.
  *   - Rule 3, the buyer's own, real funding: the escrow's payer is the buyer and it is funded,
  *     and it is never a mock escrow outside tests or a gateway-funded one. A real escrow counts
  *     only on a finalized verification record of the buyer's funding (buyer funding plan S2.1),
@@ -52,17 +53,37 @@ export type Acceptance = "accepted" | "awaiting_operator" | "refused";
 
 /**
  * The kernel operator's acceptance of `buyer`'s scope, per its policy (the approval part of
- * evaluatePolicy: the block list, then the approval mode). Where the policy is silent, missing,
- * malformed or of an unknown mode, nothing is accepted for the operator.
+ * evaluatePolicy: the block list, then the approval mode), read in this order:
+ *   - A policy that is not an object (missing, unreadable, an array, a string): awaiting_operator.
+ *   - A block list that is an array with an element naming the buyer: refused.
+ *   - A block list that is present (any value but undefined) and is not an array whose every
+ *     element is a string (a string, null, a number, an object, an array holding a non-string):
+ *     awaiting_operator, whatever the approval mode (N133 follow-up, fund-s2-review LOW-2). The
+ *     gateway can't read such a list, so it can't show the buyer is off it (the kernel's policy
+ *     engine reads a string by substring, as blocked), and refusing would claim the buyer is on
+ *     it. An absent block list blocks nobody.
+ *   - approvalMode "auto": accepted. "policy": accepted when the trust list is an array with an
+ *     element naming the buyer; a trust list that is not an array trusts nobody.
+ *   - Anything else (manual, an unknown mode, none): awaiting_operator.
+ * So where the policy is silent, missing, not an object or of an unknown mode, or its block list
+ * can't be read, nothing is accepted for the operator.
  */
 export function acceptanceFor(policy: unknown, buyer: string): Acceptance {
   if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return "awaiting_operator";
   const p = policy as Record<string, unknown>;
   const listed = (list: unknown) => Array.isArray(list) && list.some((id) => sameIdentity(id, buyer));
   if (listed(p.blockedAgents)) return "refused";
+  if (p.blockedAgents !== undefined && !isStringList(p.blockedAgents)) return "awaiting_operator";
   if (p.approvalMode === "auto") return "accepted";
   if (p.approvalMode === "policy" && listed(p.trustedAgents)) return "accepted";
   return "awaiting_operator";
+}
+
+/** An array whose every element is a string. A hole is not one: it reads as undefined (JSON makes none). */
+function isStringList(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  for (let i = 0; i < value.length; i++) if (typeof value[i] !== "string") return false;
+  return true;
 }
 
 /** The escrow fields the funding rule reads. */
