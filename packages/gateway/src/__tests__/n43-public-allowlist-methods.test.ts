@@ -17,7 +17,7 @@
  *   would reach a handler that stores and gossips ANY kernelId with no owner binding. A route-level
  *   onRequest hook keeps it refused (501 DHT_ANNOUNCE_DISABLED), before body parsing. apiGate and
  *   scopeChecker are earlier onRequest hooks: an anonymous caller gets apiGate's 401, and a limited
- *   key can receive a scope refusal before DHT's 501. The x402/MPP onRequest gate also precedes parsing.
+ *   key can receive a scope refusal before DHT's 501.
  * - Segment boundary: "/api/health" opens "/api/health" and the paths below it, never a sibling such as
  *   "/api/healthcheck-debug".
  *
@@ -335,7 +335,8 @@ describe("N43 F1: artifact-detail HEAD preserves SIWE ownership", () => {
     expect(body(res).id).toBe(publicId);
   });
 
-  it("records the pre-existing SIWE-owner GET limitation: public detail GET drops the session and returns 403", async () => {
+  // Pins a known pre-existing availability bug tracked in bus #7534 so a future fix flips it knowingly.
+  it("a SIWE owner's GET of their own PRIVATE artifact returns 403 (pins known pre-existing availability bug, bus #7534)", async () => {
     const res = await send("a SIWE session", { method: "GET", url: `/api/artifacts/${privateId}` });
     expect({ status: res.statusCode, error: body(res).error }).toEqual({ status: 403, error: "forbidden" });
   });

@@ -622,7 +622,6 @@ export async function createGateway(port = 3200) {
   // Analytics service — subscribes to event bus, persists events + updates views
   getAnalyticsService();
 
-  // MPP/x402 payment gate — onRequest after apiGate and scopeChecker, before body parsing.
   await app.register(x402Gate);
 
   // Service status + analytics — AFTER apiGate (they expose DB data, audit logs, security events)
@@ -1122,4 +1121,3 @@ process.on("uncaughtException", (err) => {
   console.error("[gateway] Uncaught exception:", err);
   process.exit(1);
 });
-
