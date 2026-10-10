@@ -51,9 +51,9 @@ describe("EmitterDecl — same grammar as CSD refs, plus via/demonstrated", () =
 
   it("emitsToPrimitiveRefs strips via/demonstrated to plain CSD refs", () => {
     const refs = emitsToPrimitiveRefs([
-      { id: "artifact.hash", params: { mode: "plain" }, bind: "cid", via: "x", demonstrated: true },
+      { id: "artifact.hash", params: { mode: "plain" }, bind: "outputArtifactCid", via: "gcode", demonstrated: true },
     ]);
-    expect(refs).toEqual([{ id: "artifact.hash", params: { mode: "plain" }, bind: "cid" }]);
+    expect(refs).toEqual([{ id: "artifact.hash", params: { mode: "plain" }, bind: "outputArtifactCid" }]);
   });
 });
 

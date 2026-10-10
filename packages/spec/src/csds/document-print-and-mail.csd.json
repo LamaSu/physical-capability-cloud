@@ -335,6 +335,10 @@
         },
         {
           "id": "capture.photo_nonced",
+          "params": {
+            "media": "photo",
+            "minClass": "CC2"
+          },
           "bind": "photo_captured"
         },
         {
@@ -397,6 +401,10 @@
         },
         {
           "id": "capture.photo_nonced",
+          "params": {
+            "media": "photo",
+            "minClass": "CC2"
+          },
           "bind": "photo_captured"
         },
         {

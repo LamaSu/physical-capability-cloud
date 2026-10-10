@@ -30,11 +30,14 @@
 import { z } from "zod";
 import {
   CsdEvidencePrimitiveRefSchema,
+  ownDataCopyStep,
+  refineClosedPrimitiveRef,
   type CsdEvidencePrimitiveRef,
   type CsdEvidenceTier,
 } from "../csd/schema.js";
+import { isEmitterVia, ownDataSnapshot, validatePrimitiveParams } from "./primitive-params.js";
 import { computeCsdEligibility } from "./eligibility.js";
-import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "./primitives.js";
+import { EVIDENCE_PRIMITIVES, VOCAB_VERSION, type EvidencePrimitiveDef } from "./primitives.js";
 
 // ── The manifest shape ──────────────────────────────────────────────
 
@@ -43,16 +46,29 @@ import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "./primitives.js"
  * (`{ id, params?, bind? }`) plus supply-side provenance/demonstration.
  */
 export const EmitterDeclSchema = CsdEvidencePrimitiveRefSchema.extend({
-  /** Provenance: adapter command / EvidenceEventType / peripheral deviceId. */
-  via: z.string().optional(),
+  /**
+   * Provenance, as a closed name (N128): an emitter channel (EMITTER_CHANNELS, e.g. an adapter command) or an
+   * EvidenceEventType. Never free text, and never merely identifier-shaped.
+   */
+  via: z.string().refine(isEmitterVia, { message: "via must name an emitter channel (EMITTER_CHANNELS) or an event type" }).optional(),
   /**
    * Demonstration flag — set ONLY by test-job / prove after a real run produced
    * this primitive, NEVER by the author. Declaration ≠ demonstration ≠
    * settlement; this is the middle checkpoint. (Consumers land in a follow-up.)
    */
   demonstrated: z.boolean().optional(),
-});
+})
+  // A public declaration: no unknown key, and closed params (N128).
+  .strict()
+  .superRefine(refineClosedPrimitiveRef);
 export type EmitterDecl = z.infer<typeof EmitterDeclSchema>;
+
+/**
+ * A list of emitter declarations, as setup receives or stores one (N128 r2): a descriptor-only copy of the
+ * whole list first, so no accessor anywhere in it runs (an index getter included), then each declaration
+ * closed as above.
+ */
+export const EmitterDeclsSchema = z.preprocess(ownDataCopyStep("emits"), z.array(EmitterDeclSchema));
 
 /** What a manifest attaches to. Subject-flexible: adapter | device | process. */
 export const EmitterSubjectKindSchema = z.enum(["adapter", "device", "process"]);
@@ -67,12 +83,16 @@ export type EmitterSubject = z.infer<typeof EmitterSubjectSchema>;
 
 export const EvidenceEmitterManifestSchema = z.object({
   subject: EmitterSubjectSchema,
-  /** Which vocabulary version the claims were authored against. */
-  vocabVersion: z.number().int().nonnegative(),
+  /**
+   * The vocabulary version the claims were authored against, pinned to VOCAB_VERSION (N128 r2, finding 3).
+   * The declarations parse only in the current closed grammar, so a manifest that names another version is
+   * refused, never read in a grammar it didn't declare.
+   */
+  vocabVersion: z.literal(VOCAB_VERSION),
   emits: z.array(EmitterDeclSchema),
-  /** Optional draft primitive proposals → the growth loop (consumer deferred). */
-  proposals: z.array(z.unknown()).optional(),
-});
+  // `proposals` (draft primitive proposals for the growth loop) left the PUBLIC manifest (N128): it was an
+  // open array, and its consumer is deferred. Proposals belong in a non-public channel when that lands.
+}).strict();
 export type EvidenceEmitterManifest = z.infer<typeof EvidenceEmitterManifestSchema>;
 
 // ── Bridge: emitter manifest → CSD evidence tier map ────────────────
@@ -119,6 +139,50 @@ function effectiveMinTier(
   return m;
 }
 
+/**
+ * Thrown by the exported builders below when a declaration they would use is not closed (N128 r2,
+ * finding 1). They never emit a ref the closed CSD grammar would refuse.
+ */
+export class EmitterManifestInputError extends Error {
+  readonly issues: readonly string[];
+  constructor(issues: readonly string[]) {
+    super(`emitter declarations are not closed: ${issues.join("; ")}`);
+    this.name = "EmitterManifestInputError";
+    this.issues = issues;
+  }
+}
+
+/**
+ * The declarations of `emits` the builders use, each parsed in the closed grammar (N128 r2, finding 1).
+ * The list is first copied through property descriptors (no accessor runs, and nothing returned is the
+ * caller's object). A declaration whose id is absent from `index` is DROPPED unread: that is the builders'
+ * forward-reference policy (a not-yet-shipped primitive contributes nothing until its entry lands). Every
+ * other declaration must parse with EmitterDeclSchema, or the call throws EmitterManifestInputError naming
+ * each issue. Nothing is silently skipped.
+ */
+function closedKnownDecls(emits: unknown, index: ReadonlyMap<string, EvidencePrimitiveDef>): EmitterDecl[] {
+  const copy = ownDataSnapshot(emits, "emits");
+  if (!copy.ok) throw new EmitterManifestInputError([copy.reason]);
+  if (!Array.isArray(copy.value)) throw new EmitterManifestInputError(["emits: not an array"]);
+  const decls: EmitterDecl[] = [];
+  const issues: string[] = [];
+  copy.value.forEach((decl: unknown, i: number) => {
+    // The copy is plain data, so reading `id` here runs no code.
+    const id = typeof decl === "object" && decl !== null ? (decl as { id?: unknown }).id : undefined;
+    if (typeof id === "string" && !index.has(id)) return;
+    const parsed = EmitterDeclSchema.safeParse(decl);
+    if (parsed.success) {
+      decls.push(parsed.data);
+      return;
+    }
+    for (const issue of parsed.error.issues) {
+      issues.push(`emits[${i}]${issue.path.length > 0 ? `.${issue.path.join(".")}` : ""}: ${issue.message}`);
+    }
+  });
+  if (issues.length > 0) throw new EmitterManifestInputError(issues);
+  return decls;
+}
+
 /** Keep only the CSD-ref fields; drop the manifest-only via/demonstrated. */
 function toCsdRef(e: EmitterDecl): CsdEvidencePrimitiveRef {
   const ref: CsdEvidencePrimitiveRef = { id: e.id };
@@ -127,11 +191,14 @@ function toCsdRef(e: EmitterDecl): CsdEvidencePrimitiveRef {
   return ref;
 }
 
-/** Strip an emit list down to plain CSD primitive refs. */
+/**
+ * Strip an emit list down to plain CSD primitive refs. Each declaration is parsed in the closed grammar
+ * first (N128 r2); an id absent from the vocabulary is dropped, as in buildEvidenceTiersFromEmits.
+ */
 export function emitsToPrimitiveRefs(
   emits: readonly EmitterDecl[],
 ): CsdEvidencePrimitiveRef[] {
-  return emits.map(toCsdRef);
+  return closedKnownDecls(emits, defaultIndex()).map(toCsdRef);
 }
 
 function deriveRequired(refs: readonly CsdEvidencePrimitiveRef[]): string[] {
@@ -158,6 +225,10 @@ function deriveRequired(refs: readonly CsdEvidencePrimitiveRef[]): string[] {
  *      that cannot reach the human-attestation floor stops below tier 2 — the
  *      honest matching signal, not a claim of assurance.
  * Tier 0 is always present (self-attested floor) so the CSD stays listable.
+ *
+ * CLOSED (N128 r2, finding 1): every declaration it uses is parsed in the closed grammar first
+ * (`closedKnownDecls`), and every dependency it adds must be valid bare, so the map never carries a ref
+ * the closed CSD grammar refuses. An unclosed declaration throws EmitterManifestInputError.
  */
 export function buildEvidenceTiersFromEmits(
   emits: readonly EmitterDecl[],
@@ -166,9 +237,9 @@ export function buildEvidenceTiersFromEmits(
   const index = options.index ?? defaultIndex();
   const maxTier = options.maxTier ?? 3;
 
-  // 1 + 2 — resolve known emits, expand transitive vocab dependencies.
+  // 1 + 2 — resolve known emits (each closed), expand transitive vocab dependencies.
   const refById = new Map<string, CsdEvidencePrimitiveRef>();
-  const queue: EmitterDecl[] = emits.filter((e) => index.has(e.id));
+  const queue: EmitterDecl[] = closedKnownDecls(emits, index);
   while (queue.length > 0) {
     const e = queue.shift() as EmitterDecl;
     const existing = refById.get(e.id);
@@ -182,7 +253,12 @@ export function buildEvidenceTiersFromEmits(
     }
     refById.set(e.id, toCsdRef(e));
     for (const dep of index.get(e.id)?.dependsOn ?? []) {
-      if (index.has(dep) && !refById.has(dep)) queue.push({ id: dep });
+      if (!index.has(dep) || refById.has(dep)) continue;
+      // A dependency is added BARE, so it must be valid with no params (true of every registry dependency).
+      if (!validatePrimitiveParams(dep, undefined).ok) {
+        throw new EmitterManifestInputError([`${dep}: a dependency of ${e.id} that is not valid without params`]);
+      }
+      queue.push({ id: dep });
     }
   }
 
@@ -226,10 +302,25 @@ export function buildEvidenceTiersFromEmits(
   return out;
 }
 
-/** Convenience: derive a CSD evidence map straight from a manifest. */
+/** A manifest's envelope, for manifestToCsdEvidence: its declarations go to the builder, which closes them. */
+const ManifestEnvelopeSchema = z
+  .object({ subject: EmitterSubjectSchema, vocabVersion: z.literal(VOCAB_VERSION), emits: z.array(z.unknown()) })
+  .strict();
+
+/**
+ * Convenience: derive a CSD evidence map straight from a manifest. The manifest is copied through
+ * descriptors and its envelope checked (closed keys, the current VOCAB_VERSION). Its declarations are
+ * closed by buildEvidenceTiersFromEmits, which keeps the forward-reference policy (N128 r2).
+ */
 export function manifestToCsdEvidence(
   manifest: EvidenceEmitterManifest,
   options: BuildEvidenceOptions = {},
 ): Record<string, CsdEvidenceTier> {
-  return buildEvidenceTiersFromEmits(manifest.emits, options);
+  const copy = ownDataSnapshot(manifest, "manifest");
+  if (!copy.ok) throw new EmitterManifestInputError([copy.reason]);
+  const envelope = ManifestEnvelopeSchema.safeParse(copy.value);
+  if (!envelope.success) {
+    throw new EmitterManifestInputError(envelope.error.issues.map((i) => `manifest.${i.path.join(".")}: ${i.message}`));
+  }
+  return buildEvidenceTiersFromEmits(envelope.data.emits as EmitterDecl[], options);
 }

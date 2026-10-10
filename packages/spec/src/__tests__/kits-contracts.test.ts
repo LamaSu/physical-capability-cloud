@@ -29,8 +29,6 @@ import {
   MAX_AS_OF_SKEW_MS,
   OPPORTUNITY_SCHEMA,
   OpportunityDTOSchema,
-  PRIMITIVE_PARAMS_ANNOTATIONS,
-  PRIMITIVE_PARAMS_KEYWORDS,
   approvedSetDigest,
   demandAggregateId,
   demandAggregateTitle,
@@ -41,7 +39,6 @@ import {
   primitivesAreExecutable,
   publicCapabilityUrls,
   readTimeIsNotInFuture,
-  validatePrimitiveParams,
   type DemandAggregateDTO,
   type FundedOfferDTO,
   type KitBuildRequestDTO,
@@ -52,6 +49,7 @@ import type { SHA256 } from "../types/common.js";
 import type { CsdEvidencePrimitiveRef } from "../csd/schema.js";
 import { loadBuiltinCsds } from "../csd/registry.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
+import { renderParamsSchema } from "../evidence/primitive-params.js";
 import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { canonicalize } from "../util/canonical.js";
 
@@ -417,7 +415,7 @@ describe("v0 amendment 1 (2026-09-29): A2, A3, A5, A6", () => {
 
   it("A3: requiredPrimitives uses the CSD evidence-primitive grammar with active ids only", () => {
     const withEvidence = (e: unknown) => ({ ...kitRequest(), evidence: e });
-    expect(parses(withEvidence(evidence(1, [{ id: "artifact.hash" }, { id: "ident.registered_key", bind: "source" }])))).toBe(true);
+    expect(parses(withEvidence(evidence(1, [{ id: "artifact.hash" }, { id: "ident.registered_key", bind: "execution_completed" }])))).toBe(true);
     expect(parses(withEvidence(evidence(1, [{ id: "made.up_primitive" }])))).toBe(false);
     expect(parses(withEvidence({ tier: 1, requiredPrimitives: [{ id: "artifact.hash", smuggled: true }], executable: false }))).toBe(false);
     // The v0 field name is gone; a strict schema refuses it.
@@ -1013,12 +1011,18 @@ describe("astra pack 112b", () => {
     expect(parses({ ...kitRequest(), evidence: { tier: 3, requiredPrimitives: decl, executable: false } })).toBe(true);
   });
 
-  it("HIGH 4c: an unsupported params-schema construct fails closed", () => {
-    expect(validatePrimitiveParams({ oneOf: [{ type: "string" }] }, 42)).toBe(false);
-    expect(validatePrimitiveParams({ type: "string", pattern: "^a$" }, "b")).toBe(false);
-    // Refused even when the value would satisfy the construct: it is never silently skipped.
-    expect(validatePrimitiveParams({ oneOf: [{ type: "string" }] }, "x")).toBe(false);
-    expect(validatePrimitiveParams({ type: "string", pattern: "^a$" }, "a")).toBe(false);
+  it("HIGH 4c (v1, N128): params are checked by the shared closed table, and anything outside it fails closed", () => {
+    const at = (tier: 0 | 1 | 2 | 3, ref: CsdEvidencePrimitiveRef, executable: boolean) =>
+      parses({ ...kitRequest(), evidence: { tier, requiredPrimitives: [ref], executable } });
+    // An unknown key, a missing required field, a value outside an enum and an out-of-bounds number are refused.
+    expect(at(0, { id: "decl.self_attested", params: { apiKey: "sk_live_x" } }, true)).toBe(false);
+    expect(at(2, { id: "capture.photo_nonced" }, false)).toBe(false);
+    expect(at(2, { id: "capture.photo_nonced", params: { media: "photo", minClass: "CC2", nonceType: "smoke" } }, false)).toBe(false);
+    expect(at(1, { id: "fresh.challenge_bound", params: { maxAgeSeconds: 0 } }, false)).toBe(false);
+    // What the table names passes, a oneOf included (v0's JSON-Schema subset refused every oneOf).
+    expect(at(0, { id: "decl.self_attested", params: { schemaRef: `sha256:${"ab".repeat(32)}` } }, true)).toBe(true);
+    expect(at(2, { id: "capture.photo_nonced", params: { media: "photo", minClass: "CC2", nonceType: "qr" } }, false)).toBe(true);
+    expect(at(1, { id: "telemetry.envelope_conformance", params: { envelope: "builtin-defaults" } }, false)).toBe(true);
   });
 
   it("executable means CUMULATIVELY tier-eligible with live verifiers (112c): the tier 0 floor, payer alone is not tier 2 or 3", () => {
@@ -1136,157 +1140,19 @@ describe("astra pack 112b", () => {
     expect(evidenceIsExecutable(3, [{ id: "decl.self_attested" }])).toBe(false);
   });
 
-  it("validatePrimitiveParams fails closed: any keyword outside the supported set refuses the params", () => {
-    const ok = (schema: Record<string, unknown>, value: unknown) => validatePrimitiveParams(schema, value);
-    // Every unsupported keyword is refused even where the value satisfies the rest of the schema.
-    const unsupported: Array<[string, unknown]> = [
-      ["oneOf", [{ type: "string" }]],
-      ["anyOf", [{ type: "string" }]],
-      ["allOf", [{ type: "string" }]],
-      ["not", { type: "number" }],
-      ["$ref", "#/definitions/x"],
-      ["pattern", "^x$"],
-      ["format", "email"],
-      ["minimum", 0],
-      ["maximum", 9],
-      ["minLength", 1],
-      ["maxLength", 9],
-      ["const", "x"],
-      ["if", { type: "string" }],
-      ["multipleOf", 1],
-      ["minItems", 0],
-      ["uniqueItems", true],
-      ["patternProperties", {}],
-      ["dependencies", {}],
-    ];
-    for (const [keyword, arg] of unsupported) {
-      expect(ok({ type: "string", [keyword]: arg }, "x"), keyword).toBe(false);
+  it("v1 (N128): every ACTIVE primitive's paramsSchema is the closed table's rendering, and refs are checked by that table", () => {
+    // One source: the registry's descriptor is rendered from evidence/primitive-params.ts, every object closed.
+    for (const d of EVIDENCE_PRIMITIVES.filter((x) => x.status === "active")) {
+      expect(d.paramsSchema, d.id).toEqual(renderParamsSchema(d.id));
+      expect(d.paramsSchema.additionalProperties, d.id).toBe(false);
     }
-    // An unknown or array type, or a missing type with any other keyword, is refused.
-    for (const type of ["null", "any", "String", ["string"], ["string", "null"], 1, null]) {
-      expect(ok({ type }, "x"), JSON.stringify(type)).toBe(false);
-    }
-    expect(ok({ enum: ["x"] }, "x")).toBe(false);
-    expect(ok({ properties: {} }, {})).toBe(false);
-    expect(ok({ required: [] }, {})).toBe(false);
-    // "Any value" (no type, or annotations only) is refused: no active primitive uses one.
-    expect(ok({}, "x")).toBe(false);
-    expect(ok({ description: "anything" }, "x")).toBe(false);
-    expect(ok({ default: 1, examples: [1] }, 1)).toBe(false);
-    // A malformed supported keyword is refused, whatever the node's type.
-    for (const bad of [
-      { type: "object", required: "a" },
-      { type: "object", required: [1] },
-      { type: "object", properties: [] },
-      { type: "object", properties: "x" },
-      { type: "object", additionalProperties: "no" },
-      { type: "object", additionalProperties: null },
-      { type: "object", additionalProperties: [] },
-      { type: "array", items: "x" },
-      { type: "array", items: [{ type: "string" }] }, // the tuple form
-      { type: "string", enum: "abc" },
-      { type: "string", properties: [] },
-    ]) {
-      expect(ok(bad, bad.type === "array" ? [] : bad.type === "string" ? "abc" : {}), JSON.stringify(bad)).toBe(false);
-    }
-    expect(ok("x" as never, "x")).toBe(false);
-    expect(ok(null as never, "x")).toBe(false);
-  });
-
-  it("validatePrimitiveParams still evaluates what it supports, ignores annotations, and checks the nodes a value reaches", () => {
-    const ok = (schema: Record<string, unknown>, value: unknown) => validatePrimitiveParams(schema, value);
-    // Annotations carry no validation.
-    expect(ok({ type: "string", description: "d", title: "t", $comment: "c", examples: ["a"], default: "a" }, "b")).toBe(true);
-    // type and enum.
-    expect(ok({ type: "string" }, "x")).toBe(true);
-    expect(ok({ type: "string" }, 1)).toBe(false);
-    expect(ok({ type: "string", enum: ["a", "b"] }, "b")).toBe(true);
-    expect(ok({ type: "string", enum: ["a", "b"] }, "c")).toBe(false);
-    expect(ok({ type: "number" }, 1.5)).toBe(true);
-    expect(ok({ type: "number" }, Number.NaN)).toBe(false);
-    expect(ok({ type: "number" }, Number.POSITIVE_INFINITY)).toBe(false);
-    expect(ok({ type: "integer" }, 2)).toBe(true);
-    expect(ok({ type: "integer" }, 1.5)).toBe(false);
-    expect(ok({ type: "boolean" }, false)).toBe(true);
-    expect(ok({ type: "boolean" }, "false")).toBe(false);
-    // items: an object schema, checked per element.
-    expect(ok({ type: "array", items: { type: "string" } }, ["a", "b"])).toBe(true);
-    expect(ok({ type: "array", items: { type: "string" } }, ["a", 1])).toBe(false);
-    expect(ok({ type: "array" }, [1, "a"])).toBe(true);
-    expect(ok({ type: "array" }, "a")).toBe(false);
-    // properties, required (own keys only) and additionalProperties.
-    const obj = { type: "object", properties: { a: { type: "string" } }, required: ["a"] };
-    expect(ok(obj, { a: "x" })).toBe(true);
-    expect(ok(obj, {})).toBe(false);
-    expect(ok(obj, { a: 1 })).toBe(false);
-    expect(ok(obj, { a: "x", extra: 1 })).toBe(true); // additionalProperties absent: extras allowed
-    expect(ok({ ...obj, additionalProperties: true }, { a: "x", extra: 1 })).toBe(true);
-    expect(ok({ ...obj, additionalProperties: false }, { a: "x", extra: 1 })).toBe(false);
-    expect(ok({ type: "object", required: ["toString"] }, {})).toBe(false); // an inherited key is not present
-    // A property named like an inherited key is an ordinary extra property, never a schema from the prototype.
-    expect(ok({ type: "object", properties: { a: { type: "string" } }, additionalProperties: false }, JSON.parse('{"constructor":1}'))).toBe(false);
-    expect(ok({ type: "object", properties: { a: { type: "string" } }, additionalProperties: true }, JSON.parse('{"constructor":1,"toString":2}'))).toBe(true);
-    expect(ok({ type: "object", additionalProperties: { type: "number" } }, JSON.parse('{"constructor":1}'))).toBe(true);
-    expect(ok({ type: "object", additionalProperties: { type: "number" } }, JSON.parse('{"constructor":"x"}'))).toBe(false);
-    expect(ok({ type: "object" }, null)).toBe(false);
-    expect(ok({ type: "object" }, [])).toBe(false);
-    // additionalProperties as an object schema validates the extra properties.
-    const typed = { type: "object", properties: { a: { type: "string" } }, additionalProperties: { type: "number" } };
-    expect(ok(typed, { a: "x", b: 1, c: 2 })).toBe(true);
-    expect(ok(typed, { a: "x", b: "y" })).toBe(false);
-    expect(ok({ type: "object", additionalProperties: {} }, { b: 1 })).toBe(false); // {} would mean "any value"
-    // Nodes the value does not reach are not evaluated; one it reaches with unsupported grammar refuses.
-    const lazy = { type: "object", properties: { x: { oneOf: [{ type: "string" }] } }, additionalProperties: true };
-    expect(ok(lazy, {})).toBe(true);
-    expect(ok(lazy, { other: 1 })).toBe(true);
-    expect(ok(lazy, { x: "s" })).toBe(false);
-    expect(ok({ type: "array", items: { oneOf: [] } }, [])).toBe(true);
-    expect(ok({ type: "array", items: { oneOf: [] } }, [1])).toBe(false);
-  });
-
-  it("every ACTIVE primitive's paramsSchema stays inside the grammar validatePrimitiveParams supports", () => {
-    const supported = new Set([...PRIMITIVE_PARAMS_KEYWORDS, ...PRIMITIVE_PARAMS_ANNOTATIONS]);
-    const types = new Set(["string", "number", "integer", "boolean", "array", "object"]);
-    const rec = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-    /** Every way a schema node, or one below it, leaves the supported grammar. */
-    const offences = (node: unknown, path: string): string[] => {
-      if (!rec(node)) return [`${path}: not an object schema`];
-      const unsupportedKeywords = Object.keys(node).filter((k) => !supported.has(k));
-      if (unsupportedKeywords.length > 0) return [`${path}: unsupported keyword ${unsupportedKeywords.join(", ")}`];
-      if (typeof node.type !== "string" || !types.has(node.type)) return [`${path}: no single known type`];
-      const own: string[] = [];
-      if (node.required !== undefined && !(Array.isArray(node.required) && node.required.every((k) => typeof k === "string"))) own.push(`${path}: required is not a list of strings`);
-      if (node.additionalProperties !== undefined && typeof node.additionalProperties !== "boolean" && !rec(node.additionalProperties)) own.push(`${path}: additionalProperties is not a boolean or a schema`);
-      if (node.items !== undefined && !rec(node.items)) own.push(`${path}: items is not an object schema`);
-      if (node.properties !== undefined && !rec(node.properties)) own.push(`${path}: properties is not an object`);
-      return [
-        ...own,
-        ...Object.entries(rec(node.properties) ? node.properties : {}).flatMap(([k, v]) => offences(v, `${path}.properties.${k}`)),
-        ...(rec(node.items) ? offences(node.items, `${path}.items`) : []),
-        ...(rec(node.additionalProperties) ? offences(node.additionalProperties, `${path}.additionalProperties`) : []),
-      ];
-    };
-    // The walker sees what it should (so a clean result below is not vacuous).
-    expect(offences({ type: "object", properties: { a: { oneOf: [] } } }, "s")).toEqual(["s.properties.a: unsupported keyword oneOf"]);
-    expect(offences({ type: "array", items: {} }, "s")).toEqual(["s.items: no single known type"]);
-    expect(offences({ type: "object", required: "a", additionalProperties: 1 }, "s")).toHaveLength(2);
-    expect(offences({ type: "object", properties: { a: { type: "string", enum: ["x"], default: "x" } }, required: ["a"], additionalProperties: false }, "s")).toEqual([]);
-
-    const active = EVIDENCE_PRIMITIVES.filter((d) => d.status === "active");
-    const found = active.flatMap((d) => offences(d.paramsSchema, "paramsSchema").map((o) => `${d.id} @ ${o}`));
-    // Pinned: today exactly one ACTIVE primitive, a stub, uses grammar outside the supported set. A future
-    // primitive that uses oneOf (or anything else) fails here, instead of its params failing open.
-    expect(found).toEqual(["telemetry.envelope_conformance @ paramsSchema.properties.envelope: unsupported keyword oneOf"]);
-    // A primitive may not go live while its params schema is outside the grammar.
-    for (const d of active.filter((x) => x.verifierStatus === "live")) {
-      expect(offences(d.paramsSchema, "paramsSchema"), d.id).toEqual([]);
-    }
-    // The exception fails closed: params that reach the unsupported node are refused; the rest validate as usual.
-    const stub = EVIDENCE_PRIMITIVES.find((d) => d.id === "telemetry.envelope_conformance")!;
-    expect(stub.verifierStatus).toBe("stub");
-    expect(validatePrimitiveParams(stub.paramsSchema, { envelope: "builtin-defaults" })).toBe(false);
-    expect(validatePrimitiveParams(stub.paramsSchema, { source: "stream" })).toBe(true);
-    expect(parses({ ...kitRequest(), evidence: { tier: 1, requiredPrimitives: [{ id: stub.id, params: { envelope: "builtin-defaults" } }], executable: false } })).toBe(false);
+    // The primitive v0 could not evaluate (its envelope is a oneOf) is checked like any other.
+    const envelope = (params: Record<string, unknown>) =>
+      parses({ ...kitRequest(), evidence: { tier: 1, requiredPrimitives: [{ id: "telemetry.envelope_conformance", params }], executable: false } });
+    expect(envelope({ envelope: "builtin-defaults" })).toBe(true);
+    expect(envelope({ envelope: [{ metric: "spindle_temp_c", unit: "degC", min: 10, max: 90 }] })).toBe(true);
+    expect(envelope({ envelope: "custom" })).toBe(false);
+    expect(envelope({ envelope: [{ metric: "spindle_temp_c", note: "x" }] })).toBe(false);
   });
 
   // ── C. Finding 2 (MEDIUM): an honest license allow-list ──
@@ -1492,7 +1358,7 @@ describe("astra pack 112b", () => {
     // The structural fingerprint is blind to the added refinement...
     expect(fingerprint(refusesEverything)).toBe(fingerprint(OpportunityDTOSchema));
     // ...the corpus is not: every accept case now fails, so the verdict test in the MEDIUM 8 block fails.
-    const accepts = loadCorpus("pcc.opportunity.v0.json").cases.filter((k) => k.expect === "accept");
+    const accepts = loadCorpus("pcc.opportunity.v1.json").cases.filter((k) => k.expect === "accept");
     expect(accepts.length).toBeGreaterThan(0);
     for (const k of accepts) expect(refusesEverything.safeParse(k.value).success, k.name).toBe(false);
   });
@@ -1561,7 +1427,7 @@ const sourceDigest = (module: string) =>
   createHash("sha256").update(readFileSync(new URL(module, import.meta.url))).digest("hex").slice(0, 16);
 
 const CONTRACTS: Array<{ literal: string; file: string; module: string; schema: z.ZodTypeAny }> = [
-  { literal: OPPORTUNITY_SCHEMA, file: "pcc.opportunity.v0.json", module: "../types/opportunity.ts", schema: OpportunityDTOSchema },
+  { literal: OPPORTUNITY_SCHEMA, file: "pcc.opportunity.v1.json", module: "../types/opportunity.ts", schema: OpportunityDTOSchema },
   { literal: OPERATOR_BINDING_SCHEMA, file: "pcc.operator-binding.v0.json", module: "../types/operator-binding.ts", schema: OperatorBindingDTOSchema },
   { literal: KIT_MANIFEST_SCHEMA, file: "pcc.capability-kit-v1.json", module: "../types/capability-kit.ts", schema: CapabilityKitManifestV1Schema },
 ];
@@ -1579,7 +1445,7 @@ describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change
   // stop a PR from rewriting its own pins; the merge-gate review is the control. The one exception is the
   // pre-release window before the first merge, when no producer or consumer is deployed.
   const LOCK: Record<string, { literal: string; shape: string; corpus: string; source: string }> = {
-    "pcc.opportunity.v0": { literal: "pcc.opportunity.v0", shape: "91d25641c69b4970", corpus: "4fb26628cccab46e", source: "4deb00fd1332e7d0" },
+    "pcc.opportunity.v1": { literal: "pcc.opportunity.v1", shape: "59ecc9a1d7d3d72a", corpus: "4d6e8b49722a4789", source: "e20c20bc1f3210a2" },
     "pcc.operator-binding.v0": { literal: "pcc.operator-binding.v0", shape: "ca2f94ba7aa72ade", corpus: "8e2aa2dd88af2f74", source: "4dbcbaa125103737" },
     "pcc.capability-kit/v1": { literal: "pcc.capability-kit/v1", shape: "0ade760b67d57c08", corpus: "99a0669d56f0e163", source: "5c97266f279b1ced" },
   };
@@ -1643,13 +1509,19 @@ describe("pack 112 MEDIUM 8 and 112b: every shape, enum or accepted-value change
     "executable must be true exactly when requiredPrimitives is a complete tier-eligible set with live verifiers (evidenceIsExecutable)";
   const READ_TIME = "a read time may not run more than MAX_AS_OF_SKEW_MS ahead of the clock";
   const ISOLATING: Record<string, Array<[caseName: string, message: string]>> = {
-    "pcc.opportunity.v0": [
+    "pcc.opportunity.v1": [
       ["reject: an unknown evidence primitive", "evidence primitive made.up_primitive is unknown or not active"],
       ["reject: primitive params outside the descriptor's enum", "params do not match capture.photo_nonced's paramsSchema"],
       [
-        "reject: primitive params that reach a schema node the validator does not support fail closed",
-        "params do not match telemetry.envelope_conformance's paramsSchema",
+        "reject: primitive params with a key the closed params do not name (N128: an apiKey under decl.self_attested)",
+        "params do not match decl.self_attested's paramsSchema",
       ],
+      [
+        "reject: a primitive whose required params are absent (N128: capture.photo_nonced needs media and minClass)",
+        "params do not match capture.photo_nonced's paramsSchema",
+      ],
+      ["reject: an identifier param that is free text (N128: a claim id with spaces)", "params do not match approval.payer's paramsSchema"],
+      ["reject: a bind that names no evidence field or event type (N128)", "bind must name an evidence field (EVIDENCE_BIND_FIELDS) or an event type"],
       ["reject: executable claimed for an empty tier 3 set", EXECUTABLE],
       ["reject: executable denied for an executable tier 0 set", EXECUTABLE],
       ["reject: executable claimed for payer approval alone at tier 3 (112c HIGH 4: its tier 1 is empty)", EXECUTABLE],

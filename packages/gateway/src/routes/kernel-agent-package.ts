@@ -56,8 +56,17 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
           .get();
         if (!kernel) return reply.status(404).send({ error: "Kernel not found" });
 
-        // Load devices
-        const devices = db.select().from(kernelDevices)
+        // Load devices: only the columns the package shows. A full device row would carry its stored emits
+        // unclosed (N128).
+        const devices = db
+          .select({
+            id: kernelDevices.id,
+            type: kernelDevices.type,
+            model: kernelDevices.model,
+            status: kernelDevices.status,
+            adapterType: kernelDevices.adapterType,
+          })
+          .from(kernelDevices)
           .where(eq(kernelDevices.kernelId, kernelId))
           .all();
 
@@ -175,7 +184,8 @@ export async function kernelAgentPackageRoutes(app: FastifyInstance) {
         const { db } = getStore();
         const { kernelId } = req.params;
 
-        const devices = db.select().from(kernelDevices)
+        // Only the column this needs (N128: a full device row would carry its stored emits unclosed).
+        const devices = db.select({ adapterType: kernelDevices.adapterType }).from(kernelDevices)
           .where(eq(kernelDevices.kernelId, kernelId))
           .all();
         const caps = db.select().from(capabilities)

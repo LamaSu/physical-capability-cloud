@@ -1,5 +1,5 @@
 /**
- * OpportunityDTO v0 — the public, policy-safe view of work and demand that an
+ * OpportunityDTO v1 — the public, policy-safe view of work and demand that an
  * operator can act on (ledger R7/R45, product PX-13). Kits owns this contract;
  * readmodels serves it; operator-ux (Work Inbox), the ADK (onboarding match)
  * and genui (DemandOpportunityCard) consume it.
@@ -40,18 +40,27 @@
  * under the same literal. After the first merge, EVERY shape, enum or
  * accepted-value change bumps OPPORTUNITY_SCHEMA. kits-contracts.test.ts pins three
  * things for it: the structural fingerprint of the schema; a semantic corpus of
- * accept and reject cases (__tests__/kits-corpus/pcc.opportunity.v0.json) with a
+ * accept and reject cases (__tests__/kits-corpus/pcc.opportunity.v1.json) with a
  * case for each refinement rule; and the digest of THIS file. The fingerprint
  * cannot see a refinement, and a finite corpus cannot see a refinement whose
  * effect lies outside it; the file digest moves on any edit here (pack 112 MEDIUM
  * 8, 112b, 112c). What this literal accepts also reads inputs this file does not
  * hold: the evidence primitive registry and evidence/eligibility.ts (executable),
+ * evidence/primitive-params.ts (a reference's closed params and bind names),
  * the built-in CSD list (the approved public set), types/kit-demand.ts (#365's
  * release policy), csd/schema.ts (CsdEvidencePrimitiveRefSchema, the shape of a
  * primitive reference), types/capability-kit.ts (CSD_CAPABILITY_URL_PATTERN, the
  * capability url shape) and util/canonical.ts. Their owners version them; a
  * change there that alters what this literal accepts needs the same bump (astra
  * pack 112d).
+ *
+ * v1 (N128): a primitive reference is closed. Its params are checked by the
+ * shared closed table (evidence/primitive-params.ts), which the registry's
+ * paramsSchema is rendered from: no unknown key, typed and bounded values, and
+ * required fields present even when params is absent. Its bind names a closed
+ * evidence field or event type, and params are read through a descriptor-only
+ * copy. v0 checked params against the registry's open paramsSchema with a local
+ * JSON-Schema subset, so it accepted an unknown key under most primitives.
  */
 
 import { z } from "zod";
@@ -61,12 +70,13 @@ import type { SHA256, Timestamp } from "./common.js";
 import { loadBuiltinCsds } from "../csd/registry.js";
 import { CsdEvidencePrimitiveRefSchema, type CsdEvidencePrimitiveRef } from "../csd/schema.js";
 import { computeCsdEligibility } from "../evidence/eligibility.js";
+import { validatePrimitiveParams } from "../evidence/primitive-params.js";
 import { EVIDENCE_PRIMITIVES, type EvidencePrimitiveDef } from "../evidence/primitives.js";
 import { canonicalize } from "../util/canonical.js";
 import { CSD_CAPABILITY_URL_PATTERN } from "./capability-kit.js";
 import { PUBLIC_RELEASE_POLICY, isReleasePeriodClosed, type PublicOpportunityRelease } from "./kit-demand.js";
 
-export const OPPORTUNITY_SCHEMA = "pcc.opportunity.v0" as const;
+export const OPPORTUNITY_SCHEMA = "pcc.opportunity.v1" as const;
 
 /** A closed UTC calendar month, the public demand release unit (painpoints #365). */
 export const OPPORTUNITY_RELEASE_PERIOD_PATTERN = /^(20[0-9]{2})-(0[1-9]|1[0-2])$/;
@@ -97,96 +107,18 @@ export function readTimeIsNotInFuture(timestamp: string): boolean {
 
 const PRIMITIVES: ReadonlyMap<string, EvidencePrimitiveDef> = new Map(EVIDENCE_PRIMITIVES.map((p) => [p.id, p]));
 
-/** The JSON-Schema keywords validatePrimitiveParams evaluates. Any other keyword refuses the params. */
-export const PRIMITIVE_PARAMS_KEYWORDS: readonly string[] = Object.freeze([
-  "type",
-  "enum",
-  "items",
-  "properties",
-  "required",
-  "additionalProperties",
-]);
-
-/** Keywords that carry no validation: validatePrimitiveParams ignores them. */
-export const PRIMITIVE_PARAMS_ANNOTATIONS: readonly string[] = Object.freeze([
-  "description",
-  "title",
-  "$comment",
-  "examples",
-  "default",
-]);
-
-const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
-const hasOwn = (o: object, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
-
 /**
- * Check a primitive's params against its minimal JSON-Schema-shaped descriptor,
- * failing CLOSED (astra pack 112b). Supported: `type` as one single string
- * (string, number, integer, boolean, array or object), `enum`, `items` (an object
- * schema, never the tuple array), `properties`, `required`, and
- * `additionalProperties` (false, true or an object schema, which then validates
- * every property that `properties` does not name). The annotations in
- * PRIMITIVE_PARAMS_ANNOTATIONS are ignored. It returns false for any other
- * keyword (oneOf, anyOf, allOf, not, $ref, pattern, format, minimum, const, ...),
- * for a missing, unknown or array `type`, for a malformed supported keyword, and
- * for a schema with no `type` at all: `{}` or annotations only would mean "any
- * value", and no active primitive uses one. It evaluates the schema nodes the
- * value reaches, as JSON Schema does.
+ * A CSD evidence-primitive ref: an ACTIVE primitive whose params are exactly its closed params (N128), checked
+ * by the same table the registry's paramsSchema is rendered from. Absent params pass only when the primitive
+ * requires none.
  */
-export function validatePrimitiveParams(schema: Record<string, unknown>, value: unknown): boolean {
-  if (!isRecord(schema)) return false;
-  const keywords = Object.keys(schema).filter((k) => !PRIMITIVE_PARAMS_ANNOTATIONS.includes(k));
-  if (keywords.some((k) => !PRIMITIVE_PARAMS_KEYWORDS.includes(k))) return false;
-  const { type, items, properties, required, additionalProperties } = schema;
-  if (items !== undefined && !isRecord(items)) return false;
-  if (properties !== undefined && !isRecord(properties)) return false;
-  if (required !== undefined && (!Array.isArray(required) || required.some((k) => typeof k !== "string"))) return false;
-  if (additionalProperties !== undefined && typeof additionalProperties !== "boolean" && !isRecord(additionalProperties)) {
-    return false;
-  }
-  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || !schema.enum.some((e) => e === value))) return false;
-  switch (type) {
-    case "string":
-      return typeof value === "string";
-    case "number":
-      return typeof value === "number" && Number.isFinite(value);
-    case "integer":
-      return typeof value === "number" && Number.isInteger(value);
-    case "boolean":
-      return typeof value === "boolean";
-    case "array":
-      return (
-        Array.isArray(value) &&
-        (items === undefined || value.every((v) => validatePrimitiveParams(items as Record<string, unknown>, v)))
-      );
-    case "object": {
-      if (!isRecord(value)) return false;
-      const props = (properties ?? {}) as Record<string, unknown>;
-      if ((required as string[] | undefined)?.some((k) => !hasOwn(value, k))) return false;
-      for (const [k, v] of Object.entries(value)) {
-        if (hasOwn(props, k)) {
-          if (!validatePrimitiveParams(props[k] as Record<string, unknown>, v)) return false;
-        } else if (additionalProperties === false) {
-          return false;
-        } else if (isRecord(additionalProperties) && !validatePrimitiveParams(additionalProperties, v)) {
-          return false;
-        }
-      }
-      return true;
-    }
-    default:
-      return false;
-  }
-}
-
-/** A CSD evidence-primitive ref: an ACTIVE primitive whose params match its descriptor. */
 const PrimitiveRefSchema = CsdEvidencePrimitiveRefSchema.strict().superRefine((ref, ctx) => {
   const def = PRIMITIVES.get(ref.id);
   if (!def || def.status !== "active") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `evidence primitive ${ref.id} is unknown or not active` });
     return;
   }
-  if (ref.params !== undefined && !validatePrimitiveParams(def.paramsSchema, ref.params)) {
+  if (!validatePrimitiveParams(ref.id, ref.params).ok) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `params do not match ${ref.id}'s paramsSchema` });
   }
 });

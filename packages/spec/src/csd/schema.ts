@@ -8,6 +8,7 @@
  */
 
 import { z } from "zod";
+import { isEvidenceBind, ownDataSnapshot, validatePrimitiveParams } from "../evidence/primitive-params.js";
 import { CompositionBlockSchema } from "./composition.js";
 
 // ── Pricing Impact ─────────────────────────────────────────────────
@@ -134,23 +135,66 @@ export type CsdInvariant = z.infer<typeof CsdInvariantSchema>;
 // ── Evidence Tier Schema ────────────────────────────────────────────
 
 /**
+ * A zod preprocess step that hands the next schema a copy of its input made through property descriptors
+ * only (`ownDataSnapshot`, N128). A value the copy refuses stops the parse (a fatal issue), so nothing after
+ * this step reads the original, and no accessor in it is ever called.
+ */
+export function ownDataCopyStep(root: string): (value: unknown, ctx: z.RefinementCtx) => unknown {
+  return (value, ctx) => {
+    const copy = ownDataSnapshot(value, root);
+    if (copy.ok) return copy.value;
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: copy.reason, fatal: true });
+    return z.NEVER;
+  };
+}
+
+/**
+ * `params` as every primitive-ref schema reads it (N128 r1, finding 5): first the descriptor-only copy, then
+ * zod's record parse of the copy. An accessor inside params is never called.
+ */
+const OwnDataParamsSchema = z.preprocess(ownDataCopyStep("params"), z.record(z.unknown()));
+
+/**
  * Structured reference to an evidence primitive (evidence-vocabulary v1, §5.2).
  *
  * Additive sibling of the legacy free-text `required[]`. `bind` names the
- * bundle/WorkSchema field carrying the instance (e.g. bind:"dropoffPhotoCid"),
+ * bundle/WorkSchema field carrying the instance (e.g. bind:"capturePhotoCid"),
  * healing the outputPhotoCid-vs-dropoffPhotoCid divergence WITHOUT renaming
  * anyone's fields.
  */
 export const CsdEvidencePrimitiveRefSchema = z.object({
   /** Short-form primitive id, e.g. "capture.photo_nonced". */
   id: z.string().min(1),
-  /** Per-primitive params (minClass, integrityGrade, channel, …). */
-  params: z.record(z.unknown()).optional(),
-  /** Bundle/WorkSchema field that carries this primitive's instance. */
-  bind: z.string().optional(),
+  /**
+   * Per-primitive params (minClass, integrityGrade, channel, …). Closed per primitive: see
+   * `refineClosedPrimitiveRef` and evidence/primitive-params.ts (N128).
+   */
+  params: OwnDataParamsSchema.optional(),
+  /**
+   * Bundle/WorkSchema field that carries this primitive's instance: a closed name (N128), an evidence field
+   * (EVIDENCE_BIND_FIELDS) or an event type. Never free text, and never merely identifier-shaped.
+   */
+  bind: z
+    .string()
+    .refine(isEvidenceBind, { message: "bind must name an evidence field (EVIDENCE_BIND_FIELDS) or an event type" })
+    .optional(),
 });
 
 export type CsdEvidencePrimitiveRef = z.infer<typeof CsdEvidencePrimitiveRefSchema>;
+
+/**
+ * The closed-params check for a primitive ref (N128): its id is a registry primitive, and its params are
+ * exactly that primitive's closed shape (evidence/primitive-params.ts). The plain object above stays
+ * extendable, so apply this with superRefine wherever a ref is parsed.
+ */
+export function refineClosedPrimitiveRef(ref: { id: string; params?: unknown }, ctx: z.RefinementCtx): void {
+  const result = validatePrimitiveParams(ref.id, ref.params);
+  if (result.ok) return;
+  for (const issue of result.issues) ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue, path: ["params"] });
+}
+
+/** A primitive ref as a document carries it: no unknown key, and closed params (N128). */
+export const ClosedCsdEvidencePrimitiveRefSchema = CsdEvidencePrimitiveRefSchema.strict().superRefine(refineClosedPrimitiveRef);
 
 export const CsdEvidenceTierSchema = z.object({
   description: z.string(),
@@ -160,7 +204,7 @@ export const CsdEvidenceTierSchema = z.object({
    * per the eligibility rule). Present ⇒ the tier references bounded primitives
    * by id, which is what makes it tier-N eligible.
    */
-  primitives: z.array(CsdEvidencePrimitiveRefSchema).optional(),
+  primitives: z.array(ClosedCsdEvidencePrimitiveRefSchema).optional(),
 });
 
 export type CsdEvidenceTier = z.infer<typeof CsdEvidenceTierSchema>;

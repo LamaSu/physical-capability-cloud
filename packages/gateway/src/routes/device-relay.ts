@@ -163,7 +163,8 @@ function resolveDeviceType(kernelId: string): string {
   if (!kernel) return "generic";
 
   // Check if any device on this kernel has an adapterType that maps to a known device type
-  const devices = db.select().from(schema.kernelDevices)
+  // Only the column this needs. A full device row would carry its stored emits unclosed (N128).
+  const devices = db.select({ adapterType: schema.kernelDevices.adapterType }).from(schema.kernelDevices)
     .where(eq(schema.kernelDevices.kernelId, kernelId))
     .all();
 

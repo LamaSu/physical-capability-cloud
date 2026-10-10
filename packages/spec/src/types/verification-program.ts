@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalize } from "../util/canonical.js";
 import { AttestationRoleSchema } from "./attestation.js";
+import { CsdEvidencePrimitiveRefSchema, refineClosedPrimitiveRef } from "../csd/schema.js";
 
 const HEX_HASH = /^0x[a-f0-9]{64}$/i;
 
@@ -146,14 +147,21 @@ const HumanAttestationSchema = z.object({
 // (photo-authentic ≡ capture.photo_nonced, geofence ≡ telemetry.geofence_event,
 // registry-membership ≡ ident.registered_key/attest.credential, human-attestation
 // ≡ approval.*/attest.committee).
-const PrimitiveRuleSchema = z.object({
-  kind: z.literal("primitive"),
-  /** Short-form primitive id, e.g. "capture.photo_nonced". */
-  id: z.string().min(1),
-  params: z.record(z.unknown()).optional(),
-  /** Bundle/WorkSchema field carrying the instance. */
-  bind: z.string().optional(),
-});
+//
+// CLOSED (N137, as N128 closed CSD refs): `params` and `bind` are the CSD ref's own fields (a
+// descriptor-only copy of params; bind a closed evidence-field or event-type name), the rule has no unknown
+// key, and VerificationRuleSchema checks the params against the primitive's closed params. The
+// discriminated union can't hold a refined option, so that check runs on the union.
+const PrimitiveRuleSchema = z
+  .object({
+    kind: z.literal("primitive"),
+    /** Short-form primitive id, e.g. "capture.photo_nonced". */
+    id: z.string().min(1),
+    params: CsdEvidencePrimitiveRefSchema.shape.params,
+    /** Bundle/WorkSchema field carrying the instance: a closed name. */
+    bind: CsdEvidencePrimitiveRefSchema.shape.bind,
+  })
+  .strict();
 
 // Logical composition — recursive via z.lazy
 // Manual type declaration breaks the circular reference between the type and
@@ -177,7 +185,8 @@ export type VerificationRule =
   | { kind: "or"; children: VerificationRule[] }
   | { kind: "not"; child: VerificationRule };
 
-export const VerificationRuleSchema: z.ZodType<VerificationRule> = z.lazy(() =>
+// Input `unknown`: a primitive rule's params go through a preprocess step (the descriptor-only copy, N137).
+export const VerificationRuleSchema: z.ZodType<VerificationRule, z.ZodTypeDef, unknown> = z.lazy(() =>
   z.discriminatedUnion("kind", [
     EventPresenceSchema,
     FieldThresholdSchema,
@@ -202,7 +211,11 @@ export const VerificationRuleSchema: z.ZodType<VerificationRule> = z.lazy(() =>
       kind: z.literal("not"),
       child: VerificationRuleSchema,
     }),
-  ]),
+  ]).superRefine((rule, ctx) => {
+    // A primitive rule's params are exactly its primitive's closed params (N137). Children parse through
+    // this same schema, so a nested rule is checked too.
+    if (rule.kind === "primitive") refineClosedPrimitiveRef(rule, ctx);
+  }),
 );
 
 // ---------------------------------------------------------------------------
