@@ -10,15 +10,29 @@
  * This drives the FULL gateway (createGateway). The non-canonical targets go over a raw socket,
  * because light-my-request's inject normalises a target before routing it.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { closeStore } from "../db.js";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-process.env.PCC_DB_PATH = ":memory:";
-process.env.NODE_ENV = "test";
-process.env.PCC_SEED_DATA = "false";
+const fixtureEnv = ["DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_DB_PATH", "NODE_ENV", "PCC_SEED_DATA"] as const;
+let savedEnv: Array<[typeof fixtureEnv[number], string | undefined]> = [];
+let sentinelDir: string;
+function closeFixtureStore(): void {
+  try { closeStore(); }
+  finally {
+    for (const [name, value] of savedEnv) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    savedEnv = [];
+    if (sentinelDir) rmSync(sentinelDir, { recursive: true, force: true });
+  }
+}
 
 const artifact = readFileSync(new URL("../../../../apps/dashboard/public/.well-known/agent.md", import.meta.url), "utf8");
 const FOREIGN_ORIGIN = "https://elsewhere.example";
@@ -40,6 +54,17 @@ function rawStatus(target: string): Promise<number> {
 }
 
 beforeAll(async () => {
+  closeStore(); // initStore is a singleton: discard stale test state before selecting a database.
+  savedEnv = fixtureEnv.map((name) => [name, process.env[name]]);
+  sentinelDir = mkdtempSync(join(tmpdir(), "agent-md-gateway-db-"));
+  // Harmless higher-priority inherited settings must never redirect the fixture into a file store.
+  process.env.DATABASE_URL = join(sentinelDir, "sentinel.db");
+  process.env.RAILWAY_VOLUME_MOUNT_PATH = sentinelDir;
+  process.env.DATABASE_URL = ":memory:"; // highest priority in initStore
+  delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
+  process.env.PCC_DB_PATH = ":memory:";
+  process.env.NODE_ENV = "test";
+  process.env.PCC_SEED_DATA = "false"; // createGateway still seeds in test; it seeds only memory here.
   const { createGateway } = await import("../server.js");
   app = (await createGateway(0)).app as unknown as FastifyInstance;
   await app.listen({ port: 0, host: "127.0.0.1" });
@@ -47,10 +72,16 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await app?.close();
+  try { await app?.close(); }
+  finally { closeFixtureStore(); }
 });
 
 describe("/.well-known/agent.md through the real gateway (Opus r1 F4)", () => {
+  it("F4: owns the highest-priority in-memory setting despite database/volume sentinels", () => {
+    expect(process.env.DATABASE_URL).toBe(":memory:");
+    expect(existsSync(join(sentinelDir, "sentinel.db"))).toBe(false);
+    expect(existsSync(join(sentinelDir, "pcc.db"))).toBe(false);
+  });
   for (const method of ["GET", "HEAD"] as const) {
     for (const origin of [undefined, FOREIGN_ORIGIN]) {
       it(`${method} with no key${origin ? ", from a foreign Origin" : ""}: 200, the artifact, markdown, 300 s cache, ACAO * and nosniff`, async () => {
