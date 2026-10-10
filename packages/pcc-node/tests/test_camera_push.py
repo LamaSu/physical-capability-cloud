@@ -7,8 +7,9 @@ in the path (it reads no kernelId from the body) and answers 201. Anything else 
 without a key, 403 for a caller who is not the kernel's operator (relay_access_denied) or a closed
 relay (relay_disabled), 400 invalid_request over the 1 MiB body limit, 400 without a frame.
 The relay administration gate runs before body parsing: a closed relay returns 403 relay_disabled
-to an ordinary node even for an oversized upload. Once that gate admits the request, the global
-1 MiB limit and error handler produce 400; the camera route's larger 5 MB check is unreachable.
+to an ordinary node even for an oversized upload. After the relay gate, apiGate (401) and the scope
+checker (403) also run before body parsing; for an authenticated operator, the global 1 MiB limit
+and error handler produce 400. The camera route's larger 5 MB check is unreachable.
 
 Only the capture is stubbed here (no camera). push_camera_frame(), pcc_request() and the gateway
 transport are the real ones, against a loopback gateway that records exactly what arrives.
