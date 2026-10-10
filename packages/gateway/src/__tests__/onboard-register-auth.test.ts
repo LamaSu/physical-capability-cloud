@@ -3,7 +3,7 @@
  *
  * The audit (review-alpha) flagged this endpoint as "unauthenticated → sybil
  * farm w/ +570 reputation cold-start exploit". The apiGate middleware was
- * already gating it (the route is NOT in PUBLIC_PREFIXES / PUBLIC_EXACT),
+ * already gating it (no PUBLIC_ROUTES entry declares this POST public),
  * but we add this test as a regression guard so a future PR doesn't
  * accidentally add `/api/onboard/register` to the public list.
  *
