@@ -626,6 +626,22 @@ describe("JSON text admission closes the VM global path (EC6 round 4)", () => {
       expect(Buffer.byteLength(text, "utf8")).toBe(CAP);
       expect(entry(text, honest(ag)).ok).toBe(true);
     });
+
+    it(`${entry.name}: text exactly one UTF-8 byte over the cap is refused before parsing`, () => {
+      const base = requestJson({ ...request(ag), accepted: null, padding: "" });
+      const remaining = CAP + 1 - Buffer.byteLength(base, "utf8");
+      const padding = "é".repeat(Math.floor(remaining / 2)) + "x".repeat(remaining % 2);
+      const text = requestJson({ ...request(ag), accepted: null, padding });
+      expect(Buffer.byteLength(text, "utf8")).toBe(CAP + 1);
+      expect(text.length).toBeLessThan(CAP);
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        expect(codes(entry(text, honest(ag)))).toEqual(UNREADABLE);
+        expect(parse).not.toHaveBeenCalled();
+      } finally {
+        parse.mockRestore();
+      }
+    });
   }
 
   it("only literal JSON null accepts now; absent accepted reaches the binding as undefined and is refused", () => {

@@ -14,9 +14,16 @@
  * Admission accepts primitive JSON text of at most 1 MiB (1,048,576 UTF-8 bytes), parsed inside this service with
  * no reviver. Non-strings, including String objects, are refused unread and without coercion; invalid or oversized
  * text is refused before any request field is read. The text carries agreement, nodes, currency and now, plus
- * accepted for `economicsBindingFor`. The agreement is read ONCE from the parsed tree into an owned copy, used only
- * to name which registry rows to read: the rate schedules, licenses and parties it cites. No value in the facts
+ * accepted for `economicsBindingFor`. The route must build the text with `JSON.stringify` from an object it
+ * assembled itself, never forward a caller's HTTP body or a caller-built text. Only `agreement` and `nodes` may
+ * derive from the submission: the agreement as submitted or the server's stored copy loaded by id, and the nodes
+ * as the route read them from the submission. `currency`, `now` and `accepted` are server values: `currency` is the
+ * reservation's settlement currency; `now` is the server clock's one reading, in whole unix seconds; `accepted` is
+ * the accepted-agreement store's record (operator item 27), or literal JSON null only when the server has determined
+ * that this acceptance is the payer's own. The agreement is read ONCE from the parsed tree into an owned copy,
+ * used only to name which registry rows to read: the rate schedules, licenses and parties it cites. No value in the facts
  * comes from it. Only literal JSON null for accepted means this acceptance is the payer's; absence stays undefined.
+ * An absent `now` or `currency` is refused (`CLOCK_INVALID` or `CURRENCY_NOT_SUPPORTED`, respectively).
  *
  * Field by field:
  *   feeBps, feeRecipient   configuration: PCC_PROTOCOL_FEE_BPS and PCC_PROTOCOL_FEE_RECIPIENT (`protocolFeePolicy`),
@@ -271,19 +278,24 @@ export interface PlanNodeRef {
 /**
  * Fields carried by the public entry points' JSON text, at most 1 MiB in UTF-8 bytes and parsed inside the service
  * without a reviver. This interface describes the parsed data, not an admitted object argument: non-string
- * arguments are refused unread. `economicsBindingFor` also reads accepted; only literal JSON null accepts now,
- * and an absent accepted stays undefined for the binding to refuse. Copier parity applies to ordinary data of
- * this realm without Proxies, within the work budget and representable diagnostic paths. Its three exceptions
- * are explicit Proxy refusal, an additional budget for skipped keys, and accepting paths snapshotJson cannot build.
+ * arguments are refused unread. The route must build the text with `JSON.stringify` from its own assembled object
+ * under the module header's provenance contract, never forward a caller's HTTP body or a caller-built text.
+ * For `economicsBindingFor`, `accepted` must be the accepted-agreement store's record (operator item 27), or literal
+ * JSON null only when the server has determined that this acceptance is the payer's own.
+ * `economicsBindingFor` also reads accepted; only literal JSON null accepts now,
+ * and an absent accepted stays undefined for the binding to refuse.
  */
 export interface EconomicsFactsRequest {
-  /** The agreement to bind. Untrusted, whether the server loaded it by id or the plan carried it. Read once. */
+  /**
+   * The agreement to bind, as submitted or the server's stored copy loaded by id.
+   * Untrusted, whether the server loaded it by id or the plan carried it. Read once.
+   */
   agreement: unknown;
   /** The plan's nodes, as the accept route read them from the submission. */
   nodes: readonly PlanNodeRef[];
-  /** The plan's settlement currency: its reservation's, which the compiler prices every node in. */
+  /** The plan's settlement currency: its reservation's, supplied by the server, which the compiler prices every node in. */
   currency: string;
-  /** The request's one clock reading, in whole unix seconds. */
+  /** The server clock's one reading, in whole unix seconds. */
   now: number;
 }
 
@@ -586,8 +598,8 @@ function ordered(refusals: readonly EconomicsFactsRefusal[]): EconomicsFactsRefu
  * The facts the binding checks the request's agreement against, or every missing fact by name. Admit primitive JSON
  * text of at most 1 MiB in UTF-8 bytes, parsed here without a reviver; refuse non-strings unread, and invalid or
  * oversized text through the existing unreadable-request codes. Sources are trusted server functions.
- * Copier parity is for ordinary data of this realm without Proxies, within the work budget and representable paths;
- * exceptions are explicit Proxy refusal, extra work for skipped keys, and accepting paths snapshotJson cannot build.
+ * The route must build the text with `JSON.stringify` from its own assembled object under the module header's
+ * provenance contract, never forward a caller's HTTP body or a caller-built text.
  */
 export function serverEconomicsFacts(requestJson: string, sources: EconomicsFactsSources = productionEconomicsFactsSources()): ServerEconomicsFactsResult {
   const request = readRequestJson(requestJson);
@@ -601,9 +613,9 @@ export type EconomicsBindingResult =
 /**
  * The seam's `economics` dependency for one request. Admit primitive JSON text of at most 1 MiB in UTF-8 bytes,
  * parsed here without a reviver; refuse non-strings unread and invalid or oversized text through the existing
- * unreadable-request codes. Sources are trusted server functions. Copier parity is for ordinary data of this realm
- * without Proxies, within the work budget and representable paths; exceptions are explicit Proxy refusal, extra
- * work for skipped keys, and accepting paths snapshotJson cannot build.
+ * unreadable-request codes. Sources are trusted server functions.
+ * The route must build the text with `JSON.stringify` from its own assembled object under the module header's
+ * provenance contract, never forward a caller's HTTP body or a caller-built text.
  * The agreement is read ONCE: its facts are assembled from that
  * copy, and both halves of the binding are bound to the same copy, so the rows looked up, the gross reserved and
  * the split compiled all describe one agreement. `accepted` is what the payer accepted (from the accepted-agreement
