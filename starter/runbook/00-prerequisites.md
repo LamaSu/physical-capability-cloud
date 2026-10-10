@@ -141,7 +141,8 @@ request_started=1
 if http_status=$(curl -s --connect-timeout 15 --max-time 600 -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' --data-binary @"$capture_dir/provision-request.json" --output "$capture_dir/provision.json" --dump-header "$capture_dir/response.headers" --write-out '%{http_code}' 2> "$capture_dir/curl.stderr"); then :; else
     curl_status=$?
     case "$curl_status" in 1|3|6|7) request_started=0; fail 'Provision request not sent; no key was issued.';; esac
-    fail 'Provision request failed or timed out; a key may have been issued. Keep the private capture, find the key and validate it, then rotate it if needed before retrying.'
+    [ "$curl_status" != 28 ] || fail 'Provision request timed out; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session.'
+    fail 'Provision request failed; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session.'
 fi
 if [ "$http_status" != 201 ]; then
     python3 - "$capture_dir" "$http_status" <<'PY' 2>/dev/null || { rm -rf -- "$capture_dir"; fail 'Provision request rejected; response projection failed.'; }
@@ -155,16 +156,19 @@ codes = {"rate_limited", "invalid_type", "invalid_wallet_address", "invalid_emai
 print("http_status: " + (sys.argv[2] if re.fullmatch(r"[0-9]{3}", sys.argv[2]) else "unrecognised"))
 print("error: " + (r.get("error") if isinstance(r.get("error"), str) and r["error"] in codes else "unrecognised"))
 retry = r.get("retry_after_seconds")
+headers = (stage / "response.headers").read_text().splitlines()
+if not isinstance(retry, int) or isinstance(retry, bool): retry = next((int(value.strip()) for name, _, value in (line.partition(":") for line in headers) if name.lower() == "retry-after" and re.fullmatch(r"[0-9]+", value.strip())), None)
 if isinstance(retry, int) and not isinstance(retry, bool): print("retry_after_seconds: " + str(retry))
 trace = r.get("trace_id")
 if not isinstance(trace, str) or not re.fullmatch(r"tr_[0-9a-f]{16,32}", trace):
     trace = None
-    for line in (stage / "response.headers").read_text().splitlines():
+    for line in headers:
         name, _, value = line.partition(":")
         if name.lower() == "x-pcc-trace-id" and re.fullmatch(r"tr_[0-9a-f]{16,32}", value.strip()): trace = value.strip()
 print("trace_id: " + json.dumps(trace, ensure_ascii=True))
 PY
     rm -rf -- "$capture_dir" || fail 'Rejected request cleanup failed.'
+    case "$http_status" in 5[0-9][0-9]) fail 'Provision server failure; a key may exist server-side and counts toward the 5-key cap; report once with the printed trace_id; do not loop.';; 429) fail 'Provision request limited; honor retry_after_seconds; do not loop.';; esac
     fail 'Provision request rejected; no credentials were published. Correct the request before retrying.'
 fi
 if [ "$in_git" = 1 ]; then
@@ -201,7 +205,7 @@ PY
 rm -rf -- "$capture_dir" || fail 'Private capture cleanup failed.'
 printf '%s\n' 'provision_status: provisioned'
 ```
-The recipe requires owned regular input files and validates them before private staging. In a Git repository it refuses tracked private state and verifies that every credential destination is ignored, including after the response arrives. Outside a repository it prints one fixed note and continues with `.pcc/` at 0700. The request can await on-chain registration and wallet assignment, so curl waits up to 600 seconds. HTTP 201 is required before importing a BYOK response. A rejection prints only `http_status`, an allowlisted fixed `error` code or `unrecognised`, an integer `retry_after_seconds` when present, and a validated JSON-escaped `trace_id`; its private staging is removed so a corrected request can run again. A transport failure or an invalid 201 preserves its capture because a key may already have been issued: find and validate the key, then rotate it if needed before retrying. Never print the response or its diagnostics.
+The recipe requires owned regular input files and validates them before private staging. In a Git repository it refuses tracked private state and verifies that every credential destination is ignored, including after the response arrives. Outside a repository it prints one fixed note and continues with `.pcc/` at 0700. The request can await on-chain registration and wallet assignment, so curl waits up to 600 seconds. HTTP 201 is required before importing a BYOK response. A rejection prints only `http_status`, an allowlisted fixed `error` code or `unrecognised`, an integer `retry_after_seconds` from the body or an ASCII-digit Retry-After header, and a validated JSON-escaped `trace_id`; its private staging is removed. For 5xx, a key may exist server-side and counts toward the 5-key cap: report once with the printed trace_id and do not loop. For 429, honor retry_after_seconds and do not loop. Correct every other rejected request before retrying. Curl exits 1, 3, 6 and 7 remove staging because the request was not sent and no key was issued. Every other transport failure or an invalid 201 preserves its capture: a key may have been issued and cannot be recovered, and it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session. Never print the response or its diagnostics.
 
 Every later call sends the key with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written. Existing credentials are never overwritten. If you need to set them aside, keep the node signing key, public key, operator input and gateway in place; archive only the API credentials and captures inside the same ignored directory with this command, then verify the archive remains ignored when working in Git:
 

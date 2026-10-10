@@ -833,7 +833,7 @@ if output: pathlib.Path(output).write_text(body)
 else: sys.stdout.write(body)
 if "--write-out" in args or "-w" in args: sys.stdout.write(os.environ.get("FIXTURE_HTTP", "201"))
 headers = next((args[i+1] for i, a in enumerate(args) if a == "--dump-header"), None)
-if headers: pathlib.Path(headers).write_text("x-pcc-trace-id: tr_" + "a" * 16 + "\\r\\n")
+if headers: pathlib.Path(headers).write_text("x-pcc-trace-id: tr_" + "a" * 16 + "\\r\\n" + os.environ.get("FIXTURE_EXTRA_HEADERS", ""))
 if os.environ.get("FIXTURE_RACE"): pathlib.Path(".pcc/auth.header").write_text("late destination")
 if os.environ.get("FIXTURE_LOSE_IGNORE"): pathlib.Path(".git/info/exclude").write_text("")
 sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
@@ -957,8 +957,9 @@ describe("F2: capture fails closed and never overwrites credentials", () => {
       expect(result.status).not.toBe(0);
       const args = JSON.parse(readFileSync(join(f.dir, "curl-args.json"), "utf8")) as string[];
       expect(Number(args[args.indexOf("--max-time") + 1])).toBeGreaterThanOrEqual(600);
-      expect(result.stdout + result.stderr).toContain("Provision request timed out; a key may have been issued.");
-      expect(result.stdout + result.stderr).toContain("validate the issued key or rotate it once found before retrying");
+      expect(result.stdout + result.stderr).toContain("Provision request timed out; a key may have been issued and cannot be recovered;");
+      for (const advice of ["cannot be recovered", "counts toward the 5-key cap", "Report the failure once", "archive the capture with the archive command", "provision again at most once", "stop and report if that fails too", "Revoke the orphan key later from an authenticated session"])
+        expect(result.stderr).toContain(advice);
       expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
       expect(readdirSync(join(f.dir, ".pcc")).some((name) => name.startsWith("capture."))).toBe(true);
     } finally { f.cleanup(); }
@@ -1424,6 +1425,53 @@ describe("F5: buyer generates and sends its own Ed25519 key", () => {
 });
 
 describe("F3: diagnostics stay private and output uses fixed classifications", () => {
+  it.each([500, 502, 429])("N4: HTTP %s prints advice for that status", (status) => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ error: status === 429 ? "rate_limited" : "provision_failed" }));
+      const result = f.run({ FIXTURE_HTTP: String(status) });
+      expect(result.stderr).toBe(status === 429
+        ? "Provision request limited; honor retry_after_seconds; do not loop.\n"
+        : "Provision server failure; a key may exist server-side and counts toward the 5-key cap; report once with the printed trace_id; do not loop.\n");
+    } finally { f.cleanup(); }
+  });
+
+  it.each([
+    ["42", undefined, 42], ["Wed, 21 Oct 2026 07:28:00 GMT", undefined, undefined],
+    ["42", 17, 17], ["42", "bad", 42], ["٤٢", undefined, undefined],
+  ])("N4: Retry-After %s with body retry %s projects only an integer (%s)", (header, bodyRetry, expected) => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ error: "rate_limited", retry_after_seconds: bodyRetry }));
+      const result = f.run({ FIXTURE_HTTP: "429", FIXTURE_EXTRA_HEADERS: `Retry-After: ${header}\r\n` });
+      if (expected === undefined) expect(result.stdout).not.toContain("retry_after_seconds:");
+      else expect(result.stdout).toContain(`retry_after_seconds: ${expected}\n`);
+    } finally { f.cleanup(); }
+  });
+
+  it("N4: an unknown 413 prints the output named by its get-key event", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ error: "FST_ERR_CTP_BODY_TOO_LARGE", message: f.body.api_key }));
+      const result = f.run({ FIXTURE_HTTP: "413" });
+      expect(result.stdout).toContain("http_status: 413\nerror: unrecognised\n");
+      const event = JSON.parse(read("starter/buyer/buyer-path.json")).events["buyer.unrecognised-rejection"];
+      expect(event?.phase).toBe("get-key");
+      expect(event?.trigger).toContain("http_status: 4xx; error: unrecognised");
+      for (const advice of ["report once", "http_status", "trace_id", "do not retry blindly"]) expect(event?.do).toContain(advice);
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+    } finally { f.cleanup(); }
+  });
+
+  it("N4: request guidance distinguishes discarded rejections and the published success file", () => {
+    const request = provisionAction().request;
+    expect(request).not.toContain("keep them in the private capture");
+    expect(request).not.toContain("find and validate the issued key");
+    expect(request).toContain("A rejection deletes its capture");
+    expect(request).toContain("on success they stay in .pcc/provision.json");
+    expect(request).toContain("provision again at most once");
+  });
+
   it.each([
     [400, "identifier_required"], [400, "invalid_type"], [400, "invalid_email"],
     [400, "invalid_wallet_address"], [400, "invalid_public_key"],

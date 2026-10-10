@@ -426,7 +426,7 @@ if os.environ.get("MOCK_DROP_IGNORE"):
 if os.environ.get("MOCK_RACE_HEADER"):
     Path(".pcc/auth.header").write_text("keep existing header\\n")
 if "--dump-header" in args:
-    Path(args[args.index("--dump-header") + 1]).write_text("HTTP/1.1 " + os.environ["MOCK_STATUS"] + "\\r\\nx-pcc-trace-id: " + os.environ.get("MOCK_TRACE_HEADER", "tr_" + "cd" * 16) + "\\r\\n\\r\\n")
+    Path(args[args.index("--dump-header") + 1]).write_text("HTTP/1.1 " + os.environ["MOCK_STATUS"] + "\\r\\nx-pcc-trace-id: " + os.environ.get("MOCK_TRACE_HEADER", "tr_" + "cd" * 16) + "\\r\\n" + os.environ.get("MOCK_EXTRA_HEADERS", "") + "\\r\\n")
 if "--output" in args:
     Path(args[args.index("--output") + 1]).write_text(response)
 else:
@@ -562,6 +562,57 @@ os.link = record_link
         self.assertNotIn("retry_after_seconds:", result.stdout)
         self.assert_not_published()
 
+    def test_server_failure_has_its_own_fixed_advice(self):
+        result = self.run_capture("500", {"error": "provision_failed"})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Provision server failure; a key may exist server-side and counts toward the 5-key cap; report once with the printed trace_id; do not loop.\n")
+        self.assertIn("http_status: 500\n", result.stdout)
+        self.assertIn("trace_id:", result.stdout)
+        self.assert_not_published()
+        self.assertFalse(list(self.private.glob("capture.*")))
+
+    def test_rate_limit_has_its_own_fixed_advice(self):
+        result = self.run_capture("429", {"error": "rate_limited", "retry_after_seconds": 3600})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Provision request limited; honor retry_after_seconds; do not loop.\n")
+        self.assertIn("retry_after_seconds: 3600\n", result.stdout)
+        self.assert_not_published()
+
+    def test_retry_after_ascii_digits_are_used_when_body_has_no_integer(self):
+        result = self.run_capture("429", {"error": "rate_limited"}, MOCK_EXTRA_HEADERS="Retry-After: 42\r\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("retry_after_seconds: 42\n", result.stdout)
+
+    def test_retry_after_http_date_is_not_printed(self):
+        result = self.run_capture("429", {"error": "rate_limited"}, MOCK_EXTRA_HEADERS="Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("retry_after_seconds:", result.stdout)
+
+    def test_integer_body_retry_wins_over_retry_after_header(self):
+        result = self.run_capture("429", {"error": "rate_limited", "retry_after_seconds": 3600}, MOCK_EXTRA_HEADERS="Retry-After: 42\r\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("retry_after_seconds: 3600\n", result.stdout)
+        self.assertNotIn("retry_after_seconds: 42\n", result.stdout)
+
+    def test_unknown_413_error_prints_only_fixed_rejection_fields(self):
+        result = self.run_capture("413", {"error": self.wallet_key, "message": self.key})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("http_status: 413\nerror: unrecognised\n", result.stdout)
+        self.assertIn("trace_id:", result.stdout)
+        self.assert_not_published()
+
+    def test_transport_failure_has_actionable_possible_issuance_advice(self):
+        result = self.run_capture(MOCK_CURL_EXIT="56")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Provision request failed; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session.\n")
+
+    def test_capture_recovery_guidance_describes_one_retry_and_later_revoke(self):
+        step = phase_text("00-prerequisites.md").split("## 4. ", 1)[1].split("## 5. ", 1)[0]
+        prose = step.split("The recipe requires", 1)[1].split("Every later call", 1)[0]
+        for text in ("cannot be recovered", "5-key cap", "report the failure once", "archive command", "at most once", "stop and report", "authenticated session"):
+            self.assertIn(text, prose.lower())
+        self.assertNotIn("find and validate the key", prose)
+
     def test_malformed_or_server_minted_success_fails_closed(self):
         for ed25519 in ({"source": "server-minted", "private_key": self.wallet_key}, {"source": "byok", "private_key_pkcs8_base64": self.wallet_key}, None):
             with self.subTest(ed25519=ed25519):
@@ -679,8 +730,7 @@ os.link = record_link
     def test_timeout_preserves_private_capture_and_explains_possible_issuance(self):
         result = self.run_capture(MOCK_CURL_EXIT="28")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("a key may have been issued", result.stderr)
-        self.assertIn("validate", result.stderr)
+        self.assertEqual(result.stderr, "Provision request timed out; a key may have been issued and cannot be recovered; it counts toward the 5-key cap. Report the failure once; archive the capture with the archive command, then provision again at most once; stop and report if that fails too. Revoke the orphan key later from an authenticated session.\n")
         self.assert_not_published()
         captures = list(self.private.glob("capture.*"))
         self.assertEqual(len(captures), 1)
