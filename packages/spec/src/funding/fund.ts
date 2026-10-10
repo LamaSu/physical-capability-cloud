@@ -15,10 +15,11 @@
  * (ESC:843). The factory writes that slot only for the clone at the policy's predicted address (FAC:228-245), so it
  * witnesses the escrow's report without trusting the escrow's code (reviewer-charlie L4).
  *
- * THREE OUTCOMES (verify-writes-three-outcomes):
+ * THREE OUTCOMES describe the ESCROW'S FUNDING ONLY (verify-writes-three-outcomes). "unchanged" means funding
+ * unchanged; token allowance may have changed. Every result after an approve send preserves its actual SendResult.
  *   committed      the read-back shows this exact policy funded;
- *   unchanged      the send was refused for certain (never broadcast, or mined and reverted) AND the read-back
- *                  shows the escrow unfunded;
+ *   unchanged      fund() was certainly not broadcast (with no unresolved approve), or mined and reverted, AND
+ *                  the read-back shows the escrow unfunded;
  *   indeterminate  anything else: a broadcast with no receipt, a successful receipt whose read-back is not
  *                  "funded" (a stale read or a reorg), funding under another acceptance, an escrow report the
  *                  pinned factory does not witness, or an unreadable state.
@@ -49,6 +50,7 @@ export type SendResult =
   | { kind: "unknown"; txHash?: Hex; reason: string }
   | { kind: "mined"; txHash: Hex; status: "success" | "reverted"; blockHash: Hex };
 
+/** Escrow funding only: "unchanged" does not mean that token allowance or other chain state is unchanged. */
 export type FundingOutcome = "committed" | "unchanged" | "indeterminate";
 
 export interface FundingResult {
@@ -57,7 +59,11 @@ export interface FundingResult {
   alreadyFunded: boolean;
   /** The last step attempted. */
   stage: "precheck" | "approve" | "fund";
+  /** Actual approve outcome, whenever approve was sent or may have been sent. Token state may have changed. */
+  approve?: SendResult;
   approveTx?: Hex;
+  /** Allowance observed at a successful approve's block; "unreadable" if that read failed. */
+  allowance?: bigint | "unreadable";
   fundTx?: Hex;
   /** The funding read-back the outcome rests on. */
   readBack: FundedState;
@@ -254,27 +260,34 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
   }
   const approve = await sendAndWait(wallet, publicClient, prepared.usdc, approveData, opts);
   const approveTx = approve.kind === "not_sent" ? undefined : approve.txHash;
-  const stopAtApprove = async (why: string): Promise<FundingResult> => {
+  const stopAtApprove = async (approve: SendResult, why: string, allowance?: bigint | "unreadable"): Promise<FundingResult> => {
     const readBack = await readFundedState({ publicClient, prepared });
+    // A known successful approve changes token state, but fund() was certainly not attempted. An unresolved
+    // approve keeps the whole run indeterminate, even while the escrow currently reads unfunded.
+    const fundingSend: SendResult = approve.kind === "mined" && approve.status === "success"
+      ? { kind: "not_sent", reason: why }
+      : approve;
     return {
-      outcome: classifyFunding({ kind: "not_sent", reason: why }, readBack.kind),
+      outcome: classifyFunding(fundingSend, readBack.kind),
       alreadyFunded: false,
       stage: "approve",
+      approve,
       approveTx,
+      allowance,
       readBack,
       detail: `${why}; fund() was not sent`,
     };
   };
-  if (approve.kind !== "mined") return stopAtApprove(`the approve's outcome is unknown: ${approve.reason}`);
-  if (approve.status !== "success") return stopAtApprove(`the approve ${approve.txHash} reverted`);
-  let allowance: bigint | undefined;
+  if (approve.kind !== "mined") return stopAtApprove(approve, `the approve's outcome is ${approve.kind}: ${approve.reason}`);
+  if (approve.status !== "success") return stopAtApprove(approve, `the approve ${approve.txHash} reverted`);
+  let allowance: bigint | "unreadable";
   try {
     allowance = await pinnedReader(publicClient, approve.blockHash).read<bigint>(prepared.usdc, ERC20_ABI, "allowance", [prepared.payer, prepared.escrow]);
   } catch {
-    allowance = undefined;
+    allowance = "unreadable";
   }
   if (allowance !== prepared.totalGross) {
-    return stopAtApprove(`the allowance read back at the approve's block is ${allowance ?? "unreadable"}, not ΣG ${prepared.totalGross}`);
+    return stopAtApprove(approve, `the allowance read back at the approve's block is ${allowance}, not ΣG ${prepared.totalGross}`, allowance);
   }
 
   // 2. fund(configs, {expiry, payerSignature: 0x, operatorSignature}): the exact args the escrow verifies.
@@ -295,7 +308,9 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
       outcome: classifyFunding({ kind: "not_sent", reason: why }, readBack.kind),
       alreadyFunded: false,
       stage: "fund",
+      approve,
       approveTx,
+      allowance,
       readBack,
       detail: `fund() would revert (${why}); it was not sent. The approve stands: allowance ${prepared.totalGross} to the escrow`,
     };
@@ -310,7 +325,9 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
     outcome,
     alreadyFunded: false,
     stage: "fund",
+    approve,
     approveTx,
+    allowance,
     fundTx: fund.kind === "not_sent" ? undefined : fund.txHash,
     readBack,
     detail:

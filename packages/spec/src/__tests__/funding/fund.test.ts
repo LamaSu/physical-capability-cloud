@@ -289,24 +289,26 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     expect(chain.state.sent.some((t) => t.data.endsWith("deadbeef"))).toBe(false);
   });
 
-  it("the approve's send throws: its outcome is unknown, fund() is never sent, funding is unchanged", async () => {
+  it("the approve's send throws: its outcome is unknown, fund() is never sent, funding is indeterminate", async () => {
     const { chain, fund } = await setup();
     chain.state.failSend = true;
     const result = await fund();
     expect(result.stage).toBe("approve");
-    expect(result.outcome).toBe("unchanged");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.approve).toMatchObject({ kind: "unknown" });
     expect(result.approveTx).toBeUndefined();
     expect(result.fundTx).toBeUndefined();
     expect(result.detail).toContain("unknown");
     expect(simulatedData(chain)).toHaveLength(1);
   });
 
-  it("the approve never mines: fund() is never sent, funding is unchanged", async () => {
+  it("the approve never mines: fund() is never sent, funding is indeterminate", async () => {
     const { chain, fund } = await setup();
     chain.state.receipts = ["none"];
     const result = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
     expect(result.stage).toBe("approve");
-    expect(result.outcome).toBe("unchanged");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.approve).toMatchObject({ kind: "unknown", txHash: chain.state.sent[0]!.hash });
     expect(result.approveTx).toBe(chain.state.sent[0]!.hash);
     expect(result.detail).toContain("unknown");
     expect(chain.state.sent).toHaveLength(1);
@@ -318,6 +320,7 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     const result = await fund();
     expect(result.stage).toBe("approve");
     expect(result.outcome).toBe("unchanged");
+    expect(result.approve).toEqual({ kind: "mined", status: "reverted", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
     expect(result.detail).toContain("reverted");
     expect(simulatedData(chain)).toHaveLength(1);
     expect(chain.state.sent).toHaveLength(1);
@@ -329,9 +332,43 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     const result = await fund();
     expect(result.stage).toBe("approve");
     expect(result.outcome).toBe("unchanged");
+    expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.allowance).toBe(fx.totalGross - 1n);
     expect(result.detail).toContain("allowance");
     expect(chain.state.sent).toHaveLength(1);
   });
+
+  it("a mined successful approve with unreadable allowance reports funding unchanged and preserves its token-state uncertainty", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.usdc, ERC20_ABI, "allowance", () => { throw new Error("allowance unavailable"); });
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.allowance).toBe("unreadable");
+    expect(result.detail).toContain("unreadable");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  for (const mode of ["simulation refusal", "send throws", "receipt missing", "reverted", "success unfunded", "success unreadable", "committed"] as const) {
+    it(`preserves the actual successful approve SendResult on a fund-stage result: ${mode}`, async () => {
+      const { fx, chain, fund, fundedAs } = await setup();
+      if (mode === "simulation refusal") {
+        chain.on(fx.escrow, ESCROW_ABI, "fund", () => revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "NotActive" })));
+      }
+      if (mode === "receipt missing") chain.state.receipts = ["success", "none"];
+      if (mode === "reverted") chain.state.receipts = ["success", "reverted"];
+      chain.state.afterSend = (i) => {
+        if (i === 0 && mode === "send throws") chain.state.failSend = true;
+        if (i === 1 && mode === "success unreadable") chain.state.failCalls = true;
+        if (i === 1 && mode === "committed") fundedAs(fx.jobPolicyHash);
+      };
+      const result = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+      expect(result.stage).toBe("fund");
+      expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+      expect(result.allowance).toBe(fx.totalGross);
+    });
+  }
 
   it("unchanged: the fund() simulation reverts, so it is never sent", async () => {
     const { fx, chain, fund } = await setup();
