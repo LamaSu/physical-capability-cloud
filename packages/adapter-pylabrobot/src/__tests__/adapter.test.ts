@@ -211,6 +211,47 @@ describe("PyLabRobotAdapter — sidecar round-trip via InMemoryTransport", () =>
     expect((instrumentResults[0]!.payload as Record<string, unknown>).well).toBe("A1");
   });
 
+  it("marks a run mock unless the sidecar says it ran on hardware", async () => {
+    const completion = async (runResult: Record<string, unknown>) => {
+      const { adapter, transport, sidecar } = makeAdapterWithTransport();
+      await sidecar.start();
+      const events: AdapterEvidenceEvent[] = [];
+      adapter.onEvidence((e) => events.push(e));
+      const startP = adapter.execute({ type: "start", payload: { jobId: "j-mode" } });
+      await tick();
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, deviceId: "dev-ot2-test", plrBackend: "chatterbox", generation: "gen-t" });
+      await tick();
+      // evidence.startRecording: the window's attestation (#502's handshake)
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", generation: "gen-t" });
+      await tick();
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", opCount: 1, durationMs: 5, ...runResult });
+      await tick();
+      // evidence.stopRecording: the barrier's attestation
+      transport.respondSuccess((transport.lastSent() as { id: string }).id, { ok: true, jobId: "j-mode", generation: "gen-t" });
+      await startP;
+      return events.find((e) => e.type === "execution_completed")!.payload as Record<string, unknown>;
+    };
+    const hardware = await completion({ executionMode: "hardware" });
+    expect(hardware.executionMode).toBe("hardware");
+    expect(hardware.mock).toBeUndefined();
+    const simulated = await completion({ executionMode: "simulated" });
+    expect(simulated.mock).toBe(true);
+    expect(simulated.executionMode).toBe("simulated");
+    // R39 CRIT1: a hardware-capable backend (ot2) the sidecar hasn't proven is
+    // physical reports "unverified" — never "hardware" — and still keeps mock.
+    const unverified = await completion({ executionMode: "unverified" });
+    expect(unverified.mock).toBe(true);
+    expect(unverified.executionMode).toBe("unverified");
+    // Anything this adapter doesn't recognize is treated as unverified too —
+    // only an exact "hardware" string is ever physical-execution evidence.
+    const mystery = await completion({ executionMode: "something-a-future-sidecar-invented" });
+    expect(mystery.mock).toBe(true);
+    expect(mystery.executionMode).toBe("unverified");
+    const unsaid = await completion({});
+    expect(unsaid.executionMode).toBe("unverified");
+    expect(unsaid.mock).toBe(true);
+  });
+
   it("backend.run failure surfaces as execute() failure + execution_failed event", async () => {
     const { adapter, transport, sidecar } = makeAdapterWithTransport();
     await sidecar.start();

@@ -8,12 +8,12 @@ version = "0.1.0"
 description = "PCC PyLabRobot sidecar — JSON-RPC 2.0 stdio bridge for the Node TypeScript adapter"
 authors = [{name = "PCC Contributors"}]
 license = {text = "Apache-2.0"}
-readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    # PLR pin — Phase 1 targets the OT-2 + ChatterboxBackend code path.
-    # Pinned conservatively to avoid surprise breakage on minor version bumps.
-    "pylabrobot>=0.2.1,<0.3.0",
+    # PLR pin (R39): only 0.2.2 has been exercised against this sidecar
+    # (LiquidHandlerChatterboxBackend, OpentronsOT2Backend). Pinned conservatively
+    # to avoid surprise breakage on minor version bumps.
+    "pylabrobot>=0.2.2,<0.3.0",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +23,9 @@ dev = [
     "pytest-cov>=4.1",
 ]
 # Optional vendor extras — operator installs only what they need.
-ot2 = ["opentrons>=7.0; python_version>='3.10'"]
+# OpentronsOT2Backend needs PLR's own "opentrons" extra (opentrons-http-api-client),
+# not the full opentrons package.
+ot2 = ["pylabrobot[opentrons]>=0.2.2,<0.3.0"]
 hamilton = ["pyusb>=1.2", "pyserial>=3.5"]
 tecan = ["pyserial>=3.5"]
 

@@ -98,12 +98,14 @@ export class SidecarClient extends EventEmitter {
   private restartCount = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionallyClosed = false;
+  /** Set when the interpreter itself cannot be spawned (e.g. ENOENT): retrying cannot help. */
+  private spawnFatal = false;
   private currentBackoffMs: number;
 
   constructor(config: SidecarClientConfig = {}) {
     super();
     this.config = {
-      pythonPath: config.pythonPath ?? "python",
+      pythonPath: config.pythonPath ?? defaultPythonPath(),
       cwd: config.cwd ?? process.cwd(),
       env: config.env,
       defaultTimeoutMs: config.defaultTimeoutMs ?? 60_000,
@@ -252,8 +254,21 @@ export class SidecarClient extends EventEmitter {
       this.emit("exit", { code, signal });
       this.handleTransportClosed();
     });
-    proc.on("error", (err) => {
-      this.emit("error", err);
+    proc.on("error", (err: NodeJS.ErrnoException) => {
+      // R39: a spawn failure (e.g. ENOENT for a missing interpreter) used to be
+      // re-emitted as an EventEmitter "error". With no listener that throws and
+      // takes the host process down. Now it fails the in-flight calls with a
+      // typed error, and a missing interpreter is never retried.
+      const failure = new SidecarError(
+        RPC_ERROR_CODES.HARDWARE_UNREACHABLE,
+        `sidecar failed to start (${this.config.pythonPath}): ${err.message}`,
+        { code: err.code ?? null },
+      );
+      if (err.code === "ENOENT" || err.code === "EACCES") this.spawnFatal = true;
+      this.emit("spawn_error", failure);
+      if (this.listenerCount("error") > 0) this.emit("error", err);
+      this.failAllPending(failure);
+      this.handleTransportClosed();
     });
 
     const transport: SidecarTransport = {
@@ -301,6 +316,11 @@ export class SidecarClient extends EventEmitter {
     }
     if ((msg as JsonRpcNotification).method && !("id" in msg)) {
       const note = msg as JsonRpcNotification;
+      if (note.method === "lifecycle" && (note.params as { phase?: unknown } | undefined)?.phase === "ready") {
+        // The sidecar proved it is up: only now does a restart cycle count as recovered.
+        this.restartCount = 0;
+        this.currentBackoffMs = this.config.initialBackoffMs;
+      }
       const handlers = this.notificationHandlers.get(note.method);
       if (handlers) {
         for (const h of handlers) {
@@ -342,6 +362,10 @@ export class SidecarClient extends EventEmitter {
     );
     this.emit("crash");
     if (this.intentionallyClosed) return;
+    if (this.spawnFatal) {
+      this.emit("gave_up", { attempts: this.restartCount, reason: "spawn_failed" });
+      return;
+    }
     if (this.restartCount >= this.config.maxRestarts) {
       this.emit("gave_up", { attempts: this.restartCount });
       return;
@@ -358,9 +382,9 @@ export class SidecarClient extends EventEmitter {
       this.currentBackoffMs = Math.min(this.currentBackoffMs * 2, this.config.maxBackoffMs);
       try {
         await this.start();
-        // success — reset backoff for next failure cycle
-        this.currentBackoffMs = this.config.initialBackoffMs;
-        this.restartCount = 0;
+        // A spawn that returns is not yet a recovery: a child that exits at once
+        // would restart forever. The counters reset on the sidecar's
+        // "lifecycle: ready" notification (handleLine) instead.
         this.emit("restarted");
       } catch (err) {
         this.emit("restart_failed", { attempt: this.restartCount, error: err });
@@ -440,4 +464,9 @@ export class InMemoryTransport implements SidecarTransport {
   async close(): Promise<void> {
     for (const h of this.closeHandlers) h();
   }
+}
+
+/** "python3" off Windows: many Linux hosts (the DGX Spark among them) have no "python". */
+export function defaultPythonPath(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "python" : "python3";
 }
