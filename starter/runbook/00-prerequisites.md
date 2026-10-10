@@ -70,6 +70,11 @@ s = os.lstat(".pcc")
 if not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid(): raise SystemExit(1)
 PY
 chmod 700 .pcc || fail 'Private directory permissions failed.'
+python3 - <<'PY' 2>/dev/null || fail 'Private directory verification failed.'
+import os, stat
+s = os.lstat(".pcc")
+if not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid() or stat.S_IMODE(s.st_mode) != 0o700: raise SystemExit(1)
+PY
 python3 - <<'PY' 2>/dev/null || fail 'Existing operator credentials; archive them inside .pcc/archive/ before retrying.'
 import os
 if any(os.path.lexists(".pcc/" + n) for n in ("provision.json", "api-key", "auth.header")): raise SystemExit(1)

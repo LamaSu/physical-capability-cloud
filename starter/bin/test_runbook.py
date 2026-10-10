@@ -686,6 +686,18 @@ os.link = record_link
         self.assertFalse(list(self.private.glob("capture.*")))
         self.assertFalse((self.private / "curl-called").exists())
 
+    def test_ineffective_chmod_refuses_before_staging_or_curl(self):
+        self.private.chmod(0o755)
+        chmod = self.bin / "chmod"
+        chmod.write_text("#!/bin/sh\nexit 0\n")
+        chmod.chmod(0o700)
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Private directory verification failed.\n")
+        self.assertFalse(list(self.private.glob("capture.*")))
+        self.assertFalse((self.private / "curl-called").exists())
+        self.assert_not_published()
+
     def test_invalid_gateway_base_file_fails_before_staging_or_curl(self):
         import shutil
         for base in (None, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#part", "https://x.example/a b"):
