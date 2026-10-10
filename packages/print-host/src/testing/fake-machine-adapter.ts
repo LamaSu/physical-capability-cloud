@@ -6,6 +6,11 @@ import type {
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
 type MachineStatus = Awaited<ReturnType<MachineAdapter["getStatus"]>>;
+type BusyResult = MachineCommandResult & { busy?: true };
+
+// A later poll must run even while a repro fakes the global timers.
+const realSetImmediate = setImmediate;
+const realClearImmediate = clearImmediate;
 
 export type FakeStartOutcome =
   | { outcome: "success"; jobId: number }
@@ -30,6 +35,7 @@ export class FakeMachineAdapter implements MachineAdapter {
   private active = false;
   private activeJobId: number | undefined;
   private disposed = false;
+  private cancelPoll: ReturnType<typeof setImmediate> | undefined;
   private eventNumber = 0;
   private readonly starts: FakeStartOutcome[] = [];
   private readonly unobservedStarts: MachineCommand[] = [];
@@ -42,7 +48,11 @@ export class FakeMachineAdapter implements MachineAdapter {
   >();
   private readonly quiesceWaiters: Array<() => void> = [];
 
-  constructor(readonly id: string, kernelId: string) {
+  constructor(
+    readonly id: string,
+    kernelId: string,
+    private readonly options: { cancelEventOrder?: "before-resolve" | "after-resolve" } = {},
+  ) {
     this.source = {
       deviceId: id,
       deviceType: "controller",
@@ -88,7 +98,10 @@ export class FakeMachineAdapter implements MachineAdapter {
       if (!outcome) return { success: false, message: "no scripted start result" };
       if (outcome.outcome === "busy") {
         this.status = "busy";
-        return { success: false, message: "device is busy", data: { busy: true, code: "busy" } };
+        const result: BusyResult = {
+          success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" },
+        };
+        return result;
       }
       if (outcome.outcome === "error") {
         this.status = "error";
@@ -106,15 +119,24 @@ export class FakeMachineAdapter implements MachineAdapter {
     return { success: true };
   }
 
-  async cancelJob(jobId: number): Promise<void> {
-    this.cancels.push(jobId);
-    if (this.disposed || !this.active || this.activeJobId !== jobId) return;
-    // The next IPP poll observes job-state 7; cancellation does not stop polling.
-    await Promise.resolve().then(() => {
-      if (!this.disposed && this.active && this.activeJobId === jobId) {
-        this.emit("execution_failed", { ippJobId: jobId, state: "canceled" });
+  async cancelJob(jobId: number | string): Promise<void> {
+    const numericJobId = Number(jobId);
+    if ((typeof jobId === "string" && jobId.trim() === "") || !Number.isSafeInteger(numericJobId)) {
+      throw new Error("cancelJob requires a numeric job id");
+    }
+    this.cancels.push(numericJobId);
+    if (this.disposed || !this.active || this.activeJobId !== numericJobId) return;
+    const reportCanceled = () => {
+      if (!this.disposed && this.active && this.activeJobId === numericJobId) {
+        this.emit("execution_failed", { ippJobId: numericJobId, state: "canceled" });
       }
-    });
+    };
+    // Cancellation leaves polling active, with either ordering of the state-7 event.
+    if (this.options.cancelEventOrder === "after-resolve") {
+      this.cancelPoll ??= realSetImmediate(reportCanceled);
+    } else {
+      await Promise.resolve().then(reportCanceled);
+    }
   }
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
@@ -151,6 +173,8 @@ export class FakeMachineAdapter implements MachineAdapter {
   }
 
   private finishWork(): void {
+    if (this.cancelPoll) realClearImmediate(this.cancelPoll);
+    this.cancelPoll = undefined;
     this.active = false;
     this.activeJobId = undefined;
     this.status = "idle";
