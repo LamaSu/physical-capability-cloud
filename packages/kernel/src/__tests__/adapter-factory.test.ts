@@ -671,6 +671,7 @@ describe("registerCameraAdapter / unregisterCameraAdapter", () => {
     const list = listRegisteredCameraAdapters();
     expect(list).toContain("mock");
     expect(list).toContain("generic-http");
+    expect(list).toContain("photo");
   });
 
   it("listRegisteredCameraAdapters returns a sorted list", () => {

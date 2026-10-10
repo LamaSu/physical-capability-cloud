@@ -148,6 +148,10 @@ export class PhotoCameraAdapter implements CameraAdapter {
     let passed = false;
     let confidence = 0;
     const findings: string[] = [];
+    // The model that actually produced the verdict. A Gemini service being
+    // configured is not enough: without reference bytes, or when the
+    // comparison is unavailable or throws, the heuristic runs.
+    let model = "anti-spoof-heuristic";
 
     if (this.geminiService && referenceHash) {
       // referenceHash may be a hex-encoded bytes payload prefixed with "sha256:".
@@ -166,6 +170,7 @@ export class PhotoCameraAdapter implements CameraAdapter {
           );
 
           if (comparison.matchScore >= 0) {
+            model = "gemini-2.0-flash";
             passed = comparison.verdict === "match" || comparison.verdict === "partial_match";
             confidence = Math.round(comparison.matchScore * 100 * 100) / 100;
             findings.push(...comparison.discrepancies);
@@ -212,7 +217,7 @@ export class PhotoCameraAdapter implements CameraAdapter {
         captureMode: "handed-in",
         ...result,
         referenceHash: referenceHash ?? null,
-        model: this.geminiService ? "gemini-2.0-flash" : "anti-spoof-heuristic",
+        model,
         antiSpoofScore: captureResult.antiSpoofScore,
       },
     });
