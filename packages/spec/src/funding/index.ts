@@ -17,6 +17,8 @@
  * and only after verifying every term. There is no x402 path: x402 cannot fund a V-next escrow (plan G10).
  * Supply expect from your own submit record, operator choice and payee list. Each "unchecked" waiver is exposed
  * in prepared.unchecked; it explicitly leaves that commitment unbound by the buyer.
+ * Every pin, especially the factory, must come from the caller's own trusted configuration,
+ * never from the gateway payload or any gateway response.
  */
 export { prepareFunding, DEFAULT_MARGIN_SECONDS } from "./prepare.js";
 export type { PrepareFundingArgs, PreparedFunding, FundingExpectations, UncheckedFundingField } from "./prepare.js";

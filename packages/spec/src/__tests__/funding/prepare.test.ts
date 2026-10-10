@@ -4,6 +4,7 @@
  * refusal must sign and send nothing.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { getAbiItem, getAddress, hashTypedData, maxUint256, recoverAddress, toFunctionSelector, zeroAddress, zeroHash, type Hex, type LocalAccount } from "viem";
 import { FundingRefusal, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs } from "../../funding/index.js";
 import { CIRCLE_USDC } from "../../funding/pins.js";
@@ -608,5 +609,19 @@ describe("time, at the pinned block (the fake chain's block time is NOW)", () =>
     await far.expectRefusal("RECLAIM_WINDOW", () => {});
     const edge = await setup({ reclaimAt: [NOW + 365n * DAY] });
     expect((await edge.prepare()).reclaimAt.latest).toBe(NOW + 365n * DAY);
+  });
+});
+
+// Pins are caller trust anchors; this public API documentation must identify their source.
+describe("trusted pin source documentation", () => {
+  it("the module header and PrepareFundingArgs.pins require own trusted configuration and reject gateway sources", () => {
+    const source = readFileSync(new URL("../../funding/prepare.ts", import.meta.url), "utf8");
+    const header = source.slice(0, source.indexOf("*/"));
+    const entrypoint = readFileSync(new URL("../../funding/index.ts", import.meta.url), "utf8");
+    const pinsDoc = source.match(/\/\*\*([^*]|\*(?!\/))*\*\/\s*pins\?: FundingPins;/)?.[0] ?? "";
+    for (const doc of [header, entrypoint.slice(0, entrypoint.indexOf("*/")), pinsDoc]) {
+      expect(doc).toContain("caller's own trusted configuration");
+      expect(doc).toContain("never from the gateway payload or any gateway response");
+    }
   });
 });

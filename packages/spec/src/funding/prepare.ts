@@ -6,6 +6,8 @@
  * S3.1; the check list and the source of each check are in the design note and on each refusal below). On
  * success it returns a deep-frozen `PreparedFunding`, registered in a module-private set. `signJobPolicy` and
  * `approveAndFund` accept nothing else, so neither can be handed unverified terms.
+ * Every pin, especially the factory, must come from the caller's own trusted configuration,
+ * never from the gateway payload or any gateway response.
  *
  * ESC = packages/contracts/src/VNextSettlementEscrow.sol, FAC = .../VNextSettlementEscrowFactory.sol.
  */
@@ -83,7 +85,11 @@ export interface PrepareFundingArgs {
   quote: { maxTotalGross: bigint };
   /** Required independent buyer intent; explicit "unchecked" waivers are recorded in PreparedFunding.unchecked. */
   expect: FundingExpectations;
-  /** Extra pins by chain id; required for the factory until a V-next deployment is pinned in this module. */
+  /**
+   * Extra pins by chain id; required for the factory until a V-next deployment is pinned in this module.
+   * Every pin, especially the factory, must come from the caller's own trusted configuration,
+   * never from the gateway payload or any gateway response.
+   */
   pins?: FundingPins;
   marginSeconds?: bigint;
 }
