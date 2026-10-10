@@ -7,8 +7,9 @@ and producing the oracle's required evidence.
 
 The host must produce one signed bundle per job: print events plus pulled carrier
 events on success, or `execution_failed` evidence on failure. The reference is
-[`tmp/oracle-bundle-contract.md`](../../tmp/oracle-bundle-contract.md), sections
-3.0, 4.2 and 5. Toolkit changes belong to pcc-adk; this package records the needed
+pcc-oracle's B5 print-host bundle contract (bus #7386; on the Spark:
+`/mnt/sparkbulk/pcc-reconciliation/returns/pcc-oracle-work/print-host-bundle-contract-20261009.md`),
+sections 3.0, 4.2 and 5. Toolkit changes belong to pcc-adk; this package records the needed
 behavior without changing or working around the toolkit.
 
 ## Repros for pcc-adk
@@ -18,6 +19,8 @@ Each `GAP-n` calls the exported toolkit and asserts what the host needs. By defa
 test fail until its registration is updated. Set `PRINT_HOST_SHOW_GAPS=1` to register
 ordinary tests and see the actual unmet assertions. One ordinary passing test
 checks that the scripted adapter completes a print and returns a success bundle.
+
+When a toolkit change makes a GAP test pass, the same PR changes that test's `gap(` to `it(`; the repro is then that fix's acceptance test.
 
 Paths and line numbers below refer to the supplied toolkit HEAD, a57ca6e1.
 
@@ -29,8 +32,8 @@ Paths and line numbers below refer to the supplied toolkit HEAD, a57ca6e1.
 | GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle | `runPrintJob({timeoutMs:300, ...})`; adapter starts but emits no terminal event | Cancel/stop the active device job; return a signed failure bundle with no completion. | `packages/kernel/src/printer-job.ts:230`, `:240`, `:248` |
 | GAP-5 stopping a print yields a terminal failure event | Mock `createIppPrintKernel`, start two pages, then `adapter.execute({type:"stop"})` after first progress | Record `execution_failed` and resolve the print promptly, before its timeout. | `packages/kernel/src/adapters/ipp-adapter.ts:295`, `:412`, `:477`; `packages/kernel/src/printer-job.ts:230` |
 | GAP-6 the unit fields reach every event | `runPrintJob({... settlementUnitId, challengeNonce})`, passed through a requested-option cast | Every recorded event payload commits both unit fields. | `packages/kernel/src/printer-job.ts:107`, `:179`; `packages/kernel/src/evidence-emitter.ts:138`, `:192` |
-| GAP-7 a success bundle is signed by a delegated session key | Host device signer supplied to `EvidenceEmitter`; successful `runPrintJob` with requested `parentAgentId` and `sessionKeyExpiresAt` three days ahead | `sessionKeyAuthorization`, parent signature over `sessionKeyDelegationPreimage` verified under the supplied device key, and bundle signed by the distinct session key. The expiry must support carrier transit measured in days. | `packages/kernel/src/printer-job.ts:57`, `:83`, `:107`; `packages/kernel/src/evidence-emitter.ts:275`; `packages/kernel-sdk/src/job-handler.ts:241` (TTL capped at 1 h); `packages/spec/src/evidence/signing-preimage.ts:239` |
-| GAP-8 a busy refusal is reported as busy and emits no failure (N127) | `runPrintJob` after adapter refuses start with structured busy data | Structured `result.busy === true`; no failure evidence. | `packages/kernel/src/printer-job.ts:221`, `:228`; `packages/kernel/src/adapters/types.ts:37` |
+| GAP-7 a success bundle is signed by a delegated session key | Host device signer supplied to `EvidenceEmitter`; successful `runPrintJob` with Base Sepolia operator `parentAgentId` (`eip155:84532:0x<escrow operator, lowercase>`, independent of the device key) and `sessionKeyExpiresAt` three days ahead | `sessionKeyAuthorization` with the requested operator `parentAgentId`, parent signature over `sessionKeyDelegationPreimage` verified under the supplied device key, and bundle signed by the distinct session key. The expiry must support carrier transit measured in days. | `packages/kernel/src/printer-job.ts:57`, `:83`, `:107`; `packages/kernel/src/evidence-emitter.ts:275`; `packages/kernel-sdk/src/job-handler.ts:241` (TTL capped at 1 h); `packages/spec/src/evidence/signing-preimage.ts:239` |
+| GAP-8 a busy refusal is reported as busy and emits no failure (N127) | `runPrintJob` after adapter refuses start with structured busy data | A structured busy marker; its shape is pcc-adk's to choose. No failure evidence. | `packages/kernel/src/printer-job.ts:221`, `:228`; `packages/kernel/src/adapters/types.ts:37` |
 
 The unit options, `parentAgentId`, `sessionKeyExpiresAt` and `result.busy` are
 requested host-facing API shapes, absent from the current print runner. Their casts
@@ -38,14 +41,13 @@ make the missing behavior executable; they do not implement it in the host.
 
 ## Running
 
-From the workspace root, set the environment for every command and link offline:
+From the workspace root:
 
 ```bash
-export TMPDIR=$PWD/tmp npm_config_cache=$PWD/tmp/npm-cache npm_config_logs_dir=$PWD/tmp/npm-cache/_logs XDG_CACHE_HOME=$PWD/tmp/xdg-cache
-pnpm install --offline --store-dir /mnt/sparkbulk/pnpm-store
-(cd packages/print-host && ./node_modules/.bin/vitest run)
-(cd packages/print-host && PRINT_HOST_SHOW_GAPS=1 ./node_modules/.bin/vitest run)
-(cd packages/print-host && ./node_modules/.bin/tsc --noEmit -p .)
+pnpm install
+pnpm --filter @pcc/print-host test
+PRINT_HOST_SHOW_GAPS=1 pnpm --filter @pcc/print-host test
+pnpm --filter @pcc/print-host typecheck
 ```
 
 The second test run is expected to report eight failures while these gaps exist.
