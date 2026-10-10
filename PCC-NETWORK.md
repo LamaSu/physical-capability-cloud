@@ -105,8 +105,8 @@ loaded — but here's what's actually happening, so you can consent to each step
    the "hello world": it exercises the whole loop at zero risk.
 
 6. **Go live:** `POST /api/onboard/registrations/:id/prove` submits evidence (a bundle
-   hash, event log, device health, optional photo). Clear the bar and you're
-   auto-approved and taking jobs — no manual review.
+   hash, event log, device health, optional photo) for review. An onboarding admin
+   approves and activates the registration; evidence alone does not make it live.
 
 > **Confirm you're actually discoverable.** The most common onboarding mistake is a
 > registration that *looks* done but never shows up: an agent registers but the
