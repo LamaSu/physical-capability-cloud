@@ -780,7 +780,7 @@ function Nav() {
             { text: "For Operators", href: "#operators" },
             { text: "For Agents", href: "#agents" },
             { text: "Docs", href: "https://capability.network/docs" },
-            { text: "GitHub", href: "https://capability.network" },
+            { text: "GitHub", href: "https://github.com/LamaSu/physical-capability-cloud" },
           ].map((link) => (
             <a
               key={link.text}
@@ -955,7 +955,7 @@ function HeroSection({ mousePos, onContextCopied }: { mousePos: { x: number; y: 
               flexWrap: "wrap",
             }}
           >
-            <TerminalCTA text="pip install pcc-node" href="https://pypi.org/project/pcc-node/" />
+            <TerminalCTA text='pip install "pcc-node[crypto]>=0.1.1"' href="https://pypi.org/project/pcc-node/" />
           </div>
         </div>
 
@@ -1589,7 +1589,7 @@ function HowItWorksSection() {
 // ---------------------------------------------------------------------------
 
 const TERMINAL_LINES = [
-  { prefix: "$ ", text: "pip install pcc-node", color: TEXT_PRIMARY, delay: 0 },
+  { prefix: "$ ", text: 'pip install "pcc-node[crypto]>=0.1.1"', color: TEXT_PRIMARY, delay: 0 },
   { prefix: "$ ", text: "pcc-node start", color: TEXT_PRIMARY, delay: 600 },
   { prefix: "  ", text: "Detecting hardware...", color: TEXT_MUTED, delay: 1000 },
   { prefix: "  ✓ ", text: "OT-2 liquid handler found at 192.168.1.105", color: GREEN, delay: 1500 },
@@ -1688,7 +1688,7 @@ const STEPS = [
   {
     step: "1",
     title: "Install",
-    text: "pip install pcc-node — Python 3.9+. Works on Raspberry Pi, Ubuntu, macOS, Windows.",
+    text: 'pip install "pcc-node[crypto]>=0.1.1" — Python 3.9+. Works on Raspberry Pi, Ubuntu, macOS, Windows.',
     badge: "30 sec",
   },
   {
@@ -1888,7 +1888,7 @@ function ForOperatorsSection() {
           <Reveal>
             <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "2rem", flexWrap: "wrap" }}>
-                <TerminalCTA text="pip install pcc-node && pcc-node start" />
+                <TerminalCTA text='pip install "pcc-node[crypto]>=0.1.1" && pcc-node start' />
                 <GhostLink text="Operator guide" href="https://capability.network/docs" />
               </div>
               <p
@@ -2964,10 +2964,10 @@ function Footer() {
               }}
             >
               <TerminalCTA
-                text="pip install pcc-node"
+                text='pip install "pcc-node[crypto]>=0.1.1"'
                 href="https://pypi.org/project/pcc-node/"
               />
-              <GhostLink text="View on GitHub" href="https://capability.network" />
+              <GhostLink text="View on GitHub" href="https://github.com/LamaSu/physical-capability-cloud" />
             </div>
           </Reveal>
         </div>
@@ -3019,7 +3019,7 @@ function Footer() {
           <div className="pcc-footer-links" style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
             {[
               { text: "capability.network", href: "https://capability.network" },
-              { text: "GitHub", href: "https://capability.network" },
+              { text: "GitHub", href: "https://github.com/LamaSu/physical-capability-cloud" },
               { text: "Docs", href: "https://capability.network/docs" },
               { text: "PyPI", href: "https://pypi.org/project/pcc-node/" },
             ].map((link, i, arr) => (
