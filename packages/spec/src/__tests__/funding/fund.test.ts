@@ -1,0 +1,863 @@
+/**
+ * approveAndFund's pre-send refusals, the funding read-back, and the three-outcome rule (implementer-bravo, pcc-adk).
+ * The sends, receipts and read-backs against real contracts are in packages/contracts/ts/__tests__/
+ * buyer-funding.anvil.test.ts.
+ */
+import { describe, expect, it, vi } from "vitest";
+import {
+  decodeFunctionData,
+  encodeErrorResult,
+  encodeFunctionData,
+  getAbiItem,
+  keccak256,
+  stringToHex,
+  toFunctionSelector,
+  zeroAddress,
+  type Address,
+  type Hex,
+} from "viem";
+import { describeRevert } from "../../funding/chain.js";
+import {
+  FundingRefusal,
+  approveAndFund,
+  classifyFunding,
+  prepareFunding,
+  readFundedState,
+  type ApproveAndFundArgs,
+  type FundedStateKind,
+  type FundingRefusalCode,
+  type SendResult,
+} from "../../funding/index.js";
+import { ERC20_ABI, ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
+import { DAY, NOW, OTHER, buildFixture, cloneRuntime, makeChain, newAccount, revertWith, testExpect, testPins, type FixtureOptions } from "./fixture.js";
+
+const MARGIN = 300n;
+const TX = keccak256(stringToHex("tx")) as Hex;
+const BLOCK = keccak256(stringToHex("block")) as Hex;
+
+async function refusal(p: Promise<unknown>): Promise<FundingRefusalCode> {
+  try {
+    await p;
+  } catch (e) {
+    if (e instanceof FundingRefusal) return e.code;
+    throw e;
+  }
+  throw new Error("expected a FundingRefusal, but the call succeeded");
+}
+
+async function setup(o: FixtureOptions = {}, chainOptions = { escrowCode: true }) {
+  const fx = await buildFixture(o);
+  const chain = makeChain(fx, chainOptions);
+  const prepared = await prepareFunding({
+    payload: fx.wire(),
+    expect: testExpect(fx),
+    wallet: chain.wallet(),
+    publicClient: chain.publicClient,
+    quote: { maxTotalGross: fx.totalGross },
+    pins: testPins(fx),
+  });
+  const fund = (wallet = chain.wallet(), p = prepared, extra: Partial<ApproveAndFundArgs> = {}) =>
+    approveAndFund({ prepared: p, wallet, publicClient: chain.publicClient, ...extra });
+  /**
+   * The escrow funded under `policyHash`, as one fund() transaction leaves it: policy() reports the hash, and the
+   * pinned factory's fundedEscrowOf(policyKey) names this escrow (ESC:893; FAC:244-245). `o` breaks that agreement.
+   */
+  const fundedAs = (policyHash: Hex, o: { witness?: Address; prePolicyRoot?: Hex } = {}) => {
+    chain.on(fx.escrow, ESCROW_ABI, "policy", () => [fx.operator.address, 1n, o.prePolicyRoot ?? fx.message.prePolicyRoot, policyHash, fx.message.acceptedPolicyDigest]);
+    chain.state.fundedEscrow = o.witness ?? fx.escrow; // the slot for this job's policyKey only (foxtrot F1)
+  };
+  /** eth_call selectors the SDK simulated (approve / fund), as opposed to reads. */
+  const simulated = () =>
+    chain.state.log
+      .filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined)
+      .map((x) => ((x.params as [{ data: Hex }])[0].data as string).slice(0, 10));
+  return { fx, chain, prepared, fund, fundedAs, simulated };
+}
+
+describe("classifyFunding: committed / unchanged / indeterminate", () => {
+  const sends: Array<[string, SendResult]> = [
+    ["never broadcast", { kind: "not_sent", reason: "simulation reverted" }],
+    ["broadcast, no receipt", { kind: "unknown", txHash: TX, reason: "timeout" }],
+    ["send threw", { kind: "unknown", reason: "transport error" }],
+    ["mined, success", { kind: "mined", txHash: TX, status: "success", blockHash: BLOCK }],
+    ["mined, reverted", { kind: "mined", txHash: TX, status: "reverted", blockHash: BLOCK }],
+  ];
+  const expected: Record<string, Record<FundedStateKind, string>> = {
+    "never broadcast": { funded_ours: "committed", unfunded: "unchanged", other: "indeterminate", unreadable: "indeterminate" },
+    "broadcast, no receipt": { funded_ours: "committed", unfunded: "indeterminate", other: "indeterminate", unreadable: "indeterminate" },
+    "send threw": { funded_ours: "committed", unfunded: "indeterminate", other: "indeterminate", unreadable: "indeterminate" },
+    "mined, success": { funded_ours: "committed", unfunded: "indeterminate", other: "indeterminate", unreadable: "indeterminate" },
+    "mined, reverted": { funded_ours: "committed", unfunded: "unchanged", other: "indeterminate", unreadable: "indeterminate" },
+  };
+  for (const [name, send] of sends) {
+    for (const read of ["funded_ours", "unfunded", "other", "unreadable"] as const) {
+      it(`${name} + read ${read} -> ${expected[name]![read]}`, () => {
+        expect(classifyFunding(send, read)).toBe(expected[name]![read]);
+      });
+    }
+  }
+});
+
+describe("readFundedState: read from the contract, never from a receipt or a balance", () => {
+  it("unfunded: no accepted policy, and no escrow funded for the job", async () => {
+    const { chain, prepared } = await setup();
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared });
+    expect(s.kind).toBe("unfunded");
+    expect(s.blockHash).toBe(chain.state.block.hash);
+  });
+  it("funded_ours: policy().jobPolicyHash_ is this policy's, with the unit states", async () => {
+    const { fx, chain, prepared, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash);
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared, blockHash: chain.state.block.hash });
+    expect(s.kind).toBe("funded_ours");
+    expect(s.unitStates).toEqual([1, 1]);
+  });
+  it("other: funded under another acceptance", async () => {
+    const { chain, prepared, fundedAs } = await setup();
+    fundedAs(keccak256(stringToHex("another acceptance")));
+    expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("other");
+  });
+  it("other: the job is funded by another escrow, so this one never can be", async () => {
+    const { chain, prepared } = await setup();
+    chain.state.fundedEscrow = OTHER;
+    expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("other");
+  });
+  it("unreadable: a read fails, or no block can be pinned", async () => {
+    const { chain, prepared } = await setup();
+    chain.state.failCalls = true;
+    expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("unreadable");
+    chain.state.failBlocks = true;
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared });
+    expect(s.kind).toBe("unreadable");
+    expect(s.blockHash).toBeNull();
+  });
+  it("NOT_PREPARED for a copy", async () => {
+    const { chain, prepared } = await setup();
+    expect(await refusal(readFundedState({ publicClient: chain.publicClient, prepared: { ...prepared } }))).toBe("NOT_PREPARED");
+  });
+});
+
+describe("approveAndFund: refusals before anything is sent", () => {
+  it("NOT_PREPARED", async () => {
+    const { chain, prepared, fund } = await setup();
+    expect(await refusal(fund(chain.wallet(), structuredClone(prepared)))).toBe("NOT_PREPARED");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("PAYER_NOT_SIGNER: another wallet would send", async () => {
+    const { chain, fund } = await setup();
+    expect(await refusal(fund(chain.wallet(newAccount())))).toBe("PAYER_NOT_SIGNER");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("CHAIN_MISMATCH: the wallet moved to another chain", async () => {
+    const { chain, fund } = await setup();
+    chain.state.walletChainId = 1;
+    expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
+  });
+  it("CHAIN_MISMATCH: a wallet with no configured chain reports another chain id; nothing is sent (guard)", async () => {
+    const { chain, fund } = await setup();
+    const wallet = chain.wallet();
+    expect(wallet.chain).toBeUndefined();
+    chain.state.walletChainId = 1;
+    expect(await refusal(fund(wallet))).toBe("CHAIN_MISMATCH");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("CHAIN_MISMATCH: the wallet with no chain changes network during approve simulation; refuse before the approve send", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => {
+      chain.state.walletChainId = 1;
+      return true;
+    });
+    expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("CHAIN_MISMATCH: the configured wallet chain differs from the prepared chain; refuse before sending", async () => {
+    const { chain, fund } = await setup();
+    const wallet = chain.wallet();
+    Object.defineProperty(wallet, "chain", { value: { id: 1, name: "other chain", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [] } } } });
+    expect(await refusal(fund(wallet))).toBe("CHAIN_MISMATCH");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("LIVE_CHECK_FAILED: the fresh wallet chain-id read before approve is unavailable; nothing is sent", async () => {
+    const { fx, chain, fund } = await setup();
+    const wallet = chain.wallet();
+    vi.spyOn(wallet, "getChainId").mockResolvedValueOnce(Number(fx.chainId)).mockRejectedValue(new Error("wallet disconnected"));
+    expect(await refusal(fund(wallet))).toBe("LIVE_CHECK_FAILED");
+    expect(chain.sends()).toEqual([]);
+  });
+  // reviewer-charlie L2 (implementer-delta): the reference is the policy's chain, not the other client's.
+  it("CHAIN_MISMATCH: the wallet and the read client both moved to the same chain, which is not the policy's", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.chainId = 1;
+    chain.state.walletChainId = 1;
+    expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  it("ESCROW_NOT_CREATED: the clone does not exist yet", async () => {
+    const { chain, fund, simulated } = await setup({}, { escrowCode: false });
+    expect(await refusal(fund())).toBe("ESCROW_NOT_CREATED");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  // reviewer-charlie L5 (implementer-delta): the approve's spender must run the real escrow code: the EIP-1167 clone of
+  // the implementation the pinned factory reported.
+  it("DEPLOYMENT_MISMATCH: the code at the escrow is not an EIP-1167 proxy", async () => {
+    const { fx, chain, fund, simulated } = await setup();
+    chain.state.code.set(fx.escrow.toLowerCase(), "0x6080604052348015600f57600080fd5b50");
+    expect(await refusal(fund())).toBe("DEPLOYMENT_MISMATCH");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  it("DEPLOYMENT_MISMATCH: the escrow is an EIP-1167 proxy to another implementation", async () => {
+    const { fx, chain, fund, simulated } = await setup();
+    chain.state.code.set(fx.escrow.toLowerCase(), cloneRuntime(OTHER));
+    expect(await refusal(fund())).toBe("DEPLOYMENT_MISMATCH");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  it("already funded under this policy: committed, and nothing is simulated or sent", async () => {
+    const { fx, chain, fund, fundedAs, simulated } = await setup();
+    fundedAs(fx.jobPolicyHash);
+    const result = await fund();
+    expect(result.outcome).toBe("committed");
+    expect(result.alreadyFunded).toBe(true);
+    expect(result.stage).toBe("precheck");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+  it("ALREADY_FUNDED: funded under another acceptance", async () => {
+    const { chain, fund, fundedAs } = await setup();
+    fundedAs(keccak256(stringToHex("another acceptance")));
+    expect(await refusal(fund())).toBe("ALREADY_FUNDED");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("ALREADY_FUNDED: the job is funded by another escrow", async () => {
+    const { chain, fund } = await setup();
+    chain.state.fundedEscrow = OTHER;
+    expect(await refusal(fund())).toBe("ALREADY_FUNDED");
+  });
+  it("LIVE_CHECK_FAILED: the funding state cannot be read, or no block can be pinned", async () => {
+    const { chain, fund } = await setup();
+    chain.state.failCalls = true;
+    expect(await refusal(fund())).toBe("LIVE_CHECK_FAILED");
+    chain.state.failCalls = false;
+    chain.state.failBlocks = true;
+    expect(await refusal(fund())).toBe("LIVE_CHECK_FAILED");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("EXPIRY_TOO_SOON: time passed since prepare", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.state.block.timestamp = fx.expiry - MARGIN + 1n;
+    expect(await refusal(fund())).toBe("EXPIRY_TOO_SOON");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("RECLAIM_WINDOW: time passed since prepare, and a reclaim window no longer holds", async () => {
+    const { chain, fund } = await setup({ expiry: NOW + 40n * DAY, reclaimAt: [NOW + 30n * DAY] });
+    chain.state.block.timestamp = NOW + 20n * DAY + 1n;
+    expect(await refusal(fund())).toBe("RECLAIM_WINDOW");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("SIMULATION_REVERTED: the approve would revert", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "NotActive" })));
+    expect(await refusal(fund())).toBe("SIMULATION_REVERTED");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("PAYER_NOT_SIGNER: a wallet with no account", async () => {
+    const { chain, prepared } = await setup();
+    expect(await refusal(approveAndFund({ prepared, wallet: chain.accountless(), publicClient: chain.publicClient }))).toBe("PAYER_NOT_SIGNER");
+  });
+  it("LIVE_CHECK_FAILED: the escrow's code cannot be read", async () => {
+    const { chain, fund } = await setup();
+    chain.state.failCode = true;
+    expect(await refusal(fund())).toBe("LIVE_CHECK_FAILED");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("a negative margin is a caller error", async () => {
+    const { chain, prepared } = await setup();
+    await expect(approveAndFund({ prepared, wallet: chain.wallet(), publicClient: chain.publicClient, marginSeconds: -1n })).rejects.toThrow(TypeError);
+  });
+});
+
+describe("approveAndFund: after the first broadcast, the outcome rests on the escrow's own state", () => {
+  /** Calldata of the payer-sent eth_call simulations, in order (the fund simulation is pinned to approve's block). */
+  const simulatedData = (chain: Awaited<ReturnType<typeof setup>>["chain"]) =>
+    chain.state.log
+      .filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined)
+      .map((x) => (x.params as [{ data: Hex }])[0].data);
+
+  it("both sends carry the prepared chain explicitly when wallet.chain is undefined", async () => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    const wallet = chain.wallet();
+    expect(wallet.chain).toBeUndefined();
+    const send = vi.spyOn(wallet, "sendTransaction");
+    chain.state.afterSend = (i) => { if (i === 1) fundedAs(fx.jobPolicyHash); };
+    expect((await fund(wallet)).outcome).toBe("committed");
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.map(([args]) => args.chain?.id)).toEqual([Number(prepared.chainId), Number(prepared.chainId)]);
+  });
+
+  it("a wallet with no chain changes network after approve: refuse the fund send and preserve the approve", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.state.afterSend = (i) => { if (i === 0) chain.state.walletChainId = 1; };
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.detail).toContain("CHAIN_MISMATCH");
+    expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.allowance).toBe(fx.totalGross);
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("committed: approve(escrow, ΣG) then a payer-sent fund(), simulated and sent byte for byte, funded per policy()", async () => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    const result = await fund();
+    expect(result.outcome).toBe("committed");
+    expect(result.stage).toBe("fund");
+    expect(result.alreadyFunded).toBe(false);
+    expect(result.readBack.kind).toBe("funded_ours");
+    expect(result.readBack.blockHash).toBe(chain.state.block.hash);
+    const [approveSent, fundSent] = chain.state.sent;
+    expect(result.approveTx).toBe(approveSent!.hash);
+    expect(result.fundTx).toBe(fundSent!.hash);
+    expect(approveSent!.to.toLowerCase()).toBe(fx.usdc.toLowerCase());
+    expect(decodeFunctionData({ abi: ERC20_ABI, data: approveSent!.data }).args).toEqual([fx.escrow, fx.totalGross]);
+    expect(fundSent!.to.toLowerCase()).toBe(fx.escrow.toLowerCase());
+    const [configs, acceptance] = decodeFunctionData({ abi: ESCROW_ABI, data: fundSent!.data }).args as unknown as [unknown, { expiry: bigint; payerSignature: Hex; operatorSignature: Hex }];
+    expect(configs).toEqual(prepared.configs);
+    expect(acceptance).toEqual({ expiry: fx.expiry, payerSignature: "0x", operatorSignature: fx.operatorSignature });
+    expect(simulatedData(chain)).toEqual([approveSent!.data, fundSent!.data]);
+  });
+
+  it("a wallet configured with a data suffix still sends exactly the simulated bytes", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    const result = await fund(chain.wallet(fx.payer, { dataSuffix: "0xdeadbeef" }));
+    expect(result.outcome).toBe("committed");
+    expect(chain.state.sent.map((t) => t.data)).toEqual(simulatedData(chain));
+    expect(chain.state.sent.some((t) => t.data.endsWith("deadbeef"))).toBe(false);
+  });
+
+  it("the approve's send throws: its outcome is unknown, fund() is never sent, funding is indeterminate", async () => {
+    const { chain, fund } = await setup();
+    chain.state.failSend = true;
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.approve).toMatchObject({ kind: "unknown" });
+    expect(result.approveTx).toBeUndefined();
+    expect(result.fundTx).toBeUndefined();
+    expect(result.detail).toContain("unknown");
+    expect(simulatedData(chain)).toHaveLength(1);
+  });
+
+  it("the approve never mines: fund() is never sent, funding is indeterminate", async () => {
+    const { chain, fund } = await setup();
+    chain.state.receipts = ["none"];
+    const result = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+    expect(result.stage).toBe("approve");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.approve).toMatchObject({ kind: "unknown", txHash: chain.state.sent[0]!.hash });
+    expect(result.approveTx).toBe(chain.state.sent[0]!.hash);
+    expect(result.detail).toContain("unknown");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the approve mines but reverts: fund() is never simulated or sent", async () => {
+    const { chain, fund } = await setup();
+    chain.state.receipts = ["reverted"];
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.approve).toEqual({ kind: "mined", status: "reverted", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.detail).toContain("reverted");
+    expect(simulatedData(chain)).toHaveLength(1);
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the allowance does not read back as ΣG at the approve's block: fund() is never sent", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.usdc, ERC20_ABI, "allowance", () => fx.totalGross - 1n);
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.allowance).toBe(fx.totalGross - 1n);
+    expect(result.detail).toContain("allowance");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("a mined successful approve with unreadable allowance reports funding unchanged and preserves its token-state uncertainty", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.usdc, ERC20_ABI, "allowance", () => { throw new Error("allowance unavailable"); });
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.allowance).toBe("unreadable");
+    expect(result.detail).toContain("unreadable");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  for (const mode of ["simulation refusal", "send throws", "receipt missing", "reverted", "success unfunded", "success unreadable", "committed"] as const) {
+    it(`preserves the actual successful approve SendResult on a fund-stage result: ${mode}`, async () => {
+      const { fx, chain, fund, fundedAs } = await setup();
+      if (mode === "simulation refusal") {
+        chain.on(fx.escrow, ESCROW_ABI, "fund", () => revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "NotActive" })));
+      }
+      if (mode === "receipt missing") chain.state.receipts = ["success", "none"];
+      if (mode === "reverted") chain.state.receipts = ["success", "reverted"];
+      chain.state.afterSend = (i) => {
+        if (i === 0 && mode === "send throws") chain.state.failSend = true;
+        if (i === 1 && mode === "success unreadable") chain.state.failCalls = true;
+        if (i === 1 && mode === "committed") fundedAs(fx.jobPolicyHash);
+      };
+      const result = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+      expect(result.stage).toBe("fund");
+      expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+      expect(result.allowance).toBe(fx.totalGross);
+    });
+  }
+
+  it("unchanged: the fund() simulation reverts, so it is never sent", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.escrow, ESCROW_ABI, "fund", () => revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "InvalidOrDisabledCohort" })));
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.fundTx).toBeUndefined();
+    expect(result.detail).toContain("InvalidOrDisabledCohort");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("unchanged: fund() mines but reverts, and the escrow reads unfunded at that block", async () => {
+    const { chain, fund } = await setup();
+    chain.state.receipts = ["success", "reverted"];
+    const result = await fund();
+    expect(result.outcome).toBe("unchanged");
+    expect(result.fundTx).toBe(chain.state.sent[1]!.hash);
+    expect(result.readBack.kind).toBe("unfunded");
+  });
+
+  it("indeterminate: fund() mines successfully but the escrow still reads unfunded (a stale read)", async () => {
+    const { chain, fund } = await setup();
+    const result = await fund();
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.readBack.kind).toBe("unfunded");
+  });
+
+  it("indeterminate: fund() never mines before the receipt wait ends", async () => {
+    const { chain, fund } = await setup();
+    chain.state.receipts = ["success", "none"];
+    const result = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.fundTx).toBe(chain.state.sent[1]!.hash);
+    expect(result.detail).toContain("no receipt");
+  });
+
+  it("indeterminate: fund() mines successfully but the escrow cannot be read back", async () => {
+    const { chain, fund } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) chain.state.failCalls = true;
+    };
+    const result = await fund();
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.readBack.kind).toBe("unreadable");
+  });
+
+  it("every read and the fund simulation is hash-pinned (EIP-1898); only the approve simulation runs at latest", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    chain.state.log.length = 0;
+    expect((await fund()).outcome).toBe("committed");
+    const reads = chain.state.log.filter((x) => x.method === "eth_getCode" || x.method === "eth_call");
+    const atLatest = reads.filter((x) => (x.params as unknown[])[1] === "latest");
+    expect(atLatest.map((x) => ((x.params as [{ data: Hex }])[0].data as string).slice(0, 10))).toEqual(simulatedData(chain).slice(0, 1).map((d) => d.slice(0, 10)));
+    expect(atLatest).toHaveLength(1);
+    const pinned = reads.filter((x) => (x.params as unknown[])[1] !== "latest");
+    expect(pinned.length).toBeGreaterThan(4);
+    for (const x of pinned) {
+      expect((x.params as unknown[])[1]).toEqual({ blockHash: expect.stringMatching(/^0x[0-9a-f]{64}$/), requireCanonical: true });
+    }
+  });
+
+  it("the allowance is read at the approve's own block, not at the block the pre-checks ran at", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    const precheckBlock = chain.state.block.hash;
+    // The chain moves on between the pre-checks and the approve, so the approve lands in a later block.
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => {
+      chain.advanceBlock();
+      return true;
+    });
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    chain.state.log.length = 0;
+    expect((await fund()).outcome).toBe("committed");
+    const approveBlock = chain.state.sent[0]!.block.hash;
+    expect(approveBlock).not.toBe(precheckBlock);
+    const allowanceSelector = toFunctionSelector(getAbiItem({ abi: ERC20_ABI, name: "allowance" }));
+    const allowanceRead = chain.state.log.find(
+      (x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(allowanceSelector),
+    );
+    expect((allowanceRead!.params as unknown[])[1]).toEqual({ blockHash: approveBlock, requireCanonical: true });
+  });
+
+  it("latest lags behind approve: fund is simulated at the receipt's canonical block, exactly where allowance was read", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    const staleLatest = chain.state.block;
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => { chain.advanceBlock(); return true; });
+    chain.on(fx.escrow, ESCROW_ABI, "fund", () => {
+      const pin = chain.state.log.at(-1)!.params[1];
+      if (pin === "latest") return revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "NotActive" }));
+      return undefined;
+    });
+    chain.state.afterSend = (i) => {
+      if (i === 0) chain.state.block = staleLatest;
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    const result = await fund();
+    expect(result.outcome).toBe("committed");
+    expect(chain.state.sent).toHaveLength(2);
+    const receiptBlock = chain.state.sent[0]!.block.hash;
+    expect(receiptBlock).not.toBe(chain.state.block.hash);
+    const selector = toFunctionSelector(getAbiItem({ abi: ESCROW_ABI, name: "fund" }));
+    const simulation = chain.state.log.find((x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(selector));
+    expect(simulation!.params[1]).toEqual({ blockHash: receiptBlock, requireCanonical: true });
+    const allowanceSelector = toFunctionSelector(getAbiItem({ abi: ERC20_ABI, name: "allowance" }));
+    const allowanceRead = chain.state.log.find((x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(allowanceSelector));
+    expect(simulation!.params[1]).toEqual(allowanceRead!.params[1]);
+  });
+
+  for (const [read, outcome] of [["unfunded", "unchanged"], ["funded_ours", "committed"], ["other", "indeterminate"], ["unreadable", "indeterminate"]] as const) {
+    it(`approve block unavailable for simulation: no claim of fund reverting, no fallback to latest; ${read} -> ${outcome}`, async () => {
+      const { fx, chain, fund, fundedAs } = await setup();
+      chain.on(fx.escrow, ESCROW_ABI, "fund", () => {
+        if (chain.state.log.at(-1)!.params[1] === "latest") return undefined; // a fallback would succeed and send
+        if (read === "funded_ours") fundedAs(fx.jobPolicyHash);
+        if (read === "other") fundedAs(keccak256(stringToHex("other acceptance")));
+        if (read === "unreadable") chain.state.failCalls = true;
+        throw new Error("fake chain: approve block unavailable for simulation");
+      });
+      const result = await fund();
+      expect(chain.state.sent).toHaveLength(1);
+      expect(result.outcome).toBe(outcome);
+      expect(result.readBack.kind).toBe(read);
+      expect(result.detail).toContain("simulation could not");
+      expect(result.detail).toContain(chain.state.sent[0]!.block.hash);
+      expect(result.detail).not.toContain("would revert");
+      expect(result.fundTx).toBeUndefined();
+      expect(result.approve).toMatchObject({ kind: "mined", status: "success" });
+      expect(result.allowance).toBe(fx.totalGross);
+    });
+  }
+
+  it("the read-back is at the fund() receipt's block, even when the chain has moved on", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) {
+        fundedAs(fx.jobPolicyHash);
+        chain.advanceBlock();
+      }
+    };
+    const result = await fund();
+    expect(result.outcome).toBe("committed");
+    expect(result.readBack.blockHash).toBe(chain.state.sent[1]!.block.hash);
+    expect(result.readBack.blockHash).not.toBe(chain.state.block.hash);
+  });
+
+  it("indeterminate: the fund() send throws after the approve (it may have been broadcast)", async () => {
+    const { chain, fund } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 0) chain.state.failSend = true;
+    };
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.fundTx).toBeUndefined();
+    expect(result.readBack.kind).toBe("unfunded");
+  });
+
+  it("committed even when the fund() receipt is lost, once the escrow reads funded under this policy", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.receipts = ["success", "none"];
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    const result = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+    expect(result.outcome).toBe("committed");
+    expect(result.readBack.kind).toBe("funded_ours");
+  });
+});
+
+// reviewer-charlie L1 (implementer-delta): both stop paths (the approve stops the run; the fund() simulation reverts)
+// send nothing more, but "nothing more was sent" does not mean "unchanged". Someone holding the buyer's JobPolicy
+// signature can fund the escrow from the buyer's allowance at any time, and a read can fail. So each stop path is
+// classified by the escrow's read-back, like every other path (verify-writes-three-outcomes).
+describe("approveAndFund: a run that stops before fund() is sent is classified by the read-back, never assumed unchanged", () => {
+  it("the approve stops the run, but the escrow reads funded under this policy: committed", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 0) {
+        // In the approve's own block, a relayed fund() carrying the buyer's signature spent the allowance.
+        chain.on(fx.usdc, ERC20_ABI, "allowance", () => 0n);
+        fundedAs(fx.jobPolicyHash);
+      }
+    };
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.detail).toContain("allowance");
+    expect(result.readBack.kind).toBe("funded_ours");
+    expect(result.outcome).toBe("committed");
+    expect(result.fundTx).toBeUndefined();
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the approve stops the run (mined, reverted), and the escrow cannot be read back: indeterminate, never unchanged", async () => {
+    const { chain, fund } = await setup();
+    chain.state.receipts = ["reverted"];
+    chain.state.afterSend = (i) => {
+      if (i === 0) chain.state.failCalls = true;
+    };
+    const result = await fund();
+    expect(result.stage).toBe("approve");
+    expect(result.detail).toContain("reverted");
+    expect(result.readBack.kind).toBe("unreadable");
+    expect(result.outcome).toBe("indeterminate");
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the fund() simulation reverts because the escrow was funded under this policy in the meantime: committed", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 0) {
+        // Between the approve and the fund(), a relayer holding the buyer's signature funded the escrow: it is sealed.
+        fundedAs(fx.jobPolicyHash);
+        chain.on(fx.escrow, ESCROW_ABI, "fund", () => revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "AlreadySealed" })));
+      }
+    };
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.detail).toContain("AlreadySealed");
+    expect(result.readBack.kind).toBe("funded_ours");
+    expect(result.outcome).toBe("committed");
+    expect(result.fundTx).toBeUndefined();
+    expect(chain.state.sent).toHaveLength(1);
+  });
+
+  it("the fund() simulation reverts, and the escrow cannot be read back: indeterminate, never unchanged", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.escrow, ESCROW_ABI, "fund", () => {
+      chain.state.failCalls = true; // the node stops answering calls right after the simulation
+      return revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "InvalidOrDisabledCohort" }));
+    });
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.detail).toContain("InvalidOrDisabledCohort");
+    expect(result.readBack.kind).toBe("unreadable");
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.fundTx).toBeUndefined();
+    expect(chain.state.sent).toHaveLength(1);
+  });
+});
+
+// reviewer-charlie L3 (implementer-delta): a simulation proves something only if it runs as the transaction will, from
+// the payer. The fake now refuses a payer-less fund() from anyone else (OnlyPayer), as the escrow does (ESC:718).
+describe("approveAndFund: both simulations run from the payer, who sends both transactions", () => {
+  it("the approve and the fund() are simulated from the payer", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    expect((await fund()).outcome).toBe("committed");
+    const simulations = chain.state.log
+      .filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined)
+      .map((x) => (x.params as [{ from?: string; to: string }])[0]);
+    expect(simulations.map((c) => c.to.toLowerCase())).toEqual([fx.usdc.toLowerCase(), fx.escrow.toLowerCase()]);
+    expect(simulations.map((c) => c.from?.toLowerCase())).toEqual([fx.payer.address.toLowerCase(), fx.payer.address.toLowerCase()]);
+  });
+
+  it("the fake's fund() is the escrow's: a sender other than the payer, with no payer signature, reverts OnlyPayer", async () => {
+    const { fx, chain } = await setup();
+    const data = encodeFunctionData({
+      abi: ESCROW_ABI,
+      functionName: "fund",
+      args: [fx.configs, { expiry: fx.expiry, payerSignature: "0x", operatorSignature: fx.operatorSignature }],
+    });
+    const simulate = (account?: Hex) =>
+      chain.publicClient.call({ account, to: fx.escrow, data }).then(
+        () => "ok",
+        (e: unknown) => describeRevert(e),
+      );
+    expect(await simulate(fx.payer.address)).toBe("ok");
+    expect(await simulate(fx.operator.address)).toBe("OnlyPayer");
+    expect(await simulate()).toBe("OnlyPayer");
+  });
+});
+
+// reviewer-charlie L4 (implementer-delta): "funded under this policy" must not rest on the escrow's own report alone.
+// The pinned factory writes fundedEscrowOf(policyKey) only from acceptPolicy, which only the clone CREATE2 placed at
+// the policy's predicted address can call, inside the fund() that stores jobPolicyHash_ (FAC:228-245; ESC:873-893).
+// So that slot is a witness the escrow's code cannot forge, read at the same pinned block as policy().
+describe("funded_ours rests on the pinned factory's witness, not only on the escrow's own report", () => {
+  const fundedEscrowOfSelector = toFunctionSelector(getAbiItem({ abi: FACTORY_ABI, name: "fundedEscrowOf" }));
+  const policySelector = toFunctionSelector(getAbiItem({ abi: ESCROW_ABI, name: "policy" }));
+
+  it("the hash matches and fundedEscrowOf(policyKey) is this escrow, both read at the same pinned block: funded_ours", async () => {
+    const { fx, chain, prepared, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash);
+    chain.state.log.length = 0;
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared, blockHash: chain.state.block.hash });
+    expect(s.kind).toBe("funded_ours");
+    const calls = chain.state.log.filter((x) => x.method === "eth_call");
+    const at = (selector: string) => calls.find((x) => (x.params as [{ data: Hex }])[0].data.startsWith(selector))?.params[1];
+    const pin = { blockHash: chain.state.block.hash, requireCanonical: true };
+    expect(at(policySelector)).toEqual(pin);
+    expect(at(fundedEscrowOfSelector)).toEqual(pin);
+    // foxtrot F1: and under this job's policyKey.
+    const witnessCall = calls.find((x) => (x.params as [{ data: Hex }])[0].data.startsWith(fundedEscrowOfSelector));
+    expect(decodeFunctionData({ abi: FACTORY_ABI, data: (witnessCall!.params as [{ data: Hex }])[0].data }).args).toEqual([fx.policyKey]);
+  });
+
+  it("the fake's fundedEscrowOf is the factory's mapping: it answers for this job's policyKey alone (foxtrot F1)", async () => {
+    const { fx, chain, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash);
+    const slot = (key: Hex) => chain.publicClient.readContract({ address: fx.factory, abi: FACTORY_ABI, functionName: "fundedEscrowOf", args: [key] });
+    expect(await slot(fx.policyKey)).toBe(fx.escrow);
+    expect(await slot(fx.jobPolicyHash)).toBe(zeroAddress);
+  });
+
+  it("the witness cannot be read: unreadable, and indeterminate after the fund() was sent", async () => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    const witnessFails = () =>
+      chain.on(fx.factory, FACTORY_ABI, "fundedEscrowOf", () => {
+        throw new Error("fake chain: fundedEscrowOf unavailable");
+      });
+    chain.state.afterSend = (i) => {
+      if (i === 1) {
+        fundedAs(fx.jobPolicyHash);
+        witnessFails();
+      }
+    };
+    const result = await fund();
+    expect(result.readBack.kind).toBe("unreadable");
+    expect(result.outcome).toBe("indeterminate");
+    expect((await readFundedState({ publicClient: chain.publicClient, prepared })).kind).toBe("unreadable");
+  });
+
+  for (const [name, witness] of [
+    ["another escrow", OTHER],
+    ["no escrow", zeroAddress],
+  ] as const) {
+    it(`the hash matches but fundedEscrowOf(policyKey) names ${name}: never funded_ours, never committed`, async () => {
+      const { fx, chain, prepared, fund, fundedAs } = await setup();
+      fundedAs(fx.jobPolicyHash, { witness });
+      const s = await readFundedState({ publicClient: chain.publicClient, prepared });
+      expect(s.kind).toBe("other");
+      expect(s.detail).toContain("fundedEscrowOf");
+      // Before anything is sent: a refusal, not "already funded".
+      expect(await refusal(fund())).toBe("ALREADY_FUNDED");
+      expect(chain.sends()).toEqual([]);
+    });
+  }
+
+  it("after the fund() was sent, an escrow that reports this policy without the factory's witness is indeterminate", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash, { witness: zeroAddress });
+    };
+    const result = await fund();
+    expect(result.readBack.kind).toBe("other");
+    expect(result.outcome).toBe("indeterminate");
+  });
+
+  it("the hash matches but policy().prePolicyRoot_ is not this policy's: never funded_ours", async () => {
+    const { fx, chain, prepared, fundedAs } = await setup();
+    fundedAs(fx.jobPolicyHash, { prePolicyRoot: keccak256(stringToHex("another root")) });
+    const s = await readFundedState({ publicClient: chain.publicClient, prepared });
+    expect(s.kind).toBe("other");
+    expect(s.detail).toContain("prePolicyRoot_");
+  });
+});
+
+// reviewer-charlie L7 (implementer-delta): retry safety. After an indeterminate result the earlier approve or fund() may
+// still be pending. A retry that sent again would re-approve and re-send: fund #2 reverts AlreadySealed once fund #1
+// lands, but its gas is spent, and an approve landing after the funding leaves a standing allowance. So approveAndFund
+// sends nothing while the payer's nonce at "pending" is above its nonce at "latest".
+describe("approveAndFund: no send while the payer has a transaction pending", () => {
+  /** Methods that send, from the log since `mark`. */
+  const sendsSince = (chain: Awaited<ReturnType<typeof setup>>["chain"], mark: number) =>
+    chain.state.log.slice(mark).filter((x) => x.method === "eth_sendRawTransaction" || x.method === "eth_sendTransaction");
+
+  it("PAYER_TX_PENDING: a retry while the earlier fund() is still pending sends and simulates nothing", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.receipts = ["success", "none"];
+    const first = await fund(undefined, undefined, { receiptTimeoutMs: 200 });
+    expect(first.outcome).toBe("indeterminate");
+    expect(chain.state.sent).toHaveLength(2);
+    const mark = chain.state.log.length;
+    const simulatedBefore = simulated().length;
+    expect(await refusal(fund())).toBe("PAYER_TX_PENDING");
+    expect(sendsSince(chain, mark)).toEqual([]);
+    expect(simulated()).toHaveLength(simulatedBefore);
+    expect(chain.state.sent).toHaveLength(2);
+  });
+
+  it("PAYER_TX_PENDING: a payer transaction this SDK did not send is pending too", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.priorNonce = 3;
+    chain.state.mempool = 1;
+    expect(await refusal(fund())).toBe("PAYER_TX_PENDING");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+
+  it("equal nonces proceed: a payer with mined history and nothing pending funds as usual", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.priorNonce = 3;
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    expect((await fund()).outcome).toBe("committed");
+    expect(chain.state.sent).toHaveLength(2);
+    const reads = chain.state.log.filter((x) => x.method === "eth_getTransactionCount" && (x.params as unknown[])[0] === fx.payer.address);
+    expect(reads.map((x) => (x.params as unknown[])[1])).toEqual(expect.arrayContaining(["pending", "latest"]));
+  });
+
+  it("the guard reads the payer's own nonce, at pending then at latest, before anything is simulated (foxtrot F2)", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    chain.state.afterSend = (i) => {
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    chain.state.log.length = 0;
+    expect((await fund()).outcome).toBe("committed");
+    const firstSimulation = chain.state.log.findIndex((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest");
+    const guardReads = chain.state.log
+      .slice(0, firstSimulation)
+      .filter((x) => x.method === "eth_getTransactionCount")
+      .map((x) => [String(x.params[0]).toLowerCase(), x.params[1]]);
+    const payer = fx.payer.address.toLowerCase();
+    expect(guardReads).toEqual([
+      [payer, "pending"],
+      [payer, "latest"],
+    ]);
+    // The fake counts per address, as a node does: the escrow (a contract) is at 1, and the operator has sent nothing.
+    expect(await chain.publicClient.getTransactionCount({ address: fx.escrow, blockTag: "pending" })).toBe(1);
+    expect(await chain.publicClient.getTransactionCount({ address: fx.operator.address, blockTag: "pending" })).toBe(0);
+  });
+
+  it("LIVE_CHECK_FAILED: the payer's nonce cannot be read, so nothing is sent", async () => {
+    const { chain, fund, simulated } = await setup();
+    chain.state.failNonce = true;
+    expect(await refusal(fund())).toBe("LIVE_CHECK_FAILED");
+    expect(simulated()).toEqual([]);
+    expect(chain.sends()).toEqual([]);
+  });
+});

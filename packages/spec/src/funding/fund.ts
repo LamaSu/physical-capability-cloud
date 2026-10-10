@@ -1,0 +1,376 @@
+/**
+ * `approveAndFund`: the buyer's two transactions, and the funding read-back. Author: implementer-bravo (pcc-adk).
+ *
+ *   1. `USDC.approve(escrow, ΣG)`: exactly ΣG, never unlimited, to the verified escrow (plan §3 step 5).
+ *   2. `escrow.fund(configs, {expiry, payerSignature: 0x, operatorSignature})`: the payer sends it, so the payer
+ *      leg is implicit and its signature bytes are empty (ESC:718, FAC:253).
+ * Each call is encoded once from the frozen `PreparedFunding`, simulated with `eth_call` from the payer using
+ * those same bytes, then sent with `dataSuffix: "0x"` so a client-configured suffix cannot change them.
+ * The fund simulation uses the approve receipt's canonical block hash, exactly where allowance was read, so a
+ * backend whose "latest" lags the receipt cannot manufacture an allowance-related simulation failure.
+ *
+ * FUNDED IS READ FROM THE CONTRACT (plan G5), never inferred from a receipt, a tx hash or a USDC balance. It
+ * means `policy().jobPolicyHash_` equals the hash this SDK recomputed (with `prePolicyRoot_` equal to ours), AND the
+ * pinned factory's `fundedEscrowOf(policyKey)` is this escrow, both at one pinned block. The escrow writes that hash
+ * only in `_acceptPolicy` (ESC:893), after checking keccak256(configs) against the root its address commits to
+ * (ESC:873) and both signatures (FAC:253-256), and in the same transaction that pulls exactly ΣG from the payer
+ * (ESC:843). The factory writes that slot only for the clone at the policy's predicted address (FAC:228-245), so it
+ * witnesses the escrow's report without trusting the escrow's code (reviewer-charlie L4).
+ *
+ * THREE OUTCOMES describe the ESCROW'S FUNDING ONLY (verify-writes-three-outcomes). "unchanged" means funding
+ * unchanged; token allowance may have changed. Every result after an approve send preserves its actual SendResult.
+ *   committed      the read-back shows this exact policy funded;
+ *   unchanged      fund() was certainly not broadcast (with no unresolved approve), or mined and reverted, AND
+ *                  the read-back shows the escrow unfunded;
+ *   indeterminate  anything else: a broadcast with no receipt, a successful receipt whose read-back is not
+ *                  "funded" (a stale read or a reorg), funding under another acceptance, an escrow report the
+ *                  pinned factory does not witness, or an unreadable state.
+ * Indeterminate is not success. After an indeterminate result, resolve with readFundedState (or wait for the earlier
+ * transactions) before retrying. A retried `approveAndFund` sends nothing while the payer has a transaction pending
+ * (PAYER_TX_PENDING), and returns `committed` without sending once the escrow reads funded under this policy.
+ */
+import { encodeFunctionData, zeroAddress, zeroHash, type Address, type Chain, type Hex, type PublicClient, type WalletClient } from "viem";
+import { assertChain, describeRevert, pinBlock, pinnedReader, type PinnedBlock } from "./chain.js";
+import { refuse } from "./errors.js";
+import { DEFAULT_MARGIN_SECONDS, assertPrepared, checkTiming, type PreparedFunding } from "./prepare.js";
+import { ERC20_ABI, ESCROW_ABI, FACTORY_ABI, cloneRuntimeCode } from "./vnext.js";
+
+export type FundedStateKind = "funded_ours" | "unfunded" | "other" | "unreadable";
+
+export interface FundedState {
+  kind: FundedStateKind;
+  detail: string;
+  /** The block the state was read at (by hash); null if no block could be pinned. */
+  blockNumber: bigint | null;
+  blockHash: Hex | null;
+  /** `unitState` of each unit, in funding order, when funded under this policy (1 = FUNDED_ACTIVE). */
+  unitStates: readonly number[];
+}
+
+export type SendResult =
+  | { kind: "not_sent"; reason: string }
+  | { kind: "unknown"; txHash?: Hex; reason: string }
+  | { kind: "mined"; txHash: Hex; status: "success" | "reverted"; blockHash: Hex };
+
+/** Escrow funding only: "unchanged" does not mean that token allowance or other chain state is unchanged. */
+export type FundingOutcome = "committed" | "unchanged" | "indeterminate";
+
+export interface FundingResult {
+  outcome: FundingOutcome;
+  /** The escrow was already funded under this exact policy before anything was sent; nothing was sent. */
+  alreadyFunded: boolean;
+  /** The last step attempted. */
+  stage: "precheck" | "approve" | "fund";
+  /** Actual approve outcome, whenever approve was sent or may have been sent. Token state may have changed. */
+  approve?: SendResult;
+  approveTx?: Hex;
+  /** Allowance observed at a successful approve's block; "unreadable" if that read failed. */
+  allowance?: bigint | "unreadable";
+  fundTx?: Hex;
+  /** The funding read-back the outcome rests on. */
+  readBack: FundedState;
+  detail: string;
+}
+
+const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** The three-outcome rule for funding, as a pure function of what the send did and what the read shows. */
+export function classifyFunding(send: SendResult, read: FundedStateKind): FundingOutcome {
+  if (read === "funded_ours") return "committed";
+  const refused = send.kind === "not_sent" || (send.kind === "mined" && send.status === "reverted");
+  return refused && read === "unfunded" ? "unchanged" : "indeterminate";
+}
+
+async function fundedStateAt(publicClient: PublicClient, block: PinnedBlock, prepared: PreparedFunding): Promise<FundedState> {
+  const reader = pinnedReader(publicClient, block.hash);
+  const state = (kind: FundedStateKind, detail: string, unitStates: readonly number[] = []): FundedState => ({
+    kind,
+    detail,
+    blockNumber: block.number,
+    blockHash: block.hash,
+    unitStates,
+  });
+  // The pinned factory's record of the escrow that funded this (payer, operator, job), read at the same block.
+  const fundedEscrowOf = () => reader.read<Address>(prepared.factory, FACTORY_ABI, "fundedEscrowOf", [prepared.policyKey]);
+  try {
+    const [, , preRoot, policyHash] = await reader.read<readonly [Address, bigint, Hex, Hex, Hex]>(prepared.escrow, ESCROW_ABI, "policy");
+    if (same(policyHash, prepared.jobPolicyHash)) {
+      // reviewer-charlie L4: the escrow's own report is not enough, since code at this address could return any
+      // values. The pinned factory must witness it: it writes fundedEscrowOf(policyKey) only in acceptPolicy, which
+      // only the clone CREATE2 placed at this policy's predicted address may call (FAC:228-245), from inside the fund()
+      // that then stores jobPolicyHash_ (ESC:840, 893). A hash the factory does not witness is never "funded" here;
+      // it is "other", so it is never committed (indeterminate after a send, ALREADY_FUNDED before one).
+      // prePolicyRoot_ comes back in the same policy() read, so design note §3's root check costs no extra call.
+      if (!same(preRoot, prepared.prePolicyRoot)) {
+        return state("other", `policy() reports this policy's jobPolicyHash_ but prePolicyRoot_ ${preRoot}, not ${prepared.prePolicyRoot}`);
+      }
+      const witness = await fundedEscrowOf();
+      if (!same(witness, prepared.escrow)) {
+        return state(
+          "other",
+          `policy().jobPolicyHash_ is this policy's, but the pinned factory's fundedEscrowOf(policyKey) is ${witness}, not this escrow: the escrow's report is not witnessed, so it is not taken as funded`,
+        );
+      }
+      // Design note §3 also promised unitCount() == n and unitIdAt(i) == our unit ids. They are not read: that is
+      // 1 + n more calls (up to 17), and with the witness above they cannot differ. The witnessed clone ran fund(),
+      // which froze exactly the configs whose keccak256 it checked against prePolicyRoot_ (ESC:739-832, 873), and
+      // stored the hash the factory computed over the unitsRoot of those unit ids in that order (ESC:875-893). So
+      // jobPolicyHash_ == ours already fixes every unit id and its order. Each unitState read below also reverts for
+      // an id the escrow does not hold (onlyExisting), which makes the state unreadable rather than funded.
+      const unitStates: number[] = [];
+      for (const id of prepared.unitIds) unitStates.push(await reader.read<number>(prepared.escrow, ESCROW_ABI, "unitState", [id]));
+      return state(
+        "funded_ours",
+        `policy().jobPolicyHash_ is this policy's ${prepared.jobPolicyHash}, and the pinned factory's fundedEscrowOf(policyKey) is this escrow`,
+        unitStates,
+      );
+    }
+    if (!same(policyHash, zeroHash)) {
+      return state("other", `the escrow is funded under another acceptance: policy().jobPolicyHash_ is ${policyHash}, not ${prepared.jobPolicyHash}`);
+    }
+    const fundedEscrow = await fundedEscrowOf();
+    if (!same(fundedEscrow, zeroAddress)) {
+      return state("other", `this job is already funded by escrow ${fundedEscrow} (factory.fundedEscrowOf); this escrow can never fund`);
+    }
+    return state("unfunded", "policy().jobPolicyHash_ is zero and no escrow is funded for this job");
+  } catch (e) {
+    return state("unreadable", `the funding state could not be read at block ${block.number}: ${describeRevert(e)}`);
+  }
+}
+
+/** The escrow's funding state at a block (the latest by default), read by block hash. Never throws for chain reasons. */
+export async function readFundedState(args: { publicClient: PublicClient; prepared: PreparedFunding; blockHash?: Hex }): Promise<FundedState> {
+  const prepared = assertPrepared(args.prepared);
+  let block: PinnedBlock;
+  try {
+    block = await pinBlock(args.publicClient, args.blockHash);
+  } catch (e) {
+    return { kind: "unreadable", detail: `could not pin the block: ${describeRevert(e)}`, blockNumber: null, blockHash: null, unitStates: [] };
+  }
+  return fundedStateAt(args.publicClient, block, prepared);
+}
+
+/** Read the wallet's current network immediately before each send, and bind viem's send-time check explicitly. */
+async function chainForSend(wallet: WalletClient, chainId: bigint): Promise<Chain> {
+  let walletChain: number;
+  try {
+    walletChain = await wallet.getChainId();
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `could not read the wallet's chain id before sending: ${describeRevert(e)}`);
+  }
+  if (BigInt(walletChain) !== chainId) refuse("CHAIN_MISMATCH", `the wallet is on chain ${walletChain}; the prepared policy is for chain ${chainId}`);
+  if (wallet.chain && BigInt(wallet.chain.id) !== chainId) {
+    refuse("CHAIN_MISMATCH", `the wallet's configured chain is ${wallet.chain.id}; the prepared policy is for chain ${chainId}`);
+  }
+  // With no configured chain, an explicit descriptor still gives viem the expected id for its own last check.
+  return wallet.chain ?? {
+    id: Number(chainId),
+    name: `PCC funding chain ${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [] } },
+  };
+}
+
+async function sendAndWait(
+  wallet: WalletClient,
+  publicClient: PublicClient,
+  chain: Chain,
+  to: Address,
+  data: Hex,
+  opts: { confirmations: number; timeout: number },
+): Promise<SendResult> {
+  let hash: Hex;
+  try {
+    hash = await wallet.sendTransaction({ account: wallet.account!, chain, to, data, dataSuffix: "0x" });
+  } catch (e) {
+    // A throw here cannot prove nothing was broadcast (a transport error can follow acceptance), so it is unknown.
+    return { kind: "unknown", reason: `the send threw and may have been broadcast: ${describeRevert(e)}` };
+  }
+  try {
+    const receipt = await publicClient.waitForTransactionReceipt({ hash, confirmations: opts.confirmations, timeout: opts.timeout });
+    return { kind: "mined", txHash: hash, status: receipt.status, blockHash: receipt.blockHash };
+  } catch (e) {
+    return { kind: "unknown", txHash: hash, reason: `no receipt for ${hash}: ${describeRevert(e)}` };
+  }
+}
+
+export interface ApproveAndFundArgs {
+  prepared: PreparedFunding;
+  wallet: WalletClient;
+  publicClient: PublicClient;
+  marginSeconds?: bigint;
+  /** Confirmations to wait for each receipt. Default 1. */
+  confirmations?: number;
+  /** How long to wait for each receipt. Default 120000 ms. */
+  receiptTimeoutMs?: number;
+}
+
+/**
+ * Approve exactly ΣG to the verified escrow, then send the payer's `fund()`, and report the outcome from the escrow's
+ * own state: committed, unchanged or indeterminate (see the module comment). Throws a `FundingRefusal` only before
+ * its first broadcast; after that it always returns a result.
+ *
+ * Retries: after an indeterminate result, resolve with readFundedState (or wait for the earlier transactions) before
+ * retrying. While the payer has any transaction pending (its nonce at "pending" above "latest"), this refuses
+ * PAYER_TX_PENDING and sends nothing; once the escrow reads funded under this policy, it returns `committed` with
+ * `alreadyFunded: true` and sends nothing.
+ */
+export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingResult> {
+  const prepared = assertPrepared(args.prepared);
+  const { wallet, publicClient } = args;
+  const margin = args.marginSeconds ?? DEFAULT_MARGIN_SECONDS;
+  if (typeof margin !== "bigint" || margin < 0n) throw new TypeError("marginSeconds must be a non-negative bigint");
+  const opts = { confirmations: args.confirmations ?? 1, timeout: args.receiptTimeoutMs ?? 120_000 };
+  const account = wallet.account;
+  if (!account) refuse("PAYER_NOT_SIGNER", "the wallet has no account to send with");
+  if (!same(account.address, prepared.payer)) refuse("PAYER_NOT_SIGNER", `the wallet is ${account.address}; the policy's payer is ${prepared.payer}`);
+  await assertChain(wallet, publicClient, prepared.chainId);
+
+  // Pre-checks at one pinned block. A refusal here means nothing was sent.
+  let block: PinnedBlock;
+  try {
+    block = await pinBlock(publicClient);
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `pin the latest block: ${describeRevert(e)}`);
+  }
+  let code: Hex;
+  try {
+    code = await pinnedReader(publicClient, block.hash).code(prepared.escrow);
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `read the escrow's code: ${describeRevert(e)}`);
+  }
+  if (code === "0x") refuse("ESCROW_NOT_CREATED", `no clone at ${prepared.escrow} yet: the gateway creates it (factory.createEscrow) before funding`);
+  // reviewer-charlie L5: the approve's spender must run the real escrow code, the EIP-1167 clone of the implementation
+  // the pinned factory reported live at prepare (prepared.implementation; an immutable, FAC:34). Checked before the
+  // funding state is read, so other code at this address can never short-circuit to "already funded".
+  if (!same(code, cloneRuntimeCode(prepared.implementation))) {
+    refuse("DEPLOYMENT_MISMATCH", `the code at ${prepared.escrow} is not the EIP-1167 clone of the pinned implementation ${prepared.implementation}`);
+  }
+  const before = await fundedStateAt(publicClient, block, prepared);
+  if (before.kind === "funded_ours") {
+    return { outcome: "committed", alreadyFunded: true, stage: "precheck", readBack: before, detail: "already funded under this policy; nothing was sent" };
+  }
+  if (before.kind === "other") refuse("ALREADY_FUNDED", before.detail);
+  if (before.kind === "unreadable") refuse("LIVE_CHECK_FAILED", before.detail);
+  checkTiming(prepared, block.timestamp, margin);
+
+  // reviewer-charlie L7: retry safety. After an indeterminate result the earlier approve or fund() may still be in
+  // flight, and sending again would re-approve and re-send: fund #2 reverts AlreadySealed once fund #1 lands, but its
+  // gas is spent, and an approve that lands after the funding leaves a standing allowance. So nothing is sent while the
+  // payer has a pending transaction: its nonce at "pending" above its nonce at "latest". "pending" is read first, so a
+  // transaction that mines between the two reads is not counted as pending. This sees only what the read client's
+  // node knows: a transaction broadcast through another node may not be in its pool yet.
+  let pendingNonce: number;
+  let latestNonce: number;
+  try {
+    pendingNonce = await publicClient.getTransactionCount({ address: prepared.payer, blockTag: "pending" });
+    latestNonce = await publicClient.getTransactionCount({ address: prepared.payer, blockTag: "latest" });
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `read the payer's nonce: ${describeRevert(e)}`);
+  }
+  if (pendingNonce > latestNonce) {
+    refuse(
+      "PAYER_TX_PENDING",
+      `the payer has ${pendingNonce - latestNonce} transaction(s) pending (nonce ${pendingNonce} at pending, ${latestNonce} at latest): resolve the earlier run with readFundedState, or wait for those transactions, before retrying`,
+    );
+  }
+
+  // 1. approve(escrow, ΣG), from the frozen prepared values: the verified escrow, exactly ΣG.
+  const approveData = encodeFunctionData({ abi: ERC20_ABI, functionName: "approve", args: [prepared.escrow, prepared.totalGross] });
+  try {
+    await publicClient.call({ account: prepared.payer, to: prepared.usdc, data: approveData });
+  } catch (e) {
+    refuse("SIMULATION_REVERTED", `approve(${prepared.escrow}, ${prepared.totalGross}) would revert: ${describeRevert(e)}`);
+  }
+  const approveChain = await chainForSend(wallet, prepared.chainId);
+  const approve = await sendAndWait(wallet, publicClient, approveChain, prepared.usdc, approveData, opts);
+  const approveTx = approve.kind === "not_sent" ? undefined : approve.txHash;
+  const stopAtApprove = async (approve: SendResult, why: string, allowance?: bigint | "unreadable"): Promise<FundingResult> => {
+    const readBack = await readFundedState({ publicClient, prepared });
+    // A known successful approve changes token state, but fund() was certainly not attempted. An unresolved
+    // approve keeps the whole run indeterminate, even while the escrow currently reads unfunded.
+    const fundingSend: SendResult = approve.kind === "mined" && approve.status === "success"
+      ? { kind: "not_sent", reason: why }
+      : approve;
+    return {
+      outcome: classifyFunding(fundingSend, readBack.kind),
+      alreadyFunded: false,
+      stage: "approve",
+      approve,
+      approveTx,
+      allowance,
+      readBack,
+      detail: `${why}; fund() was not sent`,
+    };
+  };
+  if (approve.kind !== "mined") return stopAtApprove(approve, `the approve's outcome is ${approve.kind}: ${approve.reason}`);
+  if (approve.status !== "success") return stopAtApprove(approve, `the approve ${approve.txHash} reverted`);
+  let allowance: bigint | "unreadable";
+  try {
+    allowance = await pinnedReader(publicClient, approve.blockHash).read<bigint>(prepared.usdc, ERC20_ABI, "allowance", [prepared.payer, prepared.escrow]);
+  } catch {
+    allowance = "unreadable";
+  }
+  if (allowance !== prepared.totalGross) {
+    return stopAtApprove(approve, `the allowance read back at the approve's block is ${allowance}, not ΣG ${prepared.totalGross}`, allowance);
+  }
+
+  // 2. fund(configs, {expiry, payerSignature: 0x, operatorSignature}): the exact args the escrow verifies.
+  const fundData = encodeFunctionData({
+    abi: ESCROW_ABI,
+    functionName: "fund",
+    args: [
+      prepared.configs.map((c) => ({ ...c, payouts: c.payouts.map((p) => ({ recipient: p.recipient, amount: p.amount })) })),
+      { expiry: prepared.expiry, payerSignature: "0x", operatorSignature: prepared.operatorSignature },
+    ],
+  });
+  try {
+    await publicClient.request({
+      method: "eth_call",
+      params: [
+        { from: prepared.payer, to: prepared.escrow, data: fundData },
+        { blockHash: approve.blockHash, requireCanonical: true },
+      ],
+    } as never);
+  } catch (e) {
+    const why = describeRevert(e);
+    const readBack = await readFundedState({ publicClient, prepared });
+    return {
+      outcome: classifyFunding({ kind: "not_sent", reason: why }, readBack.kind),
+      alreadyFunded: false,
+      stage: "fund",
+      approve,
+      approveTx,
+      allowance,
+      readBack,
+      detail: `fund() simulation could not complete at the approve's block ${approve.blockHash} (${why}); it was not sent. The approve stands: allowance ${prepared.totalGross} to the escrow`,
+    };
+  }
+  let fund: SendResult;
+  try {
+    const fundChain = await chainForSend(wallet, prepared.chainId);
+    fund = await sendAndWait(wallet, publicClient, fundChain, prepared.escrow, fundData, opts);
+  } catch (e) {
+    // The approve already happened, so a send-time chain refusal is a result; this fund() was never sent.
+    fund = { kind: "not_sent", reason: e instanceof Error ? e.message : String(e) };
+  }
+  const readBack =
+    fund.kind === "mined"
+      ? await readFundedState({ publicClient, prepared, blockHash: fund.blockHash })
+      : await readFundedState({ publicClient, prepared });
+  const outcome = classifyFunding(fund, readBack.kind);
+  return {
+    outcome,
+    alreadyFunded: false,
+    stage: "fund",
+    approve,
+    approveTx,
+    allowance,
+    fundTx: fund.kind === "not_sent" ? undefined : fund.txHash,
+    readBack,
+    detail:
+      fund.kind === "mined"
+        ? `fund() ${fund.txHash} mined (${fund.status}); read back at its block: ${readBack.detail}`
+        : `${fund.reason}; read back at the latest block: ${readBack.detail}`,
+  };
+}
