@@ -17,8 +17,8 @@
  *     These handlers can therefore have storage effects on HEAD too.
  *   - Public requests return before apiKeyId is set, so keyed HEAD requests
  *     to the newly public twins skip scopeChecker, as their public GETs do.
- *     scopeChecker and the x402/MPP gates are later onRequest hooks, before
- *     body parsing; a limited key can be refused before DHT's route-level 501.
+ *     scopeChecker is a later onRequest hook, before body parsing; a limited
+ *     key can be refused before DHT's route-level 501.
  *   - A prefix or regex entry can only be a read.
  *   - A write is public only as an EXACT public-by-design entry with a
  *     one-line `why`.
@@ -48,27 +48,27 @@ import { resolveSession } from "../auth/siwe-auth.js";
 
 /** A public read: HEAD follows GET unless explicitly kept authenticated. */
 export interface PublicRead {
-  methods: readonly ["GET"];
-  match: "prefix" | "exact" | "regex";
+  readonly methods: readonly ["GET"];
+  readonly match: "prefix" | "exact" | "regex";
   /** prefix and exact: a path; regex: an anchored RegExp. */
-  path: string | RegExp;
+  readonly path: string | RegExp;
   /** Default: follow-get. Artifact detail needs authenticated SIWE identity on HEAD. */
-  head?: "follow-get" | "authenticated";
-  why: string;
+  readonly head?: "follow-get" | "authenticated";
+  readonly why: string;
 }
 
 /** A public-by-design write: POST on one EXACT path, and why a caller with no key must reach it. */
 export interface PublicWrite {
-  methods: readonly ["POST"];
-  match: "exact";
-  path: string;
-  why: string;
+  readonly methods: readonly ["POST"];
+  readonly match: "exact";
+  readonly path: string;
+  readonly why: string;
 }
 
 export type PublicRoute = PublicRead | PublicWrite;
 
-const GET = ["GET"] as const;
-const POST = ["POST"] as const;
+const GET = Object.freeze(["GET"] as const);
+const POST = Object.freeze(["POST"] as const);
 
 // ── Public READS: prefixes (GET; segment-anchored, see pathMatches) ──
 const PUBLIC_READ_PREFIXES: PublicRead[] = [
@@ -170,12 +170,12 @@ const PUBLIC_BY_DESIGN_WRITES: PublicWrite[] = [
 ];
 
 /** The entire public allowlist. No other /api/ path skips apiGate. */
-export const PUBLIC_ROUTES: readonly PublicRoute[] = [
+export const PUBLIC_ROUTES: readonly PublicRoute[] = Object.freeze([
   ...PUBLIC_READ_PREFIXES,
   ...PUBLIC_READ_EXACT,
   ...PUBLIC_READ_REGEX,
   ...PUBLIC_BY_DESIGN_WRITES,
-];
+].map((entry) => Object.freeze(entry)));
 
 function pathMatches(entry: PublicRoute, path: string): boolean {
   if (entry.match === "regex") return (entry.path as RegExp).test(path);

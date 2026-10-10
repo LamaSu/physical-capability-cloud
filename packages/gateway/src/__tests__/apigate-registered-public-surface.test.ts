@@ -207,7 +207,8 @@ function intersectsEntry(route: RegisteredRoute, entry: PublicRoute): Intersecti
 function templateIntersections(routes: RegisteredRoute[], entries: readonly PublicRoute[]): string[] {
   const results: string[] = [];
   for (const route of routes) {
-    if (!route.url.startsWith("/api/") || !/[:*]/.test(route.url)) continue;
+    const first = route.url.split("/")[1] ?? "";
+    if (!(route.url.startsWith("/api/") || first.includes(":")) || !/[:*]/.test(route.url)) continue;
     const matches = entries.map((entry) => intersectsEntry(route, entry));
     const result = matches.includes("INTERSECTS") ? "INTERSECTS" : matches.includes("AMBIGUOUS") ? "AMBIGUOUS" : "DISJOINT";
     if (result !== "DISJOINT") results.push(`${route.method} ${route.url} ${result}`);
@@ -484,6 +485,11 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
 describe("N43: the registered /api/* surface the gate's allowlist opens", () => {
   it("DECLARATIONS: methods, HEAD policy, match, literal path, regex source/flags and why are pinned", () => {
     expect(declarations).toBeInstanceOf(Array);
+    expect(Object.isFrozen(declarations)).toBe(true);
+    for (const entry of declarations) {
+      expect(Object.isFrozen(entry)).toBe(true);
+      expect(Object.isFrozen(entry.methods)).toBe(true);
+    }
     expect(normalizedDeclarations(declarations)).toEqual(EXPECTED_DECLARATIONS);
   });
 
@@ -522,6 +528,30 @@ describe("N43: the registered /api/* surface the gate's allowlist opens", () => 
       expect(patched).toEqual(EXPECTED_PUBLIC_API_SURFACE);
       const intersections = templateIntersections([...bootRoutes, ...fixtureRoutes], declarations);
       expect(intersections).toContain("GET /api/:section/__n43_probe INTERSECTS");
+      expect(() => expect(intersections).toEqual(EXPECTED_TEMPLATE_INTERSECTIONS)).toThrow();
+    } finally {
+      await fixtureApp.close();
+    }
+  });
+
+  it("F2 root parameter registration: an api-valued section must fail a template pin", async () => {
+    const cursor = registered.length;
+    const fixtureApp = (await import("fastify")).default();
+    try {
+      const { apiGate } = await import("../middleware/api-gate.js");
+      await fixtureApp.register(apiGate);
+      fixtureApp.get("/:section/dht/__n43_probe", async () => ({ probe: true }));
+      await fixtureApp.ready();
+      const fixtureRoutes = registered.slice(cursor);
+      const fixture = fixtureRoutes.find((route) => route.method === "GET")!;
+      expect(fixture).toEqual({ method: "GET", url: "/:section/dht/__n43_probe" });
+      expect(isPublicRoute("/api/dht/__n43_probe", "GET")).toBe(true);
+      expect(isPublic(fixture)).toBe(false);
+      const res = await fixtureApp.inject({ method: "GET", url: "/api/dht/__n43_probe" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ probe: true });
+      const intersections = templateIntersections([...bootRoutes, ...fixtureRoutes], declarations);
+      expect(intersections).toContain("GET /:section/dht/__n43_probe INTERSECTS");
       expect(() => expect(intersections).toEqual(EXPECTED_TEMPLATE_INTERSECTIONS)).toThrow();
     } finally {
       await fixtureApp.close();
