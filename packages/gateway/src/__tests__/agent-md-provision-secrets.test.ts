@@ -841,7 +841,7 @@ sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
   spawnSync("git", ["init", "-q"], { cwd: dir });
   mkdirSync(join(dir, ".pcc"), { mode: 0o755 });
   writeFileSync(join(dir, ".pcc/provision-request.json"), JSON.stringify({ email: "fixture@example.com" }));
-  const run = (extra: Record<string, string> = {}) => spawnSync("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], {
+  const run = (extra: Record<string, string | undefined> = {}) => spawnSync("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], {
     cwd: dir, env: { ...process.env, PCC_BASE: "https://fixture.invalid", PATH: `${bin}:${process.env.PATH}`, ...extra },
     encoding: "utf8", timeout: 15_000,
   });
@@ -849,6 +849,46 @@ sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
 }
 
 describe("F2: capture fails closed and never overwrites credentials", () => {
+  it.each([undefined, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#frag", "https://x.example/white space"])("N3: refuses invalid PCC_BASE %s before creating private state", (base) => {
+    const f = captureFixture();
+    try {
+      const result = f.run({ PCC_BASE: base });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("Invalid gateway base; request refused.\n");
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+      expect(readdirSync(join(f.dir, ".pcc"))).toEqual(["provision-request.json"]);
+      expect(statSync(join(f.dir, ".pcc")).mode & 0o777).toBe(0o755);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["https://fixture.invalid", "https://fixture.invalid:4310/api", "http://127.0.0.1:4310", "http://[::1]:4310"])("N3: accepts assigned gateway base %s", (base) => {
+    const f = captureFixture();
+    try { expect(f.run({ PCC_BASE: base }).status).toBe(0); }
+    finally { f.cleanup(); }
+  });
+
+  it.each([1, 3, 6, 7])("N3: curl exit %s removes unissued staging and permits one rerun", (code) => {
+    const f = captureFixture();
+    try {
+      const result = f.run({ FIXTURE_EXIT: String(code) });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("Provision request not sent; no key was issued.\n");
+      expect(readdirSync(join(f.dir, ".pcc"))).toEqual(["provision-request.json"]);
+      expect(f.run().status).toBe(0);
+    } finally { f.cleanup(); }
+  });
+
+  it.each([28, 56])("N3: curl exit %s preserves capture for possible issuance", (code) => {
+    const f = captureFixture();
+    try {
+      const result = f.run({ FIXTURE_EXIT: String(code) });
+      expect(result.status).toBe(1);
+      const captures = readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("capture."));
+      expect(captures).toHaveLength(1);
+      expect(existsSync(join(f.dir, ".pcc", captures[0], "ed25519-private.pem"))).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
   it("N1: preserves an exclude rule without a trailing newline", () => {
     const f = captureFixture();
     try {

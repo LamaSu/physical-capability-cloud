@@ -75,6 +75,15 @@ import os
 if any(os.path.lexists(".pcc/" + n) for n in ("provision.json", "api-key", "auth.header")): raise SystemExit(1)
 if any(n.startswith("capture.") for n in os.listdir(".pcc")): raise SystemExit(1)
 PY
+python3 - <<'PY' 2>/dev/null || fail 'Invalid gateway base file; request refused.'
+import os, re, stat, sys
+from pathlib import Path
+from urllib.parse import urlsplit
+p = Path(".pcc/base"); s = p.lstat()
+if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid(): raise SystemExit(1)
+b = p.read_bytes().decode().rstrip("\n"); u = urlsplit(b)
+(b and not b.endswith("/") and not re.search(r"[\s@?#]", b) and (u.port is None or 1 <= u.port <= 65535) and ((u.scheme == "https" and re.fullmatch(r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:]+\])(?::[0-9]+)?", u.netloc)) or (u.scheme == "http" and not u.path and re.fullmatch(r"(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?", u.netloc)))) or sys.exit(1)
+PY
 python3 - <<'PY' 2>/dev/null || fail 'Invalid operator input or public key; request refused.'
 import json, os, re, stat
 from pathlib import Path
@@ -129,7 +138,9 @@ if "name" in operator: request["name"] = operator["name"]
 with open(Path(sys.argv[1]) / "provision-request.json", "x") as f: json.dump(request, f)
 PY
 request_started=1
-if ! http_status=$(curl -s --connect-timeout 15 --max-time 600 -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' --data-binary @"$capture_dir/provision-request.json" --output "$capture_dir/provision.json" --dump-header "$capture_dir/response.headers" --write-out '%{http_code}' 2> "$capture_dir/curl.stderr"); then
+if http_status=$(curl -s --connect-timeout 15 --max-time 600 -X POST "$(cat .pcc/base)/api/auth/provision" -H 'Content-Type: application/json' --data-binary @"$capture_dir/provision-request.json" --output "$capture_dir/provision.json" --dump-header "$capture_dir/response.headers" --write-out '%{http_code}' 2> "$capture_dir/curl.stderr"); then :; else
+    curl_status=$?
+    case "$curl_status" in 1|3|6|7) request_started=0; fail 'Provision request not sent; no key was issued.';; esac
     fail 'Provision request failed or timed out; a key may have been issued. Keep the private capture, find the key and validate it, then rotate it if needed before retrying.'
 fi
 if [ "$http_status" != 201 ]; then

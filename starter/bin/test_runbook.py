@@ -603,6 +603,67 @@ os.link = record_link
         self.assertFalse(list(self.private.glob("capture.*")))
         self.assertFalse((self.private / "curl-called").exists())
 
+    def test_invalid_gateway_base_file_fails_before_staging_or_curl(self):
+        import shutil
+        for base in (None, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#part", "https://x.example/a b"):
+            with self.subTest(base=base):
+                path = self.private / "base"
+                if base is None: path.unlink()
+                else: path.write_text(base + "\n")
+                result = self.run_capture()
+                try:
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stderr, "Invalid gateway base file; request refused.\n")
+                    self.assert_not_published()
+                    self.assertFalse(list(self.private.glob("capture.*")))
+                    self.assertFalse((self.private / "curl-called").exists())
+                finally:
+                    for name in ("provision.json", "api-key", "auth.header", "curl-called"):
+                        path = self.private / name
+                        if path.exists(): path.unlink()
+                    for capture in self.private.glob("capture.*"): shutil.rmtree(capture)
+
+    def test_https_and_loopback_gateway_base_files_are_accepted(self):
+        for base in ("https://fixture.invalid", "http://127.0.0.1:4310", "http://[::1]:4310"):
+            with self.subTest(base=base):
+                (self.private / "base").write_text(base + "\n\n")
+                result = self.run_capture()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                options = json.loads((self.private / "curl-options.json").read_text())
+                self.assertIn(base + "/api/auth/provision", options)
+                self.run_archive()
+
+    def assert_unsent_curl_failure_can_retry(self, code):
+        result = self.run_capture(MOCK_CURL_EXIT=str(code))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Provision request not sent; no key was issued.\n")
+        self.assert_not_published()
+        self.assertFalse(list(self.private.glob("capture.*")))
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_curl_exit_1_is_unsent_and_can_retry(self):
+        self.assert_unsent_curl_failure_can_retry(1)
+
+    def test_curl_exit_3_is_unsent_and_can_retry(self):
+        self.assert_unsent_curl_failure_can_retry(3)
+
+    def test_curl_exit_6_is_unsent_and_can_retry(self):
+        self.assert_unsent_curl_failure_can_retry(6)
+
+    def test_curl_exit_7_is_unsent_and_can_retry(self):
+        self.assert_unsent_curl_failure_can_retry(7)
+
+    def test_curl_exit_28_and_56_preserve_a_possible_issuance_capture(self):
+        for code in (28, 56):
+            with self.subTest(code=code):
+                result = self.run_capture(MOCK_CURL_EXIT=str(code))
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("a key may have been issued", result.stderr)
+                self.assert_not_published()
+                self.assertEqual(len(list(self.private.glob("capture.*"))), 1)
+                self.run_archive()
+
     def test_capture_setup_failure_removes_unissued_staging_and_can_retry(self):
         stub = self.bin / "git"
         stub.write_text('#!/usr/bin/env python3\nimport os, sys\nif sys.argv[1] == "check-ignore" and sys.argv[-1].startswith(".pcc/capture."): sys.exit(1)\nos.execv(' + repr(self.git) + ', [' + repr(self.git) + '] + sys.argv[1:])\n')
