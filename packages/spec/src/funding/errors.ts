@@ -8,6 +8,10 @@
 export type FundingRefusalCode =
   /** The payload is not the `pcc.vnext.buyer-funding.prepare.v1` shape: a key, type or format is wrong. */
   | "BAD_PAYLOAD"
+  /** The caller's independent buyer intent is missing, malformed or lacks an explicit commitment/waiver. No RPC ran. */
+  | "BAD_EXPECTATION"
+  /** A coherent funding policy disagrees with the caller's independent buyer intent. */
+  | "INTENT_MISMATCH"
   /** The payload is an x402 payment (or asks for an EIP-3009/EIP-2612 authorization): never a way to fund (plan G10). */
   | "X402_REFUSED"
   /** The wallet's (or the read client's) chain is not the payload's chain. */

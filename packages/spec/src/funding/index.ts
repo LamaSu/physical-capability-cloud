@@ -4,7 +4,7 @@
  * viem is an optional peer of `@pcc/spec`: install viem ^2 alongside it, or importing this subpath fails with
  * ERR_MODULE_NOT_FOUND.
  *
- *   const prepared = await prepareFunding({ payload, wallet, publicClient, quote: { maxTotalGross }, pins });
+ *   const prepared = await prepareFunding({ payload, wallet, publicClient, quote: { maxTotalGross }, expect, pins });
  *   const acceptance = await signJobPolicy({ prepared, wallet });   // optional for a payer-sent fund()
  *   const result = await approveAndFund({ prepared, wallet, publicClient });
  *   if (result.outcome !== "committed") { ... }                     // "indeterminate" is NOT success
@@ -15,9 +15,12 @@
  *
  * A gateway (or anything else) never gets the buyer's key: the SDK signs and sends from the caller's own wallet,
  * and only after verifying every term. There is no x402 path: x402 cannot fund a V-next escrow (plan G10).
+ * Supply expect from your own submit record, operator choice and payee list. Each "unchecked" waiver is exposed
+ * in prepared.unchecked; it explicitly leaves that commitment unbound by the buyer.
  */
 export { prepareFunding, DEFAULT_MARGIN_SECONDS } from "./prepare.js";
-export type { PrepareFundingArgs, PreparedFunding } from "./prepare.js";
+export type { PrepareFundingArgs, PreparedFunding, FundingExpectations, UncheckedFundingField } from "./prepare.js";
+export { jobIdHashOf } from "./vnext.js";
 export { signJobPolicy } from "./sign.js";
 export { approveAndFund, readFundedState, classifyFunding } from "./fund.js";
 export type { ApproveAndFundArgs, FundedState, FundedStateKind, FundingOutcome, FundingResult, SendResult } from "./fund.js";

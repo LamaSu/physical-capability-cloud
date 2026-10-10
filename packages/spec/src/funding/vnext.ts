@@ -28,6 +28,11 @@ import {
 
 const k = (preimage: string): Hex => keccak256(stringToHex(preimage));
 
+/** The compiler's `jobIdHash` convention: keccak256 of the canonical job id's UTF-8 bytes. */
+export function jobIdHashOf(jobId: string): Hex {
+  return keccak256(stringToHex(jobId));
+}
+
 /** ABI doc §1. */
 export const SETTLEMENT_UNIT_DOMAIN = k("PCC:vnext:settlement-unit:v1");
 export const POLICY_SALT_DOMAIN = k("PCC:vnext:policy-salt:v2");

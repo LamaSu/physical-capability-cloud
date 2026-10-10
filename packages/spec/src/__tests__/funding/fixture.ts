@@ -31,6 +31,7 @@ import {
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { FUNDING_PREPARE_SCHEMA } from "../../funding/payload.js";
+import type { FundingExpectations } from "../../funding/prepare.js";
 import {
   ERC20_ABI,
   ESCROW_ABI,
@@ -58,7 +59,8 @@ export const FACTORY: Address = "0x00000000000000000000000000000000000fac01";
 export const IMPLEMENTATION: Address = "0x00000000000000000000000000000000000001a1";
 export const TOKEN: Address = "0x0000000000000000000000000000000000005dc1";
 export const OTHER: Address = "0x0000000000000000000000000000000000000bad";
-const FEE_RECIPIENT: Address = "0x4444444444444444444444444444444444444444";
+export const FEE_RECIPIENT: Address = "0x4444444444444444444444444444444444444444";
+export const JOB_ID = "pcc:funding-test:job";
 /** secp256k1's group order: `n - s` is the high-s twin of a signature. */
 export const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 
@@ -110,11 +112,17 @@ export interface FixtureOptions {
   reclaimAt?: bigint[];
   usdc?: Address;
   factory?: Address;
+  jobId?: string;
+  termsHash?: Hex;
+  acceptedPolicyDigest?: Hex;
+  /** Change local configs before rebuilding all commitments and signing with the operator's key. */
+  configure?: (configs: UnitConfig[]) => void;
 }
 
 export interface Fixture {
   payer: PrivateKeyAccount;
   operator: PrivateKeyAccount;
+  jobId: string;
   chainId: bigint;
   factory: Address;
   usdc: Address;
@@ -139,9 +147,11 @@ export async function buildFixture(o: FixtureOptions = {}, parties = { payer: ne
   const usdc = o.usdc ?? TOKEN;
   const expiry = o.expiry ?? NOW + DAY;
   const configs = (o.reclaimAt ?? [NOW + 30n * DAY, NOW + 60n * DAY]).map((r, i) => unit(i, r, operator.address));
-  const jobIdHash = keccak256(stringToHex("pcc:funding-test:job"));
-  const termsHash = keccak256(stringToHex("pcc:funding-test:terms"));
-  const acceptedPolicyDigest = keccak256(stringToHex("pcc:funding-test:accepted"));
+  o.configure?.(configs);
+  const jobId = o.jobId ?? JOB_ID;
+  const jobIdHash = keccak256(stringToHex(jobId));
+  const termsHash = o.termsHash ?? keccak256(stringToHex("pcc:funding-test:terms"));
+  const acceptedPolicyDigest = o.acceptedPolicyDigest ?? keccak256(stringToHex("pcc:funding-test:accepted"));
   const policyNonce = 1n;
   const root = prePolicyRoot(configs);
   const salt = policySalt({ payer: payer.address, operator: operator.address, jobIdHash, termsHash, policyNonce, prePolicyRoot: root, acceptedPolicyDigest });
@@ -170,6 +180,7 @@ export async function buildFixture(o: FixtureOptions = {}, parties = { payer: ne
   return {
     payer,
     operator,
+    jobId,
     chainId,
     factory,
     usdc,
@@ -474,3 +485,17 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
 
 /** The pins a test passes for the fake chain (no built-in pin exists for 31337). */
 export const testPins = (fx: Fixture) => ({ [fx.chainId.toString()]: { usdc: fx.usdc, factory: fx.factory } });
+
+/** Buyer-side records for the fixture's intended policy; never read its wire payload. */
+export const testExpect = (fx: Fixture): FundingExpectations => ({
+  jobId: fx.jobId,
+  operator: fx.operator.address,
+  payees: [fx.operator.address],
+  maxFeeBps: 235,
+  feeRecipients: [FEE_RECIPIENT],
+  tiers: [0],
+  latestReclaimAt: fx.configs.reduce((latest, c) => c.reclaimAt > latest ? c.reclaimAt : latest, 0n),
+  termsHash: fx.message.termsHash,
+  acceptedPolicyDigest: fx.message.acceptedPolicyDigest,
+  compositionRoots: [zeroHash],
+});

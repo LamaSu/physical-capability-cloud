@@ -4,9 +4,10 @@
  * refusal must sign and send nothing.
  */
 import { describe, expect, it } from "vitest";
-import { getAbiItem, getAddress, hashTypedData, maxUint256, toFunctionSelector, zeroHash, type Hex, type LocalAccount } from "viem";
+import { getAbiItem, getAddress, hashTypedData, maxUint256, recoverAddress, toFunctionSelector, zeroAddress, zeroHash, type Hex, type LocalAccount } from "viem";
 import { FundingRefusal, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs } from "../../funding/index.js";
 import { CIRCLE_USDC } from "../../funding/pins.js";
+import { parsePreparePayload } from "../../funding/payload.js";
 import { ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
 import {
   DAY,
@@ -20,6 +21,8 @@ import {
   newAccount,
   parityV,
   testPins,
+  testExpect,
+  FEE_RECIPIENT,
   type FixtureOptions,
 } from "./fixture.js";
 
@@ -44,6 +47,7 @@ async function setup(o: FixtureOptions = {}) {
       wallet: chain.wallet(),
       publicClient: chain.publicClient,
       quote: { maxTotalGross: fx.totalGross },
+      expect: testExpect(fx),
       pins: testPins(fx),
       ...extra,
     });
@@ -107,6 +111,186 @@ describe("prepareFunding: a consistent payload", () => {
     w.typedData.message.payer = getAddress(w.typedData.message.payer);
     expect((await prepare(w)).escrow).toBe(fx.escrow);
   });
+});
+
+describe("buyer intent from the caller's own records", () => {
+  it("binds every matching expectation, including an optional exact jobPolicyHash", async () => {
+    const { fx, prepare } = await setup();
+    const own = { ...testExpect(fx), jobPolicyHash: fx.jobPolicyHash };
+    const prepared = await prepare(fx.wire(), { expect: own });
+    expect(prepared.expect).toEqual(own);
+    expect(prepared.unchecked).toEqual([]);
+    expect(prepared.expect).not.toBe(own);
+    expect(Object.isFrozen(prepared.expect)).toBe(true);
+    for (const field of ["payees", "feeRecipients", "tiers", "compositionRoots"] as const) {
+      expect(Object.isFrozen(prepared.expect[field])).toBe(true);
+      expect(prepared.expect[field]).not.toBe(own[field]);
+    }
+    expect(Object.isFrozen(prepared.unchecked)).toBe(true);
+  });
+
+  it("snapshots expectations before its first await without freezing the caller's records", async () => {
+    const { fx, prepare } = await setup();
+    const own = testExpect(fx);
+    const pending = prepare(fx.wire(), { expect: own });
+    (own.payees as string[])[0] = OTHER;
+    (own.feeRecipients as string[])[0] = OTHER;
+    (own.tiers as number[])[0] = 3;
+    (own.compositionRoots as Hex[])[0] = `0x${"11".repeat(32)}`;
+    own.jobId = "a different job";
+    const prepared = await pending;
+    expect(prepared.expect).toEqual(testExpect(fx));
+    expect(Object.isFrozen(own)).toBe(false);
+  });
+
+  const substitutions: Array<[string, FixtureOptions, "same" | "other"]> = [
+    ["jobId", { jobId: "pcc:funding-test:other-job" }, "same"],
+    ["operator", {}, "other"],
+    ["payees", { configure: (cs) => {
+      const c = cs[1]!; const amount = c.payouts[0]!.amount / 2n;
+      c.payouts[0]!.amount -= amount; c.payouts = [...c.payouts, { recipient: OTHER, amount }];
+    } }, "same"],
+    ["maxFeeBps", { configure: (cs) => {
+      const c = cs[1]!; c.feeBps = 236; c.f = c.g * 236n / 10_000n; c.n = c.g - c.f; c.payouts[0]!.amount = c.n;
+    } }, "same"],
+    ["feeRecipients", { configure: (cs) => { cs[1]!.feeRecipient = OTHER; } }, "same"],
+    ["tiers.requiredTier", { configure: (cs) => { cs[1]!.requiredTier = 1; } }, "same"],
+    // Still hash-coherent and correctly signed; the SDK must bind requestedTier independently even before ESC checks equality.
+    ["tiers.requestedTier", { configure: (cs) => { cs[1]!.requestedTier = 1; } }, "same"],
+    ["latestReclaimAt", { configure: (cs) => { cs[1]!.reclaimAt += 1n; } }, "same"],
+    ["termsHash", { termsHash: `0x${"11".repeat(32)}` }, "same"],
+    ["acceptedPolicyDigest", { acceptedPolicyDigest: `0x${"22".repeat(32)}` }, "same"],
+    ["compositionRoots", { configure: (cs) => { cs[1]!.compositionRoot = `0x${"33".repeat(32)}`; cs[1]!.compositionSchemaVersion = 1; } }, "same"],
+  ];
+  for (const [field, options, signer] of substitutions) {
+    it(`INTENT_MISMATCH: recompiled and operator-signed substitution of ${field}`, async () => {
+      const intended = await buildFixture();
+      const own = testExpect(intended);
+      const changed = await buildFixture(signer === "other" ? {
+        ...options, configure: (cs) => { for (const c of cs) c.payouts[0]!.recipient = intended.operator.address; },
+      } : options, { payer: intended.payer, operator: signer === "other" ? newAccount() : intended.operator });
+      // The adversarial payload's hashes, clone and signature are freshly rebuilt; no stale tampering explains refusal.
+      expect(hashTypedData(parsePreparePayload(changed.wire()).typedData as never)).toBe(changed.digest);
+      expect(await recoverAddress({ hash: changed.digest, signature: changed.operatorSignature })).toBe(changed.operator.address);
+      const chain = makeChain(changed);
+      const result = prepareFunding({ payload: changed.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+        quote: { maxTotalGross: intended.totalGross }, pins: testPins(intended), expect: own });
+      await expect(result).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining(field.split(".")[0]!) });
+      const error = await result.catch((e: FundingRefusal) => e) as FundingRefusal;
+      const c = changed.configs[1]!;
+      const values: Record<string, readonly unknown[]> = {
+        jobId: [changed.message.jobIdHash, intended.message.jobIdHash],
+        operator: [changed.operator.address, own.operator], payees: [OTHER, own.payees[0]],
+        maxFeeBps: [c.feeBps, own.maxFeeBps], feeRecipients: [c.feeRecipient, own.feeRecipients[0]],
+        "tiers.requiredTier": [c.requiredTier, own.tiers[0]], "tiers.requestedTier": [c.requestedTier, own.tiers[0]],
+        latestReclaimAt: [c.reclaimAt, own.latestReclaimAt], termsHash: [changed.message.termsHash, own.termsHash],
+        acceptedPolicyDigest: [changed.message.acceptedPolicyDigest, own.acceptedPolicyDigest],
+        compositionRoots: [c.compositionRoot, own.compositionRoots[0]],
+      };
+      for (const value of values[field]!) expect(error.message).toContain(String(value));
+      expect(chain.sends()).toEqual([]);
+    });
+  }
+
+  it("INTENT_MISMATCH: an optional exact jobPolicyHash differs from the recomputed hash", async () => {
+    const { fx, prepare } = await setup();
+    await expect(prepare(fx.wire(), { expect: { ...testExpect(fx), jobPolicyHash: zeroHash } })).rejects.toMatchObject({
+      code: "INTENT_MISMATCH", message: expect.stringContaining(`jobPolicyHash is ${fx.jobPolicyHash}`),
+    });
+  });
+
+  for (const field of ["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const) {
+    it(`the explicit ${field} waiver is accepted and listed`, async () => {
+      const { fx, prepare } = await setup();
+      const prepared = await prepare(fx.wire(), { expect: { ...testExpect(fx), [field]: "unchecked" } });
+      expect(prepared.unchecked).toEqual([field]);
+      expect(prepared.expect[field]).toBe("unchecked");
+    });
+  }
+  it("lists all explicit waivers in a stable order", async () => {
+    const { fx, prepare } = await setup();
+    const prepared = await prepare(fx.wire(), { expect: { ...testExpect(fx), termsHash: "unchecked", acceptedPolicyDigest: "unchecked", compositionRoots: "unchecked" } });
+    expect(prepared.unchecked).toEqual(["termsHash", "acceptedPolicyDigest", "compositionRoots"]);
+  });
+
+  it("matches addresses and bytes by value regardless of hex letter case", async () => {
+    const { fx, prepare } = await setup();
+    const own = testExpect(fx);
+    own.operator = own.operator.toLowerCase() as never;
+    own.payees = [fx.operator.address.toLowerCase() as never];
+    own.termsHash = `0x${fx.message.termsHash.slice(2).toUpperCase()}`;
+    own.acceptedPolicyDigest = `0x${fx.message.acceptedPolicyDigest.slice(2).toUpperCase()}`;
+    expect((await prepare(fx.wire(), { expect: own })).unchecked).toEqual([]);
+  });
+
+  it("allows a match at any position in the buyer's sets and accepts the maximum fee ceiling", async () => {
+    const { fx, prepare } = await setup();
+    const own = testExpect(fx);
+    own.payees = [OTHER, fx.operator.address];
+    own.feeRecipients = [OTHER, FEE_RECIPIENT];
+    own.tiers = [3, 0];
+    own.compositionRoots = [`0x${"11".repeat(32)}`, zeroHash];
+    own.maxFeeBps = 10_000;
+    expect((await prepare(fx.wire(), { expect: own })).unchecked).toEqual([]);
+  });
+
+  it("zero fee units permit an empty feeRecipients set when maxFeeBps is zero", async () => {
+    const { fx, prepare } = await setup({ configure: (cs) => { for (const c of cs) {
+      c.feeBps = 0; c.f = 0n; c.n = c.g; c.feeRecipient = zeroAddress; c.payouts[0]!.amount = c.n;
+    } } });
+    expect((await prepare(fx.wire(), { expect: { ...testExpect(fx), maxFeeBps: 0, feeRecipients: [] } })).unchecked).toEqual([]);
+  });
+
+  it("binds feeRecipient when feeBps is positive even if its fee rounds to zero (ESC E3)", async () => {
+    const { fx, prepare } = await setup({ configure: (cs) => { const c = cs[1]!;
+      c.g = 5n; c.f = 0n; c.n = 5n; c.feeBps = 1; c.feeRecipient = OTHER; c.payouts[0]!.amount = 5n;
+    } });
+    await expect(prepare(fx.wire())).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("feeRecipients") });
+  });
+
+  const required = ["jobId", "operator", "payees", "maxFeeBps", "feeRecipients", "tiers", "latestReclaimAt", "termsHash", "acceptedPolicyDigest", "compositionRoots"];
+  const malformed: Array<[string, (own: any) => any]> = [
+    ...required.map((field): [string, (own: any) => any] => [`missing ${field}`, (own) => { delete own[field]; return own; }]),
+    ["missing expect", () => undefined], ["null expect", () => null], ["array expect", () => []],
+    ["class instance expect", (own) => Object.assign(new Date(), own)],
+    ["extra field", (own) => ({ ...own, maxFeesBps: 0 })],
+    ["numeric jobId", (own) => ({ ...own, jobId: 1 })], ["bad operator", (own) => ({ ...own, operator: "0x1234" })],
+    ["payees not an array", (own) => ({ ...own, payees: OTHER })], ["empty payees", (own) => ({ ...own, payees: [] })],
+    ["bad payee", (own) => ({ ...own, payees: ["0x1234"] })],
+    ["bad second payee", (own) => ({ ...own, payees: [...own.payees, "0x1234"] })],
+    ["sparse payees", (own) => ({ ...own, payees: Array(1) })],
+    ["maxFeeBps not a number", (own) => ({ ...own, maxFeeBps: "235" })],
+    ["negative maxFeeBps", (own) => ({ ...own, maxFeeBps: -1 })], ["excess maxFeeBps", (own) => ({ ...own, maxFeeBps: 10001 })],
+    ["fractional maxFeeBps", (own) => ({ ...own, maxFeeBps: 2.5 })], ["NaN maxFeeBps", (own) => ({ ...own, maxFeeBps: NaN })],
+    ["feeRecipients not an array", (own) => ({ ...own, feeRecipients: FEE_RECIPIENT })],
+    ["empty feeRecipients with a positive ceiling", (own) => ({ ...own, feeRecipients: [] })],
+    ["bad fee recipient", (own) => ({ ...own, feeRecipients: ["bad"] })],
+    ["bad second fee recipient", (own) => ({ ...own, feeRecipients: [...own.feeRecipients, "bad"] })],
+    ["sparse fee recipients", (own) => ({ ...own, feeRecipients: Array(1) })],
+    ["tiers not an array", (own) => ({ ...own, tiers: 0 })], ["empty tiers", (own) => ({ ...own, tiers: [] })],
+    ["string tier", (own) => ({ ...own, tiers: ["0"] })], ["fractional tier", (own) => ({ ...own, tiers: [0.5] })],
+    ["negative tier", (own) => ({ ...own, tiers: [-1] })], ["tier above ESC range", (own) => ({ ...own, tiers: [4] })],
+    ["sparse tiers", (own) => ({ ...own, tiers: Array(1) })],
+    ["bad second tier", (own) => ({ ...own, tiers: [0, "1"] })],
+    ["non-bigint latestReclaimAt", (own) => ({ ...own, latestReclaimAt: Number(own.latestReclaimAt) })],
+    ["negative latestReclaimAt", (own) => ({ ...own, latestReclaimAt: -1n })],
+    ["overflow latestReclaimAt", (own) => ({ ...own, latestReclaimAt: 1n << 256n })],
+    ["bad termsHash", (own) => ({ ...own, termsHash: "0x12" })],
+    ["bad acceptedPolicyDigest", (own) => ({ ...own, acceptedPolicyDigest: null })],
+    ["compositionRoots not an array", (own) => ({ ...own, compositionRoots: zeroHash })],
+    ["bad compositionRoot", (own) => ({ ...own, compositionRoots: ["0x12"] })],
+    ["sparse compositionRoots", (own) => ({ ...own, compositionRoots: Array(1) })],
+    ["bad second compositionRoot", (own) => ({ ...own, compositionRoots: [zeroHash, "0x12"] })],
+    ["bad jobPolicyHash", (own) => ({ ...own, jobPolicyHash: "unchecked" })],
+    ...["termsHash", "acceptedPolicyDigest", "compositionRoots"].map((field): [string, (own: any) => any] => [`misspelled ${field} waiver`, (own) => ({ ...own, [field]: "uncheckd" })]),
+  ];
+  for (const [name, mutate] of malformed) {
+    it(`BAD_EXPECTATION before any RPC: ${name}`, async () => {
+      const { fx, chain, prepare } = await setup();
+      await expect(prepare(fx.wire(), { expect: mutate(testExpect(fx)) })).rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+      expect(chain.state.log).toEqual([]);
+    });
+  }
 });
 
 describe("BAD_PAYLOAD: anything off the v1 schema, never repaired", () => {

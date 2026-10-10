@@ -29,7 +29,7 @@ import {
   type SendResult,
 } from "../../funding/index.js";
 import { ERC20_ABI, ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
-import { DAY, NOW, OTHER, buildFixture, cloneRuntime, makeChain, newAccount, revertWith, testPins, type FixtureOptions } from "./fixture.js";
+import { DAY, NOW, OTHER, buildFixture, cloneRuntime, makeChain, newAccount, revertWith, testExpect, testPins, type FixtureOptions } from "./fixture.js";
 
 const MARGIN = 300n;
 const TX = keccak256(stringToHex("tx")) as Hex;
@@ -50,6 +50,7 @@ async function setup(o: FixtureOptions = {}, chainOptions = { escrowCode: true }
   const chain = makeChain(fx, chainOptions);
   const prepared = await prepareFunding({
     payload: fx.wire(),
+    expect: testExpect(fx),
     wallet: chain.wallet(),
     publicClient: chain.publicClient,
     quote: { maxTotalGross: fx.totalGross },

@@ -13,6 +13,7 @@ import {
   getAddress,
   hexToBigInt,
   hexToNumber,
+  isAddress,
   recoverAddress,
   size,
   slice,
@@ -36,6 +37,7 @@ import {
   acceptanceDigest,
   domainSeparator,
   jobPolicyHash,
+  jobIdHashOf,
   jobPolicyTypedData,
   policyKey,
   policySalt,
@@ -51,6 +53,25 @@ import {
 /** Seconds the acceptance must outlive the latest block, and the slack kept above the 10-day reclaim floor. */
 export const DEFAULT_MARGIN_SECONDS = 300n;
 
+/** Buyer intent from the caller's own submit record, operator choice and payee list, never a gateway response. */
+export interface FundingExpectations {
+  jobId: string;
+  operator: Address;
+  payees: readonly Address[];
+  maxFeeBps: number;
+  feeRecipients: readonly Address[];
+  /** Accepted ESC assurance tiers, integers 0..3. Both requiredTier and requestedTier must belong. */
+  tiers: readonly number[];
+  /** Latest permitted reclaim time, in chain seconds. */
+  latestReclaimAt: bigint;
+  termsHash: Hex | "unchecked";
+  acceptedPolicyDigest: Hex | "unchecked";
+  compositionRoots: readonly Hex[] | "unchecked";
+  jobPolicyHash?: Hex;
+}
+
+export type UncheckedFundingField = "termsHash" | "acceptedPolicyDigest" | "compositionRoots";
+
 export interface PrepareFundingArgs {
   /** The gateway's prepare response, JSON-decoded (`pcc.vnext.buyer-funding.prepare.v1`). */
   payload: unknown;
@@ -60,6 +81,8 @@ export interface PrepareFundingArgs {
   publicClient: PublicClient;
   /** The buyer-approved quote: ΣG above it is refused. */
   quote: { maxTotalGross: bigint };
+  /** Required independent buyer intent; explicit "unchecked" waivers are recorded in PreparedFunding.unchecked. */
+  expect: FundingExpectations;
   /** Extra pins by chain id; required for the factory until a V-next deployment is pinned in this module. */
   pins?: FundingPins;
   marginSeconds?: bigint;
@@ -67,6 +90,10 @@ export interface PrepareFundingArgs {
 
 /** A payload that passed every check, with every value the SDK recomputed. Deep-frozen. */
 export interface PreparedFunding {
+  /** A frozen copy of the caller's independent intent, captured before any RPC call. */
+  readonly expect: Readonly<FundingExpectations>;
+  /** Explicitly waived commitments, for a buyer UI or agent to display. */
+  readonly unchecked: readonly UncheckedFundingField[];
   readonly chainId: bigint;
   readonly factory: Address;
   readonly implementation: Address;
@@ -104,6 +131,85 @@ export function assertPrepared(x: unknown): PreparedFunding {
 }
 
 const same = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+
+/** Validate and copy caller intent synchronously; no RPC or signature request precedes this. */
+function copyExpectations(raw: unknown): FundingExpectations {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(raw))) {
+    refuse("BAD_EXPECTATION", "expect must be a plain object");
+  }
+  const e = raw as Record<string, unknown>;
+  const required = ["jobId", "operator", "payees", "maxFeeBps", "feeRecipients", "tiers", "latestReclaimAt", "termsHash", "acceptedPolicyDigest", "compositionRoots"];
+  if (required.some((key) => !Object.prototype.hasOwnProperty.call(e, key)) ||
+      Object.keys(e).some((key) => !required.includes(key) && key !== "jobPolicyHash")) {
+    refuse("BAD_EXPECTATION", `expect must contain ${required.join(", ")}, with only jobPolicyHash optional`);
+  }
+  const address = (v: unknown, field: string): Address => {
+    if (typeof v !== "string" || !isAddress(v)) refuse("BAD_EXPECTATION", `expect.${field} is not an address`);
+    return v;
+  };
+  const addresses = (v: unknown, field: string, nonempty: boolean): Address[] => {
+    if (!Array.isArray(v) || (nonempty && v.length === 0)) refuse("BAD_EXPECTATION", `expect.${field} must be ${nonempty ? "a non-empty" : "an"} address array`);
+    // Array.from also validates sparse entries rather than silently skipping them.
+    return Array.from(v, (entry, i) => address(entry, `${field}[${i}]`));
+  };
+  const hash = (v: unknown, field: string): Hex => {
+    if (typeof v !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(v)) refuse("BAD_EXPECTATION", `expect.${field} is not a bytes32`);
+    return v as Hex;
+  };
+  if (typeof e.jobId !== "string") refuse("BAD_EXPECTATION", "expect.jobId must be a string");
+  const operator = address(e.operator, "operator");
+  const payees = addresses(e.payees, "payees", true);
+  if (typeof e.maxFeeBps !== "number" || !Number.isInteger(e.maxFeeBps) || e.maxFeeBps < 0 || e.maxFeeBps > 10_000) {
+    refuse("BAD_EXPECTATION", "expect.maxFeeBps must be an integer in [0, 10000]");
+  }
+  const feeRecipients = addresses(e.feeRecipients, "feeRecipients", e.maxFeeBps !== 0);
+  if (!Array.isArray(e.tiers) || e.tiers.length === 0) refuse("BAD_EXPECTATION", "expect.tiers must be a non-empty array");
+  const tiers = Array.from(e.tiers, (tier) => {
+    if (typeof tier !== "number" || !Number.isInteger(tier) || tier < 0 || tier > 3) refuse("BAD_EXPECTATION", "expect.tiers entries must be integers in [0, 3]");
+    return tier;
+  });
+  if (typeof e.latestReclaimAt !== "bigint" || e.latestReclaimAt < 0n || e.latestReclaimAt >= 1n << 256n) {
+    refuse("BAD_EXPECTATION", "expect.latestReclaimAt must be a non-negative uint256 bigint in chain seconds");
+  }
+  const termsHash = e.termsHash === "unchecked" ? e.termsHash : hash(e.termsHash, "termsHash");
+  const acceptedPolicyDigest = e.acceptedPolicyDigest === "unchecked" ? e.acceptedPolicyDigest : hash(e.acceptedPolicyDigest, "acceptedPolicyDigest");
+  let compositionRoots: readonly Hex[] | "unchecked";
+  if (e.compositionRoots === "unchecked") compositionRoots = e.compositionRoots;
+  else {
+    if (!Array.isArray(e.compositionRoots)) refuse("BAD_EXPECTATION", "expect.compositionRoots must be a bytes32 array or the literal unchecked");
+    compositionRoots = Array.from(e.compositionRoots, (root, i) => hash(root, `compositionRoots[${i}]`));
+  }
+  return { jobId: e.jobId, operator, payees, maxFeeBps: e.maxFeeBps, feeRecipients, tiers,
+    latestReclaimAt: e.latestReclaimAt, termsHash, acceptedPolicyDigest, compositionRoots,
+    ...(e.jobPolicyHash === undefined ? {} : { jobPolicyHash: hash(e.jobPolicyHash, "jobPolicyHash") }) };
+}
+
+function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex): void {
+  const m = p.typedData.message;
+  const display = (v: unknown): string => Array.isArray(v) ? `[${v.join(", ")}]` : String(v);
+  const mismatch = (field: string, got: unknown, want: unknown): never =>
+    refuse("INTENT_MISMATCH", `${field} is ${display(got)}; the buyer expects ${display(want)}`);
+  const expectedJob = jobIdHashOf(e.jobId);
+  if (!same(m.jobIdHash, expectedJob)) mismatch("jobId (message.jobIdHash)", m.jobIdHash, `${expectedJob} from jobId ${e.jobId}`);
+  if (!same(m.operator, e.operator)) mismatch("operator", m.operator, e.operator);
+  if (e.termsHash !== "unchecked" && !same(m.termsHash, e.termsHash)) mismatch("termsHash", m.termsHash, e.termsHash);
+  if (e.acceptedPolicyDigest !== "unchecked" && !same(m.acceptedPolicyDigest, e.acceptedPolicyDigest)) mismatch("acceptedPolicyDigest", m.acceptedPolicyDigest, e.acceptedPolicyDigest);
+  p.fund.configs.forEach((c, i) => {
+    c.payouts.forEach((leg, j) => {
+      if (!e.payees.some((payee) => same(leg.recipient, payee))) mismatch(`payees (fund.configs[${i}].payouts[${j}].recipient)`, leg.recipient, e.payees);
+    });
+    if (c.feeBps > e.maxFeeBps) mismatch(`maxFeeBps (fund.configs[${i}].feeBps)`, c.feeBps, e.maxFeeBps);
+    // ESC:787-788 / E3 binds the recipient whenever feeBps > 0, even if F rounds to zero.
+    if (c.feeBps > 0 && !e.feeRecipients.some((recipient) => same(c.feeRecipient, recipient))) mismatch(`feeRecipients (fund.configs[${i}].feeRecipient)`, c.feeRecipient, e.feeRecipients);
+    for (const field of ["requiredTier", "requestedTier"] as const) {
+      if (!e.tiers.includes(c[field])) mismatch(`tiers (fund.configs[${i}].${field})`, c[field], e.tiers);
+    }
+    if (c.reclaimAt > e.latestReclaimAt) mismatch(`latestReclaimAt (fund.configs[${i}].reclaimAt)`, c.reclaimAt, e.latestReclaimAt);
+    if (e.compositionRoots !== "unchecked" && !e.compositionRoots.some((root) => same(c.compositionRoot, root))) mismatch(`compositionRoots (fund.configs[${i}].compositionRoot)`, c.compositionRoot, e.compositionRoots);
+  });
+  if (e.jobPolicyHash !== undefined && !same(structHash, e.jobPolicyHash)) mismatch("jobPolicyHash", structHash, e.jobPolicyHash);
+}
 
 function deepFreeze<T>(value: T): T {
   if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
@@ -178,6 +284,7 @@ function typedDataProblem(got: PreparePayload["typedData"], want: JobPolicyTyped
 }
 
 export async function prepareFunding(args: PrepareFundingArgs): Promise<PreparedFunding> {
+  const expect = copyExpectations(args.expect);
   // Everything judged below comes from this parse, taken before the first await.
   const p = parsePreparePayload(args.payload);
   const maxTotalGross = args.quote?.maxTotalGross;
@@ -272,6 +379,9 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
     refuse("OPERATOR_SIGNATURE_INVALID", `the operator signature recovers to ${operatorSigner ?? "nothing"} over these terms, not the operator ${m.operator}`);
   }
 
+  // Internal coherence and the operator's signature do not establish the buyer's authorization.
+  checkIntent(p, expect, structHash);
+
   // 10. Live, at one pinned block: the pinned factory's implementation (an immutable, FAC:34), the factory's own
   //     prediction of the escrow address (ABI doc §5.2), that implementation's token (an immutable, ESC:75), and the
   //     time rules.
@@ -302,6 +412,8 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
 
   const reclaims = p.fund.configs.map((c) => c.reclaimAt);
   const prepared: PreparedFunding = deepFreeze({
+    expect,
+    unchecked: (["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const).filter((field) => expect[field] === "unchecked"),
     chainId: p.chainId,
     factory: message.factory,
     implementation: message.implementation,

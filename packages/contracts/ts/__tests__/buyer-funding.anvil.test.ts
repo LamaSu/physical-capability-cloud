@@ -243,12 +243,26 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
     return { compiled, operatorSignature, payload };
   }
 
-  const prepare = (payload: unknown, compiled: CompiledVNextPolicy) =>
-    prepareFunding({ payload, wallet: wallet(buyer), publicClient: pub, quote: { maxTotalGross: compiled.totalGross }, pins: pins() });
+  // Buyer choices come from the test's purchase record, independently of the gateway payload/compiler output.
+  const prepare = async (payload: unknown, compiled: CompiledVNextPolicy, label: string) =>
+    prepareFunding({ payload, wallet: wallet(buyer), publicClient: pub, quote: { maxTotalGross: compiled.totalGross }, pins: pins(),
+      expect: {
+        jobId: `pcc:buyer-funding-e2e:${label}`,
+        operator: operator.address,
+        payees: [operator.address],
+        maxFeeBps: 235,
+        feeRecipients: [feeSink],
+        tiers: [0, 1],
+        latestReclaimAt: (await pub.getBlock()).timestamp + 45n * DAY,
+        termsHash: keccak256(stringToHex(`pcc:buyer-funding-e2e:${label}:terms`)),
+        acceptedPolicyDigest: keccak256(stringToHex(`pcc:buyer-funding-e2e:${label}:accepted`)),
+        compositionRoots: [zeroHash],
+      },
+    });
 
   it("a buyer EOA runs prepare -> sign -> approve -> fund; the escrow's own state says funded, and balances move by exactly ΣG", async () => {
     const { compiled, payload } = await gatewayPrepare("A");
-    const prepared: PreparedFunding = await prepare(payload, compiled);
+    const prepared: PreparedFunding = await prepare(payload, compiled, "A");
     // The SDK's independent recomputation agrees with the canonical compiler.
     expect(prepared.escrow).toBe(compiled.escrow);
     expect(prepared.digest).toBe(compiled.digest);
@@ -308,7 +322,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
 
   it("the buyer's JobPolicy signature is exactly what the contract verifies: a relayed fund() simulates with it, and reverts without it", async () => {
     const { compiled, operatorSignature, payload } = await gatewayPrepare("B");
-    const prepared = await prepare(payload, compiled);
+    const prepared = await prepare(payload, compiled, "B");
     const signature = await signJobPolicy({ prepared, wallet: wallet(buyer) });
     // Test-only: the allowance a relayed fund() would pull. The SDK itself never relays (plan S3.3).
     await send(buyer, { address: deployed.TOKEN, abi: TOKEN_ABI, functionName: "approve", args: [compiled.escrow, compiled.totalGross] });
@@ -337,17 +351,17 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
     tampered.fund.configs[0].payouts[0].amount = (BigInt(tampered.fund.configs[0].payouts[0].amount) - 1n).toString();
     tampered.fund.configs[0].n = (BigInt(tampered.fund.configs[0].n) - 1n).toString();
     tampered.fund.configs[0].f = (BigInt(tampered.fund.configs[0].f) + 1n).toString();
-    expect(await refusal(prepare(tampered, compiled))).toBe("POLICY_ROOT_MISMATCH");
+    expect(await refusal(prepare(tampered, compiled, "C"))).toBe("POLICY_ROOT_MISMATCH");
 
     const unlimited = structuredClone(payload);
     unlimited.approve.amount = maxUint256.toString();
-    expect(await refusal(prepare(unlimited, compiled))).toBe("APPROVE_AMOUNT_NOT_TOTAL");
+    expect(await refusal(prepare(unlimited, compiled, "C"))).toBe("APPROVE_AMOUNT_NOT_TOTAL");
 
     // A rival deployment of the same contracts: its payload is internally consistent and its escrow really exists.
     const rival = deploy();
     const r = await gatewayPrepare("C-rival", rival);
     expect(await pub.getCode({ address: r.compiled.escrow })).not.toBe("0x");
-    expect(await refusal(prepare(r.payload, r.compiled))).toBe("FACTORY_NOT_PINNED");
+    expect(await refusal(prepare(r.payload, r.compiled, "C-rival"))).toBe("FACTORY_NOT_PINNED");
 
     // Nothing was sent: no nonce used, no allowance, nothing funded.
     expect(await pub.getTransactionCount({ address: buyer.address })).toBe(nonce);
@@ -358,7 +372,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
 
   it("unchanged: a fund() the chain would refuse (the primary cohort disabled after prepare) is never sent", async () => {
     const { compiled, payload } = await gatewayPrepare("D");
-    const prepared = await prepare(payload, compiled);
+    const prepared = await prepare(payload, compiled, "D");
     await send(gateway, { address: deployed.ORACLE, abi: ATTESTER_ABI, functionName: "setEnabled", args: [false] });
     try {
       const buyerBefore = await usdcBalance(buyer.address);
@@ -379,7 +393,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
 
   it("indeterminate is not success: a fund() still pending when the receipt wait ends, resolved later by reading the escrow", async () => {
     const { compiled, payload } = await gatewayPrepare("E");
-    const prepared = await prepare(payload, compiled);
+    const prepared = await prepare(payload, compiled, "E");
     // The buyer's wallet transport switches automine off just before the SECOND raw transaction (the fund) reaches anvil.
     const base = http(rpc)({ chain });
     let raws = 0;
@@ -418,7 +432,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
 
   it("a reorg makes a read pinned to the vanished block unreadable, never funded", async () => {
     const { compiled, payload } = await gatewayPrepare("F");
-    const prepared = await prepare(payload, compiled);
+    const prepared = await prepare(payload, compiled, "F");
     const snapshot = await testClient.snapshot();
     const result = await approveAndFund({ prepared, wallet: wallet(buyer), publicClient: pub });
     expect(result.outcome).toBe("committed");

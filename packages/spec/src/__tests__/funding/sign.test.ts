@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { keccak256, parseSignature, recoverAddress, verifyTypedData, type LocalAccount } from "viem";
 import { toAccount } from "viem/accounts";
 import { FundingRefusal, prepareFunding, signJobPolicy, type FundingRefusalCode } from "../../funding/index.js";
-import { buildFixture, highS, makeChain, newAccount, testPins } from "./fixture.js";
+import { buildFixture, highS, makeChain, newAccount, testPins, testExpect } from "./fixture.js";
 
 async function refusal(p: Promise<unknown>): Promise<FundingRefusalCode> {
   try {
@@ -26,6 +26,7 @@ async function setup() {
     wallet: chain.wallet(),
     publicClient: chain.publicClient,
     quote: { maxTotalGross: fx.totalGross },
+    expect: testExpect(fx),
     pins: testPins(fx),
   });
   return { fx, chain, prepared };

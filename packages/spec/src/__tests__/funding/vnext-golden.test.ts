@@ -35,6 +35,7 @@ import {
   cloneInitCodeHash,
   cloneRuntimeCode,
   domainSeparator,
+  jobIdHashOf,
   jobPolicyHash,
   jobPolicyTypedData,
   policyKey,
@@ -83,6 +84,18 @@ const configs: UnitConfig[] = decodeAbiParameters(CONFIG_TUPLES, golden.encodedC
   payouts: t[12].map((p) => ({ recipient: p[0], amount: p[1] })),
 }));
 const lc = (s: string) => s.toLowerCase();
+
+describe("jobIdHashOf matches the canonical compiler's UTF-8 convention", () => {
+  // Literals computed with packages/contracts/ts/vnext/compiler.ts:jobIdHashOf, not the SDK encoder.
+  it.each([
+    ["ASCII", "job-611-ascii", "0x586f24ab72321a4c051c3fbf02ba32451118816b2a7b8b1f734b20c78fa86cbb"],
+    ["UUID", "550e8400-e29b-41d4-a716-446655440000", "0x2f779c94a35dceba72fe536ce28c5fea7566753044cdf9da29f6402ea964b7f9"],
+    ["empty", "", "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"],
+    ["non-ASCII", "job-" + String.fromCodePoint(0x00e9, 0x5236, 0x1f680), "0x1ac77bc57577bbd13c8ad3398c4aeb284c754754804da522054d15230b264a71"],
+  ])("%s job id", (_label, jobId, hash) => {
+    expect(jobIdHashOf(jobId!)).toBe(hash);
+  });
+});
 
 describe("V-next encoders reproduce the golden vectors", () => {
   it("the domain constants and type hashes", () => {

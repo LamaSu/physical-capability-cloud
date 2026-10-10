@@ -8,6 +8,7 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { jobIdHashOf } from "../../funding/index.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as {
   name: string;
@@ -19,6 +20,9 @@ const pkg = JSON.parse(readFileSync(new URL("../../../package.json", import.meta
 };
 
 describe("@pcc/spec ships viem as an optional peer", () => {
+  it("exports jobIdHashOf through the public funding subpath", () => {
+    expect(jobIdHashOf("")).toBe("0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470");
+  });
   it("viem is an optional peer (^2) and a devDependency, never a hard dependency", () => {
     expect(pkg.name).toBe("@pcc/spec");
     expect(pkg.dependencies?.viem).toBeUndefined();
