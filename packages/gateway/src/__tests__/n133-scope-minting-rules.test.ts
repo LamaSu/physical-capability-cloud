@@ -469,6 +469,42 @@ describe("N133 rule 2: a paid write scope goes live only on the kernel operator'
     expect(scopeRow(scopeId).status).toBe("awaiting_acceptance");
   });
 
+  // Fail closed: `new Date(x) <= new Date()` is false when x does not parse, so the accept route
+  // took a scope whose window it could not read. expires_at is TEXT NOT NULL and every writer
+  // stores toISOString(), so these come only from a hand edit, a restore or another writer (epoch
+  // milliseconds stored as text). Each is refused as an expired window is, and nothing goes live.
+  const UNREADABLE_EXPIRIES = ["", " ", "garbage", "Invalid Date", "1728400000000"];
+  const setExpiry = (scopeId: string, expiresAt: string) =>
+    db().update(schema.executionScopes).set({ expiresAt }).where(eq(schema.executionScopes.id, scopeId)).run();
+
+  for (const unreadable of UNREADABLE_EXPIRIES) {
+    it(`a scope whose expiry can't be read (${JSON.stringify(unreadable)}) can't be accepted either; nothing goes live`, async () => {
+      const { scopeId } = (await submit(asKey(BUYER), BUYER)).json() as { scopeId: string };
+      setExpiry(scopeId, unreadable);
+      const late = await accept(scopeId);
+      expect(late.statusCode).toBe(409);
+      expect(late.json()).toEqual({ error: "scope_expired", message: "This scope expired before it was accepted; this request changed nothing." });
+      expect(scopeRow(scopeId).status).toBe("awaiting_acceptance");
+      expect((await writeAs(asKey(BUYER), scopeId)).statusCode).toBe(403);
+      expect(queued()).toHaveLength(0);
+    });
+  }
+
+  it("controls for the unreadable expiries: a readable future expiry is accepted, a readable past one is not", async () => {
+    const open = (await submit(asKey(BUYER), BUYER)).json() as { scopeId: string };
+    setExpiry(open.scopeId, new Date(Date.now() + 10 * 60_000).toISOString());
+    const accepted = await accept(open.scopeId);
+    expect(accepted.statusCode).toBe(200);
+    expect(scopeRow(open.scopeId).status).toBe("active");
+
+    const shut = (await submit(asKey(BUYER), BUYER)).json() as { scopeId: string };
+    setExpiry(shut.scopeId, new Date(Date.now() - 1000).toISOString());
+    const late = await accept(shut.scopeId);
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toBe("scope_expired");
+    expect(scopeRow(shut.scopeId).status).toBe("awaiting_acceptance");
+  });
+
   it("an approval queued through POST /api/operator/approvals can't name a scope to activate", async () => {
     const res = await submit(asKey(BUYER), BUYER);
     const forged = await app.inject({
