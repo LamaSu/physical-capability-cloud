@@ -854,6 +854,22 @@ sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
 }
 
 describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwrites credentials", () => {
+  it.each(["unset", "malformed"])("L-e: importer refuses %s PCC_API_KEY without leaving a temporary header", (kind) => {
+    const f = captureFixture();
+    try {
+      chmodSync(join(f.dir, ".pcc"), 0o700);
+      writeFileSync(join(f.dir, ".git/info/exclude"), ".pcc/\n");
+      const key = kind === "unset" ? undefined : randomBytes(32).toString("hex");
+      const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...process.env, PCC_API_KEY: key }, encoding: "utf8", timeout: 10_000 });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("Private header import refused; preserve existing state and verify private-directory and Git setup.\n");
+      expect(readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("auth.header"))).toEqual([]);
+      if (key) expect(result.stdout + result.stderr).not.toContain(key);
+    } finally { f.cleanup(); }
+  });
+
   it.each(["uppercase", "short"])("L-d: capture refuses a 201 with an invalid api_key (%s)", (kind) => {
     const f = captureFixture();
     try {
