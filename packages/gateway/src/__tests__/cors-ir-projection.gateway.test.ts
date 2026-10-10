@@ -181,10 +181,16 @@ describe("N110 x #562 (the merge-up): a cross-origin list keeps the ONE page fie
     const { projectIrRead } = await import("../mcp/dashboard-ir-read-projection.js");
     const { LIST_PROFILES } = await import("../mcp/dashboard-ir.js");
     expect(LIST_PROFILES["/api/capabilities"]!.paged?.total).toBe("total");
-    expect(LIST_PROFILES["/api/jobs"]!.paged?.total).toBeUndefined();
+    // The N110 follow-up declares the jobs total too (the route counts the caller's readable jobs,
+    // dashboard-ir-list-producers.test.ts). /api/jobs refuses a credential-less read (401), and a
+    // caller who can read it can already count its jobs by paging, so the projection adds no new fact.
+    expect(LIST_PROFILES["/api/jobs"]!.paged?.total).toBe("total");
+    expect((await app.inject({ method: "GET", url: "/api/jobs", headers: { origin: UNKNOWN } })).statusCode).toBe(401);
+    expect(LIST_PROFILES["/api/kernels"]!.paged).toBeUndefined();
     const page = { total: 3, offset: 0, limit: 50, hasMore: false };
     expect(projectIrRead("/api/capabilities", { items: [], ...page })).toEqual({ items: [], total: 3 });
-    expect(projectIrRead("/api/jobs", { jobs: [], ...page })).toEqual({ jobs: [] });
+    expect(projectIrRead("/api/jobs", { jobs: [], ...page })).toEqual({ jobs: [], total: 3 });
+    expect(projectIrRead("/api/kernels", { kernels: [], ...page })).toEqual({ kernels: [] });
     // A declared total that is not a primitive is dropped whole, like any other projected leaf.
     expect(projectIrRead("/api/capabilities", { items: [], total: { n: 3, secret: "x" } })).toEqual({ items: [] });
   });
