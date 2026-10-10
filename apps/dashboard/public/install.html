@@ -183,7 +183,7 @@
       <label class="field" for="fb-message">Message</label>
       <textarea id="fb-message" name="message" placeholder="What's broken, what's confusing, what would help, what you wish worked, screenshot URLs welcome…" required maxlength="5000"></textarea>
       <button type="submit" class="submit" id="fb-submit">Send to the team</button>
-      <p class="privacy">We log your message + (if provided) your email to deliver a reply. We capture user-agent + the page URL for debugging. Nothing else. Rate-limited to 10 submissions per hour per IP.</p>
+      <p class="privacy">Your message and (if you give it) your email go only to the PCC gateway, which stores them with your IP address, your browser's user-agent and this page's path, and may pass them to the team's Discord channel. Submissions are rate-limited per IP.</p>
     </form>
   </div>
 
@@ -427,12 +427,10 @@ document.addEventListener('click', (e) => {
   }
 });
 
-// Feedback form: POST to /api/feedback (server-side: file save + Discord webhook)
-// AND parallel POST to formsubmit.co for direct email-to-team delivery.
-// formsubmit.co requires one-time recipient verification (a single click in
-// the first email it sends to the recipient); after that, every submission
-// goes through to the inbox.
-const FEEDBACK_EMAIL = 'globalmysterysnailrevolution@gmail.com';
+// Feedback form: POST to the gateway's own /api/feedback (it stores the report and
+// may notify the team's Discord). Nothing is sent from this page to any third
+// party: the form used to post the same message, email, full URL and user agent
+// to a third-party form relay as well (product-qa #33).
 const fbForm = document.getElementById('feedback-form');
 const fbBtn = document.getElementById('fb-submit');
 
@@ -450,29 +448,14 @@ fbForm.addEventListener('submit', async (e) => {
 
   const apiPayload = { type, message, email: email || undefined, page: location.pathname };
 
-  // Fire both in parallel; success if either completes
   const apiCall = fetch('/api/feedback', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(apiPayload),
   });
-  const emailFD = new FormData();
-  emailFD.append('_subject', 'PCC feedback: ' + type + ' from ' + (email || 'anonymous'));
-  emailFD.append('_template', 'box');
-  emailFD.append('_captcha', 'false');
-  emailFD.append('email', email || 'anonymous');
-  emailFD.append('type', type);
-  emailFD.append('message', message);
-  emailFD.append('page', location.href);
-  emailFD.append('userAgent', navigator.userAgent);
-  const emailCall = fetch('https://formsubmit.co/ajax/' + FEEDBACK_EMAIL, {
-    method: 'POST',
-    body: emailFD,
-  }).catch(() => null);
 
   try {
     const apiRes = await apiCall;
-    await emailCall;
     if (apiRes.ok) {
       fbBtn.textContent = '✓ Sent — thank you';
       fbBtn.classList.add('ok');
