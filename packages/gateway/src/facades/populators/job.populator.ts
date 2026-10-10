@@ -175,7 +175,8 @@ function buildTimeline(model: RawJob, evidenceBundles: RawEvidenceBundle[]): Job
 
   events.push({ type: "queued", timestamp: createdAt });
 
-  if (model.status !== "queued" && model.status !== "failed") {
+  // A job refused busy (N127) never started either: its run was refused before the device was commanded.
+  if (model.status !== "queued" && model.status !== "failed" && model.status !== "rejected_busy") {
     events.push({ type: "started", timestamp: createdAt });
   }
 

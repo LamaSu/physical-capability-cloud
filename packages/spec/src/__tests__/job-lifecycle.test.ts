@@ -60,8 +60,21 @@ describe("job-lifecycle: transitions", () => {
     expect(isTerminalJobStatus("failed")).toBe(true);
     expect(isTerminalJobStatus("cancelled")).toBe(true);
     expect(isTerminalJobStatus("timed_out")).toBe(true);
+    expect(isTerminalJobStatus("rejected_busy")).toBe(true);
     expect(isTerminalJobStatus("executing")).toBe(false);
     expect(isTerminalJobStatus("queued")).toBe(false);
+  });
+
+  it("a run refused busy (N127) ends rejected_busy before evidence is collected, never after, and nothing leaves it", () => {
+    let s = createJobLifecycle("job-busy", {}, 0);
+    s = advanceJob(s, "executing", 1 * S);
+    expect(advanceJob(s, "rejected_busy", 2 * S).status).toBe("rejected_busy");
+    const collecting = advanceJob(s, "collecting_evidence", 2 * S);
+    expect(() => advanceJob(collecting, "rejected_busy", 3 * S)).toThrow(/illegal job transition/);
+    const refused = advanceJob(s, "rejected_busy", 2 * S);
+    for (const to of ["queued", "executing", "completed", "failed", "cancelled"] as const) {
+      expect(() => advanceJob(refused, to, 3 * S), to).toThrow(/illegal job transition/);
+    }
   });
 
   it("advanceJob does not mutate its input", () => {
