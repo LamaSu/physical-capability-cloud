@@ -493,6 +493,52 @@ os.link = record_link
         options = json.loads((self.private / "curl-options.json").read_text())
         self.assertGreaterEqual(int(options[options.index("--max-time") + 1]), 600)
 
+    def test_exclusion_append_preserves_a_rule_without_a_trailing_newline(self):
+        exclude = self.cwd / ".git/info/exclude"
+        exclude.write_bytes(b"*.log")
+        (self.cwd / "app.log").write_text("keep ignored\n")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        ignored = self.subprocess.run([self.git, "check-ignore", "-q", "--", "app.log"], cwd=self.cwd)
+        self.assertEqual(ignored.returncode, 0)
+        self.assertEqual(exclude.read_bytes(), b"*.log\n.pcc/\n")
+
+    def test_exclusion_append_is_not_repeated_on_a_corrected_rerun(self):
+        result = self.run_capture("400", {"error": "invalid_email"})
+        self.assertNotEqual(result.returncode, 0)
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = (self.cwd / ".git/info/exclude").read_text().splitlines()
+        self.assertEqual(lines.count(".pcc/"), 1)
+
+    def test_existing_ignore_provisions_with_a_read_only_exclude_file(self):
+        (self.cwd / ".gitignore").write_text(".pcc/\n")
+        exclude = self.cwd / ".git/info/exclude"
+        before = exclude.read_bytes()
+        exclude.chmod(0o400)
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(exclude.read_bytes(), before)
+
+    def test_existing_ignore_provisions_with_no_git_info_directory(self):
+        import shutil
+        (self.cwd / ".gitignore").write_text(".pcc/\n")
+        shutil.rmtree(self.cwd / ".git/info")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse((self.cwd / ".git/info").exists())
+
+    def test_impossible_exclusion_append_has_only_its_fixed_message(self):
+        import shutil
+        shutil.rmtree(self.cwd / ".git/info")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "Git exclusion setup failed.\n")
+        self.assertFalse((self.private / "curl-called").exists())
+        self.assertFalse(list(self.private.glob("capture.*")))
+
     def test_non_201_never_imports_a_key_and_allows_a_corrected_rerun(self):
         for code in ("rate_limited", "invalid_type", "invalid_wallet_address", "invalid_email", "identifier_required", "provision_failed", "too_many_keys", "invalid_public_key"):
             with self.subTest(code=code):

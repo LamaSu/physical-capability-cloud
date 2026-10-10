@@ -849,6 +849,50 @@ sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
 }
 
 describe("F2: capture fails closed and never overwrites credentials", () => {
+  it("N1: preserves an exclude rule without a trailing newline", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".git/info/exclude"), "*.log");
+      writeFileSync(join(f.dir, "app.log"), "local log");
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      expect(spawnSync("git", ["check-ignore", "-q", "--", "app.log"], { cwd: f.dir }).status).toBe(0);
+      expect(readFileSync(join(f.dir, ".git/info/exclude"), "utf8")).toBe("*.log\n.pcc/\n");
+    } finally { f.cleanup(); }
+  });
+
+  it("N2: a rejected request followed by success adds only one exclusion", () => {
+    const f = captureFixture();
+    try {
+      expect(f.run({ FIXTURE_HTTP: "400" }).status).not.toBe(0);
+      expect(f.run().status).toBe(0);
+      expect(readFileSync(join(f.dir, ".git/info/exclude"), "utf8").split("\n").filter((line) => line === ".pcc/")).toHaveLength(1);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["readonly", "missing"])("N2: already ignored state needs no writable info/exclude (%s)", (kind) => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), ".pcc/\n");
+      if (kind === "readonly") chmodSync(join(f.dir, ".git/info/exclude"), 0o400);
+      else rmSync(join(f.dir, ".git/info"), { recursive: true });
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe("");
+    } finally { f.cleanup(); }
+  });
+
+  it("N2: impossible exclusion append prints only its fixed failure and sends nothing", () => {
+    const f = captureFixture();
+    try {
+      rmSync(join(f.dir, ".git/info"), { recursive: true });
+      const result = f.run();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe("Git exclusion setup failed.\n");
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
   it.each(["live", "test", "other", "uppercase", "short", "nonhex"])("L5: importer accepts exactly gateway-issued key format (%s)", (kind) => {
     const f = captureFixture();
     try {

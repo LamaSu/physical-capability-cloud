@@ -70,7 +70,8 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 tracked=$(git ls-files -- .pcc 2>/dev/null) || fail 'Git index verification failed.'
 if [ -n "$tracked" ]; then fail 'Private state has tracked paths; secure those paths and remove them from the index before retrying.'; fi
 exclude=$(git rev-parse --git-path info/exclude 2>/dev/null) || fail 'Git exclusion setup failed.'
-printf '%s\n' '.pcc/' >> "$exclude" 2>/dev/null || fail 'Git exclusion setup failed.'
+needs_exclusion=0; for credential in .pcc/provision.json .pcc/auth.header .pcc/provision-request.json .pcc/ed25519-private.pem .pcc/capture.probe/provision.json; do git check-ignore -q -- "$credential" 2>/dev/null || needs_exclusion=1; done
+if [ "$needs_exclusion" = 1 ]; then python3 -c 'import sys; from pathlib import Path; p = Path(sys.argv[1]); d = p.read_bytes() if p.exists() else b""; open(p, "ab").write((b"\n" if d and not d.endswith(b"\n") else b"") + b".pcc/\n")' "$exclude" 2>/dev/null || fail 'Git exclusion setup failed.'; fi
 # Defence in depth: verify every final destination before requesting credentials.
 for credential in .pcc/provision.json .pcc/auth.header .pcc/provision-request.json .pcc/ed25519-private.pem; do
     [ "$in_git" = 0 ] || git check-ignore -q -- "$credential" 2>/dev/null || fail 'Git exclusion verification failed; capture refused.'
