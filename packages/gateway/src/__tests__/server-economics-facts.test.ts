@@ -12,6 +12,8 @@
  */
 
 import { constants as bufferConstants } from "node:buffer";
+import { types as utilTypes } from "node:util";
+import vm from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize, computeScheduleHash, economics, type EvidenceRequirement, type RateSchedule } from "@pcc/spec";
 import { closeStore, getRepos, initStore } from "../db.js";
@@ -46,6 +48,8 @@ const NODES: PlanNodeRef[] = [
 
 const codes = (r: { ok: boolean; refusals?: Array<{ code: string }> }) => (r.ok ? "ok" : r.refusals!.map((x) => x.code));
 const request = (agreement: unknown, over: Partial<EconomicsFactsRequest> = {}): EconomicsFactsRequest => ({ agreement, nodes: NODES, currency: "USDC", now: NOW, ...over });
+/** Serialize test data at the caller; the service owns parsing the untrusted text. */
+const requestJson = (value: unknown): string => JSON.stringify(value);
 
 /** Today's sources (configuration set): the contributors registry, and no item 27 registries or plan sources. */
 const today = (env: NodeJS.ProcessEnv = { ...ENV }): EconomicsFactsSources => ({ ...productionEconomicsFactsSources(), env });
@@ -123,8 +127,8 @@ describe("today: the facts item 27 and the missing sources would supply are refu
 
   it("an agreement that cites licenses: every missing source is named, in a fixed order, and no binding is built", () => {
     const expected = ["LICENSE_REGISTRY_UNAVAILABLE", "PARTY_REGISTRY_UNAVAILABLE", "INTENDED_USE_UNAVAILABLE", "UNIT_FACTS_UNAVAILABLE"];
-    expect(codes(serverEconomicsFacts(request(economics.examplePrintAndMail()), today()))).toEqual(expected);
-    const bound = economicsBindingFor({ ...request(economics.examplePrintAndMail()), accepted: null }, today());
+    expect(codes(serverEconomicsFacts(requestJson(request(economics.examplePrintAndMail())), today()))).toEqual(expected);
+    const bound = economicsBindingFor(requestJson({ ...request(economics.examplePrintAndMail()), accepted: null }), today());
     expect(bound.ok).toBe(false);
     expect(codes(bound)).toEqual(expected);
   });
@@ -132,12 +136,12 @@ describe("today: the facts item 27 and the missing sources would supply are refu
   it("an agreement that cites no license needs no license registry; the other missing sources still refuse", () => {
     const ag = economics.examplePrintAndMail();
     ag.licenses = [];
-    expect(codes(serverEconomicsFacts(request(ag), today()))).toEqual(["PARTY_REGISTRY_UNAVAILABLE", "INTENDED_USE_UNAVAILABLE", "UNIT_FACTS_UNAVAILABLE"]);
+    expect(codes(serverEconomicsFacts(requestJson(request(ag)), today()))).toEqual(["PARTY_REGISTRY_UNAVAILABLE", "INTENDED_USE_UNAVAILABLE", "UNIT_FACTS_UNAVAILABLE"]);
   });
 
   it("the refusal codes are a closed list, and every refusal is one of them", () => {
     expect(new Set(ECONOMICS_FACTS_REFUSAL_CODES).size).toBe(ECONOMICS_FACTS_REFUSAL_CODES.length);
-    const r = serverEconomicsFacts(request({ not: "an agreement" }, { nodes: "x" as never, now: -1, currency: "USDT" }), today({}));
+    const r = serverEconomicsFacts(requestJson(request({ not: "an agreement" }, { nodes: "x" as never, now: -1, currency: "USDT" })), today({}));
     expect(codes(r)).toEqual([
       "AGREEMENT_UNREADABLE",
       "PLAN_INVALID",
@@ -156,7 +160,7 @@ describe("today: the facts item 27 and the missing sources would supply are refu
 describe("with every source present, the facts are the server's", () => {
   it("fee and forbidden recipients from configuration, decimals from the compiler's table, the request's clock, registry rows", () => {
     const ag = economics.examplePrintAndMail();
-    const r = serverEconomicsFacts(request(ag), honest(ag));
+    const r = serverEconomicsFacts(requestJson(request(ag)), honest(ag));
     if (!r.ok) throw new Error(JSON.stringify(r.refusals));
     expect(r.facts).toMatchObject({ feeBps: 235, feeRecipient: TREASURY, currency: { code: "USDC", decimals: 6 }, now: NOW, schedules: [] });
     expect(r.facts.forbiddenRecipients).toEqual([TOKEN, FACTORY]);
@@ -169,14 +173,14 @@ describe("with every source present, the facts are the server's", () => {
 
   it("a zero fee is the zero address, as the accept-time compiler prices it", () => {
     const ag = economics.examplePrintAndMail();
-    const r = serverEconomicsFacts(request(ag), honest(ag, { env: { ...ENV, PCC_PROTOCOL_FEE_BPS: "0" } }));
+    const r = serverEconomicsFacts(requestJson(request(ag)), honest(ag, { env: { ...ENV, PCC_PROTOCOL_FEE_BPS: "0" } }));
     if (!r.ok) throw new Error(JSON.stringify(r.refusals));
     expect([r.facts.feeBps, r.facts.feeRecipient]).toEqual([0, ZERO]);
   });
 
   it("a registry that does not hold a cited license or party leaves it out, so the binding refuses for it by name", () => {
     const ag = economics.examplePrintAndMail();
-    const r = serverEconomicsFacts(request(ag), honest(ag, { licenseRegistry: () => null, partyRegistry: (id) => (id === "courier" ? null : TREASURY) }));
+    const r = serverEconomicsFacts(requestJson(request(ag)), honest(ag, { licenseRegistry: () => null, partyRegistry: (id) => (id === "courier" ? null : TREASURY) }));
     if (!r.ok) throw new Error(JSON.stringify(r.refusals));
     expect(r.facts.licenses).toEqual([]);
     expect(r.facts.parties.map((p) => p.partyId)).not.toContain("courier");
@@ -185,7 +189,7 @@ describe("with every source present, the facts are the server's", () => {
 
 describe("configuration that is unset or malformed refuses; it is never defaulted or skipped", () => {
   const ag = economics.examplePrintAndMail();
-  const run = (env: NodeJS.ProcessEnv) => serverEconomicsFacts(request(ag), honest(ag, { env }));
+  const run = (env: NodeJS.ProcessEnv) => serverEconomicsFacts(requestJson(request(ag)), honest(ag, { env }));
 
   it("the protocol fee", () => {
     const { PCC_PROTOCOL_FEE_BPS: _bps, ...noFee } = ENV;
@@ -221,33 +225,35 @@ describe("the clock and the currency are the server's", () => {
   const ag = economics.examplePrintAndMail();
 
   it("a clock reading that is not whole unix seconds in the safe range refuses", () => {
+    // JSON encodes NaN and Infinity as null; their original number values also remain in ownedJson's parity cases.
     for (const now of [1.5, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, "1900000000", null]) {
-      expect([now, codes(serverEconomicsFacts(request(ag, { now: now as number }), honest(ag)))]).toEqual([now, ["CLOCK_INVALID"]]);
+      expect([now, codes(serverEconomicsFacts(requestJson(request(ag, { now: now as number })), honest(ag)))]).toEqual([now, ["CLOCK_INVALID"]]);
     }
   });
 
   it("a currency without server-owned decimals refuses, prototype names included", () => {
     for (const currency of ["USDT", "usdc", "", "toString", "__proto__", "constructor", "hasOwnProperty", 6]) {
-      expect([currency, codes(serverEconomicsFacts(request(ag, { currency: currency as string }), honest(ag)))]).toEqual([currency, ["CURRENCY_NOT_SUPPORTED"]]);
+      expect([currency, codes(serverEconomicsFacts(requestJson(request(ag, { currency: currency as string })), honest(ag)))]).toEqual([currency, ["CURRENCY_NOT_SUPPORTED"]]);
     }
   });
 });
 
 describe("unreadable input is refused by name and never throws", () => {
-  it("an agreement with an accessor is refused without running it; a throwing Proxy and a schema failure are refused too", () => {
+  it("ownedJson refuses an accessor without running it and a throwing Proxy; text schema failures are refused too", () => {
     const ag = economics.examplePrintAndMail();
     let reads = 0;
     const withGetter = { ...ag };
     Object.defineProperty(withGetter, "fee", { enumerable: true, get: () => (reads++, ag.fee) });
     const trap = new Proxy({}, { ownKeys: () => { throw new Error("trap"); }, getOwnPropertyDescriptor: () => { throw new Error("trap"); } });
-    for (const bad of [withGetter, trap, { ...ag, extra: 1 }, null, "agreement", 42]) {
-      expect(codes(serverEconomicsFacts(request(bad), honest(ag)))).toEqual(["AGREEMENT_UNREADABLE"]);
+    for (const bad of [withGetter, trap]) expect(ownedJson(bad)).toEqual({ ok: false });
+    for (const bad of [{ ...ag, extra: 1 }, null, "agreement", 42]) {
+      expect(codes(serverEconomicsFacts(requestJson(request(bad)), honest(ag)))).toEqual(["AGREEMENT_UNREADABLE"]);
     }
     expect(reads).toBe(0);
   });
 
   it("with an unreadable agreement, refusals that depend on its content are not guessed; missing sources still are named", () => {
-    expect(codes(serverEconomicsFacts(request({ nope: true }), today()))).toEqual([
+    expect(codes(serverEconomicsFacts(requestJson(request({ nope: true })), today()))).toEqual([
       "AGREEMENT_UNREADABLE",
       "PARTY_REGISTRY_UNAVAILABLE",
       "INTENDED_USE_UNAVAILABLE",
@@ -261,7 +267,7 @@ describe("unreadable input is refused by name and never throws", () => {
     const sources = honest(ag, { intendedUse: asked, unitFacts: asked });
     const tooMany = Array.from({ length: 1025 }, (_, i) => ({ nodeId: `n${i}`, capabilityId: "cap" }));
     for (const nodes of ["a-print", [NODES[0], NODES[0]], [{ nodeId: "a-print" }], [{ ...NODES[0], extra: 1 }], [{ nodeId: "has space", capabilityId: "c" }], tooMany]) {
-      expect(codes(serverEconomicsFacts(request(ag, { nodes: nodes as PlanNodeRef[] }), sources))).toEqual(["PLAN_INVALID"]);
+      expect(codes(serverEconomicsFacts(requestJson(request(ag, { nodes: nodes as PlanNodeRef[] })), sources))).toEqual(["PLAN_INVALID"]);
     }
     expect(asked).not.toHaveBeenCalled();
   });
@@ -270,11 +276,11 @@ describe("unreadable input is refused by name and never throws", () => {
 describe("rate schedules: only the registry's sealed bodies, and never a default for a fact the server lacks", () => {
   it("a pin verifies only against a body the registry holds", () => {
     const ag = economics.exampleSparePrinter(); // names PRINTER_KIT_SCHEDULE
-    const before = serverEconomicsFacts(request(ag, { nodes: [{ nodeId: ag.units[0]!.unitRef, capabilityId: "cap" }] }), honest(ag));
+    const before = serverEconomicsFacts(requestJson(request(ag, { nodes: [{ nodeId: ag.units[0]!.unitRef, capabilityId: "cap" }] })), honest(ag));
     if (!before.ok) throw new Error(JSON.stringify(before.refusals));
     expect(before.facts.schedules).toEqual([]); // not published: the binding refuses the pin (RATE_UNVERIFIED)
     publish(economics.PRINTER_KIT_SCHEDULE);
-    const after = serverEconomicsFacts(request(ag, { nodes: [{ nodeId: ag.units[0]!.unitRef, capabilityId: "cap" }] }), honest(ag));
+    const after = serverEconomicsFacts(requestJson(request(ag, { nodes: [{ nodeId: ag.units[0]!.unitRef, capabilityId: "cap" }] })), honest(ag));
     if (!after.ok) throw new Error(JSON.stringify(after.refusals));
     expect(after.facts.schedules).toEqual([economics.PRINTER_KIT_SCHEDULE]);
   });
@@ -284,7 +290,7 @@ describe("rate schedules: only the registry's sealed bodies, and never a default
     // The label of the 0.40% schedule over a 4.00% body: well formed, so only the hash check can catch it.
     publish({ ...s, segments: [{ kind: "constant", startTime: 0, endTime: null, bps: 400 }] });
     const ag = economics.exampleSparePrinter();
-    const r = serverEconomicsFacts(request(ag), honest(ag));
+    const r = serverEconomicsFacts(requestJson(request(ag)), honest(ag));
     if (!r.ok) throw new Error(JSON.stringify(r.refusals));
     expect(r.facts.schedules).toEqual([]);
   });
@@ -292,9 +298,9 @@ describe("rate schedules: only the registry's sealed bodies, and never a default
   it("no registry at all is refused when the agreement names a schedule, and does not matter when it names none", () => {
     closeStore();
     const pinned = economics.exampleSparePrinter();
-    expect(codes(serverEconomicsFacts(request(pinned), honest(pinned)))).toEqual(["SCHEDULE_REGISTRY_UNAVAILABLE"]);
+    expect(codes(serverEconomicsFacts(requestJson(request(pinned)), honest(pinned)))).toEqual(["SCHEDULE_REGISTRY_UNAVAILABLE"]);
     const plain = economics.examplePrintAndMail();
-    expect(serverEconomicsFacts(request(plain), honest(plain)).ok).toBe(true);
+    expect(serverEconomicsFacts(requestJson(request(plain)), honest(plain)).ok).toBe(true);
   });
 
   it("a schedule whose rate depends on a unit's capture class or jobs per day refuses; a constant one does not", () => {
@@ -304,7 +310,7 @@ describe("rate schedules: only the registry's sealed bodies, and never a default
     for (const s of [byClass, byAdoption, constant]) publish(s);
     const run = (s: RateSchedule) => {
       const ag = pinnedTo(s);
-      return serverEconomicsFacts(request(ag), honest(ag));
+      return serverEconomicsFacts(requestJson(request(ag)), honest(ag));
     };
     // Without the class, a capture-class segment would verify the pin at its `default` (40), not the class's 120.
     expect(codes(run(byClass))).toEqual(["RATE_FACTS_UNAVAILABLE"]);
@@ -376,7 +382,7 @@ const CTX = { principal: "agent:buyer-1" };
 describe("end to end: once item 27's registries and the plan sources exist, these facts bind a real agreement through the real seam", () => {
   it("accepts the print-and-mail deal, pays each party at its registered address, and seals the agreement's hash", () => {
     const ag = economics.examplePrintAndMail();
-    const bound = economicsBindingFor({ ...request(ag), accepted: null }, honest(ag));
+    const bound = economicsBindingFor(requestJson({ ...request(ag), accepted: null }), honest(ag));
     if (!bound.ok) throw new Error(JSON.stringify(bound.refusals));
     const { deps, submission, payTo } = world(ag);
     const r = acceptExternalPlan(submission, CTX, { ...deps, economics: bound.binding });
@@ -411,8 +417,8 @@ describe("end to end: once item 27's registries and the plan sources exist, thes
       if (!bound.ok) throw new Error(JSON.stringify(bound.refusals));
       return acceptExternalPlan(submission, CTX, { ...deps, economics: bound.binding });
     };
-    expect(run({ ...request(ag), accepted }).ok).toBe(true);
-    const absent = run(request(ag) as Parameters<typeof economicsBindingFor>[0]);
+    expect(run(requestJson({ ...request(ag), accepted })).ok).toBe(true);
+    const absent = run(requestJson(request(ag)));
     expect(absent.ok ? null : absent.refusal).toEqual({ stage: "compile", violations: [{ code: "economics-refused", reason: "economics:AGREEMENT_HASH_MISMATCH:SCHEMA_INVALID" }] });
   });
 
@@ -420,7 +426,7 @@ describe("end to end: once item 27's registries and the plan sources exist, thes
     const ag = economics.examplePrintAndMail();
     const { deps, submission } = world(ag);
     const reason = (sources: EconomicsFactsSources, policyFeeBps?: number) => {
-      const bound = economicsBindingFor({ ...request(ag), accepted: null }, sources);
+      const bound = economicsBindingFor(requestJson({ ...request(ag), accepted: null }), sources);
       if (!bound.ok) throw new Error(JSON.stringify(bound.refusals));
       const d = policyFeeBps === undefined ? deps : world(ag, policyFeeBps).deps;
       const r = acceptExternalPlan(submission, CTX, { ...d, economics: bound.binding });
@@ -441,7 +447,7 @@ describe("end to end: once item 27's registries and the plan sources exist, thes
 
   it("read once: the binding keeps the copy its facts were looked up for, whatever happens to the caller's object", () => {
     const ag = economics.examplePrintAndMail();
-    const bound = economicsBindingFor({ ...request(ag), accepted: null }, honest(ag));
+    const bound = economicsBindingFor(requestJson({ ...request(ag), accepted: null }), honest(ag));
     if (!bound.ok) throw new Error(JSON.stringify(bound.refusals));
     ag.units[0]!.gross = "99000000";
     ag.parties.find((p) => p.partyId === "courier")!.payTo = A("ee");
@@ -457,10 +463,10 @@ describe("the sources are server wiring", () => {
 
   it("a source that answers malformed data, or for another license, is refused by name", () => {
     const parties = honest(ag).partyRegistry!;
-    const r = serverEconomicsFacts(request(ag), honest(ag, { partyRegistry: (id) => (id === "courier" ? "not-an-address" : parties(id)) }));
+    const r = serverEconomicsFacts(requestJson(request(ag)), honest(ag, { partyRegistry: (id) => (id === "courier" ? "not-an-address" : parties(id)) }));
     expect(r.ok ? null : r.refusals).toEqual([{ code: "SERVER_FACTS_INVALID", detail: "parties.1.payTo" }]);
     const licenses = honest(ag).licenseRegistry!;
-    const swapped = serverEconomicsFacts(request(ag), honest(ag, { licenseRegistry: (id, v) => licenses(id === "lic-letter-mail" ? "lic-laser-print-kit" : id, id === "lic-letter-mail" ? 1 : v) }));
+    const swapped = serverEconomicsFacts(requestJson(request(ag)), honest(ag, { licenseRegistry: (id, v) => licenses(id === "lic-letter-mail" ? "lic-laser-print-kit" : id, id === "lic-letter-mail" ? 1 : v) }));
     expect(codes(swapped)).toEqual(["SERVER_FACTS_INVALID"]);
   });
 
@@ -476,14 +482,14 @@ describe("the sources are server wiring", () => {
     }));
     const asked: string[] = [];
     const parties = honest(registered).partyRegistry!;
-    const r = serverEconomicsFacts(request(ag), honest(registered, { partyRegistry: (id) => (asked.push(id), parties(id)) }));
+    const r = serverEconomicsFacts(requestJson(request(ag)), honest(registered, { partyRegistry: (id) => (asked.push(id), parties(id)) }));
     expect(r.ok).toBe(true);
     expect(asked.filter((id) => id.startsWith("stranger-"))).toEqual([]); // the binding then refuses the license (LICENSE_MISMATCH)
   });
 
   it("a malformed license row is refused before anything reads its parties, never thrown", () => {
     for (const bad of [{ licenseId: "lic-laser-print-kit", version: 1 }, { requires: null }, "row", 7]) {
-      const r = serverEconomicsFacts(request(ag), honest(ag, { licenseRegistry: () => bad as never }));
+      const r = serverEconomicsFacts(requestJson(request(ag)), honest(ag, { licenseRegistry: () => bad as never }));
       expect(r.ok ? null : r.refusals).toEqual([{ code: "SERVER_FACTS_INVALID", detail: "licenses (the registry answered a malformed license)" }]);
     }
   });
@@ -493,7 +499,7 @@ describe("the sources are server wiring", () => {
     Object.assign(process.env, ENV);
     try {
       const { env: _env, ...noEnv } = honest(ag);
-      expect(codes(serverEconomicsFacts(request(ag), noEnv as EconomicsFactsSources))).toEqual(["FEE_NOT_CONFIGURED", "FORBIDDEN_RECIPIENTS_NOT_CONFIGURED"]);
+      expect(codes(serverEconomicsFacts(requestJson(request(ag)), noEnv as EconomicsFactsSources))).toEqual(["FEE_NOT_CONFIGURED", "FORBIDDEN_RECIPIENTS_NOT_CONFIGURED"]);
     } finally {
       for (const k of Object.keys(ENV)) if (saved[k] === undefined) delete process.env[k];
       Object.assign(process.env, saved);
@@ -501,15 +507,15 @@ describe("the sources are server wiring", () => {
   });
 
   it("a plan source that cannot say is a missing fact", () => {
-    expect(codes(serverEconomicsFacts(request(ag), honest(ag, { intendedUse: () => null })))).toEqual(["INTENDED_USE_UNAVAILABLE"]);
-    expect(codes(serverEconomicsFacts(request(ag), honest(ag, { unitFacts: () => null })))).toEqual(["UNIT_FACTS_UNAVAILABLE"]);
+    expect(codes(serverEconomicsFacts(requestJson(request(ag)), honest(ag, { intendedUse: () => null })))).toEqual(["INTENDED_USE_UNAVAILABLE"]);
+    expect(codes(serverEconomicsFacts(requestJson(request(ag)), honest(ag, { unitFacts: () => null })))).toEqual(["UNIT_FACTS_UNAVAILABLE"]);
   });
 
   it("a source that throws is a server fault and propagates, as a dependency fault does in the seam", () => {
     const boom = () => {
       throw new Error("database is down");
     };
-    expect(() => serverEconomicsFacts(request(ag), honest(ag, { partyRegistry: boom }))).toThrow("database is down");
+    expect(() => serverEconomicsFacts(requestJson(request(ag)), honest(ag, { partyRegistry: boom }))).toThrow("database is down");
   });
 });
 
@@ -528,6 +534,112 @@ function counted<T extends object>(target: T, ran: string[]): T {
   return new Proxy(target, handler);
 }
 
+/** A native VM global hides the Proxy sandbox behind a wrapper that isProxy does not recognize. */
+function vmWrapper(target: object, ran: string[]): object {
+  const sandbox = counted(target, ran);
+  const value = vm.runInContext("this", vm.createContext(sandbox)) as object;
+  Object.setPrototypeOf(value, null);
+  ran.length = 0;
+  return value;
+}
+
+describe("JSON text admission closes the VM global path (EC6 round 4)", () => {
+  const ag = economics.examplePrintAndMail();
+  const UNREADABLE = ["AGREEMENT_UNREADABLE", "PLAN_INVALID", "CLOCK_INVALID", "CURRENCY_NOT_SUPPORTED"];
+  const entries = [serverEconomicsFacts, economicsBindingFor];
+  const CAP = 1_048_576;
+
+  it("positive control: directly inspecting the VM wrapper runs the sandbox's traps", () => {
+    const ran: string[] = [];
+    const value = vmWrapper({ a: 1 }, ran);
+    expect(utilTypes.isProxy(value)).toBe(false);
+    expect(Object.getPrototypeOf(value)).toBe(null);
+    Reflect.ownKeys(value);
+    expect(ran.length).toBeGreaterThan(0);
+  });
+
+  for (const entry of entries) {
+    it(`${entry.name}: a VM wrapper as the whole request is refused unread`, () => {
+      const ran: string[] = [];
+      const value = vmWrapper({ ...request(ag), accepted: null }, ran);
+      const result = entry(value as never, honest(ag));
+      expect(ran.length, "VM request must run zero traps").toBe(0);
+      expect(codes(result)).toEqual(UNREADABLE);
+    });
+
+    for (const nested of [false, true]) {
+      it(`${entry.name}: an object request with ${nested ? "a nested VM value" : "a VM agreement"} is refused unread`, () => {
+        const ran: string[] = [];
+        const value = vmWrapper({ a: 1 }, ran);
+        const agreement = nested ? { ...ag, fee: value } : value;
+        const result = entry({ ...request(agreement), accepted: null } as never, honest(ag));
+        expect(ran.length, "VM agreement must run zero traps").toBe(0);
+        expect(codes(result)).toEqual(UNREADABLE);
+      });
+    }
+
+    it(`${entry.name}: a Proxy request and a String object are refused without traps or coercion`, () => {
+      const ran: string[] = [];
+      const boxed = new String(requestJson({ ...request(ag), accepted: null }));
+      for (const key of [Symbol.toPrimitive, "toString", "valueOf"]) {
+        Object.defineProperty(boxed, key, { get: () => (ran.push("coercion"), () => "{}") });
+      }
+      for (const value of [counted({ ...request(ag), accepted: null }, ran), boxed]) {
+        expect(codes(entry(value as never, honest(ag)))).toEqual(UNREADABLE);
+        expect(ran.length).toBe(0);
+      }
+    });
+
+    it(`${entry.name}: other non-string requests are refused unread`, () => {
+      const ran: string[] = [];
+      const withGetter = Object.defineProperty({}, "agreement", { get: () => (ran.push("getter"), ag) });
+      for (const value of [request(ag), withGetter, null, undefined, 42, true, 1n, Symbol("request"), () => "{}", []]) {
+        expect(codes(entry(value as never, honest(ag)))).toEqual(UNREADABLE);
+        expect(ran.length).toBe(0);
+      }
+    });
+
+    it(`${entry.name}: invalid JSON is refused`, () => {
+      for (const text of ["", "{", '{"agreement":}', "undefined"]) {
+        expect(codes(entry(text, honest(ag)))).toEqual(UNREADABLE);
+      }
+    });
+
+    it(`${entry.name}: text over 1 MiB in UTF-8 bytes is refused before parsing`, () => {
+      const text = requestJson({ ...request(ag), accepted: null, padding: "é".repeat(CAP / 2) });
+      expect(text.length).toBeLessThan(CAP);
+      expect(Buffer.byteLength(text, "utf8")).toBeGreaterThan(CAP);
+      const parse = vi.spyOn(JSON, "parse");
+      try {
+        expect(codes(entry(text, honest(ag)))).toEqual(UNREADABLE);
+        expect(parse).not.toHaveBeenCalled();
+      } finally {
+        parse.mockRestore();
+      }
+    });
+
+    it(`${entry.name}: text exactly at the UTF-8 byte cap is admitted`, () => {
+      const base = requestJson({ ...request(ag), accepted: null, padding: "" });
+      const remaining = CAP - Buffer.byteLength(base, "utf8");
+      const padding = "é".repeat(Math.floor(remaining / 2)) + "x".repeat(remaining % 2);
+      const text = requestJson({ ...request(ag), accepted: null, padding });
+      expect(Buffer.byteLength(text, "utf8")).toBe(CAP);
+      expect(entry(text, honest(ag)).ok).toBe(true);
+    });
+  }
+
+  it("only literal JSON null accepts now; absent accepted reaches the binding as undefined and is refused", () => {
+    const { deps, submission } = world(ag);
+    for (const [text, accepts] of [[requestJson({ ...request(ag), accepted: null }), true], [requestJson(request(ag)), false]] as const) {
+      const bound = economicsBindingFor(text, honest(ag));
+      if (!bound.ok) throw new Error(JSON.stringify(bound.refusals));
+      const result = acceptExternalPlan(submission, CTX, { ...deps, economics: bound.binding });
+      expect(result.ok).toBe(accepts);
+      if (!accepts) expect(result.ok ? null : result.refusal).toEqual({ stage: "compile", violations: [{ code: "economics-refused", reason: "economics:AGREEMENT_HASH_MISMATCH:SCHEMA_INVALID" }] });
+    }
+  });
+});
+
 function revokedProxy(): object {
   const r = Proxy.revocable({}, {});
   r.revoke();
@@ -544,16 +656,14 @@ function revokedThrower(): object {
   });
 }
 
-describe("the request is read without running any code it carries (EC6 M1)", () => {
-  const MISSING = ["PARTY_REGISTRY_UNAVAILABLE", "INTENDED_USE_UNAVAILABLE", "UNIT_FACTS_UNAVAILABLE"];
-
+describe("ownedJson's ordinary-object safeguards and unread non-string requests (EC6 M1)", () => {
   it("the trap log is live: snapshotJson, the reader the service no longer uses, runs a counted Proxy's traps", () => {
     const ran: string[] = [];
     expect(economics.snapshotJson(counted(economics.examplePrintAndMail(), ran)).ok).toBe(true);
     expect(ran).toEqual(expect.arrayContaining(["getPrototypeOf", "ownKeys", "getOwnPropertyDescriptor"]));
   });
 
-  it("a Proxy agreement, at the root or nested anywhere, is refused by name from both entry points, and none of its traps runs", () => {
+  it("ownedJson refuses a Proxy agreement, at the root or nested anywhere, and none of its traps runs", () => {
     const ag = economics.examplePrintAndMail();
     const ran: string[] = [];
     const deep = structuredClone(ag);
@@ -565,44 +675,40 @@ describe("the request is read without running any code it carries (EC6 M1)", () 
       { ...structuredClone(ag), units: [counted(structuredClone(ag.units[0]!), ran), ...structuredClone(ag.units.slice(1))] },
       deep,
     ];
-    for (const bad of variants) {
-      expect(codes(serverEconomicsFacts(request(bad), honest(ag)))).toEqual(["AGREEMENT_UNREADABLE"]);
-      expect(codes(economicsBindingFor({ ...request(bad), accepted: null }, honest(ag)))).toEqual(["AGREEMENT_UNREADABLE"]);
-    }
+    for (const bad of variants) expect(ownedJson(bad)).toEqual({ ok: false });
     expect(ran).toEqual([]);
   });
 
-  it("a Proxy that would answer like data (a getPrototypeOf trap with a side effect) is refused without asking it", () => {
+  it("ownedJson refuses a Proxy that would answer like data (a getPrototypeOf trap with a side effect) without asking it", () => {
     const ag = economics.examplePrintAndMail();
     let sideEffects = 0;
     const benign = new Proxy(structuredClone(ag), { getPrototypeOf: () => (sideEffects++, Object.prototype) });
-    expect(codes(serverEconomicsFacts(request(benign), honest(ag)))).toEqual(["AGREEMENT_UNREADABLE"]);
+    expect(ownedJson(benign)).toEqual({ ok: false });
     expect(sideEffects).toBe(0);
   });
 
-  it("a Proxy plan, the node list or one node, is refused by name; no trap runs and no plan source is asked", () => {
-    const ag = economics.examplePrintAndMail();
+  it("ownedJson refuses a Proxy plan, the node list or one node, and no trap runs", () => {
     const ran: string[] = [];
-    const asked = vi.fn(() => null);
-    const sources = honest(ag, { intendedUse: asked, unitFacts: asked });
     for (const nodes of [counted(structuredClone(NODES), ran), [counted({ ...NODES[0]! }, ran), { ...NODES[1]! }]]) {
-      expect(codes(serverEconomicsFacts(request(ag, { nodes }), sources))).toEqual(["PLAN_INVALID"]);
-      expect(codes(economicsBindingFor({ ...request(ag, { nodes }), accepted: null }, sources))).toEqual(["PLAN_INVALID"]);
+      expect(ownedJson(nodes)).toEqual({ ok: false });
     }
     expect(ran).toEqual([]);
-    expect(asked).not.toHaveBeenCalled();
   });
 
-  it("a Proxy request runs no trap: each field reads as absent, and each is refused by name", () => {
+  it("a non-string Proxy request runs no trap and is refused by name", () => {
     const ag = economics.examplePrintAndMail();
     const ran: string[] = [];
     const expected = ["AGREEMENT_UNREADABLE", "PLAN_INVALID", "CLOCK_INVALID", "CURRENCY_NOT_SUPPORTED"];
-    expect(codes(serverEconomicsFacts(counted(request(ag), ran), honest(ag)))).toEqual(expected);
-    expect(codes(economicsBindingFor(counted({ ...request(ag), accepted: null }, ran), honest(ag)))).toEqual(expected);
+    const plain = counted(request(ag), ran);
+    const accepting = counted({ ...request(ag), accepted: null }, ran);
+    expect(ownedJson(plain)).toEqual({ ok: false });
+    expect(ownedJson(accepting)).toEqual({ ok: false });
+    expect(codes(serverEconomicsFacts(plain as unknown as string, honest(ag)))).toEqual(expected);
+    expect(codes(economicsBindingFor(accepting as unknown as string, honest(ag)))).toEqual(expected);
     expect(ran).toEqual([]);
   });
 
-  it("a Proxy acceptance runs no trap and reaches the binding as absent, which refuses it; it is never taken as null", () => {
+  it("ownedJson refuses Proxy acceptances without traps; the same hashes encoded as text are accepted", () => {
     const ag = economics.examplePrintAndMail();
     const c = economics.compileEconomics(ag, {});
     if (!c.ok) throw new Error("fixture");
@@ -610,34 +716,30 @@ describe("the request is read without running any code it carries (EC6 M1)", () 
     const { deps, submission } = world(ag);
     const ran: string[] = [];
     for (const accepted of [counted({ ...hashes }, ran), revokedProxy(), revokedThrower()]) {
-      const bound = economicsBindingFor({ ...request(ag), accepted: accepted as typeof hashes }, honest(ag));
-      if (!bound.ok) throw new Error(JSON.stringify(bound.refusals));
-      const r = acceptExternalPlan(submission, CTX, { ...deps, economics: bound.binding });
-      expect(r.ok ? null : r.refusal).toEqual({ stage: "compile", violations: [{ code: "economics-refused", reason: "economics:AGREEMENT_HASH_MISMATCH:SCHEMA_INVALID" }] });
+      expect(ownedJson(accepted)).toEqual({ ok: false });
     }
     expect(ran).toEqual([]);
-    const plain = economicsBindingFor({ ...request(ag), accepted: { ...hashes } }, honest(ag)); // control: the same hashes as data
+    const plain = economicsBindingFor(requestJson({ ...request(ag), accepted: { ...hashes } }), honest(ag)); // control: the same hashes as data
     if (!plain.ok) throw new Error(JSON.stringify(plain.refusals));
     expect(acceptExternalPlan(submission, CTX, { ...deps, economics: plain.binding }).ok).toBe(true);
   });
 
-  it("the verdict's reproduction: a trap that throws a revoked Proxy is refused by name from both entry points, not thrown", () => {
+  it("the verdict's reproduction: ownedJson refuses a trap that throws a revoked Proxy without running it, not thrown", () => {
     const bad = revokedThrower();
     expect(() => economics.snapshotJson(bad)).toThrow(TypeError); // what the old reader let escape
-    expect(codes(serverEconomicsFacts(request(bad), today()))).toEqual(["AGREEMENT_UNREADABLE", ...MISSING]);
-    expect(codes(economicsBindingFor({ ...request(bad), accepted: null }, today()))).toEqual(["AGREEMENT_UNREADABLE", ...MISSING]);
+    expect(ownedJson(bad)).toEqual({ ok: false });
   });
 
-  it("a revoked Proxy as the agreement, the node list, one node or the request itself is refused by name", () => {
+  it("ownedJson refuses a revoked Proxy as the agreement, the node list, one node or the request itself", () => {
     const ag = economics.examplePrintAndMail();
-    expect(codes(serverEconomicsFacts(request(revokedProxy()), honest(ag)))).toEqual(["AGREEMENT_UNREADABLE"]);
-    expect(codes(serverEconomicsFacts(request(ag, { nodes: revokedProxy() as PlanNodeRef[] }), honest(ag)))).toEqual(["PLAN_INVALID"]);
-    expect(codes(serverEconomicsFacts(request(ag, { nodes: [revokedProxy() as PlanNodeRef, NODES[1]!] }), honest(ag)))).toEqual(["PLAN_INVALID"]);
-    expect(codes(serverEconomicsFacts(revokedProxy() as EconomicsFactsRequest, honest(ag)))).toEqual(["AGREEMENT_UNREADABLE", "PLAN_INVALID", "CLOCK_INVALID", "CURRENCY_NOT_SUPPORTED"]);
+    expect(ownedJson(request(revokedProxy()))).toEqual({ ok: false });
+    expect(ownedJson(request(ag, { nodes: revokedProxy() as PlanNodeRef[] }))).toEqual({ ok: false });
+    expect(ownedJson(request(ag, { nodes: [revokedProxy() as PlanNodeRef, NODES[1]!] }))).toEqual({ ok: false });
+    expect(ownedJson(revokedProxy())).toEqual({ ok: false });
   });
 
-  // The parity domain (EC6 r2, finding 2): no Proxy, within the work budget, and every path snapshotJson builds within the
-  // engine's longest string. The round-3 tests pin the three exceptions outside it.
+  // The parity domain (EC6 r2, finding 2): ordinary objects of this realm, no Proxy, within the work budget, and every
+  // path snapshotJson builds within the engine's longest string. The round-3 tests pin the three exceptions outside it.
   it("in the parity domain, ownedJson accepts and refuses what snapshotJson does, and returns an equal copy", () => {
     const nest = (n: number): unknown => (n === 0 ? 0 : [nest(n - 1)]);
     const cyclic: Record<string, unknown> = { a: 1 };
@@ -658,7 +760,7 @@ describe("the request is read without running any code it carries (EC6 M1)", () 
     const cases: Array<[string, unknown]> = [
       ["print-and-mail", economics.examplePrintAndMail()],
       ["spare-printer", economics.exampleSparePrinter()],
-      ["primitives", [0, -0, 1.5, "", "x", true, false, null]],
+      ["primitives", [0, -0, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "", "x", true, false, null]],
       ["a shared, not cyclic, reference", { a: shared, b: shared }],
       ["a null-prototype object", bare],
       ["an own __proto__ key", JSON.parse('{"__proto__": {"a": 1}}')],
@@ -708,7 +810,7 @@ describe("the request is read without running any code it carries (EC6 M1)", () 
 describe("a source's malformed answer is refused by name before anything reads it (EC6 M2)", () => {
   const ag = economics.exampleSparePrinter(); // names a schedule
   const INVALID = [{ code: "SERVER_FACTS_INVALID", detail: "schedules (the registry answered malformed schedules)" }];
-  const withSchedules = (answer: unknown) => serverEconomicsFacts(request(ag), honest(ag, { sealedSchedules: () => answer as SealedAnswer }));
+  const withSchedules = (answer: unknown) => serverEconomicsFacts(requestJson(request(ag)), honest(ag, { sealedSchedules: () => answer as SealedAnswer }));
   type SealedAnswer = ReturnType<EconomicsFactsSources["sealedSchedules"]>;
 
   it("the verdict's three cases, schedules: null, [null] and [{ segments: null }], are refused, not thrown", () => {
@@ -755,7 +857,7 @@ describe("a source's malformed answer is refused by name before anything reads i
     const licenses = honest(plain).licenseRegistry!;
     const rows = [(id: string, version: number) => counted(licenses(id, version)!, ran), () => revokedThrower()];
     for (const row of rows) {
-      const r = serverEconomicsFacts(request(plain), honest(plain, { licenseRegistry: row as EconomicsFactsSources["licenseRegistry"] }));
+      const r = serverEconomicsFacts(requestJson(request(plain)), honest(plain, { licenseRegistry: row as EconomicsFactsSources["licenseRegistry"] }));
       expect(r.ok ? null : r.refusals).toEqual([{ code: "SERVER_FACTS_INVALID", detail: "licenses (the registry answered a malformed license)" }]);
     }
     expect(ran).toEqual([]);
@@ -767,13 +869,13 @@ describe("a source's malformed answer is refused by name before anything reads i
         throw new Error("registry is down");
       },
     });
-    expect(() => serverEconomicsFacts(request(ag), down)).toThrow("registry is down");
-    expect(() => economicsBindingFor({ ...request(ag), accepted: null }, down)).toThrow("registry is down");
+    expect(() => serverEconomicsFacts(requestJson(request(ag)), down)).toThrow("registry is down");
+    expect(() => economicsBindingFor(requestJson({ ...request(ag), accepted: null }), down)).toThrow("registry is down");
   });
 
   it("a configuration value that is not a string reads as unset: refused by name, never thrown", () => {
     const plain = economics.examplePrintAndMail();
-    const run = (env: Record<string, unknown>) => codes(serverEconomicsFacts(request(plain), honest(plain, { env: env as NodeJS.ProcessEnv })));
+    const run = (env: Record<string, unknown>) => codes(serverEconomicsFacts(requestJson(request(plain)), honest(plain, { env: env as NodeJS.ProcessEnv })));
     expect(run({ ...ENV, PCC_PROTOCOL_FEE_BPS: 235 })).toEqual(["FEE_NOT_CONFIGURED"]);
     expect(run({ ...ENV, PCC_PROTOCOL_FEE_RECIPIENT: { toString: () => TREASURY } })).toEqual(["FEE_NOT_CONFIGURED"]);
     expect(run({ ...ENV, PCC_FORBIDDEN_RECIPIENTS: [TOKEN, FACTORY] })).toEqual(["FORBIDDEN_RECIPIENTS_NOT_CONFIGURED"]);
@@ -818,9 +920,6 @@ function measured<T>(read: () => T): { result: T; reads: number; listed: number 
 }
 
 describe("the copy's work is bounded, and its parity with snapshotJson has a stated domain (EC6 r2, findings 1 and 2)", () => {
-  const MISSING = ["PARTY_REGISTRY_UNAVAILABLE", "INTENDED_USE_UNAVAILABLE", "UNIT_FACTS_UNAVAILABLE"];
-  type Refusable = { ok: boolean; refusals?: Array<{ code: string }> };
-
   it("the measure is live: it counts every read snapshotJson, which has no work budget, makes of a value past the budget", () => {
     // 1,100 references to one object with 2,000 hidden keys: 1,100 entries and 2,200,000 hidden keys, past the budget.
     const over = new Array(1_100).fill(hiddenKeys(2_000));
@@ -829,23 +928,12 @@ describe("the copy's work is bounded, and its parity with snapshotJson has a sta
     expect(ownedJson(over)).toEqual({ ok: false }); // the second parity exception: past the budget, ownedJson refuses
   });
 
-  it("the verdict's reproduction: 5,000 references to one object with 5,000 hidden keys are refused within the budget, from ownedJson and both entry points", () => {
+  it("the verdict's reproduction: ownedJson refuses 5,000 references to one object with 5,000 hidden keys within the budget", () => {
     const bad = new Array(5_000).fill(hiddenKeys(5_000));
     // Unbudgeted, this read 25,005,001 descriptors and returned 5,000 empty objects. Now the 399th visit's keys cross
     // the budget (5,001 + 399 × 5,000 = 2,000,001) before any of them is read: 1 length, 399 entries and 398 × 5,000
     // keys are read, and 399 × 5,000 keys are listed.
     expect(measured(() => ownedJson(bad))).toEqual({ result: { ok: false }, reads: 1_990_400, listed: 1_995_000 });
-    const entries: Array<() => Refusable> = [
-      () => serverEconomicsFacts(request(bad), today()),
-      () => economicsBindingFor({ ...request(bad), accepted: null }, today()),
-    ];
-    for (const entry of entries) {
-      const m = measured(entry);
-      expect(codes(m.result)).toEqual(["AGREEMENT_UNREADABLE", ...MISSING]);
-      // The request's other fields and its two-node plan add a few reads; the agreement adds no more than the budget.
-      expect(m.reads).toBeLessThanOrEqual(WORK + 1 + 50);
-      expect(m.listed).toBeLessThanOrEqual(WORK + 5_000 + 50);
-    }
   });
 
   it("the budget is exact: 2,000,000 keys examined are copied as snapshotJson copies them; one more is refused before any key past the budget is read", () => {

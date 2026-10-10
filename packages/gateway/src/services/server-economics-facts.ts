@@ -11,8 +11,12 @@
  * `economicsBindingFor` builds exactly that object. Wiring it into the accept route stays with the plan and
  * composition lane.
  *
- * The agreement is untrusted. It is read ONCE, into an owned copy, and used only to name which registry rows to
- * read: the rate schedules, licenses and parties it cites. No value in the facts comes from it.
+ * Admission accepts primitive JSON text of at most 1 MiB (1,048,576 UTF-8 bytes), parsed inside this service with
+ * no reviver. Non-strings, including String objects, are refused unread and without coercion; invalid or oversized
+ * text is refused before any request field is read. The text carries agreement, nodes, currency and now, plus
+ * accepted for `economicsBindingFor`. The agreement is read ONCE from the parsed tree into an owned copy, used only
+ * to name which registry rows to read: the rate schedules, licenses and parties it cites. No value in the facts
+ * comes from it. Only literal JSON null for accepted means this acceptance is the payer's; absence stays undefined.
  *
  * Field by field:
  *   feeBps, feeRecipient   configuration: PCC_PROTOCOL_FEE_BPS and PCC_PROTOCOL_FEE_RECIPIENT (`protocolFeePolicy`),
@@ -34,22 +38,30 @@
  *   maxAgreementAgeSeconds, authorityFloor   left out, so the binding's and the compiler's reviewed policy values apply.
  *
  * Nothing missing is filled in. No empty list stands in for a registry that does not exist, and no default for a
- * configuration that is unset. A refusal lists every missing fact it can name, in a fixed order. The request (its
- * agreement, nodes and acceptance) is read without running any code it carries, within a work budget (`ownedJson`),
- * and untrusted input never makes this module throw.
+ * configuration that is unset. A refusal lists every missing fact it can name, in a fixed order. The untrusted
+ * boundary is JSON text: parsing gives ordinary data of this realm, so reading agreement, nodes and acceptance
+ * cannot run caller code. Untrusted input never makes this module throw.
  *
- * PRECONDITION, the seam's own (external-plan-seam.ts, its header): the request arrives bounded in size. The accept
- * route that wires this module must keep it, as the seam's submission does: it is parsed from an HTTP body the gateway
- * caps at 1 MiB (`bodyLimit`, server.ts), so no object in it is wider than that body allows. The work budget bounds
- * the copy's walk, but not one object's width before it is enumerated: JavaScript cannot count an object's own keys
- * without materializing them.
+ * The seam's 1 MiB precondition (external-plan-seam.ts, its header; gateway bodyLimit) is enforced here before
+ * parsing. `ownedJson` retains its depth, array-length, value and work bounds. Its work budget bounds the copy's
+ * walk, but not one object's width before enumeration: JavaScript must materialize its own keys to count them.
+ * Its no-code and work guarantees hold for ordinary objects of this realm. It is NOT an admission boundary against
+ * exotic host objects such as VM globals, whose reflection can invoke Proxy traps despite util.types.isProxy false.
  *
- * A source is server code: what it answers is checked before anything reads it, and a
- * malformed answer is refused (SERVER_FACTS_INVALID); a source that throws (a database fault) propagates, as a
+ * `ownedJson` has parity with `snapshotJson` for ordinary data of this realm containing no Proxy, within the work
+ * budget, and with every diagnostic path representable by the engine. Three standalone copier exceptions remain:
+ * explicit Proxies are refused unread here; skipped non-enumerable keys can exhaust its additional work budget;
+ * and snapshotJson can refuse an unrepresentable diagnostic path that this path-free copier accepts. JSON text
+ * cannot encode Proxies or non-enumerable keys, and the service's byte cap applies before any of these comparisons.
+ *
+ * Sources are trusted server code, never caller input: schedule and license bodies are copied through `ownedJson`
+ * as defence in depth, and all facts are schema-checked. A malformed answer is refused (SERVER_FACTS_INVALID);
+ * a source that throws (a database fault) propagates, as a
  * dependency fault does in the seam. It stores nothing: it adds no ledger, and money moves only through the V-next
  * payouts the binding returns.
  */
 
+import { Buffer } from "node:buffer";
 import { types as utilTypes } from "node:util";
 import { RateScheduleSchema, SETTLEMENT_TOKEN_DECIMALS, assertScheduleIsWellFormed, computeScheduleHash, type RateSchedule } from "@pcc/spec";
 import {
@@ -80,6 +92,8 @@ const MAX_SCHEDULE_LOOKUPS = 64;
 const MAX_FORBIDDEN_RECIPIENTS = 64;
 /** The seam's bound on a submission's nodes. */
 const MAX_PLAN_NODES = 1024;
+/** The seam's admission precondition, measured in UTF-8 bytes before JSON parsing. */
+const MAX_REQUEST_JSON_BYTES = 1_048_576;
 
 // ── Configuration ────────────────────────────────────────────────────────────────────────────────
 
@@ -135,7 +149,10 @@ function readForbiddenRecipients(env: NodeJS.ProcessEnv): ForbiddenRead {
 
 // ── The contributors registry's sealed rate schedules ────────────────────────────────────────────
 
-/** Every schedule hash the (untrusted) agreement names, lowercased, for lookup only. */
+/**
+ * Every schedule hash the agreement names, lowercased, for lookup only. Callers must supply ordinary parsed or
+ * server-owned data; this helper reads properties directly and is not an arbitrary-object admission boundary.
+ */
 export function namedScheduleHashes(agreement: unknown): string[] {
   const hashes = new Set<string>();
   const visit = (rule: unknown) => {
@@ -251,6 +268,14 @@ export interface PlanNodeRef {
   capabilityId: string;
 }
 
+/**
+ * Fields carried by the public entry points' JSON text, at most 1 MiB in UTF-8 bytes and parsed inside the service
+ * without a reviver. This interface describes the parsed data, not an admitted object argument: non-string
+ * arguments are refused unread. `economicsBindingFor` also reads accepted; only literal JSON null accepts now,
+ * and an absent accepted stays undefined for the binding to refuse. Copier parity applies to ordinary data of
+ * this realm without Proxies, within the work budget and representable diagnostic paths. Its three exceptions
+ * are explicit Proxy refusal, an additional budget for skipped keys, and accepting paths snapshotJson cannot build.
+ */
 export interface EconomicsFactsRequest {
   /** The agreement to bind. Untrusted, whether the server loaded it by id or the plan carried it. Read once. */
   agreement: unknown;
@@ -263,7 +288,8 @@ export interface EconomicsFactsRequest {
 }
 
 /**
- * Where each fact comes from. A source that does not exist yet is null, and every fact it would supply is refused.
+ * Trusted server functions, never caller input. A source that does not exist yet is null, and every fact it would
+ * supply is refused.
  * The four nullable sources' signatures are placeholders until their owners build them. An answer that is not what
  * its signature says is refused (SERVER_FACTS_INVALID), never read as if it were.
  */
@@ -291,10 +317,22 @@ export type ServerEconomicsFactsResult =
   | { ok: true; facts: ServerEconomicsFacts }
   | { ok: false; refusals: EconomicsFactsRefusal[] };
 
-// ── Caller data, read without running caller code ────────────────────────────────────────────────
+// ── JSON text admission and owned ordinary data ──────────────────────────────────────────────────
+
+/** Refused admission becomes absent data, using the existing unreadable-request refusal path. */
+function readRequestJson(requestJson: string): unknown {
+  if (typeof requestJson !== "string") return undefined; // identity-only: never inspect or coerce a rejected argument
+  try {
+    if (Buffer.byteLength(requestJson, "utf8") > MAX_REQUEST_JSON_BYTES) return undefined;
+    return JSON.parse(requestJson); // no reviver; the tree stays private and originates in this realm
+  } catch {
+    // Invalid JSON or an engine error. Convert to refusals without inspecting what was thrown.
+    return undefined;
+  }
+}
 
 /**
- * One own data property of the request, read once and without running caller code; undefined for an accessor, a
+ * One own data property of the internally parsed request, read once; undefined for an accessor, a
  * missing key or a Proxy (`util.types.isProxy` invokes no trap).
  */
 function field(from: unknown, key: string): unknown {
@@ -326,8 +364,11 @@ const NOT_DATA: unique symbol = Symbol("not-data");
 export type OwnedJson = { ok: true; value: unknown } | { ok: false };
 
 /**
- * An owned copy of plain JSON data, read WITHOUT running any code the value carries (EC6 M1; the seam's `plainCopy`
- * is the model). `util.types.isProxy`, which invokes no trap, is asked of every object before anything else touches
+ * An owned copy of ordinary data of this realm, read without running code it carries (EC6 M1; the seam's `plainCopy`
+ * is the model). This guarantee excludes exotic host objects such as VM globals: reflection on them can invoke
+ * caller code despite util.types.isProxy false. This is NOT an untrusted-object boundary; the public entry points
+ * admit JSON text and parse it internally. Trusted server answers are copied here as defence in depth.
+ * `util.types.isProxy`, which invokes no trap, is asked of every object before anything else touches
  * it, so a Proxy anywhere, revoked or not, refuses the whole value and none of its traps runs. Only own data
  * properties are read, through their descriptors, so no getter and no `toJSON` runs either.
  *
@@ -337,15 +378,17 @@ export type OwnedJson = { ok: true; value: unknown } | { ok: false };
  *
  * It also has a work budget (MAX_COPY_WORK). It reads at most one descriptor past the budget: the length of a list
  * whose charge then crosses it. It lists the keys of at most one object past the budget, the one whose keys cross it,
- * and the caller paid to build that object (the PRECONDITION in the module header).
+ * so enumeration itself requires a width bound. Parsed requests have the enforced byte cap; trusted server sources
+ * supply their own ordinary objects. These work guarantees do not apply to exotic host wrappers.
  *
- * Parity with `snapshotJson` (EC6 r2, finding 2): for a value that holds no Proxy, stays within the work budget, and
- * whose every diagnostic path `snapshotJson` can build, the two readers accept and refuse the same values and copy
- * them equally. Outside that domain they differ in three ways, and a test pins each one:
- *   - a Proxy: refused here, by design (EC6 R2-D2);
- *   - more keys than MAX_COPY_WORK: refused here, by design. Only keys the copy skips can cause this;
+ * Parity with `snapshotJson` (EC6 r2, finding 2): for ordinary data of this realm that holds no Proxy, stays within
+ * the work budget, and whose every diagnostic path `snapshotJson` can build, the two readers accept and refuse the
+ * same values and copy them equally. For ordinary data, three documented exceptions have tests pinning each one:
+ *   - an explicit Proxy: refused here, by design (EC6 R2-D2); JSON text cannot encode one;
+ *   - more keys than MAX_COPY_WORK: refused here, by design. Only keys the copy skips can cause this; parsed JSON
+ *     has enumerable keys;
  *   - a path longer than the engine's longest string: `snapshotJson` names each value by its path (`input.a[0]`), so it
- *     refuses such a value. This copy builds no path, so it reads the value.
+ *     refuses such a value. This copy builds no path, so it reads the value. The service's byte cap applies first.
  */
 export function ownedJson(root: unknown): OwnedJson {
   let values = 0;
@@ -539,8 +582,15 @@ function ordered(refusals: readonly EconomicsFactsRefusal[]): EconomicsFactsRefu
   return ECONOMICS_FACTS_REFUSAL_CODES.flatMap((c) => (byCode.has(c) ? [byCode.get(c)!] : []));
 }
 
-/** The facts the binding checks this request's agreement against, or every missing fact by name. */
-export function serverEconomicsFacts(request: EconomicsFactsRequest, sources: EconomicsFactsSources = productionEconomicsFactsSources()): ServerEconomicsFactsResult {
+/**
+ * The facts the binding checks the request's agreement against, or every missing fact by name. Admit primitive JSON
+ * text of at most 1 MiB in UTF-8 bytes, parsed here without a reviver; refuse non-strings unread, and invalid or
+ * oversized text through the existing unreadable-request codes. Sources are trusted server functions.
+ * Copier parity is for ordinary data of this realm without Proxies, within the work budget and representable paths;
+ * exceptions are explicit Proxy refusal, extra work for skipped keys, and accepting paths snapshotJson cannot build.
+ */
+export function serverEconomicsFacts(requestJson: string, sources: EconomicsFactsSources = productionEconomicsFactsSources()): ServerEconomicsFactsResult {
+  const request = readRequestJson(requestJson);
   return assemble(ownedJson(field(request, "agreement")), request, sources);
 }
 
@@ -549,21 +599,28 @@ export type EconomicsBindingResult =
   | { ok: false; refusals: EconomicsFactsRefusal[] };
 
 /**
- * The seam's `economics` dependency for one request. The agreement is read ONCE: its facts are assembled from that
+ * The seam's `economics` dependency for one request. Admit primitive JSON text of at most 1 MiB in UTF-8 bytes,
+ * parsed here without a reviver; refuse non-strings unread and invalid or oversized text through the existing
+ * unreadable-request codes. Sources are trusted server functions. Copier parity is for ordinary data of this realm
+ * without Proxies, within the work budget and representable paths; exceptions are explicit Proxy refusal, extra
+ * work for skipped keys, and accepting paths snapshotJson cannot build.
+ * The agreement is read ONCE: its facts are assembled from that
  * copy, and both halves of the binding are bound to the same copy, so the rows looked up, the gross reserved and
  * the split compiled all describe one agreement. `accepted` is what the payer accepted (from the accepted-agreement
- * store, operator item 27), or null when this acceptance is the payer's.
+ * store, operator item 27), or literal JSON null when this acceptance is the payer's. Absence stays undefined and
+ * the binding refuses it; it is never taken as null.
  */
 export function economicsBindingFor(
-  request: EconomicsFactsRequest & { accepted: AcceptedAgreementHashes | null },
+  requestJson: string,
   sources: EconomicsFactsSources = productionEconomicsFactsSources(),
 ): EconomicsBindingResult {
+  const request = readRequestJson(requestJson);
   const copy = ownedJson(field(request, "agreement"));
   const assembled = assemble(copy, request, sources);
   if (!assembled.ok) return assembled;
   const agreement = copy.ok ? copy.value : undefined; // facts were assembled, so the copy parsed
   // Only null means "this acceptance is the payer's". Anything else reaches the binding as an owned copy; a value the
-  // copy refuses (a Proxy, an accessor) reaches it as undefined, as an absent one does. The binding checks both and
+  // copy refuses reaches it as undefined, as an absent one does. The binding checks both and
   // refuses them (AGREEMENT_HASH_MISMATCH:SCHEMA_INVALID); neither is ever taken as null.
   const acceptedRaw = field(request, "accepted");
   const acceptedCopy = acceptedRaw === null ? null : ownedJson(acceptedRaw);
