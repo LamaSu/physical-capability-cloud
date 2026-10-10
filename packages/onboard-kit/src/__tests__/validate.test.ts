@@ -69,12 +69,47 @@ describe("validate", () => {
     expect(result.errors.some(e => e.name.includes("kernelId"))).toBe(true);
   });
 
-  it("should fail for invalid capability type", () => {
+  it("should fail for a MALFORMED capability type (not a slug)", () => {
     const config = makeValidConfig();
-    (config.capabilities[0] as any).type = "invalid-type";
+    // Uppercase + spaces + punctuation — a typo, not a deliberate ad-hoc type.
+    (config.capabilities[0] as any).type = "Not A Real Type!";
     const result = validate({ config });
     expect(result.valid).toBe(false);
-    expect(result.errors.some(e => e.message.includes("Unknown capability type"))).toBe(true);
+    expect(result.errors.some(e => e.message.includes("Invalid capability type"))).toBe(true);
+  });
+
+  it("should fail for an empty capability type", () => {
+    const config = makeValidConfig();
+    (config.capabilities[0] as any).type = "";
+    const result = validate({ config });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some(e => e.name.includes(".type"))).toBe(true);
+  });
+
+  it("should ALLOW a well-formed ad-hoc capability type (open taxonomy) with a warning", () => {
+    // Open taxonomy: an operator can register any well-formed type — a
+    // wood-fired pizzeria, a rideshare driver — not just the 40-odd built-ins.
+    const config = makeValidConfig();
+    (config.capabilities[0] as any).type = "wood-fired-pizza";
+    const result = validate({ config });
+    expect(result.valid).toBe(true); // NOT rejected
+    expect(result.errors).toHaveLength(0);
+    expect(result.warnings.some(w => w.message.includes("ad-hoc"))).toBe(true);
+  });
+
+  it("should ALLOW a dotted namespaced ad-hoc type (pizza.order)", () => {
+    const config = makeValidConfig();
+    (config.capabilities[0] as any).type = "pizza.order";
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it("should still recognize a built-in type without a warning", () => {
+    const config = makeValidConfig(); // type: "fdm"
+    const result = validate({ config });
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some(w => w.name === "capability[fdm].type")).toBe(false);
   });
 
   it("should fail for invalid currency", () => {
