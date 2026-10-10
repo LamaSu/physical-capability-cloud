@@ -62,6 +62,7 @@ import {
   fundEscrowV2 as chainFundEscrowV2,
   depositBondV2 as chainDepositBondV2,
   fileDisputeV2 as chainFileDisputeV2,
+  waitForReceipt,
 } from "../contracts/escrow-client.js";
 import {
   isBatchEnabled,
@@ -375,8 +376,38 @@ export class SettlementFacade extends BaseFacade {
       this.validateMilestoneIndex(milestoneIndex);
       this.requireWriteEnabled();
       const result = await chainReleaseMilestone(milestoneIndex, attestation, address);
+      // A broadcast is not a release (astra A07c F4): the client resolves on the transaction hash, before the
+      // chain has run it. Completion is announced, and escrow.released recorded, only on a successful receipt.
+      // A reverted release fails. A receipt that did not arrive within the bound, or could not be read,
+      // leaves the release submitted: recorded with its hash, never announced as released.
+      const txHash = result.transactionHash;
+      let receipt: "success" | "reverted" | "timeout";
+      try {
+        receipt = (await waitForReceipt(txHash as Hex)).status;
+      } catch {
+        receipt = "timeout";
+      }
+      if (receipt === "reverted") {
+        pipelineTelemetry.emit(address, "settlement_complete", "failed", {
+          metadata: { escrow: address, milestoneIndex, released: false, txHash, error: "release_reverted" },
+        });
+        throw new Error(`release_reverted: the release transaction ${txHash} reverted, so milestone ${milestoneIndex} was not released`);
+      }
+      if (receipt !== "success") {
+        auditService.log({
+          eventType: "escrow.release_submitted",
+          actor: actorId,
+          resourceType: "escrow",
+          resourceId: address,
+          action: "release",
+          metadata: { milestoneIndex, evidenceHash: attestation.evidenceHash, txHash, receipt: "unconfirmed" },
+          ip,
+          userAgent,
+        });
+        return { ...result, status: "submitted", released: false, action: "release", escrow: address, milestoneIndex };
+      }
       pipelineTelemetry.emit(address, "settlement_complete", "completed", {
-        metadata: { escrow: address, milestoneIndex, released: true },
+        metadata: { escrow: address, milestoneIndex, released: true, txHash },
       });
       auditService.log({
         eventType: "escrow.released",
@@ -384,11 +415,11 @@ export class SettlementFacade extends BaseFacade {
         resourceType: "escrow",
         resourceId: address,
         action: "release",
-        metadata: { milestoneIndex, evidenceHash: attestation.evidenceHash },
+        metadata: { milestoneIndex, evidenceHash: attestation.evidenceHash, txHash },
         ip,
         userAgent,
       });
-      return { ...result, action: "release", escrow: address, milestoneIndex };
+      return { ...result, status: "released", released: true, action: "release", escrow: address, milestoneIndex };
     });
   }
 
@@ -694,7 +725,7 @@ export class SettlementFacade extends BaseFacade {
       return {
         jobId: result.jobId,
         escrowId: contractAddress ?? "",
-        status: result.status as SettlementResultDTO["status"],
+        status: result.status,
         releasedAmount: "0",
         protocolFee: "0",
         txHash: result.txHash,

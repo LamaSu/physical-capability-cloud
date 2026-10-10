@@ -13,13 +13,14 @@
 
 import type { EvidenceBundle } from "@pcc/spec";
 import { isFabricated } from "@pcc/spec";
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import type { OracleAttestation } from "@pcc/contracts";
 import { getRepos } from "../db.js";
 import {
   submitEvidence as onChainSubmitEvidence,
   releaseMilestone as onChainReleaseMilestone,
   isWriteEnabled,
+  waitForReceipt,
 } from "../contracts/escrow-client.js";
 import { Sentry } from "../sentry.js";
 import { traceCollector, TraceCollector } from "../trace-collector.js";
@@ -43,7 +44,11 @@ export interface SettlementResult {
 export interface ReleaseResult {
   jobId: string;
   txHash: string;
-  status: "released" | "failed";
+  /**
+   * "released" only on a successful receipt. "submitted": broadcast, but no receipt within the bound (or it
+   * could not be read), so the release is unconfirmed. "failed": not sent, or the chain reverted it.
+   */
+  status: "released" | "submitted" | "failed";
   error?: string;
 }
 
@@ -293,17 +298,30 @@ export class SettlementService {
             });
             if (job?.capabilityId) {
               const ipReg = repos.story.findIpByCapabilityId(job.capabilityId);
-              if (ipReg) {
+              // The derivative is the job's kernel operator's work (N10a: never the zero address), and only
+              // when the job ran on its capability's own kernel, so the registrant is the parent IP's
+              // recorded owner (the same rule as POST /api/ip/register-job-evidence).
+              const kernel = repos.kernels.findById(job.kernelId);
+              const operatorOk = kernel !== undefined && /^0x[0-9a-fA-F]{40}$/.test(kernel.operatorAddress) && !/^0x0{40}$/i.test(kernel.operatorAddress);
+              const capabilityOnKernel = repos.capabilities.findById(job.capabilityId)?.kernelId === job.kernelId;
+              if (ipReg && kernel && operatorOk && !capabilityOnKernel) {
+                pipelineTelemetry.emit(jobId, "settlement_claim", "skipped", {
+                  metadata: { reason: "job_capability_not_on_kernel", capabilityId: job.capabilityId },
+                });
+              }
+              if (ipReg && kernel && operatorOk && capabilityOnKernel) {
                 const { getStoryIPService } = await import("@pcc/contracts");
                 const storyIPService = getStoryIPService();
                 const link = await storyIPService.registerJobAsDerivative(ipReg.ipId, {
                   jobId,
                   evidenceBundleHash: bundle.bundleHash,
-                  operatorAddress: "0x0000000000000000000000000000000000000000",
-                  operatorName: "operator",
+                  operatorAddress: kernel.operatorAddress,
+                  operatorName: kernel.name,
                   ipfsCid: result.cid,
                 });
-                // Persist derivative link to DB
+                // Persist derivative link to DB. Only a recorded link is a completed registration: the link
+                // row is the child IP's ownership record (astra, #385 r2).
+                let recorded = false;
                 try {
                   repos.story.insertDerivativeLink({
                     id: `dl_${jobId}_${Date.now()}`,
@@ -315,19 +333,28 @@ export class SettlementService {
                     txHash: link.txHash,
                     linkedAt: link.linkedAt,
                   });
+                  recorded = true;
                 } catch (dbErr) {
-                  console.warn("[settlement] Story derivative DB persist failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+                  // The derivative exists on Story but has no owner record: flag it for operator repair.
+                  console.error("[settlement] Story derivative minted but NOT recorded:", dbErr instanceof Error ? dbErr.message : dbErr);
+                  auditService.log({ eventType: "ip.derivative_unrecorded", actor: "settlement-service", resourceType: "ip", resourceId: link.childIpId, action: "repair-needed", metadata: { jobId, parentIpId: link.parentIpId } });
                 }
-                pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
-                });
-                auditService.log({
-                  eventType: "settlement.story_registered",
-                  resourceType: "job",
-                  resourceId: jobId,
-                  action: "register_derivative",
-                  metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
-                });
+                if (recorded) {
+                  pipelineTelemetry.emit(jobId, "settlement_claim", "completed", {
+                    metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  });
+                  auditService.log({
+                    eventType: "settlement.story_registered",
+                    resourceType: "job",
+                    resourceId: jobId,
+                    action: "register_derivative",
+                    metadata: { derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  });
+                } else {
+                  pipelineTelemetry.emit(jobId, "settlement_claim", "failed", {
+                    metadata: { outcome: "unrecorded", repairRequired: true, derivativeIpId: link.childIpId, parentIpId: link.parentIpId },
+                  });
+                }
               }
             }
           } catch (storyErr) {
@@ -465,6 +492,23 @@ export class SettlementService {
         contractAddress as Address,
       );
 
+      // A broadcast is not a release (astra A07b, #385 round 3): the write resolves on the transaction hash,
+      // before the chain has run it. The milestone is reported released, and the job marked settled, only when
+      // the receipt shows success. A reverted release failed. A receipt that did not arrive within the bound,
+      // or could not be read, leaves the release submitted, with its hash, for a later chain read to settle.
+      let receipt: "success" | "reverted" | "timeout";
+      try {
+        receipt = (await waitForReceipt(writeResult.transactionHash as Hex)).status;
+      } catch {
+        receipt = "timeout";
+      }
+      if (receipt === "reverted") {
+        return { jobId, txHash: writeResult.transactionHash, status: "failed", error: "release_reverted" };
+      }
+      if (receipt !== "success") {
+        return { jobId, txHash: writeResult.transactionHash, status: "submitted", error: "release_unconfirmed" };
+      }
+
       try {
         const repos = getRepos();
         repos.jobs.updateStatus(jobId, "settled");
@@ -472,31 +516,11 @@ export class SettlementService {
         // DB update non-fatal
       }
 
-      // ── Best-effort: Story Protocol royalty payment ─────────────────
-      try {
-        const repos = getRepos();
-        // Find derivative links for this job to get the IP ID
-        const derivLinks = repos.story.findDerivativeLinksByJob(jobId);
-        if (derivLinks.length > 0) {
-          const childIpId = derivLinks[0].childIpId;
-          const royaltyPercent = Number(process.env.STORY_ROYALTY_PERCENT ?? "5");
-
-          // Estimate job value from milestone index (use a placeholder amount for mock)
-          // In production this would come from the escrow contract's milestone amount
-          const milestoneAmountStr = process.env.STORY_MILESTONE_AMOUNT ?? "1000000"; // 1 USDC in atomic units
-          const royaltyAmount = String(
-            Math.floor(Number(milestoneAmountStr) * royaltyPercent / 100),
-          );
-
-          const { getStoryIPService } = await import("@pcc/contracts");
-          const storyIPService = getStoryIPService();
-          await storyIPService.payJobRoyalty(childIpId, royaltyAmount, contractAddress as string);
-          console.log(`[settlement] Story royalty paid: ipId=${childIpId} amount=${royaltyAmount} (${royaltyPercent}% of milestone)`);
-        }
-      } catch (storyErr) {
-        // Royalty payment is best-effort — escrow release succeeds regardless
-        console.warn("[settlement] Story royalty payment failed (best-effort):", storyErr instanceof Error ? storyErr.message : storyErr);
-      }
+      // ── No automatic Story royalty payment on release (N10a, coord-watch #2974) ─────
+      // This used to pay a royalty computed from STORY_MILESTONE_AMOUNT x STORY_ROYALTY_PERCENT (an env
+      // guess, not the released amount), with the escrow contract named as payer. Royalties are now
+      // either inside each settlement unit's payouts (the economics compiler), or settled explicitly by
+      // a party to the job through POST /api/ip/settle-royalties, from the released milestone.
 
       return {
         jobId,

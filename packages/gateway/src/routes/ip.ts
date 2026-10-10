@@ -20,11 +20,30 @@
  *
  * DB persistence: registrations and derivative links are stored in the
  * story_ip_registrations / story_derivative_links tables via @pcc/store.
+ *
+ * Authorization (N10a):
+ *   - WHO the caller is: only a wallet proven by a SIWE (EIP-4361) session. An API key's operatorId is
+ *     not proof: POST /api/auth/provision is public and issues a key for a caller-asserted identity, so
+ *     an owner check on it could be passed by anyone (the reason job.cancel is unregistered in
+ *     mcp/operation-policy.ts). Keys become eligible once a key records a SIWE-proven identity.
+ *   - WHO owns an IP: there is no owner column; ownership is derived from durable records only.
+ *     A capability IP (story_ip_registrations.capability_id) is owned by the operator of that
+ *     capability's kernel; a job-evidence IP (story_derivative_links.job_id) by the operator of that
+ *     job's kernel. Anything else has no recorded owner, and every mutation of it is refused
+ *     (403 ip_owner_unknown): fail closed.
+ *   - Registration therefore requires the caller to operate the kernel it registers for, and records
+ *     the link that later proves ownership; nothing about ownership comes from the request body.
+ *   - Money never comes from the body: settle-royalties takes the revenue and the payer from the
+ *     job's released escrow milestone, and pay/claim act as the caller only.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { createHash } from "node:crypto";
 import { v4 as uuidv4 } from "uuid";
+import { parseUnits } from "viem";
 import { getRepos } from "../db.js";
+import { resolveSession } from "../auth/siwe-auth.js";
+import { auditService } from "../services/audit-service.js";
 import { getStoryIPService, getLicensingEngine } from "@pcc/contracts";
 import type { ContributorRole, LicensingTerms } from "@pcc/spec";
 
@@ -84,7 +103,8 @@ interface DistributeRoyaltiesBody {
 
 interface PayRoyaltyBody {
   amount: string;
-  payerAddress: string;
+  /** Optional: the payer is the caller. When given it must be the caller's wallet. */
+  payerAddress?: string;
 }
 
 interface ClaimRevenueBody {
@@ -127,8 +147,10 @@ interface SetLicensingTermsBody {
 interface SettleRoyaltiesBody {
   jobId: string;
   childIpId: string;
-  jobRevenue: string;
-  payerAddress: string;
+  /** Optional and never trusted: when given it must equal the released milestone's amount (base units). */
+  jobRevenue?: string;
+  /** Optional and never trusted: when given it must equal the escrow's payer. */
+  payerAddress?: string;
 }
 
 interface RoyaltyDistributionQuerystring {
@@ -144,11 +166,256 @@ interface CapabilityIdParams {
 }
 
 // ---------------------------------------------------------------------------
+// Authorization (N10a)
+// ---------------------------------------------------------------------------
+
+const SIWE_STEPS = {
+  nonce_url: "/api/auth/nonce",
+  verify_url: "/api/auth/verify",
+  how: "GET the nonce, sign the SIWE message with your wallet, POST it to verify, then send Authorization: Bearer <session token>.",
+};
+
+/**
+ * The caller's wallet, lowercase, when a SIWE session proved it; otherwise null. API keys are not
+ * accepted here on purpose (see the header): their operatorId is asserted, not proven.
+ */
+function verifiedWallet(req: FastifyRequest): string | null {
+  // Gateway #326 adds req.provenWallet, set by apiGate on every request from a SIWE session or from a key
+  // minted through the SIWE path: a wallet, or null. Only apiGate writes it; a client cannot. Once it is
+  // set it is final, null included: apiGate deliberately answers null for a SIWE cookie riding on another
+  // identity's API key (gateway #3160), so the session must not be consulted behind its back. Before
+  // #326, the field is absent and the session is the only proof.
+  const proven = (req as { provenWallet?: unknown }).provenWallet;
+  if (proven !== undefined) return typeof proven === "string" && /^0x[0-9a-fA-F]{40}$/.test(proven) ? proven.toLowerCase() : null;
+  const session = resolveSession(req);
+  return session ? session.address.toLowerCase() : null;
+}
+
+function requireWallet(req: FastifyRequest, reply: FastifyReply): string | null {
+  let wallet: string | null;
+  try {
+    wallet = verifiedWallet(req);
+  } catch {
+    void reply.code(503).send({ error: "store_unavailable", message: "Sessions cannot be checked without the store." });
+    return null;
+  }
+  if (wallet === null) {
+    void reply.code(401).send({
+      error: "verified_wallet_required",
+      message: "This action changes who is paid or what is owned, so it needs a wallet proven by a SIWE signature. An API key alone is not proof of identity.",
+      siwe: SIWE_STEPS,
+    });
+  }
+  return wallet;
+}
+
+const UNOWNED_OPERATORS = new Set(["", "0x0000000000000000000000000000000000000000"]);
+
+/**
+ * The operator of a kernel, lowercase, or null when the kernel is unknown or has no recorded owner. A legacy
+ * row carries "" or the zero address instead of an owner: nobody owns it, and nobody manages its IP until an
+ * admin migration records one (astra A07b; re-registering such a row no longer claims it).
+ */
+function kernelOperator(kernelId: string): string | null {
+  const kernel = getRepos().kernels.findById(kernelId);
+  if (!kernel) return null;
+  const operator = kernel.operatorAddress.toLowerCase();
+  return UNOWNED_OPERATORS.has(operator) ? null : operator;
+}
+
+/**
+ * The recorded owner of an IP, from durable records only:
+ *   - a capability IP → the operator of the capability's kernel;
+ *   - a job-evidence IP → the operator of the job's kernel (exactly one linked job).
+ * null means no owner is recorded. Throws only if the store itself is unavailable.
+ */
+export function recordedIpOwner(ipId: string): string | null {
+  const repos = getRepos();
+  const reg = repos.story.findIpById(ipId);
+  if (reg) {
+    if (!reg.capabilityId) return null;
+    const cap = repos.capabilities.findById(reg.capabilityId);
+    return cap ? kernelOperator(cap.kernelId) : null;
+  }
+  const jobIds = new Set(
+    repos.story
+      .findDerivativeLinksByChild(ipId)
+      .map((l) => l.jobId)
+      .filter((j): j is string => typeof j === "string" && j.length > 0),
+  );
+  if (jobIds.size !== 1) return null;
+  const job = repos.jobs.findById([...jobIds][0]!);
+  return job ? kernelOperator(job.kernelId) : null;
+}
+
+/** An IP with a recorded owner. An ownerless record is not enough: nobody could manage or claim it. */
+function hasRecordedOwner(ipId: string): boolean {
+  return recordedIpOwner(ipId) !== null;
+}
+
+/**
+ * Story real mode, where the service would sign with the GATEWAY's key. Real if EITHER the environment
+ * or the service instance says so: the instance fixes its mode when it is built (StoryIPService's
+ * `mock`), so a later change to STORY_MOCK can never make this check say "mock" while a real signer runs
+ * (astra, #385 r2). Unset means mock on both sides, and real mode needs STORY_PRIVATE_KEY before signing.
+ */
+function storyRealMode(svc: object): boolean {
+  return process.env.STORY_MOCK === "false" || (svc as { mock?: unknown }).mock === false;
+}
+
+const GATEWAY_NEVER_PAYS = {
+  error: "not_executed",
+  message:
+    "In Story real mode the gateway would pay this royalty from its own wallet on the caller's behalf. PCC does not; " +
+    "a payer's own on-chain payment path is an operator decision (queue G). Nothing was paid.",
+};
+
+/**
+ * The caller must be the IP's recorded owner. Replies (401/403/503) and returns null otherwise.
+ * An IP with no recorded owner is refused: an owner check fails CLOSED on a missing owner.
+ */
+function requireIpOwner(req: FastifyRequest, reply: FastifyReply, ipId: string): string | null {
+  const wallet = requireWallet(req, reply);
+  if (wallet === null) return null;
+  let owner: string | null;
+  try {
+    owner = recordedIpOwner(ipId);
+  } catch {
+    void reply.code(503).send({ error: "store_unavailable", message: "IP ownership cannot be checked without the store." });
+    return null;
+  }
+  if (owner === null) {
+    void reply.code(403).send({
+      error: "ip_owner_unknown",
+      message: `No owner is recorded for IP ${ipId}, so nobody may change it. Ownership comes from a registration made by the operator of the capability's (or job's) kernel.`,
+    });
+    return null;
+  }
+  if (owner !== wallet) {
+    void reply.code(403).send({ error: "not_ip_owner", message: `Only the owner of IP ${ipId} may do this.` });
+    return null;
+  }
+  return wallet;
+}
+
+/**
+ * Story's real mode refuses operations it cannot execute with `code: "STORY_NOT_EXECUTED"`
+ * (StoryNotExecutedError, pcc-economics N10b). That is an honest "not available", not a server fault:
+ * answer 501 so no client mistakes it for a transient error or for a result.
+ */
+function isStoryNotExecuted(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "STORY_NOT_EXECUTED";
+}
+
+function storyFailure(reply: FastifyReply, err: unknown, error: string) {
+  if (isStoryNotExecuted(err)) {
+    return reply.code(501).send({ error: "not_executed", message: err instanceof Error ? err.message : String(err) });
+  }
+  return reply.code(500).send({ error, message: err instanceof Error ? err.message : String(err) });
+}
+
+/** A positive integer amount in base units, as a canonical decimal string. */
+function isBaseUnitAmount(v: unknown): v is string {
+  return typeof v === "string" && /^[1-9][0-9]{0,77}$/.test(v);
+}
+
+/** Decimals of the currencies PCC escrows settle in. Anything else is refused, never guessed. */
+const ESCROW_CURRENCY_DECIMALS: Readonly<Record<string, number>> = { USDC: 6 };
+
+/**
+ * The escrow milestone that settles a job: the job's step in the escrow of the job's OWN workflow.
+ * There is no fallback across workflows: another workflow's released milestone and payer must never
+ * settle this job (coord-watch #2974). A job whose workflow id matches no escrow is not settleable.
+ * The milestone must settle this job ALONE: jobs.(cwm_id, step_id) is not unique either, and when two jobs
+ * name one milestone, whichever settled first would choose the schedule that consumes it (astra A07b).
+ */
+function findJobMilestone(job: { id: string; cwmId: string; stepId: string }):
+  | { escrow: { id: string; payer: string; currency: string }; milestone: { id: string; stepId: string; amount: string; status: string } }
+  | "none"
+  | "ambiguous" {
+  const repos = getRepos();
+  if (repos.jobs.findAll().some((j) => j.id !== job.id && j.cwmId === job.cwmId && j.stepId === job.stepId)) return "ambiguous";
+  // escrows.cwm_id is not unique, and findByCwm returns whichever row comes first: several escrows for one
+  // workflow are ambiguous and settle nothing (astra, #385 r2).
+  const escrows = repos.escrows.findAll().filter((e) => e.cwmId === job.cwmId);
+  if (escrows.length === 0) return "none";
+  if (escrows.length > 1) return "ambiguous";
+  const escrow = escrows[0]!;
+  const ms = repos.escrows.findMilestonesByEscrow(escrow.id).filter((m) => m.stepId === job.stepId);
+  if (ms.length === 0) return "none";
+  if (ms.length > 1) return "ambiguous";
+  return { escrow, milestone: ms[0]! };
+}
+
+// ── Once-only settlement, and its journal (the append-only audit log) ────────
+//
+// What is owed royalties is a RELEASED ESCROW MILESTONE: its revenue is paid out once, whichever job or
+// child IP a caller names. So the claim is keyed by the milestone (escrow_milestones.id), not by
+// (jobId, childIpId) (astra, #385 r2). The claim is written synchronously before the first payment
+// call: no other request in this process interleaves between the check and the claim.
+//
+// The journal records, per royalty row, an "intent" before the payment call and its outcome after it
+// ("paid" with the transaction, or "failed"). An intent with no outcome is an uncertain payment. A claim
+// is released ONLY when Story reported that it executed none of the rows (STORY_NOT_EXECUTED); any
+// other failure may have executed after submission, so the claim stands and the milestone waits for
+// operator reconciliation, never an automatic retry.
+//
+// Across processes this is not atomic: two gateway processes on one database could both pass the check.
+// The durable, transactional table for this (royalty_settlement_events, keyed by the obligation, written
+// under BEGIN IMMEDIATE) is in the economics DDL, operator queue item 27. Until it lands, the gateway
+// runs one process per database, and Story real mode never pays (501).
+
+const SETTLEMENT_EVENT = "ip.royalties.settlement";
+const SETTLEMENT_RESOURCE = "escrow_milestone";
+
+type SettlementAction = "claim" | "release" | "intent" | "paid" | "failed";
+
+function activeSettlementClaims(milestoneId: string): number {
+  const rows = getRepos()
+    .auditLog.query({ eventType: SETTLEMENT_EVENT, resourceType: SETTLEMENT_RESOURCE, limit: Number.MAX_SAFE_INTEGER })
+    .filter((r) => r.resourceId === milestoneId);
+  const claims = rows.filter((r) => r.action === "claim").length;
+  const releases = rows.filter((r) => r.action === "release").length;
+  return claims - releases;
+}
+
+/**
+ * What a milestone's FIRST claim bound it to: its job, its evidence IP and the digest of its payout schedule.
+ * A claim released on Story's nonexecution may be tried again, but only for that same obligation: a retry
+ * never pays another job, another child or a schedule that changed since (astra A07b). null: never claimed.
+ */
+function settlementBinding(milestoneId: string): { jobId: unknown; childIpId: unknown; scheduleDigest: unknown } | null {
+  const first = getRepos()
+    .auditLog.query({ eventType: SETTLEMENT_EVENT, resourceType: SETTLEMENT_RESOURCE, limit: Number.MAX_SAFE_INTEGER })
+    .filter((r) => r.resourceId === milestoneId && r.action === "claim")
+    .sort((a, b) => a.id - b.id)[0];
+  if (!first) return null;
+  const m = (first.metadata ?? {}) as Record<string, unknown>;
+  return { jobId: m.jobId, childIpId: m.childIpId, scheduleDigest: m.scheduleDigest };
+}
+
+function recordSettlement(action: SettlementAction, milestoneId: string, actor: string, metadata: Record<string, unknown>): void {
+  getRepos().auditLog.insert({
+    timestamp: new Date().toISOString(),
+    eventType: SETTLEMENT_EVENT,
+    actor,
+    resourceType: SETTLEMENT_RESOURCE,
+    resourceId: milestoneId,
+    action,
+    metadata,
+    ip: null,
+    userAgent: null,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Route plugin
 // ---------------------------------------------------------------------------
 
 export async function ipRoutes(app: FastifyInstance) {
   const svc = getStoryIPService();
+  /** Jobs whose evidence registration is in flight in this process (see register-job-evidence). */
+  const registeringJobEvidence = new Set<string>();
   const engine = getLicensingEngine();
 
   // ── POST /api/ip/register-capability ─────────────────────────────────────
@@ -156,7 +423,7 @@ export async function ipRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterCapabilityBody }>(
     "/api/ip/register-capability",
     async (req, reply) => {
-      const { capability, designerAddress, designerName, commercialRevShare, ipfsCid } = req.body;
+      const { capability, designerAddress, designerName, commercialRevShare, ipfsCid } = req.body ?? ({} as RegisterCapabilityBody);
 
       if (!capability?.id || !capability?.name || !capability?.type || !capability?.kernelId) {
         return reply.code(400).send({ error: "capability.id, capability.name, capability.type, and capability.kernelId are required" });
@@ -165,47 +432,62 @@ export async function ipRoutes(app: FastifyInstance) {
         return reply.code(400).send({ error: "designerAddress and designerName are required" });
       }
 
+      // Only the operator of the capability's kernel may register it, and the IP is minted to the
+      // caller's own proven wallet: ownership never comes from the body.
+      const wallet = requireWallet(req, reply);
+      if (wallet === null) return reply;
+      if (designerAddress.toLowerCase() !== wallet) {
+        return reply.code(403).send({ error: "designer_must_be_caller", message: "designerAddress must be your own signed-in wallet." });
+      }
+      let repos: ReturnType<typeof getRepos>;
+      try {
+        repos = getRepos();
+      } catch {
+        return reply.code(503).send({ error: "store_unavailable", message: "A capability cannot be registered as IP without the store." });
+      }
+      const cap = repos.capabilities.findById(capability.id);
+      if (!cap || cap.kernelId !== capability.kernelId) {
+        return reply.code(404).send({
+          error: "capability_not_found",
+          message: `Capability ${capability.id} is not registered on kernel ${capability.kernelId}. Register the capability first; its kernel's operator is its IP's owner.`,
+        });
+      }
+      if (kernelOperator(cap.kernelId) !== wallet) {
+        return reply.code(403).send({ error: "not_kernel_operator", message: `Only the operator of kernel ${cap.kernelId} may register its capabilities as IP.` });
+      }
+
       try {
         const reg = await svc.registerCapabilityAsIP(capability, {
-          designerAddress,
+          designerAddress: wallet,
           designerName,
           commercialRevShare,
           ipfsCid,
         });
 
-        // Persist to DB (best-effort)
+        // The registration row IS the ownership record (capability → kernel → operator), so it is
+        // not best-effort: an IP with no record would have no owner.
         try {
-          const repos = getRepos();
-          // Only set capabilityId if the capability actually exists in the DB
-          // (the FK is nullable, and the capability may not be persisted in all envs)
-          let resolvedCapabilityId: string | undefined;
-          try {
-            const caps = repos.capabilities.findByKernel(capability.kernelId);
-            const cap = caps.find((c) => c.id === capability.id);
-            resolvedCapabilityId = cap?.id;
-          } catch {
-            // Capability lookup failed — insert without FK
-          }
           repos.story.insertIpRegistration({
             ipId: reg.ipId,
             nftTokenId: reg.nftTokenId,
             licenseTermsId: reg.licenseTermsId,
             txHash: reg.txHash,
-            capabilityId: resolvedCapabilityId,
+            capabilityId: cap.id,
             csdUrl: reg.csdUrl,
             chain: reg.chain,
             registeredAt: reg.registeredAt,
           });
         } catch (dbErr) {
-          console.warn("[ip] DB persist of IP registration failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          auditService.log({ eventType: "ip.registration_unrecorded", actor: wallet, resourceType: "ip", resourceId: reg.ipId, action: "repair-needed", metadata: { capabilityId: cap.id } });
+          return reply.code(500).send({
+            error: "registration_not_recorded",
+            message: `The IP was registered as ${reg.ipId} but could not be recorded, so it has no owner: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}`,
+          });
         }
 
         return { registration: reg };
       } catch (err) {
-        return reply.code(500).send({
-          error: "registration_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "registration_failed");
       }
     },
   );
@@ -215,7 +497,7 @@ export async function ipRoutes(app: FastifyInstance) {
   app.post<{ Body: RegisterJobEvidenceBody }>(
     "/api/ip/register-job-evidence",
     async (req, reply) => {
-      const { parentIpId, jobId, evidenceBundleHash, operatorAddress, operatorName, ipfsCid } = req.body;
+      const { parentIpId, jobId, evidenceBundleHash, operatorAddress, operatorName, ipfsCid } = req.body ?? ({} as RegisterJobEvidenceBody);
 
       if (!parentIpId || !jobId || !evidenceBundleHash || !operatorAddress || !operatorName) {
         return reply.code(400).send({
@@ -223,46 +505,88 @@ export async function ipRoutes(app: FastifyInstance) {
         });
       }
 
+      // Only the operator of the job's kernel may register its evidence, as themselves.
+      const wallet = requireWallet(req, reply);
+      if (wallet === null) return reply;
+      if (operatorAddress.toLowerCase() !== wallet) {
+        return reply.code(403).send({ error: "operator_must_be_caller", message: "operatorAddress must be your own signed-in wallet." });
+      }
+      let repos: ReturnType<typeof getRepos>;
+      try {
+        repos = getRepos();
+      } catch {
+        return reply.code(503).send({ error: "store_unavailable", message: "Job evidence cannot be registered as IP without the store." });
+      }
+      const job = repos.jobs.findById(jobId);
+      if (!job) return reply.code(404).send({ error: "job_not_found", message: `Job ${jobId} is not recorded.` });
+      if (kernelOperator(job.kernelId) !== wallet) {
+        return reply.code(403).send({ error: "not_kernel_operator", message: `Only the operator of kernel ${job.kernelId} may register this job's evidence.` });
+      }
+      // The parent is the IP of the capability this job ran, and nothing else (coord-watch #2974).
+      const capabilityIp = repos.story.findIpByCapabilityId(job.capabilityId);
+      if (!capabilityIp || capabilityIp.ipId !== parentIpId) {
+        return reply.code(409).send({
+          error: "parent_not_job_capability",
+          message: `Job ${job.id}'s evidence derives from the IP of its own capability ${job.capabilityId}, not from ${parentIpId}.`,
+        });
+      }
+      // A job/capability association is not permission to derive from someone's IP (astra, #385 r2). A
+      // capability lives on one kernel, so a job that really ran it ran on that kernel; then the caller, as
+      // the job's kernel operator, IS the parent's recorded owner. Anything else is refused.
+      const capability = repos.capabilities.findById(job.capabilityId);
+      if (!capability || capability.kernelId !== job.kernelId) {
+        return reply.code(409).send({
+          error: "job_capability_not_on_kernel",
+          message: `Job ${job.id} ran on kernel ${job.kernelId}, but its capability ${job.capabilityId} is not that kernel's; no derivative is registered.`,
+        });
+      }
+      if (recordedIpOwner(parentIpId) !== wallet) {
+        return reply.code(403).send({
+          error: "not_parent_owner",
+          message: `Only the recorded owner of ${parentIpId} may register derivatives of it.`,
+        });
+      }
+      // One job, one evidence IP: a second would give its milestone two royalty schedules to choose from
+      // (astra A07b). A registration in flight counts too, so two concurrent requests cannot both pass.
+      if (registeringJobEvidence.has(job.id) || repos.story.findDerivativeLinksByJob(job.id).length > 0) {
+        return reply.code(409).send({ error: "job_evidence_already_registered", message: `Job ${job.id}'s evidence is already registered as IP.` });
+      }
+      registeringJobEvidence.add(job.id);
+
       try {
         const link = await svc.registerJobAsDerivative(parentIpId, {
-          jobId,
+          jobId: job.id,
           evidenceBundleHash,
-          operatorAddress,
+          operatorAddress: wallet,
           operatorName,
           ipfsCid,
         });
 
-        // Persist to DB (best-effort)
+        // The link row IS the ownership record for the child IP (job → kernel → operator).
         try {
-          const repos = getRepos();
-          // Only set jobId if the job actually exists in the DB (FK constraint)
-          let resolvedJobId: string | undefined;
-          try {
-            const job = repos.jobs.findById(link.jobId);
-            resolvedJobId = job?.id;
-          } catch {
-            // Job lookup failed — insert without FK
-          }
           repos.story.insertDerivativeLink({
             id: uuidv4(),
             parentIpId: link.parentIpId,
             childIpId: link.childIpId,
             licenseTokenId: link.licenseTokenId,
-            jobId: resolvedJobId,
+            jobId: job.id,
             evidenceBundleHash: link.evidenceBundleHash,
             txHash: link.txHash,
             linkedAt: link.linkedAt,
           });
         } catch (dbErr) {
-          console.warn("[ip] DB persist of derivative link failed (best-effort):", dbErr instanceof Error ? dbErr.message : dbErr);
+          auditService.log({ eventType: "ip.derivative_unrecorded", actor: wallet, resourceType: "ip", resourceId: link.childIpId, action: "repair-needed", metadata: { jobId: job.id, parentIpId } });
+          return reply.code(500).send({
+            error: "derivative_not_recorded",
+            message: `The derivative ${link.childIpId} was registered but could not be recorded, so it has no owner: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}`,
+          });
         }
 
         return { link };
       } catch (err) {
-        return reply.code(500).send({
-          error: "derivative_registration_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "derivative_registration_failed");
+      } finally {
+        registeringJobEvidence.delete(job.id);
       }
     },
   );
@@ -272,11 +596,13 @@ export async function ipRoutes(app: FastifyInstance) {
   app.post<{ Body: DistributeRoyaltiesBody }>(
     "/api/ip/distribute-royalties",
     async (req, reply) => {
-      const { ipId, splits } = req.body;
+      const { ipId, splits } = req.body ?? ({} as DistributeRoyaltiesBody);
 
       if (!ipId || !splits || !Array.isArray(splits) || splits.length === 0) {
         return reply.code(400).send({ error: "ipId and splits (non-empty array) are required" });
       }
+      // Who gets paid is the owner's decision alone.
+      if (requireIpOwner(req, reply, ipId) === null) return reply;
 
       const total = splits.reduce((s, item) => s + (item.percentage ?? 0), 0);
       if (total !== 100) {
@@ -310,10 +636,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return result;
       } catch (err) {
-        return reply.code(500).send({
-          error: "distribute_royalties_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "distribute_royalties_failed");
       }
     },
   );
@@ -328,11 +651,16 @@ export async function ipRoutes(app: FastifyInstance) {
       if (!body?.ipId || !body?.designerAddress) {
         return reply.code(400).send({ error: "ipId and designerAddress are required" });
       }
+      const wallet = requireIpOwner(req, reply, body.ipId);
+      if (wallet === null) return reply;
+      if (body.designerAddress.toLowerCase() !== wallet) {
+        return reply.code(403).send({ error: "designer_must_be_caller", message: "designerAddress must be your own signed-in wallet." });
+      }
 
       const terms: LicensingTerms = {
         id: uuidv4(),
         ipId: body.ipId,
-        designerAddress: body.designerAddress,
+        designerAddress: wallet,
         autoLicense: body.autoLicense,
         standingOffers: body.standingOffers ?? [],
         defaultRevShare: body.defaultRevShare ?? 5,
@@ -352,42 +680,206 @@ export async function ipRoutes(app: FastifyInstance) {
   app.post<{ Body: SettleRoyaltiesBody }>(
     "/api/ip/settle-royalties",
     async (req, reply) => {
-      const { jobId, childIpId, jobRevenue, payerAddress } = req.body ?? {};
+      const { jobId, childIpId, jobRevenue, payerAddress } = req.body ?? ({} as SettleRoyaltiesBody);
 
-      if (!jobId || !childIpId || !jobRevenue || !payerAddress) {
-        return reply.code(400).send({
-          error: "jobId, childIpId, jobRevenue, and payerAddress are required",
+      if (!jobId || !childIpId) {
+        return reply.code(400).send({ error: "jobId and childIpId are required" });
+      }
+      const wallet = requireWallet(req, reply);
+      if (wallet === null) return reply;
+
+      let repos: ReturnType<typeof getRepos>;
+      try {
+        repos = getRepos();
+      } catch {
+        return reply.code(503).send({ error: "store_unavailable", message: "Royalties cannot be settled without settlement state." });
+      }
+      const job = repos.jobs.findById(jobId);
+      if (!job) return reply.code(404).send({ error: "job_not_found", message: `Job ${jobId} is not recorded.` });
+
+      // The job's settlement, from server state only.
+      const found = findJobMilestone(job);
+      if (found === "none") {
+        return reply.code(409).send({ error: "no_settlement_record", message: `Job ${jobId} has no escrow milestone.` });
+      }
+      if (found === "ambiguous") {
+        return reply.code(409).send({
+          error: "settlement_ambiguous",
+          message: `More than one escrow or milestone matches job ${jobId}, or another job settles through the same milestone; nothing is settled.`,
+        });
+      }
+      const { escrow, milestone } = found;
+
+      // Only a party to the job: its buyer (the escrow's payer) or its kernel's operator.
+      const parties = new Set([escrow.payer.toLowerCase(), kernelOperator(job.kernelId)].filter((x): x is string => x !== null));
+      if (!parties.has(wallet)) {
+        return reply.code(403).send({ error: "not_job_party", message: `Only the buyer or the operator of job ${jobId} may settle its royalties.` });
+      }
+      if (milestone.status !== "released") {
+        return reply.code(409).send({
+          error: "milestone_not_released",
+          message: `Job ${jobId}'s milestone is "${milestone.status}". Royalties are settled only on revenue that was actually released.`,
         });
       }
 
+      // Revenue and payer are the released milestone's, in base units; the body can only agree.
+      const decimals = ESCROW_CURRENCY_DECIMALS[escrow.currency];
+      if (decimals === undefined) {
+        return reply.code(409).send({ error: "unsupported_currency", message: `Escrow currency "${escrow.currency}" has no known decimals; nothing is settled.` });
+      }
+      let revenue: string;
       try {
-        const distributions = engine.getRoyaltyDistribution(childIpId, jobRevenue);
-        const settled: Array<{ recipientAddress: string; amount: string; ipId: string; txHash: string }> = [];
-        let totalDistributed = 0n;
+        revenue = parseUnits(milestone.amount, decimals).toString();
+      } catch {
+        return reply.code(409).send({ error: "revenue_unreadable", message: `The milestone amount "${milestone.amount}" is not a ${escrow.currency} amount.` });
+      }
+      if (jobRevenue !== undefined && jobRevenue !== revenue) {
+        return reply.code(409).send({ error: "revenue_mismatch", message: `The released revenue for job ${jobId} is ${revenue} base units, not ${jobRevenue}.`, revenue });
+      }
+      if (payerAddress !== undefined && payerAddress.toLowerCase() !== escrow.payer.toLowerCase()) {
+        return reply.code(409).send({ error: "payer_mismatch", message: `Job ${jobId} was paid by its escrow's payer, not ${payerAddress}.` });
+      }
+      // The payable schedule is the job's ONE evidence IP's, from server state. A job with several would let
+      // the caller choose which schedule consumes the milestone (astra A07b), so that is refused; the body's
+      // childIpId can only agree with the recorded one.
+      const evidenceIps = new Set(repos.story.findDerivativeLinksByJob(job.id).map((l) => l.childIpId));
+      if (evidenceIps.size > 1) {
+        return reply.code(409).send({ error: "settlement_ambiguous", message: `Job ${jobId} has ${evidenceIps.size} evidence IPs, so its royalty schedule is ambiguous; nothing is settled.` });
+      }
+      if (!evidenceIps.has(childIpId)) {
+        return reply.code(409).send({ error: "ip_not_linked_to_job", message: `IP ${childIpId} is not the registered evidence of job ${jobId}.` });
+      }
 
-        for (const dist of distributions) {
-          if (dist.amount === "0") continue;
-          try {
-            const { txHash } = await svc.payJobRoyalty(dist.ipId, dist.amount, payerAddress);
-            settled.push({ recipientAddress: dist.recipientAddress, amount: dist.amount, ipId: dist.ipId, txHash });
-            totalDistributed += BigInt(dist.amount);
-          } catch (err) {
-            console.warn(`[ip] Royalty settlement failed for ${dist.ipId}:`, err instanceof Error ? err.message : err);
+      if (storyRealMode(svc)) return reply.code(501).send(GATEWAY_NEVER_PAYS);
+
+      let distributions: ReturnType<typeof engine.getRoyaltyDistribution>;
+      try {
+        distributions = engine.getRoyaltyDistribution(childIpId, revenue);
+      } catch (err) {
+        return storyFailure(reply, err, "settle_royalties_failed");
+      }
+      const payable = distributions.filter((d) => d.amount !== "0");
+      const schedule = payable.map((d) => ({ ipId: d.ipId, recipientAddress: d.recipientAddress.toLowerCase(), amount: d.amount }));
+      const scheduleDigest = createHash("sha256").update(JSON.stringify(schedule)).digest("hex");
+      const obligation = { escrowId: escrow.id, milestoneId: milestone.id, jobId: job.id, childIpId, scheduleDigest };
+      if (payable.length > 0) {
+        // Check and claim the milestone with no await in between: once-only within this process.
+        try {
+          if (activeSettlementClaims(milestone.id) > 0) {
+            return reply.code(409).send({
+              error: "already_settled",
+              message: `Royalties on job ${jobId}'s released milestone were already settled, or its settlement awaits reconciliation. They are never paid twice.`,
+            });
+          }
+          const bound = settlementBinding(milestone.id);
+          if (bound !== null && (bound.jobId !== job.id || bound.childIpId !== childIpId || bound.scheduleDigest !== scheduleDigest)) {
+            return reply.code(409).send({
+              error: "settlement_binding_changed",
+              message: `Job ${jobId}'s milestone was first claimed for another job, evidence IP or royalty schedule. A retry pays only that obligation; this one is held for reconciliation.`,
+            });
+          }
+          recordSettlement("claim", milestone.id, wallet, { ...obligation, revenue, payer: escrow.payer, rows: payable.length });
+        } catch {
+          return reply.code(503).send({ error: "store_unavailable", message: "A settlement cannot be recorded, so nothing is paid." });
+        }
+      }
+
+      // Every row reports its own outcome, and the journal keeps it. A failed row fails the request.
+      type Row =
+        | { ipId: string; recipientAddress: string; amount: string; outcome: "paid"; txHash: string }
+        | { ipId: string; recipientAddress: string; amount: string; outcome: "failed"; error: string };
+      const rows: Row[] = [];
+      let totalDistributed = 0n;
+      let notExecuted = 0;
+      // A journal row that cannot be written stops the settlement (astra A07b): nothing is paid without its
+      // intent on record, and an outcome that could not be recorded makes the answer reconciliation-required.
+      const journal = (action: SettlementAction, row: Record<string, unknown>): boolean => {
+        try {
+          recordSettlement(action, milestone.id, wallet, { ...obligation, ...row });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      let unjournaled = false;
+      for (const dist of payable) {
+        const row = { ipId: dist.ipId, recipientAddress: dist.recipientAddress, amount: dist.amount };
+        if (!journal("intent", row)) {
+          unjournaled = true;
+          break;
+        }
+        try {
+          const { txHash } = await svc.payJobRoyalty(dist.ipId, dist.amount, escrow.payer);
+          rows.push({ ...row, outcome: "paid", txHash });
+          totalDistributed += BigInt(dist.amount);
+          if (!journal("paid", { ...row, txHash })) {
+            unjournaled = true;
+            break;
+          }
+        } catch (err) {
+          const nonexecution = isStoryNotExecuted(err);
+          if (nonexecution) notExecuted++;
+          const error = err instanceof Error ? err.message : String(err);
+          rows.push({ ...row, outcome: "failed", error });
+          if (!journal("failed", { ...row, error, notExecuted: nonexecution })) {
+            unjournaled = true;
+            break;
           }
         }
-
-        return {
-          jobId,
-          childIpId,
-          distributions: settled,
-          totalDistributed: String(totalDistributed),
-        };
-      } catch (err) {
-        return reply.code(500).send({
-          error: "settle_royalties_failed",
-          message: err instanceof Error ? err.message : String(err),
+      }
+      if (unjournaled) {
+        // Nothing was attempted when the first intent could not be written: nonexecution is established, so the
+        // claim is released if the journal takes that. Otherwise the claim stands, for reconciliation.
+        let released = false;
+        if (rows.length === 0) {
+          try {
+            recordSettlement("release", milestone.id, wallet, { ...obligation, reason: "the journal could not record an intent; nothing was paid" });
+            released = true;
+          } catch {
+            /* the claim stands: a later attempt is refused, which is the safe side */
+          }
+        }
+        const notAttempted = payable.slice(rows.length).map((d) => ({ ipId: d.ipId, recipientAddress: d.recipientAddress, amount: d.amount }));
+        const unrecorded = { jobId, childIpId, revenue, payerAddress: escrow.payer, distributions: rows, notAttempted, totalDistributed: String(totalDistributed), reconciliationRequired: !released };
+        if (rows.length === 0) {
+          return reply.code(503).send({
+            error: "journal_unavailable",
+            message: released
+              ? "The settlement journal could not record a payment's intent, so nothing was paid. The settlement may be tried again."
+              : "The settlement journal could not record a payment's intent, so nothing was paid; the milestone's claim could not be released either, so it is held for reconciliation.",
+            ...unrecorded,
+          });
+        }
+        return reply.code(502).send({
+          error: "settlement_unrecorded",
+          message: "A payment's outcome could not be written to the settlement journal. The rows say what was paid; the milestone is held for reconciliation and is never retried automatically.",
+          ...unrecorded,
         });
       }
+      const failed = rows.filter((r) => r.outcome === "failed").length;
+      if (payable.length > 0 && notExecuted === payable.length) {
+        // Story reported that it executed NONE of the rows: nonexecution is established, so the claim is
+        // released and the settlement may be tried again. Any other failure may have executed after
+        // submission, so the claim stands for reconciliation.
+        try {
+          recordSettlement("release", milestone.id, wallet, { ...obligation, reason: "story executed none of the rows" });
+        } catch {
+          /* the claim stands: a later attempt is refused, which is the safe side */
+        }
+      }
+      const result = { jobId, childIpId, revenue, payerAddress: escrow.payer, distributions: rows, totalDistributed: String(totalDistributed) };
+      if (failed > 0 && failed === rows.length && notExecuted === failed) {
+        // Story's real mode executed none of it: not available, rather than a partial failure.
+        return reply.code(501).send({ error: "not_executed", message: "Story did not execute any royalty payment; nothing was paid.", ...result });
+      }
+      if (failed > 0) {
+        return reply.code(502).send({
+          error: "settlement_incomplete",
+          message: `${failed} of ${rows.length} royalty payments failed; the rows say which were paid. The milestone's settlement is held for reconciliation and is never retried automatically.`,
+          ...result,
+        });
+      }
+      return result;
     },
   );
 
@@ -421,10 +913,7 @@ export async function ipRoutes(app: FastifyInstance) {
           directChildren: children,
         };
       } catch (err) {
-        return reply.code(500).send({
-          error: "derivative_tree_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "derivative_tree_failed");
       }
     },
   );
@@ -441,10 +930,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const distributions = engine.getRoyaltyDistribution(ipId, amount);
         return { ipId, amount, distributions };
       } catch (err) {
-        return reply.code(500).send({
-          error: "royalty_distribution_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "royalty_distribution_failed");
       }
     },
   );
@@ -455,20 +941,31 @@ export async function ipRoutes(app: FastifyInstance) {
     "/api/ip/:ipId/pay",
     async (req, reply) => {
       const { ipId } = req.params;
-      const { amount, payerAddress } = req.body;
+      const { amount, payerAddress } = req.body ?? ({} as PayRoyaltyBody);
 
-      if (!amount || !payerAddress) {
-        return reply.code(400).send({ error: "amount and payerAddress are required" });
+      if (!isBaseUnitAmount(amount)) {
+        return reply.code(400).send({ error: "amount is required, as a positive integer in base units" });
       }
+      // Anyone may pay into an IP's vault, but only as themselves.
+      const wallet = requireWallet(req, reply);
+      if (wallet === null) return reply;
+      if (payerAddress !== undefined && payerAddress.toLowerCase() !== wallet) {
+        return reply.code(403).send({ error: "payer_must_be_caller", message: "You can only pay as your own signed-in wallet." });
+      }
+      try {
+        if (!hasRecordedOwner(ipId)) {
+          return reply.code(403).send({ error: "ip_owner_unknown", message: `IP ${ipId} has no recorded owner, so nobody could claim what is paid into it.` });
+        }
+      } catch {
+        return reply.code(503).send({ error: "store_unavailable", message: "The IP cannot be looked up without the store." });
+      }
+      if (storyRealMode(svc)) return reply.code(501).send(GATEWAY_NEVER_PAYS);
 
       try {
-        const result = await svc.payJobRoyalty(ipId, amount, payerAddress);
+        const result = await svc.payJobRoyalty(ipId, amount, wallet);
         return result;
       } catch (err) {
-        return reply.code(500).send({
-          error: "pay_royalty_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "pay_royalty_failed");
       }
     },
   );
@@ -480,6 +977,9 @@ export async function ipRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const { ipId } = req.params;
       const { tokenIds } = req.body ?? {};
+      // Only the IP's owner claims its vault, and the claim records who claimed it.
+      const wallet = requireIpOwner(req, reply, ipId);
+      if (wallet === null) return reply;
 
       try {
         const result = await svc.claimRevenue(ipId, tokenIds);
@@ -490,7 +990,7 @@ export async function ipRoutes(app: FastifyInstance) {
           repos.story.insertRevenueClaim({
             id: uuidv4(),
             ipId,
-            claimerAddress: "0x0000000000000000000000000000000000000000",
+            claimerAddress: wallet,
             amount: result.claimed,
             txHash: result.txHash,
             claimedAt: new Date().toISOString(),
@@ -501,10 +1001,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return result;
       } catch (err) {
-        return reply.code(500).send({
-          error: "claim_revenue_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "claim_revenue_failed");
       }
     },
   );
@@ -520,10 +1017,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const snapshot = await svc.getRevenueSnapshot(ipId);
         return snapshot;
       } catch (err) {
-        return reply.code(500).send({
-          error: "revenue_snapshot_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "revenue_snapshot_failed");
       }
     },
   );
@@ -539,10 +1033,7 @@ export async function ipRoutes(app: FastifyInstance) {
         const lineage = await svc.getLineage(ipId);
         return { ipId, ...lineage };
       } catch (err) {
-        return reply.code(500).send({
-          error: "lineage_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "lineage_failed");
       }
     },
   );
@@ -576,10 +1067,7 @@ export async function ipRoutes(app: FastifyInstance) {
 
         return { registration: reg };
       } catch (err) {
-        return reply.code(500).send({
-          error: "get_ip_registration_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "get_ip_registration_failed");
       }
     },
   );
@@ -590,20 +1078,29 @@ export async function ipRoutes(app: FastifyInstance) {
     "/api/ip/:ipId/dispute",
     async (req, reply) => {
       const { ipId } = req.params;
-      const { evidenceHash, reason } = req.body;
+      const { evidenceHash, reason } = req.body ?? ({} as RaiseDisputeBody);
 
       if (!evidenceHash || !reason) {
         return reply.code(400).send({ error: "evidenceHash and reason are required" });
       }
+      // A dispute is a claim against an IP, so its claimant is often not a party (for example the real
+      // author of a copied design). Rule: any proven wallet may raise one against a recorded IP, and the
+      // response names that wallet as the disputant. Story's dispute bond bounds abuse in real mode.
+      const wallet = requireWallet(req, reply);
+      if (wallet === null) return reply;
+      try {
+        if (!hasRecordedOwner(ipId)) {
+          return reply.code(403).send({ error: "ip_owner_unknown", message: `IP ${ipId} has no recorded owner to answer a dispute.` });
+        }
+      } catch {
+        return reply.code(503).send({ error: "store_unavailable", message: "The IP cannot be looked up without the store." });
+      }
 
       try {
         const dispute = await svc.raiseDispute(ipId, { hash: evidenceHash, reason });
-        return { dispute };
+        return { dispute, raisedBy: wallet };
       } catch (err) {
-        return reply.code(500).send({
-          error: "raise_dispute_failed",
-          message: err instanceof Error ? err.message : String(err),
-        });
+        return storyFailure(reply, err, "raise_dispute_failed");
       }
     },
   );

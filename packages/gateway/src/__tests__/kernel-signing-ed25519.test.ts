@@ -367,8 +367,10 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
 
   it("atomically allows only one of two concurrent SET-ONCE binds", async () => {
     const id = `kernel_ed_cas_${Date.now()}`;
+    // The kernel has a recorded owner: a row with none binds no signer at all (astra A07c N1), and this test
+    // is about two concurrent binds racing on a row that may take one.
     expect((await app.inject({
-      method: "POST", url: "/api/kernels", payload: { id, name: "CAS Kernel" },
+      method: "POST", url: "/api/kernels", payload: { id, name: "CAS Kernel", operatorAddress: "0x00000000000000000000000000000000000000c5" },
     })).statusCode).toBe(201);
 
     const bind = (kp: typeof KP_A) => app.inject({
