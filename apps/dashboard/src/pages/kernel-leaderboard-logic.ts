@@ -7,6 +7,7 @@
  */
 
 import type { CapabilityDTO, KernelDTO } from "../types/dto.js";
+import { isKernelOnline } from "../lib/live-status.js";
 
 export type SortDir = "desc" | "asc";
 
@@ -14,6 +15,8 @@ export interface LeaderboardRow {
   kernelId: string;
   kernelName: string;
   kernelStatus: KernelDTO["status"] | "unknown";
+  /** Online with a fresh heartbeat (isKernelOnline), as the StatusBar counts it. */
+  online: boolean;
   /** Average assurance score across all this kernel's capabilities. Null
    *  when no capability reports a score yet. */
   avgScore: number | null;
@@ -23,8 +26,8 @@ export interface LeaderboardRow {
   capabilityCount: number;
   /** Types of capabilities offered (up to 4 shown). */
   types: string[];
-  /** Sum of queue depth across capabilities. */
-  queueDepth: number;
+  /** Sum of queue depth across capabilities; null when one doesn't report it. */
+  queueDepth: number | null;
   /** Reputation from ERC-8004, when available (0-1000). */
   reputation?: number;
 }
@@ -53,7 +56,10 @@ export function buildLeaderboard(
       : null;
     const kernel = kernels.find((k) => k.id === kernelId);
     const typeSet = new Set(caps.map((c) => c.type));
-    const queueDepth = caps.reduce((s, c) => s + (c.queueDepth ?? 0), 0);
+    // A capability without a queue depth makes the kernel's queue unknown, not shorter.
+    const queueDepth = caps.every((c) => typeof c.queueDepth === "number")
+      ? caps.reduce((s, c) => s + c.queueDepth, 0)
+      : null;
     const reputation =
       kernel?.reputation ??
       caps.find((c) => typeof c.reputation === "number")?.reputation;
@@ -62,6 +68,7 @@ export function buildLeaderboard(
       kernelId,
       kernelName: kernel?.name ?? caps[0]?.kernelName ?? kernelId,
       kernelStatus: kernel?.status ?? (caps[0]?.kernelStatus as any) ?? "unknown",
+      online: kernel ? isKernelOnline(kernel) : false,
       avgScore: avg,
       scoredCount: scores.length,
       capabilityCount: caps.length,

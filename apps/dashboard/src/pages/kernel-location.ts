@@ -17,6 +17,8 @@ export function siteLocationLabel(site: SiteLocationFields): string {
   const point = site.location;
   const precision = site.locationPrecision;
   if (!point || precision === "none") return "Location not set";
+  // A malformed point (the gateway's row, not ours) reads as such: never NaN, and never a crash.
+  if (!Number.isFinite(point.lat) || !Number.isFinite(point.lng)) return "Location unreadable";
   const coords = `${point.lat.toFixed(4)}, ${point.lng.toFixed(4)}`;
   if (precision === "exact") return `Exact: ${coords}`;
   if (precision === "approximate") return `Approximate (within about 5 km): ${coords}`;

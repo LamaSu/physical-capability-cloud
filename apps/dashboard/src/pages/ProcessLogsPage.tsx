@@ -1,8 +1,27 @@
+/**
+ * Process Logs: device log lines (level, phase, progress) from running jobs.
+ *
+ * Nothing live serves these yet. No gateway route returns process-log history,
+ * and the only publisher of `process_log` events on the kernel SSE streams is
+ * the gateway's development log generator (LogProducer in
+ * packages/gateway/src/sse/producers.ts, fed by sse/mock-data-generator.ts). It
+ * invents lines for kernel "kernel-nyc" and jobs job-001..003 on a timer, and
+ * runs by default outside production. This page used to generate forty lines
+ * on load and append that stream, so it showed plausible logs that no machine
+ * wrote.
+ *
+ * It now says the view isn't connected to live data, and opens no stream. In
+ * demo mode (lib/demo-mode.ts) the prototype renders sample lines under a
+ * DemoBanner.
+ */
+
 import React from "react";
 import { GlassPanel, GlowBadge } from "@pcc/ui";
 import type { ProcessLogEntry } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
-import { useSSEStream } from "../hooks/use-sse-stream.js";
+import { isDemoMode } from "../lib/demo-mode.js";
+import { NotLiveState, DemoBanner } from "../components/DemoState.js";
+import { demoProcessLogs } from "../demo/ProcessLogsPage.fixtures.js";
 
 const LEVEL_COLORS: Record<ProcessLogEntry["level"], string> = {
   trace: "text-white/20",
@@ -22,72 +41,39 @@ const LEVEL_BADGE_COLORS: Record<ProcessLogEntry["level"], "green" | "gold" | "r
   fatal: "red",
 };
 
-// Mock log generation
-function generateMockLogs(count: number): ProcessLogEntry[] {
-  const phases = ["layer_print", "gradient_elution", "heating", "cooling", "inspection", "calibration"];
-  const levels: ProcessLogEntry["level"][] = ["info", "info", "info", "debug", "warn", "info", "info", "trace"];
-  const messages = [
-    "Layer completed successfully",
-    "Temperature target reached",
-    "Gradient step 3/10 — 45% B",
-    "Power consumption within expected range",
-    "Vibration level slightly elevated",
-    "Camera snapshot captured",
-    "Waiting for bed temperature stabilization",
-    "G-code line 4521 executed",
-    "Extrusion rate adjusted to 105%",
-    "Retraction detected at Z=12.4mm",
-  ];
-
-  const now = Date.now();
-  return Array.from({ length: count }, (_, i) => ({
-    id: `plog_${i}`,
-    timestamp: new Date(now - (count - i) * 2000).toISOString(),
-    kernelId: "kernel-nyc",
-    deviceId: "dev-001",
-    jobId: i % 3 === 0 ? "job-001" : i % 3 === 1 ? "job-002" : "job-003",
-    stepId: "step-1",
-    level: levels[i % levels.length],
-    phase: phases[i % phases.length],
-    phaseProgress: Math.min(100, Math.floor((i / count) * 100)),
-    message: messages[i % messages.length],
-    data: {},
-    sequence: i,
-    hash: `sha256:${"0".repeat(64)}` as const,
-  }));
-}
-
 export function ProcessLogsPage() {
   const setPageMeta = useUIStore((s) => s.setPageMeta);
-  const [logs, setLogs] = React.useState<ProcessLogEntry[]>([]);
+
+  React.useEffect(() => {
+    setPageMeta("Process Logs", "Device log lines from running jobs");
+  }, [setPageMeta]);
+
+  // Sample lines render only when the viewer asked for a demo (lib/demo-mode.ts).
+  return isDemoMode() ? <ProcessLogsDemo /> : <ProcessLogsNotLive />;
+}
+
+// ── Production: no live source ──────────────────────────────────────────────
+
+function ProcessLogsNotLive() {
+  return (
+    <GlassPanel padding="lg">
+      <NotLiveState
+        what="The process log stream"
+        detail="No gateway route serves device process logs yet, and the only process_log events on the kernel streams come from the gateway's development log generator. Nothing is shown here rather than generated lines. Gateway logs are on the Pipeline Telemetry page."
+        hasDemo
+      />
+    </GlassPanel>
+  );
+}
+
+// ── Demo: the prototype with sample lines, under a DemoBanner ───────────────
+
+function ProcessLogsDemo() {
+  const [logs] = React.useState<ProcessLogEntry[]>(() => demoProcessLogs(40));
   const [levelFilter, setLevelFilter] = React.useState<ProcessLogEntry["level"] | "all">("all");
   const [jobFilter, setJobFilter] = React.useState<string>("all");
   const [autoScroll, setAutoScroll] = React.useState(true);
   const containerRef = React.useRef<HTMLDivElement>(null);
-
-  React.useEffect(() => {
-    setPageMeta("Process Logs", "Real-time log streaming");
-  }, [setPageMeta]);
-
-  // Initialize with seed history
-  React.useEffect(() => {
-    setLogs(generateMockLogs(40));
-  }, []);
-
-  // Stream process logs via SSE
-  const handleSSEEvent = React.useCallback(
-    (type: string, data: unknown) => {
-      if (type === "process_log") {
-        setLogs((prev) => [...prev.slice(-200), data as ProcessLogEntry]);
-      }
-    },
-    [],
-  );
-
-  useSSEStream({
-    url: "/sse/stream/kernel/kernel-nyc",
-    onEvent: handleSSEEvent,
-  });
 
   // Auto-scroll
   React.useEffect(() => {
@@ -106,6 +92,8 @@ export function ProcessLogsPage() {
 
   return (
     <div className="space-y-4">
+      <DemoBanner what="Process logs" />
+
       {/* Filters */}
       <GlassPanel padding="sm">
         <div className="flex items-center gap-4">

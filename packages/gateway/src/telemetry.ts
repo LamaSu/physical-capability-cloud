@@ -70,6 +70,14 @@ export interface TelemetryStats {
   totalEvents: number;
   byPhase: Record<PipelinePhase, { total: number; failed: number }>;
   eventsPerMinute: number;
+  /**
+   * The number of jobs whose last event was "completed" or "failed" — the
+   * denominator successRate was computed from (astra 408b F2). successRate
+   * is 0 both when nothing has finished and when every terminal result
+   * failed; a caller must check this count (not successRate) to tell "no
+   * data yet" from "0% success."
+   */
+  terminalCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +302,7 @@ export class PipelineTelemetryService {
       totalEvents,
       byPhase,
       eventsPerMinute,
+      terminalCount: completedOrFailed,
     };
   }
 
