@@ -10,8 +10,15 @@
  * every method, and its prefixes with a raw startsWith, so "marketplace
  * browsing is public" also made POST/PUT/DELETE /api/marketplace/listings(/:id)
  * and POST /api/marketplace/orders public to a caller with no key.
- *   - A read entry opens GET, and HEAD follows GET (Fastify answers HEAD with
- *     the GET handler and no body).
+ *   - A read entry opens GET; HEAD follows GET by default. An explicit
+ *     authenticated HEAD policy preserves identity for artifact detail.
+ *     Fastify runs the GET handler for HEAD and removes the response body:
+ *     artifact recall increments loadCount and the registry snapshot persists.
+ *     These handlers can therefore have storage effects on HEAD too.
+ *   - Public requests return before apiKeyId is set, so keyed HEAD requests
+ *     to the newly public twins skip scopeChecker, as their public GETs do.
+ *     scopeChecker and the x402/MPP gates are later onRequest hooks, before
+ *     body parsing; a limited key can be refused before DHT's route-level 501.
  *   - A prefix or regex entry can only be a read.
  *   - A write is public only as an EXACT public-by-design entry with a
  *     one-line `why`.
@@ -28,8 +35,8 @@
  * edit an in-memory mock with no ownership check (PUT and DELETE change ANY
  * listing), so a key does not make them safe. Steward ruling #2637: deny those
  * writes at the gate and build no ownership logic for a surface that is going
- * away. Every non-GET under the prefix is 410, keyed or not, before
- * authentication, including write routes added later. The exact
+ * away. Every method except GET, HEAD and OPTIONS under the prefix is 410,
+ * keyed or not, before authentication, including write routes added later. The exact
  * public-by-design calculator POST /api/marketplace/roi and the reads stay
  * public.
  */
@@ -39,24 +46,26 @@ import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-req
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
-/** A public read: GET, and HEAD with it. Prefix and regex entries can only be reads. */
-interface PublicRead {
+/** A public read: HEAD follows GET unless explicitly kept authenticated. */
+export interface PublicRead {
   methods: readonly ["GET"];
   match: "prefix" | "exact" | "regex";
   /** prefix and exact: a path; regex: an anchored RegExp. */
   path: string | RegExp;
+  /** Default: follow-get. Artifact detail needs authenticated SIWE identity on HEAD. */
+  head?: "follow-get" | "authenticated";
   why: string;
 }
 
 /** A public-by-design write: POST on one EXACT path, and why a caller with no key must reach it. */
-interface PublicWrite {
+export interface PublicWrite {
   methods: readonly ["POST"];
   match: "exact";
   path: string;
   why: string;
 }
 
-type PublicRoute = PublicRead | PublicWrite;
+export type PublicRoute = PublicRead | PublicWrite;
 
 const GET = ["GET"] as const;
 const POST = ["POST"] as const;
@@ -104,6 +113,7 @@ const PUBLIC_READ_EXACT: PublicRead[] = [
   // POST /api/capabilities created a capability on any kernel).
   { methods: GET, match: "exact", path: "/api/capabilities", why: "capability listing (creating one is not public)" },
   { methods: GET, match: "exact", path: "/api/capabilities/types", why: "capability type discovery" },
+  { methods: GET, match: "exact", path: "/api/artifacts", why: "UI-artifact discovery (public listing)" },
 ];
 
 // ── Public READS: regexes (GET) ─────────────────────────────────────
@@ -124,8 +134,10 @@ const PUBLIC_READ_REGEX: PublicRead[] = [
   // On-Ramp §5.3: a shared /a/:slug link and cross-agent discovery must work
   // for an anonymous caller. The single-segment pattern excludes
   // /api/artifacts/:id/fork, and the route still runs its own visibility
-  // check, so a private artifact 403s an anonymous caller.
-  { methods: GET, match: "regex", path: /^\/api\/artifacts(?:\/[^/]+)?$/, why: "UI-artifact discovery and recall (the route enforces visibility)" },
+  // check, so a private artifact 403s an anonymous GET. HEAD stays authenticated
+  // to preserve apiGate's SIWE owner identity. GET already loses that identity
+  // on master; fixing that separate limitation is outside this gate change.
+  { methods: GET, head: "authenticated", match: "regex", path: /^\/api\/artifacts\/[^/]+$/, why: "UI-artifact recall (the route enforces visibility; HEAD preserves SIWE ownership)" },
   // D2 compiler ABI: the snapshot and its historical recall by digest. The
   // sibling /api/compose/:id stays gated (its second segment is never this literal).
   { methods: GET, match: "regex", path: /^\/api\/compose\/registry-snapshot(?:\/[^/]+)?$/, why: "public compiler-ABI registry snapshot" },
@@ -157,8 +169,8 @@ const PUBLIC_BY_DESIGN_WRITES: PublicWrite[] = [
   { methods: POST, match: "exact", path: "/api/lob/webhook", why: "Lob webhook: timestamp-bound HMAC verified in routes/lob.ts (carrier audit L1)" },
 ];
 
-/** The ENTIRE public allowlist. Nothing outside this table skips apiGate. */
-const PUBLIC_ROUTES: readonly PublicRoute[] = [
+/** The entire public allowlist. No other /api/ path skips apiGate. */
+export const PUBLIC_ROUTES: readonly PublicRoute[] = [
   ...PUBLIC_READ_PREFIXES,
   ...PUBLIC_READ_EXACT,
   ...PUBLIC_READ_REGEX,
@@ -176,8 +188,8 @@ function pathMatches(entry: PublicRoute, path: string): boolean {
 }
 
 /**
- * True when (method, url) is on the public allowlist. HEAD is judged as GET
- * (Fastify answers HEAD with the GET handler and no body). A method no entry
+ * True when (method, url) is on the public allowlist. HEAD follows each read's
+ * policy (default: follow GET). Fastify runs GET's handler with no response body. A method no entry
  * declares is not public: it falls through to authentication. Exported for tests.
  */
 export function isPublicRoute(url: string, method?: string): boolean {
@@ -185,7 +197,9 @@ export function isPublicRoute(url: string, method?: string): boolean {
   const m = (method ?? "").toUpperCase();
   const effective = m === "HEAD" ? "GET" : m;
   return PUBLIC_ROUTES.some(
-    (entry) => (entry.methods as readonly string[]).includes(effective) && pathMatches(entry, path),
+    (entry) => (entry.methods as readonly string[]).includes(effective)
+      && !(m === "HEAD" && "head" in entry && entry.head === "authenticated")
+      && pathMatches(entry, path),
   );
 }
 
