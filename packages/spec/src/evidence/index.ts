@@ -40,6 +40,9 @@ export * from "./subject-binding.js";
 // level); evidenceLevelOfBundles is the maximum over it.
 export * from "./evidence-level.js";
 export * from "./delegation-rules.js";
+// EvidenceBlockV1 v2 — the evidenceBlockHash a FinalMilestonePackageV2 carries,
+// with the unit-context and settlement-unit derivations it binds.
+export * from "./evidence-block.js";
 export * from "./eligibility.js";
 export * from "./measurement-profile.js";
 // Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),
@@ -52,3 +55,6 @@ export * from "./adapter-manifests.js";
 // acceptedPolicyDigest — the PUBLIC producer the V-next escrow's CREATE2 policy salt needs
 // (composition's accept route #391, escrow's encoder #367); byte-exact with the #270 mirror.
 export * from "./accepted-policy.js";
+// accepted-policy and evidence-block each declare Bytes32Hex (the same `0x${string}`): naming one
+// explicitly keeps the two `export *` lines from being ambiguous (TS2308).
+export type { Bytes32Hex } from "./accepted-policy.js";
