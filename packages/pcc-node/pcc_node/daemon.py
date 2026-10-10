@@ -157,7 +157,7 @@ def run_daemon(config: NodeConfig, *, on_running=None):
     Raises
     ------
     RegistrationError
-        When the gateway refuses the kernel registration. The daemon never ran: the PID file
+        When registration is refused, malformed or raises unexpectedly. The daemon never ran: the PID file
         and any state file are removed first, so no caller can mistake it for a daemon that
         ran and stopped.
     """
@@ -218,13 +218,13 @@ def run_daemon(config: NodeConfig, *, on_running=None):
     try:
         register_kernel(config.pcc_base, config.pcc_api_key, config)
         log.info(f"Kernel {config.kernel_id} registered")
-    except RegistrationError as e:
+    except Exception as e:
         # Fail CLOSED (verdict 133a MED, 133b Q1): a kernel whose registration was REFUSED (a non-2xx)
         # is not connected. Do NOT create the gateway client, send an "online" heartbeat, write running
         # state, or log "Daemon running". Also remove the PID file written at startup and any pre-existing
         # state file -- the same cleanup a clean shutdown does below -- so a later `status` finds no live
         # PID plus state and cannot report a false "PCC: connected".
-        log.error(f"Kernel registration refused ({e}); the node is NOT registered. Daemon not started.")
+        log.error(f"Kernel registration failed ({e}); the node is NOT registered. Daemon not started.")
         _remove_pid()
         try:
             os.remove(STATE_FILE)
@@ -232,9 +232,9 @@ def run_daemon(config: NodeConfig, *, on_running=None):
             pass
         # Propagate the refusal (ChatGPT r3 finding 1): a normal return here let `pcc-node start`
         # exit 0 for a node that never ran. The CLI turns it into exit 1; a direct caller sees it too.
-        raise
-    except Exception as e:
-        log.warning(f"Kernel registration failed: {e}")
+        if isinstance(e, RegistrationError):
+            raise
+        raise RegistrationError(0, {"error": "unexpected_registration_failure"}) from e
 
     # ------------------------------------------------------------------
     # 4. No capability announcements and no job polling (verdict 68c)
