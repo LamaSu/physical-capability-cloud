@@ -2,113 +2,249 @@
  * PCC REAL E2E — FULL TELEMETRY CAPTURE
  * Every HTTP call, every on-chain tx, every response — logged verbatim.
  * Output is the print job content.
+ *
+ * FC-8 round 5 (astra pack 61d, DO-NOT-SHIP at #326 @d8190fe3): round 4 left
+ * three classes of value printed raw: environment-derived values (the
+ * oracle verifier override, the injected report path), dependency-returned
+ * PUBLIC chain identifiers (tx hashes, receipt topics, addresses — the
+ * JSON.stringify'd evidence/attestation dumps leaked several of these even
+ * though the surrounding code looked like it had been fixed, because the
+ * object SPREAD left most fields untouched and only the explicitly
+ * overridden keys were safe), and an unbounded safeLogInt/un-enumerated
+ * safeLogErrorName. This round routes EVERY printed value through an
+ * explicit source-to-sink rule (see redact-log.ts and the round-5 report):
+ * SECRET → never read from env, never printed. ENV value / CLI path →
+ * envPresence() only. GATEWAY-ISSUED id → safeLogId (fingerprint, no
+ * verbatim mode, ever). PUBLIC chain/git id (tx hash, address, topic) →
+ * publicIdForLog (fingerprint by default; PUBLIC_ID_RULE is the one-line
+ * switch to verbatim later). STATUS-like field → safeLogEnum/safeLogBool.
+ * NUMBER → safeLogInt with explicit bounds. ERROR NAME → the closed enum
+ * in safeLogErrorName. Dependency SIGNATURE → presence only, never printed.
+ * An AST test (fc8-round5-ast-sink-guard.test.ts) enforces that every
+ * console log / stdout / stderr argument in this file is built only from
+ * string literals and calls to this allowlist — not merely that a canary
+ * happens to be absent today.
+ *
+ * FC-8 round 5b (steward ruling #6712, DECISIONS 00:53): the steward
+ * reviewed round 5's fingerprint-everything default and ruled that a
+ * shape-valid tx hash / address / event topic is PUBLIC chain data, not a
+ * secret, and may print VERBATIM — but ONLY on stdout/stderr/in the report
+ * file, via the new, separate publicChainRef(value, kind). Locally-computed
+ * content hashes/commitments (cwmId, stepId, evidenceHash, the attestation
+ * nonce) are NOT "a tx hash, an address, or an event topic" under the
+ * ruling's own wording, so they stay on publicIdForLog (fingerprinted),
+ * unchanged. The print job at the bottom of this file resends the ENTIRE
+ * accumulated stdout log as `parameters.content` — a THIRD-PARTY (printer)
+ * body, which the ruling says must never carry a chain value verbatim —
+ * so that content is scrubbed via redactChainValuesFromText before it is
+ * sent, even though the identical text is safe verbatim on stdout and in
+ * the report file itself.
+ *
+ * The flow is exported as `run(deps)` with injected fetch/chain-clients/env
+ * (round 3); CLI behavior is preserved behind the entry guard at the
+ * bottom.
  */
 
 import {
   createWalletClient, createPublicClient, http, parseUnits, formatUnits,
   formatEther, keccak256, toBytes, type Address, type Hex,
+  type WalletClient, type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import {
+  safeLogErrorName, safeLogId, safeLogInt, safeLogBool, safeLogEnum,
+  safeLogContentType, publicIdForLog, envPresence, safeLogDecimal, nowIso,
+  publicChainRef, redactChainValuesFromText,
+} from "../packages/gateway/src/util/redact-log.js";
 
-const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
-if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY"); process.exit(1); }
+/** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
+export class MissingEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingEnvError";
+  }
+}
 
 const GW = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
-// N44: keys come only from the environment. Never commit a key literal:
-// scripts/ci/secret-scan.mjs fails CI on any pcc_live_/pcc_test_/pcc_oracle_ literal.
-const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
-if (!ORACLE_KEY) { console.error("Set PCC_ORACLE_KEY (the oracle x-oracle-key; never hard-code it)"); process.exit(1); }
 const KERNEL = "kernel-nanoclaw";
+const JOB_STATUSES = ["queued", "running", "completed", "failed"] as const;
+const RECEIPT_STATUSES = ["success", "reverted"] as const;
+const TYPEOF_LABELS = ["string", "number", "boolean", "undefined", "object", "function", "symbol", "bigint", "array"] as const;
 
-const account = privateKeyToAccount(PK);
-const rpc = http("https://sepolia.base.org");
-const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc });
-const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
+/** Every route template this script's gw() helper is ever called with — a FIXED, author-written label, never a path built from a response value (see gw() below). Logged through safeLogEnum so a future call site that somehow passed something else prints "(unexpected)" instead of leaking it. */
+const ROUTE_TEMPLATES = [
+  "GET /api/kernels/:kernelId",
+  "GET /api/dht/peers",
+  "GET /api/dht/metrics",
+  "POST /api/operator/heartbeat",
+  "GET /api/capabilities/by-kernel/:kernelId",
+  "POST /api/jobs/submit",
+  "GET /api/jobs/:id/status",
+  "GET /api/telemetry/audit",
+  "POST /api/evidence/archive",
+  "GET /api/evidence/lit-status",
+  "POST /api/lit/provision",
+  "POST /api/zk/commit",
+  "POST /api/zk/prove/tier",
+  "POST /api/zk/anchor-starknet",
+  "GET /api/zk/anchor-starknet/:txHash",
+  "GET /api/near/status",
+  "POST /api/near/quote",
+  "POST /api/near/intent",
+  "GET /api/near/intent/:id",
+  "GET /api/escrow/chain/:address/state",
+] as const;
 
-const log: string[] = [];
-// N44: nothing that reaches the console or the report carries PCC key material,
-// whatever a response echoes back.
-const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
-function L(s: string) { const t = redactKeys(s); console.log(t); log.push(t); }
-function SEP() { L("─".repeat(72)); }
-function BIGSEP() { L("═".repeat(72)); }
+/** Every fixed tx/deploy label this script's txWrite()/deploy()/write() helpers are called with — logged through safeLogEnum rather than interpolated directly, same reasoning as ROUTE_TEMPLATES above. */
+const TX_LABELS = [
+  "MockUSDC.deploy(initialSupply=1M)",
+  "PCCProtocol.deploy(feeRecipient, 235bps, governor, oracleVerifier)",
+  "PCCProtocol.createEscrow()",
+  "MockUSDC.mint(deployer, 10e6)",
+  "MilestoneEscrow.addMilestone()",
+  "MockUSDC.approve(escrow, 10e6)",
+  "MilestoneEscrow.fund()",
+  "MilestoneEscrow.submitEvidence(0, hash)",
+  "MilestoneEscrow.submitAttestation(0, attestation)",
+  "MilestoneEscrow.release(0, attestation)",
+] as const;
 
-// ── Traced HTTP ──────────────────────────────────────────────────────
-let reqNum = 0;
-async function gw(method: string, path: string, body?: any): Promise<any> {
-  const n = ++reqNum;
-  const url = `${GW}${path}`;
-  L(`  [HTTP ${n}] ${method} ${url}`);
-  if (body) L(`  [HTTP ${n}] Body: ${JSON.stringify(body).slice(0, 500)}`);
-  const t0 = Date.now();
-  const opts: RequestInit = {
-    method,
-    headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e-verbose/1.0" },
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(url, opts);
-  const text = await r.text();
-  const ms = Date.now() - t0;
-  let data: any;
-  try { data = JSON.parse(text); } catch { data = text; }
-  L(`  [HTTP ${n}] ${r.status} ${r.statusText} (${ms}ms)`);
-  L(`  [HTTP ${n}] Response: ${JSON.stringify(data).slice(0, 800)}`);
-  return data;
-}
-
-// ── Traced on-chain write ────────────────────────────────────────────
-let txNum = 0;
-async function txWrite(label: string, fn: () => Promise<Hex>): Promise<{ hash: Hex; receipt: any }> {
-  const n = ++txNum;
-  L(`  [TX ${n}] ${label}`);
-  const nonce = await pub.getTransactionCount({ address: account.address });
-  L(`  [TX ${n}] Nonce: ${nonce}`);
-  const hash = await fn();
-  L(`  [TX ${n}] Hash: ${hash}`);
-  L(`  [TX ${n}] Explorer: https://sepolia.basescan.org/tx/${hash}`);
-  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
-  await new Promise(r => setTimeout(r, 2000));
-  L(`  [TX ${n}] Block: ${receipt.blockNumber} | Gas: ${receipt.gasUsed} | Status: ${receipt.status}`);
-  if (receipt.logs.length > 0) {
-    L(`  [TX ${n}] Events: ${receipt.logs.length} log(s)`);
-    for (const lg of receipt.logs.slice(0, 3)) {
-      L(`  [TX ${n}]   topic0: ${lg.topics[0]?.slice(0, 20)}... addr: ${lg.address}`);
-    }
+/**
+ * Read a required secret from `env` and throw a MissingEnvError when it is
+ * unset. Keys are NEVER committed to this repository (WP-A fold F8: the
+ * literal that used to sit here was exposed and is listed for revocation in
+ * docs/security/WILDCARD_KEY_ROTATION.md).
+ */
+function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
+  const value = env[name]?.trim();
+  if (!value) {
+    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
   }
-  return { hash, receipt };
+  return value;
 }
 
-async function deploy(label: string, params: any): Promise<{ hash: Hex; receipt: any; address: Address }> {
-  const r = await txWrite(label, async () => {
-    const n = await pub.getTransactionCount({ address: account.address });
-    return wallet.deployContract({ ...params, nonce: n });
-  });
-  const addr = r.receipt.contractAddress!;
-  L(`  [TX ${txNum}] Contract: ${addr}`);
-  return { ...r, address: addr };
+export interface RunDeps {
+  fetchImpl?: typeof fetch;
+  wallet?: WalletClient;
+  pub?: PublicClient;
+  env?: Record<string, string | undefined>;
+  pollSleepMs?: number;
+  pollAttempts?: number;
+  reportPath?: string;
+  contractsDir?: string;
 }
 
-async function write(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
-  return txWrite(label, async () => {
-    const n = await pub.getTransactionCount({ address: account.address });
-    return wallet.writeContract({ ...params, nonce: n });
-  });
+export interface RunResult {
+  report: string;
+  log: string[];
 }
 
-async function main() {
+export async function run(deps: RunDeps = {}): Promise<RunResult> {
+  const env = deps.env ?? process.env;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const pollSleepMs = deps.pollSleepMs ?? 5000;
+  const pollAttempts = deps.pollAttempts ?? 40;
+  const reportPath = deps.reportPath ?? "/tmp/pcc-e2e-report.txt";
+
+  const PK = (env.PCC_GATEWAY_PRIVATE_KEY || env.DEPLOYER_PRIVATE_KEY) as Hex | undefined;
+  if (!PK) throw new MissingEnvError("Set PCC_GATEWAY_PRIVATE_KEY");
+  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+
+  const account = privateKeyToAccount(PK);
+  const rpc = http("https://sepolia.base.org");
+  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport: rpc });
+  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport: rpc });
+
+  const log: string[] = [];
+  function L(s: string) { console.log(s); log.push(s); }
+  function SEP() { L("─".repeat(72)); }
+  function BIGSEP() { L("═".repeat(72)); }
+
+  // ── Traced HTTP ──────────────────────────────────────────────────────
+  // `routeTemplate` is a FIXED STRING the caller writes — never the real
+  // `path`, which can contain a response-derived segment — logged through
+  // safeLogEnum(ROUTE_TEMPLATES) rather than interpolated directly, so any
+  // call site that somehow passed something else prints "(unexpected)"
+  // instead of leaking it. The tracer otherwise logs shape/size/status
+  // only, never body content.
+  let reqNum = 0;
+  async function gw(method: string, path: string, routeTemplate: string, body?: any): Promise<any> {
+    const n = ++reqNum;
+    L(`  [HTTP ${safeLogInt(n, { min: 0, max: 100_000 })}] ${safeLogEnum(routeTemplate, ROUTE_TEMPLATES)}`);
+    if (body !== undefined) {
+      const bodyTypeLabel = Array.isArray(body) ? "array" : typeof body;
+      L(`  [HTTP ${safeLogInt(n, { min: 0, max: 100_000 })}] Body: <${safeLogEnum(bodyTypeLabel, TYPEOF_LABELS)}>`);
+    }
+    const t0 = Date.now();
+    const opts: RequestInit = {
+      method,
+      headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e-verbose/1.0" },
+    };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    const r = await fetchImpl(`${GW}${path}`, opts);
+    const text = await r.text();
+    const ms = Date.now() - t0;
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = text; }
+    L(`  [HTTP ${safeLogInt(n, { min: 0, max: 100_000 })}] ${safeLogInt(r.status, { min: 0, max: 599 })} (${safeLogInt(ms, { min: 0, max: 600_000 })}ms)`);
+    const respTypeLabel = data && typeof data === "object" ? (Array.isArray(data) ? "array" : "object") : typeof data;
+    L(`  [HTTP ${safeLogInt(n, { min: 0, max: 100_000 })}] Response: <${safeLogEnum(respTypeLabel, TYPEOF_LABELS)}> (${safeLogInt(text.length, { min: 0, max: 2_000_000_000 })} bytes)`);
+    return data;
+  }
+
+  // ── Traced on-chain write ────────────────────────────────────────────
+  let txNum = 0;
+  async function txWrite(label: string, fn: () => Promise<Hex>): Promise<{ hash: Hex; receipt: any }> {
+    const n = ++txNum;
+    L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}] ${safeLogEnum(label, TX_LABELS)}`);
+    const nonce = await pub.getTransactionCount({ address: account.address });
+    L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}] Nonce: ${safeLogInt(nonce, { min: 0, max: 100_000_000 })}`);
+    const hash = await fn();
+    L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}] Hash: ${publicChainRef(hash, "tx")}`);
+    L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}] Explorer: https://sepolia.basescan.org/tx/${publicChainRef(hash, "tx")}`);
+    const receipt: any = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    await new Promise(r => setTimeout(r, pollSleepMs > 0 ? 2000 : 0));
+    L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}] Block: ${safeLogInt(receipt.blockNumber, { min: 0, max: 99_999_999_999 })} | Gas: ${safeLogInt(receipt.gasUsed, { min: 0, max: 50_000_000 })} | Status: ${safeLogEnum(receipt.status, RECEIPT_STATUSES)}`);
+    if (receipt.logs.length > 0) {
+      L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}] Events: ${safeLogInt(receipt.logs.length, { min: 0, max: 10_000 })} log(s)`);
+      for (const lg of receipt.logs.slice(0, 3)) {
+        L(`  [TX ${safeLogInt(n, { min: 0, max: 100_000 })}]   topic0: ${publicChainRef(lg.topics[0], "topic")} addr: ${publicChainRef(lg.address, "address")}`);
+      }
+    }
+    return { hash, receipt };
+  }
+
+  async function deploy(label: string, params: any): Promise<{ hash: Hex; receipt: any; address: Address }> {
+    const r = await txWrite(label, async () => {
+      const n = await pub.getTransactionCount({ address: account.address });
+      return wallet.deployContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+    });
+    const addr = r.receipt.contractAddress!;
+    L(`  [TX ${safeLogInt(txNum, { min: 0, max: 100_000 })}] Contract: ${publicChainRef(addr, "address")}`);
+    return { ...r, address: addr };
+  }
+
+  async function write(label: string, params: any): Promise<{ hash: Hex; receipt: any }> {
+    return txWrite(label, async () => {
+      const n = await pub.getTransactionCount({ address: account.address });
+      return wallet.writeContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+    });
+  }
+
   BIGSEP();
   L("  PCC PHYSICAL CAPABILITY CLOUD — FULL TELEMETRY CAPTURE");
-  L(`  ${new Date().toISOString()}`);
+  L(`  ${nowIso()}`);
   BIGSEP();
   L("");
-  L(`Deployer:     ${account.address}`);
+  L(`Deployer:     ${publicChainRef(account.address, "address")}`);
   const ethBal = await pub.getBalance({ address: account.address });
-  L(`ETH Balance:  ${formatEther(ethBal)}`);
+  L(`ETH Balance:  ${safeLogDecimal(formatEther(ethBal))}`);
   L(`Chain:        Base Sepolia (84532)`);
   L(`RPC:          https://sepolia.base.org`);
   L(`Gateway:      ${GW}`);
@@ -116,7 +252,7 @@ async function main() {
   L(`Kernel:       ${KERNEL}`);
   L("");
 
-  const contractsDir = resolve(process.cwd(), "packages/contracts");
+  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
   const usdcArt = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
   const protArt = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
   const escrowAbi = JSON.parse(readFileSync(resolve(contractsDir, "out/MilestoneEscrow.sol/MilestoneEscrow.json"), "utf8")).abi;
@@ -139,17 +275,13 @@ async function main() {
   // 1b. PCCProtocol
   SEP();
   L("[1b] Deploy PCCProtocol (fee factory, 2.35%)");
-  // oracle verifier must be deployed first (or pass a known address).
-  // For the telemetry run we deploy a throwaway mock oracle that approves
-  // anything with verified=true so the E2E can exercise the full oracle-gated
-  // path end-to-end. Production deploys pass the PCC Oracle Verifier address.
   L("     Deploying test MockPCCOracle (verified=true bypass)...");
-  // Inline minimal oracle contract bytecode would be shipped via a compiled
-  // artifact; for now we expect the user to have deployed one and passed
-  // via env, OR we reuse the deployer as a no-op oracle address. The
-  // safe default for Base Sepolia is to point at a known-good oracle.
-  const ORACLE_VERIFIER = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
-  L(`     Oracle verifier: ${ORACLE_VERIFIER}`);
+  // FC-8 round 5: ORACLE_VERIFIER_ADDRESS is an ENV value — never printed,
+  // not even once it has been read into a variable. Only whether an
+  // override was configured is logged; the real value (env override, or
+  // the deployer's own address as the default) is still what is used below.
+  const ORACLE_VERIFIER = (env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  L(`     Oracle verifier override: ${envPresence(env.ORACLE_VERIFIER_ADDRESS)}`);
   const prot = await deploy("PCCProtocol.deploy(feeRecipient, 235bps, governor, oracleVerifier)", {
     abi: protArt.abi, bytecode: protArt.bytecode.object as `0x${string}`,
     args: [account.address, 235n, account.address, ORACLE_VERIFIER],
@@ -160,16 +292,16 @@ async function main() {
   // 1c. Escrow via factory
   SEP();
   L("[1c] Create escrow via PCCProtocol.createEscrow()");
-  L(`     payer=${account.address}, arbiter=${account.address}, token=${USDC}`);
+  L(`     payer=${publicChainRef(account.address, "address")}, arbiter=${publicChainRef(account.address, "address")}, token=${publicChainRef(USDC, "address")}`);
   const cwmId = keccak256(toBytes("pcc-full-telemetry-" + Date.now()));
-  L(`     cwmId=${cwmId}`);
+  L(`     cwmId=${publicIdForLog(cwmId, "hash")}`);
   const createResult = await write("PCCProtocol.createEscrow()", {
     address: PROTOCOL, abi: protArt.abi, functionName: "createEscrow",
     args: [account.address, account.address, USDC, cwmId],
   });
   const escrowLog = createResult.receipt.logs.find((l: any) => l.topics.length >= 2);
   const ESCROW = ("0x" + (escrowLog?.topics[1]?.slice(26) ?? "")) as Address;
-  L(`     Escrow address: ${ESCROW}`);
+  L(`     Escrow address: ${publicChainRef(ESCROW, "address")}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -185,15 +317,15 @@ async function main() {
     args: [account.address, parseUnits("10", 6)],
   });
   const bal = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [account.address] });
-  L(`     Deployer USDC balance: ${formatUnits(bal as bigint, 6)}`);
+  L(`     Deployer USDC balance: ${safeLogDecimal(formatUnits(bal as bigint, 6))}`);
   L("");
 
   // 2b. Add milestone
   SEP();
   L("[2b] Add milestone to escrow (1 USDC, 0 bond, 0 challenge window)");
   const stepId = keccak256(toBytes("pcc-slot-inspection-1-3-5"));
-  L(`     stepId: ${stepId}`);
-  L(`     operator: ${account.address}`);
+  L(`     stepId: ${publicIdForLog(stepId, "hash")}`);
+  L(`     operator: ${publicChainRef(account.address, "address")}`);
   L(`     amount: 1000000 (1 USDC)`);
   await write("MilestoneEscrow.addMilestone()", {
     address: ESCROW, abi: escrowAbi, functionName: "addMilestone",
@@ -217,10 +349,10 @@ async function main() {
     address: ESCROW, abi: escrowAbi, functionName: "fund", args: [],
   });
   const escrowBal = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [ESCROW] });
-  L(`     Escrow USDC balance: ${formatUnits(escrowBal as bigint, 6)}`);
+  L(`     Escrow USDC balance: ${safeLogDecimal(formatUnits(escrowBal as bigint, 6))}`);
   const funded = await pub.readContract({ address: ESCROW, abi: escrowAbi, functionName: "funded" });
   const msCount = await pub.readContract({ address: ESCROW, abi: escrowAbi, functionName: "getMilestoneCount" });
-  L(`     funded=${funded} milestones=${msCount}`);
+  L(`     funded=${safeLogBool(funded)} milestones=${safeLogInt(msCount, { min: 0, max: 1_000_000 })}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -230,23 +362,23 @@ async function main() {
 
   SEP();
   L("[3a] Gateway kernel state");
-  const kernelState = await gw("GET", "/api/kernels/kernel-nanoclaw");
+  await gw("GET", "/api/kernels/kernel-nanoclaw", "GET /api/kernels/:kernelId");
   L("");
 
   SEP();
   L("[3b] DHT peers + metrics");
-  const dhtPeers = await gw("GET", "/api/dht/peers");
-  const dhtMetrics = await gw("GET", "/api/dht/metrics");
+  await gw("GET", "/api/dht/peers", "GET /api/dht/peers");
+  await gw("GET", "/api/dht/metrics", "GET /api/dht/metrics");
   L("");
 
   SEP();
   L("[3c] Operator daemon heartbeat check");
-  const hbResult = await gw("POST", "/api/operator/heartbeat", { kernelId: KERNEL, status: "online" });
+  await gw("POST", "/api/operator/heartbeat", "POST /api/operator/heartbeat", { kernelId: KERNEL, status: "online" });
   L("");
 
   SEP();
   L("[3d] Capability discovery — what can this kernel do?");
-  const caps = await gw("GET", "/api/capabilities/by-kernel/kernel-nanoclaw");
+  await gw("GET", "/api/capabilities/by-kernel/kernel-nanoclaw", "GET /api/capabilities/by-kernel/:kernelId");
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -274,13 +406,18 @@ async function main() {
     "    protocol.set_rail_lights(True)",
     '    protocol.comment("PCC Full Telemetry complete")',
   ].join("\n");
-  L(`     Protocol:\n${protocol}`);
+  // FC-8 round 5: this is a locally-authored, fixed protocol body (built
+  // entirely from the literal array above) — never printed in full here
+  // (a multi-KB blob has no place in a telemetry log anyway); only its
+  // length, which is itself just a property of the literal text above.
+  L(`     Protocol: <local OT-2 python script, ${safeLogInt(protocol.length, { min: 0, max: 100_000 })} chars>`);
   L("");
-  const jobResult = await gw("POST", "/api/jobs/submit", {
+  const jobResult = await gw("POST", "/api/jobs/submit", "POST /api/jobs/submit", {
     stepId: "step-full-telemetry",
     kernelId: KERNEL,
     parameters: { pythonCode: protocol, filename: "pcc_full_telemetry.py" },
   });
+  L(`     Job ID: ${safeLogId(jobResult?.jobId)}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -291,11 +428,11 @@ async function main() {
   SEP();
   L("[5a] Polling job status every 5s — waiting for daemon to pick up and execute");
   let status = "queued";
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 5000));
-    const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
-    status = s.status;
-    L(`     Poll ${i + 1}: ${status} (progress=${s.progress})`);
+  for (let i = 0; i < pollAttempts; i++) {
+    await new Promise(r => setTimeout(r, pollSleepMs));
+    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`, "GET /api/jobs/:id/status");
+    status = s?.status;
+    L(`     Poll ${safeLogInt(i + 1, { min: 0, max: 100_000 })}: ${safeLogEnum(status, JOB_STATUSES)} (progress=${safeLogInt(s?.progress, { min: 0, max: 1_000_000 })})`);
     if (status === "completed" || status === "failed") break;
   }
   L("");
@@ -312,24 +449,25 @@ async function main() {
 
   SEP();
   L("[6a] Camera frame from OT-2 (latest JPEG pushed by daemon)");
-  const camResp = await fetch(`${GW}/api/ot2/camera/latest`, {
+  const camResp = await fetchImpl(`${GW}/api/ot2/camera/latest`, {
     headers: { "User-Agent": "pcc-e2e-verbose/1.0" },
   });
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
-  L(`     Content-Type: ${camResp.headers.get("content-type")}`);
-  L(`     Size: ${camBytes} bytes`);
-  L(`     Status: ${camResp.status}`);
+  const camContentType = safeLogContentType(camResp.headers.get("content-type"));
+  L(`     Content-Type: ${camContentType}`);
+  L(`     Size: ${safeLogInt(camBytes, { min: 0, max: 2_000_000_000 })} bytes`);
+  L(`     Status: ${safeLogInt(camResp.status, { min: 0, max: 599 })}`);
   L("");
 
   SEP();
   L("[6b] Gateway telemetry audit log (last 10 entries)");
-  const audit = await gw("GET", "/api/telemetry/audit?limit=10");
+  await gw("GET", "/api/telemetry/audit?limit=10", "GET /api/telemetry/audit");
   L("");
 
   SEP();
   L("[6c] Build evidence bundle");
   const evidence = {
-    jobId: jobResult.jobId,
+    jobId: jobResult?.jobId,
     kernel: KERNEL,
     escrow: ESCROW,
     protocol: "PCC Full Telemetry — Slots 1, 3, 5",
@@ -342,8 +480,14 @@ async function main() {
     chainId: 84532,
   };
   const evidenceHash = keccak256(toBytes(JSON.stringify(evidence)));
-  L(`     Evidence: ${JSON.stringify(evidence, null, 2)}`);
-  L(`     Hash: ${evidenceHash}`);
+  // FC-8 round 5: the HASH above covers the real values (jobId, escrow,
+  // protocolRoot, operator, camera type/bytes, status) — the logged copy
+  // below is listed field-by-field, each through its own rule, rather than
+  // spreading `evidence` and overriding a few keys (round 4's version left
+  // escrow/protocolRoot/operator unredacted precisely because a spread
+  // silently carries through every key the override list forgets).
+  L(`     Evidence: jobId=${safeLogId(evidence.jobId)} kernel=${KERNEL} escrow=${publicChainRef(evidence.escrow, "address")} protocol="PCC Full Telemetry — Slots 1, 3, 5" protocolRoot=${publicChainRef(evidence.protocolRoot, "address")} status=${safeLogEnum(evidence.status, JOB_STATUSES)} cameraBytes=${safeLogInt(evidence.camera.bytes, { min: 0, max: 2_000_000_000 })} cameraType=${camContentType} operator=${publicChainRef(evidence.operator, "address")} chain="base-sepolia" chainId=${safeLogInt(evidence.chainId, { min: 0, max: 999_999 })}`);
+  L(`     Hash: ${publicIdForLog(evidenceHash, "hash")}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -364,13 +508,17 @@ async function main() {
   SEP();
   L("[7b] Request oracle verification");
   L(`     Oracle URL: ${ORACLE_URL}`);
-  const oracleReq = await fetch(`${ORACLE_URL}/verify`, {
+  const oracleReq = await fetchImpl(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-oracle-key": ORACLE_KEY },
-    body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult.jobId }),
+    body: JSON.stringify({ escrowAddress: ESCROW, milestoneIndex: 0, evidenceHash, jobId: jobResult?.jobId }),
   });
   const oracleText = await oracleReq.text();
-  L(`     Oracle HTTP ${oracleReq.status}: ${oracleText.slice(0, 500)}`);
+  // FC-8 round 2+4: the oracle response may reflect the x-oracle-key or carry
+  // a secret; never print its raw text or object — only a validated boolean.
+  let oracleParsed: any;
+  try { oracleParsed = JSON.parse(oracleText); } catch { oracleParsed = undefined; }
+  L(`     Oracle HTTP ${safeLogInt(oracleReq.status, { min: 0, max: 599 })}: verified=${safeLogBool(oracleParsed?.verified)} hasAttestation=${safeLogBool(!!oracleParsed?.attestation)}`);
   L("");
 
   // 7c. Attestation
@@ -381,7 +529,7 @@ async function main() {
   // release(...) later must pass the same struct back in verbatim.
   const attestationStruct = {
     escrowAddress: ESCROW,
-    jobId: jobResult.jobId ?? "job-telemetry",
+    jobId: jobResult?.jobId ?? "job-telemetry",
     evidenceHash,
     tier: 1,
     verified: true,
@@ -389,10 +537,11 @@ async function main() {
     nonce: keccak256(toBytes(`nonce-${Date.now()}-${ESCROW}`)),
     signature: "0x" as Hex,
   };
-  L(`     Attestation struct: ${JSON.stringify({
-    ...attestationStruct,
-    timestamp: attestationStruct.timestamp.toString(),
-  })}`);
+  // FC-8 round 5: jobId is server-returned (safeLogId); escrowAddress/
+  // evidenceHash/nonce are public chain identifiers (publicIdForLog);
+  // signature is a dependency SIGNATURE — never printed, presence only.
+  const signaturePresent = typeof attestationStruct.signature === "string" && attestationStruct.signature !== "0x";
+  L(`     Attestation struct: escrow=${publicChainRef(attestationStruct.escrowAddress, "address")} jobId=${safeLogId(attestationStruct.jobId)} evidenceHash=${publicIdForLog(attestationStruct.evidenceHash, "hash")} tier=${safeLogInt(attestationStruct.tier, { min: 0, max: 255 })} verified=${safeLogBool(attestationStruct.verified)} timestamp=${safeLogInt(attestationStruct.timestamp, { min: 0, max: 99_999_999_999 })} nonce=${publicIdForLog(attestationStruct.nonce, "hash")} signaturePresent=${safeLogBool(signaturePresent)}`);
   await write("MilestoneEscrow.submitAttestation(0, attestation)", {
     address: ESCROW, abi: escrowAbi, functionName: "submitAttestation",
     args: [0n, attestationStruct],
@@ -403,16 +552,16 @@ async function main() {
   SEP();
   L("[7d] Release milestone — settle USDC (2.35% fee to protocol, oracle-gated)");
   const balBefore = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [account.address] });
-  L(`     Operator USDC before: ${formatUnits(balBefore as bigint, 6)}`);
+  L(`     Operator USDC before: ${safeLogDecimal(formatUnits(balBefore as bigint, 6))}`);
   await write("MilestoneEscrow.release(0, attestation)", {
     address: ESCROW, abi: escrowAbi, functionName: "release",
     args: [0n, attestationStruct],
   });
   const balAfter = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [account.address] });
-  L(`     Operator USDC after:  ${formatUnits(balAfter as bigint, 6)}`);
-  L(`     Net received: ${formatUnits((balAfter as bigint) - (balBefore as bigint), 6)} USDC`);
+  L(`     Operator USDC after:  ${safeLogDecimal(formatUnits(balAfter as bigint, 6))}`);
+  L(`     Net received: ${safeLogDecimal(formatUnits((balAfter as bigint) - (balBefore as bigint), 6))} USDC`);
   const escrowBalAfter = await pub.readContract({ address: USDC, abi: usdcArt.abi, functionName: "balanceOf", args: [ESCROW] });
-  L(`     Escrow USDC remaining: ${formatUnits(escrowBalAfter as bigint, 6)}`);
+  L(`     Escrow USDC remaining: ${safeLogDecimal(formatUnits(escrowBalAfter as bigint, 6))}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -423,10 +572,10 @@ async function main() {
   // ── 7b-1. Storacha / IPFS Evidence Archival ───────────────────────
   SEP();
   L("[7b-1] Archive evidence bundle to IPFS (Storacha/Helia)");
-  const archiveResult = await gw("POST", "/api/evidence/archive", {
+  const archiveResult = await gw("POST", "/api/evidence/archive", "POST /api/evidence/archive", {
     bundle: {
-      id: `evidence-${jobResult.jobId}`,
-      jobId: jobResult.jobId,
+      id: `evidence-${jobResult?.jobId}`,
+      jobId: jobResult?.jobId,
       kernelId: KERNEL,
       type: "execution_evidence",
       evidenceHash,
@@ -440,82 +589,87 @@ async function main() {
       timestamp: new Date().toISOString(),
     },
   });
-  L(`     Archived: ${archiveResult.archived} | CID: ${archiveResult.cid ?? "mock"}`);
-  L(`     Metadata CID: ${archiveResult.metadataCid ?? "none"}`);
+  // FC-8 round 4: cid/metadataCid are ids (fingerprinted); nothing else from
+  // this response has a sound validator, so nothing else is printed.
+  L(`     Archived: ${safeLogBool(archiveResult?.archived)} | CID: ${safeLogId(archiveResult?.cid)}`);
+  L(`     Metadata CID: ${safeLogId(archiveResult?.metadataCid)}`);
   L("");
 
   // ── 7b-2. Lit Protocol — Encrypt Evidence ─────────────────────────
   SEP();
   L("[7b-2] Lit Protocol status + key provisioning check");
-  const litStatus = await gw("GET", "/api/evidence/lit-status");
-  L(`     Lit connected: ${litStatus?.lit?.connected ?? "unknown"}`);
-  L(`     Lit mode: ${litStatus?.lit?.mode ?? "unknown"}`);
-  L(`     Lit network: ${litStatus?.lit?.network ?? "unknown"}`);
+  const litStatus = await gw("GET", "/api/evidence/lit-status", "GET /api/evidence/lit-status");
+  // FC-8 round 4: mode/network are not ids (safeLogId round-3 misuse,
+  // finding 3) and have no confidently-closed enum in this codebase —
+  // omitted. `connected` is the only field with a sound validator here.
+  L(`     Lit connected: ${safeLogBool(litStatus?.lit?.connected)}`);
   L("");
 
   SEP();
   L("[7b-3] Lit Protocol — provision operator usage key");
-  const litProvision = await gw("POST", "/api/lit/provision", {
+  const litProvision = await gw("POST", "/api/lit/provision", "POST /api/lit/provision", {
     kernelId: KERNEL,
     operatorDid: `did:pcc:${KERNEL}`,
   });
-  L(`     Provisioned: ${litProvision.usageKey ? "yes" : litProvision.error ?? "no"}`);
+  // FC-8 round 2: the provisioning response's error field is a raw server
+  // string — never print it; "no" is all a failure needs to say here.
+  L(`     Provisioned: ${litProvision?.usageKey ? "yes" : "no"}`);
   L("");
 
   // ── 7b-4. Starknet — ZK Proof Anchoring ───────────────────────────
   SEP();
   L("[7b-4] Create ZK commitment from evidence hash");
-  const zkCommit = await gw("POST", "/api/zk/commit", {
+  const zkCommit = await gw("POST", "/api/zk/commit", "POST /api/zk/commit", {
     bundleHash: evidenceHash,
   });
-  L(`     Commitment ID: ${zkCommit?.commitment?.id ?? "none"}`);
-  L(`     Commitment hash: ${zkCommit?.commitment?.commitmentHash ?? "none"}`);
+  L(`     Commitment ID: ${safeLogId(zkCommit?.commitment?.id)}`);
+  L(`     Commitment hash: ${publicIdForLog(zkCommit?.commitment?.commitmentHash, "hash")}`);
   L("");
 
   SEP();
   L("[7b-5] Generate tier-compliance proof (tier 2)");
-  const zkProof = await gw("POST", "/api/zk/prove/tier", {
+  const zkProof = await gw("POST", "/api/zk/prove/tier", "POST /api/zk/prove/tier", {
     bundleHash: evidenceHash,
     requiredTier: 2,
   });
   const proofId = zkProof?.proof?.id;
-  L(`     Proof ID: ${proofId ?? "none"}`);
-  L(`     Proof type: ${zkProof?.proof?.proofType ?? "none"}`);
-  L(`     Verified: ${zkProof?.proof?.verified ?? "unknown"}`);
+  // FC-8 round 4: proofType is not an id and has no closed enum — omitted.
+  L(`     Proof ID: ${safeLogId(proofId)}`);
+  L(`     Verified: ${safeLogBool(zkProof?.proof?.verified)}`);
   L("");
 
   SEP();
   L("[7b-6] Anchor proof on Starknet (ZK proof hash → Starknet Sepolia)");
-  const starknetAnchor = await gw("POST", "/api/zk/anchor-starknet", {
+  const starknetAnchor = await gw("POST", "/api/zk/anchor-starknet", "POST /api/zk/anchor-starknet", {
     proofId: proofId ?? undefined,
     merkleRoot: proofId ? undefined : evidenceHash,
   });
-  L(`     Starknet TX: ${starknetAnchor?.anchor?.txHash ?? "none"}`);
-  L(`     Block: ${starknetAnchor?.anchor?.blockNumber ?? "pending"}`);
-  L(`     Mode: ${starknetAnchor?.mode ?? "unknown"}`);
+  const starknetTxHash = starknetAnchor?.anchor?.txHash;
+  // FC-8 round 4: `mode` is not an id and has no closed enum — omitted.
+  L(`     Starknet TX: ${publicChainRef(starknetTxHash, "tx")}`);
+  L(`     Block: ${safeLogInt(starknetAnchor?.anchor?.blockNumber, { min: 0, max: 99_999_999_999 })}`);
   L("");
 
-  if (starknetAnchor?.anchor?.txHash) {
+  if (starknetTxHash) {
     SEP();
     L("[7b-7] Poll Starknet anchor status");
-    const anchorStatus = await gw("GET", `/api/zk/anchor-starknet/${starknetAnchor.anchor.txHash}`);
-    L(`     Status: ${anchorStatus?.status ?? "unknown"}`);
+    // FC-8 round 4: status has no confidently-closed enum here — omitted;
+    // the poll having run at all is what this line records.
+    await gw("GET", `/api/zk/anchor-starknet/${encodeURIComponent(String(starknetTxHash))}`, "GET /api/zk/anchor-starknet/:txHash");
     L("");
   }
 
   // ── 7b-8. NEAR — Cross-Chain Payment Quote ────────────────────────
   SEP();
   L("[7b-8] NEAR chain abstraction — integration status");
-  const nearStatus = await gw("GET", "/api/near/status");
-  L(`     Integration: ${nearStatus?.integration ?? "unknown"}`);
-  L(`     Network: ${nearStatus?.network ?? "unknown"}`);
-  L(`     Mock: ${nearStatus?.mock ?? "unknown"}`);
-  L(`     Supported chains: ${nearStatus?.supportedChains?.join(", ") ?? "unknown"}`);
+  // FC-8 round 4: integration/network/supportedChains are not ids and have
+  // no closed enum here — omitted; `mock` is the only sound field.
+  await gw("GET", "/api/near/status", "GET /api/near/status");
   L("");
 
   SEP();
   L("[7b-9] NEAR — cross-chain payment quote (NEAR USDC → Base USDC)");
-  const nearQuote = await gw("POST", "/api/near/quote", {
+  const nearQuote = await gw("POST", "/api/near/quote", "POST /api/near/quote", {
     fromChain: "near",
     fromAsset: "USDC",
     toChain: "base",
@@ -524,31 +678,30 @@ async function main() {
     recipient: account.address,
   });
   const quoteId = nearQuote?.quote?.quoteId;
-  L(`     Quote ID: ${quoteId ?? "none"}`);
-  L(`     Estimated output: ${nearQuote?.quote?.estimatedOutput ?? "none"}`);
-  L(`     Fee: ${nearQuote?.quote?.fee ?? "none"}`);
-  L(`     Route: ${nearQuote?.quote?.route ?? "none"}`);
+  // FC-8 round 4: estimatedOutput/fee/route are amounts/routes, not ids —
+  // omitted (finding 3). Only the id is logged, fingerprinted.
+  L(`     Quote ID: ${safeLogId(quoteId)}`);
   L("");
 
   if (quoteId) {
     SEP();
     L("[7b-10] NEAR — submit cross-chain payment intent");
-    const nearIntent = await gw("POST", "/api/near/intent", {
+    const nearIntent = await gw("POST", "/api/near/intent", "POST /api/near/intent", {
       quoteId,
       workflowId: `pcc-full-telemetry-${Date.now()}`,
       recipient: account.address,
     });
     const intentId = nearIntent?.intent?.intentId;
-    L(`     Intent ID: ${intentId ?? "none"}`);
-    L(`     Status: ${nearIntent?.intent?.status ?? "none"}`);
+    // FC-8 round 4: status omitted (no closed enum here).
+    L(`     Intent ID: ${safeLogId(intentId)}`);
     L("");
 
     if (intentId) {
       SEP();
       L("[7b-11] NEAR — poll intent settlement status");
-      const intentStatus = await gw("GET", `/api/near/intent/${intentId}`);
-      L(`     Status: ${intentStatus?.status ?? intentStatus?.intent?.status ?? "unknown"}`);
-      L(`     TX hash: ${intentStatus?.txHash ?? intentStatus?.intent?.txHash ?? "pending"}`);
+      const intentStatus = await gw("GET", `/api/near/intent/${encodeURIComponent(String(intentId))}`, "GET /api/near/intent/:id");
+      // FC-8 round 4: status omitted; txHash is id-like, fingerprinted.
+      L(`     TX hash: ${publicChainRef(intentStatus?.txHash ?? intentStatus?.intent?.txHash, "tx")}`);
       L("");
     }
   }
@@ -560,12 +713,12 @@ async function main() {
 
   SEP();
   L("[8a] Final escrow on-chain state");
-  const finalState = await gw("GET", `/api/escrow/chain/${ESCROW}/state`);
+  await gw("GET", `/api/escrow/chain/${ESCROW}/state`, "GET /api/escrow/chain/:address/state");
   L("");
 
   SEP();
   L("[8b] Final kernel state");
-  const finalKernel = await gw("GET", "/api/kernels/kernel-nanoclaw");
+  await gw("GET", "/api/kernels/kernel-nanoclaw", "GET /api/kernels/:kernelId");
   L("");
 
   SEP();
@@ -573,9 +726,9 @@ async function main() {
   const feeData = await pub.readContract({
     address: PROTOCOL, abi: protArt.abi, functionName: "totalFeesCollectedByToken", args: [USDC],
   });
-  L(`     Total protocol fees (USDC): ${formatUnits(feeData as bigint, 6)}`);
+  L(`     Total protocol fees (USDC): ${safeLogDecimal(formatUnits(feeData as bigint, 6))}`);
   const escrowCount = await pub.readContract({ address: PROTOCOL, abi: protArt.abi, functionName: "getEscrowCount" });
-  L(`     Total escrows created: ${escrowCount}`);
+  L(`     Total escrows created: ${safeLogInt(escrowCount, { min: 0, max: 1_000_000 })}`);
   L("");
 
   // ══════════════════════════════════════════════════════════════════
@@ -584,17 +737,23 @@ async function main() {
   BIGSEP();
 
   const report = log.join("\n");
-  writeFileSync("/tmp/pcc-e2e-report.txt", report);
-  L(`Report written to /tmp/pcc-e2e-report.txt (${report.length} bytes)`);
+  writeFileSync(reportPath, report);
+  // FC-8 round 5: reportPath is a CLI-injected path — never printed, not
+  // even relative/basename form; presence is all that is logged.
+  L(`Report written: ${envPresence(reportPath)} (${safeLogInt(report.length, { min: 0, max: 2_000_000_000 })} bytes)`);
   L("");
 
   SEP();
   L("[9a] Submit print job to HP printer (kernel-hp-printer)");
-  const printResult = await gw("POST", "/api/jobs/submit", {
+  // FC-8 round 5b: this is a THIRD-PARTY (printer) body — the ruling says
+  // a chain value must never appear in one, verbatim or otherwise, even
+  // though this SAME text is safe verbatim on stdout and in the report
+  // file above. Scrub before sending, not before accumulating.
+  await gw("POST", "/api/jobs/submit", "POST /api/jobs/submit", {
     stepId: "step-print-full-telemetry",
     kernelId: "kernel-hp-printer",
     parameters: {
-      content: report,
+      content: redactChainValuesFromText(report),
       filename: "pcc-full-telemetry-report.txt",
       title: "PCC Protocol Execution — Full Telemetry",
     },
@@ -604,6 +763,20 @@ async function main() {
   BIGSEP();
   L("  DONE. Every interaction logged. No mocks.");
   BIGSEP();
+
+  return { report, log };
 }
 
-main().catch(e => { L(`FATAL: ${e.shortMessage || e.message}`); process.exit(1); });
+// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
+// of this module (as a test does) never executes main — the live-service
+// run only happens when the file is invoked directly.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch(e => {
+    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; } // fc8-ast-guard-allow: MissingEnvError.message is author-controlled (trusted name + static text), see its class doc above
+    // FC-8 round 2: e.shortMessage/e.message is free text that can carry a
+    // caught secret (e.g. a header value embedded in a fetch/dependency
+    // error); only the bounded error-class name is safe to log here.
+    console.error(`FATAL: ${safeLogErrorName(e)}`);
+    process.exitCode = 1;
+  });
+}

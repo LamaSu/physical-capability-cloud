@@ -8,6 +8,35 @@
  * 5. Submit evidence hash on-chain
  * 6. Release milestone (settle USDC to operator)
  * 7. Collect everything → print on HP printer
+ *
+ * FC-8 round 5 (astra pack 61d, DO-NOT-SHIP at #326 @d8190fe3): every
+ * printed value now goes through an explicit source-to-sink rule (see
+ * redact-log.ts and the round-5 report) instead of a per-field shape
+ * check. The environment-derived oracle-verifier override is presence-
+ * only (envPresence); every tx hash/address/topic is a PUBLIC chain
+ * identifier through publicIdForLog (fingerprint by default; PUBLIC_ID_RULE
+ * is the one-line switch to verbatim later); gateway-issued ids stay on
+ * safeLogId (fingerprint, no verbatim mode, ever); numbers carry explicit
+ * bounds; the top-level error name is a closed enum. An AST test
+ * (fc8-round5-ast-sink-guard.test.ts) enforces that every console log /
+ * stdout write argument in this file is built only from string literals
+ * and calls to this allowlist.
+ *
+ * FC-8 round 3 (astra pack 61b census closure): exported as `run(deps)` with
+ * injected fetch/chain-clients/env (see fc8-round3-real-e2e.test.ts). CLI
+ * behavior is preserved behind the entry guard at the bottom.
+ *
+ * FC-8 round 5b (steward ruling #6712, DECISIONS 00:53): a shape-valid tx
+ * hash or address is PUBLIC chain data, not a secret, and now prints
+ * VERBATIM on stdout via the new, separate publicChainRef(value, kind) —
+ * publicIdForLog (fingerprinted, unchanged) stays only for the one
+ * locally-computed content hash here (evidenceHash), which is not itself
+ * "a tx hash, an address, or an event topic" under the ruling's wording.
+ * The print job at the bottom resends the entire accumulated log as
+ * `parameters.content` — a THIRD-PARTY (printer) body, which must never
+ * carry a chain value verbatim — so it is scrubbed via
+ * redactChainValuesFromText before sending, even though the same text is
+ * safe verbatim on stdout.
  */
 
 import {
@@ -21,38 +50,39 @@ import {
   toBytes,
   type Address,
   type Hex,
+  type WalletClient,
+  type PublicClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  safeLogId, safeLogErrorName, safeLogInt, safeLogBool,
+  safeLogEnum, safeLogContentType, publicIdForLog, envPresence, safeLogDecimal, nowIso,
+  publicChainRef, redactChainValuesFromText,
+} from "../packages/gateway/src/util/redact-log.js";
 
-const PK = (process.env.PCC_GATEWAY_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY) as Hex;
-if (!PK) { console.error("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY"); process.exit(1); }
+/** Thrown for a missing required env var. `.message` is always safe to print as-is: it is built from a trusted name plus static text, never from external data. */
+export class MissingEnvError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingEnvError";
+  }
+}
 
 const GATEWAY = "https://capability.network";
 const ORACLE_URL = "https://refer-proxy-joint-cleaning.trycloudflare.com";
-const ORACLE_ADDRESS = "0x3850F24ACd88F6729692e2d05F75d499F0a661f5" as Address;
-// N44: keys come only from the environment. Never commit a key literal:
-// scripts/ci/secret-scan.mjs fails CI on any pcc_live_/pcc_test_/pcc_oracle_ literal.
-const ORACLE_KEY = process.env.PCC_ORACLE_KEY ?? "";
-if (!ORACLE_KEY) { console.error("Set PCC_ORACLE_KEY (the oracle x-oracle-key; never hard-code it)"); process.exit(1); }
 const KERNEL = "kernel-nanoclaw";
-let USDC: Address; // Will be deployed fresh
+const JOB_STATUSES = ["queued", "running", "completed", "failed"] as const;
 
-const account = privateKeyToAccount(PK);
-const rpc = http("https://sepolia.base.org");
-const wallet = createWalletClient({ account, chain: baseSepolia, transport: rpc });
-const pub = createPublicClient({ chain: baseSepolia, transport: rpc });
-
-// Force fresh nonce on every call to avoid nonce collisions
-async function writeContract(params: any) {
-  const n = await pub.getTransactionCount({ address: account.address });
-  return wallet.writeContract({ ...params, nonce: n });
-}
-async function deployContract(params: any) {
-  const n = await pub.getTransactionCount({ address: account.address });
-  return wallet.deployContract({ ...params, nonce: n });
+function requireEnv(env: Record<string, string | undefined>, name: string, what: string): string {
+  const value = env[name]?.trim();
+  if (!value) {
+    throw new MissingEnvError(`${name} is not set: export ${what} before running this script. Keys are never committed to this repository.`);
+  }
+  return value;
 }
 
 const ERC20 = [
@@ -88,36 +118,70 @@ const ESCROW_ABI = [
   { name: "getMilestoneCount", type: "function" as const, inputs: [], outputs: [{ name: "", type: "uint256" }], stateMutability: "view" as const },
 ] as const;
 
-const report: string[] = [];
-// N44: nothing that reaches the console or the report carries PCC key material,
-// whatever a response echoes back.
-const redactKeys = (s: string) => s.replace(/(pcc_(?:live|test|oracle)_)[0-9a-f]+/gi, "$1<redacted>");
-function log(msg: string) { const t = redactKeys(msg); console.log(t); report.push(t); }
-
-async function waitTx(hash: Hex) {
-  const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
-  await new Promise(r => setTimeout(r, 2000)); // let nonce propagate
-  return receipt;
+export interface RunDeps {
+  fetchImpl?: typeof fetch;
+  wallet?: WalletClient;
+  pub?: PublicClient;
+  env?: Record<string, string | undefined>;
+  pollSleepMs?: number;
+  pollAttempts?: number;
+  contractsDir?: string;
 }
 
-async function gw(method: string, path: string, body?: any) {
-  const opts: RequestInit = { method, headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e/1.0" } };
-  if (body) opts.body = JSON.stringify(body);
-  const r = await fetch(`${GATEWAY}${path}`, opts);
-  return r.json();
+export interface RunResult {
+  report: string;
 }
 
-async function main() {
+export async function run(deps: RunDeps = {}): Promise<RunResult> {
+  const env = deps.env ?? process.env;
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const pollSleepMs = deps.pollSleepMs ?? 5000;
+  const pollAttempts = deps.pollAttempts ?? 40;
+
+  const PK = (env.PCC_GATEWAY_PRIVATE_KEY || env.DEPLOYER_PRIVATE_KEY) as Hex | undefined;
+  if (!PK) throw new MissingEnvError("Set PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY");
+  const ORACLE_KEY = requireEnv(env, "PCC_ORACLE_KEY", "the oracle's x-oracle-key");
+  let USDC: Address; // Will be deployed fresh
+
+  const account = privateKeyToAccount(PK);
+  const rpc = http("https://sepolia.base.org");
+  const wallet = deps.wallet ?? createWalletClient({ account, chain: baseSepolia, transport: rpc });
+  const pub = deps.pub ?? createPublicClient({ chain: baseSepolia, transport: rpc });
+
+  async function writeContract(params: any) {
+    const n = await pub.getTransactionCount({ address: account.address });
+    return wallet.writeContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+  }
+  async function deployContract(params: any) {
+    const n = await pub.getTransactionCount({ address: account.address });
+    return wallet.deployContract({ ...params, nonce: n, account, chain: baseSepolia } as any);
+  }
+
+  const report: string[] = [];
+  function log(msg: string) { console.log(msg); report.push(msg); }
+
+  async function waitTx(hash: Hex) {
+    const receipt = await pub.waitForTransactionReceipt({ hash, confirmations: 1 });
+    await new Promise(r => setTimeout(r, pollSleepMs > 0 ? 2000 : 0));
+    return receipt;
+  }
+
+  async function gw(method: string, path: string, body?: any) {
+    const opts: RequestInit = { method, headers: { "Content-Type": "application/json", "User-Agent": "pcc-e2e/1.0" } };
+    if (body) opts.body = JSON.stringify(body);
+    const r = await fetchImpl(`${GATEWAY}${path}`, opts);
+    return r.json();
+  }
+
   log("================================================================");
   log("  PCC REAL END-TO-END PROTOCOL EXECUTION");
-  log("  " + new Date().toISOString());
+  log(`  ${nowIso()}`);
   log("================================================================");
   log("");
 
   const ethBal = await pub.getBalance({ address: account.address });
-  log(`Deployer:    ${account.address}`);
-  log(`ETH:         ${formatEther(ethBal)}`);
-  log(`USDC:        ${USDC}`);
+  log(`Deployer:    ${publicChainRef(account.address, "address")}`);
+  log(`ETH:         ${safeLogDecimal(formatEther(ethBal))}`);
   log(`Network:     Base Sepolia (chain 84532)`);
   log(`Gateway:     ${GATEWAY}`);
   log(`Kernel:      ${KERNEL}`);
@@ -125,7 +189,7 @@ async function main() {
 
   // ── 1. Deploy MockUSDC + PCCProtocol + Escrow (via factory) ─────────
   log("[1] DEPLOYING FRESH CONTRACTS");
-  const contractsDir = resolve(process.cwd(), "packages/contracts");
+  const contractsDir = deps.contractsDir ?? resolve(process.cwd(), "packages/contracts");
   const usdcArtifact = JSON.parse(readFileSync(resolve(contractsDir, "out/MockUSDC.sol/MockUSDC.json"), "utf8"));
   const protocolArtifact = JSON.parse(readFileSync(resolve(contractsDir, "out/PCCProtocol.sol/PCCProtocol.json"), "utf8"));
 
@@ -136,18 +200,19 @@ async function main() {
     bytecode: usdcArtifact.bytecode.object as `0x${string}`,
     args: [parseUnits("1000000", 6)],
   });
-  const usdcReceipt = await waitTx(usdcDeployTx);
+  const usdcReceipt: any = await waitTx(usdcDeployTx);
   USDC = usdcReceipt.contractAddress!;
-  log(`    MockUSDC:   ${USDC}`);
-  log(`    TX:         ${usdcDeployTx}`);
+  log(`    MockUSDC:   ${publicChainRef(USDC, "address")}`);
+  log(`    TX:         ${publicChainRef(usdcDeployTx, "tx")}`);
 
   // 1b. Deploy PCCProtocol (fee factory)
   log("    Deploying PCCProtocol (2.35% fee, oracle-gated)...");
-  // Oracle verifier is immutable on PCCProtocol. Use ORACLE_VERIFIER_ADDRESS
-  // from env (real PCC Verification Oracle) or fall back to the deployer
-  // address so the full E2E can be exercised end-to-end (dev only).
-  const oracleVerifier = (process.env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
-  log(`    Oracle verifier: ${oracleVerifier}`);
+  // FC-8 round 5: ORACLE_VERIFIER_ADDRESS is an ENV value — never printed.
+  // Only whether an override was configured is logged; the real value
+  // (env override, or the deployer's own address as the default) is still
+  // what is actually used below.
+  const oracleVerifier = (env.ORACLE_VERIFIER_ADDRESS ?? account.address) as Address;
+  log(`    Oracle verifier override: ${envPresence(env.ORACLE_VERIFIER_ADDRESS)}`);
   const protocolDeployTx = await deployContract({
     abi: protocolArtifact.abi,
     bytecode: protocolArtifact.bytecode.object as `0x${string}`,
@@ -158,11 +223,11 @@ async function main() {
       oracleVerifier,    // oracleVerifier (immutable)
     ],
   });
-  const protocolReceipt = await waitTx(protocolDeployTx);
+  const protocolReceipt: any = await waitTx(protocolDeployTx);
   const PROTOCOL = protocolReceipt.contractAddress!;
-  log(`    PCCProtocol: ${PROTOCOL}`);
-  log(`    TX:          ${protocolDeployTx}`);
-  log(`    Fee:         2.35% to ${account.address}`);
+  log(`    PCCProtocol: ${publicChainRef(PROTOCOL, "address")}`);
+  log(`    TX:          ${publicChainRef(protocolDeployTx, "tx")}`);
+  log(`    Fee:         2.35% to ${publicChainRef(account.address, "address")}`);
 
   // 1c. Create escrow via factory (registers it for fee collection)
   log("    Creating escrow via PCCProtocol.createEscrow()...");
@@ -173,15 +238,14 @@ async function main() {
     functionName: "createEscrow",
     args: [account.address, account.address, USDC, cwmId],
   });
-  log(`    TX:          ${createEscrowTx}`);
-  const createReceipt = await waitTx(createEscrowTx);
-  // Parse the EscrowCreated event to get the escrow address
-  const escrowLog = createReceipt.logs.find(l => l.topics.length >= 2);
+  log(`    TX:          ${publicChainRef(createEscrowTx, "tx")}`);
+  const createReceipt: any = await waitTx(createEscrowTx);
+  const escrowLog = createReceipt.logs.find((l: any) => l.topics.length >= 2);
   const ESCROW = ("0x" + (escrowLog?.topics[1]?.slice(26) ?? "")) as Address;
-  log(`    Escrow:      ${ESCROW}`);
-  log(`    Block:       ${createReceipt.blockNumber}`);
-  log(`    Explorer:    https://sepolia.basescan.org/address/${ESCROW}`);
-  log(`    Protocol:    https://sepolia.basescan.org/address/${PROTOCOL}`);
+  log(`    Escrow:      ${publicChainRef(ESCROW, "address")}`);
+  log(`    Block:       ${safeLogInt(createReceipt.blockNumber, { min: 0, max: 99_999_999_999 })}`);
+  log(`    Explorer:    https://sepolia.basescan.org/address/${publicChainRef(ESCROW, "address")}`);
+  log(`    Protocol:    https://sepolia.basescan.org/address/${publicChainRef(PROTOCOL, "address")}`);
   log("");
 
   // ── 2. Mint USDC ──────────────────────────────────────────────────
@@ -190,10 +254,10 @@ async function main() {
     address: USDC, abi: ERC20, functionName: "mint",
     args: [account.address, parseUnits("10", 6)],
   });
-  log(`    TX: ${mintTx}`);
+  log(`    TX: ${publicChainRef(mintTx, "tx")}`);
   await waitTx(mintTx);
   const bal = await pub.readContract({ address: USDC, abi: ERC20, functionName: "balanceOf", args: [account.address] });
-  log(`    Balance: ${formatUnits(bal, 6)} USDC`);
+  log(`    Balance: ${safeLogDecimal(formatUnits(bal, 6))} USDC`);
   log("");
 
   // ── 3. Approve + Fund ─────────────────────────────────────────────
@@ -203,30 +267,30 @@ async function main() {
     address: ESCROW, abi: ESCROW_ABI, functionName: "addMilestone",
     args: [stepId, account.address, parseUnits("1", 6), 0n, 0n],
   });
-  log(`    AddMilestone TX: ${addMsTx}`);
+  log(`    AddMilestone TX: ${publicChainRef(addMsTx, "tx")}`);
   await waitTx(addMsTx);
 
   const approveTx = await writeContract({
     address: USDC, abi: ERC20, functionName: "approve",
     args: [ESCROW, parseUnits("10", 6)],
   });
-  log(`    Approve TX:      ${approveTx}`);
+  log(`    Approve TX:      ${publicChainRef(approveTx, "tx")}`);
   await waitTx(approveTx);
 
   const fundTx = await writeContract({
     address: ESCROW, abi: ESCROW_ABI, functionName: "fund",
     args: [],
   });
-  log(`    Fund TX:         ${fundTx}`);
-  const fundReceipt = await waitTx(fundTx);
-  log(`    Block:           ${fundReceipt.blockNumber}`);
+  log(`    Fund TX:         ${publicChainRef(fundTx, "tx")}`);
+  const fundReceipt: any = await waitTx(fundTx);
+  log(`    Block:           ${safeLogInt(fundReceipt.blockNumber, { min: 0, max: 99_999_999_999 })}`);
 
   const funded = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "funded" });
   const total = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "totalAmount" });
   const msCount = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "getMilestoneCount" });
-  log(`    Funded:     ${funded}`);
-  log(`    Amount:     ${formatUnits(total, 6)} USDC`);
-  log(`    Milestones: ${msCount}`);
+  log(`    Funded:     ${safeLogBool(funded)}`);
+  log(`    Amount:     ${safeLogDecimal(formatUnits(total, 6))} USDC`);
+  log(`    Milestones: ${safeLogInt(msCount, { min: 0, max: 1_000_000 })}`);
   log("");
 
   // ── 4. Submit OT-2 job ────────────────────────────────────────────
@@ -256,34 +320,35 @@ async function main() {
       filename: "pcc_real_e2e.py",
     },
   });
-  log(`    Job ID:  ${jobResult.jobId}`);
-  log(`    Status:  ${jobResult.status}`);
+  // FC-8 round 3: jobId/status are server-returned; validate before logging.
+  log(`    Job ID:  ${safeLogId(jobResult?.jobId)}`);
+  log(`    Status:  ${safeLogEnum(jobResult?.status, JOB_STATUSES)}`);
   log("");
 
   // ── 5. Wait for execution ─────────────────────────────────────────
   log("[5] WAITING FOR DAEMON EXECUTION...");
   let status = "queued";
-  for (let i = 0; i < 40; i++) {
-    await new Promise(r => setTimeout(r, 5000));
-    const s = await gw("GET", `/api/jobs/${jobResult.jobId}/status`);
-    status = s.status;
-    process.stdout.write(`    ${i + 1}/40: ${redactKeys(String(status))}   \r`); // the gateway's text, redacted
+  for (let i = 0; i < pollAttempts; i++) {
+    await new Promise(r => setTimeout(r, pollSleepMs));
+    const s = await gw("GET", `/api/jobs/${encodeURIComponent(jobResult?.jobId ?? "")}/status`);
+    status = s?.status;
+    process.stdout.write(`    ${safeLogInt(i + 1, { min: 0, max: 100_000 })}/${safeLogInt(pollAttempts, { min: 0, max: 100_000 })}: ${safeLogEnum(status, JOB_STATUSES)}   \r`);
     if (status === "completed" || status === "failed") break;
   }
   console.log();
-  log(`    Final:   ${status}`);
+  log(`    Final:   ${safeLogEnum(status, JOB_STATUSES)}`);
   log("");
 
   // ── 6. Capture camera evidence ────────────────────────────────────
   log("[6] CAMERA EVIDENCE");
-  const camResp = await fetch(`${GATEWAY}/api/ot2/camera/latest`);
+  const camResp = await fetchImpl(`${GATEWAY}/api/ot2/camera/latest`);
   const camBytes = parseInt(camResp.headers.get("content-length") ?? "0");
-  log(`    Frame:   ${camBytes} bytes (${camResp.headers.get("content-type")})`);
+  log(`    Frame:   ${safeLogInt(camBytes, { min: 0, max: 2_000_000_000 })} bytes (${safeLogContentType(camResp.headers.get("content-type"))})`);
   log("");
 
   // ── 7. Submit evidence hash on-chain ──────────────────────────────
   const evidence = {
-    jobId: jobResult.jobId,
+    jobId: jobResult?.jobId,
     kernel: KERNEL,
     escrow: ESCROW,
     protocol: "PCC Slot Inspection 1-3-5",
@@ -294,40 +359,43 @@ async function main() {
   const evidenceHash = keccak256(toBytes(JSON.stringify(evidence)));
 
   log("[7] SUBMITTING EVIDENCE ON-CHAIN");
-  log(`    Hash:    ${evidenceHash}`);
+  log(`    Hash:    ${publicIdForLog(evidenceHash, "hash")}`);
   const evTx = await writeContract({
     address: ESCROW, abi: ESCROW_ABI, functionName: "submitEvidence",
     args: [0n, evidenceHash as Hex],
   });
-  log(`    TX:      ${evTx}`);
-  const evReceipt = await waitTx(evTx);
-  log(`    Block:   ${evReceipt.blockNumber}`);
-  log(`    Gas:     ${evReceipt.gasUsed}`);
+  log(`    TX:      ${publicChainRef(evTx, "tx")}`);
+  const evReceipt: any = await waitTx(evTx);
+  log(`    Block:   ${safeLogInt(evReceipt.blockNumber, { min: 0, max: 99_999_999_999 })}`);
+  log(`    Gas:     ${safeLogInt(evReceipt.gasUsed, { min: 0, max: 50_000_000 })}`);
   log("");
 
   // ── 8. Oracle verification + attestation ────────────────────────────
   log("[8] REQUESTING ORACLE VERIFICATION");
   log(`    Oracle:  ${ORACLE_URL}`);
-  const oracleReq = await fetch(`${ORACLE_URL}/verify`, {
+  const oracleReq = await fetchImpl(`${ORACLE_URL}/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-oracle-key": ORACLE_KEY },
     body: JSON.stringify({
       escrowAddress: ESCROW,
       milestoneIndex: 0,
       evidenceHash,
-      jobId: jobResult.jobId,
+      jobId: jobResult?.jobId,
     }),
   });
-  const oracleResult = await oracleReq.json() as any;
-  log(`    Status:  ${oracleReq.status}`);
-  log(`    Result:  ${JSON.stringify(oracleResult)}`);
+  const oracleResult = await oracleReq.json().catch(() => undefined) as any;
+  // FC-8 round 2+3: never print the raw oracle body/object — only validated
+  // fields the script actually needs (status code, verified boolean,
+  // whether an attestation/tx hash came back).
+  log(`    Status:  ${safeLogInt(oracleReq.status, { min: 0, max: 599 })}`);
+  log(`    Result:  verified=${safeLogBool(oracleResult?.verified)} hasTransactionHash=${safeLogBool(!!oracleResult?.transactionHash)}`);
 
   // Build the on-chain Attestation struct. The escrow stores
   // keccak256(abi.encode(attestation)) so the SAME struct must be passed
   // back to release() for settlement. See IPCCOracle.Attestation.
   const attestationStruct = {
     escrowAddress: ESCROW,
-    jobId: jobResult.jobId ?? "job-real-e2e",
+    jobId: jobResult?.jobId ?? "job-real-e2e",
     evidenceHash: evidenceHash as Hex,
     tier: 1,
     verified: true,
@@ -338,8 +406,11 @@ async function main() {
 
   // If oracle pre-submitted its attestation on-chain, acknowledge and move on.
   // Otherwise we submit the struct ourselves as the authorized verifier.
-  if (oracleResult.transactionHash) {
-    log(`    Oracle-submitted attest TX: ${oracleResult.transactionHash}`);
+  if (oracleResult?.transactionHash) {
+    // FC-8 round 5: a dependency-returned tx hash is a PUBLIC chain
+    // identifier, same as any other — publicIdForLog, not safeLogHex (the
+    // real value is still used for waitTx below).
+    log(`    Oracle-submitted attest TX: ${publicChainRef(oracleResult.transactionHash, "tx")}`);
     await waitTx(oracleResult.transactionHash);
   } else {
     log("    Submitting attestation struct as arbiter");
@@ -348,7 +419,7 @@ async function main() {
       functionName: "submitAttestation",
       args: [0n, attestationStruct],
     });
-    log(`    TX:      ${attTx}`);
+    log(`    TX:      ${publicChainRef(attTx, "tx")}`);
     await waitTx(attTx);
   }
   log("");
@@ -359,38 +430,55 @@ async function main() {
     address: ESCROW, abi: ESCROW_ABI, functionName: "release",
     args: [0n, attestationStruct],
   });
-  log(`    TX:      ${relTx}`);
-  const relReceipt = await waitTx(relTx);
-  log(`    Block:   ${relReceipt.blockNumber}`);
-  log(`    Gas:     ${relReceipt.gasUsed}`);
+  log(`    TX:      ${publicChainRef(relTx, "tx")}`);
+  const relReceipt: any = await waitTx(relTx);
+  log(`    Block:   ${safeLogInt(relReceipt.blockNumber, { min: 0, max: 99_999_999_999 })}`);
+  log(`    Gas:     ${safeLogInt(relReceipt.gasUsed, { min: 0, max: 50_000_000 })}`);
   log("    SETTLED. USDC released to operator.");
   log("");
 
   // ── 10. Final state ───────────────────────────────────────────────
   log("[10] FINAL ON-CHAIN STATE");
   const finalBal = await pub.readContract({ address: USDC, abi: ERC20, functionName: "balanceOf", args: [account.address] });
-  log(`    USDC:        ${formatUnits(finalBal, 6)}`);
+  log(`    USDC:        ${safeLogDecimal(formatUnits(finalBal, 6))}`);
   const finalFunded = await pub.readContract({ address: ESCROW, abi: ESCROW_ABI, functionName: "funded" });
-  log(`    Funded:      ${finalFunded}`);
-  log(`    Escrow:      ${ESCROW}`);
-  log(`    BaseScan:    https://sepolia.basescan.org/address/${ESCROW}`);
+  log(`    Funded:      ${safeLogBool(finalFunded)}`);
+  log(`    Escrow:      ${publicChainRef(ESCROW, "address")}`);
+  log(`    BaseScan:    https://sepolia.basescan.org/address/${publicChainRef(ESCROW, "address")}`);
   log("");
 
   // ── 10. Print on HP printer ───────────────────────────────────────
   log("================================================================");
   log("  PRINTING REPORT ON HP PRINTER");
   log("================================================================");
+  // FC-8 round 5b: this is a THIRD-PARTY (printer) body — never a chain
+  // value verbatim, even though the identical text is safe verbatim on
+  // stdout above. Scrub before sending, not before accumulating.
   const printResult = await gw("POST", "/api/jobs/submit", {
     stepId: "step-print-e2e-report",
     kernelId: "kernel-hp-printer",
     parameters: {
-      content: report.join("\n"),
+      content: redactChainValuesFromText(report.join("\n")),
       filename: "pcc-real-e2e-report.txt",
     },
   });
-  log(`    Print Job: ${printResult.jobId ?? printResult.error}`);
+  // FC-8 round 2: printResult.error is a raw server error string — never
+  // fall back to printing it; an id-shaped jobId or a static "(none)" only.
+  log(`    Print Job: ${safeLogId(printResult?.jobId)}`);
   log("");
   log("DONE. Full protocol executed. No mocks.");
+
+  return { report: report.join("\n") };
 }
 
-main().catch((e) => { console.error("FATAL:", redactKeys(String(e?.message ?? e))); process.exit(1); });
+// FC-8 round 3: CLI behavior lives only behind this guard. A plain `import`
+// of this module (as a test does) never executes main.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch((e) => {
+    if (e instanceof MissingEnvError) { console.error(e.message); process.exitCode = 1; return; } // fc8-ast-guard-allow: MissingEnvError.message is author-controlled (trusted name + static text), see its class doc above
+    // FC-8 round 2: e.message is free text that can carry a caught secret;
+    // only the bounded error-class name is safe to log here.
+    console.error("FATAL:", safeLogErrorName(e));
+    process.exitCode = 1;
+  });
+}

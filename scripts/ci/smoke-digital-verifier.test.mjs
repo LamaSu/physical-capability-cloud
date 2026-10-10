@@ -1,11 +1,19 @@
-// Tests for scripts/smoke-digital-verifier.sh (board row N44), run hermetically.
+// Tests for scripts/smoke-digital-verifier.sh (board row N44), run hermetically
+// through its SUPPORTED entry point, scripts/smoke-digital-verifier.mjs
+// (FC-8 round 5 / the N44 merge: the launcher is a process boundary that
+// rebuilds the child's environment from an explicit allowlist — PATH, HOME,
+// PCC_ORACLE_KEY_FILE, ORACLE_DIRECT — and forwards nothing else, so
+// PCC_ORACLE_KEY, $SMOKE_ROUTES and TMPDIR never cross it; see the
+// adaptation notes on run(), below).
 // A stub `curl` and `gh` on PATH answer every request from a per-test route
-// table, the script runs in a scratch directory, and each test reads the report
-// the script writes there. Nothing reaches the network.
+// table, and each test reads the report the script writes to the repo's own
+// ai/supervisor/smoke-test-report.json (the launcher pins the script's cwd
+// to the repo root; any pre-existing report is backed up and restored).
+// Nothing reaches the network.
 //
 //   node --test scripts/ci/smoke-digital-verifier.test.mjs
 
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,20 +21,33 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "../smoke-digital-verifier.sh");
+const HERE = dirname(fileURLToPath(import.meta.url));
+// N44 merge: the SUPPORTED entry point is the launcher, not the .sh file
+// directly (see the .sh's own header, "UNSUPPORTED: direct invocation").
+const LAUNCHER = resolve(HERE, "../smoke-digital-verifier.mjs");
+// The launcher pins the script's cwd to the repo root (dirname of scripts/,
+// i.e. two levels up from scripts/ci/) — it takes no cwd override — so
+// REPORT_FILE resolves there too, not to a per-test scratch directory.
+const REPO_ROOT = resolve(HERE, "..", "..");
+const REPORT_FILE = join(REPO_ROOT, "ai/supervisor/smoke-test-report.json");
 const GW = "https://capability.network";
 const ORACLE = "https://refer-proxy-joint-cleaning.trycloudflare.com";
 // Built at run time, so this file holds no key literal for the secret scan.
 const KEY_SHAPED = ["pcc", "live", "0123456789abcdef0123456789abcdef"].join("_");
 
-// The stub answers "<METHOD> <URL>" from $SMOKE_ROUTES:
+// The launcher's allowlist does not forward $SMOKE_ROUTES (not a documented
+// input of the script), so the stub's routes path is baked into its own
+// generated source as a literal instead of read from the environment. It
+// otherwise answers "<METHOD> <URL>" from that table exactly as before:
 //   { status, body, exit, lockDir }
 // It writes the body to -o's file or to stdout, then expands -w's %{http_code}
 // and \n as curl does, then exits with `exit` (a transport failure after the
 // body when nonzero). lockDir makes -o's directory read-only after writing.
-const STUB_CURL = `#!/usr/bin/env node
+function stubCurl(routesPath) {
+  return `#!/usr/bin/env node
 const fs = require("fs");
 const path = require("path");
+const ROUTES_PATH = ${JSON.stringify(routesPath)};
 const args = process.argv.slice(2);
 let out, fmt, method, url, data = false;
 for (let i = 0; i < args.length; i++) {
@@ -39,7 +60,7 @@ for (let i = 0; i < args.length; i++) {
   else if (/^https?:\\/\\//.test(a)) url = a;
 }
 method = method || (data ? "POST" : "GET");
-const route = JSON.parse(fs.readFileSync(process.env.SMOKE_ROUTES, "utf8"))[method + " " + url];
+const route = JSON.parse(fs.readFileSync(ROUTES_PATH, "utf8"))[method + " " + url];
 if (!route) { process.stderr.write("curl: (7) Failed to connect\\n"); process.exit(7); }
 const body = Buffer.from(route.body || "", "utf8");
 if (out) {
@@ -51,6 +72,7 @@ if (out) {
 if (fmt) process.stdout.write(fmt.split("%{http_code}").join(String(route.status || 200)).split("\\\\n").join("\\n"));
 process.exit(route.exit || 0);
 `;
+}
 
 function baseRoutes() {
   return {
@@ -66,32 +88,62 @@ function baseRoutes() {
   };
 }
 
-/** Run the script against `routes` (merged over the sound defaults). */
+// The launcher pins the script's cwd to the repo root, so every run() below
+// writes the report there, not to a scratch directory. Save whatever (if
+// anything) was there before this suite ran, and restore it afterward.
+const REPORT_BACKUP = existsSync(REPORT_FILE) ? readFileSync(REPORT_FILE) : null;
+after(() => {
+  if (REPORT_BACKUP === null) rmSync(REPORT_FILE, { force: true });
+  else writeFileSync(REPORT_FILE, REPORT_BACKUP);
+});
+
+/**
+ * Run the script through its launcher against `routes` (merged over the
+ * sound defaults).
+ *
+ * Adapted from the pre-merge N44 version — key setup and the launcher only:
+ *   - the oracle key is written to a FILE and forwarded as
+ *     PCC_ORACLE_KEY_FILE (FC-8's contract), not PCC_ORACLE_KEY itself;
+ *   - the script runs through the launcher
+ *     (scripts/smoke-digital-verifier.mjs), never bash on the .sh file
+ *     directly;
+ *   - because the launcher rebuilds the child's environment from an
+ *     explicit allowlist (PATH, HOME, PCC_ORACLE_KEY_FILE, ORACLE_DIRECT —
+ *     see its own DOCUMENTED_INPUT_VARS), $SMOKE_ROUTES no longer crosses
+ *     it, so the stub's routes path is baked into its own source instead
+ *     (stubCurl(), above), and the script's cwd is pinned to the repo root
+ *     (REPORT_FILE, above), not a per-test scratch directory.
+ *   - that same allowlist also means `env` overrides this suite passes —
+ *     TMPDIR, for the two tests below that set it — no longer reach the
+ *     script's process either (TMPDIR was never a documented input of the
+ *     script, and is not in the launcher's allowlist). Those two tests
+ *     still pass (a value that can never arrive can never leak), but they
+ *     no longer exercise a live TMPDIR-handling path through the supported
+ *     entry point — flagged in the report as a claim this suite no longer
+ *     proves, not one it disproves.
+ */
 function run(overrides = {}, env = {}) {
   const work = mkdtempSync(join(tmpdir(), "smoke-dv-"));
   try {
     const bin = join(work, "bin");
     mkdirSync(bin);
-    writeFileSync(join(bin, "curl"), STUB_CURL, { mode: 0o755 });
-    writeFileSync(join(bin, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
     const routes = join(work, "routes.json");
+    writeFileSync(join(bin, "curl"), stubCurl(routes), { mode: 0o755 });
+    writeFileSync(join(bin, "gh"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
     writeFileSync(routes, JSON.stringify({ ...baseRoutes(), ...overrides }));
-    const cwd = join(work, "cwd");
-    mkdirSync(cwd);
-    const res = spawnSync("bash", [SCRIPT], {
-      cwd,
+    const keyFile = join(work, "oracle-key");
+    writeFileSync(keyFile, "smoke-oracle-key");
+    const res = spawnSync(process.execPath, [LAUNCHER], {
       encoding: "utf8",
       timeout: 120_000,
       env: {
         PATH: `${bin}:${process.env.PATH}`,
         HOME: work,
-        SMOKE_ROUTES: routes,
-        PCC_ORACLE_KEY: "smoke-oracle-key",
+        PCC_ORACLE_KEY_FILE: keyFile,
         ...env,
       },
     });
-    const reportFile = join(cwd, "ai/supervisor/smoke-test-report.json");
-    const reportText = existsSync(reportFile) ? readFileSync(reportFile, "utf8") : "";
+    const reportText = existsSync(REPORT_FILE) ? readFileSync(REPORT_FILE, "utf8") : "";
     return {
       stdout: res.stdout ?? "",
       stderr: res.stderr ?? "",
@@ -208,20 +260,36 @@ test("control bytes in a response never reach the terminal", () => {
 // to the hex that follows it ("pcc_" "live_" + CR + hex is no key until the
 // CR is gone); sanitize() must redact again after the strip, or the rejoined
 // key prints whole. Built at run time so this file holds no key literal.
+//
+// N44 merge note (fc8-split-n44-mergetree, conflict 3): N44's own pass
+// message here printed `reason: $REASON` (`.result.reason`, redact()-
+// sanitized); FC-8 round 2 — kept verbatim a few lines above this file's
+// stub route table, and in smoke-digital-verifier.sh's own merged verify
+// case — found that unsafe anyway: .result.reason is the oracle's free
+// text and may reflect an arbitrary secret redact()'s PCC-key-shaped regex
+// would not catch, so the merged script never prints it at all (only the
+// validated boolean `verified`). That FC-8 sink rule is kept over this
+// N44 behavior (see the report). The `if (stripped) { assert.ok(includes
+// ("pcc_live_<redacted>")) }` branch this loop used to have is removed
+// for that reason: it asserted evidence of a print path that no longer
+// exists. The two assert.ok(!includes(CONTIGUOUS_KEY)) checks below —
+// the actual leak-prevention property — stand for every byte, stripped
+// or not, and now hold unconditionally (reason is never printed, stripped
+// or rejoined or otherwise, so it can never reach output at all).
 const HEX64 = "0123456789abcdef".repeat(4);
 const CONTIGUOUS_KEY = ["pcc", "live", HEX64].join("_");
 
-for (const [label, byte, stripped] of [
-  ["a carriage return", "\r", true],
-  ["an ESC byte", "\x1b", true],
-  ["a DEL byte", "\x7f", true],
-  ["a SOH byte", "\x01", true],
-  ["a backspace byte", "\x08", true],
-  ["a VT byte", "\x0b", true],
+for (const [label, byte] of [
+  ["a carriage return", "\r"],
+  ["an ESC byte", "\x1b"],
+  ["a DEL byte", "\x7f"],
+  ["a SOH byte", "\x01"],
+  ["a backspace byte", "\x08"],
+  ["a VT byte", "\x0b"],
   // tab and newline are never stripped, so the key can never rejoin; these
   // two are a non-regression check that they are not treated specially.
-  ["a newline", "\n", false],
-  ["a tab", "\t", false],
+  ["a newline", "\n"],
+  ["a tab", "\t"],
 ]) {
   test(`a verify reason split by ${label} never reaches the output as a contiguous key`, () => {
     const reason = ["pcc", "live", byte + HEX64].join("_");
@@ -229,9 +297,6 @@ for (const [label, byte, stripped] of [
     assert.equal(status(r, "oracle-verify"), "PASS");
     assert.ok(!r.stdout.includes(CONTIGUOUS_KEY), "stdout");
     assert.ok(!r.stderr.includes(CONTIGUOUS_KEY), "stderr");
-    if (stripped) {
-      assert.ok(r.stdout.includes("pcc_live_<redacted>"), `expected a redacted marker in:\n${r.stdout}`);
-    }
   });
 }
 
