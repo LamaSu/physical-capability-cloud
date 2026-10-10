@@ -19,7 +19,7 @@ import { createDatabase, eq, schema, sql } from "@pcc/store";
 import { MAX_POST_ACTIVATION_TTL_MS, reconcilePaidScope, RECONCILE_REFUSALS } from "../services/reconcile-paid-scope.js";
 import { __setFundingRecordStoreForTest, fundingRecordStore, isWellFormedFundingRecord } from "../services/funding-record-port.js";
 import { isMockSettlement, mockFundsWrites } from "../services/settlement-mode.js";
-import { escrowForJob } from "../services/scope-acceptance.js";
+import { acceptanceFor, escrowForJob } from "../services/scope-acceptance.js";
 import { projectFundingStatus } from "../readmodels/funding-status.js";
 import {
   installCaseExactFundingRecordStore,
@@ -353,6 +353,22 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS)).toEqual(refused("buyer_blocked"));
     expect(scopeRow(scopeId).status).toBe("awaiting_funding");
     expect(store.count()).toBe(0);
+    expect((await writeAs(f, scopeId)).statusCode).toBe(403);
+  });
+
+  it("(neg-blocklist-buyer-first) a malformed list naming the buyer is buyer_blocked, as the mint refuses it first", async () => {
+    const { scopeId } = await paidScope(f);
+    const policy = basePolicy();
+    const expiresAt = scopeRow(scopeId).expiresAt;
+    for (const blockedAgents of [[BUYER, 7], [7, BUYER], [BUYER, null], [{ id: OTHER }, BUYER]]) {
+      const blocked = { ...policy, blockedAgents };
+      const label = JSON.stringify(blockedAgents);
+      setPolicy(KERNEL, blocked);
+      expect(acceptanceFor(blocked, BUYER), label).toBe("refused");
+      expect(reconcilePaidScope(scopeId, verification(scopeId), TERMS), label).toEqual(refused("buyer_blocked"));
+      expect(scopeRow(scopeId), label).toMatchObject({ status: "awaiting_funding", expiresAt });
+      expect(store.count(), label).toBe(0);
+    }
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
   });
 

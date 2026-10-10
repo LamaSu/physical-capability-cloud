@@ -57,11 +57,13 @@ export type Acceptance = "accepted" | "awaiting_operator" | "refused";
  *   - A policy that is not an object (missing, unreadable, an array, a string): awaiting_operator.
  *   - A block list that is an array with an element naming the buyer: refused.
  *   - A block list that is present (any value but undefined) and is not an array whose every
- *     element is a string (a string, null, a number, an object, an array holding a non-string):
+ *     index holds a string (a string, null, a number, an object, an array holding a non-string or a hole):
  *     awaiting_operator, whatever the approval mode (N133 follow-up, fund-s2-review LOW-2). The
  *     gateway can't read such a list, so it can't show the buyer is off it (the kernel's policy
  *     engine reads a string by substring, as blocked), and refusing would claim the buyer is on
- *     it. An absent block list blocks nobody.
+ *     it. The mint and reconcile share blockListUnreadable: a list naming the buyer is refused
+ *     (buyer_blocked at reconcile) before an unreadable list waits (policy_unavailable there).
+ *     An absent block list blocks nobody.
  *   - approvalMode "auto": accepted. "policy": accepted when the trust list is an array with an
  *     element naming the buyer; a trust list that is not an array trusts nobody.
  *   - Anything else (manual, an unknown mode, none): awaiting_operator.
@@ -73,10 +75,22 @@ export function acceptanceFor(policy: unknown, buyer: string): Acceptance {
   const p = policy as Record<string, unknown>;
   const listed = (list: unknown) => Array.isArray(list) && list.some((id) => sameIdentity(id, buyer));
   if (listed(p.blockedAgents)) return "refused";
-  if (p.blockedAgents !== undefined && !isStringList(p.blockedAgents)) return "awaiting_operator";
+  if (blockListUnreadable(policy)) return "awaiting_operator";
   if (p.approvalMode === "auto") return "accepted";
   if (p.approvalMode === "policy" && listed(p.trustedAgents)) return "accepted";
   return "awaiting_operator";
+}
+
+/**
+ * The mint and reconcile share this predicate: a non-object policy, or a present block list that
+ * is not an array with a string at every index, cannot show the buyer unblocked. A hole reads as
+ * undefined. Both callers refuse a list naming the buyer first (refused / buyer_blocked), then
+ * answer awaiting_operator / policy_unavailable for an unreadable list.
+ */
+export function blockListUnreadable(policy: unknown): boolean {
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return true;
+  const p = policy as Record<string, unknown>;
+  return p.blockedAgents !== undefined && !isStringList(p.blockedAgents);
 }
 
 /** An array whose every element is a string. A hole is not one: it reads as undefined (JSON makes none). */

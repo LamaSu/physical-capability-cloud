@@ -22,9 +22,10 @@
  *   a. re-read what allows the activation: the scope (not revoked, awaiting_funding, its
  *      pre-activation window still open: a lapsed window answers `expired` and the scope never
  *      activates), the kernel's emergency stop (clear, and its policy readable) and its operator
- *      policy (the buyer is not on the block list; a block list that is present but is not an
- *      array of strings is policy_unavailable, since it cannot show the buyer unblocked). The
- *      block-list read's catch (blockRefusal) is defence in depth and unreachable today:
+ *      policy (a list naming the buyer is buyer_blocked first, as the mint refuses it; otherwise
+ *      the shared blockListUnreadable predicate makes an unreadable list policy_unavailable,
+ *      as the mint answers awaiting_operator, since it cannot show the buyer unblocked). The
+ *      block-list read's catch and non-object check (blockRefusal) are defence in depth and unreachable today:
  *      emergencyStopState reads the same policy row first, on the same connection, and answers
  *      unavailable (policy_unavailable here) when that read throws or the policy is not an object;
  *   b. insert the verification record through the funding-record port, unless the store already
@@ -72,7 +73,7 @@ import { getStore } from "../db.js";
 import { emergencyStopState } from "../routes/device-relay.js";
 import { activationRefusal, isChainId, recordRefusal, recordScopeRefusal } from "./funding-binding.js";
 import { scopeExpiryMs } from "./scope-expiry.js";
-import { acceptanceFor, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
+import { acceptanceFor, blockListUnreadable, escrowForJob, SCOPE_AWAITING_FUNDING } from "./scope-acceptance.js";
 import {
   fundingEscrowKey,
   fundingRecordStore,
@@ -129,7 +130,7 @@ export const RECONCILE_REFUSALS = [
   /** Any status but awaiting_funding (or active, above): not accepted yet, rejected, expired, ... */
   "scope_not_awaiting_funding",
   "kernel_emergency_stopped",
-  /** The kernel's policy cannot be read, or its block list is not an array of strings: its stop or block list cannot be told. */
+  /** The policy cannot be read, or the mint's shared predicate finds an unreadable block list after buyer_blocked is checked. */
   "policy_unavailable",
   /** The buyer is on the kernel's block list. */
   "buyer_blocked",
@@ -179,19 +180,9 @@ const isActivationTtl = (v: unknown): v is number =>
   typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= MAX_POST_ACTIVATION_TTL_MS;
 
 /**
- * Whether the policy has a block list (blockedAgents present) that is not an array of strings: a
- * string, null, a number, an object, or an array holding anything but strings. Such a list cannot
- * show the buyer unblocked. acceptanceFor (#591's) reads it as "nobody blocked", and the kernel's
- * policy engine reads a string as blocked (a substring match), so the two would disagree.
- */
-function malformedBlockList(policy: unknown): boolean {
-  const list = typeof policy === "object" && policy !== null ? (policy as Record<string, unknown>).blockedAgents : undefined;
-  return list !== undefined && !(Array.isArray(list) && list.every((id) => typeof id === "string"));
-}
-
-/**
- * The kernel's block list, read in the transaction: buyer_blocked, policy_unavailable (also for a
- * block list that is present but malformed), or null.
+ * The kernel's block list, read in the transaction: a list naming the buyer is buyer_blocked first,
+ * as the mint refuses it. Then their shared blockListUnreadable predicate answers policy_unavailable
+ * (awaiting_operator at the mint), also for a non-object policy as defence in depth; otherwise null.
  */
 function blockRefusal(tx: FundingTx, kernelId: string, buyer: string): "buyer_blocked" | "policy_unavailable" | null {
   let policy: unknown;
@@ -202,8 +193,9 @@ function blockRefusal(tx: FundingTx, kernelId: string, buyer: string): "buyer_bl
     // Defence in depth, unreachable today: emergencyStopState reads this row first (module comment).
     return "policy_unavailable";
   }
-  if (malformedBlockList(policy)) return "policy_unavailable";
-  return acceptanceFor(policy, buyer) === "refused" ? "buyer_blocked" : null;
+  if (acceptanceFor(policy, buyer) === "refused") return "buyer_blocked";
+  if (blockListUnreadable(policy)) return "policy_unavailable";
+  return null;
 }
 
 /**
