@@ -32,8 +32,9 @@ export const Hex32Schema = z
   .regex(HEX32_PATTERN, "must be exactly 64 hex characters (32 bytes)");
 
 // ---------------------------------------------------------------------------
-// Unit enum — VERBATIM mirror of prism `src/plan/quantity.ts` KNOWN_UNITS
-// (the `UNIT_DEFS` symbol list, same order). prism builds
+// Unit enum — VERBATIM mirror of prism `src/plan/quantity.ts` KNOWN_UNITS at
+// unit table `prism-plan-units-v2` (the `UNIT_DEFS` symbol list, same order;
+// v2 appended volumetric flow and rotational speed). prism builds
 // `UnitSchema = z.enum(KNOWN_UNITS)`. If prism adds/removes a unit, this list
 // MUST be updated in lockstep — a drift makes a snapshot unit that prism can't
 // parse (or refuses a unit prism now knows).
@@ -64,6 +65,10 @@ export const KNOWN_UNITS = [
   "Pa", "kPa", "bar", "atm",
   // energy — base: J
   "J", "kJ", "cal",
+  // volumetric flow — base: L/s (added in prism-plan-units-v2)
+  "L/s", "L/min", "L/h", "mL/s", "mL/min", "uL/s", "uL/min",
+  // rotational speed — base: rpm (added in prism-plan-units-v2)
+  "rpm",
 ] as const;
 
 const KNOWN_UNIT_ENUM = KNOWN_UNITS as unknown as [string, ...string[]];
