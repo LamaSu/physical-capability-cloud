@@ -121,7 +121,11 @@ export class FakeMachineAdapter implements MachineAdapter {
 
   async cancelJob(jobId: number | string): Promise<void> {
     const numericJobId = Number(jobId);
-    if ((typeof jobId === "string" && jobId.trim() === "") || !Number.isSafeInteger(numericJobId)) {
+    if (
+      (typeof jobId !== "number" && typeof jobId !== "string") ||
+      (typeof jobId === "string" && !/^[1-9][0-9]*$/.test(jobId)) ||
+      !Number.isSafeInteger(numericJobId) || numericJobId <= 0
+    ) {
       throw new Error("cancelJob requires a numeric job id");
     }
     this.cancels.push(numericJobId);

@@ -1,5 +1,5 @@
-import { createPublicKey, verify } from "node:crypto";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { createPrivateKey, createPublicKey, verify } from "node:crypto";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -44,8 +44,11 @@ interface UnitEvidenceSessionApi {
     settlementUnitId: string;
     challengeNonce: string;
     jobId: string;
+    parentAgentId: string;
+    fundedAt: number;
     deviceSigner: ReturnType<typeof makeKernelEd25519Signer>;
     journalDir: string;
+    // The host passes the unit's reclaimAt as expiresAt.
     expiresAt: number;
   }): UnitEvidenceSession | Promise<UnitEvidenceSession>;
   resumeUnitEvidenceSession(options: {
@@ -122,18 +125,71 @@ async function drainPrintJob(pending: Promise<PrintJobResult>): Promise<PrintJob
   return pending;
 }
 
-async function expectPrivateJournalFiles(directory: string): Promise<number> {
+async function journalPaths(directory: string): Promise<{ directories: string[]; files: string[] }> {
   const entries = await readdir(directory, { withFileTypes: true });
-  let fileCount = 0;
+  const directories = [directory];
+  const files: string[] = [];
   for (const entry of entries) {
     const path = join(directory, entry.name);
-    if (entry.isDirectory()) fileCount += await expectPrivateJournalFiles(path);
-    else {
-      expect((await stat(path)).mode & 0o777, `${entry.name} must be mode 0600`).toBe(0o600);
-      fileCount++;
+    if (entry.isDirectory()) {
+      const nested = await journalPaths(path);
+      directories.push(...nested.directories);
+      files.push(...nested.files);
+    } else if (entry.isFile()) {
+      files.push(path);
     }
   }
-  return fileCount;
+  return { directories, files };
+}
+
+async function expectPrivateJournalFiles(directory: string): Promise<number> {
+  const paths = await journalPaths(directory);
+  for (const path of paths.directories) {
+    expect((await stat(path)).mode & 0o777, `${path} must be mode 0700`).toBe(0o700);
+  }
+  for (const path of paths.files) {
+    expect((await stat(path)).mode & 0o777, `${path} must be mode 0600`).toBe(0o600);
+  }
+  return paths.files.length;
+}
+
+async function publicKeysFromSeedsOnDisk(directory: string): Promise<Set<string>> {
+  const candidates = new Set<string>();
+  for (const path of (await journalPaths(directory)).files) {
+    // Scan encoded seeds in file text; binary files are not scanned as raw 32-byte windows.
+    const text = (await readFile(path)).toString("utf8");
+    for (const match of text.matchAll(/(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/g)) {
+      candidates.add(match[0].replace(/^0x/, "").toLowerCase());
+    }
+    for (const match of text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/g)) {
+      const seed = Buffer.from(match[0], "base64");
+      if (seed.length === 32) candidates.add(seed.toString("hex"));
+    }
+  }
+  const publicKeys = new Set<string>();
+  for (const candidate of candidates) {
+    const privateKey = createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from("302e020100300506032b657004220420", "hex"),
+        Buffer.from(candidate, "hex"),
+      ]),
+      format: "der",
+      type: "pkcs8",
+    });
+    const publicKey = createPublicKey(privateKey).export({ format: "der", type: "spki" });
+    publicKeys.add(publicKey.subarray(-32).toString("hex"));
+  }
+  return publicKeys;
+}
+
+async function copyPrivateJournal(directory: string): Promise<string> {
+  const copyDir = await mkdtemp(join(tmpdir(), "n144-journal-copy-"));
+  cleanups.push(() => rm(copyDir, { recursive: true, force: true }));
+  await cp(directory, copyDir, { recursive: true });
+  const paths = await journalPaths(copyDir);
+  for (const path of paths.directories) await chmod(path, 0o700);
+  for (const path of paths.files) await chmod(path, 0o600);
+  return copyDir;
 }
 
 afterEach(async () => {
@@ -143,6 +199,23 @@ afterEach(async () => {
 });
 
 describe("N144 print-host toolkit gap repros", () => {
+  it("the journal seed scan finds encoded private seeds and ignores seed-free files", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "n144-seed-scan-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    await writeFile(join(directory, "no-seed.txt"), "journal metadata without a private seed\n");
+    expect(await publicKeysFromSeedsOnDisk(directory)).toEqual(new Set());
+    const seed = Buffer.alloc(32, 0x3d);
+    const signer = makeKernelEd25519Signer(seed);
+    const hexPath = join(directory, "seed.hex");
+    await writeFile(hexPath, `0x${seed.toString("hex")}\n`);
+    expect(await publicKeysFromSeedsOnDisk(directory)).toContain(signer.publicKeyHex);
+    await rm(hexPath);
+    await writeFile(join(directory, "seed.base64"), seed.toString("base64"));
+    expect(await publicKeysFromSeedsOnDisk(directory)).toContain(signer.publicKeyHex);
+    await writeFile(hexPath, seed.toString("hex"));
+    expect(await publicKeysFromSeedsOnDisk(directory)).toContain(signer.publicKeyHex);
+  });
+
   it("the scripted adapter completes a print through runPrintJob", async () => {
     const setup = harness("harness-check");
     const result = await completingPrint(setup, job("harness-check"), 100);
@@ -167,6 +240,10 @@ describe("N144 print-host toolkit gap repros", () => {
       const ippJobId = cancelEventOrder === "before-resolve" ? 109 : 119;
       setup.adapter.scriptStart({ outcome: "success", jobId: ippJobId });
       await setup.adapter.execute({ type: "start" });
+      for (const invalidId of [" 109", "0x6d", "1e2"]) {
+        await expect(setup.adapter.cancelJob(invalidId)).rejects.toThrow();
+        expect(setup.adapter.cancels).toEqual([]);
+      }
       const observations: string[] = [];
       const terminal = new Promise<void>((resolve) => setup.adapter.onEvidence((event) => {
         expect(event.type).toBe("execution_failed");
@@ -275,6 +352,10 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
     expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
     expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
+    expect(bundle.events.some((event) => event.type === "execution_failed"
+      && event.payload.ippJobId === 104
+      && event.payload.origin === "kernel"
+      && event.payload.reason === "timeout"), "a timeout must include kernel-originated failure evidence").toBe(true);
   });
 
   for (const cancelEventOrder of ["before-resolve", "after-resolve"] as const) {
@@ -309,6 +390,10 @@ describe("N144 print-host toolkit gap repros", () => {
       expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
       expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
       expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
+      expect(bundle.events.some((event) => event.type === "execution_failed"
+        && event.payload.ippJobId === ippJobId
+        && event.payload.origin === "kernel"
+        && event.payload.reason === "aborted"), "an abort must include kernel-originated failure evidence").toBe(true);
     });
   }
 
@@ -349,9 +434,14 @@ describe("N144 print-host toolkit gap repros", () => {
       challengeNonce: `0x${"d".repeat(64)}`,
     };
     const options = job("delegated-unit");
+    const operator = `0x${"ab".repeat(20)}`;
+    const parentAgentId = `eip155:84532:${operator}`;
+    const fundedAt = Math.floor(Date.now() / 1_000) - 60;
+    // The unit is funded before printing; expiresAt is its reclaimAt, including late/retried settle.
     const expiresAt = Math.floor(Date.now() / 1_000) + 3 * 24 * 60 * 60;
     const session = await api.openUnitEvidenceSession({
-      ...unit, jobId: options.jobId, deviceSigner: setup.signer, journalDir, expiresAt,
+      ...unit, jobId: options.jobId, parentAgentId, fundedAt,
+      deviceSigner: setup.signer, journalDir, expiresAt,
     });
     const result = await completingPrint(setup, options, 107);
     expect(result.success).toBe(true);
@@ -380,14 +470,38 @@ describe("N144 print-host toolkit gap repros", () => {
     const pickup = await carrierEvent("courier_pickup_confirmed", "carrier-pickup");
     expectedEvents.push(structuredClone(pickup));
     await session.addEvent(pickup);
-    // Discard the original session and recover the same unit from its journal.
+    expect(await publicKeysFromSeedsOnDisk(journalDir), "the device private seed must not stay at rest before resume")
+      .not.toContain(setup.signer.publicKeyHex);
     const resumeOptions = { journalDir, settlementUnitId: unit.settlementUnitId, deviceSigner: setup.signer };
+    const tamperedDir = await copyPrivateJournal(journalDir);
+    const copiedDir = await copyPrivateJournal(journalDir);
+    for (const path of (await journalPaths(tamperedDir)).files) {
+      const contents = await readFile(path);
+      if (contents.length === 0) continue;
+      contents[Math.floor(contents.length / 2)]! ^= 0x01;
+      await writeFile(path, contents);
+    }
+    await expect(Promise.resolve().then(() => api.resumeUnitEvidenceSession({
+      ...resumeOptions, journalDir: tamperedDir,
+    })), "a broken journal must be refused").rejects.toThrow();
+    await expect(Promise.resolve().then(() => api.resumeUnitEvidenceSession({
+      ...resumeOptions, journalDir: copiedDir,
+    })), "an untampered copied journal must remain resumable").resolves.toBeDefined();
+    // Discard the original session and recover the same unit from its journal.
     const resumed = await api.resumeUnitEvidenceSession(resumeOptions);
     vi.setSystemTime(new Date("2026-10-11T01:00:00.000Z"));
     const delivery = await carrierEvent("courier_delivery_confirmed", "carrier-delivery");
     expectedEvents.push(structuredClone(delivery));
     await resumed.addEvent(delivery);
     const bundle = await resumed.finalize();
+    expect(bundle.jobId, "the bundle jobId must equal the PCC job id").toBe(options.jobId);
+    const authorization = bundle.sessionKeyAuthorization;
+    expect(authorization, "the unit bundle must carry device-authorized sessionKeyAuthorization").toBeDefined();
+    const keysAtRest = await publicKeysFromSeedsOnDisk(journalDir);
+    expect(keysAtRest, "the device private seed must not stay at rest after finalization")
+      .not.toContain(setup.signer.publicKeyHex);
+    expect(keysAtRest, "the session private seed must not stay at rest after finalization")
+      .not.toContain(authorization!.publicKey.replace(/^0x/, "").toLowerCase());
     const canonicalBundle = canonicalize(bundle);
     expect(bundle.events).toHaveLength(expectedEvents.length);
     for (const event of bundle.events) {
@@ -399,14 +513,16 @@ describe("N144 print-host toolkit gap repros", () => {
         payload: expect.objectContaining(event.payload),
       }));
     }
-    const authorization = bundle.sessionKeyAuthorization;
-    expect(authorization, "the unit bundle must carry device-authorized sessionKeyAuthorization").toBeDefined();
-    expect(authorization!.scope.contractIds).toContain(options.jobId);
-    const firstEventTimestamp = Math.min(...expectedEvents.map((event) => Date.parse(event.timestamp))) / 1_000;
-    expect(authorization!.issuedAt).toBeLessThanOrEqual(firstEventTimestamp);
-    expect(authorization!.expiresAt).toBeLessThanOrEqual(expiresAt);
+    expect(authorization!.parentAgentId, "parentAgentId must identify the operator on chain 84532").toBe(parentAgentId);
+    expect(authorization!.scope.contractIds, "contractIds must be exactly the PCC job id").toEqual([options.jobId]);
+    const firstEventTimestamp = Math.floor(Math.min(...expectedEvents.map((event) => Date.parse(event.timestamp))) / 1_000);
+    expect(Number.isInteger(authorization!.issuedAt), "issuedAt must be whole Unix seconds").toBe(true);
+    expect(authorization!.issuedAt, "issuedAt must be at or after fundedAt").toBeGreaterThanOrEqual(fundedAt);
+    expect(authorization!.issuedAt, "issuedAt must be at or before the first event").toBeLessThanOrEqual(firstEventTimestamp);
+    expect(authorization!.expiresAt, "expiresAt must equal the unit reclaimAt").toBe(expiresAt);
     expect(authorization!.scope.allowedActions).toContain("evidence_submit");
-    expect(authorization!.scope.maxSignatures).toBeGreaterThanOrEqual(bundle.events.length);
+    expect(authorization!.scope.maxSignatures, "maxSignatures must equal the number of events in the ONE bundle")
+      .toBe(bundle.events.length);
     const sessionPublicKey = Buffer.from(authorization!.publicKey.replace(/^0x/, ""), "hex");
     expect(sessionPublicKey).toHaveLength(32);
     expect(sessionPublicKey.equals(Buffer.from(setup.signer.publicKeyHex, "hex"))).toBe(false);
