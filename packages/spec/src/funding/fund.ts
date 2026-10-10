@@ -6,6 +6,8 @@
  *      leg is implicit and its signature bytes are empty (ESC:718, FAC:253).
  * Each call is encoded once from the frozen `PreparedFunding`, simulated with `eth_call` from the payer using
  * those same bytes, then sent with `dataSuffix: "0x"` so a client-configured suffix cannot change them.
+ * The fund simulation uses the approve receipt's canonical block hash, exactly where allowance was read, so a
+ * backend whose "latest" lags the receipt cannot manufacture an allowance-related simulation failure.
  *
  * FUNDED IS READ FROM THE CONTRACT (plan G5), never inferred from a receipt, a tx hash or a USDC balance. It
  * means `policy().jobPolicyHash_` equals the hash this SDK recomputed (with `prePolicyRoot_` equal to ours), AND the
@@ -323,7 +325,13 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
     ],
   });
   try {
-    await publicClient.call({ account: prepared.payer, to: prepared.escrow, data: fundData });
+    await publicClient.request({
+      method: "eth_call",
+      params: [
+        { from: prepared.payer, to: prepared.escrow, data: fundData },
+        { blockHash: approve.blockHash, requireCanonical: true },
+      ],
+    } as never);
   } catch (e) {
     const why = describeRevert(e);
     const readBack = await readFundedState({ publicClient, prepared });
@@ -335,7 +343,7 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
       approveTx,
       allowance,
       readBack,
-      detail: `fund() would revert (${why}); it was not sent. The approve stands: allowance ${prepared.totalGross} to the escrow`,
+      detail: `fund() simulation could not complete at the approve's block ${approve.blockHash} (${why}); it was not sent. The approve stands: allowance ${prepared.totalGross} to the escrow`,
     };
   }
   let fund: SendResult;

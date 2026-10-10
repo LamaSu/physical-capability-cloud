@@ -69,7 +69,7 @@ async function setup(o: FixtureOptions = {}, chainOptions = { escrowCode: true }
   /** eth_call selectors the SDK simulated (approve / fund), as opposed to reads. */
   const simulated = () =>
     chain.state.log
-      .filter((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest")
+      .filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined)
       .map((x) => ((x.params as [{ data: Hex }])[0].data as string).slice(0, 10));
   return { fx, chain, prepared, fund, fundedAs, simulated };
 }
@@ -280,10 +280,10 @@ describe("approveAndFund: refusals before anything is sent", () => {
 });
 
 describe("approveAndFund: after the first broadcast, the outcome rests on the escrow's own state", () => {
-  /** Calldata of the eth_call simulations, in order (reads are pinned by block hash; simulations run at "latest"). */
+  /** Calldata of the payer-sent eth_call simulations, in order (the fund simulation is pinned to approve's block). */
   const simulatedData = (chain: Awaited<ReturnType<typeof setup>>["chain"]) =>
     chain.state.log
-      .filter((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest")
+      .filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined)
       .map((x) => (x.params as [{ data: Hex }])[0].data);
 
   it("both sends carry the prepared chain explicitly when wallet.chain is undefined", async () => {
@@ -470,7 +470,7 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     expect(result.readBack.kind).toBe("unreadable");
   });
 
-  it("every read is pinned to one block by its hash (EIP-1898); only the two simulations run at latest", async () => {
+  it("every read and the fund simulation is hash-pinned (EIP-1898); only the approve simulation runs at latest", async () => {
     const { fx, chain, fund, fundedAs } = await setup();
     chain.state.afterSend = (i) => {
       if (i === 1) fundedAs(fx.jobPolicyHash);
@@ -479,8 +479,8 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     expect((await fund()).outcome).toBe("committed");
     const reads = chain.state.log.filter((x) => x.method === "eth_getCode" || x.method === "eth_call");
     const atLatest = reads.filter((x) => (x.params as unknown[])[1] === "latest");
-    expect(atLatest.map((x) => ((x.params as [{ data: Hex }])[0].data as string).slice(0, 10))).toEqual(simulatedData(chain).map((d) => d.slice(0, 10)));
-    expect(atLatest).toHaveLength(2);
+    expect(atLatest.map((x) => ((x.params as [{ data: Hex }])[0].data as string).slice(0, 10))).toEqual(simulatedData(chain).slice(0, 1).map((d) => d.slice(0, 10)));
+    expect(atLatest).toHaveLength(1);
     const pinned = reads.filter((x) => (x.params as unknown[])[1] !== "latest");
     expect(pinned.length).toBeGreaterThan(4);
     for (const x of pinned) {
@@ -509,6 +509,55 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     );
     expect((allowanceRead!.params as unknown[])[1]).toEqual({ blockHash: approveBlock, requireCanonical: true });
   });
+
+  it("latest lags behind approve: fund is simulated at the receipt's canonical block, exactly where allowance was read", async () => {
+    const { fx, chain, fund, fundedAs } = await setup();
+    const staleLatest = chain.state.block;
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => { chain.advanceBlock(); return true; });
+    chain.on(fx.escrow, ESCROW_ABI, "fund", () => {
+      const pin = chain.state.log.at(-1)!.params[1];
+      if (pin === "latest") return revertWith(encodeErrorResult({ abi: ESCROW_ABI, errorName: "NotActive" }));
+      return undefined;
+    });
+    chain.state.afterSend = (i) => {
+      if (i === 0) chain.state.block = staleLatest;
+      if (i === 1) fundedAs(fx.jobPolicyHash);
+    };
+    const result = await fund();
+    expect(result.outcome).toBe("committed");
+    expect(chain.state.sent).toHaveLength(2);
+    const receiptBlock = chain.state.sent[0]!.block.hash;
+    expect(receiptBlock).not.toBe(chain.state.block.hash);
+    const selector = toFunctionSelector(getAbiItem({ abi: ESCROW_ABI, name: "fund" }));
+    const simulation = chain.state.log.find((x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(selector));
+    expect(simulation!.params[1]).toEqual({ blockHash: receiptBlock, requireCanonical: true });
+    const allowanceSelector = toFunctionSelector(getAbiItem({ abi: ERC20_ABI, name: "allowance" }));
+    const allowanceRead = chain.state.log.find((x) => x.method === "eth_call" && (x.params as [{ data: Hex }])[0].data.startsWith(allowanceSelector));
+    expect(simulation!.params[1]).toEqual(allowanceRead!.params[1]);
+  });
+
+  for (const [read, outcome] of [["unfunded", "unchanged"], ["funded_ours", "committed"], ["other", "indeterminate"], ["unreadable", "indeterminate"]] as const) {
+    it(`approve block unavailable for simulation: no claim of fund reverting, no fallback to latest; ${read} -> ${outcome}`, async () => {
+      const { fx, chain, fund, fundedAs } = await setup();
+      chain.on(fx.escrow, ESCROW_ABI, "fund", () => {
+        if (chain.state.log.at(-1)!.params[1] === "latest") return undefined; // a fallback would succeed and send
+        if (read === "funded_ours") fundedAs(fx.jobPolicyHash);
+        if (read === "other") fundedAs(keccak256(stringToHex("other acceptance")));
+        if (read === "unreadable") chain.state.failCalls = true;
+        throw new Error("fake chain: approve block unavailable for simulation");
+      });
+      const result = await fund();
+      expect(chain.state.sent).toHaveLength(1);
+      expect(result.outcome).toBe(outcome);
+      expect(result.readBack.kind).toBe(read);
+      expect(result.detail).toContain("simulation could not");
+      expect(result.detail).toContain(chain.state.sent[0]!.block.hash);
+      expect(result.detail).not.toContain("would revert");
+      expect(result.fundTx).toBeUndefined();
+      expect(result.approve).toMatchObject({ kind: "mined", status: "success" });
+      expect(result.allowance).toBe(fx.totalGross);
+    });
+  }
 
   it("the read-back is at the fund() receipt's block, even when the chain has moved on", async () => {
     const { fx, chain, fund, fundedAs } = await setup();
@@ -629,7 +678,7 @@ describe("approveAndFund: both simulations run from the payer, who sends both tr
     };
     expect((await fund()).outcome).toBe("committed");
     const simulations = chain.state.log
-      .filter((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest")
+      .filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined)
       .map((x) => (x.params as [{ from?: string; to: string }])[0]);
     expect(simulations.map((c) => c.to.toLowerCase())).toEqual([fx.usdc.toLowerCase(), fx.escrow.toLowerCase()]);
     expect(simulations.map((c) => c.from?.toLowerCase())).toEqual([fx.payer.address.toLowerCase(), fx.payer.address.toLowerCase()]);
