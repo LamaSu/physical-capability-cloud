@@ -1,0 +1,169 @@
+import { inspect } from "node:util";
+import { makeKernelEd25519Signer } from "./kernel-signer.js";
+import { getAddress, type LocalAccount } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import {
+  readSecretFile,
+  SecretFileError,
+  type SecretFileErrorCode,
+  type SecretFileOptions,
+} from "./secret-file.js";
+
+export type KeyFileErrorCode = SecretFileErrorCode | "bad_json" | "bad_schema" |
+  "wrong_kind" | "public_mismatch" | "bad_key" | "expired";
+
+type KeyField = "object" | "unknown_field" | "kind" | "version" | "algorithm" |
+  "purpose" | "createdAt" | "notAfter" | "publicKey" | "seed" | "address" | "privateKey";
+
+/** Contains only trusted labels, never parser errors, values, or causes. */
+export class KeyFileError extends Error {
+  readonly code: KeyFileErrorCode;
+  readonly path: string;
+  readonly field?: KeyField;
+
+  constructor(code: KeyFileErrorCode, path: string, field?: KeyField) {
+    super(`${code}: ${path}${field === undefined ? "" : ` (${field})`}`);
+    this.name = "KeyFileError";
+    this.code = code;
+    this.path = path;
+    this.field = field;
+  }
+}
+
+export interface KeyLoadOptions extends SecretFileOptions {
+  now?: Date;
+}
+
+/** Only the public material and the toolkit signing closure survive loading. */
+export class DeviceKey {
+  readonly publicKeyHex: string;
+  readonly signingPublicKey: string;
+  readonly signFn: ReturnType<typeof makeKernelEd25519Signer>["signFn"];
+
+  constructor(publicKeyHex: string, signingPublicKey: string,
+    signFn: ReturnType<typeof makeKernelEd25519Signer>["signFn"]) {
+    this.publicKeyHex = publicKeyHex;
+    this.signingPublicKey = signingPublicKey;
+    this.signFn = signFn;
+    Object.freeze(this);
+  }
+
+  toJSON() { return { kind: "pcc-printhost.device-key", publicKey: this.signingPublicKey }; }
+  toString() { return `[DeviceKey ${this.signingPublicKey}]`; }
+  [inspect.custom]() { return this.toString(); }
+}
+
+/** viem holds the private scalar only in its signing closures. */
+export class OperatorKey {
+  readonly address: LocalAccount["address"];
+  readonly account: LocalAccount;
+
+  constructor(account: LocalAccount) {
+    this.address = account.address;
+    this.account = Object.freeze(account);
+    Object.freeze(this);
+  }
+
+  toJSON() { return { kind: "pcc-printhost.operator-key", address: this.address }; }
+  toString() { return `[OperatorKey ${this.address}]`; }
+  [inspect.custom]() { return this.toString(); }
+}
+
+/** UTC timestamps with seconds; rejects Date.parse's normalization of invalid days. */
+export function isUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)) return false;
+  const timestamp = new Date(value);
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString().slice(0, 19) === value.slice(0, 19);
+}
+
+const commonFields = ["kind", "version", "algorithm", "purpose", "createdAt", "notAfter"];
+
+function schemaError(path: string, field: KeyField): never {
+  throw new KeyFileError("bad_schema", path, field);
+}
+
+function parseObject(bytes: Buffer, path: string): Record<string, unknown> {
+  let parsed: unknown;
+  try { parsed = JSON.parse(bytes.toString("utf8")); }
+  catch { throw new KeyFileError("bad_json", path); }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) schemaError(path, "object");
+  return parsed as Record<string, unknown>;
+}
+
+function checkCommon(record: Record<string, unknown>, path: string, kind: string,
+  algorithm: string, extraFields: string[], now: Date): void {
+  if (record.kind !== kind) throw new KeyFileError("wrong_kind", path);
+  const allowed = new Set([...commonFields, ...extraFields]);
+  if (Object.keys(record).some((key) => !allowed.has(key))) schemaError(path, "unknown_field");
+  if (record.version !== 1) schemaError(path, "version");
+  if (record.algorithm !== algorithm) schemaError(path, "algorithm");
+  if (typeof record.purpose !== "string" || record.purpose.length === 0) schemaError(path, "purpose");
+  if (!isUtcTimestamp(record.createdAt)) schemaError(path, "createdAt");
+  if (Object.hasOwn(record, "notAfter")) {
+    if (!isUtcTimestamp(record.notAfter)) schemaError(path, "notAfter");
+    if (now.getTime() > new Date(record.notAfter).getTime()) throw new KeyFileError("expired", path);
+  }
+  if (!Number.isFinite(now.getTime())) throw new KeyFileError("bad_key", path);
+}
+
+async function keyBytes(path: string, options: KeyLoadOptions): Promise<Buffer> {
+  try { return await readSecretFile(path, options); }
+  catch (error) {
+    if (error instanceof SecretFileError) throw new KeyFileError(error.code, path);
+    throw new KeyFileError("read_failed", path);
+  }
+}
+
+export async function loadDeviceKey(path: string, options: KeyLoadOptions = {}): Promise<DeviceKey> {
+  const bytes = await keyBytes(path, options);
+  let seed: Buffer | undefined;
+  try {
+    const record = parseObject(bytes, path);
+    checkCommon(record, path, "pcc-printhost.device-key", "ed25519", ["publicKey", "seed"], options.now ?? new Date());
+    if (typeof record.publicKey !== "string" || !/^0x[0-9a-f]{64}$/.test(record.publicKey)) schemaError(path, "publicKey");
+    if (typeof record.seed !== "string" || !/^[0-9a-f]{64}$/.test(record.seed)) schemaError(path, "seed");
+    seed = Buffer.from(record.seed, "hex");
+    // Never retain the kernel signer object: its secretKey property is inspectable.
+    const signer = makeKernelEd25519Signer(seed);
+    if (signer.signingPublicKey !== record.publicKey) {
+      signer.secretKey.fill(0);
+      throw new KeyFileError("public_mismatch", path);
+    }
+    return new DeviceKey(signer.publicKeyHex, signer.signingPublicKey, signer.signFn);
+  } catch (error) {
+    if (error instanceof KeyFileError) throw error;
+    throw new KeyFileError("bad_key", path);
+  } finally {
+    seed?.fill(0);
+    bytes.fill(0);
+  }
+}
+
+// The public secp256k1 order, expressed without a key-shaped literal.
+const secp256k1Order = (1n << 256n) - BigInt("0x14551231950b75fc4402da1732fc9bebf");
+
+export async function loadOperatorKey(path: string, options: KeyLoadOptions = {}): Promise<OperatorKey> {
+  const bytes = await keyBytes(path, options);
+  let scalarBytes: Buffer | undefined;
+  try {
+    const record = parseObject(bytes, path);
+    checkCommon(record, path, "pcc-printhost.operator-key", "secp256k1", ["address", "privateKey"], options.now ?? new Date());
+    if (typeof record.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(record.address)) schemaError(path, "address");
+    try {
+      if (getAddress(record.address) !== record.address) schemaError(path, "address");
+    } catch { schemaError(path, "address"); }
+    if (typeof record.privateKey !== "string" || !/^0x[0-9a-f]{64}$/.test(record.privateKey)) schemaError(path, "privateKey");
+    scalarBytes = Buffer.from(record.privateKey.slice(2), "hex");
+    const scalar = BigInt(record.privateKey);
+    if (scalar <= 0n || scalar >= secp256k1Order) throw new KeyFileError("bad_key", path);
+    const account = privateKeyToAccount(record.privateKey as `0x${string}`);
+    if (account.address.toLowerCase() !== record.address.toLowerCase()) throw new KeyFileError("public_mismatch", path);
+    return new OperatorKey(account);
+  } catch (error) {
+    if (error instanceof KeyFileError) throw error;
+    throw new KeyFileError("bad_key", path);
+  } finally {
+    scalarBytes?.fill(0);
+    bytes.fill(0);
+  }
+}
