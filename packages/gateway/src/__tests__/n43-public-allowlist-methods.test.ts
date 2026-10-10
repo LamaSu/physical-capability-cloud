@@ -5,7 +5,7 @@
  * "/api/marketplace/" prefix, meant for browsing, also made POST/PUT/DELETE
  * /api/marketplace/listings(/:id) and POST /api/marketplace/orders public: an anonymous caller could
  * create a listing, rewrite or delete ANY listing, and place orders in the in-memory mock. Every public
- * entry now declares its method; a prefix opens GET only (HEAD follows GET) and matches on a
+ * entry now declares its method; a prefix opens GET and HEAD and matches on a
  * path-segment boundary.
  *
  * - Marketplace (steward #2637): the surface is retiring (kits #2523), so its writes get 410 for EVERY
@@ -13,9 +13,11 @@
  *   computation, stores nothing) and the marketplace reads stay public.
  * - DHT announce: POST /api/dht/announce was dead on master. The public "/api/dht/" prefix meant apiGate
  *   never set req.apiKeyId or req.userId, so the handler answered 401 to everyone. Once "/api/dht/" is
- *   public for GET only, apiGate authenticates the POST, and any key would reach a handler that stores
- *   and gossips ANY kernelId with no owner binding. A route-level onRequest hook keeps it refused (501
- *   DHT_ANNOUNCE_DISABLED). apiGate's onRequest hook runs first, so an anonymous caller gets apiGate's 401.
+ *   public for GET and HEAD, apiGate authenticates the POST. A caller that passes the earlier hooks
+ *   would reach a handler that stores and gossips ANY kernelId with no owner binding. A route-level
+ *   onRequest hook keeps it refused (501 DHT_ANNOUNCE_DISABLED), before body parsing. apiGate and
+ *   scopeChecker are earlier onRequest hooks: an anonymous caller gets apiGate's 401, and a limited
+ *   key can receive a scope refusal before DHT's 501. The x402/MPP onRequest gate also precedes parsing.
  * - Segment boundary: "/api/health" opens "/api/health" and the paths below it, never a sibling such as
  *   "/api/healthcheck-debug".
  *
@@ -32,6 +34,7 @@ process.env.PCC_SEED_DATA = "false";
 let app: FastifyInstance;
 let apiKey = "";
 let siweToken = "";
+let otherSiweToken = "";
 
 // A distinct client address per request (the gateway trusts X-Forwarded-For), so no per-IP limiter or
 // monitor state carries over from one request to the next.
@@ -78,6 +81,15 @@ beforeAll(async () => {
     id: randomUUID(),
     walletAddress: "0xabc0000000000000000000000000000000000043",
     token: siweToken,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+    lastActiveAt: now.toISOString(),
+  });
+  otherSiweToken = randomUUID();
+  getRepos().sessions.insert({
+    id: randomUUID(),
+    walletAddress: "0xdef0000000000000000000000000000000000043",
+    token: otherSiweToken,
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
     lastActiveAt: now.toISOString(),
@@ -244,13 +256,13 @@ describe("N43 (d): POST /api/dht/announce stays refused and nothing is stored", 
     },
   );
 
-  it("the refusal comes before any body parsing: a keyed caller with a non-JSON body still gets 501", async () => {
+  it("the refusal comes before any body parsing: a keyed caller with malformed application/json still gets 501", async () => {
     const before = await dhtState();
     const res = await send("an API key", {
       method: "POST",
       url: "/api/dht/announce",
-      headers: { "content-type": "text/plain" },
-      payload: "not json",
+      headers: { "content-type": "application/json" },
+      payload: '{"kernelId":',
     });
     expect({ status: res.statusCode, code: body(res).code, registry: await dhtState() }).toEqual({
       status: 501,
@@ -264,6 +276,68 @@ describe("N43 (d): POST /api/dht/announce stays refused and nothing is stored", 
       const res = await send("anonymous", { method: "GET", url });
       expect(res.statusCode, url).toBe(200);
     }
+  });
+});
+
+// Artifact listing is public for GET and HEAD. Detail GET remains public as on master, while detail
+// HEAD must authenticate: the recall handler needs apiGate's SIWE identity to recognise its owner.
+describe("N43 F1: artifact-detail HEAD preserves SIWE ownership", () => {
+  let privateId: string;
+  let publicId: string;
+
+  beforeAll(async () => {
+    for (const visibility of ["private", "public"] as const) {
+      const res = await send("a SIWE session", {
+        method: "POST",
+        url: "/api/artifacts",
+        payload: {
+          name: `N43 ${visibility} artifact`,
+          visibility,
+          manifest: { csd: "pcc://artifacts/dashboard/v1", title: "N43 recall", sections: [] },
+        },
+      });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(body(res)).toMatchObject({
+        owner: "siwe_0xabc0000000000000000000000000000000000043",
+        visibility,
+        status: "active",
+      });
+      if (visibility === "private") privateId = body(res).id as string;
+      else publicId = body(res).id as string;
+    }
+  });
+
+  it.each(["bearer", "cookie"] as const)("a SIWE owner (%s) gets a bodyless 200 HEAD of their active PRIVATE artifact", async (credential) => {
+    const headers = credential === "bearer"
+      ? { authorization: `Bearer ${siweToken}` }
+      : { cookie: `pcc_session=${encodeURIComponent(app.signCookie(siweToken))}` };
+    const res = await send("anonymous", { method: "HEAD", url: `/api/artifacts/${privateId}`, headers });
+    expect({ status: res.statusCode, body: res.body }).toEqual({ status: 200, body: "" });
+  });
+
+  it("a different SIWE principal gets master's 403 HEAD of the PRIVATE artifact", async () => {
+    const res = await send("anonymous", {
+      method: "HEAD",
+      url: `/api/artifacts/${privateId}`,
+      headers: { authorization: `Bearer ${otherSiweToken}` },
+    });
+    expect({ status: res.statusCode, body: res.body }).toEqual({ status: 403, body: "" });
+  });
+
+  it("an anonymous detail HEAD is refused by apiGate (401), even for a PUBLIC artifact", async () => {
+    const res = await send("anonymous", { method: "HEAD", url: `/api/artifacts/${publicId}` });
+    expect({ status: res.statusCode, body: res.body }).toEqual({ status: 401, body: "" });
+  });
+
+  it("an anonymous GET of a PUBLIC artifact detail stays 200", async () => {
+    const res = await send("anonymous", { method: "GET", url: `/api/artifacts/${publicId}` });
+    expect(res.statusCode).toBe(200);
+    expect(body(res).id).toBe(publicId);
+  });
+
+  it("records the pre-existing SIWE-owner GET limitation: public detail GET drops the session and returns 403", async () => {
+    const res = await send("a SIWE session", { method: "GET", url: `/api/artifacts/${privateId}` });
+    expect({ status: res.statusCode, error: body(res).error }).toEqual({ status: 403, error: "forbidden" });
   });
 });
 

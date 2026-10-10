@@ -5,9 +5,11 @@
  * `app.get("/api/marketplace/brand-new-thing", ...)` widens the unauthenticated surface with no change
  * to any allowlist string (review #2829 / WP-A round 6, review A3). So this file builds the real gateway
  * (createGateway: every route plugin, in-memory DB), records every route Fastify registers with an
- * onRoute hook, substitutes a sample value for each path parameter, and runs each (method, path)
- * through the gate's own exported matcher, `isPublicRoute`. The result is compared with an EXPLICIT
- * array, not `toMatchSnapshot()`: a widening must fail here and force a reviewed edit of this file.
+ * onRoute hook and uses the gate's own exported matcher, `isPublicRoute`. The sampled surface is
+ * complemented by declaration and template-intersection pins, so parameter-specific exemptions
+ * cannot disappear behind a private sample. A second boot captures production static registration;
+ * the authoritative dashboard public/api inventory is pinned too. All pins are EXPLICIT arrays:
+ * a widening must fail here and force a reviewed edit of this file.
  *
  * Scope: registered /api/* routes, the only paths apiGate judges (its hook returns early for any other
  * path). The retired-write 410 branch is pinned separately below and, end to end, in
@@ -15,6 +17,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { PublicRoute } from "../middleware/api-gate.js";
 
 interface RegisteredRoute {
   method: string;
@@ -46,23 +53,52 @@ vi.mock("fastify", async (importOriginal) => {
 let app: FastifyInstance;
 /** Frozen when boot finishes, so nothing a later test does can change what this file pins. */
 let bootRoutes: RegisteredRoute[];
+let productionRoutes: RegisteredRoute[];
+let dashboardFixture: string;
+let declarations: readonly PublicRoute[];
 type Matcher = (url: string, method?: string) => boolean;
 let isPublicRoute: Matcher;
+const environmentKeys = ["PCC_DB_PATH", "NODE_ENV", "PCC_SEED_DATA", "SERVE_DASHBOARD", "DASHBOARD_PATH"] as const;
+const savedEnvironment = new Map(environmentKeys.map((key) => [key, process.env[key]]));
 
 beforeAll(async () => {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.NODE_ENV = "test";
   process.env.PCC_SEED_DATA = "false";
+  // Both registration-affecting values are explicit, even when the static branch is disabled.
+  process.env.SERVE_DASHBOARD = "false";
+  process.env.DASHBOARD_PATH = fileURLToPath(new URL("../../../../tmp/n43-dashboard-unused", import.meta.url));
   const server = await import("../server.js");
   app = (await server.createGateway(0)).app as unknown as FastifyInstance;
   await app.ready(); // no start()/listen(): no port is bound
   bootRoutes = [...registered];
-  const gate = (await import("../middleware/api-gate.js")) as { isPublicRoute?: Matcher };
-  isPublicRoute = gate.isPublicRoute as Matcher;
+  const gate = await import("../middleware/api-gate.js");
+  isPublicRoute = gate.isPublicRoute;
+  declarations = gate.PUBLIC_ROUTES;
+
+  // Close before the second boot because createGateway initialises a shared database store.
+  await app.close();
+  registered.length = 0;
+  dashboardFixture = await mkdtemp(join(tmpdir(), "n43-dashboard-"));
+  await mkdir(join(dashboardFixture, "api/agent"), { recursive: true });
+  await mkdir(join(dashboardFixture, "api/marketplace"), { recursive: true });
+  await writeFile(join(dashboardFixture, "index.html"), "<!doctype html><title>N43 fixture</title>");
+  await writeFile(join(dashboardFixture, "api/agent/tools.json"), '{"tools":[]}');
+  await writeFile(join(dashboardFixture, "api/marketplace/preview.json"), '{"preview":true}');
+  process.env.SERVE_DASHBOARD = "true";
+  process.env.DASHBOARD_PATH = dashboardFixture;
+  app = (await server.createGateway(0)).app as unknown as FastifyInstance;
+  await app.ready();
+  productionRoutes = [...registered];
 }, 180_000);
 
 afterAll(async () => {
   await app?.close();
+  if (dashboardFixture) await rm(dashboardFixture, { recursive: true, force: true });
+  for (const [key, value] of savedEnvironment) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 /**
@@ -78,10 +114,252 @@ function samplePath(template: string): string {
 
 const isPublic = (r: RegisteredRoute) => isPublicRoute(samplePath(r.url), r.method);
 
+function normalizedDeclarations(entries: readonly PublicRoute[]) {
+  return entries.map((entry) => [
+    [...entry.methods],
+    entry.methods[0] === "GET" ? ("head" in entry ? entry.head ?? "follow-get" : "follow-get") : null,
+    entry.match,
+    typeof entry.path === "string" ? entry.path : null,
+    entry.path instanceof RegExp ? entry.path.source : null,
+    entry.path instanceof RegExp ? entry.path.flags : null,
+    entry.why,
+  ]);
+}
+
+type Intersection = "INTERSECTS" | "AMBIGUOUS" | "DISJOINT";
+
+function declaresMethod(entry: PublicRoute, method: string): boolean {
+  return method === "HEAD"
+    ? entry.methods[0] === "GET" && ("head" in entry ? entry.head ?? "follow-get" : "follow-get") === "follow-get"
+    : (entry.methods as readonly string[]).includes(method);
+}
+
+/** Segment unification: a parameter can equal any literal; a wildcard can equal any suffix. */
+function unifyLiteral(template: string, literal: string, kind: "exact" | "prefix"): Intersection {
+  const route = template.slice(1).split("/");
+  const target = literal.slice(1).replace(/\/$/, "").split("/");
+  const requiresSuffix = kind === "prefix" && literal.endsWith("/");
+  let ambiguous = false;
+  for (let i = 0; i < target.length; i++) {
+    const segment = route[i];
+    if (segment === "*") return ambiguous ? "AMBIGUOUS" : "INTERSECTS";
+    if (segment === undefined) return "DISJOINT";
+    if (segment.startsWith(":")) {
+      // Constraints and compound parameters need review; do not pretend to solve their language.
+      if (!/^:[A-Za-z0-9_]+$/.test(segment)) ambiguous = true;
+    } else if (segment.includes(":") || segment.includes("*")) {
+      ambiguous = true;
+    } else if (segment !== target[i]) {
+      return "DISJOINT";
+    }
+  }
+  if (kind === "exact" && route.length !== target.length && route[target.length] !== "*") return "DISJOINT";
+  if (requiresSuffix && route.length <= target.length) return "DISJOINT";
+  return ambiguous ? "AMBIGUOUS" : "INTERSECTS";
+}
+
+/** Extract only complete literal segments before the first regex construct. */
+function anchoredLiteralPrefix(regex: RegExp): string | null {
+  // Multiline and case-insensitive expressions can match outside this literal prefix.
+  if (!regex.source.startsWith("^") || regex.flags.includes("m") || regex.flags.includes("i")) return null;
+  let literal = "";
+  for (let i = 1; i < regex.source.length; i++) {
+    const c = regex.source[i];
+    if (c === "\\") {
+      const escaped = regex.source[++i];
+      if (!escaped || /[A-Za-z0-9]/.test(escaped)) break;
+      literal += escaped;
+    } else if ("[](){}.*+?$^|".includes(c)) {
+      // Zero repetitions can remove the last literal atom, including a slash boundary.
+      if ("?*{".includes(c)) literal = literal.slice(0, -1);
+      break;
+    } else {
+      literal += c;
+    }
+  }
+  // A root-level alternative can escape the anchor. Ignore escaped syntax and character classes.
+  let depth = 0;
+  let inClass = false;
+  for (let i = 0; i < regex.source.length; i++) {
+    const c = regex.source[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (!inClass && c === "(") depth++;
+    else if (!inClass && c === ")") depth--;
+    else if (!inClass && c === "|" && depth === 0) return null;
+  }
+  const lastSlash = literal.lastIndexOf("/");
+  return lastSlash > 0 ? literal.slice(0, lastSlash + 1) : null;
+}
+
+function intersectsEntry(route: RegisteredRoute, entry: PublicRoute): Intersection {
+  if (!declaresMethod(entry, route.method)) return "DISJOINT";
+  if (entry.match !== "regex") return unifyLiteral(route.url, entry.path as string, entry.match);
+  const regex = entry.path as RegExp;
+  // A successful sample is an existential witness, never a proof of disjointness.
+  const sampleIsValid = route.url.split("/").every((segment) => !segment.includes(":") || /^:[A-Za-z0-9_]+$/.test(segment));
+  if (sampleIsValid && new RegExp(regex.source, regex.flags).test(samplePath(route.url))) return "INTERSECTS";
+  const prefix = anchoredLiteralPrefix(regex);
+  return prefix && unifyLiteral(route.url, prefix, "prefix") === "DISJOINT" ? "DISJOINT" : "AMBIGUOUS";
+}
+
+function templateIntersections(routes: RegisteredRoute[], entries: readonly PublicRoute[]): string[] {
+  const results: string[] = [];
+  for (const route of routes) {
+    if (!route.url.startsWith("/api/") || !/[:*]/.test(route.url)) continue;
+    const matches = entries.map((entry) => intersectsEntry(route, entry));
+    const result = matches.includes("INTERSECTS") ? "INTERSECTS" : matches.includes("AMBIGUOUS") ? "AMBIGUOUS" : "DISJOINT";
+    if (result !== "DISJOINT") results.push(`${route.method} ${route.url} ${result}`);
+  }
+  return [...new Set(results)].sort();
+}
+
+const dashboardPublic = fileURLToPath(new URL("../../../../apps/dashboard/public/", import.meta.url));
+async function staticApiInventory(): Promise<string[]> {
+  const paths: string[] = [];
+  async function visit(relative: string) {
+    for (const entry of await readdir(join(dashboardPublic, relative), { withFileTypes: true })) {
+      const path = `${relative}/${entry.name}`;
+      if (entry.isDirectory()) await visit(path);
+      else {
+        // Refuse unsupported inventory entries instead of silently dropping them.
+        expect(entry.isFile(), `${path} is a regular static file`).toBe(true);
+        for (const method of ["GET", "HEAD"]) paths.push(`${method} /${path} ${isPublicRoute(`/${path}`, method) ? "PUBLIC" : "AUTHENTICATED"}`);
+      }
+    }
+  }
+  await visit("api");
+  return paths.sort();
+}
+
 /** Unique, sorted "METHOD template" strings for the registered routes matching `pred`. */
 function surfaceOf(routes: RegisteredRoute[], pred: (r: RegisteredRoute) => boolean): string[] {
   return [...new Set(routes.filter(pred).map((r) => `${r.method} ${r.url}`))].sort();
 }
+
+// Tuple fields: methods, effective HEAD policy (null for writes), match kind, literal path,
+// regex source, regex flags, and justification. A declaration edit always requires explicit review.
+const EXPECTED_DECLARATIONS = [
+  [["GET"],"follow-get","prefix","/api/health",null,null,"liveness and health probes"],
+  [["GET"],"follow-get","prefix","/api/auth/validate",null,null,"key validation checks the presented key itself"],
+  [["GET"],"follow-get","prefix","/api/waitlist",null,null,"public beta waitlist count (GET /api/waitlist/count)"],
+  [["GET"],"follow-get","prefix","/api/admin/feedback",null,null,"admin feedback export, authenticated by X-Admin-Token in the route"],
+  [["GET"],"follow-get","prefix","/api/onboard/check/",null,null,"invite-code validation"],
+  [["GET"],"follow-get","prefix","/api/onboard/chat",null,null,"onboarding chat health and conversation reads"],
+  [["GET"],"follow-get","prefix","/api/dht/",null,null,"DHT discovery (distributed capability queries)"],
+  [["GET"],"follow-get","prefix","/api/marketplace/",null,null,"marketplace browsing (see what's available)"],
+  [["GET"],"follow-get","prefix","/.well-known/",null,null,"discovery documents"],
+  [["GET"],"follow-get","prefix","/docs",null,null,"docs hub and Swagger UI (/docs/api)"],
+  [["GET"],"follow-get","exact","/api/agents/status",null,null,"network status"],
+  [["GET"],"follow-get","exact","/api/onboard/registrations",null,null,"public registration listing"],
+  [["GET"],"follow-get","exact","/api/orchestrator/templates",null,null,"template directory for unauthenticated landing-page discovery"],
+  [["GET"],"follow-get","exact","/openapi.json",null,null,"OpenAPI 3.x spec (APIs.guru, Smithery, mcp.so); outside /api"],
+  [["GET"],"follow-get","exact","/api/courier-jobs/open",null,null,"open courier-jobs feed: driver agents poll without a key (legacy shim)"],
+  [["GET"],"follow-get","exact","/api/courier-jobs/jobs/open",null,null,"v0.2 compat alias for the open courier-jobs feed (legacy shim)"],
+  [["GET"],"follow-get","exact","/api/courier-jobs/healthz",null,null,"courier-jobs liveness for monitoring (legacy shim)"],
+  [["GET"],"follow-get","exact","/api/job-offers/open",null,null,"open-offers feed: operator agents poll without a key"],
+  [["GET"],"follow-get","exact","/api/job-offers/healthz",null,null,"job-offers liveness for monitoring"],
+  [["GET"],"follow-get","exact","/api/auth/nonce",null,null,"SIWE challenge: login needs a nonce before any key exists"],
+  [["GET"],"follow-get","exact","/api/kernels",null,null,"kernel discovery (creating or upserting a kernel stays authenticated)"],
+  [["GET"],"follow-get","exact","/api/capabilities",null,null,"capability listing (creating one is not public)"],
+  [["GET"],"follow-get","exact","/api/capabilities/types",null,null,"capability type discovery"],
+  [["GET"],"follow-get","exact","/api/artifacts",null,null,"UI-artifact discovery (public listing)"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/capabilities\\/[^/]+(?:\\/button|\\/td)?$","","capability detail, button and thing-description reads"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/operators\\/[^/]+\\/ratings$","","operator rating reads"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/kernels\\/[^/]+\\/agent-card\\.json$","","per-kernel A2A agent card (federated discovery)"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/job-offers\\/[^/]+$","","job-offer detail reads"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/courier-jobs\\/(?:jobs\\/)?[^/]+$","","courier-job detail reads (legacy v0.2 public GET)"],
+  [["GET"],"authenticated","regex",null,"^\\/api\\/artifacts\\/[^/]+$","","UI-artifact recall (the route enforces visibility; HEAD preserves SIWE ownership)"],
+  [["GET"],"follow-get","regex",null,"^\\/api\\/compose\\/registry-snapshot(?:\\/[^/]+)?$","","public compiler-ABI registry snapshot"],
+  [["POST"],null,"exact","/api/auth/provision",null,null,"self-service key provisioning: how a caller gets a key"],
+  [["POST"],null,"exact","/api/auth/verify",null,null,"SIWE signature verify -> session: the login endpoint itself"],
+  [["POST"],null,"exact","/api/waitlist",null,null,"public beta waitlist signup"],
+  [["POST"],null,"exact","/api/beta-apply",null,null,"public beta-tester application"],
+  [["POST"],null,"exact","/api/feedback",null,null,"public feedback sink: cold agents have no key"],
+  [["POST"],null,"exact","/api/feedback/agent-report",null,null,"keyless agent friction report"],
+  [["POST"],null,"exact","/api/onboard/chat",null,null,"layperson conversational onboarding"],
+  [["POST"],null,"exact","/api/onboard/identify-device",null,null,"device identification for the install.html landing page"],
+  [["POST"],null,"exact","/api/capabilities/templates/match",null,null,"landing-page template matcher: a read-only heuristic that stores nothing"],
+  [["POST"],null,"exact","/api/marketplace/roi",null,null,"ROI calculator: pure computation that stores nothing"],
+  [["POST"],null,"exact","/api/carrier/webhook/easypost",null,null,"EasyPost webhook: X-Hmac-Signature verified in routes/carrier.ts (sol #297 finding 15)"],
+  [["POST"],null,"exact","/api/lob/webhook",null,null,"Lob webhook: timestamp-bound HMAC verified in routes/lob.ts (carrier audit L1)"],
+];
+
+const EXPECTED_TEMPLATE_INTERSECTIONS: string[] = [
+  "GET /api/artifacts/:idOrSlug INTERSECTS",
+  "GET /api/capabilities/:capId INTERSECTS",
+  "GET /api/capabilities/:capabilityId/compliance AMBIGUOUS",
+  "GET /api/capabilities/:id/button INTERSECTS",
+  "GET /api/capabilities/:id/td INTERSECTS",
+  "GET /api/capabilities/by-kernel/:kernelId AMBIGUOUS",
+  "GET /api/capabilities/by-type/:type AMBIGUOUS",
+  "GET /api/capabilities/graph-search/:searchId AMBIGUOUS",
+  "GET /api/compose/:id AMBIGUOUS",
+  "GET /api/compose/registry-snapshot/:registryDigest INTERSECTS",
+  "GET /api/courier-jobs/:id INTERSECTS",
+  "GET /api/courier-jobs/jobs/:id INTERSECTS",
+  "GET /api/job-offers/:id INTERSECTS",
+  "GET /api/kernels/:kernelId AMBIGUOUS",
+  "GET /api/kernels/:kernelId/agent-card.json INTERSECTS",
+  "GET /api/kernels/:kernelId/agent-package AMBIGUOUS",
+  "GET /api/kernels/:kernelId/agent-package/suggest AMBIGUOUS",
+  "GET /api/kernels/:kernelId/devices AMBIGUOUS",
+  "GET /api/kernels/:kernelId/jobs AMBIGUOUS",
+  "GET /api/kernels/:kernelId/sdk/:language AMBIGUOUS",
+  "GET /api/kernels/marketplace/:kernelId AMBIGUOUS",
+  "GET /api/marketplace/classes/:id INTERSECTS",
+  "GET /api/marketplace/listings/:id INTERSECTS",
+  "GET /api/marketplace/orders/:id INTERSECTS",
+  "GET /api/onboard/:id/live-data INTERSECTS",
+  "GET /api/onboard/:id/status INTERSECTS",
+  "GET /api/onboard/chat/:id INTERSECTS",
+  "GET /api/onboard/check/:code INTERSECTS",
+  "GET /api/operators/:id/discoverability AMBIGUOUS",
+  "GET /api/operators/:id/ratings INTERSECTS",
+  "GET /api/operators/:slug/channels AMBIGUOUS",
+  "GET /api/operators/:slug/status AMBIGUOUS",
+  "GET /api/operators/by-compliance/:regulationId AMBIGUOUS",
+  "HEAD /api/capabilities/:capId INTERSECTS",
+  "HEAD /api/capabilities/:capabilityId/compliance AMBIGUOUS",
+  "HEAD /api/capabilities/:id/button INTERSECTS",
+  "HEAD /api/capabilities/:id/td INTERSECTS",
+  "HEAD /api/capabilities/by-kernel/:kernelId AMBIGUOUS",
+  "HEAD /api/capabilities/by-type/:type AMBIGUOUS",
+  "HEAD /api/capabilities/graph-search/:searchId AMBIGUOUS",
+  "HEAD /api/compose/:id AMBIGUOUS",
+  "HEAD /api/compose/registry-snapshot/:registryDigest INTERSECTS",
+  "HEAD /api/courier-jobs/:id INTERSECTS",
+  "HEAD /api/courier-jobs/jobs/:id INTERSECTS",
+  "HEAD /api/job-offers/:id INTERSECTS",
+  "HEAD /api/kernels/:kernelId AMBIGUOUS",
+  "HEAD /api/kernels/:kernelId/agent-card.json INTERSECTS",
+  "HEAD /api/kernels/:kernelId/agent-package AMBIGUOUS",
+  "HEAD /api/kernels/:kernelId/agent-package/suggest AMBIGUOUS",
+  "HEAD /api/kernels/:kernelId/devices AMBIGUOUS",
+  "HEAD /api/kernels/:kernelId/jobs AMBIGUOUS",
+  "HEAD /api/kernels/:kernelId/sdk/:language AMBIGUOUS",
+  "HEAD /api/kernels/marketplace/:kernelId AMBIGUOUS",
+  "HEAD /api/marketplace/classes/:id INTERSECTS",
+  "HEAD /api/marketplace/listings/:id INTERSECTS",
+  "HEAD /api/marketplace/orders/:id INTERSECTS",
+  "HEAD /api/onboard/:id/live-data INTERSECTS",
+  "HEAD /api/onboard/:id/status INTERSECTS",
+  "HEAD /api/onboard/chat/:id INTERSECTS",
+  "HEAD /api/onboard/check/:code INTERSECTS",
+  "HEAD /api/operators/:id/discoverability AMBIGUOUS",
+  "HEAD /api/operators/:id/ratings INTERSECTS",
+  "HEAD /api/operators/:slug/channels AMBIGUOUS",
+  "HEAD /api/operators/:slug/status AMBIGUOUS",
+  "HEAD /api/operators/by-compliance/:regulationId AMBIGUOUS",
+];
+
+// Vite's unmodified publicDir="public" and copyPublicDir=true copy these files verbatim.
+// vite.config.ts has no API entries or custom output filenames; all generated assets use assets/.
+const EXPECTED_STATIC_API_INVENTORY = [
+  "GET /api/agent/tools.json AUTHENTICATED",
+  "HEAD /api/agent/tools.json AUTHENTICATED",
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The registered /api/* public surface, pinned explicitly.
@@ -94,8 +372,8 @@ function surfaceOf(routes: RegisteredRoute[], pred: (r: RegisteredRoute) => bool
 //
 // Against master 7d0c27ca (101 pairs) this is: minus POST /api/dht/announce and the four retired
 // marketplace writes (POST /api/marketplace/listings, PUT and DELETE /api/marketplace/listings/:id,
-// POST /api/marketplace/orders); plus the HEAD twin of eight public GETs that master opened for GET
-// only (HEAD follows GET: Fastify answers HEAD with the same handler and no body).
+// POST /api/marketplace/orders); plus the HEAD twin of seven public GETs that master opened for GET
+// only. Artifact-detail HEAD remains authenticated so SIWE owners retain private-artifact access.
 // ─────────────────────────────────────────────────────────────────────────────
 const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "GET /api/admin/feedback",
@@ -147,7 +425,6 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
   "HEAD /api/admin/feedback",
   "HEAD /api/agents/status",
   "HEAD /api/artifacts",
-  "HEAD /api/artifacts/:idOrSlug",
   "HEAD /api/auth/nonce",
   "HEAD /api/auth/validate",
   "HEAD /api/capabilities",
@@ -205,6 +482,87 @@ const EXPECTED_PUBLIC_API_SURFACE: string[] = [
 ];
 
 describe("N43: the registered /api/* surface the gate's allowlist opens", () => {
+  it("DECLARATIONS: methods, HEAD policy, match, literal path, regex source/flags and why are pinned", () => {
+    expect(declarations).toBeInstanceOf(Array);
+    expect(normalizedDeclarations(declarations)).toEqual(EXPECTED_DECLARATIONS);
+  });
+
+  it("INTERSECTIONS: every parameter or wildcard template that could be public is explicitly reviewed", () => {
+    expect(templateIntersections(bootRoutes, declarations)).toEqual(EXPECTED_TEMPLATE_INTERSECTIONS);
+  });
+
+  it("F2 exact parameter exception: changing only cap-a must fail a policy pin", () => {
+    const original = surfaceOf(bootRoutes, (r) => r.url.startsWith("/api/") && isPublic(r));
+    const patchedMatcher: Matcher = (url, method) =>
+      (method === "POST" && url === "/api/capabilities/cap-a/heartbeat") || isPublicRoute(url, method);
+    expect(patchedMatcher("/api/capabilities/cap-a/heartbeat", "POST")).toBe(true);
+    expect(patchedMatcher("/api/capabilities/p-capId/heartbeat", "POST")).toBe(false);
+    const patched = surfaceOf(bootRoutes, (r) => r.url.startsWith("/api/") && patchedMatcher(samplePath(r.url), r.method));
+    expect(patched).toEqual(original); // Demonstrate why the sampled pin alone is insufficient.
+    const patchedDeclarations: PublicRoute[] = [...declarations, {
+      methods: ["POST"], match: "exact", path: "/api/capabilities/cap-a/heartbeat", why: "N43 negative-control exception",
+    }];
+    expect(() => expect(normalizedDeclarations(patchedDeclarations)).toEqual(EXPECTED_DECLARATIONS)).toThrow();
+    expect(() => expect(templateIntersections(bootRoutes, patchedDeclarations)).toEqual(EXPECTED_TEMPLATE_INTERSECTIONS)).toThrow();
+    expect(templateIntersections(bootRoutes, patchedDeclarations)).toContain("POST /api/capabilities/:capId/heartbeat INTERSECTS");
+  });
+
+  it("F2 parameter registration: a health-valued section must fail a template pin", async () => {
+    const cursor = registered.length;
+    const fixtureApp = (await import("fastify")).default();
+    try {
+      fixtureApp.get("/api/:section/__n43_probe", async () => ({ probe: true }));
+      await fixtureApp.ready();
+      const fixtureRoutes = registered.slice(cursor);
+      const fixture = fixtureRoutes.find((route) => route.method === "GET")!;
+      expect(fixture).toEqual({ method: "GET", url: "/api/:section/__n43_probe" });
+      expect(isPublicRoute("/api/health/__n43_probe", "GET")).toBe(true);
+      expect(isPublic(fixture)).toBe(false);
+      const patched = surfaceOf([...bootRoutes, ...fixtureRoutes], (r) => r.url.startsWith("/api/") && isPublic(r));
+      expect(patched).toEqual(EXPECTED_PUBLIC_API_SURFACE);
+      const intersections = templateIntersections([...bootRoutes, ...fixtureRoutes], declarations);
+      expect(intersections).toContain("GET /api/:section/__n43_probe INTERSECTS");
+      expect(() => expect(intersections).toEqual(EXPECTED_TEMPLATE_INTERSECTIONS)).toThrow();
+    } finally {
+      await fixtureApp.close();
+    }
+  });
+
+  it("unsupported regex languages remain ambiguous rather than disappearing from review", () => {
+    const route = { method: "GET", url: "/api/:section/__n43_regex_probe" };
+    for (const path of [
+      /^\/api\/health(?:x)?|^\/api\/other\/[^/]+$/,
+      /^\/api\/health\/?[^/]+$/,
+      /^\/api\/health\/*[^/]+$/,
+      /^\/api\/health\/{0,1}[^/]+$/,
+      /^\/api\/health\/[^/]+$/i,
+    ]) {
+      expect(intersectsEntry(route, { methods: ["GET"], match: "regex", path, why: "conservative regex control" }), path.source).toBe("AMBIGUOUS");
+    }
+  });
+
+  it("F3 production static registrations: capture authenticated tools and public marketplace preview", async () => {
+    const staticPaths = ["/api/agent/tools.json", "/api/marketplace/preview.json"];
+    expect(surfaceOf(productionRoutes, (r) => staticPaths.includes(r.url))).toEqual([
+      "GET /api/agent/tools.json", "GET /api/marketplace/preview.json",
+      "HEAD /api/agent/tools.json", "HEAD /api/marketplace/preview.json",
+    ]);
+    for (const method of ["GET", "HEAD"] as const) {
+      expect(isPublicRoute("/api/agent/tools.json", method)).toBe(false);
+      expect(isPublicRoute("/api/marketplace/preview.json", method)).toBe(true);
+      expect((await app.inject({ method, url: "/api/agent/tools.json" })).statusCode).toBe(401);
+      expect((await app.inject({ method, url: "/api/marketplace/preview.json" })).statusCode).toBe(200);
+    }
+    // This fixture proves the production branch actually contributes to the public inventory.
+    const staticPublic = surfaceOf(productionRoutes, (r) => r.url.startsWith("/api/") && isPublic(r));
+    expect(staticPublic).toContain("GET /api/marketplace/preview.json");
+    expect(() => expect(staticPublic).toEqual(EXPECTED_PUBLIC_API_SURFACE)).toThrow();
+  });
+
+  it("STATIC INVENTORY: dashboard public/api files copied verbatim to dist are pinned with gate classification", async () => {
+    expect(await staticApiInventory()).toEqual(EXPECTED_STATIC_API_INVENTORY);
+  });
+
   it("SNAPSHOT: every registered /api/* (method, route) that isPublicRoute opens (edit deliberately; see HOW TO UPDATE)", () => {
     expect(isPublicRoute, "api-gate.ts exports isPublicRoute").toBeTypeOf("function");
     const publicApi = surfaceOf(bootRoutes, (r) => r.url.startsWith("/api/") && isPublic(r));
@@ -219,10 +577,10 @@ describe("N43: the registered /api/* surface the gate's allowlist opens", () => 
     expect(writes).toHaveLength(12);
   });
 
-  it("HEAD follows GET: the public HEAD set is exactly the public GET set", () => {
+  it("HEAD follows GET except artifact detail, which authenticates to retain SIWE ownership", () => {
     const gets = EXPECTED_PUBLIC_API_SURFACE.filter((l) => l.startsWith("GET ")).map((l) => l.slice(4));
     const heads = EXPECTED_PUBLIC_API_SURFACE.filter((l) => l.startsWith("HEAD ")).map((l) => l.slice(5));
-    expect(heads).toEqual(gets);
+    expect(heads).toEqual(gets.filter((path) => path !== "/api/artifacts/:idOrSlug"));
   });
 
   it("drift check: a new GET under a public prefix would be public the moment it is registered, so the SNAPSHOT would fail until this file is edited", () => {
