@@ -74,6 +74,7 @@ import { bountyRoutes } from "./routes/bounty.js";
 import { poolRoutes } from "./routes/pool.js";
 import { wellKnownRoutes, unimplementedWellKnownBody } from "./routes/well-known.js";
 import { wellKnownAeoRoutes } from "./routes/well-known-aeo.js";
+import { wellKnownAgentRoutes } from "./routes/well-known-agent.js";
 import { appsHttpMcpRoutes, httpMcpRoutes } from "./mcp/http-mcp-server.js";
 import { docsHttpMcpRoutes } from "./mcp/docs-mcp-server.js";
 import { jwksRoutes } from "./routes/jwks.js";
@@ -446,6 +447,7 @@ export async function createGateway(port = 3200) {
   await app.register(wellKnownRoutes);
   // AEO/API/MCP/NLWeb discovery (public, before the API auth gate)
   await app.register(wellKnownAeoRoutes);
+  await app.register(wellKnownAgentRoutes);
   // Streamable HTTP MCP transport — the FULL agent/dev surface (public, before
   // the API auth gate)
   await app.register(httpMcpRoutes);

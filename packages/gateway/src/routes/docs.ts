@@ -6,7 +6,7 @@ import { resolve } from "node:path";
  * Serve project documentation as raw markdown or simple HTML.
  *
  * GET /docs/whitepaper     — PCC technical whitepaper
- * GET /docs/agent-guide    — Agent instructions for onboarding
+ * GET /docs/agent-guide    — Redirect to the generated agent golden path
  * GET /docs/csd-spec       — Capability StructureDefinition design spec
  * GET /docs/setup-spec     — Setup agent technical specification
  * GET /docs/story-plan     — Story Protocol integration plan
@@ -88,6 +88,7 @@ function wrapHtml(title: string, markdown: string): string {
 </head>
 <body>
   <nav class="nav">
+    <a href="/.well-known/agent.md">Agent Golden Path</a>
     <a href="/docs/whitepaper">Whitepaper</a>
     <a href="/agent-package.json">Agent Package</a>
     <a href="/docs/csd-spec">CSD Spec</a>
@@ -118,13 +119,17 @@ function wrapHtml(title: string, markdown: string): string {
 
 const DOCS: Record<string, { title: string; path: string }> = {
   whitepaper: { title: "Technical Whitepaper", path: "apps/dashboard/public/whitepaper.md" },
-  "agent-guide": { title: "Agent Onboarding Guide", path: "packages/onboard-kit/AGENT_INSTRUCTIONS.md" },
   "csd-spec": { title: "Capability StructureDefinitions", path: "docs/CAPABILITY_PROFILES.md" },
   "setup-spec": { title: "Setup Agent Specification", path: "docs/SETUP_AGENT_SPEC.md" },
   "story-plan": { title: "Story Protocol Integration", path: "docs/STORY_PROTOCOL_INTEGRATION_PLAN.md" },
 };
 
 export async function docRoutes(app: FastifyInstance) {
+  // Retire every presentation of the old guide in favor of one agent entry point.
+  app.get("/docs/agent-guide", async (_req, reply) => {
+    return reply.redirect("/.well-known/agent.md", 308);
+  });
+
   // Index page
   app.get("/docs", async (_req, reply) => {
     const html = `<!DOCTYPE html>
@@ -165,7 +170,7 @@ export async function docRoutes(app: FastifyInstance) {
     <button class="copy-btn" id="copy-agent" onclick="copyAgentPrompt()">Copy the agent prompt</button>
     <span id="copy-status" style="margin-left: 1rem; color: #94a3b8; font-size: 0.85rem;"></span>
     <br><br>
-    <small><a href="/snippet.md">View the prompt</a> · <a href="/agent-package.json">Agent package</a></small>
+    <small><a href="/.well-known/agent.md">Start here: agent golden path</a> · <a href="/snippet.md">View the prompt</a> · <a href="/agent-package.json">Agent package</a></small>
   </div>
 
   <div class="cards">

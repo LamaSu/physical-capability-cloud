@@ -132,6 +132,7 @@ RUN cd packages/db && node -e "const Database = require('better-sqlite3'); const
 RUN set -e; \
     for f in \
       apps/dashboard/public/agent-package.json \
+      apps/dashboard/public/.well-known/agent.md \
       apps/dashboard/public/ui-kit/v1/manifest.schema.json \
       apps/dashboard/public/ui-kit/v1/pcc-ui.js \
       apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js \

@@ -588,6 +588,7 @@ export async function wellKnownRoutes(app: FastifyInstance) {
 
 /** Paths under /.well-known/ that genuinely resolve today (routes + static). */
 export const PUBLISHED_WELL_KNOWN = [
+  "/.well-known/agent.md",
   "/.well-known/agent-card.json",
   "/.well-known/agent-registration.json",
   "/.well-known/agent-descriptions",
