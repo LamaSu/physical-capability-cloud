@@ -3,7 +3,7 @@
  * The sends, receipts and read-backs against real contracts are in packages/contracts/ts/__tests__/
  * buyer-funding.anvil.test.ts.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   decodeFunctionData,
   encodeErrorResult,
@@ -153,6 +153,37 @@ describe("approveAndFund: refusals before anything is sent", () => {
     chain.state.walletChainId = 1;
     expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
   });
+  it("CHAIN_MISMATCH: a wallet with no configured chain reports another chain id; nothing is sent (guard)", async () => {
+    const { chain, fund } = await setup();
+    const wallet = chain.wallet();
+    expect(wallet.chain).toBeUndefined();
+    chain.state.walletChainId = 1;
+    expect(await refusal(fund(wallet))).toBe("CHAIN_MISMATCH");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("CHAIN_MISMATCH: the wallet with no chain changes network during approve simulation; refuse before the approve send", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.on(fx.usdc, ERC20_ABI, "approve", () => {
+      chain.state.walletChainId = 1;
+      return true;
+    });
+    expect(await refusal(fund())).toBe("CHAIN_MISMATCH");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("CHAIN_MISMATCH: the configured wallet chain differs from the prepared chain; refuse before sending", async () => {
+    const { chain, fund } = await setup();
+    const wallet = chain.wallet();
+    Object.defineProperty(wallet, "chain", { value: { id: 1, name: "other chain", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: { default: { http: [] } } } });
+    expect(await refusal(fund(wallet))).toBe("CHAIN_MISMATCH");
+    expect(chain.sends()).toEqual([]);
+  });
+  it("LIVE_CHECK_FAILED: the fresh wallet chain-id read before approve is unavailable; nothing is sent", async () => {
+    const { fx, chain, fund } = await setup();
+    const wallet = chain.wallet();
+    vi.spyOn(wallet, "getChainId").mockResolvedValueOnce(Number(fx.chainId)).mockRejectedValue(new Error("wallet disconnected"));
+    expect(await refusal(fund(wallet))).toBe("LIVE_CHECK_FAILED");
+    expect(chain.sends()).toEqual([]);
+  });
   // reviewer-charlie L2 (implementer-delta): the reference is the policy's chain, not the other client's.
   it("CHAIN_MISMATCH: the wallet and the read client both moved to the same chain, which is not the policy's", async () => {
     const { chain, fund, simulated } = await setup();
@@ -254,6 +285,29 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     chain.state.log
       .filter((x) => x.method === "eth_call" && (x.params as unknown[])[1] === "latest")
       .map((x) => (x.params as [{ data: Hex }])[0].data);
+
+  it("both sends carry the prepared chain explicitly when wallet.chain is undefined", async () => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    const wallet = chain.wallet();
+    expect(wallet.chain).toBeUndefined();
+    const send = vi.spyOn(wallet, "sendTransaction");
+    chain.state.afterSend = (i) => { if (i === 1) fundedAs(fx.jobPolicyHash); };
+    expect((await fund(wallet)).outcome).toBe("committed");
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls.map(([args]) => args.chain?.id)).toEqual([Number(prepared.chainId), Number(prepared.chainId)]);
+  });
+
+  it("a wallet with no chain changes network after approve: refuse the fund send and preserve the approve", async () => {
+    const { fx, chain, fund } = await setup();
+    chain.state.afterSend = (i) => { if (i === 0) chain.state.walletChainId = 1; };
+    const result = await fund();
+    expect(result.stage).toBe("fund");
+    expect(result.outcome).toBe("unchanged");
+    expect(result.detail).toContain("CHAIN_MISMATCH");
+    expect(result.approve).toEqual({ kind: "mined", status: "success", txHash: chain.state.sent[0]!.hash, blockHash: chain.state.sent[0]!.block.hash });
+    expect(result.allowance).toBe(fx.totalGross);
+    expect(chain.state.sent).toHaveLength(1);
+  });
 
   it("committed: approve(escrow, ΣG) then a payer-sent fund(), simulated and sent byte for byte, funded per policy()", async () => {
     const { fx, chain, prepared, fund, fundedAs } = await setup();

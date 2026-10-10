@@ -27,7 +27,7 @@
  * transactions) before retrying. A retried `approveAndFund` sends nothing while the payer has a transaction pending
  * (PAYER_TX_PENDING), and returns `committed` without sending once the escrow reads funded under this policy.
  */
-import { encodeFunctionData, zeroAddress, zeroHash, type Address, type Hex, type PublicClient, type WalletClient } from "viem";
+import { encodeFunctionData, zeroAddress, zeroHash, type Address, type Chain, type Hex, type PublicClient, type WalletClient } from "viem";
 import { assertChain, describeRevert, pinBlock, pinnedReader, type PinnedBlock } from "./chain.js";
 import { refuse } from "./errors.js";
 import { DEFAULT_MARGIN_SECONDS, assertPrepared, checkTiming, type PreparedFunding } from "./prepare.js";
@@ -148,16 +148,38 @@ export async function readFundedState(args: { publicClient: PublicClient; prepar
   return fundedStateAt(args.publicClient, block, prepared);
 }
 
+/** Read the wallet's current network immediately before each send, and bind viem's send-time check explicitly. */
+async function chainForSend(wallet: WalletClient, chainId: bigint): Promise<Chain> {
+  let walletChain: number;
+  try {
+    walletChain = await wallet.getChainId();
+  } catch (e) {
+    refuse("LIVE_CHECK_FAILED", `could not read the wallet's chain id before sending: ${describeRevert(e)}`);
+  }
+  if (BigInt(walletChain) !== chainId) refuse("CHAIN_MISMATCH", `the wallet is on chain ${walletChain}; the prepared policy is for chain ${chainId}`);
+  if (wallet.chain && BigInt(wallet.chain.id) !== chainId) {
+    refuse("CHAIN_MISMATCH", `the wallet's configured chain is ${wallet.chain.id}; the prepared policy is for chain ${chainId}`);
+  }
+  // With no configured chain, an explicit descriptor still gives viem the expected id for its own last check.
+  return wallet.chain ?? {
+    id: Number(chainId),
+    name: `PCC funding chain ${chainId}`,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+    rpcUrls: { default: { http: [] } },
+  };
+}
+
 async function sendAndWait(
   wallet: WalletClient,
   publicClient: PublicClient,
+  chain: Chain,
   to: Address,
   data: Hex,
   opts: { confirmations: number; timeout: number },
 ): Promise<SendResult> {
   let hash: Hex;
   try {
-    hash = await wallet.sendTransaction({ account: wallet.account!, chain: wallet.chain ?? null, to, data, dataSuffix: "0x" });
+    hash = await wallet.sendTransaction({ account: wallet.account!, chain, to, data, dataSuffix: "0x" });
   } catch (e) {
     // A throw here cannot prove nothing was broadcast (a transport error can follow acceptance), so it is unknown.
     return { kind: "unknown", reason: `the send threw and may have been broadcast: ${describeRevert(e)}` };
@@ -258,7 +280,8 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
   } catch (e) {
     refuse("SIMULATION_REVERTED", `approve(${prepared.escrow}, ${prepared.totalGross}) would revert: ${describeRevert(e)}`);
   }
-  const approve = await sendAndWait(wallet, publicClient, prepared.usdc, approveData, opts);
+  const approveChain = await chainForSend(wallet, prepared.chainId);
+  const approve = await sendAndWait(wallet, publicClient, approveChain, prepared.usdc, approveData, opts);
   const approveTx = approve.kind === "not_sent" ? undefined : approve.txHash;
   const stopAtApprove = async (approve: SendResult, why: string, allowance?: bigint | "unreadable"): Promise<FundingResult> => {
     const readBack = await readFundedState({ publicClient, prepared });
@@ -315,7 +338,14 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
       detail: `fund() would revert (${why}); it was not sent. The approve stands: allowance ${prepared.totalGross} to the escrow`,
     };
   }
-  const fund = await sendAndWait(wallet, publicClient, prepared.escrow, fundData, opts);
+  let fund: SendResult;
+  try {
+    const fundChain = await chainForSend(wallet, prepared.chainId);
+    fund = await sendAndWait(wallet, publicClient, fundChain, prepared.escrow, fundData, opts);
+  } catch (e) {
+    // The approve already happened, so a send-time chain refusal is a result; this fund() was never sent.
+    fund = { kind: "not_sent", reason: e instanceof Error ? e.message : String(e) };
+  }
   const readBack =
     fund.kind === "mined"
       ? await readFundedState({ publicClient, prepared, blockHash: fund.blockHash })
