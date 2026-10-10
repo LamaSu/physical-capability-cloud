@@ -4,15 +4,15 @@
  * DISABLED on the gateway: POST /api/pgtr/relay answers 501 PGTR_RELAY_DISABLED
  * (see PGTRClient below).
  *
- * Enables keyless agent authentication by bundling EIP-3009 USDC payment
- * authorizations with target contract calls. The client:
+ * Originally designed to enable keyless agent authentication by bundling EIP-3009
+ * USDC payment authorizations with target contract calls. The intended flow, now disabled:
  *
  *   1. Builds the relay request (target + callData + payment amount)
  *   2. Sends it to the gateway's PGTR relay endpoint
  *   3. The gateway relayer calls PCCForwarder.relay() on-chain
  *   4. Returns the transaction hash
  *
- * Usage:
+ * Intended usage (disabled on the gateway; relayAction throws):
  *   import { PGTRClient } from "@pcc/payments";
  *   const client = new PGTRClient({ gatewayUrl: "https://gateway.pcc.dev" });
  *   const result = await client.relayAction({
@@ -66,15 +66,18 @@ export class PGTRClient {
   }
 
   /**
-   * Relay a payment-gated action through the PCCForwarder.
+   * DISABLED: against a PCC gateway with the relay disabled, this method always throws:
+   * "PGTR relay failed (501): ..." when the request reaches the route, or an earlier
+   * global refusal (401, 403, 429 and so on).
    *
-   * The caller must have already signed an EIP-3009 transferWithAuthorization
-   * for the USDC payment. The v/r/s components and nonce are included in the
-   * request.
+   * Intended to relay a payment-gated action through the PCCForwarder, with an
+   * EIP-3009 transferWithAuthorization already signed for the USDC payment.
+   * The v/r/s components and nonce are included in the request.
    *
    * @param request - The relay request with target, callData, payment auth
-   * @returns The relay result with transaction hash
-   * @throws Error if the relay fails (network, validation, or on-chain revert)
+   * @returns The relay result with transaction hash only if a gateway accepts the relay;
+   * a PCC gateway with the relay disabled never returns a result
+   * @throws Error for the route's 501, an earlier global refusal, or a network failure
    */
   async relayAction(request: PGTRRelayRequest): Promise<PGTRRelayResult> {
     const headers: Record<string, string> = {
