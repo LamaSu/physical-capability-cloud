@@ -13,6 +13,8 @@ to a loopback gateway; only the gateway's answers are scripted.
 """
 
 import json
+import http.client
+import io
 import os
 import signal
 import threading
@@ -192,3 +194,111 @@ def test_a_banner_that_cannot_be_printed_does_not_stop_the_daemon(surroundings):
     # The loop ran and the daemon stopped cleanly: an offline heartbeat, no PID or state left.
     assert gateway.paths()[-1] == "/api/operator/heartbeat"
     assert not os.path.exists(pid_file) and not os.path.exists(state_file)
+
+
+class WireGateway:
+    """Real urllib/HTTP parsing over scripted bytes; no sandbox socket is needed."""
+
+    url = "http://127.0.0.1:3200"
+
+    def __init__(self, monkeypatch, *answers):
+        from pcc_node import http_util
+
+        self.answers = list(answers)
+        self.requests = []
+        gateway = self
+        real_open = http_util._GATEWAY_OPENER.open
+
+        class Socket:
+            def makefile(self, *args):
+                raw = gateway.answers.pop(0) if gateway.answers else _wire_answer(200, b"{}")
+                return io.BytesIO(raw)
+
+            def sendall(self, data):
+                pass
+
+            def close(self):
+                pass
+
+        def connect(conn):
+            conn.sock = Socket()
+
+        def tracked_open(req, **kwargs):
+            gateway.requests.append((req.get_method(), req.selector))
+            return real_open(req, **kwargs)
+
+        monkeypatch.setattr(http.client.HTTPConnection, "connect", connect)
+        monkeypatch.setattr(http_util._GATEWAY_OPENER, "open", tracked_open)
+
+    def paths(self):
+        return [path for _, path in self.requests]
+
+
+def _wire_answer(status, body, length=None):
+    return (f"HTTP/1.1 {status} Answer\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body) if length is None else length}\r\n"
+            "Connection: close\r\n\r\n").encode() + body
+
+
+@pytest.mark.parametrize("phase", ["first", "daemon"])
+@pytest.mark.parametrize("answer, expected_status", [
+    pytest.param(_wire_answer(401, b'{"error": "denied"}', 100), 0, id="truncated-refusal"),
+    pytest.param(_wire_answer(201, b'{"id":"k1"}', 100), 0, id="truncated-success"),
+    pytest.param(b"not an HTTP status\r\n\r\n", 0, id="malformed-status"),
+    pytest.param(_wire_answer(201, b'{"id":'), 0, id="malformed-json"),
+    pytest.param(_wire_answer(201, b'[]'), 0, id="unexpected-array"),
+    pytest.param(_wire_answer(201, b'null'), 0, id="unexpected-null"),
+])
+def test_malformed_registration_stops_start(surroundings, tmp_path, monkeypatch,
+                                           phase, answer, expected_status):
+    pid_file, state_file = surroundings
+    with open(state_file, "w") as f:
+        json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
+    answers = ([_wire_answer(201, b'{"id":"k1"}')] if phase == "daemon" else []) + [answer]
+    gateway = WireGateway(monkeypatch, *answers)
+    running = []
+    real_daemon = daemon.run_daemon
+
+    def observed_daemon(config, *, on_running):
+        def callback():
+            running.append(True)
+            on_running()
+        return real_daemon(config, on_running=callback)
+
+    monkeypatch.setattr("pcc_node.cli.run_daemon", observed_daemon)
+    result = _start(tmp_path, gateway)
+    assert result.exit_code == 1, result.output
+    assert BANNER not in result.output and "Press Ctrl+C" not in result.output, result.output
+    assert f"Registration failed (HTTP {expected_status})" in result.output, result.output
+    assert running == []
+    assert gateway.paths() == [KERNELS] * (2 if phase == "daemon" else 1)
+    assert not os.path.exists(pid_file)
+    if phase == "daemon":
+        assert not os.path.exists(state_file)
+
+
+def test_unexpected_registration_exception_cleans_up_and_never_runs(surroundings, monkeypatch):
+    pid_file, state_file = surroundings
+    with open(state_file, "w") as f:
+        json.dump({"kernel_id": "k-old", "pid": os.getpid()}, f)
+    register = mock.Mock(side_effect=RuntimeError("unexpected registration failure"))
+    client = mock.Mock()
+    monkeypatch.setattr(daemon, "register_kernel", register)
+    monkeypatch.setattr(daemon, "PCCGatewayClient", client)
+    running = []
+    with pytest.raises(RegistrationError) as refused:
+        daemon.run_daemon(NodeConfig(devices=[{"id": "d1"}]),
+                          on_running=lambda: running.append(True))
+    assert refused.value.status == 0
+    assert running == []
+    client.assert_not_called()
+    assert not os.path.exists(pid_file) and not os.path.exists(state_file)
+
+
+def test_complete_wire_registration_starts_normally(surroundings, tmp_path, monkeypatch):
+    gateway = WireGateway(monkeypatch, _wire_answer(201, b'{"id":"k1"}'),
+                          _wire_answer(200, b'{"id":"k1"}'))
+    result = _start(tmp_path, gateway)
+    assert result.exit_code == 0, result.output
+    assert BANNER in result.output
+    assert gateway.paths()[:3] == [KERNELS, KERNELS, "/api/operator/heartbeat"]
