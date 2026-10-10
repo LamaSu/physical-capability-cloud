@@ -1,0 +1,74 @@
+/**
+ * Buyer funding Stage 2: the FundingRecordStore port's contract, as the conformance suite in
+ * helpers/funding-record-store-conformance.ts states it (fund-s2 review LOW-1; the steward's ruling 3).
+ * The test store passes it; each deliberately broken store fails exactly the checks of the property
+ * it breaks, so the suite is not vacuous.
+ */
+import { describe, it, expect } from "vitest";
+import { sql } from "@pcc/store";
+import { closeStore, getStore, initStore } from "../db.js";
+import {
+  describeFundingRecordStoreConformance,
+  FUNDING_RECORD_STORE_CONTRACT,
+  withFreshFundingRecordStore,
+  type ConformanceStore,
+} from "./helpers/funding-record-store-conformance.js";
+import {
+  installCaseExactFundingRecordStore,
+  installChainBlindFundingRecordStore,
+  installFinalityBlindFundingRecordStore,
+  installTestFundingRecordStore,
+} from "./helpers/test-funding-record-store.js";
+
+describeFundingRecordStoreConformance("the test store (helpers/test-funding-record-store.ts)", installTestFundingRecordStore);
+
+/** Which contract checks a store passes, in the suite's order. */
+const outcomes = (makeStore: () => ConformanceStore) =>
+  FUNDING_RECORD_STORE_CONTRACT.map((check) => {
+    try {
+      withFreshFundingRecordStore(makeStore, (store) => check.run(store));
+      return "passed";
+    } catch {
+      return "failed";
+    }
+  });
+
+describe("the conformance suite is not vacuous", () => {
+  it("(neg-conformance-case) a store that matches escrow letter case exactly, with no unique escrow key, fails the three checks that need one record per escrow, and only them", () => {
+    // The per-escrow check (any letter case), the finalized-uniqueness check's "a second finalized
+    // record for the escrow throws", and the chain-key check's "the key is still unique, in any case".
+    expect(outcomes(installCaseExactFundingRecordStore)).toEqual(["passed", "failed", "passed", "passed", "failed", "failed"]);
+  });
+
+  it("(neg-conformance-finality) a store that ignores finality fails the two finalized-only checks, and only them (ruling 3)", () => {
+    expect(outcomes(installFinalityBlindFundingRecordStore)).toEqual(["passed", "passed", "passed", "failed", "failed", "passed"]);
+  });
+
+  it("(neg-conformance-chain) a store that keys the escrow by its address alone fails the chain-key check, and only it (ruling 4)", () => {
+    expect(outcomes(installChainBlindFundingRecordStore)).toEqual(["passed", "passed", "passed", "passed", "passed", "failed"]);
+  });
+});
+
+describe("withFreshFundingRecordStore", () => {
+  it("(neg-conformance-open) refuses to run over a store that is already open, and leaves that store as it was (review NIT-2)", () => {
+    const saved = process.env.PCC_DB_PATH;
+    process.env.PCC_DB_PATH = ":memory:";
+    initStore({ seed: false });
+    try {
+      const open = getStore();
+      open.db.run(sql`CREATE TEMP TABLE nit2_marker (x INTEGER)`);
+      open.db.run(sql`INSERT INTO nit2_marker (x) VALUES (7)`);
+      expect(() => withFreshFundingRecordStore(installTestFundingRecordStore, () => "ran")).toThrow(/already open/);
+      // The open store is the same one, still open, its data intact.
+      expect(getStore()).toBe(open);
+      expect(open.db.get<{ x: number }>(sql`SELECT x FROM nit2_marker`).x).toBe(7);
+    } finally {
+      closeStore();
+      if (saved === undefined) delete process.env.PCC_DB_PATH;
+      else process.env.PCC_DB_PATH = saved;
+    }
+    // With no store open it runs, and closes its own after.
+    expect(withFreshFundingRecordStore(installTestFundingRecordStore, () => "ran")).toBe("ran");
+    expect(() => getStore()).toThrow();
+  });
+});

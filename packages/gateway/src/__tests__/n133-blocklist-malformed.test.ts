@@ -24,7 +24,7 @@ import { a2aTasksRoutes, __resetA2ATasksForTest } from "../routes/a2a-tasks.js";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { schema, eq } from "@pcc/store";
 import { actAsJobParty } from "./helpers/job-read-party.js";
-import { acceptanceFor } from "../services/scope-acceptance.js";
+import { acceptanceFor, blockListUnreadable } from "../services/scope-acceptance.js";
 
 const KERNEL = "kernel-nyc"; // operator 0x1111…, seeded with the default (manual) policy
 const LAB = "kernel-nanoclaw"; // operator 0x8888…, seeded in "policy" mode
@@ -64,6 +64,33 @@ const ACCEPTING: ReadonlyArray<readonly [label: string, policy: Record<string, u
   ["auto", { approvalMode: "auto" }],
   ["policy, the buyer trusted", { approvalMode: "policy", trustedAgents: [BUYER] }],
 ];
+
+describe("blockListUnreadable: the mint and reconcile share one predicate", () => {
+  it("a non-object policy cannot show the buyer off its block list", () => {
+    for (const policy of [undefined, null, "x", 7, [], [BUYER]]) {
+      expect(blockListUnreadable(policy), String(policy)).toBe(true);
+    }
+  });
+
+  it("each malformed block list is unreadable, including a hole", () => {
+    for (const [label, blockedAgents] of MALFORMED) {
+      expect(blockListUnreadable({ approvalMode: "auto", blockedAgents }), label).toBe(true);
+    }
+  });
+
+  it("a hole between strings is unreadable, though every skips it", () => {
+    const blockedAgents = [OTHER];
+    blockedAgents[2] = BUYER;
+    expect(blockListUnreadable({ approvalMode: "auto", blockedAgents })).toBe(true);
+  });
+
+  it("an absent or undefined list and arrays of strings are readable, even when naming the buyer", () => {
+    expect(blockListUnreadable({ approvalMode: "auto" })).toBe(false);
+    for (const blockedAgents of [undefined, [], [OTHER], [OTHER, BUYER]]) {
+      expect(blockListUnreadable({ approvalMode: "auto", blockedAgents }), JSON.stringify(blockedAgents)).toBe(false);
+    }
+  });
+});
 
 describe("acceptanceFor: a block list it can't read", () => {
   it("present and not an array of strings: awaiting_operator under auto and under a policy trusting the buyer, never accepted or refused", () => {
