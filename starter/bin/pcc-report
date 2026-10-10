@@ -36,7 +36,7 @@ TARGETS = ["runbook", "agent-package", "docs", "code", "process", "other"]
 STATE = ".pcc"
 
 _REDACTIONS = [
-    # A PEM private key, whole or cut off: the provisioning response carries one.
+    # A PEM private key, whole or cut off: requests without publicKey may return one; local key files hold one.
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.S), "[redacted-pem]"),
     # The value of any secret-named JSON field ("private_key_pkcs8_base64": "...", "api_key": "...").
     (re.compile(r'("[A-Za-z0-9_]*(?:private_?key|secret|api_?key|password|mnemonic|seed)[A-Za-z0-9_]*"\s*:\s*")[^"]*"', re.I), r'\1[redacted]"'),
