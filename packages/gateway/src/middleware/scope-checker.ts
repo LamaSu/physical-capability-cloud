@@ -1,8 +1,9 @@
 /**
  * Scope Checker middleware — API key scope validation against endpoint requirements.
  *
- * Attaches an `onRequest` hook that validates the caller's scopes after api-gate
- * has already resolved the principal: either req.apiKeyId (an API key), or just
+ * Attaches an `onRequest` hook after apiGate in createGateway, before body parsing
+ * and route-level onRequest hooks. apiGate has already resolved the principal
+ * on authenticated routes: either req.apiKeyId (an API key), or just
  * req.userId with no req.apiKeyId (a SIWE wallet session, which proves identity
  * but carries no scopes). Endpoint scope requirements come from TWO sources that
  * both ALWAYS apply:

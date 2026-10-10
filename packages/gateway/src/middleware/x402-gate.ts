@@ -1,7 +1,8 @@
 /**
  * Fastify payment gate — supports both MPP (mppx/Tempo, default) and x402 (legacy).
  *
- * Registers as a Fastify plugin. Protected routes return 402
+ * Each protocol registers an onRequest hook after apiGate and scopeChecker in
+ * createGateway, before body parsing. Protected routes return 402
  * with payment requirements unless the request carries valid payment.
  *
  * Protocol selection via environment variable:

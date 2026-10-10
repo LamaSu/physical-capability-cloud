@@ -20,11 +20,12 @@ import { canOpenSSE, trackSSEOpen, trackSSEClose } from "../middleware/security-
  * The handler below stores and gossips a caller-chosen kernelId, DID, endpoints and TTL, with no check
  * that the caller owns the kernel. It was dead while apiGate treated "/api/dht/" as public for every
  * method: apiGate skipped the route, never set req.apiKeyId or req.userId, and the handler answered
- * 401 to everyone. N43 makes "/api/dht/" public for GET only, so apiGate now authenticates the POST,
- * and any API key or SIWE session would reach the handler and could announce ANY kernel, poisoning the
- * registry. Until an announcement is bound to its kernel's owner (the design of WP-A 8dbb8e3b), the
- * route's onRequest hook answers every request with this 501. apiGate's onRequest hook runs before a
- * route-level one, so a caller with no credentials gets apiGate's 401 first.
+ * 401 to everyone. N43 makes "/api/dht/" public for GET and HEAD, so apiGate now authenticates the
+ * POST. A caller that passes the earlier hooks would reach the handler and could announce ANY
+ * kernel, poisoning the registry. Until an announcement is bound to its kernel's owner (the design
+ * of WP-A 8dbb8e3b), the route's onRequest hook answers callers that reach it with this 501, before
+ * body parsing. apiGate and scopeChecker run as earlier onRequest hooks: a caller with no credentials
+ * gets apiGate's 401, and a limited API key may receive a scope refusal before the route's 501.
  */
 export const DHT_ANNOUNCE_DISABLED_REFUSAL = {
   error: "not_implemented",
@@ -96,12 +97,12 @@ export async function dhtWebSocketRoutes(app: FastifyInstance) {
 
   // ── REST: announce capabilities (DISABLED: DHT_ANNOUNCE_DISABLED_REFUSAL) ──
   app.post("/api/dht/announce", {
-    // This hook answers every request before any content-type parser reads the body. Returning reply
-    // ends the request stage, so the handler below never runs: nothing is stored or gossiped. The
-    // handler is kept unchanged for the owner-bound redesign.
+    // For requests that pass the earlier apiGate and scopeChecker onRequest hooks, this refusal runs
+    // before any content-type parser reads the body. Returning reply ends the request stage, so the
+    // handler below never runs: nothing is stored or gossiped. It remains for the owner-bound redesign.
     onRequest: async (_req, reply) => reply.code(501).send(DHT_ANNOUNCE_DISABLED_REFUSAL),
   }, async (req, reply) => {
-    // Require authentication — prevents DHT registry poisoning with fake kernels
+    // Legacy authentication check; it does not bind the caller to the announced kernel.
     const apiKeyId = (req as any).apiKeyId;
     const operatorId = (req as any).operatorId;
     const userId = (req as any).userId;
