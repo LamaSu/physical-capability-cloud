@@ -38,6 +38,8 @@ async function expectFailure(
     expect(error).toBeInstanceOf(SecretFileError);
     expect((error as SecretFileError).code).toBe(code);
     expect((error as SecretFileError).path).toBe(path);
+    expect((error as SecretFileError).message).toBe(`${code}: ${path}`);
+    expect(Object.hasOwn(error as object, "cause")).toBe(false);
   }
 }
 
@@ -126,6 +128,18 @@ describe("readSecretFile", () => {
       return originalOpen(...args);
     });
     await expectFailure(readSecretFile(path), "changed_during_open", path);
+  });
+
+  it("refuses a symlink swapped in between lstat and open", async () => {
+    const path = await write();
+    const originalOpen = fs.open.bind(fs);
+    vi.spyOn(fs, "open").mockImplementationOnce(async (...args) => {
+      const target = join(directory, "original");
+      await fs.rename(path, target);
+      await fs.symlink(target, path);
+      return originalOpen(...args);
+    });
+    await expectFailure(readSecretFile(path), "symlink", path);
   });
 
   it("rechecks mode on the opened file", async () => {

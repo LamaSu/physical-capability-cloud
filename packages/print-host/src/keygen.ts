@@ -148,7 +148,13 @@ export async function generateHostKeys(outDir: string, options: GenerateHostKeys
   }
   const now = options.now ?? new Date();
   if (!Number.isFinite(now.getTime())) throw new KeyGenerationError("bad_time", outDir);
-  if (options.notAfter !== undefined && !isUtcTimestamp(options.notAfter)) throw new KeyGenerationError("bad_not_after", outDir);
+  const createdAt = now.toISOString();
+  // createdAt is the same instant as now; a newly generated key must be valid
+  // strictly after that instant, including when the caller supplies the clock.
+  if (options.notAfter !== undefined &&
+      (!isUtcTimestamp(options.notAfter) || Date.parse(options.notAfter) <= now.getTime())) {
+    throw new KeyGenerationError("bad_not_after", outDir);
+  }
   const directory = await prepareDirectory(outDir, uid);
   const paths = {
     deviceKeyFile: join(outDir, "device-key.json"),
@@ -175,7 +181,6 @@ export async function generateHostKeys(outDir: string, options: GenerateHostKeys
     signer.secretKey.fill(0); // keygen needs only the derived public half.
     const privateKey = generatePrivateKey();
     const operatorAddress = privateKeyToAccount(privateKey).address;
-    const createdAt = now.toISOString();
     const expiry = options.notAfter === undefined ? {} : { notAfter: options.notAfter };
     await writeExclusive(pinnedPaths.deviceKeyFile, paths.deviceKeyFile, {
       kind: "pcc-printhost.device-key", version: 1, algorithm: "ed25519",

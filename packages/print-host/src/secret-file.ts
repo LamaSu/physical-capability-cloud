@@ -20,7 +20,7 @@ export class SecretFileError extends Error {
   readonly path: string;
 
   constructor(code: SecretFileErrorCode, path: string) {
-    super(`${path}: ${code}`);
+    super(`${code}: ${path}`);
     this.name = "SecretFileError";
     this.code = code;
     this.path = path;

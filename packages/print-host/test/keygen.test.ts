@@ -35,6 +35,10 @@ function assertNoLeak(value: unknown, rawSecrets: string[]): void {
     }
   }
 }
+function keyFileOpenPaths(): string[] {
+  return vi.mocked(fs.open).mock.calls.map(([path]) => String(path))
+    .filter((path) => /\/(?:device-key|operator-key|public)\.json$/.test(path));
+}
 
 describe("host key generation", () => {
   it("creates a private directory, two loadable private files, and the public identity", async () => {
@@ -74,6 +78,40 @@ describe("host key generation", () => {
       previous.fill(0);
     });
   }
+
+  it("checks an existing operator key before opening the device key", async () => {
+    const directory = join(parent, "operator-precheck");
+    await fs.mkdir(directory, { mode: 0o700 });
+    const path = join(directory, "operator-key.json");
+    const previous = randomBytes(80);
+    await fs.writeFile(path, previous, { mode: 0o600 });
+    vi.mocked(fs.open).mockClear();
+    await expect(generateHostKeys(directory)).rejects.toMatchObject({
+      code: "already_exists", message: `already_exists: ${path}`,
+    });
+    expect(keyFileOpenPaths()).toEqual([]);
+    expect((await fs.readFile(path)).equals(previous)).toBe(true);
+    previous.fill(0);
+  });
+
+  it("opens every generated key file through the pinned directory descriptor", async () => {
+    await generateHostKeys(join(parent, "pinned-opens"));
+    const openedPaths = keyFileOpenPaths();
+    expect(openedPaths).toHaveLength(3);
+    for (const path of openedPaths) expect(path.startsWith("/proc/self/fd/")).toBe(true);
+  });
+
+  it("rejects an existing 0755 directory before opening any key file", async () => {
+    const directory = join(parent, "unsafe-opens");
+    await fs.mkdir(directory, { mode: 0o700 });
+    await fs.chmod(directory, 0o755);
+    vi.mocked(fs.open).mockClear();
+    await expect(generateHostKeys(directory)).rejects.toMatchObject({
+      code: "bad_mode", message: `bad_mode: ${directory}`,
+    });
+    expect(keyFileOpenPaths()).toEqual([]);
+    expect(await fs.readdir(directory)).toEqual([]);
+  });
 
   it("two fresh runs create different keys", async () => {
     const first = await generateHostKeys(join(parent, "one"));
@@ -183,6 +221,33 @@ describe("host key generation", () => {
       expect(error instanceof KeyGenerationError).toBe(true);
       expect((error as KeyGenerationError).code === code).toBe(true);
       assertNoLeak(error, [malformed]);
+    }
+  });
+
+  it("rejects expiry at or before the generation time before opening any files", async () => {
+    const now = new Date("2030-01-01T00:00:00.500Z");
+    for (const notAfter of [
+      "2029-12-31T23:59:59Z", "2030-01-01T00:00:00Z", "2030-01-01T00:00:00.500Z",
+    ]) {
+      const directory = join(parent, `expired-${Date.parse(notAfter)}`);
+      vi.mocked(fs.open).mockClear();
+      await expect(generateHostKeys(directory, { now, notAfter })).rejects.toMatchObject({
+        code: "bad_not_after", message: `bad_not_after: ${directory}`,
+      });
+      expect(vi.mocked(fs.open)).not.toHaveBeenCalled();
+      await expect(fs.lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+  });
+
+  it("accepts expiry strictly after createdAt", async () => {
+    const now = new Date("2030-01-01T00:00:00.500Z");
+    const notAfter = "2030-01-01T00:00:00.501Z";
+    const generated = await generateHostKeys(join(parent, "valid-expiry"), { now, notAfter });
+    expect(generated.identity.createdAt).toBe(now.toISOString());
+    for (const path of [generated.paths.deviceKeyFile, generated.paths.operatorKeyFile]) {
+      const object = JSON.parse(await fs.readFile(path, "utf8")) as { createdAt: string; notAfter: string };
+      expect(object.createdAt).toBe(now.toISOString());
+      expect(object.notAfter).toBe(notAfter);
     }
   });
 

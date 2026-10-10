@@ -9,12 +9,16 @@ via the Dockerfile's turbo filter.
 
 ## Configuration and testnet keys
 
-Build with `pnpm --filter @pcc/print-host build`. The CLI supports
-`print-host keygen --out <absolute-directory> [--not-after <UTC-timestamp>]` and
-`print-host check-config <absolute-config-path>`. Both commands print public
+Build from the workspace root with `pnpm --filter "@pcc/print-host..." build` to
+build the host and its kernel, kernel-sdk, and spec dependencies. Run the CLI with
+`node packages/print-host/dist/cli.js keygen --out <absolute-directory> [--not-after <UTC-timestamp>]` and
+`node packages/print-host/dist/cli.js check-config <absolute-config-path>`.
+The `print-host` bin is available through pnpm linking; `dist/cli.js` has mode 0644.
+Both commands print public
 identity JSON only; keygen also prints the generated file paths. Keygen refuses
 existing files and writes the device and operator keys at 0600 inside a private
-directory. Keep the funded Ed25519 device principal separate from the secp256k1
+directory. An optional `--not-after` must be later than the current time and the
+keys' `createdAt`. Keep the funded Ed25519 device principal separate from the secp256k1
 operator EOA. This package delegates bundle signing to the kernel's existing
 `signFn`; D1, D2, and delegation signing belong to the toolkit.
 
@@ -25,7 +29,12 @@ paths must be absolute. Only Base Sepolia (84532) and offline anvil (31337) are
 accepted. Secret files and their immediate parent directories must belong to the
 current uid and deny group/other access; the configuration file must deny
 group/other writes. `checkHostConfig` checks both keys, the credential files, and
-the private data directory, then returns only the public identity.
+the private data directory, then returns only the public identity. It can throw
+`HostConfigError`, `KeyFileError`, or `SecretFileError`.
+
+Testnet-only is a policy enforced on the configuration's `chainId`. The operator
+EOA has the same address on every chain: never fund it on mainnet. The runtime PR
+will check `eth_chainId` against the configuration before any signing.
 
 Secret reads compare the checked path's device/inode with the opened descriptor,
 then recheck its permissions and ownership before reading bounded bytes from that
@@ -33,7 +42,9 @@ descriptor. Loaders erase mutable buffers after parsing. JavaScript strings and
 the signing closures' retained keys cannot be reliably erased; key objects expose
 only public data and signing functions, and their JSON/string/inspection methods
 redact private state. Parser and validation errors use fixed codes and trusted
-field labels without retaining input values or exception causes.
+field labels without retaining input values or exception causes. All custody
+errors use `<code>: <path>`, with a field label for `bad_schema` or the fixed
+testnet-only sentence for `testnet_only`. The CLI prints that message once.
 
 The host must produce ONE signed bundle per settlement unit: print events plus pulled carrier
 events on success, or `execution_failed` evidence on failure. The reference is

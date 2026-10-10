@@ -18,7 +18,7 @@ export class HostConfigError extends Error {
   readonly field?: string;
 
   constructor(code: HostConfigErrorCode, path: string, field?: string) {
-    super(`${path}: ${code}${field ? ` (${field})` : ""}${code === "testnet_only" ? "; the print host is testnet-only" : ""}`);
+    super(`${code}: ${path}${code === "bad_schema" && field ? ` (${field})` : ""}${code === "testnet_only" ? "; the print host is testnet-only" : ""}`);
     this.name = "HostConfigError";
     this.code = code;
     this.path = path;
@@ -114,7 +114,7 @@ function validateConfig(value: unknown, path: string): HostConfig {
     if (typeof chain === "object" && chain !== null && "chainId" in chain) {
       const chainId = (chain as Record<string, unknown>).chainId;
       if (typeof chainId === "number" && chainId !== 84532 && chainId !== 31337) {
-        throw new HostConfigError("testnet_only", path, "chainId");
+        throw new HostConfigError("testnet_only", path);
       }
     }
   }
@@ -193,7 +193,12 @@ function singleLine(bytes: Buffer): string | undefined {
   return line && !/[\r\n]/.test(line) ? line : undefined;
 }
 
-/** Validate credential files, returning public identifiers only. */
+/**
+ * Validate credential files, returning public identifiers only.
+ * @throws {HostConfigError} If the configuration or its credential values are invalid.
+ * @throws {KeyFileError} If a device or operator key cannot be loaded.
+ * @throws {SecretFileError} If a credential file cannot be read securely.
+ */
 export async function checkHostConfig(config: HostConfig, options: HostConfigOptions = {}): Promise<HostPublicIdentity> {
   const checked = validateConfig(config, "config");
   const expectedUid = uid(options);

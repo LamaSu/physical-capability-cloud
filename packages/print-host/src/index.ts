@@ -11,5 +11,4 @@ export type {
 } from "./keygen.js";
 export { loadHostConfig, checkHostConfig, HostConfigError } from "./config.js";
 export type { HostConfig, HostConfigOptions, HostConfigErrorCode, HostPublicIdentity } from "./config.js";
-export { main } from "./cli.js";
 export type { CliIo } from "./cli.js";

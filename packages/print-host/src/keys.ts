@@ -22,7 +22,7 @@ export class KeyFileError extends Error {
   readonly field?: KeyField;
 
   constructor(code: KeyFileErrorCode, path: string, field?: KeyField) {
-    super(`${code}: ${path}${field === undefined ? "" : ` (${field})`}`);
+    super(`${code}: ${path}${code === "bad_schema" && field !== undefined ? ` (${field})` : ""}`);
     this.name = "KeyFileError";
     this.code = code;
     this.path = path;
@@ -144,7 +144,6 @@ const secp256k1Order = (1n << 256n) - BigInt("0x14551231950b75fc4402da1732fc9beb
 
 export async function loadOperatorKey(path: string, options: KeyLoadOptions = {}): Promise<OperatorKey> {
   const bytes = await keyBytes(path, options);
-  let scalarBytes: Buffer | undefined;
   try {
     const record = parseObject(bytes, path);
     checkCommon(record, path, "pcc-printhost.operator-key", "secp256k1", ["address", "privateKey"], options.now ?? new Date());
@@ -153,7 +152,6 @@ export async function loadOperatorKey(path: string, options: KeyLoadOptions = {}
       if (getAddress(record.address) !== record.address) schemaError(path, "address");
     } catch { schemaError(path, "address"); }
     if (typeof record.privateKey !== "string" || !/^0x[0-9a-f]{64}$/.test(record.privateKey)) schemaError(path, "privateKey");
-    scalarBytes = Buffer.from(record.privateKey.slice(2), "hex");
     const scalar = BigInt(record.privateKey);
     if (scalar <= 0n || scalar >= secp256k1Order) throw new KeyFileError("bad_key", path);
     const account = privateKeyToAccount(record.privateKey as `0x${string}`);
@@ -163,7 +161,6 @@ export async function loadOperatorKey(path: string, options: KeyLoadOptions = {}
     if (error instanceof KeyFileError) throw error;
     throw new KeyFileError("bad_key", path);
   } finally {
-    scalarBytes?.fill(0);
     bytes.fill(0);
   }
 }

@@ -52,7 +52,7 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
   } catch (error) {
     if (error instanceof SecretFileError || error instanceof KeyFileError
       || error instanceof HostConfigError || error instanceof KeyGenerationError) {
-      io.stderr.write(`${error.code}: ${error.message}\n`);
+      io.stderr.write(`${error.message}\n`);
     } else {
       // Native/library errors may contain input values. Never format them.
       io.stderr.write("internal_error: print-host operation failed\n");

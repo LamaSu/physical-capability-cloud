@@ -2,11 +2,18 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/cli.js";
+import { generateHostKeys } from "../src/keygen.js";
+
+vi.mock("../src/keygen.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/keygen.js")>();
+  return { ...actual, generateHostKeys: vi.fn(actual.generateHostKeys) };
+});
 
 const dirs: string[] = [];
 afterEach(async () => {
+  vi.mocked(generateHostKeys).mockClear();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -85,9 +92,9 @@ describe("print-host CLI", () => {
 
   it.each([
     [], ["unknown"], ["keygen"], ["keygen", "--out"],
-    ["keygen", "--out", "/tmp/unused", "--out", "/tmp/unused"],
+    ["keygen", "--out", "relative-unused", "--out", "relative-unused"],
     ["keygen", "--unknown", "value"], ["keygen", "--not-after", "2099-01-01T00:00:00Z"],
-    ["check-config"], ["check-config", "/tmp/unused", "extra"],
+    ["check-config"], ["check-config", "relative-unused", "extra"],
   ])("bad arguments exit 2 (%#)", async (...argv: string[]) => {
     const captured = capture();
     expect(await main(argv, captured.io)).toBe(2);
@@ -101,7 +108,23 @@ describe("print-host CLI", () => {
     const captured = capture();
     expect(await main(["check-config", missingConfig], captured.io)).toBe(1);
     expect(captured.output().stdout).toBe("");
-    expect(captured.output().stderr.includes("not_found")).toBe(true);
-    expect(captured.output().stderr.includes("\n    at ")).toBe(false);
+    expect(captured.output().stderr).toBe(`not_found: ${missingConfig}\n`);
+  });
+
+  it("keygen errors print the closed message once", async () => {
+    const captured = capture();
+    expect(await main(["keygen", "--out", "relative-unused"], captured.io)).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "not_absolute: relative-unused\n" });
+  });
+
+  it("internal errors discard content-bearing messages", async () => {
+    const root = await temporaryDirectory();
+    vi.mocked(generateHostKeys).mockRejectedValueOnce(new Error(randomBytes(32).toString("hex")));
+    const captured = capture();
+    expect(await main(["keygen", "--out", join(root, "keys")], captured.io)).toBe(1);
+    expect(captured.output().stdout).toBe("");
+    // A failed mutation must not print the secret in the assertion's diagnostics.
+    expect(captured.output().stderr === "internal_error: print-host operation failed\n",
+      "internal errors use only the closed message").toBe(true);
   });
 });

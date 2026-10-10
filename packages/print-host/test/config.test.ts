@@ -62,8 +62,12 @@ async function expectConfigFailure(operation: () => Promise<unknown>, code: stri
   try { await operation(); } catch (error) { caught = error; }
   expect(caught instanceof HostConfigError).toBe(true);
   expect((caught as HostConfigError).code === code).toBe(true);
+  expect(Object.hasOwn(caught as object, "cause")).toBe(false);
+  const allowedKeys = new Set(["name", "code", "path", "field"]);
+  expect(Object.keys(caught as object).every((key) => allowedKeys.has(key))).toBe(true);
   expectNoSecret(caught, secrets);
   expectNoSecret((caught as Error).message, secrets);
+  return caught as HostConfigError;
 }
 
 afterEach(async () => {
@@ -82,8 +86,8 @@ describe("host configuration", () => {
   it.each([8453, 1, 11155111])("refuses chain %s with an explicit testnet-only error", async (chainId) => {
     const setup = await fixture();
     await setup.save({ ...setup.config, chain: { ...setup.config.chain, chainId } });
-    await expectConfigFailure(() => loadHostConfig(setup.path), "testnet_only");
-    await expect(loadHostConfig(setup.path)).rejects.toThrow("testnet-only");
+    const error = await expectConfigFailure(() => loadHostConfig(setup.path), "testnet_only");
+    expect(error.message).toBe(`testnet_only: ${setup.path}; the print host is testnet-only`);
   });
 
   it.each(["root", "chain", "keys", "gateway", "printer"])("refuses unknown fields in %s", async (section) => {
@@ -154,11 +158,13 @@ describe("host configuration", () => {
 
   it("does not retain JSON parser excerpts or schema values", async () => {
     const setup = await fixture();
-    const secret = randomBytes(32).toString("hex");
+    const secret = "abcdef"[randomBytes(1)[0]! % 6]! + randomBytes(32).toString("hex");
     await writeFile(setup.path, `${secret}{`, { mode: 0o644 });
-    await expectConfigFailure(() => loadHostConfig(setup.path), "bad_json", [secret]);
+    const parseError = await expectConfigFailure(() => loadHostConfig(setup.path), "bad_json", [secret]);
+    expect(parseError.message === `bad_json: ${setup.path}`, "bad_json uses only its closed message").toBe(true);
     await setup.save({ ...setup.config, kernelId: secret.repeat(3) });
-    await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema", [secret]);
+    const schemaError = await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema", [secret]);
+    expect(schemaError.message).toBe(`bad_schema: ${setup.path} (kernelId)`);
   });
 
   it("checks all private files end to end and returns only public identity", async () => {
