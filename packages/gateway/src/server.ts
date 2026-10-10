@@ -44,6 +44,7 @@ import { operatorStatusRoutes } from "./routes/operator-status.js";
 import { capabilityAvailabilityRoutes } from "./routes/capability-availability.js";
 import { captureRoutes } from "./routes/capture.js";
 import { toolCatalogRoutes } from "./routes/tool-catalog.js";
+import { kitRoutes } from "./routes/kits.js";
 import { composeRoutes } from "./routes/compose.js";
 import { agentPlanRoutes } from "./routes/agent-plans.js";
 import { registrySnapshotRoutes } from "./routes/registry-snapshot.js";
@@ -668,6 +669,8 @@ export async function createGateway(port = 3200) {
   await app.register(startRoutes);
   await app.register(marketplaceRoutes);
   await app.register(toolCatalogRoutes);
+  // Capability Kit registry (kits K1 slice 1): write-once, verified, durable-volume backed.
+  await app.register(kitRoutes);
   await app.register(composeRoutes);
   // R9: externally authored plans. Validate is a live read; accept is money-path (the scope checker
   // default-denies it) and answers 503 until the R13 store, #349, the evidence map, the fee policy and
