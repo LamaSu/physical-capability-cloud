@@ -432,8 +432,12 @@ class _DeviceHTTPResponse(http.client.HTTPResponse):
 
 
 def _check_framing(resp: http.client.HTTPResponse) -> None:
-    """Check original fields before the parser's discarded length can look like EOF framing."""
-    if resp.headers.defects:
+    """Check original fields before the parser's discarded length can look like EOF framing.
+
+    Refuse a head the parser did not take entirely as fields: a bare CR (invalid
+    under RFC 9112 section 2.2) can hide later fields in the message payload.
+    """
+    if resp.headers.defects or resp.headers.get_payload():
         raise http.client.HTTPException("malformed response headers")
     lengths = resp.headers.get_all("Content-Length", [])
     transfers = resp.headers.get_all("Transfer-Encoding", [])
