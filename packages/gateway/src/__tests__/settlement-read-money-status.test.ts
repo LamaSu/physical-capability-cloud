@@ -30,7 +30,7 @@ function kitClassifier(): (r: unknown) => [string, string | null, string] {
   const m = kitSrc.match(/\/\/ <status-map v2>[^\n]*\n([\s\S]*?)\/\/ <\/status-map v2>/);
   if (!m) throw new Error("<status-map v2> markers not found in pcc-ui.js");
   const ctx: Record<string, unknown> = {};
-  vm.runInNewContext(m[1] + "\nthis.settlementRecordClass = settlementRecordClass;", ctx);
+  vm.runInNewContext(kitSrc.slice(kitSrc.indexOf("  function dataAt("), kitSrc.indexOf("  function dot(")) + m[1] + "\nthis.settlementRecordClass = settlementRecordClass;", ctx);
   return ctx.settlementRecordClass as (r: unknown) => [string, string | null, string];
 }
 const kit = kitClassifier();

@@ -18,8 +18,8 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "test": "node scripts/build-dashboard-ir-kit.mjs --check && vitest run --passWithNoTests",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json",
-    "typecheck:browser": "tsc -p tsconfig.browser.json",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.browser.json && tsc -p tsconfig.kit-tests.json",
+    "typecheck:browser": "tsc -p tsconfig.browser.json && tsc -p tsconfig.kit-tests.json",
     "build:ir-kit": "node scripts/build-dashboard-ir-kit.mjs",
     "check:ir-kit": "node scripts/build-dashboard-ir-kit.mjs --check",
     "clean": "rm -rf dist"

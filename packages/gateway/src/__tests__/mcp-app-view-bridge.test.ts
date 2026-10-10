@@ -26,6 +26,7 @@ import {
 // facade/kernel graph that breaks a jsdom module graph). The served-HTML
 // injection is proven in the node-env mcp-typed-operations.test.ts.
 import { REGISTERED_OPERATION_IDS } from "../mcp/operation-ids.js";
+import { expectNoPccUiTextViolations, expectSettledPccUiText } from "./helpers/pcc-ui-text.js";
 
 const STUB_KIT = "/* stub kit */ window.__STUB_KIT_RAN__ = true;";
 
@@ -200,6 +201,7 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
     // 'complete', so mount() runs immediately).
     // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
     new Function(kitSource)();
+    expectNoPccUiTextViolations("host bridge kit boot");
   }
 
   const manifest = manifestFor("Ops", [
@@ -217,7 +219,7 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
     },
   ]);
 
-  it("a REGISTERED-operation button stays live and, on click, calls the bridge with (operationId, arguments)", () => {
+  it("a REGISTERED-operation button stays live and, on click, calls the bridge with (operationId, arguments)", async () => {
     const spy = vi.fn().mockResolvedValue({ structuredContent: { pricing: {} } });
     bootKitWithManifest(manifest, spy);
 
@@ -227,8 +229,10 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
     expect(btn!.className).toContain("pcc-host-op-enabled");
 
     btn!.click();
+    expectNoPccUiTextViolations("registered operation click");
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy).toHaveBeenCalledWith("capability.request_quote", { type: "fdm", selections: {} });
+    await expectSettledPccUiText("registered operation response");
   });
 
   it("an UNREGISTERED-operation button is disabled (inert) — default-DENY on the client", () => {
@@ -266,6 +270,7 @@ describe("[bridge] the real pcc-ui.js routes a registered op via the bridge, kee
     delete (window as Record<string, unknown>).__PCC_UI_BOOTED__; // allow a fresh boot
     // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
     new Function(kitSource)();
+    expectNoPccUiTextViolations("host kit boot without a bridge");
 
     const btn = buttonByLabel("Get quote");
     expect(btn).toBeTruthy();

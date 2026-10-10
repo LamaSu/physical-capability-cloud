@@ -119,11 +119,11 @@
     if (v === null || typeof v !== 'object') return JSON.stringify(v);
     var i, out = [];
     if (Array.isArray(v)) {
-      for (i = 0; i < v.length; i++) out.push(v[i] === undefined ? 'null' : canonicalJson(v[i]));
+      for (i = 0; i < v.length; i++) out.push(dataAt(v, i) === undefined ? 'null' : canonicalJson(dataAt(v, i)));
       return '[' + out.join(',') + ']';
     }
     var ks = Object.keys(v).sort();
-    for (i = 0; i < ks.length; i++) { if (v[ks[i]] !== undefined) out.push(JSON.stringify(ks[i]) + ':' + canonicalJson(v[ks[i]])); }
+    for (i = 0; i < ks.length; i++) { if (dataAt(v, dataAt(ks, i)) !== undefined) out.push(JSON.stringify(dataAt(ks, i)) + ':' + canonicalJson(dataAt(v, dataAt(ks, i)))); }
     return '{' + out.join(',') + '}';
   }
   function canonicalTarget(desc) {
@@ -142,7 +142,7 @@
   function intentState(desc) {
     if (desc.money) return MONEY_INTENT;
     var k = requestFingerprint(desc);
-    var it = INTENT_STATE[k];
+    var it = dataAt(INTENT_STATE, k);
     // request: the fingerprint of the request that holds the unresolved key (only it may retry with it)
     if (!it) { it = { key: null, request: null, posting: false, done: false, gate: null }; INTENT_STATE[k] = it; }
     return it;
@@ -152,12 +152,98 @@
   // DOM helpers (verbatim shape from control-plane bus.js) — textContent only
   // ═══════════════════════════════════════════════════════════════════════
 
+  // Runtime brands cannot be forged or copied: only these module-private mints register them.
+  var TEXT_BRANDS = new WeakSet();
+  window.__PCC_UI_TEXT_VIOLATIONS__ = 0;
+  function mintText(t) {
+    if (typeof t !== 'string') { window.__PCC_UI_TEXT_VIOLATIONS__++; t = '—'; }
+    var text = Object.freeze({ t: t });
+    TEXT_BRANDS.add(text);
+    return text;
+  }
+  function kitText(t) { return mintText(t); }
+  function isKitText(text) { return !!text && typeof text === 'object' && TEXT_BRANDS.has(text); }
+  function readText(text) {
+    if (isKitText(text)) return text.t;
+    window.__PCC_UI_TEXT_VIOLATIONS__++;
+    return '—';
+  }
+  function joinText() {
+    var out = '';
+    for (var i = 0; i < arguments.length; i++) {
+      if (!isKitText(dataAt(arguments, i))) {
+        window.__PCC_UI_TEXT_VIOLATIONS__++;
+        return mintText('—');
+      }
+      out += dataAt(arguments, i).t;
+    }
+    return mintText(out);
+  }
+  function setText(node, text) { node.textContent = readText(text); }
+  function setAttrText(node, name, text) {
+    if (name !== 'title' && name !== 'placeholder') { window.__PCC_UI_TEXT_VIOLATIONS__++; return; }
+    node.setAttribute(name, readText(text));
+  }
+  function setValue(input, text) { input.value = readText(text); }
   function el(tag, cls, txt) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
-    if (txt != null) e.textContent = txt; // textContent — never innerHTML
+    if (txt != null) e.textContent = readText(txt); // textContent — never innerHTML
     return e;
   }
+
+  // Manifest prose has its own private tier; it never becomes kit-authored text.
+  var AGENT_TEXT_BRANDS = new WeakSet();
+  var WITHHELD_PROSE = kitText('Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.');
+  var WITHHELD_FIELD = kitText('withheld: stated money or verification');
+  function agentText(raw, prose) {
+    var t = String(raw);
+    if (isProseClaim(t)) return prose ? WITHHELD_PROSE : WITHHELD_FIELD;
+    var text = Object.freeze({ t: t });
+    AGENT_TEXT_BRANDS.add(text);
+    return text;
+  }
+  // The sole agent sink marks the agent's words; PCC notices retain PCC authorship.
+  function agentEl(tag, cls, text) {
+    if (text === WITHHELD_PROSE || text === WITHHELD_FIELD) return el(tag, (cls || '') + ' pcc-withheld', text);
+    var e = document.createElement(tag);
+    e.className = (cls || '') + ' pcc-agent pcc-untrusted';
+    if (text && typeof text === 'object' && AGENT_TEXT_BRANDS.has(text)) e.textContent = text.t;
+    else { window.__PCC_UI_TEXT_VIOLATIONS__++; e.textContent = '—'; }
+    return e;
+  }
+  function enumValueText(raw) { return mintText(String(raw)); }
+  // The descriptor is the exact request the user is approving, never a settlement claim.
+  function requestValueText(raw) { return mintText(wireText(raw)); }
+  function requestMethodText(desc) { return kitText(desc.method === 'PATCH' ? 'PATCH' : 'POST'); }
+  function requestDestinationText(desc) { return mintText(desc.destination); }
+  function requestReasonText(desc, blocked) { return mintText((desc && desc.reason) || (blocked ? 'unsafe or non-PCC destination' : 'no valid request')); }
+  function apiBaseText(raw) { return raw === API_ORIGIN ? mintText(raw) : kitText('—'); }
+  function modeText(raw) {
+    if (raw === 'snapshot') return kitText('snapshot');
+    if (raw === 'host') return kitText('host');
+    return kitText(raw === 'live-cors' ? 'live-cors' : 'live-same-origin');
+  }
+  function numberText(raw) { return typeof raw === 'number' && isFinite(raw) ? mintText(String(raw)) : kitText('—'); }
+  function currencyText(raw) {
+    if (raw === 'USDC') return kitText('USDC');
+    if (raw === 'ETH') return kitText('ETH');
+    return kitText(raw === 'DAI' ? 'DAI' : 'currency not reported');
+  }
+  function settlementCaptionText(row, bindingPath, live) {
+    // Captions are chosen by the closed settlement classifiers, never from server prose.
+    return mintText(settlementReadClass(row, bindingPath, live)[1] || '');
+  }
+  function traceSuffixText(raw) {
+    var trace = traceText(raw);
+    return trace.t ? joinText(kitText(' · '), trace) : kitText('');
+  }
+  function joinWithText(separator, parts) {
+    var joined = kitText('');
+    for (var i = 0; i < parts.length; i++) joined = joinText(joined, i ? separator : kitText(''), dataAt(parts, i));
+    return joined;
+  }
+
   function clear(node) { while (node && node.firstChild) node.removeChild(node.firstChild); }
   function uuid() {
     return (window.crypto && crypto.randomUUID)
@@ -180,13 +266,13 @@
   // writes via a typed, server-authorized operation allowlist.
   // ═══════════════════════════════════════════════════════════════════════
 
-  var HOST_WRITE_NOTE = 'Actions are unavailable in this host view.';
+  var HOST_WRITE_NOTE = kitText('Actions are unavailable in this host view.');
   function isHostEmbed() { return window.__PCC_HOST__ === true; }
   function hostDisableBtn(btn) {
     btn.disabled = true;
     btn.setAttribute('aria-disabled', 'true');
     if ((' ' + btn.className + ' ').indexOf(' pcc-btn-disabled ') === -1) btn.className += ' pcc-btn-disabled';
-    if (!btn.title) btn.title = HOST_WRITE_NOTE;
+    if (!btn.title) setAttrText(btn, 'title', HOST_WRITE_NOTE);
   }
   // R4 PR2 — the registered typed-operation allowlist injected onto the window by
   // the host boot script (window.__PCC_HOST_OPERATIONS__). An action naming one
@@ -196,7 +282,7 @@
     if (!operationId) return false;
     var ops = window.__PCC_HOST_OPERATIONS__;
     if (!ops || !ops.length) return false;
-    for (var i = 0; i < ops.length; i++) { if (ops[i] === operationId) return true; }
+    for (var i = 0; i < ops.length; i++) { if (dataAt(ops, i) === operationId) return true; }
     return false;
   }
   // True when an action maps to a REGISTERED typed operation reachable through
@@ -216,8 +302,8 @@
     var btns = container.querySelectorAll ? container.querySelectorAll('button') : [];
     var lockedAny = false;
     for (var i = 0; i < btns.length; i++) {
-      if ((' ' + btns[i].className + ' ').indexOf(' pcc-host-op-enabled ') !== -1) continue;
-      hostDisableBtn(btns[i]);
+      if ((' ' + dataAt(btns, i).className + ' ').indexOf(' pcc-host-op-enabled ') !== -1) continue;
+      hostDisableBtn(dataAt(btns, i));
       lockedAny = true;
     }
     if (lockedAny) container.appendChild(el('div', 'pcc-host-note pcc-muted', HOST_WRITE_NOTE));
@@ -225,7 +311,7 @@
   function markWriteUnavailable(status) {
     if (!status) return;
     status.className = 'pcc-action-status';
-    status.textContent = HOST_WRITE_NOTE;
+    setText(status, HOST_WRITE_NOTE);
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -247,7 +333,7 @@
       if (m && m[1]) {
         var k = decodeURIComponent(m[1]);
         try { sessionStorage.setItem(KEY_STORE, k); } catch (e) {}
-        var cleaned = h.replace(/([#&])pcc_key=[^&]*/, '$1').replace(/[#&]+$/, '');
+        var cleaned = String(String(h).replace(/([#&])pcc_key=[^&]*/, '$1')).replace(/[#&]+$/, '');
         try {
           history.replaceState(null, '', location.pathname + location.search + (cleaned && cleaned !== '#' ? cleaned : ''));
         } catch (e2) { try { location.hash = ''; } catch (e3) {} }
@@ -294,7 +380,7 @@
   // Whether apiBase points at the page's own origin (empty, or literal match).
   function isSameOrigin(apiBase) {
     if (apiBase === '') return true;
-    try { return apiBase.replace(/\/+$/, '') === location.origin; } catch (e) { return false; }
+    try { return String(apiBase).replace(/\/+$/, '') === location.origin; } catch (e) { return false; }
   }
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -331,7 +417,7 @@
     if (decoded.indexOf('\\') !== -1) return null;
     var segs = decoded.split('/');
     for (var i = 0; i < segs.length; i++) {
-      if (segs[i] === '..' || segs[i] === '.') return null; // traversal (incl. %2e%2e)
+      if (dataAt(segs, i) === '..' || dataAt(segs, i) === '.') return null; // traversal (incl. %2e%2e)
     }
     if (decoded.indexOf('..') !== -1) return null;   // belt-and-suspenders (encoded joins)
     if (isHost && !/^\/(api|sse)(\/|$)/.test(decoded)) return null; // PCC namespace allowlist
@@ -368,8 +454,8 @@
     var t = template.slice(sp + 1).split('/'), p = path.split('/');
     if (t.length !== p.length) return false;
     for (var i = 0; i < t.length; i++) {
-      if (t[i] === ':') { if (!/^[A-Za-z0-9_.~-]+$/.test(p[i])) return false; }
-      else if (t[i] !== p[i]) return false;
+      if (dataAt(t, i) === ':') { if (!/^[A-Za-z0-9_.~-]+$/.test(dataAt(p, i))) return false; }
+      else if (dataAt(t, i) !== dataAt(p, i)) return false;
     }
     return true;
   }
@@ -378,7 +464,7 @@
   function isNonMoneyWrite(method, canonical, search) {
     if (search) return false;
     for (var i = 0; i < NON_MONEY_WRITES.length; i++) {
-      if (matchesWriteTemplate(NON_MONEY_WRITES[i], method, canonical)) return true;
+      if (matchesWriteTemplate(dataAt(NON_MONEY_WRITES, i), method, canonical)) return true;
     }
     return false;
   }
@@ -390,12 +476,12 @@
     var out = {};
     var srcs = [base, overrides];
     for (var s = 0; s < srcs.length; s++) {
-      var src = srcs[s];
+      var src = dataAt(srcs, s);
       if (!src || typeof src !== 'object') continue;
       var ks = Object.keys(src);
       for (var i = 0; i < ks.length; i++) {
-        if (ks[i] === '__proto__') return null;
-        out[ks[i]] = src[ks[i]];
+        if (dataAt(ks, i) === '__proto__') return null;
+        out[dataAt(ks, i)] = dataAt(src, dataAt(ks, i));
       }
     }
     return out;
@@ -404,9 +490,9 @@
   function ownFields(b, names, truthy) {
     var out = [];
     for (var i = 0; i < names.length; i++) {
-      if (!Object.prototype.hasOwnProperty.call(b, names[i])) continue;
-      var v = b[names[i]];
-      if (truthy ? v : v != null) out.push([names[i], v]);
+      if (!Object.prototype.hasOwnProperty.call(b, dataAt(names, i))) continue;
+      var v = dataAt(b, dataAt(names, i));
+      if (truthy ? v : v != null) out.push([dataAt(names, i), v]);
     }
     return out;
   }
@@ -463,14 +549,26 @@
   // Formatting + dot-path pluck (no eval; a manual split/reduce)
   // ═══════════════════════════════════════════════════════════════════════
 
+  // Dynamic data reads admit only enumerable own fields, as a fresh JSON copy
+  // would. Read the requested field once; copying the object per read makes
+  // loops quadratic in its width. The lint reviews this exact guarded read.
+  // Numeric array/arguments/NodeList positions retain their requested-index semantics.
+  function dataAt(raw, key) {
+    if (raw == null) throw new TypeError('Cannot read absent data');
+    if (typeof key === 'number' && key >= 0 && key % 1 === 0 && typeof raw.length === 'number') {
+      return Array.prototype.slice.call(raw, key, key + 1)[0];
+    }
+    if (key === 'length' && typeof raw.length === 'number') return raw.length;
+    return Object.prototype.propertyIsEnumerable.call(raw, key) ? raw[key] : undefined;
+  }
   function dot(obj, path) {
     if (path == null || path === '') return obj;
     var parts = String(path).split('.');
     var cur = obj;
     for (var i = 0; i < parts.length; i++) {
       if (cur == null) return undefined;
-      var k = parts[i];
-      cur = Array.isArray(cur) && /^\d+$/.test(k) ? cur[parseInt(k, 10)] : cur[k];
+      var k = dataAt(parts, i);
+      cur = Array.isArray(cur) && /^\d+$/.test(k) ? dataAt(cur, parseInt(k, 10)) : dataAt(cur, k);
     }
     return cur;
   }
@@ -481,33 +579,40 @@
   // 1000000 base units of a 6-decimal token is 1, not 1,000,000.00. Anything else: null.
   function baseUnitsText(raw, decimals) {
     var s = typeof raw === 'number' && isFinite(raw) && raw % 1 === 0 && raw >= 0 ? String(raw) : raw;
-    if (typeof s !== 'string' || !/^\d+$/.test(s)) return null;
+    if (typeof s !== 'string' || !/^\d+$/.test(s)) return kitText('amount not reported');
     if (typeof decimals !== 'number' || decimals % 1 !== 0 || decimals < 0 || decimals > 36) {
-      return s.replace(/^0+(?=\d)/, '') + ' base units (decimals not reported)';
+      return mintText(String(s).replace(/^0+(?=\d)/, '') + ' base units (decimals not reported)');
     }
     while (s.length <= decimals) s = '0' + s;
-    var ip = s.slice(0, s.length - decimals).replace(/^0+(?=\d)/, ''), fp = s.slice(s.length - decimals).replace(/0+$/, '');
-    return ip.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fp ? '.' + fp : '');
+    var ip = String(s.slice(0, s.length - decimals)).replace(/^0+(?=\d)/, ''), fp = String(s.slice(s.length - decimals)).replace(/0+$/, '');
+    return mintText(String(ip).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fp ? '.' + fp : ''));
   }
-  function fmtUsd(v) {
+  function fmtUsdRaw(v) {
+    if (!(typeof v === 'number' || (typeof v === 'string' && /^-?\d+(\.\d+)?$/.test(v)))) return 'amount not reported';
     var n = Number(v);
-    if (!isFinite(n)) return String(v == null ? '' : v);
+    if (!isFinite(n)) return 'amount not reported';
     return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
-  function fmtTs(v) {
-    if (v == null || v === '') return '';
-    var d = new Date(v);
-    if (isNaN(d.getTime())) return String(v);
-    try { return d.toLocaleString(); } catch (e) { return d.toISOString(); }
+  function fmtUsd(v) {
+    var text = fmtUsdRaw(v);
+    return text === 'amount not reported' ? kitText('amount not reported') : mintText(text);
   }
-  function fmtVal(v, format) {
-    if (v == null) return '—';
+  function fmtTs(v) {
+    if (!(canonicalPlainTime(v) || (typeof v === 'number' && isFinite(v)))) return kitText('time not reported');
+    var d = new Date(v);
+    if (!isFinite(d.getTime())) return kitText('time not reported');
+    try { return mintText(d.toLocaleString()); } catch (e) { return mintText(d.toISOString()); }
+  }
+  function fmtVal(v, format, path) {
+    if (v == null) return kitText('—');
+    if (format === 'ts') return timeText(v);
+    if (typeof v !== 'number' || !isFinite(v)) return boundText(path, v, false);
     switch (format) {
       case 'usd': return fmtUsd(v);
-      case 'int': { var n = Number(v); return isFinite(n) ? Math.round(n).toLocaleString('en-US') : String(v); }
-      case 'pct': { var p = Number(v); return isFinite(p) ? (p <= 1 ? (p * 100).toFixed(0) : p.toFixed(0)) + '%' : String(v); }
-      case 'ts': return fmtTs(v);
-      default: return typeof v === 'object' ? JSON.stringify(v) : String(v);
+      case 'int': { var n = Number(v); return mintText(Math.round(n).toLocaleString('en-US')); }
+      case 'pct': { var p = Number(v); return mintText((p <= 1 ? (p * 100).toFixed(0) : p.toFixed(0)) + '%'); }
+      case 'ts': return timeText(v);
+      default: return numberText(v);
     }
   }
 
@@ -528,10 +633,10 @@
     if (typeof s !== 'string') return '';
     var t = s.trim();
     if (!/^[A-Za-z0-9 _-]+$/.test(t)) return '';
-    return t.toUpperCase().replace(/[ _-]+/g, '_').replace(/^_+|_+$/g, '');
+    return String(String(t.toUpperCase()).replace(/[ _-]+/g, '_')).replace(/^_+|_+$/g, '');
   }
   function freezeTable(t) {
-    for (var k in t) { if (Object.prototype.hasOwnProperty.call(t, k)) Object.freeze(t[k]); }
+    for (var k in t) { if (Object.prototype.hasOwnProperty.call(t, k)) Object.freeze(dataAt(t, k)); }
     return Object.freeze(t);
   }
   // Flat table for BARE words: key -> [pillClass, honest label]. It has NO st-settled entry: a bare
@@ -605,20 +710,20 @@
   // table (which has no green). Callers route money data away from here (dataStatusClass).
   function statusClass(s) {
     var k = normStatus(s);
-    if (k !== '' && Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return GENERIC_STATES[k];
-    if (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return MONEY_STATUS[k][0];
+    if (k !== '' && Object.prototype.hasOwnProperty.call(GENERIC_STATES, k)) return dataAt(GENERIC_STATES, k);
+    if (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) return dataAt(MONEY_STATUS, k)[0];
     return 'st-unknown'; // fail closed -- an unmapped status is NEVER rendered as settled/green
   }
   // A BARE money word: the flat table only (never green). A generic success word ("done",
   // "success", "ok") is not a money state.
   function moneyStatusClass(s) {
     var k = normStatus(s);
-    return (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) ? MONEY_STATUS[k][0] : 'st-unknown';
+    return (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) ? dataAt(MONEY_STATUS, k)[0] : 'st-unknown';
   }
   // Honest direction label for a bare money word; null for non-money/unknown.
   function settlementLabel(s) {
     var k = normStatus(s);
-    return (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) ? MONEY_STATUS[k][1] : null;
+    return (k !== '' && Object.prototype.hasOwnProperty.call(MONEY_STATUS, k)) ? dataAt(MONEY_STATUS, k)[1] : null;
   }
   // The V-next state NAME for a wire value: an integer 1..9 or its exact name. 0 is a read error
   // (unitState() reverts for a missing unit); anything else is null.
@@ -626,7 +731,7 @@
     var i = -1;
     if (typeof v === 'number' && Math.floor(v) === v) i = v;
     else if (typeof v === 'string') i = VNEXT_UNIT_STATES.indexOf(v);
-    return (i >= 1 && i <= 9) ? VNEXT_UNIT_STATES[i] : null;
+    return (i >= 1 && i <= 9) ? dataAt(VNEXT_UNIT_STATES, i) : null;
   }
   function ownKey(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
   function isVNextRecord(o) { return !!o && typeof o === 'object' && !Array.isArray(o) && (ownKey(o, 'unitState') || ownKey(o, 'finalState')); }
@@ -647,7 +752,7 @@
       if ((ownKey(o, 'finalState') && fs !== (terminal ? name : null)) ||
           (ownKey(o, 'isAllocated') && o.isAllocated !== allocated) ||
           (ownKey(o, 'isTerminal') && o.isTerminal !== terminal) ||
-          (ownKey(o, 'phase') && o.phase !== VNEXT_PHASE[name])) {
+          (ownKey(o, 'phase') && o.phase !== dataAt(VNEXT_PHASE, name))) {
         return ['st-unknown', DISAGREE, name];
       }
       // A FINAL state needs unitState, finalState, isAllocated and phase present: absence is not
@@ -656,7 +761,7 @@
       if (terminal && !(ownKey(o, 'finalState') && ownKey(o, 'isAllocated') && ownKey(o, 'phase'))) {
         return ['st-unknown', INCOMPLETE, name];
       }
-      return [VNEXT_STATE_PRESENTATION[name][0], VNEXT_STATE_PRESENTATION[name][1], name];
+      return [dataAt(VNEXT_STATE_PRESENTATION, name)[0], dataAt(VNEXT_STATE_PRESENTATION, name)[1], name];
     }
     // A /receipt carries finalState, phase and isAllocated (no unitState, no isTerminal).
     if (ownKey(o, 'finalState')) {
@@ -665,7 +770,7 @@
       if (final) {
         if (!ownKey(o, 'isAllocated') || !ownKey(o, 'phase')) return ['st-unknown', INCOMPLETE, f];
         if (o.isAllocated !== false || o.phase !== 'settled') return ['st-unknown', DISAGREE, f];
-        return [VNEXT_STATE_PRESENTATION[f][0], VNEXT_STATE_PRESENTATION[f][1], f];
+        return [dataAt(VNEXT_STATE_PRESENTATION, f)[0], dataAt(VNEXT_STATE_PRESENTATION, f)[1], f];
       }
       if (f === null && o.isAllocated === true) {
         if (ownKey(o, 'phase') && o.phase !== 'allocated') return ['st-unknown', DISAGREE, String(o.phase)];
@@ -692,7 +797,7 @@
     if (!NON_MONEY_READS.test(p)) return true;
     if (row && typeof row === 'object') {
       for (var i = 0; i < MONEY_FIELDS.length; i++) {
-        if (ownKey(row, MONEY_FIELDS[i]) && row[MONEY_FIELDS[i]] != null) return true;
+        if (ownKey(row, dataAt(MONEY_FIELDS, i)) && dataAt(row, dataAt(MONEY_FIELDS, i)) != null) return true;
       }
     }
     return false;
@@ -740,19 +845,19 @@
   var UNVERIFIED_SUFFIX = ' - status unverified';
   function statusPillText(raw, verified, money) {
     var t = raw == null ? '' : String(raw);
-    if (verified || t === '') return t;
+    if (verified || t === '') return mintText(t);
     var k = normStatus(t);
     var safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
-    if (k !== '' && ownKey(safe, k)) return t;
-    return 'reported status: ' + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX);
+    if (k !== '' && ownKey(safe, k)) return mintText(t);
+    return mintText('reported status: ' + t + (money ? UNCONFIRMED_SUFFIX : UNVERIFIED_SUFFIX));
   }
   // A free-text server MESSAGE outside a pill (astra r6 F12): never PCC's own claim, so it is attributed
   // to its source, and on money data it says the settlement is unconfirmed. Callers pass `verified` only
   // for a VERIFIED PAYEE PAYMENT, never a verified refund (astra r6 F10). Mirrors the spec's reportedText.
   function reportedText(raw, verified, money) {
     var t = raw == null ? '' : String(raw);
-    if (verified || t === '') return t;
-    return 'reported: ' + t + (money ? UNCONFIRMED_SUFFIX : '');
+    if (verified || t === '') return mintText(t);
+    return mintText('reported: ' + t + (money ? UNCONFIRMED_SUFFIX : ''));
   }
   // The TEXT of a data status pill (list rows, run windows), paired with dataStatusClass. Money data shows
   // the classifier's honest label, and a VERIFIED final (a live read of an exact settlement route) keeps
@@ -761,20 +866,264 @@
     if (isMoneyData(bindingPath, row)) {
       var vnext = isVNextRecord(row);
       var rc = vnext ? settlementReadClass(row, bindingPath, live) : [moneyStatusClass(s), settlementLabel(s), s];
-      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return String(rc[2]);
-      if (rc[1]) return rc[1];
+      if (vnext && (rc[0] === 'st-settled' || rc[0] === 'st-refunded')) return mintText(String(rc[2]));
+      if (rc[1]) return mintText(rc[1]);
       return statusPillText(s, false, true);
     }
     return statusPillText(s, false, false);
   }
   // </status-map v2>
 
+  // <plain-text helpers> — mirrored from @pcc/spec; parity checks the shipped bytes.
+  var CLAIM_DETECTOR = initClaimDetector();
+  function initClaimDetector() {
+    try {
+      // The test switch can only withhold more; unsupported engines still boot.
+      if (window.__PCC_UI_FORCE_CLAIM_INIT_FAILURE__ === true) throw new Error('claim detector disabled');
+      return (function () {
+        // Claim logic mirrors the IR and spec; only syntax and initialization differ.
+        var LOOKALIKE = {
+            // Cyrillic
+            "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p", "\u0441": "c", "\u0443": "y", "\u0445": "x",
+            "\u0456": "i", "\u0458": "j", "\u0455": "s", "\u0501": "d", "\u04bb": "h", "\u051b": "q", "\u051d": "w",
+            "\u04cf": "l", "\u0410": "A", "\u0412": "B", "\u0415": "E", "\u041a": "K", "\u041c": "M", "\u041d": "H",
+            "\u041e": "O", "\u0420": "P", "\u0421": "C", "\u0422": "T", "\u0425": "X", "\u0406": "I", "\u0408": "J",
+            "\u0405": "S", "\u04ae": "Y", "\u051a": "Q", "\u051c": "W", "\u04c0": "I",
+            // Greek
+            "\u0391": "A", "\u0392": "B", "\u0395": "E", "\u0396": "Z", "\u0397": "H", "\u0399": "I", "\u039a": "K",
+            "\u039c": "M", "\u039d": "N", "\u039f": "O", "\u03a1": "P", "\u03a4": "T", "\u03a5": "Y", "\u03a7": "X",
+            "\u03bf": "o", "\u03b1": "a", "\u03c1": "p", "\u03bd": "v", "\u03b9": "i", "\u03ba": "k", "\u03c5": "u",
+            "\u03c7": "x", "\u03b5": "e", "\u03c4": "t",
+            // Latin letters with no compatibility decomposition: dotless i and j, IPA, small capitals, strokes, hooks
+            "\u0131": "i", "\u0237": "j", "\u0251": "a", "\u0261": "g", "\u0269": "i", "\u1d00": "a", "\u0299": "b",
+            "\u1d04": "c", "\u1d05": "d", "\u1d07": "e", "\ua730": "f", "\u0262": "g", "\u029c": "h", "\u026a": "i",
+            "\u1d0a": "j", "\u1d0b": "k", "\u029f": "l", "\u1d0d": "m", "\u0274": "n", "\u1d0f": "o", "\u1d18": "p",
+            "\u0280": "r", "\ua731": "s", "\u1d1b": "t", "\u1d1c": "u", "\u1d20": "v", "\u1d21": "w", "\u028f": "y",
+            "\u1d22": "z", "\u0111": "d", "\u0180": "b", "\u0268": "i", "\u0142": "l", "\u00f8": "o", "\u0127": "h",
+            "\u0167": "t", "\u01a5": "p", "\u0257": "d", "\u0256": "d", "\u0188": "c", "\u0253": "b", "\u0192": "f",
+            "\u0266": "h", "\u0199": "k", "\u0271": "m", "\u0272": "n", "\u0273": "n", "\u0282": "s", "\u01ad": "t",
+            "\u0288": "t", "\u01b4": "y", "\u0225": "z", "\u024d": "r", "\u0247": "e", "\u023c": "c", "\u0249": "j",
+            "\u0110": "D", "\u0141": "L", "\u00d8": "O", "\u0126": "H", "\u0166": "T", "\u0197": "I", "\u01a4": "P",
+            "\u018a": "D", "\u0187": "C", "\u0181": "B", "\u0191": "F", "\u0198": "K", "\u01ac": "T", "\u01b3": "Y",
+            "\u0224": "Z", "\u024c": "R", "\u0246": "E", "\u023b": "C",
+        };
+        // Marks, format/bidi controls and invisible fillers vanish; a braille blank reads as a space.
+        var INVISIBLE_RE = new RegExp("[\\p{M}\\p{Cf}\\u115f\\u1160\\u3164\\uffa0]", "gu");
+        var MONEY_EMOJI_RE = new RegExp("[\\u{1F4B0}-\\u{1F4B8}\\u{1F911}\\u{1FA99}]", "gu");
+        var CAMEL_RE = new RegExp("(?<![A-Z])([a-z])([A-Z])", "g");
+        /** The one fold every check uses: lowercase Latin skeleton of what a reader sees. Whitespace runs
+         *  collapse to one space, as HTML renders them; that also keeps every match below linear-time. */
+        function foldForClaims(text) {
+            var t = String(text.normalize("NFKD")).replace(INVISIBLE_RE, "").normalize("NFKC");
+            t = String(String(t).replace(/\u2800/g, " ")).replace(MONEY_EMOJI_RE, " $ ");
+            t = String(t).replace(/[^\x00-\x7f]/g, function (c) { return (dataAt(LOOKALIKE, c) === undefined ? c : dataAt(LOOKALIKE, c)); });
+            // Split only a REAL camelCase join (a lowercase run ending, then an uppercase start): the
+            // lowercase letter must not itself be sandwiched directly between two uppercase letters, else
+            // "PAlD" (a single lowercased confusable inside an otherwise-capital word) would mis-split into
+            // "PAl D" and never fold back to "paid" (astra r3 H1).
+            return String(String(String(t).replace(CAMEL_RE, "$1 $2")).replace(/_/g, " ")).replace(/\s+/g, " ").toLowerCase();
+        }
+        // Digit and symbol spellings, read both ways for "1" (i and l).
+        var LEET_I = { "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "!": "i", "|": "i" };
+        var LEET_L = { "0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "@": "a", "$": "s", "!": "i", "|": "l" };
+        var LEET_RE = /[0134578@$!|]/g;
+        var HAS_LEET = /[0134578@$!|]/;
+        /** Every spelling view of the folded text: the digit/symbol leet views (when present), plus an
+         *  l<->i confusable swap of each ("pald" reads "paid"; "settied" reads "settled"). Bounded: at
+         *  most 3 leet bases x up to 2 l/i swaps = at most 9 views, each built once (still linear-time). */
+        var views = function (f) {
+            var base = HAS_LEET.test(f) ? [f, String(f).replace(LEET_RE, function (c) { return dataAt(LEET_I, c); }), String(f).replace(LEET_RE, function (c) { return dataAt(LEET_L, c); })] : [f];
+            var out = base.slice();
+            for (var i = 0; i < base.length; i++) {
+                var b = dataAt(base, i);
+                if (b.indexOf("l") !== -1)
+                    out.push(String(b).replace(/l/g, "i"));
+                if (b.indexOf("i") !== -1)
+                    out.push(String(b).replace(/i/g, "l"));
+            }
+            return out;
+        };
+        // A run of three or more single letters split by up to three separators is read as one word ("p a i d").
+        // Word boundaries mean nothing inside such a run, so a claim word anywhere in it counts ("p a i d x").
+        var SPACED_RE = new RegExp("(?<![a-z0-9])[a-z](?:[^a-z0-9]{1,3}[a-z](?![a-z0-9])){2,}", "g");
+        var spacedRuns = function (v) { return (v.match(SPACED_RE) || []).map(function (r) { return String(r).replace(/[^a-z]/g, ""); }).join(" "); };
+        var CUR_CODE = "usdc|usdt|usde|usd|eurc|eur|gbp|jpy|cny|rmb|inr|chf|cad|aud|krw|rub|brl|mxn|eth|weth|btc|wbtc|dai|sol|matic|pol|xrp|ltc|bnb|busd|tusd|pyusd|gusd|frax|sats?|gwei|wei" +
+            "|xlm|ada|dot|avax|trx|ton|near|atom|apt|sui|shib|doge|xmr|bch|etc|fil|icp|hbar|vet|algo|xtz|eos|cro|usdp|fdusd" +
+            "|hkd|sgd|nzd|sek|nok|dkk|pln|try|zar|thb|idr|myr|vnd|ils|aed|sar|ars|clp|cop|pen|egp|ngn|kes|pkr|uah|czk|huf|ron";
+        var CUR_WORD = "dollars?|bucks|cents?|euros?|pence|quid|yen|yuan|renminbi|rupees?|rubles?|roubles?|pesos?|francs?|satoshis?|bitcoins?|ethers?|stablecoins?";
+        var MAGNITUDE = "thousand|million|billion|trillion|mil|mio|mrd|mm|mn|bn|tn|k|m|b|t";
+        var NUMBER_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|trillion|dozen|half";
+        var CURRENCY = "(?:\\p{Sc}|(?:" + CUR_CODE + "|" + CUR_WORD + ")\\b)";
+        // Every repeat is bounded and every branch starts at a rare token (a currency, a number word), so a
+        // hostile run of digits, spaces or hyphens costs linear time, also across a whole dashboard's prose.
+        // "5 USDC" is found from the currency, with a bounded look back for the number before it.
+        var AMOUNT_RE = new RegExp("\\p{Sc} ?(?:\\d|(?:" + NUMBER_WORD + ")\\b)" + //                                   $5, $ 5, $five
+            "|" + CURRENCY + "(?<=\\d[\\d,._]{0,40} ?(?:" + MAGNITUDE + ")? ?[(\\[]? ?" + CURRENCY + ")" + //     5 USDC, 1m USDC, 5$, 1 $ USDC
+            "|\\b(?:" + NUMBER_WORD + ")\\b[ -]{0,3}(?:(?:" + MAGNITUDE + ")\\b[ -]{0,3})?" + CURRENCY + // one million dollars
+            "|\\ban? (?:" + CUR_WORD + ")\\b" + //                                                  a dollar
+            "|\\b(?:" + CUR_CODE + "|" + CUR_WORD + ")[ :=]{0,3}(?:\\d|(?:" + NUMBER_WORD + ")\\b)", //       USD 5, usdc:100, USDC five
+        "u");
+        // Payment and verification words: English, Spanish, French, German, Italian, Portuguese, Dutch,
+        // Polish, Turkish and Indonesian, as folded (accents stripped, lowercase).
+        var CLAIM_WORDS = [
+            "paid|unpaid|prepaid|repaid|overpaid|underpaid|payout|payouts|paidout|refund|refunds|refunded|reimbursed",
+            "settled|verified|guaranteed|funded|charged|deposited|withdrawn|credited|debited",
+            "remitted|disbursed|escrowed",
+            "da thanh toan", // Vietnamese "paid", with diacritics folded to this ASCII skeleton already
+            "pagad[oa]s?|pago|abonad[oa]s?|reembolsad[oa]s?|reembolso|liquidad[oa]s?|cobrad[oa]s?|acreditad[oa]s?|depositad[oa]s?",
+            "verificad[oa]s?|confirmad[oa]s?|aprobad[oa]s?|aprovad[oa]s?|recibid[oa]s?|recebid[oa]s?|creditad[oa]s?|debitad[oa]s?|quitad[oa]s?|saldo",
+            "payee?s?|rembourse[es]?|remboursee?s?|remboursement|credite[es]?|creditee?s?|debite[es]?|debitee?s?|verifiee?s?",
+            "confirmee?s?|approuvee?s?|encaissee?s?|recue?s?|solde",
+            "bezahlt|gezahlt|ausgezahlt|uberwiesen|ueberwiesen|erstattet|ruckerstattet|rueckerstattet|gutgeschrieben|abgebucht",
+            "bestatigt|bestaetigt|verifiziert|genehmigt|beglichen|eingegangen|kontostand|guthaben",
+            "pagat[oaie]|rimborsat[oaie]|rimborso|accreditat[oaie]|addebitat[oaie]|verificat[oaie]|confermat[oaie]|approvat[oaie]",
+            "saldat[oaie]|incassat[oaie]|ricevut[oaie]",
+            "betaald|terugbetaald|uitbetaald|geverifieerd|bevestigd|goedgekeurd|ontvangen|gestort",
+            "zaplacon[oay]|oplacon[oay]|zwrocon[oay]|potwierdzon[oay]|zweryfikowan[oay]",
+            "odendi|onaylandi|dogrulandi|iade|bakiye|dibayar|lunas|dikembalikan|terverifikasi|disetujui",
+        ].join("|");
+        var CLAIM_RE = new RegExp("\\b(?:" + CLAIM_WORDS + ")\\b");
+        var CLAIM_IN_RUN_RE = new RegExp("(?:" + CLAIM_WORDS + ")");
+        // ── The pair rule (M4 fix): a GENERIC word (received/released/approved/confirmed/complete/...) is
+        // physical-workflow prose on its own ("Sample received", "Run confirmed for 9:00") and is withheld
+        // only when a MONEY_OR_VERIFICATION noun sits within 3 words of it, in either order ("payment
+        // received", "funds released", "payout approved"). "balance"/"balances" moved here as nouns, not
+        // generic words: a bare "Available balance" label states nothing, but "balance confirmed" does.
+        var GENERIC_WORDS = "received|released|approved|confirmed|complete|completed|passed|succeeded|successful|cleared|processed|accepted|sent|done";
+        var CLAIM_NOUNS = "payment|payments|funds|fund|money|payout|payouts|transfer|transfers|transaction|transactions|invoice|invoices|deposit|deposits|escrow|settlement|refund|refunds|balance|balances|wallet|charge|charges|fee|fees|amount|price|verification|identity|kyc|kyb|attestation|proof|audit|oracle";
+        var CLAIM_NOUN_GROUP = "(?:" + CLAIM_NOUNS + "|" + CUR_CODE + "|" + CUR_WORD + ")";
+        var GENERIC_GROUP = "(?:" + GENERIC_WORDS + ")";
+        // Bounded repeats only (lazy, capped at 3 intervening words) — linear-time even across a whole
+        // dashboard's joined prose, same discipline as the rest of this file's regexes.
+        var PAIR_RE = new RegExp("\\b" + CLAIM_NOUN_GROUP + "\\b(?:\\W+\\w+){0,3}?\\W+" + GENERIC_GROUP + "\\b" +
+            "|\\b" + GENERIC_GROUP + "\\b(?:\\W+\\w+){0,3}?\\W+" + CLAIM_NOUN_GROUP + "\\b");
+        // Folded into the SAME `wordsIn` pass as MONEY_WORDS/NOTICE_WORDS below (one `views()` build, one
+        // loop) rather than a second independent pass: re-building up to 9 spelling views of a whole
+        // dashboard's joined prose twice over was measured to roughly 3.5x the adapt+validate time on the
+        // benchmark's 2,000-char-per-note worst case. PAIR_RE needs no spaced-run check (that defense is
+        // for single-letter-spaced words, not word-level pairing), so its "inRun" slot never matches.
+        var PAIR_WORDS = [PAIR_RE, /(?!)/];
+        // The same words in non-Latin scripts (Russian and Ukrainian, Chinese, Japanese, Korean, Arabic,
+        // Hindi), matched in the folded text with spaces removed. Each is folded like the text (lower and
+        // upper case), so a look-alike or all-capitals spelling still matches.
+        var SCRIPT_CLAIM_WORDS = ["\u043e\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u044b\u043f\u043b\u0430\u0447\u0435\u043d", "\u0441\u043f\u043b\u0430\u0447\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0435\u043d", "\u0432\u043e\u0437\u0432\u0440\u0430\u0442", "\u0437\u0430\u0447\u0438\u0441\u043b\u0435\u043d", "\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d", "\u043f\u0456\u0434\u0442\u0432\u0435\u0440\u0434\u0436\u0435\u043d", "\u043f\u0440\u043e\u0432\u0435\u0440\u0435\u043d", "\u043e\u0434\u043e\u0431\u0440\u0435\u043d", "\u0431\u0430\u043b\u0430\u043d\u0441", "\u043f\u043e\u043b\u0443\u0447\u0435\u043d", "\u5df2\u4ed8", "\u5df2\u652f\u4ed8", "\u652f\u4ed8\u6210\u529f", "\u9000\u6b3e", "\u5df2\u7ed3\u7b97", "\u5df2\u7d50\u7b97", "\u5df2\u786e\u8ba4", "\u5df2\u78ba\u8a8d", "\u5df2\u9a8c\u8bc1", "\u5df2\u9a57\u8b49", "\u5230\u8d26", "\u5230\u8cec", "\u4f59\u989d", "\u9918\u984d", "\u5df2\u6536\u6b3e", "\u5df2\u6279\u51c6", "\u652f\u6255\u6e08", "\u652f\u6255\u3044\u6e08", "\u652f\u6255\u5b8c\u4e86", "\u652f\u6255\u3044\u5b8c\u4e86", "\u5165\u91d1\u6e08", "\u8fd4\u91d1", "\u6c7a\u6e08\u6e08", "\u6c7a\u6e08\u5b8c\u4e86", "\u78ba\u8a8d\u6e08", "\u627f\u8a8d\u6e08", "\u6b8b\u9ad8", "\uc9c0\uae09\uc644\ub8cc", "\uacb0\uc81c\uc644\ub8cc", "\uacb0\uc81c\ub428", "\uc9c0\uae09\ub428", "\ud658\ubd88", "\uc794\uc561", "\uc785\uae08\uc644\ub8cc", "\ud655\uc778\ub428", "\uc2b9\uc778\ub428", "\u0645\u062f\u0641\u0648\u0639", "\u062a\u0645\u0627\u0644\u062f\u0641\u0639", "\u0627\u0633\u062a\u0631\u062f\u0627\u062f", "\u0631\u0635\u064a\u062f", "\u092d\u0941\u0917\u0924\u093e\u0928\u0915\u093f\u092f\u093e", "\u092d\u0941\u0917\u0924\u093e\u0928\u0939\u094b\u0917\u092f\u093e", "\u03c0\u03bb\u03b7\u03c1\u03ce\u03b8\u03b7\u03ba\u03b5", "\u03c0\u03bb\u03b7\u03c1\u03ce\u03b8\u03b7\u03ba\u03b1\u03bd", "\u03b5\u03c0\u03b9\u03c3\u03c4\u03c1\u03bf\u03c6\u03ae \u03c7\u03c1\u03b7\u03bc\u03ac\u03c4\u03c9\u03bd", "\u03c5\u03c0\u03cc\u03bb\u03bf\u03b9\u03c0\u03bf", "\u05e9\u05d5\u05dc\u05dd", "\u0e0a\u0e33\u0e23\u0e30\u0e41\u0e25\u0e49\u0e27"];
+        var scriptWords = [];
+        for (var si = 0; si < SCRIPT_CLAIM_WORDS.length; si++) {
+            scriptWords.push(String(foldForClaims(dataAt(SCRIPT_CLAIM_WORDS, si))).replace(/\s+/g, ""));
+            scriptWords.push(String(foldForClaims(dataAt(SCRIPT_CLAIM_WORDS, si).toUpperCase())).replace(/\s+/g, ""));
+        }
+        var SCRIPT_CLAIM_RE = new RegExp(scriptWords.filter(function (w, i) { return scriptWords.indexOf(w) === i; }).join("|"), "u"); // the words hold no regex syntax
+        var NOTICE_RE = /\bwithh[eo]ld/;
+        var NOTICE_IN_RUN_RE = /withh[eo]ld/;
+        var MONEY_WORDS = [CLAIM_RE, CLAIM_IN_RUN_RE];
+        var NOTICE_WORDS = [NOTICE_RE, NOTICE_IN_RUN_RE];
+        /** Any of the word checks in any spelling view of the folded text (views are built once). */
+        function wordsIn(f, checks) {
+            var spellings = views(f);
+            for (var i = 0; i < spellings.length; i++) {
+                var v = dataAt(spellings, i);
+                var runs = spacedRuns(v);
+                for (var j = 0; j < checks.length; j++) {
+                    var word = dataAt(checks, j)[0], inRun = dataAt(checks, j)[1];
+                    if (word.test(v) || inRun.test(runs))
+                        return true;
+                }
+            }
+            return false;
+        }
+        var scriptIn = function (f) { return /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(String(f).replace(/ /g, "")); };
+        function statesAmount(text) { return AMOUNT_RE.test(foldForClaims(text)); }
+        /** Does the text state an amount or a payment or verification status? */
+        function isMoneyClaim(text) { var f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]); }
+        /** Does the text mention PCC's withheld notice ("withheld", "withhold")? Only PCC may say that. */
+        function mentionsWithheld(text) { return wordsIn(foldForClaims(text), [NOTICE_WORDS]); }
+        /** Agent prose that may not be shown: a money claim, or a mention of PCC's notice (one fold). */
+        function isProseClaim(text) {
+            var f = foldForClaims(text);
+            return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
+        }
+
+        var IDENT_NOUN_RE = new RegExp("\\b" + CLAIM_NOUN_GROUP + "\\b");
+        var IDENT_GENERIC_RE = new RegExp("\\b" + GENERIC_GROUP + "\\b");
+        function isIdentifierClaim(value) {
+          if (isMoneyClaim(value) || mentionsWithheld(value)) return true;
+          var variants = views(foldForClaims(value));
+          for (var i = 0; i < variants.length; i++) if (IDENT_NOUN_RE.test(dataAt(variants, i)) && IDENT_GENERIC_RE.test(dataAt(variants, i))) return true;
+          return false;
+        }
+        return { identifier: isIdentifierClaim, fold: foldForClaims, amount: statesAmount, money: isMoneyClaim, notice: mentionsWithheld, prose: isProseClaim };
+      })();
+    } catch (e) { return null; }
+  }
+  function foldForClaims(text) { return CLAIM_DETECTOR ? CLAIM_DETECTOR.fold(text) : ''; }
+  function statesAmount(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.amount(text); }
+  function isMoneyClaim(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.money(text); }
+  function mentionsWithheld(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.notice(text); }
+  function isProseClaim(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.prose(text); }
+
+  var PLAIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+  var PLAIN_HEX_RE = /^0x(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
+  var PLAIN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+  var PLAIN_TRACE_RE = /^[A-Za-z0-9_-]{8,64}$/;
+  /** Identifiers can spell prose: withhold claims and attribute all remaining values, as in the IR. */
+  function idText(raw) {
+      if (typeof raw === "string" && (!CLAIM_DETECTOR || CLAIM_DETECTOR.identifier(raw))) return WITHHELD_FIELD;
+      return reportedText(raw, false, false);
+  }
+  /** Addresses and transaction hashes admit exactly their two wire lengths. */
+  function hexText(raw) {
+      return mintText(typeof raw === "string" && PLAIN_HEX_RE.test(raw) ? raw : "unrecognised value");
+  }
+  /** Canonical UTC, calendar-valid, and in the same 2000..2100 era as the IR kit. */
+  function canonicalPlainTime(raw) {
+      if (typeof raw !== "string")
+          return false;
+      var m = PLAIN_TIME_RE.exec(raw);
+      if (!m)
+          return false;
+      var year = Number(m[1]), month = Number(m[2]), day = Number(m[3]);
+      var hour = Number(m[4]), minute = Number(m[5]), second = Number(m[6]);
+      var ms = m[7] ? Number((m[7] + "00").slice(0, 3)) : 0;
+      if (year < 2000 || year > 2100)
+          return false;
+      var d = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
+      return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day &&
+          d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second &&
+          d.getUTCMilliseconds() === ms;
+  }
+  /** Preserve the kit's locale-formatted timestamp after the UTC grammar check. */
+  function timeText(raw) {
+      if (!canonicalPlainTime(raw))
+          return mintText("time not reported");
+      return fmtTs(raw);
+  }
+  /** An invalid trace is omitted, so arbitrary response-header text is never shown. */
+  function traceText(raw) {
+      return mintText(typeof raw === "string" && PLAIN_TRACE_RE.test(raw) ? "trace " + raw : "");
+  }
+  /** Operator-chosen names are visibly framed; claims use PCC's withheld notice. */
+  function nameText(raw) {
+      if (typeof raw !== "string")
+          return reportedText(raw, false, false);
+      return mintText(isProseClaim(raw) ? "name withheld: stated money or verification" : "name: " + raw);
+  }
+  /** Editable defaults admit only the field kind's wire value, without coercion. */
+  function fieldDefaultText(kind, raw) {
+      if (kind === "number" || kind === "integer")
+          return mintText(typeof raw === "number" && Number.isFinite(raw) ? String(raw) : "");
+      if (kind === "string")
+          return mintText(typeof raw === "string" && !isProseClaim(raw) ? raw : "");
+      return mintText("");
+  }
+
+  // </plain-text helpers>
+
   // Pull the first array out of a response (for list windows without a select).
   function firstArray(resp) {
     if (Array.isArray(resp)) return resp;
     if (resp && typeof resp === 'object') {
       var keys = Object.keys(resp);
-      for (var i = 0; i < keys.length; i++) if (Array.isArray(resp[keys[i]])) return resp[keys[i]];
+      for (var i = 0; i < keys.length; i++) if (Array.isArray(dataAt(resp, dataAt(keys, i)))) return dataAt(resp, dataAt(keys, i));
     }
     return [];
   }
@@ -838,9 +1187,9 @@
     var parts = [];
     var keys = Object.keys(query);
     for (var i = 0; i < keys.length; i++) {
-      var v = query[keys[i]];
+      var v = dataAt(query, dataAt(keys, i));
       if (v == null) continue;
-      parts.push(encodeURIComponent(keys[i]) + '=' + encodeURIComponent(typeof v === 'object' ? JSON.stringify(v) : String(v)));
+      parts.push(encodeURIComponent(dataAt(keys, i)) + '=' + encodeURIComponent(typeof v === 'object' ? JSON.stringify(v) : String(v)));
     }
     return parts.length ? ('?' + parts.join('&')) : '';
   };
@@ -910,7 +1259,7 @@
           var frames = buf.split('\n\n');
           buf = frames.pop();
           for (var i = 0; i < frames.length; i++) {
-            var line = frames[i].split('\n')
+            var line = dataAt(frames, i).split('\n')
               .filter(function (l) { return l.indexOf('data:') === 0; })
               .map(function (l) { return l.slice(5).trim(); })
               .join('');
@@ -996,7 +1345,7 @@
   function resolveBinding(ctx, binding) {
     if (!binding || !binding.path) return Promise.resolve({ data: undefined, stale: true, error: null });
     if (ctx.mode === 'snapshot') {
-      var d = ctx.snapshot[binding.path];
+      var d = dataAt(ctx.snapshot, binding.path);
       var picked = binding.select != null ? dot(d, binding.select) : d;
       return Promise.resolve({ data: picked, stale: true, error: d === undefined ? 'no snapshot for ' + binding.path : null });
     }
@@ -1004,8 +1353,8 @@
       function (d) { return { data: binding.select != null ? dot(d, binding.select) : d, raw: d, stale: false, error: null }; },
       function (err) {
         // Live fetch failed → fall back to any baked snapshot, else stale-empty.
-        if (ctx.snapshot && ctx.snapshot[binding.path] !== undefined) {
-          var s = ctx.snapshot[binding.path];
+        if (ctx.snapshot && dataAt(ctx.snapshot, binding.path) !== undefined) {
+          var s = dataAt(ctx.snapshot, binding.path);
           ctx.degraded = true;
           return { data: binding.select != null ? dot(s, binding.select) : s, stale: true, error: null };
         }
@@ -1022,7 +1371,8 @@
   function winShell(title, statusText, statusCls) {
     var wrap = el('article', 'pcc-win');
     var head = el('div', 'pcc-win-head');
-    head.appendChild(el('span', 'pcc-win-title', title));
+    head.appendChild((title && typeof title === 'object' && AGENT_TEXT_BRANDS.has(title)) || title === WITHHELD_FIELD ?
+      agentEl('span', 'pcc-win-title pcc-text', title) : el('span', 'pcc-win-title', title));
     if (statusText != null) head.appendChild(el('span', 'pcc-pill ' + (statusCls || ''), statusText));
     wrap.appendChild(head);
     var body = el('div', 'pcc-win-body');
@@ -1033,19 +1383,20 @@
       // .pcc-win-foot for styling and must never be removed by a footer refresh.
       var old = wrap.querySelector('.pcc-win-foot.pcc-foot-meta');
       if (old) old.parentNode.removeChild(old);
-      if (!traceId && !stale) return;
+      var trace = traceText(traceId);
+      if (!trace.t && !stale) return;
       var foot = el('div', 'pcc-win-foot pcc-foot-meta');
-      if (stale) foot.appendChild(el('span', 'pcc-foot-stale', 'snapshot'));
-      if (traceId) foot.appendChild(el('span', 'pcc-mono pcc-foot-trace', 'trace ' + traceId));
+      if (stale) foot.appendChild(el('span', 'pcc-foot-stale', kitText('snapshot')));
+      if (trace.t) foot.appendChild(el('span', 'pcc-mono pcc-foot-trace', trace));
       wrap.appendChild(foot);
     };
     return wrap;
   }
-  function loadingLine() { return el('p', 'pcc-muted', 'Loading…'); }
+  function loadingLine() { return el('p', 'pcc-muted', kitText('Loading…')); }
   function errorLine(msg) {
     var p = el('p', 'pcc-err');
-    p.appendChild(el('span', 'pcc-err-msg', msg || 'Could not load this data.'));
-    p.appendChild(el('span', 'pcc-err-honest', ' Nothing was fabricated.'));
+    p.appendChild(el('span', 'pcc-err-msg', isKitText(msg) ? msg : msg ? reportedText(msg, false, false) : kitText('Could not load this data.')));
+    p.appendChild(el('span', 'pcc-err-honest', kitText(' Nothing was fabricated.')));
     return p;
   }
 
@@ -1067,25 +1418,26 @@
   // ═══════════════════════════════════════════════════════════════════════
 
   function writeTag(ctx, action, desc) {
-    if (ctx.mode === 'snapshot') return 'via assistant';
-    if (ctx.mode === 'host') return hostActionEnabled(action) ? 'sends now' : 'unavailable';
-    if (!desc.ok) return 'blocked';
-    if (desc.money) return 'needs approval';
-    return action.confirm === 'inline' ? 'asks to confirm' : 'sends now';
+    if (ctx.mode === 'snapshot') return kitText('via assistant');
+    if (ctx.mode === 'host') return kitText(hostActionEnabled(action) ? 'sends now' : 'unavailable');
+    if (!desc.ok) return kitText('blocked');
+    if (desc.money) return kitText('needs approval');
+    return kitText(action.confirm === 'inline' ? 'asks to confirm' : 'sends now');
   }
   // Styling comes from the SAME descriptor the gate uses: a money write can never look non-money.
   function writeButton(ctx, action, desc, fallbackLabel) {
     var b = el('button', 'pcc-btn ' + (desc.money ? 'pcc-btn-primary' : 'pcc-btn-quiet'));
     b.type = 'button';
-    b.appendChild(el('span', 'pcc-btn-label', String((action && action.label) || fallbackLabel)));
-    b.appendChild(el('span', 'pcc-btn-tag', ' · ' + writeTag(ctx, action, desc)));
+    b.appendChild(action && action.label ? agentEl('span', 'pcc-btn-label pcc-text', agentText(action.label, false)) :
+      el('span', 'pcc-btn-label', kitText(fallbackLabel === 'Submit' ? 'Submit' : fallbackLabel === 'Plan' ? 'Plan' : fallbackLabel === 'Execute' ? 'Execute' : 'Action')));
+    b.appendChild(el('span', 'pcc-btn-tag', joinText(kitText(' · '), writeTag(ctx, action, desc))));
     return b;
   }
   // A manifest label shown as what it is: quoted, attributed, untrusted text.
   function untrustedLabel(label) {
     var p = el('p', 'pcc-untrusted-label');
-    p.appendChild(el('span', 'pcc-untrusted-k', 'The dashboard calls this: '));
-    p.appendChild(el('span', 'pcc-untrusted-v', '“' + String(label) + '”'));
+    p.appendChild(el('span', 'pcc-untrusted-k', kitText('The dashboard calls this: ')));
+    p.appendChild(el('span', 'pcc-untrusted-v', mintText('“' + String(label) + '”')));
     return p;
   }
 
@@ -1103,7 +1455,11 @@
   // as sent. Never verified: these windows read collections, snapshots or single values, not a live
   // settlement read model.
   function boundText(path, v, money) {
-    return isStatusPath(path) ? statusPillText(v, false, money) : String(v);
+    if (isStatusPath(path)) return statusPillText(v, false, money);
+    var field = typeof path === 'string' ? path.split('.').pop() : '';
+    if (/name$/i.test(field)) return nameText(v);
+    if (/id$|type$/i.test(field)) return idText(v);
+    return reportedText(typeof v === 'object' ? JSON.stringify(v) : v, false, money);
   }
 
   // note — prose; split on double newline into <p>, textContent only.
@@ -1112,23 +1468,23 @@
     var text = String(w.text == null ? '' : w.text);
     var paras = text.split(/\n\n+/);
     for (var i = 0; i < paras.length; i++) {
-      if (paras[i] === '') continue;
-      wrap.appendChild(el('p', 'pcc-note-p', paras[i]));
+      if (dataAt(paras, i) === '') continue;
+      wrap.appendChild(agentEl('p', 'pcc-note-p pcc-text', agentText(dataAt(paras, i), true)));
     }
     return wrap;
   }
 
   // metric — single scalar, formatted, tabular.
   function renderMetric(ctx, w) {
-    var wrap = winShell(w.label || 'Metric', null, null);
-    var val = el('div', 'pcc-metric-amount pcc-tnum', '—');
+    var wrap = winShell(w.label ? agentText(w.label, false) : kitText('Metric'), null, null);
+    var val = el('div', 'pcc-metric-amount pcc-tnum', kitText('—'));
     wrap._body.appendChild(val);
     var sel = w.select != null ? w.select : (w.binding && w.binding.select);
     resolveBinding(ctx, w.binding).then(function (r) {
       var raw = sel != null ? dot(r.data, sel) : r.data;
       if (r.error) { clear(wrap._body); wrap._body.appendChild(errorLine(r.error)); }
-      else val.textContent = isStatusPath(sel) && raw != null && typeof raw !== 'object'
-        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format);
+      else setText(val, isStatusPath(sel) && raw != null && typeof raw !== 'object'
+        ? boundText(sel, raw, isMoneyData(w.binding && w.binding.path, r.data)) : fmtVal(raw, w.format, sel));
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -1136,29 +1492,29 @@
 
   // capability — one catalog row: name + provider + price + trust + assurance.
   function renderCapability(ctx, w) {
-    var wrap = winShell('Capability', null, null);
+    var wrap = winShell(kitText('Capability'), null, null);
     wrap._body.appendChild(loadingLine());
     resolveBinding(ctx, w.binding).then(function (r) {
       clear(wrap._body);
       var c = r.data;
-      if (r.error || !c) { wrap._body.appendChild(errorLine(r.error || 'No capability data.')); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
+      if (r.error || !c) { wrap._body.appendChild(errorLine(r.error || kitText('No capability data.'))); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       // Follow the API shape (CapabilityDTO) — render what it actually emits.
       var titleRow = el('div', 'pcc-cap-title');
-      titleRow.appendChild(el('span', 'pcc-cap-name', String(c.name || c.id || 'Capability')));
+      titleRow.appendChild(el('span', 'pcc-cap-name', c.name ? nameText(c.name) : c.id ? idText(c.id) : kitText('Capability')));
       var price = c.pricing && (c.pricing.baseCost != null ? c.pricing.baseCost : c.pricing.minimum);
       var currency = (c.pricing && c.pricing.currency) || 'USDC';
-      if (price != null) titleRow.appendChild(el('span', 'pcc-price-chip pcc-tnum', fmtUsd(price) + ' ' + currency));
+      if (price != null) titleRow.appendChild(el('span', 'pcc-price-chip pcc-tnum', joinText(fmtUsd(price), kitText(' '), currencyText(currency))));
       wrap._body.appendChild(titleRow);
       var meta = el('div', 'pcc-cap-meta');
-      if (c.kernelName || c.kernelId) meta.appendChild(el('span', 'pcc-mono', String(c.kernelName || c.kernelId)));
-      if (c.type) meta.appendChild(el('span', 'pcc-tag', String(c.type)));
-      if (typeof c.reputation === 'number') meta.appendChild(el('span', 'pcc-badge', 'rep ' + c.reputation));
+      if (c.kernelName || c.kernelId) meta.appendChild(el('span', 'pcc-mono', c.kernelName ? nameText(c.kernelName) : idText(c.kernelId)));
+      if (c.type) meta.appendChild(el('span', 'pcc-tag', idText(c.type)));
+      if (typeof c.reputation === 'number') meta.appendChild(el('span', 'pcc-badge', joinText(kitText('rep '), numberText(c.reputation))));
       wrap._body.appendChild(meta);
-      if (c.description) wrap._body.appendChild(el('p', 'pcc-cap-desc', String(c.description)));
+      if (c.description) wrap._body.appendChild(el('p', 'pcc-cap-desc', reportedText(c.description, false, false)));
       var tiers = Array.isArray(c.assuranceTiers) ? c.assuranceTiers : null;
       if (tiers && tiers.length) {
-        wrap._body.appendChild(el('p', 'pcc-cap-assurance', 'assurance tier ' + tiers.join('/') +
-          (c.available === false ? ' · unavailable' : (typeof c.queueDepth === 'number' ? ' · queue ' + c.queueDepth : ''))));
+        wrap._body.appendChild(el('p', 'pcc-cap-assurance', joinText(kitText('assurance tier '), joinWithText(kitText('/'), tiers.map(numberText)),
+          c.available === false ? kitText(' · unavailable') : typeof c.queueDepth === 'number' ? joinText(kitText(' · queue '), numberText(c.queueDepth)) : kitText(''))));
       }
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
@@ -1167,29 +1523,29 @@
 
   // list — a collection of light rows (title · meta · status pill).
   function renderList(ctx, w) {
-    var wrap = winShell('List', null, null);
+    var wrap = winShell(kitText('List'), null, null);
     wrap._body.appendChild(loadingLine());
     resolveBinding(ctx, w.binding).then(function (r) {
       clear(wrap._body);
       if (r.error) { wrap._body.appendChild(errorLine(r.error)); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       var rows = w.binding && w.binding.select != null ? (Array.isArray(r.data) ? r.data : firstArray(r.data)) : firstArray(r.raw != null ? r.raw : r.data);
-      if (!rows.length) { wrap._body.appendChild(el('p', 'pcc-muted', 'Nothing here yet.')); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
+      if (!rows.length) { wrap._body.appendChild(el('p', 'pcc-muted', kitText('Nothing here yet.'))); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       var limit = w.limit || rows.length;
       var listNode = el('ul', 'pcc-list');
       for (var i = 0; i < rows.length && i < limit; i++) {
-        var row = rows[i];
+        var row = dataAt(rows, i);
         var li = el('li', 'pcc-list-row');
         var main = el('div', 'pcc-list-main');
         var rowMoney = isMoneyData(w.binding && w.binding.path, row);
         var tv = dot(row, w.item.title);
-        main.appendChild(el('span', 'pcc-list-title', tv != null ? boundText(w.item.title, tv, rowMoney) : String(w.item.title || '')));
+        main.appendChild(tv != null ? el('span', 'pcc-list-title', boundText(w.item.title, tv, rowMoney)) : agentEl('span', 'pcc-list-title', agentText(w.item.title || '', false)));
         var metaVals = [];
         var metaKeys = (w.item.meta || []);
         for (var j = 0; j < metaKeys.length; j++) {
-          var mv = dot(row, metaKeys[j]);
-          if (mv != null && mv !== '') metaVals.push(boundText(metaKeys[j], mv, rowMoney));
+          var mv = dot(row, dataAt(metaKeys, j));
+          if (mv != null && mv !== '') metaVals.push(boundText(dataAt(metaKeys, j), mv, rowMoney));
         }
-        if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', metaVals.join(' · ')));
+        if (metaVals.length) main.appendChild(el('span', 'pcc-list-meta', joinWithText(kitText(' · '), metaVals)));
         li.appendChild(main);
         if (w.item.statusFrom) {
           var st = dot(row, w.item.statusFrom);
@@ -1216,18 +1572,26 @@
     frag.className = 'pcc-form-fields';
     var names = Object.keys(props);
     for (var i = 0; i < names.length; i++) {
-      var name = names[i];
-      var spec = props[name] || {};
+      var name = dataAt(names, i);
+      var spec = dataAt(props, name) || {};
       var isReq = required.indexOf(name) >= 0;
       var row = el('div', 'pcc-field');
-      var lab = el('label', 'pcc-field-label', (spec.title || name) + (isReq ? ' *' : ''));
+      var lab = el('label', 'pcc-field-label');
+      lab.appendChild(untrustedLabel(spec.title || name));
+      if (isReq) lab.appendChild(el('span', null, kitText(' *')));
       var fieldId = 'pf-' + name + '-' + Math.random().toString(36).slice(2, 7);
       lab.setAttribute('for', fieldId);
       row.appendChild(lab);
       var input, kind = spec.type;
       if (kind === 'string' && Array.isArray(spec.enum)) {
         input = el('select', 'pcc-input');
-        for (var e = 0; e < spec.enum.length; e++) input.appendChild(el('option', null, String(spec.enum[e])));
+        for (var e = 0; e < spec.enum.length; e++) {
+          var option = el('option');
+          option.appendChild(untrustedLabel(dataAt(spec.enum, e)));
+          // Keep the wire value distinct from the attributed option label.
+          setValue(option, enumValueText(dataAt(spec.enum, e)));
+          input.appendChild(option);
+        }
         kind = 'enum';
       } else if (kind === 'number' || kind === 'integer') {
         input = el('input', 'pcc-input'); input.type = 'number';
@@ -1238,14 +1602,14 @@
         input = el('input', 'pcc-checkbox'); input.type = 'checkbox';
       } else if (kind === 'object' || kind === 'array') {
         input = el('textarea', 'pcc-input pcc-mono'); input.rows = 3;
-        input.placeholder = kind === 'array' ? '[ ]' : '{ }';
+        setAttrText(input, 'placeholder', kitText(kind === 'array' ? '[ ]' : '{ }'));
         kind = 'json';
       } else {
         input = el('input', 'pcc-input'); input.type = 'text';
         kind = 'string';
       }
       input.id = fieldId;
-      if (spec['default'] != null && kind !== 'boolean') input.value = String(spec['default']);
+      if (spec['default'] != null && kind !== 'boolean') setValue(input, fieldDefaultText(spec.type, spec['default']));
       if (spec['default'] === true && kind === 'boolean') input.checked = true;
       row.appendChild(input);
       var errLine = el('div', 'pcc-field-err'); errLine.hidden = true;
@@ -1261,19 +1625,19 @@
     var out = {};
     var firstBad = null;
     for (var i = 0; i < form.fields.length; i++) {
-      var f = form.fields[i];
+      var f = dataAt(form.fields, i);
       f.errLine.hidden = true; f.input.classList.remove('bad');
       var raw = f.kind === 'boolean' ? f.input.checked : f.input.value;
       var empty = f.kind === 'boolean' ? false : (raw == null || String(raw).trim() === '');
-      if (f.required && empty) { markBad(f, 'Required.'); firstBad = firstBad || f; continue; }
+      if (f.required && empty) { markBad(f, kitText('Required.')); firstBad = firstBad || f; continue; }
       if (empty) continue;
       if (f.kind === 'number' || f.kind === 'integer') {
         var n = Number(raw);
-        if (!isFinite(n)) { markBad(f, 'Enter a number.'); firstBad = firstBad || f; continue; }
+        if (!isFinite(n)) { markBad(f, kitText('Enter a number.')); firstBad = firstBad || f; continue; }
         out[f.name] = n;
       } else if (f.kind === 'json') {
         try { out[f.name] = JSON.parse(raw); }
-        catch (e) { markBad(f, 'Enter valid JSON.'); firstBad = firstBad || f; continue; }
+        catch (e) { markBad(f, kitText('Enter valid JSON.')); firstBad = firstBad || f; continue; }
       } else if (f.kind === 'boolean') {
         out[f.name] = !!raw;
       } else {
@@ -1283,10 +1647,10 @@
     if (firstBad) { var err = new Error('Please fix the highlighted fields.'); err._inline = true; throw err; }
     return out;
   }
-  function markBad(f, msg) { f.input.classList.add('bad'); f.errLine.textContent = msg; f.errLine.hidden = false; }
+  function markBad(f, msg) { f.input.classList.add('bad'); setText(f.errLine, msg); f.errLine.hidden = false; }
 
   function renderForm(ctx, w) {
-    var wrap = winShell('Set up', null, null);
+    var wrap = winShell(kitText('Set up'), null, null);
     var form = buildForm(w.schema || {});
     wrap._body.appendChild(form.node);
     var foot = el('div', 'pcc-win-foot pcc-actionbar');
@@ -1297,7 +1661,7 @@
     submit.onclick = function () {
       var values;
       try { values = collectForm(form); }
-      catch (e) { status.className = 'pcc-action-status st-failed'; status.textContent = e.message; return; }
+      catch (e) { status.className = 'pcc-action-status st-failed'; setText(status, reportedText(e.message, false, false)); return; }
       dispatchAction(ctx, w.submit, { formValues: values, status: status });
     };
     foot.appendChild(submit);
@@ -1309,22 +1673,22 @@
 
   // run — live status + prominent latest line + collapsed event feed.
   function renderRun(ctx, w) {
-    var wrap = winShell('Run', 'connecting', 'st-running');
+    var wrap = winShell(kitText('Run'), kitText('connecting'), 'st-running');
     var pill = wrap.querySelector('.pcc-pill');
-    var latest = el('div', 'pcc-run-latest', 'Waiting for the first update…');
+    var latest = el('div', 'pcc-run-latest', kitText('Waiting for the first update…'));
     wrap._body.appendChild(latest);
     var started = Date.now();
-    var elapsed = el('div', 'pcc-run-elapsed pcc-mono', '');
+    var elapsed = el('div', 'pcc-run-elapsed pcc-mono', kitText(''));
     wrap._body.appendChild(elapsed);
-    var toggle = el('button', 'pcc-link', 'Show all');
+    var toggle = el('button', 'pcc-link', kitText('Show all'));
     toggle.type = 'button';
     var feed = el('div', 'pcc-run-feed'); feed.hidden = true;
-    toggle.onclick = function () { feed.hidden = !feed.hidden; toggle.textContent = feed.hidden ? 'Show all' : 'Hide'; };
+    toggle.onclick = function () { feed.hidden = !feed.hidden; setText(toggle, kitText(feed.hidden ? 'Show all' : 'Hide')); };
     wrap._body.appendChild(toggle);
     wrap._body.appendChild(feed);
 
     var tick = setInterval(function () {
-      elapsed.textContent = Math.floor((Date.now() - started) / 1000) + 's elapsed';
+      setText(elapsed, joinText(numberText(Math.floor((Date.now() - started) / 1000)), kitText('s elapsed')));
     }, 1000);
 
     // Secondary text is HELD raw and repainted under each read's verification (astra r7 F10): a later
@@ -1333,13 +1697,13 @@
     var held = { latest: null, feed: null };
     function paintLatest(verified) {
       var h = held.latest;
-      if (h) latest.textContent = h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money);
+      if (h) setText(latest, h.isStatus ? statusPillText(h.raw, verified, h.money) : reportedText(h.raw, verified, h.money));
     }
     function paintFeed(verified) {
       var f = held.feed;
       if (!f) return;
       clear(feed);
-      for (var i = 0; i < f.lines.length; i++) feedLine(f.lines[i].ts + statusPillText(f.lines[i].label, verified, f.money));
+      for (var i = 0; i < f.lines.length; i++) feedLine(joinText(dataAt(f.lines, i).ts, statusPillText(dataAt(f.lines, i).label, verified, f.money)));
     }
 
     // `live` is true only for a successful poll of the binding (never a snapshot or a stream event).
@@ -1348,13 +1712,13 @@
       var cls = null; // this read's pill class, when it sets one
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
         cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source
-        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
+        setText(pill, dataStatusText(bpath, data, statusVal, live)); pill.className = 'pcc-pill ' + cls;
       } else if (statusVal != null) {
         cls = dataStatusClass(bpath, data, statusVal, live);
-        pill.textContent = dataStatusText(bpath, data, statusVal, live); pill.className = 'pcc-pill ' + cls;
+        setText(pill, dataStatusText(bpath, data, statusVal, live)); pill.className = 'pcc-pill ' + cls;
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
-        pill.textContent = 'unknown'; pill.className = 'pcc-pill st-unknown';
+        setText(pill, kitText('unknown')); pill.className = 'pcc-pill st-unknown';
       }
       // Secondary text (the latest line, timeline and feed lines) is plain only on a VERIFIED PAYEE
       // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
@@ -1377,22 +1741,22 @@
     }
 
     if (ctx.mode === 'snapshot') {
-      var snap = ctx.snapshot[w.binding.path];
+      var snap = dataAt(ctx.snapshot, w.binding.path);
       apply(dot(snap, w.statusFrom), dot(snap, w.latestFrom), snap, true, false);
       var stat = dot(snap, w.statusFrom);
       // apply() has set the honest text (F6: never the raw word); only a status-less, non-read-model
       // snapshot keeps the plain 'snapshot' marker.
-      if (stat == null && !isVNextRecord(snap)) pill.textContent = 'snapshot';
+      if (stat == null && !isVNextRecord(snap)) setText(pill, kitText('snapshot'));
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
         // Timeline entries are labels (astra r6 F11): the closed vocabulary, never verified in a snapshot.
         var snapMoney = isMoneyData(w.binding.path, snap);
-        for (var ti = 0; ti < tl.length; ti++) feedLine((tl[ti].timestamp ? fmtTs(tl[ti].timestamp) + ' \u00b7 ' : '') + statusPillText(tl[ti].type || '', false, snapMoney));
-        var lastType = tl[tl.length - 1].type; // last event = latest truth
-        if (lastType != null && lastType !== '') latest.textContent = statusPillText(lastType, false, snapMoney);
+        for (var ti = 0; ti < tl.length; ti++) feedLine(joinText(dataAt(tl, ti).timestamp ? joinText(fmtTs(dataAt(tl, ti).timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(dataAt(tl, ti).type || '', false, snapMoney)));
+        var lastType = dataAt(tl, tl.length - 1).type; // last event = latest truth
+        if (lastType != null && lastType !== '') setText(latest, statusPillText(lastType, false, snapMoney));
       }
       wrap._setFoot(null, true);
-      clearInterval(tick); elapsed.textContent = '';
+      clearInterval(tick); setText(elapsed, kitText(''));
       return wrap;
     }
 
@@ -1408,7 +1772,7 @@
         var tl = dot(d, 'timeline') || dot(d, 'job.timeline');
         if (Array.isArray(tl)) {
           var lines = [];
-          for (var i = 0; i < tl.length; i++) lines.push({ ts: tl[i].timestamp ? fmtTs(tl[i].timestamp) + ' \u00b7 ' : '', label: tl[i].type || JSON.stringify(tl[i]) });
+          for (var i = 0; i < tl.length; i++) lines.push({ ts: dataAt(tl, i).timestamp ? joinText(fmtTs(dataAt(tl, i).timestamp), kitText(' \u00b7 ')) : kitText(''), label: dataAt(tl, i).type || JSON.stringify(dataAt(tl, i)) });
           held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) };
         }
         paintFeed(payeeVerified);
@@ -1417,7 +1781,7 @@
       }, function () {
         var next = Math.min((delay || POLL_DEFAULT_MS) * 2, 120000); // backoff
         // A failed read never keeps an earlier state, least of all a final one (astra r2 on #313, F3).
-        pill.textContent = 'unknown · read failed'; pill.className = 'pcc-pill st-unknown';
+        setText(pill, kitText('unknown · read failed')); pill.className = 'pcc-pill st-unknown';
         paintLatest(false); paintFeed(false); // nothing earlier stays vouched for (astra r7 F10)
         wrap._setFoot(ctx.tx.lastTrace, true);
         setTimeout(function () { poll(next); }, next);
@@ -1432,7 +1796,7 @@
         // event) takes the closed vocabulary on every surface. A stream event is never a verified read.
         var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
         var label = ev.type || ev.status || JSON.stringify(ev);
-        feedLine((ev.timestamp ? fmtTs(ev.timestamp) + ' \u00b7 ' : '') + statusPillText(label, false, feedMoney));
+        feedLine(joinText(ev.timestamp ? joinText(fmtTs(ev.timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(label, false, feedMoney)));
         wrap._setFoot(ctx.tx.lastTrace, false);
       }).catch(function () { poll(w.binding.pollMs || POLL_DEFAULT_MS); }); // stream dropped → poll
     } else {
@@ -1445,7 +1809,7 @@
   // approve label is shown only as quoted, untrusted text. Only Approve sends, and it sends exactly
   // the descriptor displayed in "This will send".
   function renderApproval(ctx, w) {
-    var wrap = winShell('Approval', 'needs you', 'st-waiting');
+    var wrap = winShell(kitText('Approval'), kitText('needs you'), 'st-waiting');
     wrap._body.appendChild(loadingLine());
     resolveBinding(ctx, w.binding).then(function (r) {
       clear(wrap._body);
@@ -1460,7 +1824,7 @@
       wrap._body.appendChild(recordNode(r, desc));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
-      var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve'); // kit text, never w.approve.label
+      var approve = el('button', 'pcc-btn pcc-btn-primary', kitText('Approve')); // kit text, never w.approve.label
       approve.type = 'button';
       var deny = null;
       var submitted = false; // a request may have left: Deny must never again say "nothing was sent"
@@ -1476,15 +1840,17 @@
         if (!sent || typeof sent.then !== 'function') return;
         sent.then(function (outcome) {
           if (outcome && outcome.ok) return; // consumed: one effect per approval, controls stay locked
-          // Failed or unknown: Approve may retry (the same body resends the same Idempotency-Key).
+          // Money intent stays locked after any unaccepted/unknown outcome, including a throw.
+          var intent = intentState(desc);
+          approve.disabled = !!(desc.money && (intent.key || intent.posting || intent.done));
+          if (approve.disabled) setText(status, joinText(outcome && outcome.message ? outcome.message : kitText('The outcome is not confirmed.'), kitText(' Reload and check it before sending another.')));
           // Deny stays locked because a request was sent -- unless the kit refused before sending.
-          approve.disabled = false;
-          if (outcome && outcome.sent === false) { submitted = false; if (deny) deny.disabled = false; }
+          if (!approve.disabled && outcome && outcome.sent === false) { submitted = false; if (deny) deny.disabled = false; }
         });
       };
       foot.appendChild(approve);
       if (w.deny) {
-        deny = el('button', 'pcc-btn pcc-btn-quiet', 'Deny'); // kit text, never w.deny.label
+        deny = el('button', 'pcc-btn pcc-btn-quiet', kitText('Deny')); // kit text, never w.deny.label
         deny.type = 'button';
         // Deny is UI-ONLY: it never dispatches a manifest-authored action. A hostile manifest could
         // set w.deny to a money POST, and dispatching it with viaApproval would SKIP the money gate,
@@ -1493,10 +1859,10 @@
         deny.onclick = function () {
           if (submitted) return; // a request already left: there is nothing to "deny" here
           status.className = 'pcc-action-status';
-          status.textContent = 'Closed here - nothing was sent. This does not decline it on the network.';
+          setText(status, kitText('Closed here - nothing was sent. This does not decline it on the network.'));
           approve.disabled = true; deny.disabled = true;
           var pill = wrap.querySelector('.pcc-win-head .pcc-pill');
-          if (pill) { pill.textContent = 'not approved here'; pill.className = 'pcc-pill st-unknown'; }
+          if (pill) { setText(pill, kitText('not approved here')); pill.className = 'pcc-pill st-unknown'; }
         };
         foot.appendChild(deny);
       }
@@ -1513,17 +1879,17 @@
     if (!pill) return;
     // A 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2; astra r3 F5 on #313): a money approval reads "submitted"
     // (waiting); anything else a NEUTRAL "resolved". Settled-green comes only from a read model.
-    if (desc.money) { pill.textContent = 'submitted'; pill.className = 'pcc-pill st-waiting'; }
-    else { pill.textContent = 'resolved'; pill.className = 'pcc-pill st-ack'; }
+    if (desc.money) { setText(pill, kitText('submitted')); pill.className = 'pcc-pill st-waiting'; }
+    else { setText(pill, kitText('resolved')); pill.className = 'pcc-pill st-ack'; }
   }
   // What the BOUND RECORD says about an approval: attributed context, never the request. Its amount
   // line is dropped whenever the request carries an amount (the request's amount is what is sent),
   // and a failed or empty read says so instead of showing nothing (review charlie F1, N5).
   function recordNode(r, desc) {
     var box = el('div', 'pcc-approval-record');
-    box.appendChild(el('div', 'pcc-untrusted-k', 'The bound record says (context, not what will be sent):'));
+    box.appendChild(el('div', 'pcc-untrusted-k', kitText('The bound record says (context, not what will be sent):')));
     if (r.error || !r.data || typeof r.data !== 'object') {
-      box.appendChild(el('p', 'pcc-muted', 'Details unavailable' + (r.error ? ': ' + String(r.error) : '.')));
+      box.appendChild(el('p', 'pcc-muted', joinText(kitText('Details unavailable'), r.error ? joinText(kitText(': '), reportedText(r.error, false, false)) : kitText('.'))));
       return box;
     }
     box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }));
@@ -1538,36 +1904,36 @@
     if (ra == null) return null;
     var sent = [];
     for (var i = 0; i < desc.amounts.length; i++) {
-      if (sameAmount(ra, desc.amounts[i][1])) return null;
-      sent.push(amountText(desc.amounts[i][1]));
+      if (sameAmount(ra, dataAt(desc.amounts, i)[1])) return null;
+      sent.push(amountText(dataAt(desc.amounts, i)[1]));
     }
-    return 'The bound record says ' + amountText(ra) + ', but the request sends ' + sent.join(' / ') + '. Approve sends the request, not the record.';
+    return joinText(kitText('The bound record says '), amountText(ra), kitText(', but the request sends '), joinWithText(kitText(' / '), sent), kitText('. Approve sends the request, not the record.'));
   }
   function approvalDetails(info, opts) {
     var box = el('div', 'pcc-approval');
     // what
     var summary = info.summary || info.name || info.description;
-    if (summary) box.appendChild(el('div', 'pcc-approval-what', String(summary)));
+    if (summary) { var what = untrustedLabel(summary); what.classList.add('pcc-approval-what'); box.appendChild(what); }
     // who + cost
     var line = el('div', 'pcc-approval-line');
     var payee = info.payee || (info.provider && (info.provider.id || info.provider.name)) || info.operatorAddress;
-    if (payee) line.appendChild(el('span', 'pcc-mono', 'to ' + payee));
+    if (payee) line.appendChild(el('span', 'pcc-mono', joinText(kitText('to '), hexText(payee))));
     var amount = info.amount || info.totalAmount || (info.price && (info.price.base || info.price.amount));
     var currency = info.currency || (info.price && info.price.currency) || '';
-    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', amountText(amount) + (currency ? ' ' + wireText(currency) : '')));
+    if (amount != null && !(opts && opts.noCost)) line.appendChild(el('span', 'pcc-approval-cost pcc-tnum', joinText(amountText(amount), currency ? joinText(kitText(' '), currencyText(currency)) : kitText(''))));
     if (line.childNodes.length) box.appendChild(line);
-    if (info.rationale) box.appendChild(el('p', 'pcc-approval-rationale', String(info.rationale)));
+    if (info.rationale) { var rationale = untrustedLabel(info.rationale); rationale.classList.add('pcc-approval-rationale'); box.appendChild(rationale); }
     // args table (ui.summaryKeys when present)
     var args = info.args || info.params;
     if (args && typeof args === 'object') {
       var keys = (info.ui && Array.isArray(info.ui.summaryKeys)) ? info.ui.summaryKeys : Object.keys(args);
       var tbl = el('div', 'pcc-args');
       for (var i = 0; i < keys.length; i++) {
-        var v = args[keys[i]];
+        var v = dataAt(args, dataAt(keys, i));
         if (v == null) continue;
         var kv = el('div', 'pcc-args-row');
-        kv.appendChild(el('span', 'pcc-args-k', keys[i]));
-        kv.appendChild(el('span', 'pcc-args-v pcc-mono', typeof v === 'object' ? JSON.stringify(v) : String(v)));
+        kv.appendChild(el('span', 'pcc-args-k', reportedText(JSON.stringify(dataAt(keys, i)), false, false)));
+        kv.appendChild(el('span', 'pcc-args-v pcc-mono', reportedText(typeof v === 'object' ? JSON.stringify(v) : String(v), false, false)));
         tbl.appendChild(kv);
       }
       if (tbl.childNodes.length) box.appendChild(tbl);
@@ -1577,12 +1943,12 @@
 
   // receipt — amount large + payer→payee + rail + event timeline + tx ids.
   function renderReceipt(ctx, w) {
-    var wrap = winShell('Receipt', null, null);
+    var wrap = winShell(kitText('Receipt'), null, null);
     wrap._body.appendChild(loadingLine());
     resolveBinding(ctx, w.binding).then(function (r) {
       clear(wrap._body);
       var e = r.data;
-      if (r.error || !e) { wrap._body.appendChild(errorLine(r.error || 'No settlement data.')); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
+      if (r.error || !e) { wrap._body.appendChild(errorLine(r.error || kitText('No settlement data.'))); wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale); return; }
       // Nothing is invented: an amount, currency, payer, payee or rail the record does not carry is
       // shown as not reported, never defaulted ("USDC", "payer", "escrow-milestone").
       var econ = (e.economics && typeof e.economics === 'object') ? e.economics : {};
@@ -1591,19 +1957,19 @@
       var econText = (amount == null || amount === '') && econ.amount != null ? baseUnitsText(econ.amount, econ.tokenDecimals) : null;
       if (amount != null && amount !== '') {
         amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
-        if (typeof e.currency === 'string' && e.currency) amtRow.appendChild(el('span', 'pcc-receipt-cur', ' ' + e.currency));
+        amtRow.appendChild(el('span', 'pcc-receipt-cur', joinText(kitText(' '), currencyText(e.currency))));
       } else if (econText !== null) {
         // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
         amtRow.appendChild(el('span', 'pcc-receipt-num', econText));
       } else {
-        amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', 'amount not reported'));
+        amtRow.appendChild(el('span', 'pcc-receipt-num pcc-muted', kitText('amount not reported')));
       }
       wrap._body.appendChild(amtRow);
       var payer = e.payer || e.funder, payee = e.payee || e.provider;
       var pay = el('div', 'pcc-receipt-parties');
-      pay.appendChild(el('span', 'pcc-mono', payer ? String(payer) : 'payer not reported'));
-      pay.appendChild(el('span', 'pcc-arrow', '→'));
-      pay.appendChild(el('span', 'pcc-mono', payee ? String(payee) : 'payee not reported'));
+      pay.appendChild(el('span', 'pcc-mono', payer ? hexText(payer) : kitText('payer not reported')));
+      pay.appendChild(el('span', 'pcc-arrow', kitText('→')));
+      pay.appendChild(el('span', 'pcc-mono', payee ? hexText(payee) : kitText('payee not reported')));
       wrap._body.appendChild(pay);
       // Settlement state by SOURCE SCHEMA (V-next /lifecycle or /receipt, a legacy escrow record,
       // or "not a settlement record"), never by a bare status word. Never inferred from a count or
@@ -1618,21 +1984,21 @@
       var recVerified = isVNextRecord(e) && (rec[0] === 'st-settled' || rec[0] === 'st-refunded');
       var payeePaid = isVNextRecord(e) && rec[0] === 'st-settled'; // secondary text: payee payment only
       railRow.appendChild(el('span', 'pcc-pill ' + rec[0], statusPillText(rec[2], recVerified || (!isVNextRecord(e) && e.status == null), true)));
-      if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', ' ' + rec[1]));
-      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', ' · ' + String(e.rail)));
+      if (rec[1]) railRow.appendChild(el('span', 'pcc-muted pcc-settle-label', joinText(kitText(' '), settlementCaptionText(e, w.binding && w.binding.path, !r.stale && ctx.mode !== 'snapshot' && recTopLevel))));
+      if (e.rail) railRow.appendChild(el('span', 'pcc-muted', joinText(kitText(' · '), idText(e.rail))));
       wrap._body.appendChild(railRow);
       // timeline of pcc.* / escrow events
       var events = e.events || e.timeline || (e.milestones);
       if (Array.isArray(events) && events.length) {
         var tl = el('ol', 'pcc-timeline');
         for (var i = 0; i < events.length; i++) {
-          var ev = events[i];
+          var ev = dataAt(events, i);
           var li = el('li', 'pcc-timeline-row');
           // Each entry is a server claim about this money record (astra r5 F8). Its label (type, name or
           // status) takes the closed vocabulary, plain only on a VERIFIED PAYEE PAYMENT: a verified refund
           // keeps its own pill text but vouches for no entry (astra r6 F10). 'event' is PCC's own placeholder.
           var evRaw = ev.type || ev.name || ev.status;
-          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, payeePaid, true) : 'event';
+          var evTxt = evRaw != null && evRaw !== '' ? statusPillText(evRaw, payeePaid, true) : kitText('event');
           li.appendChild(el('span', 'pcc-timeline-type', evTxt));
           if (ev.timestamp) li.appendChild(el('span', 'pcc-mono pcc-timeline-ts', fmtTs(ev.timestamp)));
           tl.appendChild(li);
@@ -1640,7 +2006,7 @@
         wrap._body.appendChild(tl);
       }
       var tx = e.txHash || e.tx || e.escrowAddress || e.address;
-      if (tx) wrap._body.appendChild(el('div', 'pcc-mono pcc-receipt-tx', String(tx)));
+      if (tx) wrap._body.appendChild(el('div', 'pcc-mono pcc-receipt-tx', hexText(tx)));
       wrap._setFoot(ctx.tx && ctx.tx.lastTrace, r.stale);
     });
     return wrap;
@@ -1651,26 +2017,28 @@
   // dispatchAction, so it gets the descriptor, the Approval gate (an unlisted write is money), an
   // Idempotency-Key and the busy guard. It is created ONCE per window, so its kit state is stable.
   function renderChain(ctx, w) {
-    var wrap = winShell('Value chain', null, null);
+    var wrap = winShell(kitText('Value chain'), null, null);
     var cr = w.composeRef || {};
     var head = el('div', 'pcc-chain-head');
-    head.appendChild(el('span', 'pcc-chain-outcome', String(cr.outcomeType || 'outcome')));
-    if (cr.budgetUSD != null) head.appendChild(el('span', 'pcc-chain-budget pcc-tnum', 'budget ' + fmtUsd(cr.budgetUSD) + ' USDC'));
+    head.appendChild(cr.outcomeType ? agentEl('span', 'pcc-chain-outcome', agentText(cr.outcomeType, false)) : el('span', 'pcc-chain-outcome', kitText('outcome')));
+    if (cr.budgetUSD != null) head.appendChild(el('span', 'pcc-chain-budget pcc-tnum', joinText(kitText('budget '), fmtUsd(cr.budgetUSD), kitText(' USDC'))));
     wrap._body.appendChild(head);
     var seq = (cr.outcomeChain && cr.outcomeChain.length) ? cr.outcomeChain : (cr.steps || [cr.outcomeType]);
     var stepsRow = el('div', 'pcc-chain-steps');
     for (var i = 0; i < seq.length; i++) {
-      if (i > 0) stepsRow.appendChild(el('span', 'pcc-arrow', '→'));
-      stepsRow.appendChild(el('span', 'pcc-chain-step', String(seq[i])));
+      if (i > 0) stepsRow.appendChild(el('span', 'pcc-arrow', kitText('→')));
+      stepsRow.appendChild(agentEl('span', 'pcc-chain-step', agentText(dataAt(seq, i), false)));
     }
     wrap._body.appendChild(stepsRow);
-    wrap._body.appendChild(el('p', 'pcc-muted', 'tier ' + (cr.minAssuranceTier != null ? cr.minAssuranceTier : 0) + ' · optimize for ' + (cr.optimizeFor || 'price')));
+    var optimize = el('p', 'pcc-muted', joinText(kitText('tier '), numberText(cr.minAssuranceTier != null ? cr.minAssuranceTier : 0), kitText(' · optimize for ')));
+    optimize.appendChild(cr.optimizeFor ? agentEl('span', 'pcc-chain-optimize', agentText(cr.optimizeFor, false)) : el('span', null, kitText('price')));
+    wrap._body.appendChild(optimize);
     var result = el('div', 'pcc-chain-result');
     wrap._body.appendChild(result);
 
     var foot = el('div', 'pcc-win-foot pcc-actionbar');
     var status = el('span', 'pcc-action-status');
-    var planAction = { id: 'pcc-chain-plan', label: 'Plan', kind: 'post', path: '/api/compose', body: cr,
+    var planAction = { id: 'pcc-chain-plan', kind: 'post', path: '/api/compose', body: cr,
       intentText: 'pcc: plan ' + (cr.outcomeType || 'chain') };
     var plan = writeButton(ctx, planAction, requestDescriptor(planAction, cr, ctx.mode === 'host', ctx.apiBase), 'Plan');
     function showPlan(body) {
@@ -1678,14 +2046,14 @@
       var steps = body.steps || [];
       var box = el('ol', 'pcc-plan');
       for (var i = 0; i < steps.length; i++) {
-        var s = steps[i];
+        var s = dataAt(steps, i);
         var li = el('li', 'pcc-plan-row');
-        li.appendChild(el('span', 'pcc-plan-type', String(s.capabilityType || s.outcomeType || ('step ' + (i + 1)))));
-        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsd(s.estimatedPriceUSD) + ' USDC'));
+        li.appendChild(el('span', 'pcc-plan-type', s.capabilityType || s.outcomeType ? idText(s.capabilityType || s.outcomeType) : joinText(kitText('step '), numberText(i + 1))));
+        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', joinText(fmtUsd(s.estimatedPriceUSD), kitText(' USDC'))));
         box.appendChild(li);
       }
       result.appendChild(box);
-      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', 'total ' + fmtUsd(body.totalPriceUSD) + ' USDC'));
+      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', joinText(kitText('total '), fmtUsd(body.totalPriceUSD), kitText(' USDC'))));
       if (w.execute) {
         var execBtn = writeButton(ctx, w.execute, requestDescriptor(w.execute, w.execute.body || {}, ctx.mode === 'host', ctx.apiBase), 'Execute');
         execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
@@ -1704,7 +2072,7 @@
 
   // actions — a bare bar of buttons.
   function renderActions(ctx, w) {
-    var wrap = winShell('Actions', null, null);
+    var wrap = winShell(kitText('Actions'), null, null);
     var bar = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
     (w.actions || []).forEach(function (a) {
@@ -1752,11 +2120,11 @@
       var c = result && result.content;
       if (c && c.length) {
         for (var i = 0; i < c.length; i++) {
-          if (c[i] && c[i].type === 'text' && c[i].text) return c[i].text;
+          if (dataAt(c, i) && dataAt(c, i).type === 'text' && dataAt(c, i).text) return reportedText(dataAt(c, i).text, false, false);
         }
       }
     } catch (e) {}
-    return null;
+    return kitText('Operation failed');
   }
 
   // R4 PR2 — run a REGISTERED typed operation from a hosted view. The manifest
@@ -1771,11 +2139,11 @@
     // (Money approval / dedupe for a typed operation is the trusted server operation's job.)
     if (st.posting) { alreadySubmitted(status, st); return; }
     st.posting = true;
-    status.className = 'pcc-action-status'; status.textContent = 'Working…';
+    status.className = 'pcc-action-status'; setText(status, kitText('Working…'));
     function fail(err) {
       st.posting = false;
       status.className = 'pcc-action-status st-failed';
-      status.textContent = String((err && err.message) || 'Operation failed');
+      setText(status, err && err.message ? reportedText(err.message, false, false) : kitText('Operation failed'));
     }
     var call;
     try { call = window.__PCC_HOST_BRIDGE__.callOperation(action.operation_id, action.arguments || {}); }
@@ -1784,11 +2152,11 @@
       st.posting = false;
       if (result && result.isError) {
         status.className = 'pcc-action-status st-failed';
-        status.textContent = hostOpErrorText(result) || 'Operation failed';
+        setText(status, hostOpErrorText(result));
       } else {
         // An acknowledgement, never settlement (ruling 2; astra r3 F5 on #313): NEUTRAL, not green.
         status.className = 'pcc-action-status st-ack';
-        status.textContent = 'Done' + (ctx && ctx.tx && ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '');
+        setText(status, joinText(kitText('Done'), traceSuffixText(ctx && ctx.tx && ctx.tx.lastTrace)));
       }
     }, fail);
   }
@@ -1838,16 +2206,16 @@
   function refuseStatus(status, desc) {
     if (!status) return;
     status.className = 'pcc-action-status st-failed';
-    status.textContent = 'Refused: ' + ((desc && desc.reason) || 'no valid request') + ' - nothing was sent.';
+    setText(status, joinText(kitText('Refused: '), requestReasonText(desc), kitText(' - nothing was sent.')));
   }
   function alreadySubmitted(status, st) {
     if (!status) return;
     status.className = 'pcc-action-status st-waiting';
-    status.textContent = st.posting
+    setText(status, kitText(st.posting
       ? 'Already submitted - waiting for the response.'
       // st.done / it.done is set true only once a MONEY write was accepted (astra r4 F1 on #342: the
       // intent is now the whole view, not just this endpoint), so this is always that case.
-      : 'Already submitted - a money request from this view was accepted. Reload the page to make another.';
+      : 'Already submitted - a money request from this view was accepted. Reload the page to make another.'));
   }
 
   function doPost(ctx, action, desc, opts, status) {
@@ -1874,17 +2242,17 @@
       var sameRequest = it.request === request;
       if (desc.money) {
         // a money request from this view was already sent and not accepted (astra r5 F1, F2)
-        show('pcc-action-status st-failed', "Refused: a money request from this view was already sent and its outcome is not confirmed. Reload and check it before sending another - nothing was sent.");
+        show('pcc-action-status st-failed', kitText("Refused: a money request from this view was already sent and its outcome is not confirmed. Reload and check it before sending another - nothing was sent."));
         return null;
       } else if (!sameRequest) {
         // a DIFFERENT request to this endpoint whose earlier request has an unknown outcome
-        show('pcc-action-status st-failed', 'Refused: an earlier request to this endpoint has an unknown outcome. Reload to check it before sending a different one - nothing was sent.');
+        show('pcc-action-status st-failed', kitText('Refused: an earlier request to this endpoint has an unknown outcome. Reload to check it before sending a different one - nothing was sent.'));
         return null;
       }
     }
     var key = it.key;
     if (!key) {
-      var ref = (action.idempotencyFrom && opts.formValues) ? opts.formValues[action.idempotencyFrom] : null;
+      var ref = (action.idempotencyFrom && opts.formValues) ? dataAt(opts.formValues, action.idempotencyFrom) : null;
       key = (ref != null && ref !== '')
         ? 'idem-' + hash53(desc.method + ' ' + canonicalTarget(desc) + '|' + String(ref) + '|' + fp)
         : 'idem-' + uuid();
@@ -1892,44 +2260,46 @@
     }
     var sendBody = Object.assign({}, desc.body);
     if (desc.method === 'POST') sendBody.idempotencyKey = key; // legacy body field (kind "post"), preserved
+    var outcomeText = kitText('');
     function show(cls, text) {
-      status.className = cls; status.textContent = text;
+      outcomeText = text;
+      status.className = cls; setText(status, text);
       // The approval GATE closes after a moment; mirror the final outcome to the caller's status
       // line so it never stays at a stale "Working...".
-      if (opts.mirror && opts.mirror !== status) { opts.mirror.className = cls; opts.mirror.textContent = text; }
+      if (opts.mirror && opts.mirror !== status) { opts.mirror.className = cls; setText(opts.mirror, text); }
     }
     st.posting = true; it.posting = true;
-    show('pcc-action-status', 'Working…');
+    show('pcc-action-status', kitText('Working…'));
     var sending;
     try { sending = ctx.tx.send(desc, sendBody, key); }
     catch (e) { // the request never started (review charlie F6): release the guard, say so honestly
       st.posting = false; it.posting = false;
-      show('pcc-action-status st-failed', 'Refused: the request could not be started - nothing was sent.');
-      return Promise.resolve({ ok: false, sent: false });
+      show('pcc-action-status st-failed', kitText('Refused: the request could not be started - nothing was sent.'));
+      return Promise.resolve({ ok: false, sent: false, message: outcomeText });
     }
     return sending.then(function (res) {
       st.posting = false; it.posting = false;
       if (res.ok) {
         it.key = null; it.request = null; // this intent is resolved
-        var trace = ctx.tx.lastTrace ? ' · trace ' + ctx.tx.lastTrace : '';
+        var trace = traceSuffixText(ctx.tx.lastTrace);
         // An HTTP 2xx is an ACKNOWLEDGEMENT, never settlement (ruling 2; astra r3 F5 on #313). A money write reads
         // "submitted" (waiting) and is one-shot for this render; anything else a NEUTRAL "Done".
         // Settled-green comes only from a read model (a receipt window).
-        if (desc.money) { st.done = true; it.done = true; show('pcc-action-status st-waiting', 'Submitted - awaiting network confirmation' + trace); }
-        else show('pcc-action-status st-ack', 'Done' + trace);
+        if (desc.money) { st.done = true; it.done = true; show('pcc-action-status st-waiting', joinText(kitText('Submitted - awaiting network confirmation'), trace)); }
+        else show('pcc-action-status st-ack', joinText(kitText('Done'), trace));
         if (typeof opts.onSuccess === 'function') opts.onSuccess(res, desc);
       } else {
         // Not accepted: the key is KEPT. No status proves the request had no effect (astra r5 F2), so
         // a money intent stays locked and every further money request from this view is refused.
         show('pcc-action-status st-failed', postErrorText(res, desc));
       }
-      return { ok: !!res.ok, sent: !res.refused };
+      return { ok: !!res.ok, sent: !res.refused, message: outcomeText };
     }, function (err) {
       st.posting = false; it.posting = false;
       // A throw/network error is an UNKNOWN outcome (the request may have reached the server): the
       // key is kept, same as any other unresolved outcome.
-      show('pcc-action-status st-failed', String(err && err.message || 'Request failed'));
-      return { ok: false, sent: true };
+      show('pcc-action-status st-failed', err && err.message ? reportedText(err.message, false, !!desc.money) : kitText('Request failed'));
+      return { ok: false, sent: true, message: outcomeText };
     });
   }
 
@@ -1937,25 +2307,29 @@
   // C-03 endpoint changes instead of a bare status code.
   function postErrorText(res, desc) {
     var msg = res.body && (res.body.message || res.body.error);
-    if (msg) return typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 300);
+    if (msg) return reportedText(typeof msg === 'string' ? msg : JSON.stringify(msg).slice(0, 300), false, !!(desc && desc.money));
     var canon = (desc && desc.canonical) || '';
-    if (res.status === 410) return 'This action is no longer available - the endpoint was removed. Nothing was executed.';
-    if (res.status === 404 && /^\/api\/escrow\/chain\/[^\/]+\/fund$/.test(canon)) return 'Funding was refused: this escrow is not recognised by the protocol.';
+    if (res.status === 410) return kitText('This action is no longer available - the endpoint was removed. Nothing was executed.');
+    if (res.status === 404 && /^\/api\/escrow\/chain\/[^\/]+\/fund$/.test(canon)) return kitText('Funding was refused: this escrow is not recognised by the protocol.');
     // A 5xx can come from the edge AFTER the gateway executed the write. The kit cannot know the
     // outcome, so it never claims that nothing was charged.
-    if (res.status >= 500) return 'Failed (HTTP ' + res.status + ') - the outcome is unknown. Check the receipt before retrying.';
-    return 'Failed (HTTP ' + res.status + ')';
+    if (res.status >= 500) return joinText(kitText('Failed (HTTP '), numberText(res.status), kitText(') - the outcome is unknown. Check the receipt before retrying.'));
+    return joinText(kitText('Failed (HTTP '), numberText(res.status), kitText(')'));
   }
 
   function inlineConfirm(status, action, onConfirm) {
     clear(status); status.className = 'pcc-action-status';
-    var yes = el('button', 'pcc-btn pcc-btn-primary pcc-btn-sm', 'Confirm');
+    var yes = el('button', 'pcc-btn pcc-btn-primary pcc-btn-sm', kitText('Confirm'));
     yes.type = 'button';
-    var no = el('button', 'pcc-btn pcc-btn-quiet pcc-btn-sm', 'Cancel');
+    var no = el('button', 'pcc-btn pcc-btn-quiet pcc-btn-sm', kitText('Cancel'));
     no.type = 'button';
     yes.onclick = function () { clear(status); onConfirm(); };
     no.onclick = function () { clear(status); };
-    status.appendChild(el('span', 'pcc-confirm-q', 'Confirm “' + action.label + '”?'));
+    var question = el('span', 'pcc-confirm-q');
+    question.appendChild(el('span', null, kitText('Confirm “')));
+    question.appendChild(agentEl('span', 'pcc-text', agentText(action.label, false)));
+    question.appendChild(el('span', null, kitText('”?')));
+    status.appendChild(question);
     status.appendChild(yes);
     status.appendChild(no);
   }
@@ -1967,48 +2341,53 @@
   // never hide the true destination/amount (directive 10).
   function realRequestNode(desc) {
     var box = el('div', 'pcc-realreq');
-    box.appendChild(el('div', 'pcc-realreq-title', 'This will send'));
+    box.appendChild(el('div', 'pcc-realreq-title', kitText('This will send')));
     var line = el('div', 'pcc-realreq-line');
     if (!desc.ok || desc.destination === null) {
-      line.appendChild(el('span', 'pcc-realreq-blocked', 'BLOCKED — ' + (desc.reason || 'unsafe or non-PCC destination')));
+      line.appendChild(el('span', 'pcc-realreq-blocked', joinText(kitText('BLOCKED — '), requestReasonText(desc, true))));
     } else {
-      line.appendChild(el('span', 'pcc-realreq-method', desc.method));
-      line.appendChild(el('span', 'pcc-realreq-dest pcc-mono', desc.destination));
+      line.appendChild(el('span', 'pcc-realreq-method', requestMethodText(desc)));
+      line.appendChild(el('span', 'pcc-realreq-dest pcc-mono', requestDestinationText(desc)));
     }
     box.appendChild(line);
     // EVERY amount- and reference-like field the body carries. With more than one, each line names
     // its field, so a small first "amount" can never stand in for a larger "totalAmount" that is also
     // sent. A value that is not a plain decimal is shown as sent (JSON), never coerced into a sum.
-    var amts = desc.amounts || [], refs = desc.refs || [], shown = {};
+    var amts = desc.amounts || [], refs = desc.refs || [], shown = new Set();
     // The unit is shown only when the request states one; the kit never supplies a currency.
-    var asset = desc.asset != null ? ' ' + wireText(desc.asset) : ' (no currency in the request)';
+    var asset = desc.asset != null ? joinText(kitText(' '), requestValueText(desc.asset)) : kitText(' (no currency in the request)');
     for (var i = 0; i < amts.length; i++) {
-      shown[amts[i][0]] = true;
-      box.appendChild(el('div', 'pcc-realreq-amt pcc-tnum',
-        (amts.length > 1 ? amts[i][0] : 'Amount') + ' ' + amountText(amts[i][1]) + asset));
+      shown.add(dataAt(amts, i)[0]);
+      var amountLine = el('div', 'pcc-realreq-amt pcc-tnum');
+      amountLine.appendChild(amts.length > 1 ? el('span', null, reportedText(JSON.stringify(dataAt(amts, i)[0]), false, false)) : el('span', null, kitText('Amount')));
+      amountLine.appendChild(el('span', null, joinText(kitText(' '), amountText(dataAt(amts, i)[1]), asset)));
+      box.appendChild(amountLine);
     }
-    if (amts.length && desc.assetField) shown[desc.assetField] = true;
+    if (amts.length && desc.assetField) shown.add(desc.assetField);
     for (var j = 0; j < refs.length; j++) {
-      shown[refs[j][0]] = true;
-      box.appendChild(el('div', 'pcc-realreq-ref pcc-mono', (refs.length > 1 ? refs[j][0] : 'ref') + ' ' + wireText(refs[j][1])));
+      shown.add(dataAt(refs, j)[0]);
+      var refLine = el('div', 'pcc-realreq-ref pcc-mono');
+      refLine.appendChild(refs.length > 1 ? el('span', null, reportedText(JSON.stringify(dataAt(refs, j)[0]), false, false)) : el('span', null, kitText('ref')));
+      refLine.appendChild(el('span', null, joinText(kitText(' '), requestValueText(dataAt(refs, j)[1]))));
+      box.appendChild(refLine);
     }
     // ...and every OTHER field of the body, exactly as the wire carries it. A POST's idempotencyKey
     // is the KIT's (one per request intent; it replaces any value the body names), so it is shown
     // as that, never with the body's value. Nothing the request sends is left off this block.
     var post = desc.ok && desc.method === 'POST';
-    var rest = Object.keys(desc.body || {}).filter(function (k) { return !shown[k] && !(post && k === 'idempotencyKey'); });
+    var rest = Object.keys(desc.body || {}).filter(function (k) { return !shown.has(k) && !(post && k === 'idempotencyKey'); });
     if (rest.length || post) {
       var tbl = el('div', 'pcc-args pcc-realreq-body');
       for (var r = 0; r < rest.length; r++) {
         var kv = el('div', 'pcc-args-row');
-        kv.appendChild(el('span', 'pcc-args-k', rest[r]));
-        kv.appendChild(el('span', 'pcc-args-v pcc-mono', JSON.stringify(desc.body[rest[r]])));
+        kv.appendChild(el('span', 'pcc-args-k', reportedText(JSON.stringify(dataAt(rest, r)), false, false)));
+        kv.appendChild(el('span', 'pcc-args-v pcc-mono', reportedText(JSON.stringify(dataAt(desc.body, dataAt(rest, r))), false, false)));
         tbl.appendChild(kv);
       }
       if (post) {
         var kr = el('div', 'pcc-args-row pcc-args-kit');
-        kr.appendChild(el('span', 'pcc-args-k', 'idempotencyKey'));
-        kr.appendChild(el('span', 'pcc-args-v pcc-muted', 'set by the kit when sent'));
+        kr.appendChild(el('span', 'pcc-args-k', kitText('idempotencyKey')));
+        kr.appendChild(el('span', 'pcc-args-v pcc-muted', kitText('set by the kit when sent')));
         tbl.appendChild(kr);
       }
       box.appendChild(tbl);
@@ -2023,11 +2402,11 @@
   // never rounds, coerces or invents an amount.
   function amountText(v) {
     if (typeof v === 'number' && isFinite(v)) {
-      var f = fmtUsd(v);
-      return Number(f.replace(/,/g, '')) === v ? f : String(v);
+      var f = fmtUsdRaw(v);
+      return mintText(Number(String(f).replace(/,/g, '')) === v ? f : String(v));
     }
     if (typeof v === 'string' && /^-?\d{1,15}(\.\d{1,2})?$/.test(v)) return fmtUsd(v);
-    return JSON.stringify(v);
+    return mintText(JSON.stringify(v) || '');
   }
   // Do two wire amounts denote the same number? (Both must be numbers or numeric strings.)
   function sameAmount(a, b) {
@@ -2048,7 +2427,7 @@
     // One approval modal per action AND per request intent: neither a rapid second click nor a
     // cloned action for the same request can stack a second gate (astra r2 F1), and it says so.
     if (st.gate || it.gate) {
-      if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; opts.status.textContent = 'An approval window for this is already open.'; }
+      if (opts && opts.status) { opts.status.className = 'pcc-action-status st-waiting'; setText(opts.status, kitText('An approval window for this is already open.')); }
       return;
     }
     var gate = {}; // THIS opening's identity: only it may release the one-gate guards
@@ -2056,8 +2435,8 @@
     var overlay = el('div', 'pcc-overlay');
     var card = el('div', 'pcc-modal');
     var head = el('div', 'pcc-win-head');
-    head.appendChild(el('span', 'pcc-win-title', 'Approve'));
-    head.appendChild(el('span', 'pcc-pill st-waiting', 'confirm'));
+    head.appendChild(el('span', 'pcc-win-title', kitText('Approve')));
+    head.appendChild(el('span', 'pcc-pill st-waiting', kitText('confirm')));
     card.appendChild(head);
     // The manifest's label is untrusted: quoted text only. The gate's controls are kit-owned.
     if (action.label) card.appendChild(untrustedLabel(action.label));
@@ -2066,9 +2445,9 @@
     card.appendChild(realRequestNode(desc));
     var foot = el('div', 'pcc-actionbar');
     var status = el('span', 'pcc-action-status');
-    var approve = el('button', 'pcc-btn pcc-btn-primary', 'Approve');
+    var approve = el('button', 'pcc-btn pcc-btn-primary', kitText('Approve'));
     approve.type = 'button';
-    var cancel = el('button', 'pcc-btn pcc-btn-quiet', 'Cancel');
+    var cancel = el('button', 'pcc-btn pcc-btn-quiet', kitText('Cancel'));
     cancel.type = 'button';
     // Instance-specific cleanup (r1 finding 5): a stale close() -- e.g. this gate's delayed
     // auto-close firing after it was cancelled and a NEWER gate opened -- removes only its own
@@ -2096,17 +2475,20 @@
   // Snapshot action-intent chip — copyable text the person hands to their LLM.
   function intentChip(status, text) {
     clear(status); status.className = 'pcc-action-status';
-    var chip = el('button', 'pcc-chip', text);
+    var chipText = agentText(text, false);
+    var chip = el('button', 'pcc-chip');
+    chip.appendChild(agentEl('span', 'pcc-text', chipText));
     chip.type = 'button';
-    chip.title = 'Copy — paste to your assistant to run this';
+    setAttrText(chip, 'title', kitText('Copy — paste to your assistant to run this'));
     chip.onclick = function () {
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text);
       } catch (e) {}
-      chip.textContent = 'copied ✓';
-      setTimeout(function () { chip.textContent = text; }, 1400);
+      clear(chip);
+      chip.appendChild(el('span', null, kitText('copied ✓')));
+      setTimeout(function () { clear(chip); chip.appendChild(agentEl('span', 'pcc-text', chipText)); }, 1400);
     };
-    status.appendChild(el('span', 'pcc-chip-label', 'snapshot — run via your assistant: '));
+    status.appendChild(el('span', 'pcc-chip-label', kitText('snapshot — run via your assistant: ')));
     status.appendChild(chip);
   }
 
@@ -2121,15 +2503,15 @@
   };
 
   function renderWindow(ctx, w) {
-    var fn = RENDERERS[w.kind];
+    var fn = dataAt(RENDERERS, w.kind);
     if (!fn) { // unknown kind (a newer manifest against an older kit): honest, never throws.
-      var stub = winShell(w.kind || 'window', 'unsupported', 'st-waiting');
-      stub._body.appendChild(el('p', 'pcc-muted', 'This dashboard uses a window type this kit version does not render.'));
+      var stub = winShell(w.kind ? agentText(w.kind, false) : kitText('window'), kitText('unsupported'), 'st-waiting');
+      stub._body.appendChild(el('p', 'pcc-muted', kitText('This dashboard uses a window type this kit version does not render.')));
       return stub;
     }
     try { return fn(ctx, w); }
     catch (e) {
-      var errw = winShell(w.kind || 'window', 'error', 'st-failed');
+      var errw = winShell(w.kind ? agentText(w.kind, false) : kitText('window'), kitText('error'), 'st-failed');
       errw._body.appendChild(errorLine(String(e && e.message || e)));
       return errw;
     }
@@ -2148,19 +2530,19 @@
 
   function connectBar(ctx, onConnect) {
     var bar = el('div', 'pcc-connect');
-    bar.appendChild(el('span', 'pcc-connect-label', 'Connect your PCC key to go live:'));
+    bar.appendChild(el('span', 'pcc-connect-label', kitText('Connect your PCC key to go live:')));
     var input = el('input', 'pcc-input pcc-connect-input');
     input.type = 'password';
-    input.placeholder = 'pcc_live_…';
+    setAttrText(input, 'placeholder', kitText('pcc_live_…'));
     input.autocomplete = 'off';
     input.spellcheck = false;
-    var btn = el('button', 'pcc-btn pcc-btn-primary pcc-btn-sm', 'Connect');
+    var btn = el('button', 'pcc-btn pcc-btn-primary pcc-btn-sm', kitText('Connect'));
     btn.type = 'button';
     btn.onclick = function () {
       var v = input.value.trim();
       if (!v) return;
       setKey(v);
-      input.value = ''; // never keep the key in the DOM
+      setValue(input, kitText('')); // never keep the key in the DOM
       onConnect();
     };
     input.addEventListener('keydown', function (e) { if (e.key === 'Enter') btn.click(); });
@@ -2172,10 +2554,10 @@
   function snapshotBanner(ctx) {
     var ts = ctx.snapshot && ctx.snapshot._ts;
     var banner = el('div', 'pcc-banner');
-    banner.appendChild(el('span', 'pcc-banner-dot', ''));
+    banner.appendChild(el('span', 'pcc-banner-dot', kitText('')));
     banner.appendChild(el('span', null, ctx.degraded
-      ? 'Snapshot — live data is unreachable; showing the last known values.'
-      : ('Snapshot' + (ts ? ' — data as of ' + fmtTs(ts) : '') + ' · not live.')));
+      ? kitText('Snapshot — live data is unreachable; showing the last known values.')
+      : joinText(kitText('Snapshot'), ts ? joinText(kitText(' — data as of '), fmtTs(ts)) : kitText(''), kitText(' · not live.'))));
     return banner;
   }
 
@@ -2199,7 +2581,7 @@
     if (status && status.parentNode) status.parentNode.removeChild(status);
 
     if (!manifest || !Array.isArray(manifest.sections)) {
-      root.appendChild(el('p', 'pcc-err', 'No dashboard manifest found.'));
+      root.appendChild(el('p', 'pcc-err', kitText('No dashboard manifest found.')));
       return;
     }
 
@@ -2225,19 +2607,19 @@
 
     // Sections → windows.
     for (var s = 0; s < manifest.sections.length; s++) {
-      var section = manifest.sections[s];
+      var section = dataAt(manifest.sections, s);
       var secNode = el('section', 'pcc-section');
-      if (section.heading) secNode.appendChild(el('h2', 'pcc-section-heading', section.heading));
+      if (section.heading) secNode.appendChild(agentEl('h2', 'pcc-section-heading pcc-heading', agentText(section.heading, true)));
       var wins = section.windows || [];
       for (var wi = 0; wi < wins.length; wi++) {
-        secNode.appendChild(renderWindow(ctx, wins[wi]));
+        secNode.appendChild(renderWindow(ctx, dataAt(wins, wi)));
       }
       wrap.appendChild(secNode);
     }
 
     // Foot attribution.
     var foot = el('div', 'pcc-kit-foot pcc-muted');
-    foot.appendChild(el('span', null, 'PCC · ' + ctx.mode + (ctx.apiBase ? ' · ' + ctx.apiBase : ' · same-origin')));
+    foot.appendChild(el('span', null, joinText(kitText('PCC · '), modeText(ctx.mode), ctx.apiBase ? joinText(kitText(' · '), apiBaseText(ctx.apiBase)) : kitText(' · same-origin'))));
     wrap.appendChild(foot);
 
     root.appendChild(wrap);
@@ -2366,6 +2748,9 @@
       '.pcc-btn-tag{font-weight:400;opacity:.72;}',
       '.pcc-untrusted-label{margin:0;font:400 13px/18px var(--font);color:var(--ink-3);}',
       '.pcc-untrusted-v{color:var(--ink-2);}',
+      '.pcc-agent{border-left:2px dashed currentColor;padding-left:6px}',
+      '.pcc-text.pcc-agent::before,.pcc-heading.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}',
+      '.pcc-withheld{font-style:italic}',
       '.pcc-confirm-q{color:var(--ink-2);}',
       /* run */
       '.pcc-run-latest{font:450 15px/22px var(--font);color:var(--ink);}',
@@ -2441,21 +2826,11 @@
     ].join('');
     var style = el('style');
     style.id = 'pcc-ui-styles';
-    style.textContent = css; // CSS text on a <style> node — not HTML injection
+    setText(style, mintText(css)); // CSS text on a <style> node — not HTML injection
     document.head.appendChild(style);
   }
 
-  // Object.assign shim (older webviews) — no external deps.
-  if (typeof Object.assign !== 'function') {
-    Object.assign = function (t) {
-      for (var i = 1; i < arguments.length; i++) {
-        var s = arguments[i]; if (!s) continue;
-        for (var k in s) if (Object.prototype.hasOwnProperty.call(s, k)) t[k] = s[k];
-      }
-      return t;
-    };
-  }
-
+  // ES2015 runtime APIs: WeakSet, Set, Number.isFinite, WeakMap, Math.imul, Promise and Object.assign.
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);
   else mount();
 })();

@@ -4,7 +4,7 @@
  * Money-status CONFORMANCE against the SHIPPED kit (apps/dashboard/public/ui-kit/v1/pcc-ui.js).
  *
  * Two proofs, both against the real bytes the browser runs (never a parallel copy):
- *  1. The kit's <status-map v2> region is extracted verbatim and evaluated. Its money
+ *  1. The kit's private helpers are evaluated together without its DOM boot. Its money
  *     table must equal the canonical @pcc/spec MONEY_STATUS_MAP key for key (same keys,
  *     same tone, same label), and its classifiers must agree with classifyMoneyStatus
  *     over an adversarial battery. This is what makes "one shared exact map" true for a
@@ -15,7 +15,7 @@
  *
  * Spec: genui read-route contract sec-A + rules 1 and 12.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -23,7 +23,11 @@ import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
   classifySettlementRead, SETTLEMENT_READ_ROUTE, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
+  idText, hexText, timeText, traceText, nameText, fieldDefaultText,
 } from "../money/money-status.js";
+import { foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD } from "../money/plain-text-claims.js";
+import { PLAIN_TEXT_CASES, PLAIN_TIME_ACCEPTED, PLAIN_TIME_REJECTED, FIELD_DEFAULT_CASES, PLAIN_CLAIM_CASES } from "./plain-text-fixtures.js";
+import { assertKitTextBeforeBoot, assertKitTextViolations, flushKitText, checkKitClicks } from "./ui-kit-text-counter.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const kitPath = path.resolve(here, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js");
@@ -45,25 +49,38 @@ type KitRegion = {
   SETTLEMENT_READ_ROUTE: RegExp;
   SAFE_STATUS_WORDS: Record<string, boolean>;
   SAFE_MONEY_STATUS_WORDS: Record<string, boolean>;
-  statusPillText: (raw: unknown, verified: boolean, money: boolean) => string;
-  reportedText: (raw: unknown, verified: boolean, money: boolean) => string;
+  statusPillText: (raw: unknown, verified: boolean, money: boolean) => { readonly t: string };
+  reportedText: (raw: unknown, verified: boolean, money: boolean) => { readonly t: string };
+  idText: (raw: unknown) => { readonly t: string };
+  hexText: (raw: unknown) => { readonly t: string };
+  timeText: (raw: unknown) => { readonly t: string };
+  traceText: (raw: unknown) => { readonly t: string };
+  nameText: (raw: unknown) => { readonly t: string };
+  fieldDefaultText: (kind: unknown, raw: unknown) => { readonly t: string };
+  foldForClaims: (text: string) => string;
+  isMoneyClaim: (text: string) => boolean;
+  isProseClaim: (text: string) => boolean;
+  WITHHELD_PROSE: { readonly t: string };
+  WITHHELD_FIELD: { readonly t: string };
 };
 
 function extractRegion(): KitRegion {
-  const m = kitSrc.match(/\/\/ <status-map v2>[^\n]*\n([\s\S]*?)\/\/ <\/status-map v2>/);
-  if (!m) throw new Error("<status-map v2> markers not found in pcc-ui.js");
-  const ctx: Record<string, unknown> = {};
+  if (!kitSrc.includes("// <status-map v2>") || !kitSrc.includes("// </status-map v2>")) {
+    throw new Error("<status-map v2> markers not found in pcc-ui.js");
+  }
+  const ctx: Record<string, unknown> = { window: {}, document: {} };
+  // Evaluate the genuine private mints and helpers together, without mounting a DOM.
+  // Only the final boot dispatch is replaced; every helper uses the shipped bytes.
+  const helperSrc = kitSrc.replace(/  if \(document\.readyState === 'loading'\)[\s\S]*?\n\}\)\(\);\s*$/, "\n" +
+      "window.kitRegion = { MONEY_STATUS, GENERIC_STATES, statusClass, moneyStatusClass, settlementLabel, isMoneyData, dataStatusClass," +
+      " VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE, settlementRecordClass, settlementReadClass, SETTLEMENT_READ_ROUTE," +
+      " SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText, idText, hexText, timeText, traceText, nameText, fieldDefaultText, foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD };\n})();");
+  if (helperSrc === kitSrc) throw new Error("plain kit's final boot dispatch not found");
   vm.runInNewContext(
-    m[1] +
-      "\nthis.MONEY_STATUS = MONEY_STATUS; this.GENERIC_STATES = GENERIC_STATES;" +
-      " this.statusClass = statusClass; this.moneyStatusClass = moneyStatusClass;" +
-      " this.settlementLabel = settlementLabel; this.isMoneyData = isMoneyData; this.dataStatusClass = dataStatusClass;" +
-      " this.VNEXT_UNIT_STATES = VNEXT_UNIT_STATES; this.VNEXT_STATE_PRESENTATION = VNEXT_STATE_PRESENTATION; this.VNEXT_PHASE = VNEXT_PHASE;" +
-      " this.settlementRecordClass = settlementRecordClass; this.settlementReadClass = settlementReadClass; this.SETTLEMENT_READ_ROUTE = SETTLEMENT_READ_ROUTE;" +
-      " this.SAFE_STATUS_WORDS = SAFE_STATUS_WORDS; this.SAFE_MONEY_STATUS_WORDS = SAFE_MONEY_STATUS_WORDS; this.statusPillText = statusPillText; this.reportedText = reportedText;",
+    helperSrc,
     ctx,
   );
-  return ctx as unknown as KitRegion;
+  return (ctx.window as { kitRegion: KitRegion }).kitRegion;
 }
 
 const toneToClass = (tone: string) => "st-" + tone;
@@ -78,6 +95,60 @@ const ADVERSARIAL: unknown[] = [
   "completed", "COMPLETED", "released!", "*released*", "released\u0000", "released\u200b", "RELEASED\u0130",
   ["released"], [["released"]], { toString: () => "released" },
 ];
+
+describe("plain typed-text helper grammars, kit == canonical spec", () => {
+  const kit = extractRegion();
+  const spec = { idText, hexText, traceText, nameText };
+
+  for (const name of Object.keys(PLAIN_TEXT_CASES) as Array<keyof typeof PLAIN_TEXT_CASES>) {
+    it(name + " agrees on shared accepted and rejected inputs", () => {
+      for (const [raw, expected] of PLAIN_TEXT_CASES[name]) {
+        expect(spec[name](raw), name + " spec " + String(raw)).toBe(expected);
+        const branded = kit[name](raw);
+        expect(branded.t, name + " kit " + String(raw)).toBe(expected);
+        expect(Object.isFrozen(branded), name + " brand is frozen").toBe(true);
+      }
+    });
+  }
+
+  it("timeText admits only calendar-valid canonical UTC in the kit's supported era", () => {
+    for (const raw of PLAIN_TIME_ACCEPTED) {
+      const expected = new Date(raw).toLocaleString();
+      expect(timeText(raw), raw).toBe(expected);
+      expect(kit.timeText(raw).t, raw).toBe(expected);
+    }
+    for (const raw of PLAIN_TIME_REJECTED) {
+      expect(timeText(raw), String(raw)).toBe("time not reported");
+      expect(kit.timeText(raw).t, String(raw)).toBe("time not reported");
+    }
+  });
+
+  it("fieldDefaultText validates the field kind and withholds claim-bearing strings", () => {
+    for (const [kind, raw, expected] of FIELD_DEFAULT_CASES) {
+      expect(fieldDefaultText(kind, raw), String(kind) + " spec " + String(raw)).toBe(expected);
+      expect(kit.fieldDefaultText(kind, raw).t, String(kind) + " kit " + String(raw)).toBe(expected);
+    }
+  });
+
+  it("the existing claim detector agrees, including reserved notices and folded spellings", () => {
+    for (const [raw, expected] of PLAIN_CLAIM_CASES) {
+      expect(isProseClaim(raw), raw).toBe(expected);
+      expect(kit.isProseClaim(raw), raw).toBe(expected);
+    }
+    const inputs = new Set([
+      ...PLAIN_CLAIM_CASES.map(([raw]) => raw),
+      ...Object.values(PLAIN_TEXT_CASES).flatMap((cases) => cases.map(([raw]) => raw)),
+      ...FIELD_DEFAULT_CASES.map(([, raw]) => raw), ...PLAIN_TIME_ACCEPTED, ...PLAIN_TIME_REJECTED,
+    ].filter((raw): raw is string => typeof raw === "string"));
+    for (const raw of inputs) {
+      expect(kit.foldForClaims(raw), raw).toBe(foldForClaims(raw));
+      expect(kit.isMoneyClaim(raw), raw).toBe(isMoneyClaim(raw));
+      expect(kit.isProseClaim(raw), raw).toBe(isProseClaim(raw));
+    }
+    expect(kit.WITHHELD_PROSE.t).toBe(WITHHELD_PROSE);
+    expect(kit.WITHHELD_FIELD.t).toBe(WITHHELD_FIELD);
+  });
+});
 
 describe("shipped kit money table == canonical @pcc/spec map", () => {
   const kit = extractRegion();
@@ -158,6 +229,7 @@ const receiptManifest = JSON.stringify({
 });
 
 function boot(escrow: Record<string, unknown>, manifest: string = receiptManifest, snapshot?: Record<string, unknown>) {
+  assertKitTextBeforeBoot();
   document.documentElement.removeAttribute("data-theme");
   document.head.innerHTML = "";
   document.body.innerHTML = "";
@@ -177,8 +249,17 @@ function boot(escrow: Record<string, unknown>, manifest: string = receiptManifes
   document.body.appendChild(sNode);
   // eslint-disable-next-line no-eval
   (0, eval)(kitSrc);
+  assertKitTextViolations();
 }
-const flush = () => new Promise((r) => setTimeout(r, 0));
+const flush = flushKitText;
+let clickCheck: ReturnType<typeof checkKitClicks>;
+beforeEach(() => { clickCheck = checkKitClicks(); });
+afterEach(async () => {
+  // Pure helper cases run in an isolated VM; DOM boots and driven interactions use flush.
+  try {
+    if ((window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__) await flush();
+  } finally { clickCheck.mockRestore(); }
+});
 
 async function renderedPill(escrow: Record<string, unknown>) {
   boot({ id: "esc-test-1", totalAmount: "10.00", currency: "USDC", payer: "p", payee: "o", ...escrow });
@@ -462,6 +543,7 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
   const man = (windows: unknown[]) => JSON.stringify({ csd: "pcc://artifacts/dashboard/v1", title: "T", sections: [{ windows }] });
   type Reply = { status: number; body?: unknown } | "reject";
   function bootLive(manifest: string, reply: (url: string, n: number) => Reply) {
+    assertKitTextBeforeBoot();
     document.documentElement.removeAttribute("data-theme");
     document.head.innerHTML = "";
     document.body.innerHTML = "";
@@ -477,6 +559,7 @@ describe("astra r2 (#313 @8f946499): settlement green needs a LIVE read of an ex
     };
     // eslint-disable-next-line no-eval
     (0, eval)(kitSrc);
+    assertKitTextViolations();
   }
   const receiptPill = () => (document.querySelector(".pcc-receipt-rail .pcc-pill") as HTMLElement).className;
   const receiptWin = (path: string) => man([{ kind: "receipt", binding: { path } }]);
@@ -556,6 +639,7 @@ describe("astra r3 (#313 @9250c578): F5, generic request success is never green 
   // so a run window left polling by an earlier test stays frozen instead of being revived by these stubs.
   function bootWith(manifest: string, reply: (url: string, method: string) => { status: number; body?: unknown } | null, host?: { ops: string[]; result: unknown }) {
     const w = window as unknown as W;
+    assertKitTextBeforeBoot();
     document.documentElement.removeAttribute("data-theme");
     document.head.innerHTML = "";
     document.body.innerHTML = "";
@@ -576,6 +660,7 @@ describe("astra r3 (#313 @9250c578): F5, generic request success is never green 
     };
     // eslint-disable-next-line no-eval
     (0, eval)(kitSrc);
+    assertKitTextViolations();
   }
   const click = (label: string) => {
     // startsWith: a kit may append its own tag after the manifest label (#342, ruling 4).
@@ -625,6 +710,7 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
   // Answers only the requests a test expects (null = not this test's), and only its FIRST read of each:
   // a later poll never settles, so no window keeps polling after the test.
   function bootRead(manifest: string, reply: (url: string) => unknown) {
+    assertKitTextBeforeBoot();
     document.documentElement.removeAttribute("data-theme");
     document.head.innerHTML = "";
     document.body.innerHTML = "";
@@ -642,6 +728,7 @@ describe("astra r4 (#313 @887ea3c3): F6, a rejected money word is never shown as
     };
     // eslint-disable-next-line no-eval
     (0, eval)(kitSrc);
+    assertKitTextViolations();
   }
   const pills = () => Array.from(document.querySelectorAll(".pcc-pill")).map((p) => (p.textContent || "").trim());
   const WORDS = ["paid", "released", "settled", "PAID", "Released", "SETTLED_RELEASED"];
@@ -756,7 +843,7 @@ describe("astra r4 (#313): the pill-text rule, kit == spec", () => {
       "completed", "settled", "PAID", "SETTLED_RELEASED", "RELEASE_ALLOCATED"];
     for (const x of inputs) {
       for (const v of [true, false]) for (const money of [true, false]) {
-        expect(kit.statusPillText(x, v, money), JSON.stringify(x) + " v=" + v + " money=" + money).toBe(statusPillText(x, v, money));
+        expect(kit.statusPillText(x, v, money).t, JSON.stringify(x) + " v=" + v + " money=" + money).toBe(statusPillText(x, v, money));
       }
     }
   });
@@ -783,7 +870,7 @@ describe("astra r4 (#313): the pill-text rule, kit == spec", () => {
     const inputs: unknown[] = [...ADVERSARIAL, "Payout released to payee", "PAID", "Printing layer 3", "", "p\u0430id", 42, ["paid"]];
     for (const x of inputs) {
       for (const v of [true, false]) for (const money of [true, false]) {
-        expect(kit.reportedText(x, v, money), JSON.stringify(x) + " v=" + v + " money=" + money).toBe(reportedText(x, v, money));
+        expect(kit.reportedText(x, v, money).t, JSON.stringify(x) + " v=" + v + " money=" + money).toBe(reportedText(x, v, money));
       }
     }
   });
@@ -806,6 +893,7 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
   // Answers only the requests a test expects (null = not this test's), and only its FIRST read of each:
   // a later poll never settles, so no window keeps polling after the test (same contract as astra r4's bootRead).
   function bootRead(manifest: string, reply: (url: string) => unknown) {
+    assertKitTextBeforeBoot();
     document.documentElement.removeAttribute("data-theme");
     document.head.innerHTML = "";
     document.body.innerHTML = "";
@@ -823,11 +911,13 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
     };
     // eslint-disable-next-line no-eval
     (0, eval)(kitSrc);
+    assertKitTextViolations();
   }
   // A single SSE frame carrying `payload`, delivered through a real ReadableStream (Node 22's global
   // Streams API survives the jsdom test environment): proves the kit's SSE feed-line path, not just
   // its poll path. Closes the stream after one frame so the pump settles instead of hanging.
   function bootSSE(manifest: string, ssePath: string, payload: unknown) {
+    assertKitTextBeforeBoot();
     document.documentElement.removeAttribute("data-theme");
     document.head.innerHTML = "";
     document.body.innerHTML = "";
@@ -850,6 +940,7 @@ describe("astra r5 (#313 @d82cde8b): F7-F9 (verify before fix)", () => {
     };
     // eslint-disable-next-line no-eval
     (0, eval)(kitSrc);
+    assertKitTextViolations();
   }
   const pills = () => Array.from(document.querySelectorAll(".pcc-pill")).map((p) => (p.textContent || "").trim());
 
@@ -1113,6 +1204,7 @@ describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify be
   type Reply = { status: number; body?: unknown } | "reject";
   // Replies by call index; after the script every request stays pending, so no window keeps polling.
   function bootScript(manifest: string, script: Reply[]) {
+    assertKitTextBeforeBoot();
     document.documentElement.removeAttribute("data-theme");
     document.head.innerHTML = "";
     document.body.innerHTML = "";
@@ -1129,6 +1221,7 @@ describe("astra r7 (#313 @9f3f75af): F13 provenance and F10 over time (verify be
     };
     // eslint-disable-next-line no-eval
     (0, eval)(kitSrc);
+    assertKitTextViolations();
   }
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const pillClass = (sel: string) => (document.querySelector(sel) as HTMLElement).className;
