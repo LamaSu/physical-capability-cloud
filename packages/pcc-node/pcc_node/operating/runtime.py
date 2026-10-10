@@ -447,6 +447,8 @@ def _check_framing(resp: http.client.HTTPResponse) -> None:
                     or resp.length is None):
         raise http.client.HTTPException("malformed or duplicate Content-Length")
     if transfers:
+        if resp.version == 10:
+            raise http.client.HTTPException("Transfer-Encoding on HTTP/1.0 response")
         if lengths or len(transfers) != 1 or transfers[0].strip(" \t").lower() != "chunked":
             raise http.client.HTTPException("ambiguous or unsupported Transfer-Encoding")
         # stdlib does not strip trailing OWS when recognizing chunked. Apply
