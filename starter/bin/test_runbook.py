@@ -114,18 +114,25 @@ class TestTruths(unittest.TestCase):
 
     def test_provisioning_output_goes_to_a_private_file_never_the_terminal(self):
         for path, text in text_files():
+            if "buyer" in path.relative_to(STARTER).parts:
+                continue  # Its private staging recipe is checked below, without a literal redirection.
             for m in re.finditer(r"/api/auth/provision", text):
                 window = text[m.end(): m.end() + 400]
-                self.assertRegex(window, r"> \.pcc/", f"{path.name}: provision output must be written under .pcc/")
+                self.assertIn('--output "$capture_dir/provision.json"', window, f"{path.name}: provision output must use private staging")
 
     def test_every_provisioning_call_sends_its_own_public_key(self):
         # Rehearsal R0's P9: without publicKey, the response carries a server-made private key.
         # A body is either inline JSON, or a private file built just before the call (115c F5).
-        # The supply runbook's rule: the buyer path (starter/buyer/) is a separate flow whose
-        # publicKey is optional by design; its own test follows.
         calls = 0
         for path, text in text_files():
             if "buyer" in path.relative_to(STARTER).parts:
+                buyer = json.loads(text)
+                action = buyer["steps"][0]["actions"][0]
+                recipe = "\n".join(action["recipe"])
+                self.assertEqual(len(re.findall(r"\bcurl [^\n]*/api/auth/provision", recipe)), 1)
+                self.assertIn('request["publicKey"] = public.hex()', recipe, "buyer path: provision without publicKey")
+                self.assertIn('--data-binary @"$capture_dir/provision-request.json"', recipe)
+                calls += 1
                 continue
             for m in re.finditer(r"curl [^\n]*/api/auth/provision", text):
                 calls += 1
@@ -133,25 +140,29 @@ class TestTruths(unittest.TestCase):
                 body_file = re.search(r"--data-binary @(\S+)", after)
                 if body_file:
                     before = text[max(0, m.start() - 600): m.start()]
-                    self.assertIn("> " + body_file.group(1), before, f"{path.name}: body file not built here")
+                    self.assertEqual(body_file.group(1), '"$capture_dir/provision-request.json"', f"{path.name}: body must use private staging")
                     self.assertIn('"publicKey"', before, f"{path.name}: provision without publicKey")
+                    self.assertIn('with open(Path(sys.argv[1]) / "provision-request.json", "x")', before, f"{path.name}: request must not overwrite")
                 else:
                     self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
-        self.assertEqual(calls, 1)  # the operator's own; phase 6's buyer key went with its submission (115e)
+        self.assertEqual(calls, 2)  # the operator's own and the buyer's own; both require publicKey
 
     def test_the_buyer_path_provisions_once_into_a_private_file(self):
         # #603 (Opus r1 F1/F2): the buyer path provisions over direct HTTP with one recipe. It makes
-        # .pcc private before the call and redirects the response into it; a minted key (no
-        # publicKey) stays in that file. agent-md-provision-secrets.test.ts runs the recipe as
+        # .pcc private before generating its own signing key and capturing the response.
+        # agent-md-provision-secrets.test.ts runs the recipe as
         # written and checks that nothing secret is printed.
         buyer = json.loads((STARTER / "buyer" / "buyer-path.json").read_text(encoding="utf-8"))
         provision = buyer["steps"][0]["actions"][0]
         self.assertEqual((provision["tool"], provision["route"]), (None, "/api/auth/provision"))
         calls = [line for line in provision["recipe"] if re.search(r"curl [^\n]*/api/auth/provision", line)]
         self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0].endswith(" > .pcc/provision.json"), calls[0])
+        self.assertIn('--output "$capture_dir/provision.json"', calls[0])
         recipe = provision["recipe"]
-        self.assertLess(recipe.index("umask 077 && mkdir -p .pcc && chmod 700 .pcc"), recipe.index(calls[0]))
+        self.assertEqual(recipe[0], "set -euo pipefail")
+        self.assertLess(next(i for i, line in enumerate(recipe) if "chmod 700 .pcc" in line), recipe.index(calls[0]))
+        self.assertIn('capture_dir=$(mktemp -d .pcc/capture.XXXXXXXX) || fail \'Private capture setup failed.\'', recipe)
+        self.assertIn('    os.link(stage / name, Path(".pcc") / name)', recipe)
         everywhere = [m for _, text in text_files() for m in re.finditer(r"curl [^\n]*/api/auth/provision", text)]
         self.assertEqual(len(everywhere), 2)  # the operator's own (runbook phase 0) and the buyer's own
 
@@ -303,7 +314,7 @@ class TestRound3(unittest.TestCase):
         # F5: the provisioning body is built in a private file, never on curl's command line.
         provision = between(phase_text("00-prerequisites.md"), "/api/auth/provision", "**Check:**")
         self.assertNotRegex(provision, r'-d "\{')
-        self.assertIn("--data-binary @.pcc/", provision)
+        self.assertIn('--data-binary @"$capture_dir/provision-request.json"', provision)
 
 
 
@@ -365,6 +376,300 @@ class TestRound5(unittest.TestCase):
     def test_phase_7_points_at_the_envelope_check_where_it_is(self):
         # LOW: phase 6's sections were renumbered in round 4.
         self.assertNotIn("phase 6 step 2.", phase_text("07-operate.md"))
+
+
+class TestSupplyCapture(unittest.TestCase):
+    """Execute phase 0's capture with a curl stub; no sockets or optional Python modules."""
+
+    def setUp(self):
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        self.os, self.subprocess = os, subprocess
+        self.temp = tempfile.TemporaryDirectory(prefix="pcc-supply-capture-")
+        self.addCleanup(self.temp.cleanup)
+        self.cwd = pathlib.Path(self.temp.name)
+        self.private = self.cwd / ".pcc"
+        self.private.mkdir(mode=0o700)
+        self.bin = self.cwd / "mock-bin"
+        self.bin.mkdir()
+        self.git = shutil.which("git")
+        if self.git is None:
+            self.skipTest("Git is unavailable; supply capture repository checks need it")
+        subprocess.run([self.git, "init", "-q", str(self.cwd)], check=True)
+        (self.private / "base").write_text("http://127.0.0.1:4310\n")
+        (self.private / "operator.json").write_text(json.dumps({"email": "operator@example.org", "name": "Bench plate reader"}))
+        (self.private / "node-public-key").write_text("ab" * 32)
+        # Construct fake credentials at runtime; their literals never enter the source diff.
+        self.key = "pcc_" + "live_" + os.urandom(32).hex()
+        self.wallet_key = "0x" + os.urandom(32).hex()
+        self.response = {
+            "api_key": self.key, "key_id": "supply-key", "trace_id": "tr_" + "ab" * 16,
+            "ed25519": {"source": "byok", "public_key": "ab" * 32},
+            "operator_wallet": {"source": "server-minted", "private_key": self.wallet_key},
+            "usage": {"header": "Authorization: Bearer " + self.key},
+        }
+        curl_stub = self.bin / "curl"
+        curl_stub.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+response = Path(os.environ["MOCK_RESPONSE"]).read_text()
+Path(".pcc/curl-called").write_text("yes")
+Path(".pcc/curl-options.json").write_text(json.dumps(args))
+if "--data-binary" in args:
+    request = Path(args[args.index("--data-binary") + 1].lstrip("@")).read_text()
+    Path(".pcc/request-seen.json").write_text(request)
+if os.environ.get("MOCK_DROP_IGNORE"):
+    Path(".git/info/exclude").write_text("")
+if os.environ.get("MOCK_RACE_HEADER"):
+    Path(".pcc/auth.header").write_text("keep existing header\\n")
+if "--dump-header" in args:
+    Path(args[args.index("--dump-header") + 1]).write_text("HTTP/1.1 " + os.environ["MOCK_STATUS"] + "\\r\\nx-pcc-trace-id: " + os.environ.get("MOCK_TRACE_HEADER", "tr_" + "cd" * 16) + "\\r\\n\\r\\n")
+if "--output" in args:
+    Path(args[args.index("--output") + 1]).write_text(response)
+else:
+    sys.stdout.write(response)
+if "--write-out" in args:
+    sys.stdout.write(os.environ["MOCK_STATUS"])
+sys.exit(int(os.environ.get("MOCK_CURL_EXIT", "0")))
+''')
+        curl_stub.chmod(0o700)
+        # Observe actual hardlink publication rather than asserting an implementation string.
+        (self.bin / "sitecustomize.py").write_text('''import os
+original = os.link
+def record_link(source, destination, *args, **kwargs):
+    result = original(source, destination, *args, **kwargs)
+    with open(".pcc/publish-links.jsonl", "a") as f:
+        import json
+        f.write(json.dumps([str(source), str(destination)]) + "\\n")
+    return result
+os.link = record_link
+''')
+        step = phase_text("00-prerequisites.md").split("## 4. ", 1)[1].split("## 5. ", 1)[0]
+        blocks = re.findall(r"```bash\n(.*?)\n```", step, re.S)
+        self.recipe = blocks[0]
+        self.archive_recipe = blocks[1] if len(blocks) > 2 else None
+
+    def run_capture(self, status="201", response=None, **extras):
+        response_path = self.private / "test-response.json"
+        response_path.write_text(json.dumps(self.response if response is None else response))
+        env = dict(self.os.environ, PATH=str(self.bin) + self.os.pathsep + self.os.environ["PATH"],
+                   PYTHONPATH=str(self.bin), MOCK_RESPONSE=str(response_path), MOCK_STATUS=status, **extras)
+        result = self.subprocess.run(["bash", "-c", self.recipe], cwd=self.cwd, env=env,
+                                     capture_output=True, text=True, timeout=20)
+        for secret in (self.key, self.wallet_key):
+            self.assertNotIn(secret, result.stdout + result.stderr)
+        return result
+
+    def run_archive(self):
+        self.assertIsNotNone(self.archive_recipe, "Phase 0 must contain an executable private archive command")
+        result = self.subprocess.run(["bash", "-c", self.archive_recipe], cwd=self.cwd,
+                                     capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for secret in (self.key, self.wallet_key): self.assertNotIn(secret, result.stdout + result.stderr)
+        return result
+
+    def assert_not_published(self):
+        for name in ("provision.json", "api-key", "auth.header"):
+            self.assertFalse((self.private / name).exists(), name)
+
+    def test_success_checks_status_and_publishes_ignored_0600_files_atomically(self):
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("provision_status: provisioned", result.stdout)
+        self.assertEqual((self.private / "api-key").read_text(), self.key)
+        self.assertEqual((self.private / "auth.header").read_text(), "Authorization: Bearer " + self.key + "\n")
+        for name in ("provision.json", "api-key", "auth.header"):
+            path = self.private / name
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600, name)
+            ignored = self.subprocess.run([self.git, "check-ignore", "-q", "--", str(path)], cwd=self.cwd)
+            self.assertEqual(ignored.returncode, 0, name)
+        self.assertEqual(len((self.private / "publish-links.jsonl").read_text().splitlines()), 3)
+        request = json.loads((self.private / "request-seen.json").read_text())
+        self.assertEqual(request["publicKey"], "ab" * 32)
+        self.assertFalse(list(self.private.glob("capture.*")))
+        options = json.loads((self.private / "curl-options.json").read_text())
+        self.assertGreaterEqual(int(options[options.index("--max-time") + 1]), 600)
+
+    def test_non_201_never_imports_a_key_and_allows_a_corrected_rerun(self):
+        for code in ("rate_limited", "invalid_type", "invalid_wallet_address", "invalid_email", "identifier_required", "provision_failed", "too_many_keys", "invalid_public_key"):
+            with self.subTest(code=code):
+                body = dict(self.response, error=code, message=self.key, retry_after_seconds=3600)
+                body.pop("trace_id")
+                result = self.run_capture("429", body)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("http_status: 429\n", result.stdout)
+                self.assertIn("error: " + code + "\n", result.stdout)
+                self.assertIn("retry_after_seconds: 3600\n", result.stdout)
+                self.assertIn('trace_id: "' + 'tr_' + 'cd' * 16 + '"', result.stdout)
+                self.assert_not_published()
+                self.assertFalse(list(self.private.glob("capture.*")))
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rejection_never_prints_free_text_error_or_noninteger_retry(self):
+        result = self.run_capture("400", {"error": self.wallet_key, "message": self.key, "retry_after_seconds": self.key})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("error: unrecognised\n", result.stdout)
+        self.assertNotIn("retry_after_seconds:", result.stdout)
+        self.assert_not_published()
+
+    def test_malformed_or_server_minted_success_fails_closed(self):
+        for ed25519 in ({"source": "server-minted", "private_key": self.wallet_key}, {"source": "byok", "private_key_pkcs8_base64": self.wallet_key}, None):
+            with self.subTest(ed25519=ed25519):
+                result = self.run_capture(response=dict(self.response, ed25519=ed25519))
+                self.assertNotEqual(result.returncode, 0)
+                self.assert_not_published()
+                self.assertEqual(len(list(self.private.glob("capture.*"))), 1)
+                self.run_archive()
+                for leaf in (self.private / "archive").rglob("*"):
+                    self.assertEqual(leaf.stat().st_mode & 0o777, 0o700 if leaf.is_dir() else 0o600)
+                    self.assertEqual(self.subprocess.run([self.git, "check-ignore", "-q", "--", str(leaf)], cwd=self.cwd).returncode, 0)
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_existing_header_is_never_overwritten_or_requested_again(self):
+        header = self.private / "auth.header"
+        header.write_text("keep existing header\n")
+        result = self.run_capture()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(header.read_text(), "keep existing header\n")
+        self.assertFalse((self.private / "curl-called").exists())
+
+    def test_header_created_during_request_is_never_overwritten(self):
+        result = self.run_capture(MOCK_RACE_HEADER="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.private / "auth.header").read_text(), "keep existing header\n")
+        self.assertFalse((self.private / "api-key").exists())
+        self.assertFalse((self.private / "provision.json").exists())
+
+    def test_lost_exclusion_after_response_refuses_publication(self):
+        result = self.run_capture(MOCK_DROP_IGNORE="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_not_published()
+
+    def test_invalid_input_fails_before_staging_or_curl(self):
+        (self.private / "operator.json").write_text("{}")
+        result = self.run_capture()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(list(self.private.glob("capture.*")))
+        self.assertFalse((self.private / "curl-called").exists())
+
+    def test_capture_setup_failure_removes_unissued_staging_and_can_retry(self):
+        stub = self.bin / "git"
+        stub.write_text('#!/usr/bin/env python3\nimport os, sys\nif sys.argv[1] == "check-ignore" and sys.argv[-1].startswith(".pcc/capture."): sys.exit(1)\nos.execv(' + repr(self.git) + ', [' + repr(self.git) + '] + sys.argv[1:])\n')
+        stub.chmod(0o700)
+        result = self.run_capture()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.private / "curl-called").exists())
+        self.assertFalse(list(self.private.glob("capture.*")))
+        stub.unlink()
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_timeout_preserves_private_capture_and_explains_possible_issuance(self):
+        result = self.run_capture(MOCK_CURL_EXIT="28")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("a key may have been issued", result.stderr)
+        self.assertIn("validate", result.stderr)
+        self.assert_not_published()
+        captures = list(self.private.glob("capture.*"))
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(captures[0].stat().st_mode & 0o777, 0o700)
+
+    def test_outside_git_continues_with_a_fixed_note(self):
+        import shutil
+        shutil.rmtree(self.cwd / ".git")
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Outside a Git repository; private state uses filesystem permissions.", result.stdout)
+
+
+    def test_secret_trace_values_in_body_and_headers_are_never_printed(self):
+        result = self.run_capture("400", {"error": "invalid_email", "trace_id": self.key}, MOCK_TRACE_HEADER=self.wallet_key)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("trace_id: null\n", result.stdout)
+        self.assert_not_published()
+
+    def test_failed_git_detection_refuses_when_repository_markers_exist(self):
+        # A failing Git command cannot quietly select the no-repository branch.
+        broken_git = self.bin / "git"
+        broken_git.write_text("#!/bin/sh\nexit 1\n")
+        broken_git.chmod(0o700)
+        result = self.run_capture()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Git repository detection failed; request refused.", result.stderr)
+        self.assertFalse((self.private / "curl-called").exists())
+        self.assertFalse(list(self.private.glob("capture.*")))
+
+    def test_empty_git_directory_is_not_treated_as_a_repository(self):
+        import shutil
+        shutil.rmtree(self.cwd / ".git")
+        (self.cwd / ".git").mkdir()
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Outside a Git repository; private state uses filesystem permissions.", result.stdout)
+
+    def test_missing_python_has_its_own_fixed_message_before_staging(self):
+        # An executable stub models a PATH entry that cannot run Python; command -v is insufficient.
+        missing_python = self.bin / "python3"
+        missing_python.write_text("#!/bin/sh\nexit 127\n")
+        missing_python.chmod(0o700)
+        result = self.run_capture()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Python3 is required; request refused.", result.stderr)
+        self.assertFalse((self.private / "curl-called").exists())
+        self.assertFalse(list(self.private.glob("capture.*")))
+
+    def test_exact_archive_command_keeps_every_leaf_private_ignored_and_allows_rerun(self):
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        node_key = self.private / "node-keys.json"
+        node_key.write_text(json.dumps({"private": self.wallet_key}))
+        node_key.chmod(0o600)
+        inputs = {name: (self.private / name).read_bytes() for name in ("node-keys.json", "node-public-key", "base", "operator.json")}
+        capture = self.private / "capture.leftover"
+        nested = capture / "nested"
+        nested.mkdir(parents=True)
+        capture.chmod(0o755)
+        nested.chmod(0o755)
+        (nested / "diagnostic.json").write_text(json.dumps({"secret": self.key}))
+        (nested / "diagnostic.json").chmod(0o644)
+        self.run_archive()
+        destinations = list((self.private / "archive").iterdir())
+        self.assertEqual(len(destinations), 1)
+        self.assertRegex(destinations[0].name, r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}$")
+        self.assertEqual({p.name for p in destinations[0].iterdir()}, {"provision.json", "api-key", "auth.header", "capture.leftover"})
+        for leaf in (self.private / "archive").rglob("*"):
+            self.assertFalse(leaf.is_symlink())
+            self.assertEqual(leaf.stat().st_uid, self.os.getuid())
+            self.assertEqual(leaf.stat().st_mode & 0o777, 0o700 if leaf.is_dir() else 0o600)
+            self.assertEqual(self.subprocess.run([self.git, "check-ignore", "-q", "--", str(leaf)], cwd=self.cwd).returncode, 0)
+        for name, content in inputs.items(): self.assertEqual((self.private / name).read_bytes(), content)
+        self.assert_not_published()
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_archive_without_git_outside_a_repository(self):
+        import shutil
+        result = self.run_capture()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shutil.rmtree(self.cwd / ".git")
+        python_only = self.cwd / "python-only"
+        python_only.mkdir()
+        (python_only / "python3").symlink_to(shutil.which("python3"))
+        env = dict(self.os.environ, PATH=str(python_only))
+        result = self.subprocess.run([shutil.which("bash"), "-c", self.archive_recipe],
+                                     cwd=self.cwd, env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for secret in (self.key, self.wallet_key): self.assertNotIn(secret, result.stdout + result.stderr)
+        self.assert_not_published()
+        for leaf in (self.private / "archive").rglob("*"):
+            self.assertFalse(leaf.is_symlink())
+            self.assertEqual(leaf.stat().st_uid, self.os.getuid())
+            self.assertEqual(leaf.stat().st_mode & 0o777, 0o700 if leaf.is_dir() else 0o600)
 
 
 if __name__ == "__main__":

@@ -84,16 +84,24 @@ describe("generated agent golden path", () => {
   });
 
   /**
-   * The prose of a Markdown text outside fenced blocks and code spans. Spans are found by the renderer's own rule
-   * (splitCodeSpans), so a malformed delimiter run throws here instead of being stripped (ChatGPT r1 L4).
+   * Independent visibility check for the guide's restricted inline syntax. CommonMark 6.1 gives raw HTML and
+   * autolinks equal precedence with code spans: an earlier angle construct may consume an apparent opener.
+   * Reject those interactions before removing spans; do not import the renderer's splitter here.
    */
   const outsideCode = async (markdown: string) => {
-    const { splitCodeSpans } = await import("../docs/render-agent-md.js");
     const prose: string[] = [];
     let fenced = false;
     for (const line of markdown.split("\n")) {
       if (line.startsWith("```")) fenced = !fenced;
-      else if (!fenced) prose.push(splitCodeSpans(line).filter((_, index) => index % 2 === 0).join(""));
+      else if (!fenced) {
+        // These CommonMark constructs are outside the source contract, even when hidden by a naive span regex.
+        if (/<(?:[A-Za-z][A-Za-z0-9-]*\s+[^>]*[="'`]|[A-Za-z][A-Za-z0-9+.-]*:|[^<>\s]+@|[!?])/.test(line))
+          throw new Error("Unsupported HTML/autolink interaction");
+        if (/`{2,}/.test(line)) throw new Error("A run of backticks");
+        if (/\\`/.test(line)) throw new Error("An escaped backtick");
+        if ((line.match(/`/g) ?? []).length % 2) throw new Error("Unbalanced backticks");
+        prose.push(line.replace(/`[^`\n]+`/g, ""));
+      }
     }
     return prose.join("\n");
   };
@@ -112,6 +120,28 @@ describe("generated agent golden path", () => {
     expect(await outsideCode("Keys `<phase>` and `GET /api/x/<id>`.")).toBe("Keys  and .");
     expect(await outsideCode("Keys <phase> here.")).toMatch(/<[^>\n]+>/);
     expect(await outsideCode(["```bash", "echo `<x>` ``", "```", "ok"].join("\n"))).toBe("ok");
+  });
+
+  it.each([
+    'See <span title="`x"> <phase> y` here.',
+    'See <https://example.com/`x> <phase> y` here.',
+  ])("F6: rejects an HTML/autolink backtick interaction in source and visibility checks: %s", async (about) => {
+    const { renderAgentMd, splitCodeSpans } = await import("../docs/render-agent-md.js");
+    expect(() => splitCodeSpans(about)).toThrow(/HTML|autolink/);
+    const index = { ...json("starter/runbook/index.json"), about };
+    expect(() => renderAgentMd({
+      runbook: json("starter/runbook/runbook.json"), index,
+      buyer: json("starter/buyer/buyer-path.json"), agentPackage: json("apps/dashboard/public/agent-package.json"),
+    })).toThrow(/HTML|autolink/);
+  });
+
+  it.each([
+    'See <span title="`x"> <phase> y` here.',
+    'See <https://example.com/`x> <phase> y` here.',
+  ])("F6: visibility validation independently refuses already rendered hidden placeholders: %s", async (markdown) => {
+    // CommonMark consumes the first backtick in the HTML attribute/autolink. It is not a span opener.
+    // Feed the bad bytes directly, so disabling the renderer's source guard cannot make this pass.
+    await expect(outsideCode(markdown)).rejects.toThrow(/HTML|autolink/);
   });
 
   it("wraps prose placeholders in code without splitting a route's code span", async () => {
@@ -261,7 +291,8 @@ describe("generated agent golden path", () => {
   it("prescribes a short path with verification, no production default, and a spending stop", () => {
     const doc = read(artifactPath);
     const runbook = json("starter/runbook/runbook.json");
-    expect(doc.split("\n").length).toBeLessThan(400);
+    // Local key generation, guarded capture and safe error projection add executable code; keep the guide bounded.
+    expect(doc.split("\n").length).toBeLessThan(500);
     expect(doc).toContain(runbook.askingRule);
     expect(doc).toContain(runbook.target.rule);
     expect(doc).toMatch(/Never claim success until.*verified/);
@@ -303,12 +334,12 @@ describe("generated agent golden path", () => {
     }
   });
 
-  it("documents optional provisioning publicKey and once-only private-key handling", () => {
+  it("requires a locally generated buyer publicKey and private response capture", () => {
     const provision = json("starter/buyer/buyer-path.json").steps[0].actions[0];
     expect(provision.request).toMatch(/locally generated Ed25519 publicKey.*64 hex.*optional 0x/);
-    expect(provision.request).toContain("publicKey is optional");
-    expect(provision.request).toContain("ed25519.private_key once");
-    expect(provision.request).toContain("private 0600 file and never print it");
+    expect(provision.request).toContain("The buyer path requires its own locally generated Ed25519 publicKey.");
+    expect(provision.request).toContain(".pcc/ed25519-private.pem (0600), never prints it");
+    expect(provision.request).toContain("For other clients, only a body with no publicKey field");
     expect(provision.storeOnlyFields).toContain("ed25519.private_key (only when publicKey was omitted)");
     expect(provision.responseFields.join(" ")).not.toContain("private_key");
   });
@@ -380,13 +411,14 @@ describe("generated agent golden path", () => {
 
   it("handles throttling and any-route failures and limits public search to 20 results", () => {
     const buyer = json("starter/buyer/buyer-path.json");
-    expect(buyer.events["buyer.key-limit"].do).toContain("retry_after_seconds or the Retry-After header");
+    expect(buyer.events["buyer.key-limit"].do).toContain("the printed retry_after_seconds");
     expect(buyer.events["buyer.key-limit"].do).toContain("limit counts rejected (400) attempts too");
     const failure = buyer.events["buyer.server-failure"];
     expect(failure.phase).toBe("any");
     for (const code of ["provision_failed", "INTERNAL_ERROR", "internal_error"])
       expect(failure.trigger).toContain(code);
-    expect(failure.do).toContain("If the body has report_hint, send the report it describes once through pcc_report");
+    expect(failure.do).toContain("if the body has report_hint, send the report it describes once through pcc_report");
+    expect(failure.do).toContain("During get-key use only the printed http_status, fixed error and trace_id");
     expect(buyer.events["buyer.payment-required"].phase).toBe("any");
     expect(buyer.events["buyer.payment-required"].trigger).toBe("If any route answers 402");
     const search = buyer.steps.flatMap((step: { actions: Array<{ route: string }> }) => step.actions)

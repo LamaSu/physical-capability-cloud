@@ -18,8 +18,8 @@
  */
 
 import { execFile, spawnSync } from "node:child_process";
-import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,8 +73,9 @@ vi.mock("../services/erc8004-identity-write.js", () => ({
 }));
 
 import { provisionRoutes } from "../routes/provision.js";
+import { generateApiKey } from "../auth/api-key-auth.js";
 import { traceIdPlugin } from "../middleware/trace-id.js";
-import { initStore, closeStore, getRepos } from "../db.js";
+import { initStore, closeStore, getRepos, getStore } from "../db.js";
 
 const root = new URL("../../../../", import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, root), "utf8");
@@ -97,21 +98,45 @@ const API_KEY_PATHS = ["api_key", "usage.header", "usage.example"];
 
 /**
  * Opus r1 F1: a tool call returns the 201 body (API key, private keys) into the conversation, and
- * the provision_api_key tool cannot send publicKey. The get-key step names no tool and says why.
+ * returns the upstream body. Its response must stay out of the conversation; publicKey transport is not blocked.
  */
 const NO_TOOL =
   "Do not call the `provision_api_key` tool, or any tool that hands this response back to you: " +
-  "a tool result enters the conversation, and the tool cannot send publicKey.";
+  "its response includes the API key and any returned private key, and a tool result enters the conversation.";
+
+const STORE_ENV = ["DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_DB_PATH"] as const;
+let savedStoreEnv: Array<[typeof STORE_ENV[number], string | undefined]> | undefined;
+
+function closeTestStore(): void {
+  try { closeStore(); }
+  finally {
+    for (const [name, value] of savedStoreEnv ?? []) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    savedStoreEnv = undefined;
+  }
+}
 
 async function buildApp(): Promise<FastifyInstance> {
+  // initStore selects DATABASE_URL ahead of Railway and PCC_DB_PATH. Own that highest priority.
+  closeTestStore();
+  savedStoreEnv = STORE_ENV.map((name) => [name, process.env[name]]);
+  process.env.DATABASE_URL = ":memory:";
+  delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
   process.env.PCC_DB_PATH = ":memory:";
-  initStore({ seed: true });
   const app = Fastify({ logger: false });
-  // server.ts registers it before the routes; without it the 201 has no trace_id.
-  await app.register(traceIdPlugin);
-  await app.register(provisionRoutes);
-  await app.ready();
-  return app;
+  try {
+    initStore({ seed: true });
+    await app.register(traceIdPlugin);
+    await app.register(provisionRoutes);
+    await app.ready();
+    return app;
+  } catch (error) {
+    await app.close();
+    closeTestStore();
+    throw error;
+  }
 }
 
 /** A real Ed25519 public key as 64 hex characters: the SPKI DER's last 32 bytes. */
@@ -197,8 +222,9 @@ const SUPPLY_ED25519 =
   "A request without a `publicKey` would also get back a server-made Ed25519 private key, twice " +
   "(`ed25519.private_key` and `ed25519.private_key_pkcs8_base64`); the request below always sends your node's public key, " +
   "so this response carries neither.";
-/** The recipe prints the error fields, then exactly the fields to read. */
-const ERROR_FIELDS = ["error", "message", "retry_after_seconds"];
+/** Raw diagnostics stay private; the only printed status is a fixed classification. */
+const ERROR_FIELDS = ["provision_status"];
+const DIAGNOSTIC_STORE_ONLY = ["operator_wallet.onchain_error (raw diagnostic; may contain secrets)", "message (raw server diagnostic; may contain secrets)", "error (raw error body; only fixed route codes are printed)"];
 
 /** The value at a dotted path, or undefined. */
 const valueAt = (body: unknown, path: string): unknown => path.split(".").reduce<unknown>(
@@ -230,7 +256,7 @@ const STORE_ONLY_CONDITIONS: Condition[] = [
 
 /** Throws unless the store-only entries are exactly the documented conditions, word for word and in order. */
 function checkStoreOnlyText(storeOnlyFields: string[] | undefined): void {
-  expect(storeOnlyFields).toEqual(STORE_ONLY_CONDITIONS.map(([entry]) => entry));
+  expect(storeOnlyFields).toEqual([...STORE_ONLY_CONDITIONS.map(([entry]) => entry), ...DIAGNOSTIC_STORE_ONLY]);
 }
 
 /** Throws unless the response carries each secret exactly when its documented condition holds. */
@@ -312,8 +338,8 @@ describe("the buyer path documents the private-key fields of two provisioning re
   });
 
   afterEach(async () => {
-    if (app) await app.close();
-    closeStore();
+    try { if (app) await app.close(); }
+    finally { closeTestStore(); }
   });
 
   it("identity write on, own publicKey sent: operator_wallet.private_key and no Ed25519 private key", async () => {
@@ -378,8 +404,8 @@ describe("the wallet key comes back only when this call registered the identity 
   });
 
   afterEach(async () => {
-    if (app) await app.close();
-    closeStore();
+    try { if (app) await app.close(); }
+    finally { closeTestStore(); }
   });
 
   it("registration rejected: a 201 with no wallet key and the identity still pending", async () => {
@@ -436,8 +462,8 @@ describe("every leaf of every 201 the route returns is classified, and every sec
   });
 
   afterEach(async () => {
-    if (app) await app.close();
-    closeStore();
+    try { if (app) await app.close(); }
+    finally { closeTestStore(); }
   });
 
   for (const outcome of IDENTITY_OUTCOMES) {
@@ -463,11 +489,14 @@ describe("every leaf of every 201 the route returns is classified, and every sec
     expect(new Set(provision.responseFields).size).toBe(provision.responseFields.length);
   });
 
-  it("the recipe prints the error fields, then exactly the fields to read", () => {
-    const reader = (provisionAction().recipe ?? []).find((line) => line.includes("for f in ("));
-    expect(reader, "the recipe's field reader").toBeDefined();
-    const printed = [...(reader ?? "").slice((reader ?? "").indexOf("for f in (")).matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-    expect(printed).toEqual([...ERROR_FIELDS, ...provisionAction().responseFields]);
+  it("the recipe prints a fixed classification, then exactly the fields to read", () => {
+    const f = captureFixture();
+    try {
+      const result = f.run();
+      expect(result.status).toBe(0);
+      const printed = result.stdout.trim().split("\n").map((line) => line.slice(0, line.indexOf(": ")));
+      expect(printed).toEqual([...ERROR_FIELDS, ...provisionAction().responseFields]);
+    } finally { f.cleanup(); }
   });
 
   it("the supply runbook names every secret copy the route can return", () => {
@@ -487,8 +516,8 @@ describe("each documented secret condition holds on the real route, for the buye
   });
 
   afterEach(async () => {
-    if (app) await app.close();
-    closeStore();
+    try { if (app) await app.close(); }
+    finally { closeTestStore(); }
   });
 
   it("the buyer path's store-only entries state exactly these conditions, word for word", () => {
@@ -517,7 +546,8 @@ describe("each documented secret condition holds on the real route, for the buye
   it("the supply runbook's own request gets back only the secrets its step 4 names, on the conditions it states", async () => {
     const step = supplyStep4();
     // Step 4 builds its request from the node's public key, the email and the name.
-    expect(step).toContain("print(json.dumps({\"publicKey\": open(\".pcc/node-public-key\").read().strip(),");
+    expect(step).toContain('"publicKey": Path(".pcc/node-public-key").read_text().strip()');
+    expect(step).toContain('with open(Path(sys.argv[1]) / "provision-request.json", "x")');
     for (const outcome of IDENTITY_OUTCOMES) {
       mockIdentity(outcome);
       const res = await provisionFrom(app, {
@@ -563,13 +593,9 @@ describe("each documented secret condition holds on the real route, for the buye
  * undefined and otherwise stores normalizePublicKeyHex()'s result or throws invalid_public_key (ed25519.ts:89-95).
  */
 const BUYER_PUBLIC_KEY =
-  "publicKey is optional: only a body with no publicKey field gets a minted key pair, and then the response carries " +
-  "ed25519.private_key once (the same key again as ed25519.private_key_pkcs8_base64); store it with the API key in the " +
-  "private 0600 file and never print it. A publicKey that is present is never replaced by a minted key: 64 hex characters " +
-  "(optional 0x prefix) are stored, a non-string such as null gets 400 invalid_type, and any other string, including an " +
-  "empty one, whitespace or base64, gets 400 invalid_public_key; neither 400 issues a key.";
+  "The buyer path requires its own locally generated Ed25519 publicKey.";
 
-describe("only a body with no publicKey field gets a minted Ed25519 key (ChatGPT r1 gap 1)", () => {
+describe("other clients: only a body with no publicKey field gets a minted Ed25519 key (ChatGPT r1 gap 1)", () => {
   let app: FastifyInstance;
 
   beforeEach(async () => {
@@ -578,8 +604,8 @@ describe("only a body with no publicKey field gets a minted Ed25519 key (ChatGPT
   });
 
   afterEach(async () => {
-    if (app) await app.close();
-    closeStore();
+    try { if (app) await app.close(); }
+    finally { closeTestStore(); }
   });
 
   const OMIT = Symbol("no publicKey field");
@@ -637,6 +663,13 @@ describe("only a body with no publicKey field gets a minted Ed25519 key (ChatGPT
 });
 
 describe("agent golden path provisions over direct HTTP, never through a tool (Opus r1 F1)", () => {
+  it("F7: explains that the tool response exposes credentials to the conversation", () => {
+    const request = provisionAction().request;
+    expect(request).not.toContain("the tool cannot send publicKey");
+    expect(request).toContain("its response includes the API key and any returned private key");
+    expect(request).toContain("a tool result enters the conversation");
+  });
+
   it("no buyer action names provision_api_key, and agent.md renders the get-key step as direct HTTP", () => {
     const buyer = JSON.parse(read("starter/buyer/buyer-path.json")) as {
       steps: Array<{ actions: Array<{ tool: string | null }> }>;
@@ -660,20 +693,24 @@ describe("agent golden path captures the provision response without leaking it (
     const recipe = provisionAction().recipe ?? [];
     const at = (needle: string) => recipe.findIndex((line) => line.includes(needle));
     const curl = at("/api/auth/provision");
-    expect(recipe[0]).toBe("umask 077 && mkdir -p .pcc && chmod 700 .pcc");
-    expect(at("git check-ignore -q .pcc/provision.json")).toBeGreaterThan(0);
-    expect(recipe[at("git check-ignore")]).toContain("info/exclude");
+    expect(recipe[0]).toBe("set -euo pipefail");
+    expect(recipe).toContain("umask 077");
+    expect(at("chmod 700 .pcc")).toBeLessThan(curl);
+    expect(at('git check-ignore -q -- "$credential"')).toBeGreaterThan(0);
+    expect(recipe.join("\n")).toContain("info/exclude");
     expect(at("git check-ignore")).toBeLessThan(curl);
-    expect(recipe[curl]).toMatch(/--data-binary @\.pcc\/provision-request\.json > \.pcc\/provision\.json$/);
-    expect(at(".pcc/auth.header")).toBeGreaterThan(curl);
-    expect(recipe).toContain("chmod 600 .pcc/provision.json .pcc/auth.header");
+    expect(recipe[curl]).toContain('--data-binary @"$capture_dir/provision-request.json"');
+    expect(recipe[curl]).toContain('--output "$capture_dir/provision.json"');
+    expect(recipe[curl]).toContain('--dump-header "$capture_dir/response.headers"');
+    expect(at('with open(stage / "auth.header", "x")')).toBeGreaterThan(curl);
+    expect(recipe).toContain('    os.link(stage / name, Path(".pcc") / name)');
     // Nothing dumps the response or the key: no cat, no echo of a variable, no print of the whole body or key.
     expect(recipe.join("\n")).not.toMatch(/\bcat\b|\becho\s+"?\$|print\(r\)|print\(k\)/);
     expect(provisionAction().request).toContain("never print, cat or paste .pcc/provision.json");
     expect(validateAction().recipe).toEqual(['curl -s "$PCC_BASE/api/auth/validate" -H @.pcc/auth.header']);
-    expect(validateAction().request).toContain("printf is a shell builtin");
+    expect(validateAction().request).toContain("atomic, no-overwrite importer");
     const getKey = JSON.parse(read("starter/buyer/buyer-path.json")).steps[0] as { doneWhen: string[] };
-    expect(getKey.doneWhen.join(" ")).toContain("(.pcc/ is 0700 and ignored by git), no key or private key was printed");
+    expect(getKey.doneWhen.join(" ")).toContain("(.pcc/ is 0700 and ignored by git when working in a repository), no key or private key was printed");
   });
 
   it("agent.md renders both recipes as bash blocks, lists only non-secret fields to read, and marks the rest store-only", () => {
@@ -684,7 +721,8 @@ describe("agent golden path captures the provision response without leaking it (
     expect(doc).toContain(
       "Store only, never read into the conversation: api_key, usage.header (holds api_key), usage.example (holds api_key), " +
       "ed25519.private_key (only when publicKey was omitted), ed25519.private_key_pkcs8_base64 (only when publicKey was omitted), " +
-      "operator_wallet.private_key (when operator_wallet.source is server-minted).",
+      "operator_wallet.private_key (when operator_wallet.source is server-minted), " +
+      DIAGNOSTIC_STORE_ONLY.join(", ") + ".",
     );
     expect(doc).toContain("Keep API keys, private keys and transcripts out of logs, chat, reports and version control.");
   });
@@ -698,14 +736,14 @@ describe("agent golden path captures the provision response without leaking it (
     });
 
     afterEach(async () => {
-      if (app) await app.close();
-      closeStore();
+      try { if (app) await app.close(); }
+      finally { closeTestStore(); }
     });
 
     it.runIf(recipeTools || process.env.CI === "true")(
       "prints no secret, leaves .pcc 0700 and git-ignored with 0600 files, and its header validates",
       async () => {
-        // Identity write on and no publicKey: every secret the 201 can carry comes back at once.
+        // The recipe always sends its locally generated publicKey; the wallet key can still return.
         mockIsIdentityWriteEnabled.mockReturnValue(true);
         mockRegisterAgentOnChain.mockResolvedValue({
           agentId: 7n,
@@ -719,34 +757,35 @@ describe("agent golden path captures the provision response without leaking it (
         const env = { ...process.env, PCC_BASE: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}` };
         const dir = mkdtempSync(join(tmpdir(), "agent-md-recipe-"));
         try {
-          await run("git", ["init", "-q"], { cwd: dir });
+          await run("git", ["init", "-q"], { cwd: dir, timeout: 10_000 });
           // The agent writes the request body with its file-writing tool before running the recipe.
           mkdirSync(join(dir, ".pcc"));
           writeFileSync(join(dir, ".pcc/provision-request.json"), JSON.stringify({ email: "recipe-run@example.com" }));
-          const provision = await run("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], { cwd: dir, env });
-          const validate = await run("bash", ["-c", (validateAction().recipe ?? []).join("\n")], { cwd: dir, env });
+          const provision = await run("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], { cwd: dir, env, timeout: 20_000 });
+          const validate = await run("bash", ["-c", (validateAction().recipe ?? []).join("\n")], { cwd: dir, env, timeout: 20_000 });
 
           const body = JSON.parse(readFileSync(join(dir, ".pcc/provision.json"), "utf8"));
           expectSecretValuesStoreOnly(body);
           const secrets: string[] = [
-            body.api_key, body.ed25519.private_key, body.ed25519.private_key_pkcs8_base64, body.operator_wallet.private_key,
+            body.api_key, body.operator_wallet.private_key, readFileSync(join(dir, ".pcc/ed25519-private.pem"), "utf8"),
           ];
           for (const secret of secrets) expect(typeof secret === "string" && secret.length >= 32).toBe(true);
           const printed = provision.stdout + provision.stderr + validate.stdout + validate.stderr;
           secrets.forEach((secret, index) => expect(printed.includes(secret), `secret #${index} was printed`).toBe(false));
-          expect(provision.stdout).toContain("error: None");
-          expect(provision.stdout).toContain(`key_id: ${body.key_id}`);
+          expect(provision.stdout).toContain("provision_status: wallet assignment failed");
+          expect(provision.stdout).toContain(`key_id: ${JSON.stringify(body.key_id)}`);
           // One "name: value" line per field: the error fields, then exactly the fields to read (ChatGPT r1 L1).
           const printedNames = provision.stdout.trim().split("\n").map((line) => line.slice(0, line.indexOf(": ")));
           expect(printedNames).toEqual([...ERROR_FIELDS, ...provisionAction().responseFields]);
           expect(JSON.parse(validate.stdout)).toMatchObject({ valid: true });
           expect(statSync(join(dir, ".pcc")).mode & 0o777).toBe(0o700);
-          for (const file of ["provision.json", "auth.header"])
+          for (const file of ["provision.json", "auth.header", "ed25519-private.pem"])
             expect(statSync(join(dir, ".pcc", file)).mode & 0o777, file).toBe(0o600);
           expect(readFileSync(join(dir, ".pcc/auth.header"), "utf8") === `Authorization: Bearer ${body.api_key}\n`).toBe(true);
           expect(existsSync(join(dir, ".pcc/provision-request.json"))).toBe(false);
           // check-ignore exits 1 (and execFile rejects) when the path is not ignored.
-          await expect(run("git", ["check-ignore", "-q", ".pcc/provision.json"], { cwd: dir })).resolves.toBeDefined();
+          for (const credential of ["provision.json", "auth.header", "ed25519-private.pem"])
+            await expect(run("git", ["check-ignore", "-q", "--", `.pcc/${credential}`], { cwd: dir })).resolves.toBeDefined();
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -757,10 +796,663 @@ describe("agent golden path captures the provision response without leaking it (
 });
 
 describe("agent golden path drops the claims that no private key comes back", () => {
+  it("L1: preserves compact buyer source formatting and literal punctuation", () => {
+    const source = read("starter/buyer/buyer-path.json");
+    expect(source).toMatch(/^    "buyer\.identifier-required": \{"phase": "get-key", "trigger": /m);
+    expect(source).not.toMatch(/"responseFields": \[\s*\n/);
+    expect(source).toContain("assurance tier (0–3)");
+  });
+
   it("buyer path request and supply runbook", () => {
     expect(provisionAction().request).not.toContain("no private key comes back");
     const runbook = read("starter/runbook/00-prerequisites.md");
     expect(runbook).toContain("operator_wallet.private_key");
     expect(runbook).not.toContain("no private key ever travels");
+  });
+});
+
+/** No socket or real credentials: curl is a subprocess fixture; bash executes the published recipe. */
+function captureFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "agent-capture-"));
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const token = ["pcc", "live", randomBytes(32).toString("hex")].join("_");
+  const body = { api_key: token, key_id: "fixture", ed25519: { source: "byok" } };
+  writeFileSync(join(dir, "body.json"), JSON.stringify(body));
+  const executable = (name: string, source: string) => writeFileSync(join(bin, name), source, { mode: 0o700 });
+  executable("curl", `#!/usr/bin/env python3
+import os, pathlib, sys
+pathlib.Path("requested").write_text("yes")
+args = sys.argv[1:]
+pathlib.Path("curl-args.json").write_text(__import__("json").dumps(args))
+request = next((args[i+1][1:] for i, a in enumerate(args) if a == "--data-binary"), None)
+if request: pathlib.Path("sent.json").write_text(pathlib.Path(request).read_text())
+output = next((args[i+1] for i, a in enumerate(args) if a in ("--output", "-o")), None)
+body = pathlib.Path("body.json").read_text()
+if output: pathlib.Path(output).write_text(body)
+else: sys.stdout.write(body)
+if "--write-out" in args or "-w" in args: sys.stdout.write(os.environ.get("FIXTURE_HTTP", "201"))
+headers = next((args[i+1] for i, a in enumerate(args) if a == "--dump-header"), None)
+if headers: pathlib.Path(headers).write_text("x-pcc-trace-id: tr_" + "a" * 16 + "\\r\\n")
+if os.environ.get("FIXTURE_RACE"): pathlib.Path(".pcc/auth.header").write_text("late destination")
+if os.environ.get("FIXTURE_LOSE_IGNORE"): pathlib.Path(".git/info/exclude").write_text("")
+sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
+`);
+  spawnSync("git", ["init", "-q"], { cwd: dir });
+  mkdirSync(join(dir, ".pcc"), { mode: 0o755 });
+  writeFileSync(join(dir, ".pcc/provision-request.json"), JSON.stringify({ email: "fixture@example.com" }));
+  const run = (extra: Record<string, string> = {}) => spawnSync("bash", ["-c", (provisionAction().recipe ?? []).join("\n")], {
+    cwd: dir, env: { ...process.env, PCC_BASE: "https://fixture.invalid", PATH: `${bin}:${process.env.PATH}`, ...extra },
+    encoding: "utf8", timeout: 15_000,
+  });
+  return { dir, body, executable, run, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+describe("F2: capture fails closed and never overwrites credentials", () => {
+  it.each(["live", "test", "other", "uppercase", "short", "nonhex"])("L5: importer accepts exactly gateway-issued key format (%s)", (kind) => {
+    const f = captureFixture();
+    try {
+      chmodSync(join(f.dir, ".pcc"), 0o700);
+      writeFileSync(join(f.dir, ".git/info/exclude"), ".pcc/\n");
+      const issued = generateApiKey().rawKey;
+      const key = kind === "live" ? issued : kind === "test" ? issued.replace("live", "test")
+        : kind === "other" ? issued.replace("live", "other") : kind === "uppercase" ? ["pcc", "live", "A".repeat(64)].join("_")
+        : kind === "short" ? issued.slice(0, -1) : ["pcc", "live", "z".repeat(64)].join("_");
+      const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...process.env, PCC_API_KEY: key }, encoding: "utf8", timeout: 10_000 });
+      expect(result.status === 0).toBe(kind === "live");
+      expect(existsSync(join(f.dir, ".pcc/auth.header"))).toBe(kind === "live");
+      expect(result.stdout + result.stderr).not.toContain(key);
+    } finally { f.cleanup(); }
+  });
+
+  it("L4: allows the on-chain path and treats curl timeout as possible issuance", () => {
+    const f = captureFixture();
+    try {
+      const result = f.run({ FIXTURE_EXIT: "28", FIXTURE_HTTP: "000" });
+      expect(result.status).not.toBe(0);
+      const args = JSON.parse(readFileSync(join(f.dir, "curl-args.json"), "utf8")) as string[];
+      expect(Number(args[args.indexOf("--max-time") + 1])).toBeGreaterThanOrEqual(600);
+      expect(result.stdout + result.stderr).toContain("Provision request timed out; a key may have been issued.");
+      expect(result.stdout + result.stderr).toContain("validate the issued key or rotate it once found before retrying");
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+      expect(readdirSync(join(f.dir, ".pcc")).some((name) => name.startsWith("capture."))).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["missing", "malformed", "invalid-email", "invalid-type"])("L3: validates %s request input before staging", (kind) => {
+    const f = captureFixture();
+    try {
+      const path = join(f.dir, ".pcc/provision-request.json");
+      if (kind === "missing") rmSync(path);
+      else writeFileSync(path, kind === "malformed" ? "{" : JSON.stringify({ email: kind === "invalid-email" ? "bad" : 123 }));
+      f.executable("mktemp", "#!/bin/sh\nprintf yes > staged\nexit 1\n");
+      const result = f.run();
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(f.dir, "staged")), "input must be checked before mktemp").toBe(false);
+      expect(result.stdout + result.stderr).toContain(kind === "missing" ? "Provisioning input file missing." : "Invalid provisioning input; request refused.");
+    } finally { f.cleanup(); }
+  });
+
+  it("L3: a missing Python executable has its own fixed prerequisite message", () => {
+    const f = captureFixture();
+    try {
+      f.executable("python3", "#!/bin/sh\nexit 127\n");
+      const result = f.run();
+      expect(result.status).not.toBe(0);
+      expect(result.stdout + result.stderr).toContain("Python3 is required; request refused.");
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("L3: failure after generating a key removes unissued staging and permits a retry", () => {
+    const f = captureFixture();
+    try {
+      const mktemp = spawnSync("bash", ["-c", "command -v mktemp"], { encoding: "utf8" }).stdout.trim();
+      f.executable("mktemp", `#!/bin/sh\nstage=$('${mktemp}' "$@") || exit 1\nprintf late > "$stage/provision-request.json"\nprintf '%s' "$stage"\n`);
+      const result = f.run();
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(f.dir, ".pcc/ed25519-private.pem"))).toBe(false);
+      expect(readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("capture."))).toEqual([]);
+      rmSync(join(f.dir, "bin/mktemp"));
+      expect(f.run().status).toBe(0);
+    } finally { f.cleanup(); }
+  });
+
+  it("L2 P1: refuses a leftover capture directory with no key or final credentials", () => {
+    const f = captureFixture();
+    try {
+      mkdirSync(join(f.dir, ".pcc/capture.leftover"), { mode: 0o700 });
+      expect(f.run().status).not.toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("L2 P3: refuses success when the exclusion is lost during the request", () => {
+    const f = captureFixture();
+    try {
+      const result = f.run({ FIXTURE_LOSE_IGNORE: "yes" });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Git exclusion verification failed after capture");
+    } finally { f.cleanup(); }
+  });
+
+  it("L2 P4: refuses a server-minted 201 without publishing a header", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ ...f.body, ed25519: { source: "server-minted", private_key: randomBytes(32).toString("hex") } }));
+      expect(f.run().status).not.toBe(0);
+      expect(existsSync(join(f.dir, ".pcc/auth.header"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it.each([false, true])("L2 P5: importer refuses an existing header with private and ignored state (race=%s)", (race) => {
+    const f = captureFixture();
+    try {
+      chmodSync(join(f.dir, ".pcc"), 0o700);
+      writeFileSync(join(f.dir, ".git/info/exclude"), ".pcc/\n");
+      const prior = randomBytes(32).toString("hex");
+      const path = join(f.dir, ".pcc/auth.header");
+      if (race) {
+        const git = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+        f.executable("git", `#!/bin/sh\nif [ "$1" = check-ignore ]; then case "$4" in */.pcc/auth.header.*) printf '%s' '${prior}' > .pcc/auth.header;; esac; fi\nexec '${git.replace(/'/g, "'\\''")}' "$@"\n`);
+      } else writeFileSync(path, prior);
+      const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+      const result = spawnSync("bash", ["-c", snippet ?? ""], {
+        cwd: f.dir, env: { ...process.env, PATH: `${join(f.dir, "bin")}:${process.env.PATH}`, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
+      });
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(path, "utf8") === prior).toBe(true);
+      if (!race) expect(readdirSync(join(f.dir, ".pcc")).filter((name) => name.startsWith("auth.header."))).toEqual([]);
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+    } finally { f.cleanup(); }
+  });
+
+  it("the existing-key import refuses a captured header", () => {
+    const f = captureFixture();
+    try {
+      const prior = randomBytes(32).toString("hex");
+      const path = join(f.dir, ".pcc/auth.header");
+      writeFileSync(path, prior);
+      const snippet = validateAction().request.match(/`([^`]*(?:printf|python3)[^`]*)`/)?.[1];
+      expect(snippet).toBeDefined();
+      const result = spawnSync("bash", ["-c", snippet ?? ""], {
+        cwd: f.dir, env: { ...process.env, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
+      });
+      expect(result.status, "existing-key import must refuse overwrite").not.toBe(0);
+      expect(readFileSync(path, "utf8") === prior, "existing-key import destroyed a captured header").toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it("imports an environment key privately only after verified directory and Git setup", () => {
+    const f = captureFixture();
+    try {
+      const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+      expect(snippet).toBeDefined();
+      const runImport = () => spawnSync("bash", ["-c", snippet ?? ""], {
+        cwd: f.dir, env: { ...process.env, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000,
+      });
+      // Neither loose permissions nor missing effective Git exclusions may allow a secret to be written.
+      expect(runImport().status).not.toBe(0);
+      chmodSync(join(f.dir, ".pcc"), 0o700);
+      expect(runImport().status).not.toBe(0);
+      writeFileSync(join(f.dir, ".git/info/exclude"), ".pcc/\n");
+      const result = runImport();
+      expect(result.status).toBe(0);
+      expect((result.stdout + result.stderr).includes(f.body.api_key)).toBe(false);
+      const path = join(f.dir, ".pcc/auth.header");
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(readFileSync(path, "utf8") === `Authorization: Bearer ${f.body.api_key}\n`).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["mkdir", "chmod"])("stops before requesting if %s fails", (command) => {
+    const f = captureFixture();
+    try {
+      f.executable(command, "#!/bin/sh\nexit 1\n");
+      const result = f.run();
+      expect(result.status, "failed security setup must exit nonzero").not.toBe(0);
+      expect(existsSync(join(f.dir, "requested")), "request ran after failed setup").toBe(false);
+      expect(existsSync(join(f.dir, ".pcc/provision.json"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("stops before requesting if Git exclusion setup fails", () => {
+    const f = captureFixture();
+    try {
+      rmSync(join(f.dir, ".git/info/exclude"));
+      mkdirSync(join(f.dir, ".git/info/exclude"));
+      const result = f.run();
+      expect(result.status, "failed exclusion setup must exit nonzero").not.toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["provision.json", "auth.header"])("refuses an existing %s and preserves both prior files", (name) => {
+    const f = captureFixture();
+    try {
+      const path = join(f.dir, ".pcc", name);
+      const prior = randomBytes(32).toString("hex");
+      writeFileSync(path, prior);
+      const result = f.run({ FIXTURE_EXIT: "7" });
+      expect(result.status, "rerun must fail").not.toBe(0);
+      expect(readFileSync(path, "utf8") === prior, "prior credential was destroyed").toBe(true);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+      expect(result.stderr).toContain("archive command");
+    } finally { f.cleanup(); }
+  });
+
+  it.each([
+    { FIXTURE_EXIT: "7", FIXTURE_HTTP: "201" },
+    { FIXTURE_EXIT: "0", FIXTURE_HTTP: "500" },
+  ])("rejects transport/HTTP failure without publishing a header", (env) => {
+    const f = captureFixture();
+    try {
+      const result = f.run(env);
+      expect(result.status, "failed provisioning must exit nonzero").not.toBe(0);
+      expect(existsSync(join(f.dir, ".pcc/auth.header"))).toBe(false);
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+    } finally { f.cleanup(); }
+  });
+
+  it.each(["not JSON", JSON.stringify({ error: "fixture" })])("rejects malformed/non-success bodies", (body) => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), body);
+      expect(f.run().status, "invalid success body must exit nonzero").not.toBe(0);
+      expect(existsSync(join(f.dir, ".pcc/auth.header"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it.each([".pcc", ".pcc/provision.json", ".pcc/auth.header"])("refuses a symlink at %s", (name) => {
+    const f = captureFixture();
+    try {
+      const target = join(f.dir, "outside");
+      if (name === ".pcc") { mkdirSync(target); rmSync(join(f.dir, ".pcc"), { recursive: true }); }
+      else writeFileSync(target, "unchanged");
+      symlinkSync(target, join(f.dir, name));
+      expect(f.run().status, "unsafe symlink must be refused").not.toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+      if (name !== ".pcc") expect(readFileSync(target, "utf8")).toBe("unchanged");
+    } finally { f.cleanup(); }
+  });
+
+  it("publishes complete private files on success and refuses the next capture", () => {
+    const f = captureFixture();
+    try {
+      expect(f.run().status).toBe(0);
+      const response = readFileSync(join(f.dir, ".pcc/provision.json"), "utf8");
+      const header = readFileSync(join(f.dir, ".pcc/auth.header"), "utf8");
+      expect(JSON.parse(response).api_key === f.body.api_key).toBe(true);
+      expect(header === `Authorization: Bearer ${f.body.api_key}\n`).toBe(true);
+      expect(statSync(join(f.dir, ".pcc")).mode & 0o777).toBe(0o700);
+      for (const file of ["provision.json", "auth.header", "ed25519-private.pem"])
+        expect(statSync(join(f.dir, ".pcc", file)).mode & 0o777).toBe(0o600);
+      expect(f.run().status).not.toBe(0);
+      expect(readFileSync(join(f.dir, ".pcc/provision.json"), "utf8") === response).toBe(true);
+      expect(readFileSync(join(f.dir, ".pcc/auth.header"), "utf8") === header).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it("does not overwrite a destination created during the request", () => {
+    const f = captureFixture();
+    try {
+      expect(f.run({ FIXTURE_RACE: "yes" }).status).not.toBe(0);
+      expect(readFileSync(join(f.dir, ".pcc/auth.header"), "utf8")).toBe("late destination");
+      expect(JSON.parse(readFileSync(join(f.dir, ".pcc/provision.json"), "utf8")).api_key === f.body.api_key).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it("M2: a rejected request leaves no credential and permits a retry", () => {
+    const f = captureFixture();
+    try {
+      expect(f.run({ FIXTURE_HTTP: "500" }).status).not.toBe(0);
+      rmSync(join(f.dir, "requested"));
+      const result = f.run();
+      expect(result.status).toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(true);
+    } finally { f.cleanup(); }
+  });
+
+  it("M2: the exact archive command keeps every credential private and ignored, then permits a rerun", () => {
+    const f = captureFixture();
+    try {
+      expect(f.run().status).toBe(0);
+      const prior = readFileSync(join(f.dir, ".pcc/ed25519-private.pem"), "utf8");
+      mkdirSync(join(f.dir, ".pcc/capture.leftover"), { mode: 0o700 });
+      writeFileSync(join(f.dir, ".pcc/capture.leftover/provision.json"), JSON.stringify(f.body));
+      const snippet = provisionAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+      expect(snippet, "the guide must give the exact archive command").toBeDefined();
+      const archived = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, encoding: "utf8", timeout: 10_000 });
+      expect(archived.status).toBe(0);
+      const walk = (rel: string): void => {
+        const path = join(f.dir, rel);
+        const s = statSync(path);
+        expect(s.mode & 0o777).toBe(s.isDirectory() ? 0o700 : 0o600);
+        expect(spawnSync("git", ["check-ignore", "-q", "--", rel], { cwd: f.dir }).status).toBe(0);
+        if (s.isDirectory()) for (const name of readdirSync(path)) walk(`${rel}/${name}`);
+      };
+      walk(".pcc/archive");
+      const archives = readdirSync(join(f.dir, ".pcc/archive"));
+      expect(archives).toHaveLength(1);
+      expect(archives[0]).toMatch(/^\d{8}T\d{6}Z-/);
+      expect(readFileSync(join(f.dir, ".pcc/archive", archives[0], "ed25519-private.pem"), "utf8") === prior).toBe(true);
+      writeFileSync(join(f.dir, ".pcc/provision-request.json"), JSON.stringify({ email: "retry@example.com" }));
+      expect(f.run().status).toBe(0);
+      expect(archived.stdout + archived.stderr).not.toContain(f.body.api_key);
+      expect(provisionAction().request).not.toContain("move .pcc aside");
+      expect(validateAction().request).not.toContain("move .pcc aside");
+    } finally { f.cleanup(); }
+  });
+});
+
+describe("F1: every credential destination is untracked and effectively ignored", () => {
+  it("L8: the tracked-file fixture resolves Git from PATH", () => {
+    expect(read("packages/gateway/src/__tests__/agent-md-provision-secrets.test.ts")).not.toContain(["/usr/bin", "git"].join("/"));
+  });
+
+  it("protects the header when only provision.json was ignored initially", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), ".pcc/provision.json\n");
+      expect(f.run().status).toBe(0);
+      for (const name of ["provision.json", "auth.header"])
+        expect(spawnSync("git", ["check-ignore", "-q", "--", `.pcc/${name}`], { cwd: f.dir }).status,
+          `${name} is eligible for commit`).toBe(0);
+    } finally { f.cleanup(); }
+  });
+
+  it("refuses a tracked credential destination even if absent from the working tree", () => {
+    const f = captureFixture();
+    try {
+      // Model Git's tracked-but-deleted index entry without mutating an index.
+      const git = spawnSync("bash", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+      expect(git).not.toBe("");
+      f.executable("git", `#!/bin/sh\nif [ "$1" = ls-files ]; then printf '.pcc/auth.header\\n'; exit 0; fi\nexec '${git.replace(/'/g, "'\\''")}' "$@"\n`);
+      const result = f.run();
+      expect(result.status, "tracked destination must be refused").not.toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("refuses an exclusion overridden by a higher-priority Git rule", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, ".gitignore"), "!.pcc/\n!.pcc/auth.header\n");
+      expect(f.run().status, "unverified exclusion must be refused").not.toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("L6: captures privately outside a Git repository and prints one fixed note", () => {
+    const f = captureFixture();
+    try {
+      rmSync(join(f.dir, ".git"), { recursive: true });
+      const result = f.run();
+      expect(result.status, result.stderr).toBe(0);
+      const getKey = JSON.parse(read("starter/buyer/buyer-path.json")).steps[0] as { doneWhen: string[] };
+      expect(getKey.doneWhen.join(" ")).toContain("ignored by git when working in a repository");
+      expect(existsSync(join(f.dir, "requested"))).toBe(true);
+      expect(result.stdout.match(/Outside a Git repository; private state uses filesystem permissions\./g)).toHaveLength(1);
+      expect(statSync(join(f.dir, ".pcc")).mode & 0o777).toBe(0o700);
+      for (const name of ["provision.json", "auth.header", "ed25519-private.pem"])
+        expect(statSync(join(f.dir, ".pcc", name)).mode & 0o777).toBe(0o600);
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+    } finally { f.cleanup(); }
+  });
+
+  it("L6: existing-key import also works privately outside Git", () => {
+    const f = captureFixture();
+    try {
+      rmSync(join(f.dir, ".git"), { recursive: true });
+      chmodSync(join(f.dir, ".pcc"), 0o700);
+      const snippet = validateAction().request.match(/`(python3 -c[^`]*)`/)?.[1];
+      const result = spawnSync("bash", ["-c", snippet ?? ""], { cwd: f.dir, env: { ...process.env, PCC_API_KEY: f.body.api_key }, encoding: "utf8", timeout: 10_000 });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("Outside a Git repository; private state uses filesystem permissions.");
+      expect(statSync(join(f.dir, ".pcc/auth.header")).mode & 0o777).toBe(0o600);
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+    } finally { f.cleanup(); }
+  });
+
+  it("L6: failed Git detection in an existing repository still refuses capture", () => {
+    const f = captureFixture();
+    try {
+      f.executable("git", "#!/bin/sh\nexit 1\n");
+      expect(f.run().status).not.toBe(0);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("L6: import and archive work outside a repository even without a Git executable", () => {
+    const f = captureFixture();
+    try {
+      rmSync(join(f.dir, ".git"), { recursive: true });
+      chmodSync(join(f.dir, ".pcc"), 0o700);
+      const resolve = (name: string) => spawnSync("bash", ["-c", `command -v ${name}`], { encoding: "utf8" }).stdout.trim();
+      const python = resolve("python3");
+      f.executable("python3", `#!/bin/sh\nexec '${python.replace(/'/g, "'\\''")}' "$@"\n`);
+      const env = { ...process.env, PATH: join(f.dir, "bin"), PCC_API_KEY: f.body.api_key };
+      for (const action of [validateAction(), provisionAction()]) {
+        const snippet = action.request.match(/`(python3 -c[^`]*)`/)?.[1];
+        const result = spawnSync(resolve("bash"), ["-c", snippet ?? ""], { cwd: f.dir, env, encoding: "utf8", timeout: 10_000 });
+        expect(result.status).toBe(0);
+        expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+      }
+      expect(existsSync(join(f.dir, ".pcc/auth.header"))).toBe(false);
+      expect(readdirSync(join(f.dir, ".pcc/archive"))).toHaveLength(1);
+    } finally { f.cleanup(); }
+  });
+});
+
+type KeyProvider = "python" | "pynacl" | "openssl" | "node";
+type ProviderProbe = (command: string, args: string[]) => { status: number | null; stdout: string };
+function providerSkipReason(provider: KeyProvider, probe: ProviderProbe = (command, args) => {
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 10_000 });
+  return { status: result.status, stdout: result.stdout ?? "" };
+}): string | undefined {
+  if (provider === "node") return undefined; // Vitest's own Node executable is always available.
+  if (provider === "openssl") {
+    const version = probe("openssl", ["version"]);
+    if (version.stdout.includes("LibreSSL")) return "LibreSSL has no Ed25519 genpkey support";
+    if (version.status !== 0 || probe("openssl", ["genpkey", "-algorithm", "ed25519"]).status !== 0)
+      return "OpenSSL Ed25519 generation unavailable";
+    return undefined;
+  }
+  const script = provider === "python"
+    ? "from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey; Ed25519PrivateKey.generate()"
+    : "from nacl.signing import SigningKey; SigningKey.generate()";
+  if (probe("python3", ["-c", script]).status !== 0)
+    return provider === "python" ? "Python cryptography Ed25519 unavailable" : "Python PyNaCl Ed25519 unavailable";
+  return undefined;
+}
+
+describe("F5: buyer generates and sends its own Ed25519 key", () => {
+  it("M4: constructs PEM armor at runtime in the published recipe", () => {
+    const recipe = (provisionAction().recipe ?? []).join("\n");
+    expect(recipe).not.toContain(["PRIVATE", "KEY"].join(" "));
+  });
+
+  it("M3: availability gates explain bare Python and LibreSSL while Node always runs", () => {
+    const unavailable: ProviderProbe = () => ({ status: 1, stdout: "" });
+    expect(providerSkipReason("python", unavailable)).toBe("Python cryptography Ed25519 unavailable");
+    expect(providerSkipReason("pynacl", unavailable)).toBe("Python PyNaCl Ed25519 unavailable");
+    expect(providerSkipReason("openssl", () => ({ status: 0, stdout: "LibreSSL 3.3.6" }))).toBe("LibreSSL has no Ed25519 genpkey support");
+    expect(providerSkipReason("openssl", unavailable)).toBe("OpenSSL Ed25519 generation unavailable");
+    expect(providerSkipReason("node", unavailable)).toBeUndefined();
+  });
+
+  for (const provider of ["python", "pynacl", "openssl", "node"] as const) {
+    const reason = providerSkipReason(provider);
+    if (reason) console.info(`F5 skip ${provider}: ${reason}`);
+    it.skipIf(Boolean(reason))(`keeps the private key locally with the ${provider} generator chain${reason ? ` [skip: ${reason}]` : ""}`, () => {
+    const f = captureFixture();
+    try {
+      const blocked = provider === "python" ? ["nacl"] : provider === "pynacl" ? ["cryptography"] : ["cryptography", "nacl"];
+      f.executable("sitecustomize.py", `import builtins\noriginal = builtins.__import__\ndef guarded(name, *args, **kwargs):\n    if name.split(".")[0] in ${JSON.stringify(blocked)}: raise ImportError("fixture")\n    return original(name, *args, **kwargs)\nbuiltins.__import__ = guarded\n`);
+      // Force each named provider, so an earlier/later fallback cannot conceal a broken branch.
+      if (provider !== "openssl") f.executable("openssl", "#!/bin/sh\nexit 1\n");
+      if (provider !== "node") f.executable("node", "#!/bin/sh\nexit 1\n");
+      else f.executable("node", `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' "$@"\n`);
+      const result = f.run({ PYTHONPATH: join(f.dir, "bin") });
+      expect(result.status, "local generation must succeed").toBe(0);
+      const sent = JSON.parse(readFileSync(join(f.dir, "sent.json"), "utf8"));
+      expect(sent.publicKey, "every buyer request requires publicKey").toMatch(/^[0-9a-f]{64}$/);
+      const path = join(f.dir, ".pcc/ed25519-private.pem");
+      const pem = readFileSync(path, "utf8");
+      const privateKey = createPrivateKey(pem);
+      const pub = createPublicKey(privateKey).export({ type: "spki", format: "der" }).subarray(-32);
+      expect(pub.toString("hex")).toBe(sent.publicKey);
+      const message = randomBytes(24);
+      expect(verify(null, message, createPublicKey(privateKey), sign(null, message, privateKey))).toBe(true);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect((result.stdout + result.stderr).includes(pem), "private PEM was printed").toBe(false);
+      const raw = privateKey.export({ type: "pkcs8", format: "der" });
+      expect((result.stdout + result.stderr).includes(raw.toString("base64")), "private DER was printed").toBe(false);
+      expect(spawnSync("git", ["check-ignore", "-q", "--", ".pcc/ed25519-private.pem"], { cwd: f.dir }).status).toBe(0);
+    } finally { f.cleanup(); }
+  });
+  }
+
+  it("fails closed with a clear message if no key generator is available", () => {
+    const f = captureFixture();
+    try {
+      f.executable("sitecustomize.py", 'import builtins\noriginal = builtins.__import__\ndef guarded(name, *args, **kwargs):\n    if name.split(".")[0] in ("cryptography", "nacl"): raise ImportError("fixture")\n    return original(name, *args, **kwargs)\nbuiltins.__import__ = guarded\n');
+      for (const command of ["openssl", "node"]) f.executable(command, "#!/bin/sh\nexit 1\n");
+      const result = f.run({ PYTHONPATH: join(f.dir, "bin") });
+      expect(result.status, "must never request a server-minted Ed25519 key").not.toBe(0);
+      expect(result.stderr).toContain("No Ed25519 generator available");
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("refuses an existing local private key without changing it", () => {
+    const f = captureFixture();
+    try {
+      const path = join(f.dir, ".pcc/ed25519-private.pem");
+      const prior = generateKeyPairSync("ed25519").privateKey.export({ type: "pkcs8", format: "pem" });
+      writeFileSync(path, prior);
+      expect(f.run().status).not.toBe(0);
+      expect(readFileSync(path, "utf8") === prior).toBe(true);
+      expect(existsSync(join(f.dir, "requested"))).toBe(false);
+    } finally { f.cleanup(); }
+  });
+});
+
+describe("F3: diagnostics stay private and output uses fixed classifications", () => {
+  it.each([
+    [400, "identifier_required"], [400, "invalid_type"], [400, "invalid_email"],
+    [400, "invalid_wallet_address"], [400, "invalid_public_key"],
+    [429, "rate_limited"], [429, "too_many_keys"], [500, "provision_failed"],
+  ])("M1: projects HTTP %s and fixed error %s", (status, error) => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ error, message: f.body.api_key, retry_after_seconds: 3600 }));
+      const result = f.run({ FIXTURE_HTTP: String(status) });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(`http_status: ${status}\nerror: ${error}\nretry_after_seconds: 3600\ntrace_id: "tr_${"a".repeat(16)}"`);
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+    } finally { f.cleanup(); }
+  });
+
+  it("M1: prints unrecognised for free-text errors and excludes noninteger retries", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ error: f.body.api_key + "\nfree text", retry_after_seconds: "3600", trace_id: f.body.api_key }));
+      const result = f.run({ FIXTURE_HTTP: "400" });
+      expect(result.stdout).toContain("http_status: 400\nerror: unrecognised\n");
+      expect(result.stdout).not.toContain("retry_after_seconds:");
+      expect(result.stdout + result.stderr).not.toContain(f.body.api_key);
+      expect(result.stdout + result.stderr).not.toContain("free text");
+    } finally { f.cleanup(); }
+  });
+
+  it("never prints secret-bearing or multiline wallet diagnostics or a server message", () => {
+    const f = captureFixture();
+    try {
+      const diagnostic = f.body.api_key + "\nsecond diagnostic line";
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ ...f.body,
+        message: diagnostic, operator_wallet: { onchain_status: "failed", onchain_error: diagnostic },
+      }));
+      const result = f.run();
+      expect(result.status).toBe(0);
+      expect((result.stdout + result.stderr).includes(f.body.api_key), "diagnostic printed a secret").toBe(false);
+      expect(result.stdout + result.stderr).not.toContain("second diagnostic line");
+      expect(result.stdout).toContain("provision_status: wallet assignment failed");
+      const capture = JSON.parse(readFileSync(join(f.dir, ".pcc/provision.json"), "utf8"));
+      expect(capture.message === diagnostic && capture.operator_wallet.onchain_error === diagnostic).toBe(true);
+      expect(names(provisionAction().storeOnlyFields, "operator_wallet.onchain_error")).toBe(true);
+      expect(names(provisionAction().responseFields, "operator_wallet.onchain_error")).toBe(false);
+    } finally { f.cleanup(); }
+  });
+
+  it("keeps rejected-request exception text private", () => {
+    const f = captureFixture();
+    try {
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ error: "provision_failed", message: f.body.api_key + "\nraw exception" }));
+      const result = f.run({ FIXTURE_HTTP: "500" });
+      expect(result.status).not.toBe(0);
+      expect((result.stdout + result.stderr).includes(f.body.api_key)).toBe(false);
+      expect(result.stdout + result.stderr).not.toContain("raw exception");
+    } finally { f.cleanup(); }
+  });
+});
+
+describe("F4: provisioning fixture owns a fresh in-memory database", () => {
+  it.each(["DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH"])("cannot be redirected by %s", async (variable) => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-md-db-boundary-"));
+    let app: FastifyInstance | undefined;
+    try {
+      closeTestStore();
+      // Vitest 1.x stringifies undefined in stubEnv; register restoration, then truly unset.
+      vi.stubEnv("DATABASE_URL", "");
+      vi.stubEnv("RAILWAY_VOLUME_MOUNT_PATH", "");
+      delete process.env.DATABASE_URL;
+      delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
+      vi.stubEnv(variable, variable === "DATABASE_URL" ? join(dir, "sentinel.db") : dir);
+      app = await buildApp();
+      expect(existsSync(join(dir, "sentinel.db")) || existsSync(join(dir, "pcc.db")), "fixture opened a persistent store").toBe(false);
+    } finally {
+      await app?.close();
+      closeTestStore();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a stale singleton with a fresh store", async () => {
+    let app: FastifyInstance | undefined;
+    try {
+      closeTestStore();
+      vi.stubEnv("DATABASE_URL", ":memory:");
+      const stale = initStore({ seed: false });
+      app = await buildApp();
+      expect(getStore() === stale, "fixture reused stale singleton").toBe(false);
+    } finally {
+      await app?.close();
+      closeTestStore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("restores all database environment settings on teardown", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-md-db-restore-"));
+    const original = { DATABASE_URL: join(dir, "sentinel.db"), RAILWAY_VOLUME_MOUNT_PATH: dir, PCC_DB_PATH: join(dir, "legacy.db") };
+    let app: FastifyInstance | undefined;
+    try {
+      for (const name of STORE_ENV) vi.stubEnv(name, original[name]);
+      app = await buildApp();
+      expect(process.env.DATABASE_URL).toBe(":memory:");
+      await app.close();
+      app = undefined;
+      closeTestStore();
+      for (const name of STORE_ENV) expect(process.env[name]).toBe(original[name]);
+      expect(() => getStore()).toThrow(/Store not initialised/);
+    } finally {
+      await app?.close();
+      closeTestStore();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

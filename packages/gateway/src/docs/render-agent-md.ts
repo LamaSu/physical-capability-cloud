@@ -74,9 +74,11 @@ const http = (text: string) => text.replace(
 /**
  * agent.md's code-span contract (ChatGPT r1 L4): the only backticks in a line are single-backtick code spans,
  * "`" + content + "`", whose content is nonempty and holds no backtick and no line break. A CommonMark reader then
- * pairs the backticks exactly as a split on "`" does. A run of two or more backticks, a backslash before a backtick
+ * pairs the backticks exactly as a split on "`" does. Angle tokens are limited to plain placeholder words:
+ * HTML attributes, comments, declarations and autolinks are refused, since they can consume a backtick before
+ * it opens a code span (CommonMark 6.1). A run of two or more backticks, a backslash before a backtick
  * and an unmatched backtick all throw, because CommonMark would pair them differently (or not at all).
- * Returns the text split at its spans: [prose, code, prose, ..., prose]. The visibility test parses with this too.
+ * Returns the text split at its spans: [prose, code, prose, ..., prose]. Visibility is checked independently.
  */
 export function splitCodeSpans(text: string): string[] {
   const refuse = (what: string) => {
@@ -84,6 +86,13 @@ export function splitCodeSpans(text: string): string[] {
   };
   if (text.includes("``")) refuse("A run of backticks");
   if (text.includes("\\`")) refuse("An escaped backtick");
+  for (let start = text.indexOf("<"); start >= 0; start = text.indexOf("<", start + 1)) {
+    if (!/[A-Za-z/!?]/.test(text[start + 1] ?? "")) continue; // "a < b > c" is ordinary prose.
+    const end = text.indexOf(">", start + 1);
+    const token = end < 0 ? "" : text.slice(start, end + 1);
+    if (!/^<\/?[A-Za-z][A-Za-z0-9_-]*(?: [A-Za-z0-9_-]+)*>$/.test(token))
+      refuse("Unsupported HTML/autolink interaction");
+  }
   const parts = text.split("`");
   if (parts.length % 2 === 0) refuse("Unbalanced backticks");
   if (parts.some((part, index) => index % 2 === 1 && part.includes("\n"))) refuse("A line break inside a code span");
