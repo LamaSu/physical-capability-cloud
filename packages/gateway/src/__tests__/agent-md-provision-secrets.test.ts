@@ -854,6 +854,19 @@ sys.exit(int(os.environ.get("FIXTURE_EXIT", "0")))
 }
 
 describe.runIf(captureToolsRequired)("F2: capture fails closed and never overwrites credentials", () => {
+  it.each(["uppercase", "short"])("L-d: capture refuses a 201 with an invalid api_key (%s)", (kind) => {
+    const f = captureFixture();
+    try {
+      const key = ["pcc", "live", kind === "uppercase" ? "A".repeat(64) : randomBytes(32).toString("hex").slice(0, 63)].join("_");
+      writeFileSync(join(f.dir, "body.json"), JSON.stringify({ ...f.body, api_key: key }));
+      const result = f.run();
+      expect(result.status).not.toBe(0);
+      for (const name of ["provision.json", "auth.header", "ed25519-private.pem"])
+        expect(existsSync(join(f.dir, ".pcc", name))).toBe(false);
+      expect(result.stdout + result.stderr).not.toContain(key);
+    } finally { f.cleanup(); }
+  });
+
   it.each([undefined, "", "http://example.com", "http://localhost:4310", "https://x.example/", "https://user@x.example", "https://x.example?q=1", "https://x.example#frag", "https://x.example/white space"])("N3: refuses invalid PCC_BASE %s before creating private state", (base) => {
     const f = captureFixture();
     try {

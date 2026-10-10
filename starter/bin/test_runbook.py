@@ -646,6 +646,19 @@ os.link = record_link
         result = self.run_capture()
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def assert_invalid_api_key_is_refused(self, invalid_key):
+        result = self.run_capture(response=dict(self.response, api_key=invalid_key))
+        self.assertEqual(result.returncode, 1)
+        self.assert_not_published()
+        self.assertNotIn(invalid_key, result.stdout + result.stderr)
+        self.assertEqual(len(list(self.private.glob("capture.*"))), 1)
+
+    def test_uppercase_api_key_hex_is_refused_before_publication(self):
+        self.assert_invalid_api_key_is_refused("pcc_" + "live_" + "A" * 64)
+
+    def test_api_key_with_63_hex_digits_is_refused_before_publication(self):
+        self.assert_invalid_api_key_is_refused(self.key[:-1])
+
     def test_existing_header_is_never_overwritten_or_requested_again(self):
         header = self.private / "auth.header"
         header.write_text("keep existing header\n")
