@@ -56,6 +56,7 @@ INVALID = [
     pytest.param(wire(b"Transfer-Encoding: chunked \t\r\nContent-Length: 0\r\n", chunk()),
                  id="chunked-ows-and-zero-length"),
     pytest.param(wire(CHUNKED + CHUNKED, chunk()), id="duplicate-transfer-encoding"),
+    pytest.param(wire(CHUNKED, chunk()).replace(b"HTTP/1.1", b"HTTP/1.0", 1), id="http-1.0-chunked"),
     pytest.param(wire(b"Transfer-Encoding: gzip\r\n"), id="unsupported-transfer-encoding"),
     pytest.param(wire(b"Transfer-Encoding: identity\r\n", chunk()), id="identity-with-chunked-body"),
     pytest.param(wire(b"Transfer-Encoding: gzip, chunked\r\n"), id="multiple-transfer-encodings"),
