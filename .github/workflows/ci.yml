@@ -302,6 +302,28 @@ jobs:
           echo "staging health check did not pass within 3 minutes"
           exit 1
 
+      # /api/health stays green while the hosted MCP serves no tools (board row N88:
+      # a deployed gateway without PCC_API_BASE_URL fails every tools/list). Check
+      # the surface agents use: tools/list must return tools.
+      - name: Check out the MCP smoke script
+        if: vars.STAGING_URL != ''
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: packages/gateway/scripts/smoke-mcp-tools-list.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Node
+        if: vars.STAGING_URL != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Smoke test staging MCP tools/list
+        if: vars.STAGING_URL != ''
+        env:
+          STAGING_URL: ${{ vars.STAGING_URL }}
+        run: node packages/gateway/scripts/smoke-mcp-tools-list.mjs "$STAGING_URL"
+
   # Prod promotion lives in .github/workflows/deploy-prod.yml as a
   # workflow_dispatch trigger. That "click to run" is our manual gate:
   # GitHub Free + private repos can't enforce required-reviewer rules on
