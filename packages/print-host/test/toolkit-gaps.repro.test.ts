@@ -155,15 +155,39 @@ async function expectPrivateJournalFiles(directory: string): Promise<number> {
 
 async function publicKeysFromSeedsOnDisk(directory: string): Promise<Set<string>> {
   const candidates = new Set<string>();
+  const addByteWindows = (bytes: Buffer) => {
+    for (let offset = 0; offset + 32 <= bytes.length; offset++) {
+      candidates.add(bytes.subarray(offset, offset + 32).toString("hex"));
+    }
+  };
   for (const path of (await journalPaths(directory)).files) {
     // Scan encoded seeds in file text; binary files are not scanned as raw 32-byte windows.
     const text = (await readFile(path)).toString("utf8");
-    for (const match of text.matchAll(/(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64}(?![0-9a-fA-F])/g)) {
-      candidates.add(match[0].replace(/^0x/, "").toLowerCase());
+    for (const match of text.matchAll(/(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64,}(?![0-9a-fA-F])/g)) {
+      const hex = match[0].replace(/^0x/, "").toLowerCase();
+      for (let offset = 0; offset + 64 <= hex.length; offset += 2) {
+        candidates.add(hex.slice(offset, offset + 64));
+      }
     }
     for (const match of text.matchAll(/[A-Za-z0-9+/_-]+={0,2}/g)) {
-      const seed = Buffer.from(match[0], "base64");
-      if (seed.length === 32) candidates.add(seed.toString("hex"));
+      // Skip tokens longer than 8192 characters to bound base64/base64url candidate work.
+      if (match[0].length > 8192) continue;
+      addByteWindows(Buffer.from(match[0], "base64"));
+    }
+    const jsonByteRuns = /\[\s*\d+(?:\s*,\s*\d+){31,}\s*\]|\{\s*"\d+"\s*:\s*\d+(?:\s*,\s*"\d+"\s*:\s*\d+){31,}\s*\}/g;
+    for (const match of text.matchAll(jsonByteRuns)) {
+      let parsed: number[] | Record<string, number>;
+      try {
+        parsed = JSON.parse(match[0]);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(parsed)
+        && !Object.keys(parsed).every((key, index) => key === String(index))) continue;
+      const bytes = Array.isArray(parsed) ? parsed : Object.values(parsed);
+      if (bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) {
+        addByteWindows(Buffer.from(bytes));
+      }
     }
   }
   const publicKeys = new Set<string>();
@@ -202,18 +226,53 @@ describe("N144 print-host toolkit gap repros", () => {
   it("the journal seed scan finds encoded private seeds and ignores seed-free files", async () => {
     const directory = await mkdtemp(join(tmpdir(), "n144-seed-scan-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
-    await writeFile(join(directory, "no-seed.txt"), "journal metadata without a private seed\n");
-    expect(await publicKeysFromSeedsOnDisk(directory)).toEqual(new Set());
-    const seed = Buffer.alloc(32, 0x3d);
+    const scanFile = async (fileName: string, contents: string) => {
+      const path = join(directory, fileName);
+      try {
+        await writeFile(path, contents);
+        return await publicKeysFromSeedsOnDisk(directory);
+      } finally {
+        await rm(path, { force: true });
+      }
+    };
+    expect(await scanFile("no-seed.txt", "journal metadata without a private seed\n"))
+      .toEqual(new Set());
+    // This byte makes base64url use its distinct '-' and '_' alphabet.
+    const seed = Buffer.alloc(32, 0xfb);
     const signer = makeKernelEd25519Signer(seed);
-    const hexPath = join(directory, "seed.hex");
-    await writeFile(hexPath, `0x${seed.toString("hex")}\n`);
-    expect(await publicKeysFromSeedsOnDisk(directory)).toContain(signer.publicKeyHex);
-    await rm(hexPath);
-    await writeFile(join(directory, "seed.base64"), seed.toString("base64"));
-    expect(await publicKeysFromSeedsOnDisk(directory)).toContain(signer.publicKeyHex);
-    await writeFile(hexPath, seed.toString("hex"));
-    expect(await publicKeysFromSeedsOnDisk(directory)).toContain(signer.publicKeyHex);
+    const secretKey = Buffer.from(signer.secretKey);
+    const forms = [
+      ["seed.hex", "64-hex seed", seed.toString("hex")],
+      ["seed-prefixed.hex", "0x-prefixed 64-hex seed", `0x${seed.toString("hex")}\n`],
+      ["secret-key.hex", "128-hex secretKey", secretKey.toString("hex")],
+      ["seed.base64", "base64 seed", seed.toString("base64")],
+      ["seed.base64url", "base64url seed", seed.toString("base64url")],
+      ["secret-key.base64", "base64 secretKey", secretKey.toString("base64")],
+      ["secret-key.json", "JSON Uint8Array secretKey", JSON.stringify({ secretKey: signer.secretKey })],
+      ["seed-array.json", "JSON seed array", JSON.stringify(Array.from(seed))],
+    ] as const;
+    for (const [fileName, form, contents] of forms) {
+      expect(await scanFile(fileName, contents), `the scan must find the held key from ${form} alone`)
+        .toContain(signer.publicKeyHex);
+    }
+
+    const setup = harness("seed-scan-bundle");
+    const result = await completingPrint(setup, job("seed-scan-bundle"), 120);
+    expect(result.bundle).toBeDefined();
+    const bundle = result.bundle!;
+    expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
+    const eventHashes = bundle.events.map((event) => event.hash.replace(/^sha256:/, ""));
+    for (const hash of eventHashes) expect(hash).toMatch(/^[0-9a-f]{64}$/i);
+    expect(bundle.kernelSignature.value).toMatch(/^[0-9a-f]{128}$/i);
+    const hashesAndSignature = [
+      ...eventHashes, bundle.kernelSignature.value,
+    ].join("\n");
+    expect(hashesAndSignature, "the false-positive fixture must not contain the device public key")
+      .not.toContain(setup.signer.publicKeyHex);
+    const foundKeys = await scanFile("hashes-and-signature.txt", hashesAndSignature);
+    for (const heldKey of [signer.publicKeyHex, setup.signer.publicKeyHex]) {
+      expect(foundKeys, "event hashes and a real signature must not identify a held key").not.toContain(heldKey);
+    }
   });
 
   it("the scripted adapter completes a print through runPrintJob", async () => {

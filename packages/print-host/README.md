@@ -21,9 +21,12 @@ Each `GAP-n` calls the exported toolkit and asserts what the host needs. By defa
 test fail until its registration is updated. Set `PRINT_HOST_SHOW_GAPS=1` to register
 ordinary tests and see the actual unmet assertions. Passing controls check a print's
 success bundle, positive decimal cancel ids (and rejection of whitespace, hex, and
-exponent strings), both cancel/event orders, and an Ed25519 seed scan using known
-hex and base64 seeds plus a file without a seed. GAP-7 also checks that an intact
-copied journal resumes alongside the requirement to refuse a tampered copy.
+exponent strings), both cancel/event orders, and an Ed25519 seed scan with isolated
+leak forms, seed-free text, and real event hashes/signature as false-positive controls.
+GAP-7 also checks that an intact copied journal resumes alongside the requirement to
+refuse a tampered copy.
+
+The scan derives Ed25519 keys from 32-byte windows in hex runs, base64/base64url tokens (at most 8192 characters), and JSON byte arrays/index-keyed objects; it does not scan raw binary byte windows.
 
 When a toolkit change makes a GAP test pass, the same PR changes that test's `gap(` to `it(`; the repro is then that fix's acceptance test.
 
