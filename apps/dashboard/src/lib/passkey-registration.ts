@@ -58,17 +58,19 @@ export interface PasskeyRegistrationDeps {
   /** Base URL for gateway API calls (e.g. VITE_PCC_URL, "" for same-origin). */
   apiBase: string;
   /**
-   * Optional operator binding. When set, the challenge must carry the
-   * signed-in key, so it goes through `authorizedFetchFn`, and the credential
-   * is persisted to that operator's api_keys row on verify. Without it, the
-   * challenge is anonymous (verify succeeds but persisted:false). The gateway
-   * enforces the auth match (PR #198).
+   * Optional operator binding. When set, both calls go through
+   * `authorizedFetchFn`, so they carry the signed-in key: the challenge needs
+   * it to bind the operator, and the verification is behind the gateway's API
+   * gate, which honors a session cookie only beside its own key (N103). The
+   * credential is persisted to that operator's api_keys row on verify.
+   * Without it, the challenge is anonymous (verify succeeds but
+   * persisted:false). The gateway enforces the auth match (PR #198).
    */
   operatorId?: string;
   /**
-   * The app's authorizedFetch (lib/authorized-fetch.ts), used for the binding
-   * challenge. It attaches the signed-in key, and only for the configured
-   * gateway. This module never sees or builds a key (N50 round 2).
+   * The app's authorizedFetch (lib/authorized-fetch.ts), used for both calls
+   * of a bound registration. It attaches the signed-in key, and only for the
+   * configured gateway. This module never sees or builds a key (N50 round 2).
    */
   authorizedFetchFn?: (path: string, init: RequestInit) => Promise<Response>;
   /** Injected fetch (window.fetch in prod; a fake in tests). */
@@ -161,18 +163,21 @@ export async function runPasskeyRegistration(
   const optionsJSON = assembleCreationOptions(challenge, operatorId, randomHandle);
   const attestationResponse = await startRegistration({ optionsJSON });
 
-  // 3. Verify server-side (real cryptographic check in Phase A).
-  const verifyRes = await fetchFn(
-    `${apiBase}/api/onboard/passkey/verify-attestation`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        sessionId: challenge.sessionId,
-        attestationResponse,
-      }),
-    },
-  );
+  // 3. Verify server-side (real cryptographic check in Phase A). A bound
+  //    registration sends the signed-in key here too: the route is behind the
+  //    API gate, which honors a session cookie only beside its own key (N103).
+  const verifyInit: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      sessionId: challenge.sessionId,
+      attestationResponse,
+    }),
+  };
+  const verifyRes =
+    operatorId && authorizedFetchFn
+      ? await authorizedFetchFn("/api/onboard/passkey/verify-attestation", verifyInit)
+      : await fetchFn(`${apiBase}/api/onboard/passkey/verify-attestation`, verifyInit);
   if (!verifyRes.ok) {
     const body = await safeJson(verifyRes);
     throw new Error(

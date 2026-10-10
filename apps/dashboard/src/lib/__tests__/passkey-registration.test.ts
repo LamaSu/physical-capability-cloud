@@ -109,20 +109,22 @@ describe("runPasskeyRegistration", () => {
     expect(passedOptions.challenge).toBe(CHALLENGE.challenge);
   });
 
-  it("binding an operator sends the challenge through the authorized fetch, and builds no key itself", async () => {
-    const authorizedFetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(CHALLENGE));
-    const fetchFn = vi
-      .fn()
-      .mockResolvedValueOnce(
-        jsonResponse({
-          sessionId: "s",
-          credentialId: "c",
-          publicKey: "p",
-          rpId: "capability.network",
-          persisted: true,
-          verification: "verified",
-        }),
-      );
+  // Both calls: the challenge binds the operator with the signed-in key, and the
+  // verification is behind the gateway's API gate, which honors a session cookie
+  // only beside its own key (N103). A key-only user has no cookie at all.
+  it("binding an operator sends the challenge and the verification through the authorized fetch, and builds no key itself", async () => {
+    const verified = () =>
+      jsonResponse({
+        sessionId: "s",
+        credentialId: "c",
+        publicKey: "p",
+        rpId: "capability.network",
+        persisted: true,
+        verification: "verified",
+      });
+    const authorizedFetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(CHALLENGE)).mockResolvedValueOnce(verified());
+    // Answers too, so a verification sent without the key fails the assertions below, not the run.
+    const fetchFn = vi.fn().mockResolvedValue(verified());
     const startRegistration = vi.fn().mockResolvedValue({ id: "c" });
 
     await runPasskeyRegistration(
@@ -136,14 +138,16 @@ describe("runPasskeyRegistration", () => {
       "rand1234",
     );
 
-    expect(authorizedFetchFn).toHaveBeenCalledTimes(1);
+    expect(authorizedFetchFn).toHaveBeenCalledTimes(2);
     const [challengePath, challengeInit] = authorizedFetchFn.mock.calls[0]!;
     expect(challengePath).toBe("/api/onboard/passkey/register-challenge");
     expect(JSON.stringify(challengeInit.headers).toLowerCase()).not.toContain("authorization");
     expect(JSON.parse(challengeInit.body).operatorId).toBe("op@example.com");
-    // Only the verify call used the plain fetch.
-    expect(fetchFn).toHaveBeenCalledTimes(1);
-    expect(fetchFn.mock.calls[0][0]).toContain("/api/onboard/passkey/verify-attestation");
+    const [verifyPath, verifyInit] = authorizedFetchFn.mock.calls[1]!;
+    expect(verifyPath).toBe("/api/onboard/passkey/verify-attestation");
+    expect(JSON.stringify(verifyInit.headers).toLowerCase()).not.toContain("authorization");
+    expect(JSON.parse(verifyInit.body)).toEqual({ sessionId: CHALLENGE.sessionId, attestationResponse: { id: "c" } });
+    expect(fetchFn).not.toHaveBeenCalled();
   });
 
   it("throws the gateway message when the challenge is rejected (e.g. 401)", async () => {
