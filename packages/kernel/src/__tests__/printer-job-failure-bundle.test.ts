@@ -619,6 +619,20 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(bundle.events[1]!.payload.origin).toBe("kernel");
   });
 
+  it("INFO-1: defense in depth, the first signed failure decides the verdict (fixture breaching the quiesce contract)", async () => {
+    const quiet = deferred<void>();
+    const f = fixtureBreachingQuiesceContract({ quiesce: () => quiet.promise });
+    const pending = runPrintJob({ ...f.options, evidenceQuiesceTimeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(81);
+    f.printer.emit("execution_failed", { state: "canceled", origin: "device" });
+    quiet.resolve();
+    const result = await drive(pending);
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(result.success).toBe(false);
+    expect(result.failure).toEqual({ kind: "timeout", origin: "kernel" });
+    expect(bundle.events.filter((event) => event.type === "execution_failed").map((event) => event.payload.origin)).toEqual(["kernel", "device"]);
+  });
+
   it("abort while start is in flight waits for its id then cancels immediately (printer-job.ts:554 abort latch checked after start)", async () => {
     const start = deferred<MachineCommandResult>();
     const f = fixture({ start: () => start.promise, cancel: reportCanceled });

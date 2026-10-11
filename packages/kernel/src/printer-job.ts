@@ -212,7 +212,11 @@ export interface PrintCompletion {
   jobName: string;
 }
 
-/** Signed failure verdict; binding, recording or handshake failures have no verdict or bundle. */
+/**
+ * Signed failure verdict; binding, recording or handshake failures have no verdict or bundle.
+ * When multiple execution_failed events are signed, the first bound failure decides the
+ * verdict and its origin; later failures remain in the bundle.
+ */
 export type PrintJobFailure =
   | { kind: "device_reported"; origin: "device" }
   | { kind: "timeout" | "aborted" | "contradiction"; origin: "device" | "kernel" };
