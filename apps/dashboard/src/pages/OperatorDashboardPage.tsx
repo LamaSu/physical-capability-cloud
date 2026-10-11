@@ -8,11 +8,12 @@ import {
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { InboxPanel } from "../components/inbox/InboxPanel.js";
 import {
   mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
 } from "../api/mock-onboarding-data.js";
 
-const tabs = ["overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
 
 /* ---------- Approval types ---------- */
 interface Approval {
@@ -141,6 +142,8 @@ export function OperatorDashboardPage() {
           </button>
         ))}
       </div>
+
+      {activeTab === "inbox" && <InboxPanel />}
 
       {/* Overview Tab */}
       {activeTab === "overview" && (
