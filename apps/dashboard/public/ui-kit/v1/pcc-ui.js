@@ -1924,17 +1924,18 @@
     // `data` is then that poll's whole response: a run never projects its read (binding.select is unused).
     function apply(statusVal, latestVal, data, full, live) {
       var bpath = w.binding && w.binding.path;
+      var runMoney = isMoneyData(bpath, data) || selectsMoney(bpath, data, w.statusFrom);
       var cls = null; // this read's pill class, when it sets one
       if (full && isVNextRecord(data) && isMoneyData(bpath, data)) {
         cls = settlementReadClass(data, bpath, live)[0]; // a settlement read model: by its schema AND source AND pin
         // R12 r2 A: a state (any of 1-9, D) shows only with this read's own pin, and then the pill is a money
         // fact on that pin and its reference is painted with it.
         var pin = live === true ? chainPin(data, bpath) : null;
-        var txt = dataStatusText(bpath, data, statusVal, live);
+        var txt = dataStatusText(bpath, data, statusVal, live, runMoney);
         setPill(pin && cls !== 'st-unknown' ? moneyFactEl('span', 'pcc-pill ' + cls, chainFactText(txt, pin)) : el('span', 'pcc-pill ' + cls, txt), pin);
       } else if (statusVal != null) {
-        cls = dataStatusClass(bpath, data, statusVal, live);
-        setPill(el('span', 'pcc-pill ' + cls, dataStatusText(bpath, data, statusVal, live)), null);
+        cls = dataStatusClass(bpath, data, statusVal, live, runMoney);
+        setPill(el('span', 'pcc-pill ' + cls, dataStatusText(bpath, data, statusVal, live, runMoney)), null);
       } else if (full) {
         // A full snapshot WITHOUT a status: the earlier status is no longer known (never kept green).
         setPill(el('span', 'pcc-pill st-unknown', kitText('unknown')), null);
@@ -1943,12 +1944,12 @@
       // PAYMENT: a V-next record whose live exact read is st-settled. A verified refund proves the payees
       // were NOT paid, so it vouches for no other claim (astra r6 F10).
       var payeeVerified = isVNextRecord(data) && cls === 'st-settled';
-      if (latestVal != null && latestVal !== '') {
+      if (w.latestFrom && latestVal != null && latestVal !== '') {
         // The latest line, on every surface (astra r5 F8, r6 F12). Status-sourced text (the status path
         // itself, or a status/state/phase field) is a label, so it takes the closed vocabulary; anything
         // else is a free-text message, attributed to its source.
         var latestIsStatus = typeof w.latestFrom === 'string' && (w.latestFrom === w.statusFrom || isStatusPath(w.latestFrom));
-        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) };
+        held.latest = { raw: latestVal, isStatus: latestIsStatus, money: isMoneyData(bpath, data) || selectsMoney(bpath, data, w.latestFrom) };
       }
       paintLatest(payeeVerified); // this read decides, even when it carries no new latest value
       return payeeVerified;
@@ -1969,10 +1970,11 @@
       var tl = dot(snap, 'job.timeline') || dot(snap, 'timeline');
       if (Array.isArray(tl) && tl.length) {
         // Timeline entries are labels (astra r6 F11): the closed vocabulary, never verified in a snapshot.
-        var snapMoney = isMoneyData(w.binding.path, snap);
+        var snapMoney = isMoneyData(w.binding.path, snap) || selectsMoney(w.binding.path, snap, w.statusFrom);
         for (var ti = 0; ti < tl.length; ti++) feedLine(joinText(tl[ti].timestamp ? joinText(fmtTs(tl[ti].timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(tl[ti].type || '', false, snapMoney)));
         var lastType = tl[tl.length - 1].type; // last event = latest truth
-        if (lastType != null && lastType !== '') setText(latest, statusPillText(lastType, false, snapMoney));
+        var snapLatestMoney = isMoneyData(w.binding.path, snap) || selectsMoney(w.binding.path, snap, w.latestFrom);
+        if (lastType != null && lastType !== '') setText(latest, statusPillText(lastType, false, snapMoney || snapLatestMoney));
       }
       wrap._setFoot(null, true);
       clearInterval(tick); setText(elapsed, kitText(''));
@@ -1992,7 +1994,7 @@
         if (Array.isArray(tl)) {
           var lines = [];
           for (var i = 0; i < tl.length; i++) lines.push({ ts: tl[i].timestamp ? joinText(fmtTs(tl[i].timestamp), kitText(' \u00b7 ')) : kitText(''), label: tl[i].type || JSON.stringify(tl[i]) });
-          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) };
+          held.feed = { lines: lines, money: isMoneyData(w.binding.path, d) || selectsMoney(w.binding.path, d, w.statusFrom) };
         }
         paintFeed(payeeVerified);
         wrap._setFoot(ctx.tx.lastTrace, false);
@@ -2014,7 +2016,7 @@
               dot(ev, w.latestFrom) != null ? dot(ev, w.latestFrom) : (ev.message || ev.type), ev, false, false);
         // The feed line (astra r5 F8, r6 F12). Every label (the event's type, its status or the raw
         // event) takes the closed vocabulary on every surface. A stream event is never a verified read.
-        var feedMoney = isMoneyData(w.binding && w.binding.path, ev);
+        var feedMoney = isMoneyData(w.binding && w.binding.path, ev) || selectsMoney(w.binding && w.binding.path, ev, w.statusFrom);
         var label = ev.type || ev.status || JSON.stringify(ev);
         feedLine(joinText(ev.timestamp ? joinText(fmtTs(ev.timestamp), kitText(' \u00b7 ')) : kitText(''), statusPillText(label, false, feedMoney)));
         wrap._setFoot(ctx.tx.lastTrace, false);
@@ -2041,7 +2043,10 @@
       wrap._body.appendChild(realRequestNode(desc));
       var mismatch = recordAmountMismatch(r.data, desc);
       if (mismatch) wrap._body.appendChild(el('p', 'pcc-action-status st-failed pcc-mismatch', mismatch));
-      wrap._body.appendChild(recordNode(r, desc));
+      var bpath = w.binding && w.binding.path;
+      var top = r.raw !== undefined ? r.raw : ctx.snapshot && typeof bpath === 'string' ? ctx.snapshot[bpath] : undefined;
+      var recMoney = selectsMoney(bpath, top, w.binding && w.binding.select);
+      wrap._body.appendChild(recordNode(r, desc, bpath, recMoney));
       var foot = el('div', 'pcc-win-foot pcc-actionbar');
       var status = el('span', 'pcc-action-status');
       var approve = el('button', 'pcc-btn pcc-btn-primary', kitText('Approve')); // kit text, never w.approve.label
@@ -2105,14 +2110,14 @@
   // What the BOUND RECORD says about an approval: attributed context, never the request. Its amount
   // line is dropped whenever the request carries an amount (the request's amount is what is sent),
   // and a failed or empty read says so instead of showing nothing (review charlie F1, N5).
-  function recordNode(r, desc) {
+  function recordNode(r, desc, bpath, recMoney) {
     var box = el('div', 'pcc-approval-record');
     box.appendChild(el('div', 'pcc-untrusted-k', kitText('The bound record says (context, not what will be sent):')));
     if (r.error || !r.data || typeof r.data !== 'object') {
       box.appendChild(el('p', 'pcc-muted', joinText(kitText('Details unavailable'), r.error ? joinText(kitText(': '), reportedText(r.error, false, false)) : kitText('.'))));
       return box;
     }
-    box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }));
+    box.appendChild(approvalDetails(r.data, { noCost: !!(desc.amounts && desc.amounts.length) }, bpath, recMoney));
     return box;
   }
   // A kit warning when the bound record states an amount that no amount in the request matches.
@@ -2129,7 +2134,7 @@
     }
     return joinText(kitText('The bound record says '), amountText(ra), kitText(', but the request sends '), joinWithText(kitText(' / '), sent), kitText('. Approve sends the request, not the record.'));
   }
-  function approvalDetails(info, opts) {
+  function approvalDetails(info, opts, bpath, recMoney) {
     var box = el('div', 'pcc-approval');
     // what
     var summary = info.summary || info.name || info.description;
@@ -2154,7 +2159,8 @@
         if (v == null) continue;
         var kv = el('div', 'pcc-args-row');
         kv.appendChild(el('span', 'pcc-args-k', idText(keys[i])));
-        kv.appendChild(el('span', 'pcc-args-v pcc-mono', reportedText(typeof v === 'object' ? JSON.stringify(v) : String(v), false, false)));
+        var argMoney = recMoney || selectsMoney(bpath, info, (info.args ? 'args' : 'params') + '.' + keys[i]);
+        kv.appendChild(el('span', 'pcc-args-v pcc-mono', reportedText(typeof v === 'object' ? JSON.stringify(v) : String(v), false, argMoney)));
         tbl.appendChild(kv);
       }
       if (tbl.childNodes.length) box.appendChild(tbl);

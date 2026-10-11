@@ -323,7 +323,7 @@ describe("shipped kit renders money state honestly (full jsdom boot, receipt win
     expect(r.cls).not.toContain("st-settled");
   });
 
-  it("the pill text is the raw server value when the surface's safe vocabulary covers it", async () => {
+  it("the legacy pill attributes EXPIRED to the escrow service independently of the safe vocabulary", async () => {
     // R12 r2d g1: EXPIRED is no longer on SAFE_MONEY_STATUS_WORDS (it is a money-table word). This legacy escrow pill
     // never consults that list (R12 rule 4): it shows the escrow service's word as sent, attributed, so its text is unchanged.
     const r = await renderedPill({ status: "EXPIRED" });
@@ -2585,6 +2585,23 @@ describe("R12 r2d F1 (lane review, MEDIUM): a name that states money or verifica
     }
   });
 
+  it("NF-3 non-string names (live and snapshot): 42, an array and an object paint without throwing, as N3 reports on money data and nameText reports otherwise", async () => {
+    const values = [42, ["Paid $5"], { claim: "Paid $5" }];
+    const onMoney = values.map((v) => r2dRep(typeof v === "object" ? JSON.stringify(v) : String(v)));
+    const offMoney = ["reported: 42", "reported: Paid $5", "reported: [object Object]"];
+    const rows = values.map((v) => ({ displayName: v, ownerName: v }));
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint(values.map((_, i) => r2dMetric("/api/escrow/e1", "names." + i + ".displayName")), { "/api/escrow/e1": { totalAmount: 250, names: rows } }, mode);
+      expect(r2dTexts(".pcc-metric-amount"), "money metrics " + mode).toEqual(onMoney);
+      await r2dPaint([r2dList("/api/escrow", "displayName", ["ownerName"])], { "/api/escrow": rows }, mode);
+      expect(r2dTexts(".pcc-list-title"), "money list titles " + mode).toEqual(onMoney);
+      expect(r2dTexts(".pcc-list-meta"), "money list metas " + mode).toEqual(onMoney);
+      await r2dPaint([r2dList("/api/kernels", "displayName", ["ownerName"])], { "/api/kernels": rows }, mode);
+      expect(r2dTexts(".pcc-list-title"), "non-money list titles " + mode).toEqual(offMoney);
+      expect(r2dTexts(".pcc-list-meta"), "non-money list metas " + mode).toEqual(offMoney);
+    }
+  });
+
   // The review's names, the IR's own documented example, and the two shared corpora both kits' detectors are pinned to.
   const PARITY_NAMES: readonly string[] = [...new Set([
     "Paid in full - verified $250", "Payment received", "250 USDC settled", "withheld: stated money or verification", "Paid $1M - verified",
@@ -2756,7 +2773,7 @@ describe("R12 r2d g2 (lane review, LOW-MEDIUM): a list row's status pill judges 
     }
   });
 
-  it("the classifiers: a caller's money judgment (the optional 5th argument) forces the money table and can only add money, never remove it; without it a row is judged by its own keys, as the run window still calls them", () => {
+  it("the classifiers: a caller's money judgment (the optional 5th argument) forces the money table and can only add money, never remove it; without it a row is judged by its own keys", () => {
     const kit = extractRegion();
     const JOB = { status: "completed" }, PAID_JOB = { status: "completed", amount: 5 };
     expect(kit.dataStatusClass("/api/jobs", JOB, "completed")).toBe("st-ack");
@@ -2765,5 +2782,130 @@ describe("R12 r2d g2 (lane review, LOW-MEDIUM): a list row's status pill judges 
     expect(kit.dataStatusText("/api/jobs", JOB, "completed", false, true).t).toBe(COMPLETED_ON_MONEY);
     expect(kit.dataStatusClass("/api/jobs", PAID_JOB, "completed", false, false)).toBe("st-unknown");
     expect(kit.dataStatusText("/api/jobs", PAID_JOB, "completed", false, false).t).toBe(COMPLETED_ON_MONEY);
+  });
+});
+
+// R12 round 2e NF-1: the run window uses the same selector-aware money judgment as a list pill.
+describe("R12 r2e NF-1: nested money in the run window", () => {
+  const PATH = "/api/jobs/j1", SSE = "/sse/stream/jobs/j1";
+  const MODES = ["poll", "snapshot", "SSE"] as const;
+  const body = (status: string) => ({ id: "j1", status: "running", payment: { amount: 250, currency: "USDC", status } });
+  const repStatus = (status: string) => "reported status: " + status + " - settlement unconfirmed";
+  async function paint(mode: typeof MODES[number], record: unknown, extra: R2dWin = {}) {
+    const win = { kind: "run", binding: { path: PATH, ...(mode === "SSE" ? { sse: SSE } : {}) }, statusFrom: "payment.status", latestFrom: "payment.status", ...extra };
+    if (mode === "SSE") { r2dBootSse([win], SSE, record); await flush(); await flush(); }
+    else await r2dPaint([win], { [PATH]: record }, mode === "poll" ? "live" : "snapshot");
+  }
+
+  it.each(MODES)("NF-1 pill and latest (%s): nested completed, done and success match the same record's list pill and qualify the latest status", async (mode) => {
+    for (const status of ["completed", "done", "success"]) {
+      const record = body(status);
+      await r2dPaint([r2dList("/api/jobs", "id", [], "payment.status")], { "/api/jobs": [record] }, "snapshot");
+      const listText = r2dTexts(".pcc-list-row .pcc-pill");
+      expect(listText).toEqual([status === "completed"
+        ? "bound record reports: completed - settlement not confirmed (not confirmed on chain)" : repStatus(status)]);
+      await paint(mode, record);
+      expect.soft(r2dTexts(".pcc-win-head .pcc-pill"), "run == list " + status).toEqual(listText);
+      expect.soft(document.querySelector(".pcc-win-head .pcc-pill")?.className, status + " class").toBe("pcc-pill st-unknown");
+      expect.soft(r2dTexts(".pcc-run-latest"), status + " latest").toEqual([repStatus(status)]);
+    }
+  });
+
+  it.each(MODES)("NF-1 amount latest (%s): payment.amount carries the settlement qualifier independently of the job's status", async (mode) => {
+    await paint(mode, body("completed"), { statusFrom: "status", latestFrom: "payment.amount" });
+    expect(r2dTexts(".pcc-run-latest")).toEqual([r2dRep("250")]);
+    expect(r2dTexts(".pcc-win-head .pcc-pill")).toEqual(["running"]);
+    expect(document.querySelector(".pcc-win-head .pcc-pill")?.className).toBe("pcc-pill st-running");
+  });
+
+  it.each(MODES)("NF-1 feed (%s): timeline and event labels use the nested money judgment, including the snapshot's last-event latest", async (mode) => {
+    await paint(mode, { ...body("completed"), type: "done", timeline: [{ type: "completed" }, { type: "done" }] });
+    expect.soft(r2dTexts(".pcc-feed-line")).toEqual(mode === "SSE" ? [repStatus("done")] : [repStatus("completed"), repStatus("done")]);
+    if (mode === "snapshot") expect.soft(r2dTexts(".pcc-run-latest")).toEqual([repStatus("done")]);
+  });
+
+  it.each(MODES)("NF-1 control (%s): a non-money selector keeps the job status, latest message and feed plain even with sibling money", async (mode) => {
+    await paint(mode, { ...body("completed"), status: "completed", message: "Printing layer 3", type: "completed", timeline: [{ type: "completed" }] },
+      { statusFrom: "status", latestFrom: "message" });
+    expect(r2dTexts(".pcc-win-head .pcc-pill")).toEqual(["completed"]);
+    expect(document.querySelector(".pcc-win-head .pcc-pill")?.className).toBe("pcc-pill st-ack");
+    expect(r2dTexts(".pcc-run-latest")).toEqual([mode === "snapshot" ? "completed" : "reported: Printing layer 3"]);
+    expect(r2dTexts(".pcc-feed-line")).toEqual(["completed"]);
+  });
+
+  it.each(MODES)("XA latest and feed (%s): a repeated timeline label keeps the feed's money judgment", async (mode) => {
+    await paint(mode, { ...body("completed"), message: "Printing layer 3", type: "completed", timeline: [{ type: "completed" }] },
+      { statusFrom: "payment.status", latestFrom: "message" });
+    expect(r2dTexts(".pcc-feed-line")).toEqual([repStatus("completed")]);
+    expect(r2dTexts(".pcc-run-latest")).toEqual([mode === "snapshot" ? repStatus("completed") : "reported: Printing layer 3"]);
+  });
+
+  it.each(MODES)("NF-1 snapshot selectors (%s): latestFrom and statusFrom independently judge the latest and feed", async (mode) => {
+    await paint(mode, { ...body("completed"), type: "done", timeline: [{ type: "done" }] }, { statusFrom: "status", latestFrom: "payment.amount" });
+    expect(r2dTexts(".pcc-run-latest")).toEqual([mode === "snapshot" ? repStatus("done") : r2dRep("250")]);
+    expect(r2dTexts(".pcc-feed-line")).toEqual(["done"]);
+  });
+});
+
+describe("R12 r2e ride-alongs", () => {
+  it.each(["poll", "SSE"] as const)("gap 4 (%s): a run without latestFrom or with an empty selector skips the latest update", async (mode) => {
+    for (const latestFrom of [undefined, ""]) {
+      for (const money of [false, true]) {
+        const record = { id: "j1", status: "running", message: "Printing layer 3", type: "done", ...(money ? { amount: 250 } : {}) };
+        const win = { kind: "run", binding: { path: "/api/jobs/j1", ...(mode === "SSE" ? { sse: "/sse/stream/jobs/j1" } : {}) },
+          statusFrom: "status", ...(latestFrom === undefined ? {} : { latestFrom }) };
+        if (mode === "SSE") { r2dBootSse([win], "/sse/stream/jobs/j1", record); await flush(); await flush(); }
+        else await r2dPaint([win], { "/api/jobs/j1": record }, "live");
+        expect(r2dTexts(".pcc-win-head .pcc-pill"), "the update was delivered").toEqual(["running"]);
+        expect(r2dTexts(".pcc-run-latest"), "latestFrom=" + JSON.stringify(latestFrom) + ", money=" + money).toEqual(["Waiting for the first update…"]);
+      }
+    }
+  });
+
+  it("gap 6g: approval args from money data each carry the settlement qualifier", async () => {
+    for (const mode of ["live", "snapshot"] as const) {
+      await r2dPaint([{ kind: "approval", binding: { path: "/api/escrow/e1" }, approve: { method: "POST", path: "/api/jobs" } }],
+        { "/api/escrow/e1": r2dEsc({ args: { amount: 250, payee: R2B_PAYEE, details: { amount: 250 } } }) }, mode);
+      expect(r2dTexts(".pcc-args-v"), mode).toEqual([r2dRep("250"), r2dRep(R2B_PAYEE), r2dRep('{"amount":250}')]);
+    }
+  });
+});
+
+// R12 round 2f B1: approval context qualifies money per record and per args/params value.
+describe("R12 r2f B1: approval args qualify only money data", () => {
+  const MODES = ["live", "snapshot"] as const;
+  async function paint(mode: typeof MODES[number], record: unknown, path = "/api/jobs/j1", select?: string) {
+    await r2dPaint([{ kind: "approval", binding: { path, ...(select ? { select } : {}) },
+      approve: { method: "POST", path: "/api/feedback" } }], { [path]: record }, mode);
+  }
+
+  it.each(MODES)("B1 non-money control (%s): args and params retain plain reported values", async (mode) => {
+    await paint(mode, { id: "j1", summary: "Send feedback", args: { note: "go", material: "PLA", layers: 30 } });
+    expect(r2dTexts(".pcc-approval .pcc-args-v")).toEqual(["reported: go", "reported: PLA", "reported: 30"]);
+    await paint(mode, { name: "Document", params: { doc: "d", strict: true }, ui: { summaryKeys: ["strict", "doc"] } }, "/api/csd/doc-1");
+    expect(r2dTexts(".pcc-approval .pcc-args-v")).toEqual(["reported: true", "reported: d"]);
+  });
+
+  it.each(MODES)("B1 mixed values (%s): nested money qualifies that value without qualifying its sibling", async (mode) => {
+    for (const field of ["args", "params"]) {
+      await paint(mode, { id: "j1", [field]: { note: "go", details: { amount: 250, currency: "USDC" } } });
+      expect(r2dTexts(".pcc-approval .pcc-args-v"), field).toEqual(["reported: go", r2dRep('{"amount":250,"currency":"USDC"}')]);
+    }
+  });
+
+  it.each(MODES)("B1 money context retained (%s): route, record fields and binding projections keep qualifiers", async (mode) => {
+    const record = { id: "j1", args: { note: "go" } };
+    for (const path of ["/api/escrow/e1", "/api/not-classified/r1"]) {
+      await paint(mode, record, path);
+      expect(r2dTexts(".pcc-approval .pcc-args-v"), path).toEqual([r2dRep("go")]);
+    }
+    for (const extra of [{ payee: R2B_PAYEE }, { currency: "USDC" }]) {
+      await paint(mode, { ...record, ...extra });
+      expect(r2dTexts(".pcc-approval .pcc-args-v"), JSON.stringify(extra)).toEqual([r2dRep("go")]);
+      await paint(mode, { ...extra, job: record }, "/api/jobs/j1", "job");
+      expect(r2dTexts(".pcc-approval .pcc-args-v"), "projected " + JSON.stringify(extra)).toEqual([r2dRep("go")]);
+    }
+    await paint(mode, { envelope: { amount: 250, job: record } }, "/api/jobs/j1", "envelope.job");
+    expect(r2dTexts(".pcc-approval .pcc-args-v"), "money on projection path").toEqual([r2dRep("go")]);
   });
 });

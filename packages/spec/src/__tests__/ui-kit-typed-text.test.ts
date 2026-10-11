@@ -380,7 +380,7 @@ describe("a helper deleted from a mapped sink", () => {
     expect(Array.from(options).map((option) => option.value)).toEqual(["PLA", "verified"]);
     expect(text(".pcc-approval-what")).toBe("The dashboard calls this: “Print parts”");
     expect(text(".pcc-approval-rationale")).toBe("The dashboard calls this: “Use the mill”");
-    expect(text(".pcc-approval-record .pcc-args-v")).toBe("reported: PLA");
+    expect(text(".pcc-approval-record .pcc-args-v")).toBe("reported: PLA - settlement unconfirmed");
     expect(text(".pcc-receipt-cur")).toBe(" (currency not reported) (PCC escrow service)"); // R12: attributed legacy amount
     // R12 r2 B: a legacy party is a claim naming the escrow service (an id in the grammar stays an id)
     expect(Array.from(document.querySelectorAll(".pcc-receipt-claims .pcc-receipt-claim")).map((node) => node.textContent))
