@@ -587,6 +587,23 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(bundle.events.filter((event) => event.type === "execution_failed")).toHaveLength(1);
   });
 
+  it("LOW-C: defense in depth, kernel contradiction during quiesce (fixture breaching the quiesce contract)", async () => {
+    const quiet = deferred<void>();
+    const f = fixtureBreachingQuiesceContract({ quiesce: () => quiet.promise });
+    const pending = runPrintJob({ ...f.options, evidenceQuiesceTimeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(81); // Guard and cancel window only; hashes run on microtasks.
+    f.printer.emit("execution_completed", { totalPages: 3 });
+    quiet.resolve();
+    const result = await drive(pending);
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(result.success).toBe(false);
+    expect(result.failure).toEqual({ kind: "contradiction", origin: "kernel" });
+    expect(result.cancelRequested).toBe("timeout");
+    expect(result.error).toBe(`kernel reported failure and printer reported completion for device job ${f.printer.job}`);
+    expect(bundle.events.map((event) => event.type)).toEqual(["execution_started", "execution_failed", "execution_completed"]);
+    expect(bundle.events[1]!.payload.origin).toBe("kernel");
+  });
+
   it("abort while start is in flight waits for its id then cancels immediately (printer-job.ts:554 abort latch checked after start)", async () => {
     const start = deferred<MachineCommandResult>();
     const f = fixture({ start: () => start.promise, cancel: reportCanceled });

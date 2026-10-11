@@ -214,8 +214,8 @@ export interface PrintCompletion {
 
 /** Signed failure verdict; binding, recording or handshake failures have no verdict or bundle. */
 export type PrintJobFailure =
-  | { kind: "device_reported" | "contradiction"; origin: "device" }
-  | { kind: "timeout" | "aborted"; origin: "device" | "kernel" };
+  | { kind: "device_reported"; origin: "device" }
+  | { kind: "timeout" | "aborted" | "contradiction"; origin: "device" | "kernel" };
 
 /** A session/step refusal, or a device that refused start without accepting a job. */
 export type PrintJobBusy = NonNullable<JobResult["busy"]> | { reason: "device"; adapterId: string; jobId: string };
@@ -645,13 +645,16 @@ async function printOnce(
     const bundle = await emitter.finalizeBundle(jobId, stepId);
 
     if (failed !== null) {
+      const origin = failed === kernelFailure ? "kernel" : "device";
       const verdict: PrintJobFailure = completed !== null
-        ? { kind: "contradiction", origin: "device" }
+        ? { kind: "contradiction", origin }
         : cancellation.requested
-          ? { kind: cancellation.requested, origin: failed === kernelFailure ? "kernel" : "device" }
+          ? { kind: cancellation.requested, origin }
           : { kind: "device_reported", origin: "device" };
       const error = completed !== null
-        ? `printer reported both completion and failure for device job ${String(id)}`
+        ? origin === "kernel"
+          ? `kernel reported failure and printer reported completion for device job ${String(id)}`
+          : `printer reported both completion and failure for device job ${String(id)}`
         : cancellation.requested === "timeout"
           ? `print job ${jobId} timed out after ${timeoutMs}ms`
           : cancellation.requested === "aborted"
