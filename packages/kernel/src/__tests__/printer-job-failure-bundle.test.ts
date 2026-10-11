@@ -253,6 +253,17 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(result.error).toContain("aborted before start");
   });
 
+  it("INFO-2: onBundle publishes a finalized signed failure", async () => {
+    const f = fixture({ cancel: reportCanceled });
+    const observed: EvidenceBundle[] = [];
+    f.emitter.onBundle((bundle) => { observed.push(bundle); });
+    const result = await drive(runPrintJob(f.options));
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(result.success).toBe(false);
+    expect(observed).toEqual([bundle]);
+    expect(observed[0]!.events.some((event) => event.type === "execution_failed")).toBe(true);
+  });
+
   it("T2: timeout sends exactly one cancelJob and signs its device failure (printer-job.ts:586 cancelJob.call)", async () => {
     const f = fixture({ cancel: reportCanceled });
     const result = await drive(runPrintJob(f.options));
