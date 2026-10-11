@@ -644,6 +644,28 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(bundle.events.filter((event) => event.type === "execution_failed").map((event) => event.payload.origin)).toEqual(["kernel", "device"]);
   });
 
+  it.each(["execution_completed", "execution_failed"] as const)("INFO-3: abort during a start already reporting %s sends no cancel and adds no cancel error", async (terminal) => {
+    const controller = new AbortController();
+    const f = fixture({
+      start: (printer) => {
+        printer.emit(terminal, { totalPages: 3, state: "aborted", origin: "device" });
+        controller.abort();
+        return { success: true, data: { jobId: printer.job } };
+      },
+      cancel: () => { throw new Error("ended job cannot cancel"); },
+    });
+    const result = await drive(runPrintJob({ ...f.options, signal: controller.signal }));
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(f.printer.cancels).toEqual([]);
+    expect(result.cancelRequested).toBeUndefined();
+    expect(result.error ?? "").not.toContain("cancelJob failed");
+    expect(result.error ?? "").not.toContain("ended job cannot cancel");
+    expect(result.success).toBe(terminal === "execution_completed");
+    expect(result.failure).toEqual(terminal === "execution_failed" ? { kind: "device_reported", origin: "device" } : undefined);
+    expect(bundle.events.map((event) => event.type)).toEqual([terminal]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("abort while start is in flight waits for its id then cancels immediately (printer-job.ts:554 abort latch checked after start)", async () => {
     const start = deferred<MachineCommandResult>();
     const f = fixture({ start: () => start.promise, cancel: reportCanceled });

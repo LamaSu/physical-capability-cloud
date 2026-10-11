@@ -574,7 +574,8 @@ async function printOnce(
         clearTimeout(timer);
       }
     }
-    if (requested !== "terminal") {
+    // A terminal report can arrive during start or while the abort/timeout race resolves.
+    if (requested !== "terminal" && deviceJob.completed === null && deviceJob.failed === null) {
       const reason = requested;
       const error = reason === "timeout" ? `print job ${jobId} timed out after ${timeoutMs}ms` : `print job ${jobId} aborted`;
       const cancelJob = adapter.cancelJob;
