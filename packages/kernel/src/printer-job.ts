@@ -170,7 +170,11 @@ export interface PrintJobOptions {
   timeoutMs?: number;
   /** Abort before start refuses the print; after start it requests cancelJob, retaining evidence. */
   signal?: AbortSignal;
-  /** Wait for terminal evidence after cancelJob, before recording a kernel failure. Default 30 s. */
+  /**
+   * Wait for terminal evidence after cancelJob, before recording a kernel failure. Default 30 s.
+   * That failure is signed only once the adapter confirms quiescence; a live silent job
+   * instead fails without a bundle and leaves the device quiescing.
+   */
   cancelWindowMs?: number;
   /** Escrow settlement unit and challenge nonce: supply both, as 0x + 64 lowercase hex. */
   settlementUnitId?: string;
@@ -233,6 +237,7 @@ export interface PrintJobResult {
    * Present on every result whose cancelJob path ran, including an eventless failure.
    * A completion that wins after cancel is ordinary success with this field retained.
    * Absent when no cancel was sent, including adapters without cancelJob.
+   * The kernel's own failure event is signed only once the adapter confirms quiescence.
    */
   cancelRequested?: "timeout" | "aborted";
   /**
@@ -256,7 +261,8 @@ export interface PrintJobResult {
  * `execution_failed`) for this print's device job rather than fabricating a completion.
  * A success bundle requires completion without failure. Device failures and contradictions
  * also return signed bundles. Timeout or abort sends cancelJob once, keeps admitting evidence,
- * and signs a kernel failure only if no terminal evidence arrives within cancelWindowMs.
+ * and records a kernel failure if no terminal evidence arrives within cancelWindowMs.
+ * That event is signed only after the adapter confirms quiescence.
  * Completion after cancel is success carrying cancelRequested; every cancel result carries it.
  * The evidence binding (session, step lease, device job, recording, quiesce) is described at
  * the top of this file.

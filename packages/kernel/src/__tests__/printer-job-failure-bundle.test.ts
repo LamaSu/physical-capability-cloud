@@ -51,11 +51,15 @@ interface PrinterBehavior {
   cancel?: (printer: Printer, job: string | number) => void | Promise<void>;
   quiesce?: () => Promise<void>;
   source?: EvidenceSource;
+  /** Defense in depth only: deliberately lets quiesce resolve with a live device job. */
+  breachQuiesceContract?: boolean;
 }
 
 function fixture(behavior: PrinterBehavior = {}) {
   const id = `adk-printer-${nextFixture++}`;
   const work = new OutstandingWork();
+  let endJob: (() => void) | undefined;
+  const finishJob = () => { endJob?.(); endJob = undefined; };
   const signer = makeKernelEd25519Signer(SEED);
   const emitter = new EvidenceEmitter(KERNEL_ID, signer.signFn);
   const printer: Printer = {
@@ -71,7 +75,12 @@ function fixture(behavior: PrinterBehavior = {}) {
     async execute(command) {
       printer.commands.push(command);
       if (command.type !== "start") return { success: true, message: "acknowledged" };
-      if (behavior.start) return behavior.start(printer);
+      if (!behavior.breachQuiesceContract) endJob = work.begin();
+      if (behavior.start) {
+        const result = await behavior.start(printer);
+        if (!result.success) finishJob();
+        return result;
+      }
       printer.emit("execution_started");
       return { success: true, data: { jobId: printer.job } };
     },
@@ -88,6 +97,7 @@ function fixture(behavior: PrinterBehavior = {}) {
         payload: { ippJobId: printer.job, ...payload },
       };
       for (const listener of [...printer.listeners]) listener(event);
+      if (event.payload.ippJobId === printer.job && (type === "execution_completed" || type === "execution_failed")) finishJob();
     },
     later(delay, callback) {
       const end = work.begin();
@@ -95,8 +105,11 @@ function fixture(behavior: PrinterBehavior = {}) {
         try { callback(); } finally { end(); }
       }, delay);
     },
-    quiesceEvidence() { return behavior.quiesce ? behavior.quiesce() : work.idle(); },
-    async dispose() {},
+    async quiesceEvidence() {
+      await behavior.quiesce?.();
+      await work.idle();
+    },
+    async dispose() { finishJob(); },
   };
   const options: PrintJobOptions = {
     adapter: printer,
@@ -111,6 +124,24 @@ function fixture(behavior: PrinterBehavior = {}) {
     evidenceSettleTimeoutMs: 40,
   };
   return { printer, emitter, signer, options };
+}
+
+/** Deliberately breaches quiesceEvidence: defense in depth only, never the adapter default. */
+function fixtureBreachingQuiesceContract(behavior: PrinterBehavior = {}) {
+  return fixture({ ...behavior, breachQuiesceContract: true });
+}
+
+async function honestSilentOutcome(f: ReturnType<typeof fixture>, result: PrintJobResult, reason: "timeout" | "aborted") {
+  eventless(result);
+  expect(result.cancelRequested).toBe(reason);
+  expect(result.error).toContain("evidence did not quiesce within 40 ms");
+  expect(f.printer.cancels).toEqual([f.printer.job]);
+  expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
+  const next = await runPrintJob({ ...f.options, jobId: `${f.options.jobId}-next` });
+  eventless(next);
+  expect(next.busy).toEqual({ reason: "quiescing", adapterId: f.printer.id, jobId: f.options.jobId });
+  expect(f.printer.commands.map((command) => command.type)).toEqual(["start"]);
+  await f.printer.dispose();
 }
 
 function fromHex(value: string): Uint8Array {
@@ -201,9 +232,9 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
   });
 
-  it("T3: silent cancel produces one bound kernel failure after cancelWindowMs, preserving simulated source (printer-job.ts:599 admit(kernelFailure))", async () => {
+  it("T3 defense in depth: a fixture breaching the quiesce contract produces one bound kernel failure after cancelWindowMs, preserving simulated source (printer-job.ts:599 admit(kernelFailure))", async () => {
     const source: EvidenceSource = { deviceId: "silent-sim", deviceType: "controller", kernelId: "original-kernel", simulated: true };
-    const f = fixture({ source });
+    const f = fixtureBreachingQuiesceContract({ source });
     const pending = runPrintJob({ ...f.options, ...UNIT });
     await vi.advanceTimersByTimeAsync(50);
     expect(f.printer.cancels).toEqual([f.printer.job]);
@@ -224,6 +255,30 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(failures[0]!.source.simulated).toBe(true);
     expect(failures[0]!.timestamp).toBe(new Date().toISOString());
     for (const event of bundle.events) expect(event.payload).toMatchObject({ jobId: f.options.jobId, ...UNIT });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("MEDIUM-1 T3: an honest silent timeout stays eventless and the next print is refused quiescing", async () => {
+    const f = fixture();
+    await honestSilentOutcome(f, await drive(runPrintJob({ ...f.options, ...UNIT })), "timeout");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("MEDIUM-1: an honest rejected silent cancel stays eventless and the next print is refused quiescing", async () => {
+    const f = fixture({ cancel: () => { throw new Error("cancel offline"); } });
+    const result = await drive(runPrintJob(f.options));
+    await honestSilentOutcome(f, result, "timeout");
+    expect(result.error).toContain("cancel offline");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("MEDIUM-1: an honest silent abort stays eventless and the next print is refused quiescing", async () => {
+    const f = fixture();
+    const controller = new AbortController();
+    const pending = runPrintJob({ ...f.options, ...UNIT, signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await honestSilentOutcome(f, await drive(pending), "aborted");
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -468,8 +523,8 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.printer.cancels).toEqual([f.printer.job]);
   });
 
-  it("a rejected silent cancel still synthesizes a signed kernel failure and keeps its error (printer-job.ts:590 cancel window continues after rejection)", async () => {
-    const f = fixture({ cancel: () => { throw new Error("cancel offline"); } });
+  it("defense in depth: a rejected silent cancel on a fixture breaching the quiesce contract signs a kernel failure (printer-job.ts:590 cancel window continues after rejection)", async () => {
+    const f = fixtureBreachingQuiesceContract({ cancel: () => { throw new Error("cancel offline"); } });
     const result = await drive(runPrintJob(f.options));
     signed(result, f.signer.publicKeyHex);
     expect(result.failure).toEqual({ kind: "timeout", origin: "kernel" });
@@ -546,8 +601,8 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(removed).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
-  it("silent abort commits its distinct kernel reason (printer-job.ts:596 kernel failure reason cancelRequested)", async () => {
-    const f = fixture();
+  it("defense in depth: silent abort on a fixture breaching the quiesce contract commits its kernel reason (printer-job.ts:596 kernel failure reason cancelRequested)", async () => {
+    const f = fixtureBreachingQuiesceContract();
     const controller = new AbortController();
     const pending = runPrintJob({ ...f.options, ...UNIT, signal: controller.signal });
     await vi.advanceTimersByTimeAsync(0);
