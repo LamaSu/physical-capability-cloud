@@ -328,6 +328,28 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("INFO-5: default guard, cancel, quiesce and settle bounds budget 195 seconds", async () => {
+    const f = fixture(); // Honest silent live job: quiesce uses the entire bound.
+    const pendingEvent = deferred<EvidenceEvent>();
+    const add = f.emitter.addEvent.bind(f.emitter);
+    vi.spyOn(f.emitter, "addEvent").mockImplementation((jobId, stepId, event) =>
+      event.type === "execution_failed" ? pendingEvent.promise : add(jobId, stepId, event));
+    const startedAt = Date.now();
+    const result = await drive(runPrintJob({
+      ...f.options, timeoutMs: undefined, cancelWindowMs: undefined,
+      evidenceQuiesceTimeoutMs: undefined, evidenceSettleTimeoutMs: undefined,
+    }));
+    eventless(result);
+    expect(result.cancelRequested).toBe("timeout");
+    // The failed result is formed before bounded cleanup waits for the pending recording.
+    expect(result.durationMs).toBe(165_000);
+    expect(Date.now() - startedAt).toBe(195_000);
+    expect(result.error).toContain("evidence did not quiesce within 15000 ms");
+    expect(f.printer.cancels).toEqual([f.printer.job]);
+    await f.printer.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("T4: no cancelJob fails closed without cancelRequested (printer-job.ts:571 typeof cancelJob)", async () => {
     const f = fixture();
     delete f.printer.cancelJob;

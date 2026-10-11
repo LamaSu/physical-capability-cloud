@@ -166,7 +166,11 @@ export interface PrintJobOptions {
   documentData?: Buffer | string;
   /** Assurance tier for the bundle (default 0 — the printer CSD's tier-0 floor). */
   assuranceTier?: AssuranceTier;
-  /** Guard timeout waiting for the device's completion event (default 120s). */
+  /**
+   * Guard timeout waiting for the device's completion event (default 120 s).
+   * Cancel, quiesce and settle can add 30 + 15 + 30 s at their defaults: budget about
+   * 195 s for these waits, in addition to start and finalization time.
+   */
   timeoutMs?: number;
   /** Abort before start refuses the print; after start it requests cancelJob, retaining evidence. */
   signal?: AbortSignal;
