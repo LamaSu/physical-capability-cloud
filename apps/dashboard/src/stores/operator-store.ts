@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { EarningsPeriod } from "@pcc/ui";
 
-type OperatorTab = "overview" | "approvals" | "earnings" | "certifications" | "maintenance";
+type OperatorTab = "inbox" | "overview" | "approvals" | "earnings" | "certifications" | "maintenance";
 
 interface OperatorState {
   selectedMachineId: string | null;
@@ -16,7 +16,7 @@ interface OperatorState {
 export const useOperatorStore = create<OperatorState>((set) => ({
   selectedMachineId: null,
   earningsPeriod: "30d",
-  activeTab: "overview",
+  activeTab: "inbox",
 
   setSelectedMachine: (id) => set({ selectedMachineId: id }),
   setEarningsPeriod: (p) => set({ earningsPeriod: p }),
