@@ -238,6 +238,21 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.printer.cancels).toEqual(mode === "unsolicited" ? [] : [f.printer.job]);
   });
 
+  it("LOW-D M18: an onEvidence collaborator aborting after preflight refuses before the start command", async () => {
+    const controller = new AbortController();
+    const f = fixture();
+    f.printer.onEvidence = (callback) => {
+      f.printer.listeners.push(callback);
+      controller.abort(); // The session opens after preflight, before the in-print recheck.
+    };
+    const result = await drive(runPrintJob({ ...f.options, signal: controller.signal }));
+    eventless(result);
+    expect(f.printer.commands).toEqual([]);
+    expect(f.printer.cancels).toEqual([]);
+    expect(result.cancelRequested).toBeUndefined();
+    expect(result.error).toContain("aborted before start");
+  });
+
   it("T2: timeout sends exactly one cancelJob and signs its device failure (printer-job.ts:586 cancelJob.call)", async () => {
     const f = fixture({ cancel: reportCanceled });
     const result = await drive(runPrintJob(f.options));
