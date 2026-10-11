@@ -218,6 +218,26 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(result.cancelRequested).toBeUndefined();
   });
 
+  it.each(["unsolicited", "timeout-cancel"] as const)("LOW-B: a device payload claiming kernel origin stays verbatim and yields a device verdict (%s)", async (mode) => {
+    let emitted: Emitted | undefined;
+    const reportSpoofedOrigin = (printer: Printer) => {
+      printer.emit("execution_failed", { origin: "kernel", state: "aborted" });
+    };
+    const f = fixture(mode === "unsolicited" ? { start: (printer) => {
+      reportSpoofedOrigin(printer);
+      return { success: true, data: { jobId: printer.job } };
+    } } : { cancel: reportSpoofedOrigin });
+    f.printer.onEvidence((event) => { if (event.type === "execution_failed") emitted = event; });
+    const result = await drive(runPrintJob(f.options));
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(result.success).toBe(false);
+    expect(result.failure).toEqual({ kind: mode === "unsolicited" ? "device_reported" : "timeout", origin: "device" });
+    expect(emitted!.payload).toEqual({ ippJobId: f.printer.job, origin: "kernel", state: "aborted" });
+    expect(bundle.events.find((event) => event.type === "execution_failed")!.payload).toEqual({ ...emitted!.payload, jobId: f.options.jobId });
+    expect(result.cancelRequested).toBe(mode === "unsolicited" ? undefined : "timeout");
+    expect(f.printer.cancels).toEqual(mode === "unsolicited" ? [] : [f.printer.job]);
+  });
+
   it("T2: timeout sends exactly one cancelJob and signs its device failure (printer-job.ts:586 cancelJob.call)", async () => {
     const f = fixture({ cancel: reportCanceled });
     const result = await drive(runPrintJob(f.options));
@@ -449,7 +469,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     const failures = events.filter((event) => event.type === "execution_failed");
     expect(failures).toHaveLength(1);
-    expect(failures[0]!.payload).toEqual({ ippJobId: job, jobName: "active.pdf", state: "canceled", mock: true });
+    expect(failures[0]!.payload).toEqual({ ippJobId: job, jobName: "active.pdf", state: "canceled", origin: "device", mock: true });
     expect(failures[0]!.source).toEqual(adapter.source);
     expect(order.indexOf("execution_failed")).toBeLessThan(order.indexOf("quiesced"));
     expect(events.some((event) => event.type === "execution_completed")).toBe(false);

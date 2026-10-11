@@ -336,7 +336,7 @@ describe("IppAdapter — cancelJob()", () => {
     });
     await adapter.execute(makeCommand("start", { jobName: "a.pdf", totalPages: 5 }));
     const quiesced = adapter.quiesceEvidence().then(() => {
-      expect(failures).toEqual([{ ippJobId: 1000, jobName: "a.pdf", state: "canceled", mock: true }]);
+      expect(failures).toEqual([{ ippJobId: 1000, jobName: "a.pdf", state: "canceled", origin: "device", mock: true }]);
     });
     await expect(adapter.cancelJob(1000)).resolves.toBeUndefined();
     await quiesced;

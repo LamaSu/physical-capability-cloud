@@ -295,7 +295,7 @@ export class IppAdapter implements MachineAdapter {
           type: "execution_failed",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { ippJobId: job.jobId, jobName: job.jobName, state: "canceled", mock: true },
+          payload: { ippJobId: job.jobId, jobName: job.jobName, state: "canceled", origin: "device", mock: true },
         });
       } finally {
         // Emit before ending outstanding work: quiesceEvidence covers the terminal event.
