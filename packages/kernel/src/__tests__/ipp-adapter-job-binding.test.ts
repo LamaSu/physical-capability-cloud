@@ -101,9 +101,16 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
     const { result, rejected } = await outcome;
     expect(rejected, "runPrintJob rejected").toBeUndefined();
     // Its own device job's failure is retained in the bundle even after its step is detached.
-    expect(result).toMatchObject({ success: false, failure: { kind: "device_reported", origin: "device" }, error: 'printer reported failure: {"ippJobId":77,"state":"aborted"}', durationMs: expect.any(Number) });
     expect(result?.bundle).toBeDefined();
-    expect(result?.events).toEqual(result?.bundle?.events);
+    if (!result?.bundle) throw new Error("the device-reported failure must have a bundle");
+    expect(result).toEqual({
+      success: false,
+      bundle: expect.any(Object),
+      events: result.bundle.events,
+      error: 'printer reported failure: {"ippJobId":77,"state":"aborted"}',
+      failure: { kind: "device_reported", origin: "device" },
+      durationMs: expect.any(Number),
+    });
     expect(result?.events.map((event) => event.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_failed"]);
     expect(emitter.getEvents("job-ipp-4", "job-ipp-4")).toEqual([]);
     expect(console.warn, "an event excluded as naming no device job").not.toHaveBeenCalledWith(expect.stringContaining("names no device job"));
