@@ -25,16 +25,6 @@ export interface IApiKeyRepository {
   ): ApiKeyRow | undefined;
   recordOnchainFailure(id: string, error: string): ApiKeyRow | undefined;
   listPendingOnchain(limit?: number): ApiKeyRow[];
-  recordOperatorWallet(
-    id: string,
-    wallet: {
-      address: string;
-      privateKey: string;
-      onchainStatus: "written" | "failed" | "pending";
-      onchainTxHash: string | null;
-      onchainError: string | null;
-    },
-  ): ApiKeyRow | undefined;
   setPasskeyCredential(
     id: string,
     passkey: {

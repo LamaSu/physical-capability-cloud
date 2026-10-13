@@ -627,6 +627,8 @@ export class KernelFacade extends BaseFacade {
           const capId = `cap-${kernelId}-${capType}`;
           try {
             const existing = repos.capabilities.findById(capId);
+            // Kernel/type pairs can share a generated id; never refresh another kernel's row.
+            if (existing && existing.kernelId !== kernelId) continue;
             if (!existing) {
               repos.capabilities.insert({
                 id: capId,

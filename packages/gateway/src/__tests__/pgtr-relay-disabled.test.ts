@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import Fastify from "fastify";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
+import type { ServerResponse } from "node:http";
+import { connect } from "node:net";
+import type { Socket } from "node:net";
 import { apiGate } from "../middleware/api-gate.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { initStore, closeStore, getRepos } from "../db.js";
@@ -14,8 +17,8 @@ import { pgtrRelayRoutes, PGTR_RELAY_DISABLED_REFUSAL } from "../routes/pgtr-rel
 // relayer key with a caller-chosen payer, target and callData, and an amount of
 // "0" skipped the forwarder's only signature check. These tests pin the 501:
 // the route's onRequest hook answers every request, so no body parser, relayer
-// key read, wallet client or forwarder call ever runs. The spies below stand in
-// for the handler's whole on-chain path: they record any call that would load
+// key read, wallet client or forwarder call ever runs. The spies below guard
+// against the removed on-chain path returning: they record any call that would load
 // the relayer key (privateKeyToAccount), build a client, send the relay
 // transaction (writeContract) or load the forwarder ABI.
 // ───────────────────────────────────────────────────────────────────────────
@@ -282,13 +285,14 @@ describe("behind the real apiGate: any API key or SIWE session gets the 501", ()
 //
 // Production wraps the relay route in ROOT async onSend hooks (report_hint at server.ts:267 and
 // irCorsReadProjection at :314, both added before the plugin registers at :728, at e20bd239), so a
-// 501 sent from onRequest is still in flight when send() returns. The guard returns reply, so its promise adopts reply.then, which settles
-// only when the raw response ends or closes (Fastify 4.29.1 lib/reply.js:491-510); only then does
-// the hook runner go on (lib/hooks.js:244-250). Once the response has ended, reply.sent is true and
-// runPreParsing stops (lib/route.js:600-601). A guard that calls send() without returning reply
-// resolves at once, while reply.sent (lib/reply.js:104-108: hijacked or raw.writableEnded) is still
-// false, so the request goes on into preParsing, the body parser and the handler. The fixtures above
-// have no onSend hook: their send() ends the response at once, so they cannot tell the two apart.
+// 501 sent from onRequest is still in flight when send() returns. The callback guard neither
+// returns a promise nor calls done, so the hook runner receives no continuation (Fastify 4.29.1
+// lib/hooks.js:230-263). An async guard that sends without returning reply resolves at once,
+// while reply.sent (lib/reply.js:104-108: hijacked or raw.writableEnded) is still false, so the
+// request goes on into preParsing and the body parser. The old async guard returned reply,
+// which waited for completion but also fulfilled on premature close (lib/reply.js:491-510).
+// The fixtures above have no onSend hook: send() ends the response at once, so they cannot
+// distinguish those guards from the callback guard.
 // This fixture holds the 501 in an async onSend hook until the test opens a gate.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -342,6 +346,12 @@ describe("with a root async onSend hook holding the 501, as in production, the r
       onSendEntered.resolve();
       await gate.promise;
       return payload;
+    });
+    // A broken guard can queue a second response behind the same gate. Once the
+    // first response is sent, discard duplicate writes without changing reply.sent
+    // or the stage observations, so negative controls have no unhandled rejection.
+    app.addHook("onSend", (_request, reply, payload, done) => {
+      if (!reply.raw.headersSent) done(null, payload);
     });
     // Stage spies: each records that a request reached its stage.
     app.addHook("preParsing", async (_request, _reply, payload) => {
@@ -433,5 +443,156 @@ describe("with a root async onSend hook holding the 501, as in production, the r
       body: { ok: true },
       stages: ["preParsing", "parse", "preValidation", "preHandler"],
     });
+  });
+});
+
+describe("a premature close while the 501 is held does not let the request past onRequest", () => {
+  const RELAY_URL = "/api/pgtr/relay";
+  const CONTROL_URL = "/__premature-close-control";
+
+  async function fixture() {
+    const app = Fastify({ logger: false });
+    const stages: string[] = [];
+    const onSendEntered = deferred();
+    const closed = deferred();
+    const gate = deferred();
+    let rawResponse: ServerResponse | undefined;
+
+    // Both sibling routes are under the same root hold and stage observers.
+    app.addHook("onSend", async (_request, reply, payload) => {
+      if (!rawResponse) {
+        rawResponse = reply.raw;
+        reply.raw.once("close", closed.resolve);
+        onSendEntered.resolve();
+        await gate.promise;
+      }
+      return payload;
+    });
+    // After an abort, discard response writes (including an accidental second send).
+    // This changes neither reply.sent nor request continuation: stages and signing
+    // remain observable, without ERR_HTTP_HEADERS_SENT when the gate is released.
+    app.addHook("onSend", (_request, reply, payload, done) => {
+      if (!reply.raw.destroyed) done(null, payload);
+    });
+    app.addHook("preParsing", async (_request, _reply, payload) => {
+      stages.push("preParsing");
+      return payload;
+    });
+    app.removeContentTypeParser("application/json");
+    app.addContentTypeParser<string>("application/json", { parseAs: "string" }, (_request, body, done) => {
+      stages.push("parse");
+      try {
+        done(null, JSON.parse(body));
+      } catch (err) {
+        done(err as Error);
+      }
+    });
+    app.addHook("preValidation", async () => {
+      stages.push("preValidation");
+    });
+    app.addHook("preHandler", async () => {
+      stages.push("preHandler");
+    });
+    await app.register(pgtrRelayRoutes);
+    await app.register(async (sibling) => {
+      sibling.post(CONTROL_URL, {
+        // The old async guard deliberately resumes when reply.then fulfills on close.
+        onRequest: async (_request, reply) => reply.code(501).send(PGTR_RELAY_DISABLED_REFUSAL),
+      }, (_request, reply) => {
+        stages.push("handler");
+        reply.hijack(); // Record continuation without sending a second response.
+      });
+    });
+    return { app, stages, onSendEntered, closed, gate, rawResponse: () => rawResponse };
+  }
+
+  async function abortedRequest(transport: "inject" | "http", amount: string | undefined, control = false) {
+    const f = await fixture();
+    let socket: Socket | undefined;
+    let pending: Promise<void> | undefined;
+    const url = control ? CONTROL_URL : RELAY_URL;
+    const observe = () => ({ stages: [...f.stages], work: relayWork() });
+    const assertStopped = () => expect(observe()).toEqual({ stages: [], work: NO_RELAY_WORK });
+    const assertContinued = () => {
+      expect(f.stages).toEqual(transport === "inject"
+        ? ["preParsing", "parse", "preValidation", "preHandler", "handler"]
+        : ["preParsing", "preValidation", "preHandler", "handler"]);
+      expect(relayWork()).toEqual(NO_RELAY_WORK);
+    };
+
+    setPgtrEnv();
+    watchPgtrEnvReads();
+    try {
+      if (transport === "inject") {
+        // Attach both outcomes immediately: light-my-request rejects on response close.
+        pending = f.app.inject({ method: "POST", url, payload: relayBody(amount!) }).then(
+          () => undefined,
+          () => undefined,
+        );
+      } else {
+        await within(f.app.listen({ port: 0, host: "127.0.0.1" }), 2_000, "the local HTTP listener never started");
+        const address = f.app.server.address();
+        if (!address || typeof address === "string") throw new Error("expected a local TCP address");
+        socket = connect({ port: address.port, host: "127.0.0.1" });
+        const connected = new Promise<void>((resolve, reject) => {
+          socket!.once("connect", resolve);
+          socket!.once("error", reject);
+        });
+        // Also handle errors after connect; the bounded entry/close waits still fail if needed.
+        socket.on("error", () => undefined);
+        await within(connected, 2_000, "the local HTTP client never connected");
+        const body = amount === undefined ? "" : JSON.stringify(relayBody(amount));
+        socket.write(`POST ${url} HTTP/1.1\r\nHost: 127.0.0.1\r\n${amount === undefined ? "" : "Content-Type: application/json\r\n"}Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      }
+
+      await within(f.onSendEntered.promise, 2_000, "the request never entered the held onSend hook");
+      const raw = f.rawResponse()!;
+      expect(raw.writableEnded).toBe(false);
+      if (transport === "inject") raw.destroy();
+      else socket!.destroy();
+      await within(f.closed.promise, 2_000, "the server response never emitted close");
+      expect(raw.writableEnded).toBe(false); // Close happened before successful completion.
+      await within(settle(), 2_000, "queued work never settled after close");
+      // A shared short margin after close lets dynamic imports in a regressed signer finish.
+      // Controls use exactly the same margin and waits as the real route.
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      if (control) assertContinued();
+      else assertStopped();
+
+      f.gate.resolve();
+      await within(settle(), 2_000, "queued work never settled after releasing onSend");
+      if (control) assertContinued();
+      else assertStopped();
+    } finally {
+      f.gate.resolve();
+      socket?.destroy();
+      f.rawResponse()?.destroy();
+      try {
+        if (pending) await within(pending, 2_000, "the aborted inject never settled");
+        await within(settle(), 2_000, "cleanup work never settled");
+      } finally {
+        await within(f.app.close(), 2_000, "the app never closed");
+      }
+    }
+  }
+
+  it.each(["0", "1000000"])("inject with amount %s: no stages, env reads or relay work after premature close", async (amount) => {
+    await abortedRequest("inject", amount);
+  });
+
+  it("real HTTP with JSON body: no stages, env reads or relay work after premature close", async () => {
+    await abortedRequest("http", "0");
+  });
+
+  it("real HTTP with Content-Length: 0 and no Content-Type: no stages, env reads or relay work after premature close", async () => {
+    await abortedRequest("http", undefined);
+  });
+
+  it("control: the old async guard continues through the handler after inject premature close", async () => {
+    await abortedRequest("inject", "0", true);
+  });
+
+  it("control: the old async guard continues through the handler after bodyless HTTP premature close", async () => {
+    await abortedRequest("http", undefined, true);
   });
 });

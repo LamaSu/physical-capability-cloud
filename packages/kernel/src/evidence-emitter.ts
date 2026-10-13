@@ -382,7 +382,7 @@ export class EvidenceEmitter {
     return this.step(jobId, stepId)?.events ?? [];
   }
 
-  /** Subscribe to finalized bundles */
+  /** Subscribe to finalized bundles. A finalized bundle may be a signed failure. */
   onBundle(callback: (bundle: EvidenceBundle) => void): void {
     this.bundleListeners.push(callback);
   }

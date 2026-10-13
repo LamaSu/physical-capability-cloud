@@ -79,6 +79,7 @@ import { resolveSession } from "../auth/siwe-auth.js";
 import { schema, eq, and, sql } from "@pcc/store";
 import { getManifest, warmManifestCache } from "../services/tool-manifest-service.js";
 import { mockFundsWrites } from "../services/settlement-mode.js";
+import { scopeExpiryMs } from "../services/scope-expiry.js";
 import { getSafetyGateway, initSafetyGateway } from "@pcc/kernel";
 
 const {
@@ -205,7 +206,7 @@ function validateToolCall(scope: typeof executionScopes.$inferSelect, toolName: 
 /** Why `scope` does not authorize a write of `toolName` now, or null. */
 function scopeWriteRefusal(scope: typeof executionScopes.$inferSelect, toolName: string): string | null {
   if (scope.status !== "active") return "scope_not_active";
-  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (scopeExpiryMs(scope.expiresAt) < Date.now()) return "scope_expired"; // unreadable: expired (N133)
   if (!(scope.allowedTools as string[]).includes(toolName)) return "tool_not_allowed";
   return null;
 }
@@ -545,7 +546,7 @@ function dispatchRefusal(call: typeof toolCallRelay.$inferSelect): string | null
   if (scope.kernelId !== call.kernelId) return "scope_kernel_mismatch";
   // F2: a call needs live scope authority (#6771: every call, whatever its tool).
   if (scope.status !== "active") return "scope_not_active";
-  if (new Date(scope.expiresAt) < new Date()) return "scope_expired";
+  if (scopeExpiryMs(scope.expiresAt) < Date.now()) return "scope_expired"; // unreadable: expired (N133)
   if (!(scope.allowedTools as string[]).includes(call.toolName)) return "tool_not_allowed";
   // F3: re-derive the command budget from the rows. Admission increments
   // scope.commandCount, but a legacy row it never saw would not have been
@@ -1568,8 +1569,8 @@ export async function deviceRelayRoutes(app: FastifyInstance) {
     const scope = ownedScopeOrReply(req, reply, "proof");
     if (!scope) return reply;
 
-    // Check if expired and auto-update status
-    if (scope.status === "active" && new Date(scope.expiresAt) < new Date()) {
+    // Check if expired (an unreadable expiry included, N133) and auto-update status
+    if (scope.status === "active" && scopeExpiryMs(scope.expiresAt) < Date.now()) {
       db.update(executionScopes)
         .set({ status: "expired" })
         .where(eq(executionScopes.id, scopeId))

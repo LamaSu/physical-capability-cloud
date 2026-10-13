@@ -9,9 +9,20 @@
  *   POST /api/operator/evidence       — push evidence bundle from operator node
  *   POST /api/operator/heartbeat      — operator heartbeat + capability re-announcement
  *   POST /api/operator/job-status     — update job status from operator node
+ *
+ * Poll, heartbeat and status require kernel-authority "operate": the recorded
+ * operator identity, its proven wallet, or the gateway admin secret.
+ * Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c).
+ * Anonymous callers get 401
+ * before any job read; authority 403/404/503 refusals are sent unchanged.
+ * Non-string IDs get 400 before lookup.
+ * Evidence and status use the job row's kernel, never a body's kernelId.
+ * Authenticated unknown jobs retain their 200 job_not_found receipt; jobs without a kernel
+ * refuse non-admin callers with 403 job_has_no_kernel.
+ * Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getRepos, getStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
@@ -20,6 +31,26 @@ import { extractNodeSignedBundle } from "../services/device-evidence-settlement.
 import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
+import { authorityOf, isAnonymous, refuseKernelAction, AUTHENTICATION_REQUIRED, type KernelAction } from "../auth/kernel-authority.js";
+
+function isNonEmptyId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Shared authority check for poll/heartbeat targets and the kernel read from a job row. */
+function refuseKernelRequest(req: FastifyRequest, kernelId: unknown, action: KernelAction = "operate"): { status: number; body: Record<string, string> } | null {
+  const authority = authorityOf(req);
+  if (isAnonymous(authority)) return { status: 401, body: AUTHENTICATION_REQUIRED };
+  if (kernelId === null || kernelId === undefined) {
+    return authority.admin ? null : {
+      status: 403,
+      body: { error: "forbidden", reason: "job_has_no_kernel", message: "This job has no kernel whose operator can authorize the action." },
+    };
+  }
+  // Reject malformed repository values too, even for admins, before a kernel lookup.
+  if (!isNonEmptyId(kernelId)) return { status: 400, body: { error: "kernelId must be a non-empty string" } };
+  return refuseKernelAction(req, authority, kernelId, action);
+}
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -77,9 +108,12 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   }>("/api/operator/jobs", async (req, reply) => {
     const { kernelId, status = "queued" } = req.query;
 
-    if (!kernelId) {
+    if (!isNonEmptyId(kernelId)) {
       return reply.code(400).send({ error: "kernelId query param required" });
     }
+
+    const refusal = refuseKernelRequest(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const result = await jobFacade.list({ kernelId, status });
     if (!result.success) return { jobs: [] };
@@ -97,12 +131,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   app.post<{ Body: EvidenceBody }>("/api/operator/evidence", async (req, reply) => {
     const { jobId, kernelId, evidence, timestamp } = req.body ?? {};
 
-    if (!jobId) {
+    if (!isNonEmptyId(jobId)) {
       return reply.code(400).send({ error: "jobId required" });
+    }
+    if (kernelId !== undefined && !isNonEmptyId(kernelId)) {
+      return reply.code(400).send({ error: "kernelId must be a non-empty string" });
     }
     if (!evidence) {
       return reply.code(400).send({ error: "evidence required" });
     }
+    if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
 
     try {
       const repos = getRepos();
@@ -119,6 +157,10 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
           timestamp: new Date().toISOString(),
         };
       }
+
+      // Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c).
+      const refusal = refuseKernelRequest(req, job.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
       // The stored bundle belongs to the job's kernel. A body naming another kernel is
       // refused, never stored under it (N80: stored evidence tells the truth).
@@ -167,7 +209,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       const kernelSignature = captured
         ? captured.kernelSignature
         : {
-            signer: kernelId ?? job.kernelId ?? "unknown",
+            signer: job.kernelId ?? "unknown",
             algorithm: "sha256",
             value: "operator-relay-auto",
           };
@@ -181,7 +223,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
             id: bundleId,
             jobId,
             stepId: job.stepId ?? "operator-relay",
-            kernelId: job.kernelId ?? kernelId,
+            kernelId: job.kernelId,
             assuranceTier: 0,
             bundleHash,
             kernelSignature,
@@ -250,9 +292,12 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
     const { kernelId, status = "online", capabilities, timestamp } = req.body ?? {};
 
-    if (!kernelId) {
+    if (!isNonEmptyId(kernelId)) {
       return reply.code(400).send({ error: "kernelId required" });
     }
+
+    const refusal = refuseKernelRequest(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
     return sendResult(reply, result);
@@ -267,10 +312,13 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * Body: { jobId, kernelId?, status, metadata?, timestamp? }
    */
   app.post<{ Body: JobStatusBody }>("/api/operator/job-status", async (req, reply) => {
-    const { jobId, status, metadata, timestamp } = req.body ?? {};
+    const { jobId, kernelId, status, metadata, timestamp } = req.body ?? {};
 
-    if (!jobId) {
+    if (!isNonEmptyId(jobId)) {
       return reply.code(400).send({ error: "jobId required" });
+    }
+    if (kernelId !== undefined && !isNonEmptyId(kernelId)) {
+      return reply.code(400).send({ error: "kernelId must be a non-empty string" });
     }
     if (!status) {
       return reply.code(400).send({ error: "status required" });
@@ -285,11 +333,30 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         valid: [...JOB_STATUSES],
       });
     }
+    if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
 
     try {
+      const job = getRepos().jobs.findById(jobId);
+      if (!job) {
+        // Job not found — return 200 so the node doesn't fail hard.
+        return {
+          updated: false,
+          jobId,
+          status: canonicalStatus,
+          warning: "job_not_found",
+          timestamp: new Date().toISOString(),
+        };
+      }
+      const refusal = refuseKernelRequest(req, job.kernelId);
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+
       // N85(a): a paid job's terminal status belongs to its settlement path.
-      const outcome = writeJobStatusGuarded(jobId, canonicalStatus);
+      // N85: bind that UPDATE to the same kernel the operate check authorized.
+      const outcome = writeJobStatusGuarded(jobId, canonicalStatus, undefined, job.kernelId ?? null);
       if (outcome.kind === "refused") {
+        if (outcome.kernelChanged) {
+          return reply.code(409).send({ error: "job_kernel_changed", message: "The job's kernel changed after authorization. Poll again before reporting status." });
+        }
         return reply.code(409).send({
           error: "settlement_owned_status",
           currentStatus: outcome.currentStatus,

@@ -30,7 +30,7 @@ For wallet-based registration, replace `email` with a valid `walletAddress` such
 
 ## Claim
 
-A successful provisioning response returns the new API credential as `api_key`; save it immediately because the raw key is shown once. The response also identifies the created key record. If the gateway mints an Ed25519 signing keypair, any returned private signing material is likewise shown once and must be stored separately as a secret. There is no additional claim URL and no browser redirect to follow.
+A successful provisioning response returns the new API credential as `api_key`; save it immediately because the raw key is shown once. The response also identifies the created key record. The gateway stores an Ed25519 signing public key only when you send `publicKey`; otherwise no signing key is on file. The gateway never generates or returns a private signing key. There is no additional claim URL and no browser redirect to follow.
 
 ## Use the credential
 

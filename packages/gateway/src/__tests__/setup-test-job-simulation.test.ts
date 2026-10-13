@@ -519,6 +519,17 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       }
     });
 
+    it("[F] an exact IppAdapter with its simulated marker deleted is simulated (fail closed)", () => {
+      const adapter = new IppAdapter("dev-unit-ipp-unmarked", { uri: "ipp://127.0.0.1:9/ipp/print", kernelId: KERNEL_ID, mockMode: false });
+      try {
+        delete (adapter.source as { simulated?: boolean }).simulated;
+        expect("simulated" in adapter.source).toBe(false);
+        expect(adapterIsSimulated(adapter)).toBe(true);
+      } finally {
+        void adapter.dispose();
+      }
+    });
+
     it("a SUBCLASS of that built-in with no marker is simulated: the list matches exact classes only", () => {
       class LooksLikeOctoPrint extends OctoPrintAdapter {}
       const adapter = new LooksLikeOctoPrint("dev-unit-sub", { url: "http://127.0.0.1:9", apiKey: "", kernelId: KERNEL_ID, mockMode: false });

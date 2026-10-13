@@ -1044,8 +1044,8 @@ export async function createGateway(port = 3200) {
       // Start ERC-8004 identity write retry sweeper (no-op if write disabled)
       import("./services/erc8004-identity-sweeper.js")
         .then(({ startIdentitySweeper }) => startIdentitySweeper())
-        .catch((err) =>
-          console.warn("[gateway] ERC-8004 sweeper init failed:", err),
+        .catch(() =>
+          console.warn("[gateway] ERC-8004 sweeper init failed:", { code: "unknown" }),
         );
 
       // Start mock streaming producers

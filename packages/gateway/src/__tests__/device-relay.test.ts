@@ -3142,3 +3142,132 @@ describe("N4b-gw r7 F3: the execution lease", () => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// N133 follow-up (fail closed): a scope whose expiry can't be read is an expired one. Admission
+// (scopeWriteRefusal), dispatch (dispatchRefusal, at the poll and at the lease start) and the scope
+// read each compared `new Date(scope.expiresAt) < new Date()`, which is false when expiresAt does
+// not parse, so each treated such a scope as live. expires_at is TEXT NOT NULL and every writer
+// stores toISOString(), so these shapes come only from a hand edit, a restore or another writer
+// (epoch milliseconds stored as text). The holder's own write was refused already: the guard reads
+// the expiry with `>` (isProvenHolderOfNamedScope), which fails closed. This block runs on its own
+// kernel, so its dispatches use their own safety-governor rate bucket.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("N133 follow-up: a scope whose expiry can't be read is expired at the relay", () => {
+  const KERNEL = "kernel-expiry";
+  const HOLDER = "agent-unreadable-expiry";
+  const UNREADABLE = ["", " ", "garbage", "Invalid Date", "1728400000000"];
+  const future = () => new Date(Date.now() + 10 * 60_000).toISOString();
+  const past = () => new Date(Date.now() - 1_000).toISOString();
+
+  beforeAll(() => seedKernel(KERNEL, OPERATOR));
+
+  const setExpiry = (scopeId: string, expiresAt: string) =>
+    getStore().db.update(executionScopes).set({ expiresAt }).where(eq(executionScopes.id, scopeId)).run();
+  const scopeOf = (id: string) => getStore().db.select().from(executionScopes).where(eq(executionScopes.id, id)).get()!;
+  const callOf = (id: string) => getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.id, id)).get()!;
+  const callsUnder = (scopeId: string) =>
+    getStore().db.select().from(toolCallRelay).where(eq(toolCallRelay.scopeId, scopeId)).all().map((c) => [c.status, c.error]);
+  /** The kernel's operator grants HOLDER a scope (a decision: the admin key, N126). */
+  const mint = () => mintScope(HOLDER, ["run_create"], KERNEL);
+  /** A write under the scope, by the admin unless `headers` says otherwise (N126: a write is a decision). */
+  const write = (scopeId: string, headers: Record<string, string> = adminFor(HOLDER)) =>
+    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call`, headers, payload: { scopeId, toolName: "run_create" } });
+  /** The device's poll; it takes the lease (op sends X-PCC-Lease: 1), so each call it hands out has a claim token. */
+  const poll = async () =>
+    (await app.inject({ method: "GET", url: `/api/relay/${KERNEL}/tool-call/pending`, headers: op })).json() as {
+      calls: Array<{ id: string; claimToken: string }>;
+    };
+  const start = (callId: string, claimToken: string) =>
+    app.inject({ method: "POST", url: `/api/relay/${KERNEL}/tool-call/${callId}/start`, headers: op, payload: { claimToken } });
+  /** A scope read by its proven holder (DECISIONS 00:53). */
+  const readScope = (scopeId: string) =>
+    app.inject({ method: "GET", url: `/api/relay/${KERNEL}/scope/${scopeId}`, headers: asProven(HOLDER) });
+
+  /** A write queued under a fresh scope while the scope's expiry could still be read. */
+  async function queued(): Promise<{ scopeId: string; callId: string }> {
+    const scopeId = await mint();
+    const res = await write(scopeId);
+    expect(res.statusCode).toBe(201);
+    return { scopeId, callId: res.json().id as string };
+  }
+
+  for (const unreadable of UNREADABLE) {
+    const shape = JSON.stringify(unreadable);
+
+    it(`admission: a write under a scope whose expiry is ${shape} is refused as expired; nothing is queued or spent`, async () => {
+      const scopeId = await mint();
+      setExpiry(scopeId, unreadable);
+      expect((await write(scopeId, asProven(HOLDER))).statusCode).toBe(403); // the guard: already fail-closed
+      const res = await write(scopeId);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().reason).toBe("scope_expired");
+      expect(callsUnder(scopeId)).toEqual([["rejected", "scope_expired"]]);
+      expect(scopeOf(scopeId).commandCount).toBe(0);
+    });
+
+    it(`dispatch: a call queued before its scope's expiry became ${shape} is never handed out; the poll closes it as expired`, async () => {
+      const { scopeId, callId } = await queued();
+      setExpiry(scopeId, unreadable);
+      expect((await poll()).calls.map((c) => c.id)).not.toContain(callId);
+      expect(callOf(callId)).toMatchObject({ status: "rejected", error: "scope_expired", claimedAt: null });
+    });
+
+    it(`lease start: a call claimed before its scope's expiry became ${shape} does not start`, async () => {
+      const { scopeId, callId } = await queued();
+      const claimToken = (await poll()).calls.find((c) => c.id === callId)!.claimToken;
+      setExpiry(scopeId, unreadable);
+      const res = await start(callId, claimToken);
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: "lease_refused", reason: "scope_expired" });
+      expect(callOf(callId)).toMatchObject({ status: "rejected", error: "scope_expired", startedAt: null });
+    });
+
+    it(`scope read: a live scope whose expiry is ${shape} reads, and is recorded, as expired`, async () => {
+      const scopeId = await mint();
+      setExpiry(scopeId, unreadable);
+      const res = await readScope(scopeId);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().status).toBe("expired");
+      expect(scopeOf(scopeId).status).toBe("expired");
+    });
+  }
+
+  it("controls: under a readable future expiry a write is admitted, handed out and started, and the scope reads as active", async () => {
+    const { scopeId, callId } = await queued();
+    setExpiry(scopeId, future());
+    const claimToken = (await poll()).calls.find((c) => c.id === callId)?.claimToken;
+    expect(claimToken).toBeTruthy();
+    expect((await start(callId, claimToken!)).statusCode).toBe(200);
+    expect(callOf(callId).status).toBe("executing");
+    expect((await readScope(scopeId)).json().status).toBe("active");
+    expect(scopeOf(scopeId).status).toBe("active");
+  });
+
+  it("controls: a readable past expiry is refused at admission, dispatch and start, and reads as expired", async () => {
+    const admitted = await mint();
+    setExpiry(admitted, past());
+    expect((await write(admitted)).json().reason).toBe("scope_expired");
+
+    const waiting = await queued();
+    setExpiry(waiting.scopeId, past());
+    expect((await poll()).calls.map((c) => c.id)).not.toContain(waiting.callId);
+    expect(callOf(waiting.callId)).toMatchObject({ status: "rejected", error: "scope_expired" });
+
+    const claimed = await queued();
+    const claimToken = (await poll()).calls.find((c) => c.id === claimed.callId)!.claimToken;
+    setExpiry(claimed.scopeId, past());
+    expect((await start(claimed.callId, claimToken)).json()).toEqual({ error: "lease_refused", reason: "scope_expired" });
+
+    const read = await mint();
+    setExpiry(read, past());
+    expect((await readScope(read)).json().status).toBe("expired");
+  });
+
+  it("a null expiry never reaches these checks: the column refuses it", async () => {
+    const scopeId = await mint();
+    expect(() => setExpiry(scopeId, null as unknown as string)).toThrow(/NOT NULL/);
+    expect(typeof scopeOf(scopeId).expiresAt).toBe("string");
+  });
+});
