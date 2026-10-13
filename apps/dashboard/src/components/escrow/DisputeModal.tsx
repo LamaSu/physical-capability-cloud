@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { GlassPanel } from "@pcc/ui";
 import { authorizedFetch } from "../../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../../lib/scope-notice.js";
 
 /**
  * T2.8 — dispute UI surface.
@@ -57,13 +58,14 @@ export function DisputeModal({
         // Auto-close after a moment so the user sees the confirmation
         setTimeout(onClose, 1200);
       } else {
+        const notice = await scopeErrorMessage(res, `/api/escrow/${encodeURIComponent(escrowId)}/dispute`, "POST");
         const j = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-        const msg =
+        const msg = notice ?? (
           res.status === 401
             ? "Sign in to file a dispute."
             : res.status === 403
             ? "Only the escrow's payer or arbiter can file a dispute."
-            : j.message ?? j.error ?? `HTTP ${res.status}`;
+            : j.message ?? j.error ?? `HTTP ${res.status}`);
         setStatus({ kind: "err", msg });
       }
     } catch (e) {

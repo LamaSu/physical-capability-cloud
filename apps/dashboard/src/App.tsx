@@ -154,7 +154,7 @@ function AgentShell() {
 // ---------------------------------------------------------------------------
 
 function LogoutButton() {
-  const logout = useAuthStore((s) => s.logout);
+  const logout = useAuthStore((s) => s.signOutWallet);
   return (
     <button
       onClick={logout}

@@ -1,4 +1,5 @@
 import { fetchWithKey, installKeyEgressGuard, type EgressGuardOptions } from "./gateway-base.js";
+import { isSessionKeyActive, renewSessionKey, sessionIdentity } from "./session-key-recovery.js";
 
 const STORAGE_KEY = "pcc-api-key";
 
@@ -16,13 +17,13 @@ const STORAGE_KEY = "pcc-api-key";
  * __tests__/no-direct-auth-headers.test.ts and lib/__tests__/key-boundary-r4
  * hold this module to that.
  *
- * It is persisted in localStorage so a reload keeps the user signed in. Any
- * script on this origin can still read that slot. Only an HttpOnly gateway
- * session would take the key out of JavaScript's reach, and that is a gateway
- * change awaiting the operator. Until then the ratchet keeps every other
- * module off this slot, and off storage it can't name.
+ * Pasted keys persist in localStorage so a reload keeps the user signed in;
+ * wallet session keys remain in memory for this page only. Any script on
+ * this origin can still read the persisted slot. The ratchet keeps every
+ * other module off this slot, and off storage it can't name.
  */
 let storedApiKey: string | null = readStorage();
+let keyVersion = 0;
 
 function readStorage(): string | null {
   try {
@@ -60,12 +61,13 @@ let round = -1;
  * before it touches the key (astra A03f N1), so the key never holds a value
  * its listeners weren't told of.
  */
-export function setStoredApiKey(key: string | null): void {
+export function setStoredApiKey(key: string | null, persist = true): void {
   if (round >= MAX_KEY_CHANGE_ROUNDS - 1) {
     throw new Error("Key listeners kept changing the key; this change was refused.");
   }
   storedApiKey = key || null;
-  writeStorage(storedApiKey);
+  keyVersion += 1;
+  writeStorage(persist ? storedApiKey : null);
   undelivered += 1;
   if (round >= 0) return; // a delivery is under way: the next round tells everyone
   let failed = false;
@@ -107,7 +109,15 @@ export function hasStoredApiKey(): boolean {
  * before a request is made (lib/gateway-base.ts). Every module that sends the
  * key does it through here.
  */
-export function authorizedFetch(target: string, init: RequestInit = {}): Promise<Response> {
+export async function authorizedFetch(target: string, init: RequestInit = {}): Promise<Response> {
+  const version = keyVersion;
+  const sessionKey = isSessionKeyActive();
+  const identity = sessionIdentity();
+  const response = await fetchWithKey(target, storedApiKey, init);
+  if (response.status !== 401 || !sessionKey || !isSessionKeyActive() || identity !== sessionIdentity()) return response;
+  // A late response may belong to the key another request already renewed.
+  if (version === keyVersion && !await renewSessionKey()) return response;
+  if (!isSessionKeyActive() || identity !== sessionIdentity()) return response;
   return fetchWithKey(target, storedApiKey, init);
 }
 
