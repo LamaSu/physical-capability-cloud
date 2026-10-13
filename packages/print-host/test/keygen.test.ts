@@ -1,12 +1,27 @@
 import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { inspect } from "node:util";
+import { inspect, promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateHostKeys, KeyGenerationError } from "../src/keygen.js";
 import { loadDeviceKey, loadOperatorKey } from "../src/keys.js";
 
+const keygenBuffers = vi.hoisted(() => ({
+  seeds: [] as Uint8Array[],
+  secretKeys: [] as Uint8Array[],
+  serialized: [] as Buffer[],
+}));
+vi.mock("../src/kernel-signer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/kernel-signer.js")>();
+  return { ...actual, makeKernelEd25519Signer: vi.fn((...args: Parameters<typeof actual.makeKernelEd25519Signer>) => {
+    const signer = actual.makeKernelEd25519Signer(...args);
+    if (args[0] !== undefined) keygenBuffers.seeds.push(args[0]);
+    keygenBuffers.secretKeys.push(signer.secretKey);
+    return signer;
+  }) };
+});
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
   return { ...actual, open: vi.fn(actual.open), mkdir: vi.fn(actual.mkdir) };
@@ -14,6 +29,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 let parent: string;
 beforeEach(async () => {
+  keygenBuffers.seeds = [];
+  keygenBuffers.secretKeys = [];
+  keygenBuffers.serialized = [];
   const actual = await vi.importActual<typeof fs>("node:fs/promises");
   vi.mocked(fs.open).mockReset().mockImplementation(actual.open);
   vi.mocked(fs.mkdir).mockReset().mockImplementation(actual.mkdir);
@@ -38,6 +56,40 @@ function assertNoLeak(value: unknown, rawSecrets: string[]): void {
 function keyFileOpenPaths(): string[] {
   return vi.mocked(fs.open).mock.calls.map(([path]) => String(path))
     .filter((path) => /\/(?:device-key|operator-key|public)\.json$/.test(path));
+}
+async function captureSerializedWrites(failOperatorSync = false): Promise<void> {
+  const actualOpen = (await vi.importActual<typeof fs>("node:fs/promises")).open;
+  vi.mocked(fs.open).mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await actualOpen(...args);
+    if (/\/(?:device-key|operator-key|public)\.json$/.test(String(args[0]))) {
+      const actualWriteFile = handle.writeFile.bind(handle);
+      vi.spyOn(handle, "writeFile").mockImplementation(async (...writeArgs: Parameters<typeof handle.writeFile>) => {
+        expect(Buffer.isBuffer(writeArgs[0]), "key JSON is written from a mutable buffer").toBe(true);
+        const bytes = writeArgs[0] as Buffer;
+        expect(bytes.some((byte) => byte !== 0), "captured JSON starts with data").toBe(true);
+        keygenBuffers.serialized.push(bytes);
+        return actualWriteFile(...writeArgs);
+      });
+      if (failOperatorSync && String(args[0]).endsWith("/operator-key.json")) {
+        vi.spyOn(handle, "sync").mockRejectedValueOnce(new Error("injected sync failure"));
+      }
+    }
+    return handle;
+  });
+}
+function assertGenerationBuffersZeroed(serializedCount: number): void {
+  expect(keygenBuffers.seeds).toHaveLength(1);
+  expect(keygenBuffers.secretKeys).toHaveLength(1);
+  expect(keygenBuffers.serialized).toHaveLength(serializedCount);
+  for (const [label, buffers] of [
+    ["seed", keygenBuffers.seeds], ["secret key", keygenBuffers.secretKeys],
+    ["serialized JSON", keygenBuffers.serialized],
+  ] as const) {
+    for (const bytes of buffers) {
+      expect(bytes.length > 0).toBe(true);
+      expect(bytes.every((byte) => byte === 0), `generated ${label} bytes were retained`).toBe(true);
+    }
+  }
 }
 
 describe("host key generation", () => {
@@ -92,6 +144,50 @@ describe("host key generation", () => {
     expect(keyFileOpenPaths()).toEqual([]);
     expect((await fs.readFile(path)).equals(previous)).toBe(true);
     previous.fill(0);
+  });
+
+  it("checks an existing public identity before opening either secret file", async () => {
+    const directory = join(parent, "public-precheck");
+    await fs.mkdir(directory, { mode: 0o700 });
+    const path = join(directory, "public.json");
+    const previous = randomBytes(80);
+    await fs.writeFile(path, previous, { mode: 0o644 });
+    vi.mocked(fs.open).mockClear();
+    await expect(generateHostKeys(directory)).rejects.toMatchObject({
+      code: "already_exists", message: `already_exists: ${path}`,
+    });
+    expect(keyFileOpenPaths()).toEqual([]);
+    expect(await fs.readdir(directory)).toEqual(["public.json"]);
+    expect((await fs.readFile(path)).equals(previous)).toBe(true);
+    previous.fill(0);
+  });
+
+  it("zeroes the seed, secret key, and serialized JSON buffers after generation", async () => {
+    await captureSerializedWrites();
+    await generateHostKeys(join(parent, "zero-success"));
+    assertGenerationBuffersZeroed(3);
+  });
+
+  it("zeroes the seed, secret key, and serialized JSON buffers after a write failure", async () => {
+    await captureSerializedWrites(true);
+    const directory = join(parent, "zero-failure");
+    await expect(generateHostKeys(directory)).rejects.toMatchObject({ code: "write_failed" });
+    assertGenerationBuffersZeroed(2);
+    expect(await fs.readdir(directory)).toEqual([]);
+  });
+
+  it("preserves 0600 secret files and 0644 public identity under umask 077", async () => {
+    // Node forbids changing the process umask inside Vitest's thread worker.
+    // Run the actual producer in a child process with the local tsx loader.
+    const directory = join(parent, "umask-077");
+    await promisify(execFile)(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+      import { generateHostKeys } from "./src/keygen.ts";
+      process.umask(0o077);
+      await generateHostKeys(process.argv[1]);
+    `, directory], { cwd: new URL("..", import.meta.url) });
+    expect((await fs.lstat(join(directory, "device-key.json"))).mode & 0o777).toBe(0o600);
+    expect((await fs.lstat(join(directory, "operator-key.json"))).mode & 0o777).toBe(0o600);
+    expect((await fs.lstat(join(directory, "public.json"))).mode & 0o777).toBe(0o644);
   });
 
   it("opens every generated key file through the pinned directory descriptor", async () => {

@@ -1,7 +1,14 @@
 import { inspect } from "node:util";
+import { createPrivateKey, sign } from "node:crypto";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
 import { getAddress, type Address, type Hex, type LocalAccount } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import {
+  DeviceSigningError, delegationParent, prepareDelegation, prepareD2,
+  type DelegationInput, type DeviceDelegationBinding,
+} from "./device-signing.js";
+export { DeviceSigningError } from "./device-signing.js";
+export type { DelegationInput, DeviceDelegationBinding, DeviceSigningErrorCode } from "./device-signing.js";
 import {
   OperatorSigningError, prepareD1, prepareJobPolicyAcceptance, prepareSubmitEvidenceTx, validateHostTerms,
   type D1Input, type HostTerms, type JobPolicyAcceptanceInput, type OperatorChainId, type SubmitEvidenceTxInput,
@@ -42,30 +49,56 @@ export interface KeyLoadOptions extends SecretFileOptions {
   now?: Date;
 }
 
+export interface DeviceKeyLoadOptions extends KeyLoadOptions {
+  /** Omit for public-identity checks; delegation signing then fails closed. */
+  delegationBinding?: DeviceDelegationBinding;
+}
+
 export interface OperatorKeyLoadOptions extends KeyLoadOptions {
   terms?: HostTerms;
 }
 
-/** Only the public material and the toolkit signing closure survive loading. */
-export class DeviceKey {
+/** Public identity and exactly two protocol signers; private material stays in closures. */
+export interface DeviceKey {
   readonly publicKeyHex: string;
   readonly signingPublicKey: string;
-  readonly signFn: ReturnType<typeof makeKernelEd25519Signer>["signFn"];
-
-  constructor(publicKeyHex: string, signingPublicKey: string,
-    signFn: ReturnType<typeof makeKernelEd25519Signer>["signFn"]) {
-    this.publicKeyHex = publicKeyHex;
-    this.signingPublicKey = signingPublicKey;
-    this.signFn = signFn;
-    Object.freeze(this);
-  }
-
-  toJSON() { return { kind: "pcc-printhost.device-key", publicKey: this.signingPublicKey }; }
-  toString() { return `[DeviceKey ${this.signingPublicKey}]`; }
-  [inspect.custom]() { return this.toString(); }
+  readonly signDelegation: (input: DelegationInput) => Promise<Hex>;
+  readonly signD2: (packageBodyHash: Uint8Array | string) => Promise<Hex>;
+  toJSON(): { kind: "pcc-printhost.device-key"; publicKey: string };
+  toString(): string;
+  [inspect.custom](): string;
 }
 
-/** Public identity and three scoped closures; no general signer is reachable. */
+const deviceKeyPrototype = Object.freeze(Object.assign(Object.create(null), {
+  toJSON(this: DeviceKey) { return { kind: "pcc-printhost.device-key", publicKey: this.signingPublicKey }; },
+  toString(this: DeviceKey) { return `[DeviceKey ${this.signingPublicKey}]`; },
+  [inspect.custom](this: DeviceKey) { return this.toString(); },
+}));
+
+function deviceKey(seed: Buffer, publicKeyHex: string, signingPublicKey: string,
+  binding: DeviceDelegationBinding | undefined): DeviceKey {
+  const parent = delegationParent(binding);
+  // RFC 8410 PKCS#8 prefix for a raw Ed25519 seed; this temporary copy is erased.
+  const encoded = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]);
+  let privateKey;
+  try { privateKey = createPrivateKey({ key: encoded, format: "der", type: "pkcs8" }); }
+  finally { encoded.fill(0); }
+  return Object.freeze(Object.assign(Object.create(deviceKeyPrototype), {
+    publicKeyHex, signingPublicKey,
+    async signDelegation(input: DelegationInput): Promise<Hex> {
+      const preimage = prepareDelegation(input, parent, publicKeyHex);
+      try { return `0x${sign(null, preimage, privateKey).toString("hex")}`; }
+      catch { throw new DeviceSigningError("signing_failed"); }
+    },
+    async signD2(packageBodyHash: Uint8Array | string): Promise<Hex> {
+      const preimage = prepareD2(packageBodyHash);
+      try { return `0x${sign(null, preimage, privateKey).toString("hex")}`; }
+      catch { throw new DeviceSigningError("signing_failed"); }
+    },
+  })) as DeviceKey;
+}
+
+/** Public identity and three scoped closures; no general signer is reachable. WP-A remains open. */
 export interface OperatorKey {
   readonly address: Address;
   readonly signD1: (input: D1Input) => Promise<Hex>;
@@ -149,7 +182,7 @@ async function keyBytes(path: string, options: KeyLoadOptions): Promise<Buffer> 
   }
 }
 
-export async function loadDeviceKey(path: string, options: KeyLoadOptions = {}): Promise<DeviceKey> {
+export async function loadDeviceKey(path: string, options: DeviceKeyLoadOptions = {}): Promise<DeviceKey> {
   const bytes = await keyBytes(path, options);
   let seed: Buffer | undefined;
   try {
@@ -159,12 +192,11 @@ export async function loadDeviceKey(path: string, options: KeyLoadOptions = {}):
     if (typeof record.seed !== "string" || !/^[0-9a-f]{64}$/.test(record.seed)) schemaError(path, "seed");
     seed = Buffer.from(record.seed, "hex");
     // Never retain the kernel signer object: its secretKey property is inspectable.
-    const signer = makeKernelEd25519Signer(seed);
-    if (signer.signingPublicKey !== record.publicKey) {
-      signer.secretKey.fill(0);
-      throw new KeyFileError("public_mismatch", path);
-    }
-    return new DeviceKey(signer.publicKeyHex, signer.signingPublicKey, signer.signFn);
+    const { publicKeyHex, signingPublicKey, secretKey } = makeKernelEd25519Signer(seed);
+    try {
+      if (signingPublicKey !== record.publicKey) throw new KeyFileError("public_mismatch", path);
+      return deviceKey(seed, publicKeyHex, signingPublicKey, options.delegationBinding);
+    } finally { secretKey.fill(0); }
   } catch (error) {
     if (error instanceof KeyFileError) throw error;
     throw new KeyFileError("bad_key", path);
