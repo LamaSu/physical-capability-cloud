@@ -5,7 +5,8 @@
  *   2. `escrow.fund(configs, {expiry, payerSignature: 0x, operatorSignature})`: the payer sends it, so the payer
  *      leg is implicit and its signature bytes are empty (ESC:718, FAC:253).
  * Each call is encoded once from the frozen `PreparedFunding`, simulated with `eth_call` from the payer using
- * those same bytes, then sent with `dataSuffix: "0x"` so a client-configured suffix cannot change them.
+ * those same bytes. JSON-RPC sends use `dataSuffix: "0x"`; local accounts prepare and sign the exact calldata
+ * directly, checking the filled request and signed bytes, so a client-configured suffix cannot change them.
  * The fund simulation uses the approve receipt's canonical block hash, exactly where allowance was read, so a
  * backend whose "latest" lags the receipt cannot manufacture an allowance-related simulation failure.
  *
@@ -29,7 +30,7 @@
  * transactions) before retrying. A retried `approveAndFund` sends nothing while the payer has a transaction pending
  * (PAYER_TX_PENDING), and returns `committed` without sending once the escrow reads funded under this policy.
  */
-import { encodeFunctionData, zeroAddress, zeroHash, type Address, type Chain, type Hex, type PublicClient, type WalletClient } from "viem";
+import { encodeFunctionData, parseTransaction, zeroAddress, zeroHash, type Address, type Chain, type Hex, type PublicClient, type WalletClient } from "viem";
 import { assertChain, describeRevert, pinBlock, pinnedReader, type PinnedBlock } from "./chain.js";
 import { refuse } from "./errors.js";
 import { DEFAULT_MARGIN_SECONDS, assertPrepared, checkTiming, type PreparedFunding } from "./prepare.js";
@@ -162,7 +163,8 @@ async function chainForSend(wallet: WalletClient, chainId: bigint): Promise<Chai
   if (wallet.chain && BigInt(wallet.chain.id) !== chainId) {
     refuse("CHAIN_MISMATCH", `the wallet's configured chain is ${wallet.chain.id}; the prepared policy is for chain ${chainId}`);
   }
-  // With no configured chain, an explicit descriptor still gives viem the expected id for its own last check.
+  // The descriptor binds viem's JSON-RPC send check. Local requests and signed bytes are checked separately below:
+  // eth_fillTransaction can supply a chain id different from this descriptor.
   return wallet.chain ?? {
     id: Number(chainId),
     name: `PCC funding chain ${chainId}`,
@@ -171,17 +173,47 @@ async function chainForSend(wallet: WalletClient, chainId: bigint): Promise<Chai
   };
 }
 
+/** Check both the node-filled request and the signed bytes before any local-account broadcast. */
+function assertLocalTransaction(
+  tx: { chainId?: number; to?: string | null; data?: Hex; value?: bigint },
+  chainId: number,
+  to: Address,
+  data: Hex,
+): void {
+  if (tx.chainId !== chainId) throw new Error(`transaction chainId is ${tx.chainId}; the prepared policy is for ${chainId}`);
+  if (typeof tx.to !== "string" || !same(tx.to, to)) throw new Error("transaction to differs from the intended address");
+  if (tx.data !== data) throw new Error("transaction data differs from the intended calldata");
+  if (tx.value !== undefined && tx.value !== 0n) throw new Error("transaction value must be absent or 0n");
+}
+
 async function sendAndWait(
   wallet: WalletClient,
   publicClient: PublicClient,
   chain: Chain,
+  policyChainId: bigint,
   to: Address,
   data: Hex,
   opts: { confirmations: number; timeout: number },
 ): Promise<SendResult> {
+  let serializedTransaction: Hex | undefined;
+  if (wallet.account?.type === "local") {
+    try {
+      // These direct actions never append the client's dataSuffix: data is already the exact simulated calldata.
+      const request = await wallet.prepareTransactionRequest({
+        account: wallet.account, chain, to, data, nonceManager: wallet.account.nonceManager,
+      });
+      assertLocalTransaction(request, Number(policyChainId), to, data);
+      serializedTransaction = await wallet.signTransaction({ ...request, account: wallet.account, chain });
+      assertLocalTransaction(parseTransaction(serializedTransaction), Number(policyChainId), to, data);
+    } catch (e) {
+      return { kind: "not_sent", reason: `local transaction refused before broadcast: ${describeRevert(e)}` };
+    }
+  }
   let hash: Hex;
   try {
-    hash = await wallet.sendTransaction({ account: wallet.account!, chain, to, data, dataSuffix: "0x" });
+    hash = serializedTransaction === undefined
+      ? await wallet.sendTransaction({ account: wallet.account!, chain, to, data, dataSuffix: "0x" })
+      : await wallet.sendRawTransaction({ serializedTransaction });
   } catch (e) {
     // A throw here cannot prove nothing was broadcast (a transport error can follow acceptance), so it is unknown.
     return { kind: "unknown", reason: `the send threw and may have been broadcast: ${describeRevert(e)}` };
@@ -283,7 +315,7 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
     refuse("SIMULATION_REVERTED", `approve(${prepared.escrow}, ${prepared.totalGross}) would revert: ${describeRevert(e)}`);
   }
   const approveChain = await chainForSend(wallet, prepared.chainId);
-  const approve = await sendAndWait(wallet, publicClient, approveChain, prepared.usdc, approveData, opts);
+  const approve = await sendAndWait(wallet, publicClient, approveChain, prepared.chainId, prepared.usdc, approveData, opts);
   const approveTx = approve.kind === "not_sent" ? undefined : approve.txHash;
   const stopAtApprove = async (approve: SendResult, why: string, allowance?: bigint | "unreadable"): Promise<FundingResult> => {
     const readBack = await readFundedState({ publicClient, prepared });
@@ -349,7 +381,7 @@ export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingR
   let fund: SendResult;
   try {
     const fundChain = await chainForSend(wallet, prepared.chainId);
-    fund = await sendAndWait(wallet, publicClient, fundChain, prepared.escrow, fundData, opts);
+    fund = await sendAndWait(wallet, publicClient, fundChain, prepared.chainId, prepared.escrow, fundData, opts);
   } catch (e) {
     // The approve already happened, so a send-time chain refusal is a result; this fund() was never sent.
     fund = { kind: "not_sent", reason: e instanceof Error ? e.message : String(e) };

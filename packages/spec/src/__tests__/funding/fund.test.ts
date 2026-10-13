@@ -10,6 +10,7 @@ import {
   encodeFunctionData,
   getAbiItem,
   keccak256,
+  parseTransaction,
   stringToHex,
   toFunctionSelector,
   zeroAddress,
@@ -279,6 +280,171 @@ describe("approveAndFund: refusals before anything is sent", () => {
   });
 });
 
+describe("local-account transaction binding", () => {
+  for (const stage of ["approve", "fund"] as const) {
+    const index = stage === "approve" ? 0 : 1;
+    it(`${stage}: mutating the chain descriptor cannot change the prepared-policy chain check`, async () => {
+      const { chain, fund } = await setup();
+      const wallet = chain.wallet();
+      const prepare = wallet.prepareTransactionRequest;
+      let calls = 0;
+      vi.spyOn(wallet, "prepareTransactionRequest").mockImplementation(async (args) => {
+        const request = await prepare(args);
+        if (calls++ !== index) return request;
+        args.chain!.id = 1;
+        chain.state.walletChainId = 1;
+        return { ...request, chainId: 1 } as never;
+      });
+      const sign = vi.spyOn(wallet, "signTransaction");
+      const result = await fund(wallet);
+      expect(result.stage).toBe(stage);
+      expect(result.outcome).toBe("unchanged");
+      expect(result.detail).toContain("chainId");
+      expect(sign).toHaveBeenCalledTimes(index);
+      expect(chain.sends()).toHaveLength(index);
+    });
+    it(`${stage}: a different eth_fillTransaction chain id is not_sent, with nothing broadcast for that stage`, async () => {
+      const { chain, fund } = await setup();
+      if (index === 0) chain.state.fillChainId = 1;
+      else chain.state.afterSend = () => { chain.state.fillChainId = 1; };
+      const wallet = chain.wallet();
+      const sign = vi.spyOn(wallet, "signTransaction");
+      const result = await fund(wallet);
+      expect(result.stage).toBe(stage);
+      expect(result.outcome).toBe("unchanged");
+      expect(result.detail).toContain("chainId");
+      if (index === 0) expect(result.approve).toMatchObject({ kind: "not_sent" });
+      expect(sign).toHaveBeenCalledTimes(index);
+      expect(chain.sends()).toHaveLength(index);
+      expect(chain.sends().every((x) => x.method === "eth_sendRawTransaction")).toBe(true);
+    });
+
+    const mutations = [
+      ["chainId", { chainId: 1 }], ["to", { to: OTHER }], ["data", { data: "0x1234" as Hex }], ["value", { value: 1n }],
+    ] as const;
+    for (const [field, change] of mutations) {
+      it(`${stage}: altered prepared ${field} is refused before signing or broadcasting`, async () => {
+        const { chain, fund } = await setup();
+        const wallet = chain.wallet();
+        const prepare = wallet.prepareTransactionRequest;
+        let calls = 0;
+        vi.spyOn(wallet, "prepareTransactionRequest").mockImplementation(async (args) => {
+          const request = await prepare(args);
+          return (calls++ === index ? { ...request, ...change } : request) as never;
+        });
+        const sign = vi.spyOn(wallet, "signTransaction");
+        const result = await fund(wallet);
+        expect(result.stage).toBe(stage);
+        expect(result.outcome).toBe("unchanged");
+        expect(result.detail).toContain(field);
+        if (index === 0) expect(result.approve).toMatchObject({ kind: "not_sent" });
+        expect(sign).toHaveBeenCalledTimes(index);
+        expect(chain.sends()).toHaveLength(index);
+      });
+
+      it(`${stage}: altered signed ${field} is refused before broadcasting`, async () => {
+        const { fx, chain, fund } = await setup();
+        const wallet = chain.wallet();
+        const sign = wallet.signTransaction;
+        let calls = 0;
+        vi.spyOn(wallet, "signTransaction").mockImplementation(async (args) => {
+          const signed = await sign(args);
+          return calls++ === index
+            ? await fx.payer.signTransaction({ ...parseTransaction(signed), ...change } as never) as Awaited<ReturnType<typeof sign>>
+            : signed;
+        });
+        const result = await fund(wallet);
+        expect(result.stage).toBe(stage);
+        expect(result.outcome).toBe("unchanged");
+        expect(result.detail).toContain(field);
+        if (index === 0) expect(result.approve).toMatchObject({ kind: "not_sent" });
+        expect(chain.sends()).toHaveLength(index);
+      });
+    }
+
+    for (const action of ["prepareTransactionRequest", "signTransaction"] as const) {
+      it(`${stage}: ${action} throwing is not_sent`, async () => {
+        const { chain, fund } = await setup();
+        const wallet = chain.wallet();
+        const original = wallet[action] as (args: never) => Promise<unknown>;
+        let calls = 0;
+        vi.spyOn(wallet, action).mockImplementation(async (args) => {
+          if (calls++ === index) throw new Error(`refused-${action}`);
+          return original(args as never) as never;
+        });
+        const result = await fund(wallet);
+        expect(result.stage).toBe(stage);
+        expect(result.outcome).toBe("unchanged");
+        expect(result.detail).toContain(`refused-${action}`);
+        if (index === 0) expect(result.approve).toMatchObject({ kind: "not_sent" });
+        expect(chain.sends()).toHaveLength(index);
+      });
+    }
+  }
+
+  it("malformed signed serialization is not_sent", async () => {
+    const { chain, fund } = await setup();
+    const wallet = chain.wallet();
+    vi.spyOn(wallet, "signTransaction").mockResolvedValue("0x1234" as never);
+    const result = await fund(wallet);
+    expect(result.approve).toMatchObject({ kind: "not_sent" });
+    expect(result.outcome).toBe("unchanged");
+    expect(chain.sends()).toEqual([]);
+  });
+
+  it.each([false, true])("the local happy path uses fill (unavailable: %s) and broadcasts the exact checked bytes", async (unavailable) => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    chain.state.fillUnavailable = unavailable;
+    chain.state.afterSend = (i) => { if (i === 1) fundedAs(fx.jobPolicyHash); };
+    const result = await fund(chain.wallet(fx.payer, { dataSuffix: "0xdeadbeef" }));
+    expect(result.outcome).toBe("committed");
+    expect(chain.state.log.some((x) => x.method === "eth_fillTransaction")).toBe(true);
+    if (unavailable) expect(chain.state.log.some((x) => x.method === "eth_estimateGas")).toBe(true);
+    const simulations = chain.state.log.filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined);
+    const sends = chain.sends();
+    expect(sends.map((x) => x.method)).toEqual(["eth_sendRawTransaction", "eth_sendRawTransaction"]);
+    sends.forEach((sent, i) => {
+      const tx = parseTransaction(sent.params[0] as Hex);
+      expect(tx.chainId).toBe(Number(prepared.chainId));
+      expect(tx.to!.toLowerCase()).toBe([prepared.usdc, prepared.escrow][i]!.toLowerCase());
+      expect(tx.data).toBe((simulations[i]!.params as [{ data: Hex }])[0].data);
+      expect(tx.value ?? 0n).toBe(0n);
+    });
+  });
+
+  it("a raw-send throw remains unknown even after the node accepted it", async () => {
+    const { chain, fund } = await setup();
+    const wallet = chain.wallet();
+    const send = wallet.sendRawTransaction;
+    vi.spyOn(wallet, "sendRawTransaction").mockImplementation(async (args) => {
+      await send(args);
+      throw new Error("connection dropped after acceptance");
+    });
+    const result = await fund(wallet);
+    expect(result.approve).toMatchObject({ kind: "unknown" });
+    expect(result.outcome).toBe("indeterminate");
+    expect(chain.sends()).toHaveLength(1);
+  });
+
+  it("a JSON-RPC account still uses eth_sendTransaction with the explicit chain and exact calldata", async () => {
+    const { fx, chain, prepared, fund, fundedAs } = await setup();
+    const wallet = chain.wallet(fx.payer.address, { dataSuffix: "0xdeadbeef" });
+    expect(wallet.account.type).toBe("json-rpc");
+    const send = vi.spyOn(wallet, "sendTransaction");
+    chain.state.afterSend = (i) => { if (i === 1) fundedAs(fx.jobPolicyHash); };
+    expect((await fund(wallet)).outcome).toBe("committed");
+    expect(chain.sends().map((x) => x.method)).toEqual(["eth_sendTransaction", "eth_sendTransaction"]);
+    expect(send.mock.calls.map(([args]) => args.chain?.id)).toEqual([Number(prepared.chainId), Number(prepared.chainId)]);
+    expect(chain.state.log.some((x) => x.method === "eth_fillTransaction")).toBe(false);
+    const simulations = chain.state.log.filter((x) => x.method === "eth_call" && (x.params as [{ from?: string }])[0].from !== undefined);
+    chain.sends().forEach((sent, i) => {
+      const tx = sent.params[0] as { to: Address; data: Hex };
+      expect(tx.to.toLowerCase()).toBe([prepared.usdc, prepared.escrow][i]!.toLowerCase());
+      expect(tx.data).toBe((simulations[i]!.params as [{ data: Hex }])[0].data);
+    });
+  });
+});
+
 describe("approveAndFund: after the first broadcast, the outcome rests on the escrow's own state", () => {
   /** Calldata of the payer-sent eth_call simulations, in order (the fund simulation is pinned to approve's block). */
   const simulatedData = (chain: Awaited<ReturnType<typeof setup>>["chain"]) =>
@@ -290,11 +456,15 @@ describe("approveAndFund: after the first broadcast, the outcome rests on the es
     const { fx, chain, prepared, fund, fundedAs } = await setup();
     const wallet = chain.wallet();
     expect(wallet.chain).toBeUndefined();
-    const send = vi.spyOn(wallet, "sendTransaction");
+    const prepare = vi.spyOn(wallet, "prepareTransactionRequest");
+    const sign = vi.spyOn(wallet, "signTransaction");
     chain.state.afterSend = (i) => { if (i === 1) fundedAs(fx.jobPolicyHash); };
     expect((await fund(wallet)).outcome).toBe("committed");
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls.map(([args]) => args.chain?.id)).toEqual([Number(prepared.chainId), Number(prepared.chainId)]);
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(sign).toHaveBeenCalledTimes(2);
+    for (const calls of [prepare.mock.calls, sign.mock.calls]) {
+      expect(calls.map(([args]) => args.chain?.id)).toEqual([Number(prepared.chainId), Number(prepared.chainId)]);
+    }
   });
 
   it("a wallet with no chain changes network after approve: refuse the fund send and preserve the approve", async () => {

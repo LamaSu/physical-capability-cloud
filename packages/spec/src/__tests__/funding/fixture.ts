@@ -246,6 +246,9 @@ type FakeBlock = { number: bigint; hash: Hex; timestamp: bigint };
 export interface ChainState {
   chainId: number;
   walletChainId: number;
+  /** Override only the node's filled chain id, to reproduce a switch between chain read and fill. */
+  fillChainId?: number;
+  fillUnavailable: boolean;
   /** The latest block; every block ever latest stays readable by hash in `blocks`. */
   block: FakeBlock;
   blocks: Map<string, FakeBlock>;
@@ -289,6 +292,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
   const state: ChainState = {
     chainId: Number(fx.chainId),
     walletChainId: Number(fx.chainId),
+    fillUnavailable: false,
     block: genesis,
     blocks: new Map([[genesis.hash, genesis]]),
     pendingBlock: false,
@@ -405,6 +409,29 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
           return toHex(1_000_000_000n);
         case "eth_estimateGas":
           return toHex(200_000n);
+        case "eth_fillTransaction": {
+          if (state.fillUnavailable) throw Object.assign(new Error("eth_fillTransaction unavailable"), { code: -32601 });
+          const tx = (params as [{ from: Address; to: Address; data?: Hex; value?: Hex }])[0];
+          return {
+            raw: "0x",
+            tx: {
+              from: tx.from, to: tx.to, input: tx.data ?? "0x", value: tx.value ?? "0x0",
+              chainId: toHex(state.fillChainId ?? state.walletChainId),
+              nonce: toHex(state.priorNonce + state.sent.length + state.mempool),
+              gas: toHex(200_000n), gasPrice: toHex(1_000_000_000n), type: "0x0",
+            },
+          };
+        }
+        case "eth_sendTransaction": {
+          if (state.failSend) throw new Error("fake chain: the connection dropped");
+          const tx = (params as [{ to: Address; data?: Hex }])[0];
+          const index = state.sent.length;
+          const hash = keccak256(stringToHex(`fake-json-rpc-${index}`));
+          state.sent.push({ hash, to: tx.to, data: tx.data ?? "0x", plan: state.receipts[index] ?? "success",
+            block: { number: state.block.number, hash: state.block.hash } });
+          state.afterSend?.(index);
+          return hash;
+        }
         case "eth_sendRawTransaction": {
           if (state.failSend) throw new Error("fake chain: the connection dropped");
           const raw = (params as [Hex])[0];
@@ -468,7 +495,7 @@ export function makeChain(fx: Fixture, o: { escrowCode?: boolean } = {}) {
     },
   });
   const publicClient = createPublicClient({ transport: custom(provider("public"), { retryCount: 0 }), pollingInterval: 20 });
-  const wallet = (account: LocalAccount = fx.payer, options: { dataSuffix?: Hex } = {}) =>
+  const wallet = (account: LocalAccount | Address = fx.payer, options: { dataSuffix?: Hex } = {}) =>
     createWalletClient({ account, transport: custom(provider("wallet"), { retryCount: 0 }), ...options });
   /** A new latest block, 12 s later; the old one stays readable by hash. */
   const advanceBlock = () => {
