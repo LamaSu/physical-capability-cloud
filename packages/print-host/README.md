@@ -20,7 +20,9 @@ existing files and writes the device and operator keys at 0600 inside a private
 directory. An optional `--not-after` must be later than the current time and the
 keys' `createdAt`. Keep the funded Ed25519 device principal separate from the secp256k1
 operator EOA. The per-unit SESSION key signs the bundle (H1(b)). The device key
-signs ONLY LO-EV-1 delegations and D2, through `signDelegation` and `signD2`.
+signs LO-EV-1 delegations through `signDelegation`; `signD2` signs the 32 bytes
+the caller supplies, behind a guard that refuses bytes beginning with the UTF-8
+prefix `pcc-kernel-signing-key:` in either raw or hex form.
 Load it with `delegationBinding: { chainId, operator }` from the host's configured
 chain and operator identity; loading without that binding permits public identity
 checks and D2, but refuses delegation signing. Delegations name one bounded job id
@@ -28,6 +30,14 @@ checks and D2, but refuses delegation signing. Delegations name one bounded job 
 the spec's exact MVP action set, and a distinct 32-byte session public key. Their
 whole-second issuance lies between funding and the first event, expiry equals
 reclaimAt, and maxSignatures equals the finalized event count (1–1000).
+Delegation input must be a plain object with exactly these 11 own enumerable data
+properties: `sessionId`, `parentAgentId`, `publicKey`, `issuedAt`, `expiresAt`,
+`scope`, `jobId`, `fundedAt`, `reclaimAt`, `firstEventAt`, and `eventCount`. Extra
+properties are refused even when their value is `undefined`, and accessors are
+refused. `sessionId` must match `/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/`.
+`fundedAt`, `issuedAt`, `expiresAt`, and `reclaimAt` must be integer Unix seconds
+in the range `1_600_000_000 <= t < 2^32`. `firstEventAt` uses the same range and
+may include a fractional second for event timing.
 `signD2` accepts exactly 32 raw bytes or their `0x`-prefixed lowercase hex encoding.
 The toolkit still needs the unit session and bundle builders recorded by GAP-7.
 The operator key's uses are D1 `FinalMilestonePackageV2` signatures, zero-value

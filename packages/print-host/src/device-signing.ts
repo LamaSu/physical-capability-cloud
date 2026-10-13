@@ -4,7 +4,7 @@ import type { OperatorChainId } from "./operator-signing.js";
 
 export type DeviceSigningErrorCode = "bad_input" | "bad_binding" | "bad_job" |
   "bad_session" | "bad_public_key" | "bad_scope" | "bad_time" |
-  "bad_signature_count" | "bad_parent" | "bad_bytes32" | "signing_failed";
+  "bad_signature_count" | "bad_parent" | "bad_bytes32" | "forbidden_protocol" | "signing_failed";
 
 /** Only a closed code survives a validation or crypto failure. */
 export class DeviceSigningError extends Error {
@@ -63,16 +63,24 @@ function stringArray(input: unknown): string[] {
 
 export function delegationParent(binding: DeviceDelegationBinding | undefined): SessionKey["parentAgentId"] | undefined {
   if (binding === undefined) return undefined;
-  const checked = record(binding, ["chainId", "operator"]);
-  if (checked.chainId !== 84532 && checked.chainId !== 31337) throw new DeviceSigningError("bad_binding");
   try {
+    const checked = record(binding, ["chainId", "operator"]);
+    if (checked.chainId !== 84532 && checked.chainId !== 31337) throw new Error();
     if (typeof checked.operator !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(checked.operator)) throw new Error();
     return `eip155:${checked.chainId}:${getAddress(checked.operator).toLowerCase()}` as SessionKey["parentAgentId"];
   } catch { throw new DeviceSigningError("bad_binding"); }
 }
 
-function seconds(value: unknown): value is number {
+function count(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function timestampInRange(value: number): boolean {
+  return value >= 1_600_000_000 && value < 2 ** 32;
+}
+
+function seconds(value: unknown): value is number {
+  return count(value) && timestampInRange(value);
 }
 
 const fieldPrime = (1n << 255n) - 19n;
@@ -140,11 +148,11 @@ export function prepareDelegation(input: DelegationInput, parent: SessionKey["pa
   if (allowedActions.length !== mvpActions.length || new Set(allowedActions).size !== mvpActions.length ||
     allowedActions.some((action) => !mvpActions.includes(action))) throw new DeviceSigningError("bad_scope");
   if (!seconds(checked.issuedAt) || !seconds(checked.fundedAt) || !seconds(checked.expiresAt) || !seconds(checked.reclaimAt) ||
-    typeof checked.firstEventAt !== "number" || !Number.isFinite(checked.firstEventAt) ||
+    typeof checked.firstEventAt !== "number" || !Number.isFinite(checked.firstEventAt) || !timestampInRange(checked.firstEventAt) ||
     checked.fundedAt > checked.issuedAt || checked.issuedAt > checked.firstEventAt ||
     checked.expiresAt !== checked.reclaimAt || checked.expiresAt <= checked.issuedAt) throw new DeviceSigningError("bad_time");
-  if (!seconds(scope.maxSignatures) || scope.maxSignatures < 1 || scope.maxSignatures > 1000 ||
-    !seconds(checked.eventCount) || checked.eventCount !== scope.maxSignatures) throw new DeviceSigningError("bad_signature_count");
+  if (!count(scope.maxSignatures) || scope.maxSignatures < 1 || scope.maxSignatures > 1000 ||
+    !count(checked.eventCount) || checked.eventCount !== scope.maxSignatures) throw new DeviceSigningError("bad_signature_count");
   try {
     return sessionKeyDelegationPreimage({
       sessionId: checked.sessionId, parentAgentId: parent, publicKey,
@@ -157,16 +165,23 @@ export function prepareDelegation(input: DelegationInput, parent: SessionKey["pa
 // packages/spec/src/identity/ephemeral.ts: DEFAULT_SESSION_KEY_CONFIG's MVP actions.
 const mvpActions: readonly string[] = Object.freeze(["evidence_submit", "workflow_step_complete"]);
 
-/** D2 signs raw32. Delegation JSON and the 71-byte bundle preimage cannot enter this path. */
+const kernelRegistrationPrefix = Buffer.from("pcc-kernel-signing-key:", "utf8");
+
+/** D2 signs caller-supplied raw32, excluding the kernel-registration challenge. */
 export function prepareD2(input: Uint8Array | string): Uint8Array {
+  let bytes: Uint8Array;
   try {
     if (typeof input === "string") {
       if (!/^0x[0-9a-f]{64}$/.test(input)) throw new Error();
-      return Buffer.from(input.slice(2), "hex");
+      bytes = Buffer.from(input.slice(2), "hex");
+    } else {
+      if (!(input instanceof Uint8Array)) throw new Error();
+      bytes = new Uint8Array(input);
     }
-    if (!(input instanceof Uint8Array)) throw new Error();
-    const bytes = new Uint8Array(input);
     if (bytes.length !== 32) throw new Error();
-    return bytes;
   } catch { throw new DeviceSigningError("bad_bytes32"); }
+  if (kernelRegistrationPrefix.every((byte, index) => bytes[index] === byte)) {
+    throw new DeviceSigningError("forbidden_protocol");
+  }
+  return bytes;
 }
