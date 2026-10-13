@@ -32,6 +32,15 @@ interface HttpIppTransportOptions {
 
 type FailureKind = Extract<IppTransportResult, { ok: false }>["kind"];
 
+/** HTTP optional whitespace is only SP/HTAB; walk each edge once. */
+function trimOptionalWhitespace(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && (value[start] === " " || value[start] === "\t")) start += 1;
+  while (end > start && (value[end - 1] === " " || value[end - 1] === "\t")) end -= 1;
+  return value.slice(start, end);
+}
+
 /** Each invocation sends once, uses one total deadline, and resolves on every exit. */
 export function createHttpIppTransport(options: HttpIppTransportOptions = {}): IppTransport {
   return (input) => new Promise<IppTransportResult>((resolve) => {
@@ -102,9 +111,8 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
         const transfers: string[] = [];
         for (let index = 0; index < res.rawHeaders.length; index += 2) {
           const name = res.rawHeaders[index].toLowerCase();
-          const value = res.rawHeaders[index + 1].replace(/^[ \t]+|[ \t]+$/g, "");
-          if (name === "content-length") lengths.push(value);
-          if (name === "transfer-encoding") transfers.push(value);
+          if (name === "content-length") lengths.push(trimOptionalWhitespace(res.rawHeaders[index + 1]));
+          if (name === "transfer-encoding") transfers.push(trimOptionalWhitespace(res.rawHeaders[index + 1]));
         }
         if (lengths.length && transfers.length) {
           fail("framing", "IPP response has both Content-Length and Transfer-Encoding");

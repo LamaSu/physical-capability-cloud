@@ -68,6 +68,31 @@ describe("HTTP IPP transport, socket-free", () => {
     expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
   });
 
+  it("header scanning never trims an unrelated 16000-space header value", async () => {
+    const header = `NO_TRIM_START${" ".repeat(16000)}NO_TRIM_END`;
+    const replace = RegExp.prototype[Symbol.replace];
+    const touched: number[] = [];
+    const spy = vi.spyOn(RegExp.prototype, Symbol.replace).mockImplementation(function (
+      this: RegExp, input: string, replacement: string | ((substring: string, ...args: unknown[]) => string),
+    ): string {
+      if (input.includes("NO_TRIM_START")) touched.push(input.length);
+      return Reflect.apply(replace, this, [input, replacement]) as string;
+    });
+    let result;
+    try {
+      const { transport } = scripted(`HTTP/1.1 200 OK\r\nX-Unrelated: ${header}\r\nContent-Length: 3\r\n\r\nIPP`);
+      result = await transport(request());
+    } finally { spy.mockRestore(); }
+    expect(result).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+    expect(touched).toEqual([]);
+  });
+
+  it.each(["Content-Length:\t3 \t", "Transfer-Encoding:\tchunked"])("framing trims only HTTP optional whitespace from %s", async header => {
+    const body = header.startsWith("Content-Length") ? "IPP" : "3\r\nIPP\r\n0\r\n\r\n";
+    const { transport } = scripted(`HTTP/1.1 200 OK\r\n${header}\r\n\r\n${body}`);
+    expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+  });
+
   it("T2: refuses Content-Length together with chunked", async () => {
     // Revert strict parser/error classification or both-header refusal to fail.
     const { transport } = scripted("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nIPP\r\n0\r\n\r\n");
