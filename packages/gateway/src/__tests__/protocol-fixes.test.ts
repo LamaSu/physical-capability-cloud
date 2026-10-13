@@ -5,31 +5,17 @@
  *   Fix 3: Kernel heartbeat expiry — stale kernel marking
  */
 
-import { afterAll, describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { jobRoutes } from "../routes/jobs.js";
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { apiGate } from "../middleware/api-gate.js";
 import { initKernelService, resetKernelService } from "../services/kernel-service.js";
 import type { KernelConfig } from "@pcc/kernel";
-
-// N31b (#575 stacked; the steward's ruling #6508): every relay route and the kernel heartbeat now
-// take the kernel-ownership guard. These tests exercise the routes' own logic, so their apps act
-// with the admin key unless a test sets its own identity; the guard itself is tested in
-// n31-relay-and-heartbeat-ownership.test.ts.
-const N31_ADMIN = "n31b-test-admin-secret";
-const PREV_N31_ADMIN = process.env.PCC_ADMIN_KEY;
-process.env.PCC_ADMIN_KEY = N31_ADMIN;
-afterAll(() => {
-  if (PREV_N31_ADMIN === undefined) delete process.env.PCC_ADMIN_KEY;
-  else process.env.PCC_ADMIN_KEY = PREV_N31_ADMIN;
-});
-const asN31Admin = async (req: { headers: Record<string, unknown> }) => {
-  if (req.headers["x-admin-key"] === undefined) req.headers["x-admin-key"] = N31_ADMIN;
-};
-
 
 // ---------------------------------------------------------------------------
 // Minimal mock KernelConfig
@@ -60,7 +46,14 @@ async function buildApp(): Promise<FastifyInstance> {
   initKernelService(mockConfig);
 
   const app = Fastify({ logger: false });
-  app.addHook("onRequest", asN31Admin);
+  // Both heartbeat routes require the kernel's operator. Authenticate the protocol fixture
+  // as kernel-nyc's recorded operator; these checks exercise capability handling and routing.
+  const operator = getRepos().kernels.findById("kernel-nyc")!.operatorAddress;
+  const { rawKey } = provisionApiKey({ operatorId: operator, name: "protocol-fixes-test", scopes: ["*"] });
+  app.addHook("onRequest", async (req) => {
+    req.headers.authorization ??= `Bearer ${rawKey}`;
+  });
+  await app.register(apiGate);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);

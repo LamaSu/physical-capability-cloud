@@ -7,11 +7,12 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { provisionApiKey } from "../auth/api-key-auth.js";
+import { classifyProvisionError, provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
+import { classifyChainError, type ChainErrorCode } from "../services/chain-error-code.js";
 import {
   registerAgentOnChain,
   isIdentityWriteEnabled,
@@ -175,7 +176,7 @@ export async function provisionRoutes(app: FastifyInstance) {
             warning: string;
             onchain_status?: "written" | "failed" | "pending";
             onchain_tx_hash?: string;
-            onchain_error?: string;
+            onchain_error?: ChainErrorCode;
           }
         | undefined;
       if (isIdentityWriteEnabled()) {
@@ -262,46 +263,44 @@ export async function provisionRoutes(app: FastifyInstance) {
                 userAgent: req.headers["user-agent"],
               });
             } catch (walletErr) {
-              const walletErrMsg =
-                walletErr instanceof Error ? walletErr.message : String(walletErr);
+              const code = classifyChainError(walletErr);
               try {
                 getRepos().apiKeys.recordOperatorWallet(record.id, {
                   address: opWallet.address,
                   privateKey: opWallet.privateKey,
                   onchainStatus: "failed",
                   onchainTxHash: null,
-                  onchainError: walletErrMsg.slice(0, 1024),
+                  onchainError: code,
                 });
               } catch {
                 // Non-fatal.
               }
               operatorWalletResponse.onchain_status = "failed";
-              operatorWalletResponse.onchain_error = walletErrMsg.slice(0, 256);
+              operatorWalletResponse.onchain_error = code;
               req.log?.warn(
-                { keyId: record.id, error: walletErrMsg },
+                { keyId: record.id, code },
                 "setAgentWallet best-effort failed — off-chain wallet preserved",
               );
             }
-          } catch (opWalletErr) {
+          } catch {
             // generateOperatorWallet failed (e.g. viem import glitch in a
             // test env). Do NOT let this leak into the outer catch and
             // revert the sponsored-mint success record. Off-chain identity
             // continues to work; operator wallet is a future retry.
             req.log?.warn(
-              { keyId: record.id, err: opWalletErr instanceof Error ? opWalletErr.message : String(opWalletErr) },
+              { keyId: record.id, code: "wallet_generation_failed" },
               "operator wallet generation failed — sponsored mint still succeeded",
             );
           }
         } catch (onchainErr) {
-          const errMsg =
-            onchainErr instanceof Error ? onchainErr.message : String(onchainErr);
+          const code = classifyChainError(onchainErr);
           try {
-            getRepos().apiKeys.recordOnchainFailure(record.id, errMsg);
+            getRepos().apiKeys.recordOnchainFailure(record.id, code);
           } catch {
             // Non-fatal: DB write failure doesn't block HTTP response
           }
           req.log?.warn(
-            { keyId: record.id, error: errMsg },
+            { keyId: record.id, code },
             "ERC-8004 on-chain identity write failed — will retry",
           );
           auditService.log({
@@ -310,7 +309,7 @@ export async function provisionRoutes(app: FastifyInstance) {
             resourceType: "api_key",
             resourceId: record.id,
             action: "create",
-            metadata: { error: errMsg.slice(0, 256) },
+            metadata: { code },
             ip: req.ip,
             userAgent: req.headers["user-agent"],
           });
@@ -349,17 +348,24 @@ export async function provisionRoutes(app: FastifyInstance) {
           : { status: "disabled" },
       });
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to provision key";
-      if (message.includes("Maximum 5")) {
-        return reply.status(429).send({ error: "too_many_keys", message });
+      const code = classifyProvisionError(err);
+      if (code === "too_many_keys") {
+        return reply.status(429).send({
+          error: "too_many_keys", message: "Maximum 5 active API keys per operator",
+        });
       }
-      if (
-        err instanceof Error &&
-        (err as Error & { code?: string }).code === "invalid_public_key"
-      ) {
-        return reply.status(400).send({ error: "invalid_public_key", message });
+      if (code === "invalid_public_key") {
+        return reply.status(400).send({
+          error: "invalid_public_key",
+          message: "publicKey must be a 32-byte Ed25519 public key (64 hex chars, optional 0x prefix)",
+        });
       }
-      return reply.status(500).send({ error: "provision_failed", message });
+      if (code === "provision_in_progress") {
+        return reply.status(500).send({
+          error: "provision_failed", message: "Key provisioning in progress — try again in a moment",
+        });
+      }
+      return reply.status(500).send({ error: "provision_failed", message: "Failed to provision key" });
     }
   });
 
