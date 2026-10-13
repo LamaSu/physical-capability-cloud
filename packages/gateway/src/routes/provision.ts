@@ -40,8 +40,8 @@ export async function provisionRoutes(app: FastifyInstance) {
       capability?: string;
       /**
        * Optional Ed25519 public key (BYOK). 64 hex chars, optional 0x prefix.
-       * Omitted → gateway mints a fresh keypair and returns the private
-       * key in this response ONCE.
+       * Omitted means no signing key on file. The gateway never returns
+       * a private key.
        */
       publicKey?: string;
     };
@@ -97,7 +97,7 @@ export async function provisionRoutes(app: FastifyInstance) {
     }
 
     try {
-      const { rawKey, record, ed25519 } = provisionApiKey({
+      const { rawKey, record } = provisionApiKey({
         operatorId,
         name: body.name,
         description: body.capability
@@ -122,7 +122,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         metadata: {
           name: body.name,
           capability: body.capability,
-          ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+          ed25519_keypair_source: record.publicKey ? "byok" : "none",
         },
         ip: req.ip,
         userAgent: req.headers["user-agent"],
@@ -130,7 +130,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       trackServerEvent("api_key_provisioned", {
         email: body.email,
         capability: body.capability,
-        ed25519_keypair_source: ed25519 ? "server-minted" : "byok",
+        ed25519_keypair_source: record.publicKey ? "byok" : "none",
       });
       // Surface the trace_id (stamped by `middleware/trace-id.ts`) so the
       // agent can echo it on every subsequent call via `x-pcc-trace-id`.
@@ -139,21 +139,11 @@ export async function provisionRoutes(app: FastifyInstance) {
       // than headers.
       // See docs/AGENT_ONBOARDING_OBSERVABILITY.md.
       const trace_id = (req as unknown as { traceId?: string }).traceId;
-      // Ed25519 surfacing: ALWAYS return the public key; return the private
-      // key ONLY when the gateway minted it. BYOK keys never round-trip.
-      const ed25519Response = ed25519
-        ? {
-            public_key: ed25519.publicKeyHex,
-            private_key: ed25519.privateKeyHex,
-            private_key_pkcs8_base64: ed25519.privateKeyPkcs8B64,
-            source: "server-minted",
-            warning:
-              "Store the private_key now — it will not be shown again. Anyone holding it can sign as this agent.",
-          }
-        : {
-            public_key: record.publicKey ?? null,
-            source: "byok",
-          };
+      // Provisioning returns only the caller-supplied public key, or null.
+      const ed25519Response = {
+        public_key: record.publicKey ?? null,
+        source: record.publicKey ? "byok" : "none",
+      };
 
       // ── ERC-8004 on-chain identity write (best-effort) ────────────
       // The off-chain DB row is the source of truth at this moment; the
@@ -286,8 +276,8 @@ export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/agents/:id/verify ────────────────────────────────────
   //
   // Verify that a signature was produced by the agent identified by `:id`.
-  // The agent's public key was set at provision time (server-minted OR
-  // BYOK). Body: { message: string, signature: string }. Returns
+  // The agent's public key is set only from the caller's publicKey.
+  // Body: { message: string, signature: string }. Returns
   // { valid: bool, keyId, operatorId } on success. Returns 404 when the
   // key doesn't exist or has no public_key on file (e.g. legacy rows).
   //
@@ -345,7 +335,7 @@ export async function provisionRoutes(app: FastifyInstance) {
       return reply.status(404).send({
         error: "key_not_found",
         message:
-          "No verifiable public key on file for this agent. Re-provision with publicKey or as server-minted.",
+          "No verifiable public key on file for this agent. Re-provision with publicKey.",
       });
     }
 

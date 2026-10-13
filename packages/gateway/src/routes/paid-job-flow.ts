@@ -398,6 +398,7 @@ export async function createJobFromSession(
         );
 
         // Every milestone pays the gateway signer.
+        // requiredTier is carried for parity; Mode A ignores it at release.
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
           const addTx = await walletClient.writeContract({

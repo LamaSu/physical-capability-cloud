@@ -12,11 +12,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { PCC_API_KEY_LIVE_PREFIX } from "@pcc/spec";
 import { getRepos } from "../db.js";
-import {
-  generateEd25519Keypair,
-  normalizePublicKeyHex,
-  type Ed25519Keypair,
-} from "./ed25519.js";
+import { normalizePublicKeyHex } from "./ed25519.js";
 
 // Note: FastifyRequest augmentation for apiKeyId/operatorId lives in
 // require-auth.ts alongside the userId declaration.
@@ -117,18 +113,13 @@ export function classifyProvisionError(err: unknown): ProvisionErrorCode | "unkn
  *
  * `rawKey` is the bearer token (shown ONCE, then forgotten).
  *
- * `record` is the persisted row, including the agent's Ed25519 public key
- * if one was provided/generated.
- *
- * `ed25519` is populated iff this provision call MINTED a keypair (caller
- * didn't bring their own). It is the one and only chance the caller has
- * to capture the matching private key — surface it to the agent in the
- * HTTP response and forget it.
+ * `record` stores an Ed25519 public key only when supplied by the caller.
+ * Otherwise it has no signing key on file. Provisioning never generates
+ * or returns a signing private key.
  */
 export interface ProvisionResult {
   rawKey: string;
   record: ReturnType<ReturnType<typeof getRepos>["apiKeys"]["insert"]>;
-  ed25519?: Ed25519Keypair;
 }
 
 export function provisionApiKey(opts: {
@@ -140,14 +131,10 @@ export function provisionApiKey(opts: {
   expiresInDays?: number;
   metadata?: Record<string, unknown>;
   /**
-   * Optional caller-provided Ed25519 public key (hex, 64 chars, no 0x).
-   * When set, the gateway stores it AS-IS and does NOT generate one or
-   * return any private material — the agent already has the matching
-   * private key.
-   *
-   * When omitted, the gateway generates a fresh Ed25519 keypair, stores
-   * the public half, and returns the private half in the ProvisionResult
-   * (only chance to capture it).
+   * Optional caller-provided Ed25519 public key (64 hex chars, optional 0x).
+   * The gateway normalizes and stores only this public key. When omitted,
+   * no signing key is on file. Provisioning never generates or returns
+   * the private half.
    *
    * Invalid input (non-hex, wrong length) throws — the route layer maps
    * that to HTTP 400.
@@ -175,9 +162,8 @@ export function provisionApiKey(opts: {
       );
     }
 
-    // Ed25519: BYOK or mint
+    // Only caller-supplied Ed25519 public keys are stored.
     let storedPublicKeyHex: string | null = null;
-    let mintedKeypair: Ed25519Keypair | undefined;
     if (opts.publicKey !== undefined) {
       const cleaned = normalizePublicKeyHex(opts.publicKey);
       if (cleaned === null) {
@@ -187,9 +173,6 @@ export function provisionApiKey(opts: {
         );
       }
       storedPublicKeyHex = cleaned;
-    } else {
-      mintedKeypair = generateEd25519Keypair();
-      storedPublicKeyHex = mintedKeypair.publicKeyHex;
     }
 
     const { rawKey, keyHash, keyPrefix } = generateApiKey();
@@ -213,7 +196,7 @@ export function provisionApiKey(opts: {
       publicKey: storedPublicKeyHex,
     });
 
-    return { rawKey, record, ed25519: mintedKeypair };
+    return { rawKey, record };
   } finally {
     provisioningLocks.delete(opts.operatorId);
   }

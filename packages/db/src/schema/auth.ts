@@ -30,14 +30,9 @@ export const apiKeys = sqliteTable("api_keys", {
   metadata: text("metadata"),
   /**
    * Raw Ed25519 public key the agent signs evidence + heartbeats with.
-   * Hex-encoded 32 bytes (64 hex chars), no `0x` prefix. Nullable for
-   * backward compatibility with pre-migration rows.
-   *
-   * Set at provision time:
-   *   - server-generated when `POST /api/auth/provision` runs without a
-   *     `publicKey` field (the matching private key is returned ONCE in
-   *     the response body, then forgotten).
-   *   - bring-your-own when the agent provides `publicKey` in the request.
+   * Hex-encoded 32 bytes (64 hex chars), no `0x` prefix. Set only from
+   * the caller's `publicKey`; NULL otherwise. The gateway never generates
+   * or returns the private half.
    *
    * See `POST /api/agents/:id/verify` for the verification surface.
    */
