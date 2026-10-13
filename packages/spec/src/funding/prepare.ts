@@ -55,7 +55,14 @@ import {
 /** Seconds the acceptance must outlive the latest block, and the slack kept above the 10-day reclaim floor. */
 export const DEFAULT_MARGIN_SECONDS = 300n;
 
-/** Buyer intent from the caller's own submit record, operator choice and payee list, never a gateway response. */
+/**
+ * Buyer intent fixed in the caller's own records before requesting the prepare payload; never copy it from that
+ * payload. PCC MVP units bind termsHash, acceptedPolicyDigest and compositionRoots exactly (or bind jobPolicyHash,
+ * which commits to everything), and must not waive them. Trusted values come from the caller's own trusted record
+ * (N150's canonical funded policy or the CANONICAL record), held like the pins, never copied from the payload or
+ * any gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true and leave
+ * the terms, evidence policy or composition to the payload's author; prepared.unchecked lists them.
+ */
 export interface FundingExpectations {
   jobId: string;
   operator: Address;
@@ -85,6 +92,8 @@ export interface PrepareFundingArgs {
   quote: { maxTotalGross: bigint };
   /** Required independent buyer intent; explicit "unchecked" waivers are recorded in PreparedFunding.unchecked. */
   expect: FundingExpectations;
+  /** Explicit opt-in to exact-literal commitment waivers outside the MVP. Defaults to false. */
+  allowUnchecked?: boolean;
   /**
    * Extra pins by chain id; required for the factory until a V-next deployment is pinned in this module.
    * Every pin, especially the factory, must come from the caller's own trusted configuration,
@@ -290,7 +299,14 @@ function typedDataProblem(got: PreparePayload["typedData"], want: JobPolicyTyped
 }
 
 export async function prepareFunding(args: PrepareFundingArgs): Promise<PreparedFunding> {
+  if ("allowUnchecked" in args && typeof args.allowUnchecked !== "boolean") {
+    refuse("BAD_EXPECTATION", "allowUnchecked must be true or false");
+  }
   const expect = copyExpectations(args.expect);
+  const waived = (["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const).filter((field) => expect[field] === "unchecked");
+  if (waived.length !== 0 && args.allowUnchecked !== true) {
+    refuse("BAD_EXPECTATION", `${waived.join(", ")} waived without allowUnchecked: true; the PCC MVP binds all three exactly and must not waive them`);
+  }
   // Everything judged below comes from this parse, taken before the first await.
   const p = parsePreparePayload(args.payload);
   const maxTotalGross = args.quote?.maxTotalGross;

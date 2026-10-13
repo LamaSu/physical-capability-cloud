@@ -201,17 +201,46 @@ describe("buyer intent from the caller's own records", () => {
   });
 
   for (const field of ["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const) {
+    for (const allowUnchecked of [undefined, false]) {
+      it(`BAD_EXPECTATION before any RPC: ${field} waiver with allowUnchecked ${allowUnchecked}`, async () => {
+        const { fx, chain, prepare } = await setup();
+        await expect(prepare(fx.wire(), { expect: { ...testExpect(fx), [field]: "unchecked" }, ...(allowUnchecked === undefined ? {} : { allowUnchecked }) }))
+          .rejects.toMatchObject({ code: "BAD_EXPECTATION", message: expect.stringContaining(field) });
+        expect(chain.state.log).toEqual([]);
+      });
+    }
     it(`the explicit ${field} waiver is accepted and listed`, async () => {
       const { fx, prepare } = await setup();
-      const prepared = await prepare(fx.wire(), { expect: { ...testExpect(fx), [field]: "unchecked" } });
+      const prepared = await prepare(fx.wire(), { expect: { ...testExpect(fx), [field]: "unchecked" }, allowUnchecked: true });
       expect(prepared.unchecked).toEqual([field]);
       expect(prepared.expect[field]).toBe("unchecked");
     });
   }
   it("lists all explicit waivers in a stable order", async () => {
     const { fx, prepare } = await setup();
-    const prepared = await prepare(fx.wire(), { expect: { ...testExpect(fx), termsHash: "unchecked", acceptedPolicyDigest: "unchecked", compositionRoots: "unchecked" } });
+    const prepared = await prepare(fx.wire(), { expect: { ...testExpect(fx), termsHash: "unchecked", acceptedPolicyDigest: "unchecked", compositionRoots: "unchecked" }, allowUnchecked: true });
     expect(prepared.unchecked).toEqual(["termsHash", "acceptedPolicyDigest", "compositionRoots"]);
+  });
+
+  it.each(["true", 1, null, undefined])("BAD_EXPECTATION before any RPC: malformed allowUnchecked %s", async (value) => {
+    const { fx, chain, prepare } = await setup();
+    await expect(prepare(fx.wire(), { allowUnchecked: value as never })).rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+    expect(chain.state.log).toEqual([]);
+  });
+
+  it("the default waiver refusal names all waived fields and the MVP rule", async () => {
+    const { fx, chain, prepare } = await setup();
+    const result = prepare(fx.wire(), { expect: { ...testExpect(fx), termsHash: "unchecked", acceptedPolicyDigest: "unchecked", compositionRoots: "unchecked" } });
+    await expect(result).rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+    const error = await result.catch((e: FundingRefusal) => e) as FundingRefusal;
+    for (const field of ["termsHash", "acceptedPolicyDigest", "compositionRoots"]) expect(error.message).toContain(field);
+    expect(error.message).toContain("MVP binds all three exactly");
+    expect(chain.state.log).toEqual([]);
+  });
+
+  it("explicit false permits an all-bound policy with no waivers", async () => {
+    const { prepare } = await setup();
+    expect((await prepare(undefined, { allowUnchecked: false })).unchecked).toEqual([]);
   });
 
   it("matches addresses and bytes by value regardless of hex letter case", async () => {

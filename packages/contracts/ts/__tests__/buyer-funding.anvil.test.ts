@@ -263,6 +263,7 @@ describe.skipIf(!RUN)("buyer funding with @pcc/spec/funding against the real V-n
   it("a buyer EOA runs prepare -> sign -> approve -> fund; the escrow's own state says funded, and balances move by exactly ΣG", async () => {
     const { compiled, payload } = await gatewayPrepare("A");
     const prepared: PreparedFunding = await prepare(payload, compiled, "A");
+    expect(prepared.unchecked).toEqual([]);
     // The SDK's independent recomputation agrees with the canonical compiler.
     expect(prepared.escrow).toBe(compiled.escrow);
     expect(prepared.digest).toBe(compiled.digest);

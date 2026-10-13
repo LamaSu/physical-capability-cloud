@@ -15,8 +15,12 @@
  *
  * A gateway (or anything else) never gets the buyer's key: the SDK signs and sends from the caller's own wallet,
  * and only after verifying every term. There is no x402 path: x402 cannot fund a V-next escrow (plan G10).
- * Supply expect from your own submit record, operator choice and payee list. Each "unchecked" waiver is exposed
- * in prepared.unchecked; it explicitly leaves that commitment unbound by the buyer.
+ * Fix expect in your own submit record, operator choice and payee list before requesting the prepare payload.
+ * PCC MVP units bind termsHash, acceptedPolicyDigest and compositionRoots exactly (or bind jobPolicyHash, which
+ * commits to everything), and must not waive them. Trusted values come from the caller's own trusted record
+ * (N150's canonical funded policy or the CANONICAL record), held like the pins, never copied from the payload or
+ * any gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
+ * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.
  * Every pin, especially the factory, must come from the caller's own trusted configuration,
  * never from the gateway payload or any gateway response.
  */
