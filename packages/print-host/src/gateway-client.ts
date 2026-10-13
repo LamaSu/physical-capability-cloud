@@ -123,6 +123,21 @@ function defaultEmergencyStopReader(): EStopDecision {
   return { proceed: false, why: "reader_unavailable" };
 }
 
+/** The production poll contract requires an explicit clear and an own job list. */
+export function strictEmergencyStopReader(body: Readonly<Record<string, unknown>>): EStopDecision {
+  try {
+    if (!object(body)) return { proceed: false, why: "malformed" };
+    if (!Object.hasOwn(body, "emergencyStop")) return { proceed: false, why: "absent" };
+    const stop = own(body, "emergencyStop");
+    if (stop === "stopped") return { proceed: false, why: "stopped" };
+    if (stop === "unavailable") return { proceed: false, why: "unavailable" };
+    if (stop === "clear" && Array.isArray(own(body, "jobs"))) return { proceed: true };
+    return { proceed: false, why: "malformed" };
+  } catch {
+    return { proceed: false, why: "malformed" };
+  }
+}
+
 function readStop(reader: EmergencyStopReader, body: ObjectBody): EStopDecision {
   try {
     const decision: unknown = reader(body);

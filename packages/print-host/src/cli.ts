@@ -3,11 +3,22 @@ import { realpathSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { acceptanceDigest, domainSeparator, jobPolicyHash } from "@pcc/contracts/vnext";
+import { getAddress } from "viem";
 import { checkHostConfig, HostConfigError, loadHostConfig } from "./config.js";
+import type { HostConfig } from "./config.js";
+import { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
+import type { GatewayClient, GatewayClientConfig } from "./gateway-client.js";
+import { createHost, HOST_LOG_CODES } from "./host.js";
+import { createJobJournal, JournalError } from "./journal.js";
+import { defaultJobInputSource, fileJobInputSource } from "./job-inputs.js";
 import { generateHostKeys, KeyGenerationError } from "./keygen.js";
-import { KeyFileError, loadOperatorKey, OperatorSigningError } from "./keys.js";
+import { KeyFileError, loadDeviceKey, loadOperatorKey, OperatorSigningError } from "./keys.js";
 import { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "./policy-json.js";
-import { SecretFileError } from "./secret-file.js";
+import { readSecretFile, SecretFileError } from "./secret-file.js";
+// The kernel barrel starts a shop server at import time. This existing private
+// workspace leaf constructs only the printer adapter.
+import { IppAdapter } from "../../kernel/dist/adapters/ipp-adapter.js";
+import type { MachineAdapter } from "../../kernel/dist/adapters/types.js";
 
 export interface CliIo {
   stdout: { write(text: string): unknown };
@@ -16,7 +27,103 @@ export interface CliIo {
 
 const usage = "Usage: print-host keygen --out <dir> [--not-after <ISO>]\n"
   + "       print-host check-config <path>\n"
+  + "       print-host run --config <path> [--once] [--poll-only] [--inputs-dir <dir>]\n"
   + "       print-host sign-policy --config <cfg> --terms <terms.json> --input <policy.json> --out <sig.json>\n";
+
+export interface CliPrintComponents {
+  adapter: MachineAdapter;
+  dispose(): Promise<void>;
+}
+
+/** Local factories let CLI tests exercise the real host without a network or printer. */
+export interface CliRunRuntime {
+  createGateway?: (config: GatewayClientConfig) => GatewayClient;
+  createPrinter?: (config: HostConfig) => CliPrintComponents;
+}
+
+interface RunOptions {
+  configPath: string;
+  once: boolean;
+  pollOnly: boolean;
+  inputsDir?: string;
+}
+
+function parseRunOptions(argv: string[]): RunOptions | undefined {
+  let configPath: string | undefined;
+  let inputsDir: string | undefined;
+  let once = false;
+  let pollOnly = false;
+  for (let index = 1; index < argv.length; index += 1) {
+    const flag = argv[index];
+    if (flag === "--once" && !once) once = true;
+    else if (flag === "--poll-only" && !pollOnly) pollOnly = true;
+    else if ((flag === "--config" && configPath === undefined)
+      || (flag === "--inputs-dir" && inputsDir === undefined)) {
+      const value = argv[++index];
+      if (!value || value.startsWith("--")) return undefined;
+      if (flag === "--config") configPath = value;
+      else inputsDir = value;
+    } else return undefined;
+  }
+  return configPath ? { configPath, once, pollOnly, inputsDir } : undefined;
+}
+
+function createPrinter(config: HostConfig): CliPrintComponents {
+  const adapter = new IppAdapter(config.deviceId, {
+    uri: config.printer.uri, kernelId: config.kernelId, mockMode: false,
+  });
+  return { adapter, dispose: () => adapter.dispose() };
+}
+
+async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime): Promise<void> {
+  const shutdown = new AbortController();
+  const stop = () => shutdown.abort();
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  let printer: CliPrintComponents | undefined;
+  try {
+    const config = await loadHostConfig(options.configPath);
+    // Poll-only is usable before key provisioning and never opens the printer.
+    // Real mode uses only checkHostConfig's public operator address; the
+    // operator's signing authority is never passed into the run loop.
+    const identity = options.pollOnly ? undefined : await checkHostConfig(config);
+    const deviceKey = identity ? await loadDeviceKey(config.keys.deviceKeyFile, {
+      delegationBinding: { chainId: config.chain.chainId, operator: getAddress(identity.operatorAddress) },
+    }) : undefined;
+    const apiBytes = await readSecretFile(config.gateway.apiKeyFile);
+    let gateway: GatewayClient;
+    try {
+      const text = apiBytes.toString("utf8");
+      const apiKey = text.endsWith("\r\n") ? text.slice(0, -2)
+        : text.endsWith("\n") ? text.slice(0, -1) : text;
+      if (!apiKey || /\s/.test(apiKey)) throw new HostConfigError("bad_api_key", config.gateway.apiKeyFile);
+      gateway = (runtime.createGateway ?? createGatewayClient)({
+        baseUrl: config.gateway.baseUrl, kernelId: config.kernelId, apiKey,
+        emergencyStopReader: strictEmergencyStopReader,
+      });
+    } finally { apiBytes.fill(0); }
+    if (!options.pollOnly) printer = (runtime.createPrinter ?? createPrinter)(config);
+    const host = createHost({
+      config, gateway, adapter: printer?.adapter, deviceKey, operatorAddress: identity?.operatorAddress,
+      inputSource: options.inputsDir ? fileJobInputSource(options.inputsDir) : defaultJobInputSource,
+      journal: createJobJournal(config.dataDir), pollOnly: options.pollOnly,
+      stopSignal: shutdown.signal,
+      logger: (code) => {
+        // Preserve the runtime's closed logging contract at the CLI boundary.
+        if ((HOST_LOG_CODES as readonly string[]).includes(code)) io.stdout.write(`${code}\n`);
+      },
+    });
+    if (options.once) {
+      const tick = await host.runOnce();
+      if (tick.kind === "halted") throw new JournalError("journal_write_failed");
+    }
+    else await host.run(shutdown.signal);
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    await printer?.dispose();
+  }
+}
 
 type PolicyCliErrorCode = "bad_arguments" | "output_exists" | "write_failed";
 class PolicyCliError extends Error {
@@ -72,7 +179,7 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
 }
 
 /** Parse arguments without ever interpolating an untrusted argument into output. */
-export async function main(argv: string[], io: CliIo): Promise<number> {
+export async function main(argv: string[], io: CliIo, runtime: CliRunRuntime = {}): Promise<number> {
   if (argv[0] === "sign-policy") return signPolicy(argv, io);
   try {
     if (argv[0] === "keygen") {
@@ -105,12 +212,21 @@ export async function main(argv: string[], io: CliIo): Promise<number> {
       io.stdout.write(`${JSON.stringify(identity)}\n`);
       return 0;
     }
+    if (argv[0] === "run") {
+      const options = parseRunOptions(argv);
+      if (options) {
+        await runCommand(options, io, runtime);
+        return 0;
+      }
+    }
     io.stderr.write(usage);
     return 2;
   } catch (error) {
     if (error instanceof SecretFileError || error instanceof KeyFileError
       || error instanceof HostConfigError || error instanceof KeyGenerationError) {
       io.stderr.write(`${error.message}\n`);
+    } else if (error instanceof GatewayClientError || error instanceof JournalError) {
+      io.stderr.write(`${error.code}\n`);
     } else {
       // Native/library errors may contain input values. Never format them.
       io.stderr.write("internal_error: print-host operation failed\n");

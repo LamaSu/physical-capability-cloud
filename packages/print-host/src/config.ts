@@ -79,6 +79,7 @@ const hostConfigSchema = z.object({
     operatorKeyFile: absolutePath,
   }).strict(),
   dataDir: absolutePath,
+  eStopPollIntervalMs: z.number().int().min(1).max(60_000).optional(),
 }).strict();
 
 export type HostConfig = Readonly<{
@@ -89,6 +90,8 @@ export type HostConfig = Readonly<{
   gateway: Readonly<{ baseUrl: string; apiKeyFile: string }>;
   keys: Readonly<{ deviceKeyFile: string; operatorKeyFile: string }>;
   dataDir: string;
+  /** Re-check execution permission during a print (default 5 seconds). */
+  eStopPollIntervalMs?: number;
 }>;
 
 export interface HostConfigOptions {
@@ -108,7 +111,7 @@ export interface HostPublicIdentity {
 
 const knownFields = new Set([
   "kernelId", "deviceId", "printer", "uri", "chain", "chainId", "rpcUrlFile",
-  "gateway", "baseUrl", "apiKeyFile", "keys", "deviceKeyFile", "operatorKeyFile", "dataDir",
+  "gateway", "baseUrl", "apiKeyFile", "keys", "deviceKeyFile", "operatorKeyFile", "dataDir", "eStopPollIntervalMs",
 ]);
 
 function validateConfig(value: unknown, path: string): HostConfig {

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createGatewayClient,
   GatewayClientError,
+  strictEmergencyStopReader,
   type EmergencyStopReader,
 } from "../src/gateway-client.js";
 
@@ -318,6 +319,97 @@ describe("closed gateway status mapping", () => {
     const result = await client.reportInProgress(jobId);
     expect(result).toMatchObject({ ok: false, code, status });
     expectNoCanaries(result);
+  });
+});
+
+describe("strictEmergencyStopReader", () => {
+  it.each([
+    ["clear", "clear", { proceed: true }],
+    ["stopped", "stopped", { proceed: false, why: "stopped" }],
+    ["unavailable", "unavailable", { proceed: false, why: "unavailable" }],
+    ["undefined", undefined, { proceed: false, why: "malformed" }],
+    ["null", null, { proceed: false, why: "malformed" }],
+    ["true", true, { proceed: false, why: "malformed" }],
+    ["false", false, { proceed: false, why: "malformed" }],
+    ["number", 0, { proceed: false, why: "malformed" }],
+    ["bigint", 1n, { proceed: false, why: "malformed" }],
+    ["symbol", Symbol("clear"), { proceed: false, why: "malformed" }],
+    ["function", () => "clear", { proceed: false, why: "malformed" }],
+    ["CLEAR", "CLEAR", { proceed: false, why: "malformed" }],
+    ["leading whitespace", " clear", { proceed: false, why: "malformed" }],
+    ["trailing whitespace", "clear ", { proceed: false, why: "malformed" }],
+    ["empty string", "", { proceed: false, why: "malformed" }],
+    ["array", ["clear"], { proceed: false, why: "malformed" }],
+    ["object", { emergencyStop: "clear" }, { proceed: false, why: "malformed" }],
+    ["boxed string", new String("clear"), { proceed: false, why: "malformed" }],
+  ] as const)("maps own emergencyStop %s with an own jobs array", (_label, emergencyStop, expected) => {
+    expect(strictEmergencyStopReader({ jobs: [], emergencyStop })).toEqual(expected);
+  });
+
+  it.each([
+    ["missing emergencyStop", { jobs: [] }, "absent"],
+    ["missing both properties", {}, "absent"],
+    ["inherited emergencyStop", Object.assign(Object.create({ emergencyStop: "clear" }), { jobs: [] }), "absent"],
+    ["missing jobs", { emergencyStop: "clear" }, "malformed"],
+    ["inherited jobs", Object.assign(Object.create({ jobs: [] }), { emergencyStop: "clear" }), "malformed"],
+  ] as const)("refuses %s", (_label, body, why) => {
+    expect(strictEmergencyStopReader(body)).toEqual({ proceed: false, why });
+  });
+
+  it.each([
+    ["undefined", undefined], ["null", null], ["boolean", true],
+    ["number", 0], ["bigint", 1n], ["string", "[]"],
+    ["symbol", Symbol("jobs")], ["function", () => []], ["object", { length: 0 }],
+  ] as const)("refuses clear with jobs of type %s", (_label, jobs) => {
+    expect(strictEmergencyStopReader({ emergencyStop: "clear", jobs })).toEqual({ proceed: false, why: "malformed" });
+  });
+
+  it.each(["stopped", "unavailable"] as const)("preserves %s when jobs are missing", (emergencyStop) => {
+    expect(strictEmergencyStopReader({ emergencyStop })).toEqual({ proceed: false, why: emergencyStop });
+  });
+
+  it("accepts a null-prototype body with both own properties", () => {
+    expect(strictEmergencyStopReader(Object.assign(Object.create(null), { emergencyStop: "clear", jobs: [] })))
+      .toEqual({ proceed: true });
+  });
+
+  it.each(["emergencyStop", "jobs"])("does not read an inherited %s accessor", (property) => {
+    const getter = vi.fn(() => { throw new Error(noiseString); });
+    const prototype = Object.defineProperty({}, property, { get: getter });
+    const body = Object.assign(Object.create(prototype), property === "emergencyStop" ? { jobs: [] } : { emergencyStop: "clear" });
+    expect(strictEmergencyStopReader(body)).toEqual({ proceed: false, why: property === "emergencyStop" ? "absent" : "malformed" });
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it.each(["emergencyStop", "jobs"])("maps a throwing own %s accessor to malformed", (property) => {
+    const body = Object.defineProperty({ jobs: [], emergencyStop: "clear" }, property, {
+      get() { throw new Error(noiseString); },
+    });
+    const decision = strictEmergencyStopReader(body);
+    expect(decision).toEqual({ proceed: false, why: "malformed" });
+    expectNoCanaries(decision);
+  });
+
+  it("maps a throwing own-property check to malformed", () => {
+    const body = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error(noiseString); } });
+    expect(strictEmergencyStopReader(body)).toEqual({ proceed: false, why: "malformed" });
+  });
+
+  it("maps a revoked proxy to malformed", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    expect(strictEmergencyStopReader(proxy)).toEqual({ proceed: false, why: "malformed" });
+  });
+
+  it.each([null, undefined, [], "clear", true, 0, 1n, Symbol("body"), () => ({})])("refuses a nonobject body (%#)", (body) => {
+    expect(strictEmergencyStopReader(body as unknown as Record<string, unknown>)).toEqual({ proceed: false, why: "malformed" });
+  });
+
+  it("reads the production contract through a gateway poll without changing the library placeholder", async () => {
+    const { client } = fixture(json({ jobs: [], emergencyStop: "clear" }), { emergencyStopReader: strictEmergencyStopReader });
+    expect(await client.pollJobs()).toMatchObject({ ok: true, value: { stop: { proceed: true } } });
+    expect(await fixture(json({ jobs: [], emergencyStop: "clear" })).client.pollJobs())
+      .toMatchObject({ ok: true, value: { stop: { proceed: false, why: "reader_unavailable" } } });
   });
 });
 

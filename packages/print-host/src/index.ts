@@ -16,13 +16,19 @@ export type {
 } from "./keygen.js";
 export { loadHostConfig, checkHostConfig, HostConfigError } from "./config.js";
 export type { HostConfig, HostConfigOptions, HostConfigErrorCode, HostPublicIdentity } from "./config.js";
-export type { CliIo } from "./cli.js";
-export { createGatewayClient, GatewayClientError } from "./gateway-client.js";
+export type { CliIo, CliRunRuntime, CliPrintComponents } from "./cli.js";
+export { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
 export type {
   GatewayClient, GatewayClientConfig, GatewayClientErrorCode, GwCode, GwSubCode, GwResult,
   EStopDecision, EmergencyStopReader, RelayEvidenceBundle, PollJobsValue,
   HeartbeatValue, InProgressValue, RelayEvidenceReceipt,
 } from "./gateway-client.js";
+export { createHost, HOST_LOG_CODES } from "./host.js";
+export type { HostDeps, HostLogCode, HostPrintOptions, HostTickResult, HostTimers } from "./host.js";
+export { createJobJournal, JournalError, JOURNAL_STATES } from "./journal.js";
+export type { JobJournal, JournalRecord, JournalState, JournalCode, JournalErrorCode } from "./journal.js";
+export { defaultJobInputSource, fileJobInputSource, JOB_INPUT_CODES } from "./job-inputs.js";
+export type { JobInputs, JobInputSource, JobInputResult, JobInputCode } from "./job-inputs.js";
 export { createCarrierClient } from "./carrier-client.js";
 export { openUnitEvidenceSession, resumeUnitEvidenceSession, UnitSessionError } from "./unit-session.js";
 export type {

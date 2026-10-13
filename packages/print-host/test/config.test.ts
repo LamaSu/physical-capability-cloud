@@ -105,6 +105,18 @@ describe("host configuration", () => {
     for (const nested of [config.chain, config.gateway, config.keys, config.printer]) expect(Object.isFrozen(nested)).toBe(true);
   });
 
+  it("accepts an explicit e-stop polling interval", async () => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, eStopPollIntervalMs: 2_000 });
+    expect((await loadHostConfig(setup.path)).eStopPollIntervalMs).toBe(2_000);
+  });
+
+  it.each([0, -1, 1.5, 60_001, "5000"])("refuses an invalid e-stop interval (%s)", async (eStopPollIntervalMs) => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, eStopPollIntervalMs });
+    await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema");
+  });
+
   it.each([8453, 1, 11155111])("refuses chain %s with an explicit testnet-only error", async (chainId) => {
     const setup = await fixture();
     await setup.save({ ...setup.config, chain: { ...setup.config.chain, chainId } });

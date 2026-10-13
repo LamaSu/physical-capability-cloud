@@ -1,10 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
+import { createGatewayClient } from "../src/gateway-client.js";
+import { HOST_LOG_CODES } from "../src/host.js";
+import { FakeMachineAdapter } from "../src/testing/fake-machine-adapter.js";
 
 vi.mock("../src/keygen.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/keygen.js")>();
@@ -32,6 +35,76 @@ function capture() {
     stderr: { write: (text: string) => { stderr += text; } },
   };
   return { io, output: () => ({ stdout, stderr }) };
+}
+
+async function runFixture(stopFields: Record<string, unknown> = { emergencyStop: "clear" }) {
+  const root = await temporaryDirectory();
+  const generated = await generateHostKeys(join(root, "keys"));
+  const apiToken = `pcc_test_${randomBytes(24).toString("hex")}`;
+  const providerToken = randomBytes(24).toString("hex");
+  const rpcUrlFile = join(root, "rpc-url");
+  const apiKeyFile = join(root, "api-key");
+  await writeFile(rpcUrlFile, `https://rpc.example.test/${providerToken}\n`, { mode: 0o600 });
+  await writeFile(apiKeyFile, `${apiToken}\r\n`, { mode: 0o600 });
+  const dataDir = join(root, "data");
+  const inputsDir = join(root, "inputs");
+  await mkdir(dataDir, { mode: 0o700 });
+  await mkdir(inputsDir, { mode: 0o700 });
+  const configFile = join(root, "host.json");
+  await writeFile(configFile, JSON.stringify({
+    kernelId: "n144-cli-run", deviceId: "printer-cli-run",
+    printer: { uri: "ipp://localhost:631/printers/test" },
+    chain: { chainId: 84532, rpcUrlFile },
+    gateway: { baseUrl: "https://gateway.example.test", apiKeyFile },
+    keys: { deviceKeyFile: generated.paths.deviceKeyFile, operatorKeyFile: generated.paths.operatorKeyFile },
+    dataDir,
+  }), { mode: 0o600 });
+  const jobName = randomBytes(24).toString("hex");
+  // The deterministic fake adapter timestamps its events from this fixture epoch.
+  const fundedAt = Math.floor(Date.UTC(2026, 9, 9) / 1_000) - 60;
+  await writeFile(join(inputsDir, "cli-job.json"), JSON.stringify({
+    jobName, totalPages: 1, documentFile: "buyer.pdf",
+    unit: {
+      settlementUnitId: `0x${randomBytes(32).toString("hex")}`,
+      challengeNonce: `0x${randomBytes(32).toString("hex")}`,
+      fundedAt, reclaimAt: Math.floor(Date.now() / 1_000) + 3 * 24 * 60 * 60,
+    },
+  }));
+  await writeFile(join(inputsDir, "buyer.pdf"), "%PDF-1.7\nprivate buyer document\n");
+  const calls: string[] = [];
+  const fetchImpl = vi.fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>(async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    calls.push(path);
+    let body: unknown;
+    if (path.endsWith("/heartbeat")) body = { acknowledged: true };
+    else if (path.endsWith("/jobs")) body = {
+      ...stopFields, jobs: [{ id: "cli-job", kernelId: "n144-cli-run", status: "queued" }],
+    };
+    else if (path.endsWith("/job-status")) body = { updated: true };
+    else if (path.endsWith("/evidence")) {
+      const request = JSON.parse(String(init?.body));
+      body = { stored: true, jobId: request.jobId, contentHash: request.evidence.bundleHash, hashModel: "event_bundle_hash" };
+    } else throw new Error("unexpected fake gateway call");
+    return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  const adapter = new FakeMachineAdapter("printer-cli-run", "n144-cli-run");
+  adapter.source.simulated = false;
+  const dispose = vi.spyOn(adapter, "dispose");
+  const createPrinter = vi.fn<[], { adapter: FakeMachineAdapter; dispose(): Promise<void> }>(() => ({
+    adapter, dispose: () => adapter.dispose(),
+  }));
+  const device = JSON.parse(await readFile(generated.paths.deviceKeyFile, "utf8"));
+  const operator = JSON.parse(await readFile(generated.paths.operatorKeyFile, "utf8"));
+  return { configFile, inputsDir, dataDir, calls, fetchImpl, adapter, dispose, createPrinter,
+    secrets: [apiToken, providerToken, device.seed, operator.privateKey.slice(2), jobName, "private buyer document"] };
+}
+
+function assertRunOutput(captured: ReturnType<typeof capture>, secrets: string[]) {
+  const { stdout, stderr } = captured.output();
+  expect(stderr).toBe("");
+  const lines = stdout.trim().split("\n").filter(Boolean);
+  expect(lines.every(line => (HOST_LOG_CODES as readonly string[]).includes(line))).toBe(true);
+  for (const secret of secrets) expect((stdout + stderr).includes(secret)).toBe(false);
 }
 
 describe("print-host CLI", () => {
@@ -95,6 +168,10 @@ describe("print-host CLI", () => {
     ["keygen", "--out", "relative-unused", "--out", "relative-unused"],
     ["keygen", "--unknown", "value"], ["keygen", "--not-after", "2099-01-01T00:00:00Z"],
     ["check-config"], ["check-config", "relative-unused", "extra"],
+    ["run"], ["run", "--config"], ["run", "--config", "unused", "--once", "--once"],
+    ["run", "--config", "unused", "--poll-only", "--poll-only"],
+    ["run", "--config", "unused", "--inputs-dir"], ["run", "--config", "unused", "--unknown"],
+    ["run", "--config", "unused", "--config", "unused"],
   ])("bad arguments exit 2 (%#)", async (...argv: string[]) => {
     const captured = capture();
     expect(await main(argv, captured.io)).toBe(2);
@@ -126,5 +203,131 @@ describe("print-host CLI", () => {
     // A failed mutation must not print the secret in the assertion's diagnostics.
     expect(captured.output().stderr === "internal_error: print-host operation failed\n",
       "internal errors use only the closed message").toBe(true);
+  });
+
+  it("run --once defaults to the strict reader and claims a job with clear e-stop and available inputs", async () => {
+    const fixture = await runFixture();
+    fixture.adapter.scriptStart({ outcome: "busy" });
+    const fetchImpl = vi.fn<Parameters<typeof fetch>, ReturnType<typeof fetch>>(async (input, init) => {
+      // After discovery supplies the job, the pre-print poll can have an empty
+      // queue: its own clear field and jobs array still authorize this print.
+      if (new URL(String(input)).pathname.endsWith("/jobs") && fixture.calls.includes("/api/operator/jobs")) {
+        fixture.calls.push("/api/operator/jobs");
+        return new Response(JSON.stringify({ jobs: [], emergencyStop: "clear" }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return fixture.fetchImpl(input, init);
+    });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway: config => createGatewayClient({ ...config, fetchImpl }),
+      createPrinter: fixture.createPrinter,
+    })).toBe(0);
+    expect(fixture.calls).toEqual([
+      "/api/operator/heartbeat", "/api/operator/jobs", "/api/operator/job-status", "/api/operator/jobs",
+    ]);
+    expect(fixture.adapter.commands.map(command => command.type)).toEqual(["start"]);
+    const records = (await readFile(join(fixture.dataDir, "journal", "cli-job.jsonl"), "utf8"))
+      .trim().split("\n").map(line => JSON.parse(line));
+    expect(records.map(record => record.state)).toEqual(["claimed", "in_progress_reported", "printing", "busy"]);
+    expect(fixture.dispose).toHaveBeenCalledOnce();
+    assertRunOutput(captured, fixture.secrets);
+  });
+
+  it("run --once defaults to the strict reader and claims nothing when emergencyStop is absent", async () => {
+    const fixture = await runFixture({});
+    const createGateway = vi.fn((config: Parameters<typeof createGatewayClient>[0]) =>
+      createGatewayClient({ ...config, fetchImpl: fixture.fetchImpl }));
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway, createPrinter: fixture.createPrinter,
+    })).toBe(0);
+    expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
+    expect(fixture.adapter.commands).toEqual([]);
+    expect(await readdir(join(fixture.dataDir, "journal"))).toEqual([]);
+    expect(fixture.dispose).toHaveBeenCalledOnce();
+    assertRunOutput(captured, fixture.secrets);
+  });
+
+  it("run --poll-only never claims even with clear e-stop and available inputs", async () => {
+    const fixture = await runFixture();
+    // If --poll-only is removed, the real host can reach start and finish this
+    // refusal promptly instead of leaving the mutant waiting for a printer.
+    fixture.adapter.scriptStart({ outcome: "busy" });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway: config => createGatewayClient({
+        ...config, fetchImpl: fixture.fetchImpl, emergencyStopReader: () => ({ proceed: true }),
+      }),
+      createPrinter: fixture.createPrinter,
+    })).toBe(0);
+    expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
+    expect(fixture.adapter.commands).toEqual([]);
+    expect(await readdir(join(fixture.dataDir, "journal"))).toEqual([]);
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+    expect(fixture.dispose).not.toHaveBeenCalled();
+    assertRunOutput(captured, fixture.secrets);
+  });
+
+  it("run --poll-only works before operator and device keys or RPC credentials are provisioned", async () => {
+    const fixture = await runFixture();
+    const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+    await Promise.all([
+      rm(config.keys.deviceKeyFile), rm(config.keys.operatorKeyFile), rm(config.chain.rpcUrlFile),
+    ]);
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
+      createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+      createPrinter: fixture.createPrinter,
+    })).toBe(0);
+    expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+    expect(await readdir(join(fixture.dataDir, "journal"))).toEqual([]);
+    assertRunOutput(captured, fixture.secrets);
+  });
+
+  it("run --once exits 1 for an invalid journal instead of reporting a successful smoke test", async () => {
+    const fixture = await runFixture();
+    await mkdir(join(fixture.dataDir, "journal"), { mode: 0o700 });
+    await writeFile(join(fixture.dataDir, "journal", "cli-job.jsonl"), "invalid local journal\n", { mode: 0o600 });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
+      createGateway: config => createGatewayClient({ ...config, fetchImpl: fixture.fetchImpl }),
+      createPrinter: fixture.createPrinter,
+    })).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "journal_failed\n", stderr: "journal_write_failed\n" });
+    expect(fixture.calls).toEqual([]);
+    expect(fixture.adapter.commands).toEqual([]);
+    expect(fixture.createPrinter).not.toHaveBeenCalled();
+    expect(fixture.dispose).not.toHaveBeenCalled();
+  });
+
+  it.each(["SIGINT", "SIGTERM"] as const)("run --once handles %s by cancelling and posting signed failure evidence", async (signal) => {
+    const fixture = await runFixture();
+    fixture.adapter.scriptStart({ outcome: "success", jobId: 901 });
+    const captured = capture();
+    const before = process.listenerCount(signal);
+    const running = main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway: config => createGatewayClient({
+        ...config, fetchImpl: fixture.fetchImpl, emergencyStopReader: () => ({ proceed: true }),
+      }),
+      createPrinter: fixture.createPrinter,
+    });
+    await fixture.adapter.started();
+    process.emit(signal);
+    const result = await running;
+    expect(captured.output().stderr).toBe("");
+    expect(result).toBe(0);
+    expect(fixture.adapter.cancels).toEqual([901]);
+    expect(fixture.calls.filter(path => path.endsWith("/evidence"))).toHaveLength(1);
+    const bundle = JSON.parse(await readFile(join(fixture.dataDir, "journal", "cli-job.bundle.json"), "utf8"));
+    expect(bundle.kernelSignature.algorithm).toBe("ed25519");
+    expect(bundle.sessionKeyAuthorization).toBeDefined();
+    expect(bundle.events.some((event: { type: string }) => event.type === "execution_failed")).toBe(true);
+    expect(bundle.events.some((event: { type: string }) => event.type === "execution_completed")).toBe(false);
+    expect(fixture.dispose).toHaveBeenCalledOnce();
+    expect(process.listenerCount(signal)).toBe(before);
+    assertRunOutput(captured, fixture.secrets);
   });
 });
