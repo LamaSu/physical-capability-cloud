@@ -1,4 +1,4 @@
-import { encodeFunctionData, getAddress, zeroHash, type Address, type Hex } from "viem";
+import { encodeFunctionData, getAddress, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 
 export type OperatorChainId = 84532 | 31337;
 export type OperatorSigningErrorCode = "bad_input" | "bad_escrow" | "bad_bytes32" |
@@ -89,7 +89,9 @@ function inputRecord(input: unknown, fields: readonly string[]): Record<string, 
 }
 
 function escrowAddress(value: unknown): Address {
-  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) throw new OperatorSigningError("bad_escrow");
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value) || value === zeroAddress) {
+    throw new OperatorSigningError("bad_escrow");
+  }
   try {
     if (getAddress(value) === value) return value as Address;
   } catch { /* Collapse address-library exceptions to the closed code. */ }

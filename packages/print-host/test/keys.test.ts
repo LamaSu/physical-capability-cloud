@@ -1,12 +1,10 @@
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createPrivateKey, createPublicKey } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeKernelEd25519Signer } from "../src/kernel-signer.js";
-import { verifyBundleSignature } from "@pcc/kernel-sdk";
-import type { EvidenceBundle } from "@pcc/spec";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { KeyFileError, loadDeviceKey, loadOperatorKey, type KeyFileErrorCode } from "../src/keys.js";
 import type * as secretFile from "../src/secret-file.js";
@@ -15,7 +13,21 @@ const mocks = vi.hoisted(() => ({
   fileBuffers: [] as Buffer[],
   acceptAnyScalar: false,
   publicAccount: undefined as ReturnType<typeof privateKeyToAccount> | undefined,
+  captureDeviceBuffers: false,
+  deviceSeeds: [] as Uint8Array[],
+  deviceSecretKeys: [] as Uint8Array[],
 }));
+vi.mock("../src/kernel-signer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/kernel-signer.js")>();
+  return { ...actual, makeKernelEd25519Signer: vi.fn((...args: Parameters<typeof actual.makeKernelEd25519Signer>) => {
+    const signer = actual.makeKernelEd25519Signer(...args);
+    if (mocks.captureDeviceBuffers) {
+      mocks.deviceSeeds.push(args[0]!);
+      mocks.deviceSecretKeys.push(signer.secretKey);
+    }
+    return signer;
+  }) };
+});
 vi.mock("../src/secret-file.js", async (importOriginal) => {
   const actual = await importOriginal<typeof secretFile>();
   return { ...actual, readSecretFile: vi.fn(async (...args: Parameters<typeof actual.readSecretFile>) => {
@@ -38,6 +50,9 @@ beforeEach(async () => {
   mocks.fileBuffers = [];
   mocks.acceptAnyScalar = false;
   mocks.publicAccount = undefined;
+  mocks.captureDeviceBuffers = false;
+  mocks.deviceSeeds = [];
+  mocks.deviceSecretKeys = [];
   vi.mocked(privateKeyToAccount).mockClear();
   directory = await mkdtemp(join(tmpdir(), "ph2-keys-"));
   await chmod(directory, 0o700);
@@ -114,24 +129,39 @@ async function refused(document: Document | string, type: "device" | "operator",
 }
 
 describe("host key loading and redaction", () => {
-  it("device signFn produces the existing bundle signature format", async () => {
+  it("device public key derives from the recorded seed without exposing a general signer", async () => {
     const document = deviceDocument();
     const key = await loadDeviceKey(await writeDocument(document), { now });
     assertNoLeak(key, [secret(document)]);
-    expect(Reflect.ownKeys(key).sort()).toEqual(["publicKeyHex", "signingPublicKey", "signFn"].sort());
+    expect(Reflect.ownKeys(key).sort()).toEqual(["publicKeyHex", "signingPublicKey", "signDelegation", "signD2"].sort());
     assertNoOwnedSecretMaterial(key);
     expect(Object.hasOwn(key, "secretKey")).toBe(false);
     expect(Object.hasOwn(key, "seed")).toBe(false);
-    const digest = createHash("sha256").update("runtime bundle probe").digest("hex");
-    const bundleHash = `sha256:${digest}` as EvidenceBundle["bundleHash"];
-    const bundle: EvidenceBundle = {
-      id: "bundle-runtime", jobId: "job-runtime", stepId: "step-runtime", kernelId: "kernel-runtime",
-      assuranceTier: 0, events: [], bundleHash, kernelSignature: await key.signFn(bundleHash),
-      createdAt: now.toISOString(),
-    };
-    expect(verifyBundleSignature(bundle, Buffer.from(key.publicKeyHex, "hex"))).toBe(true);
+    const encoded = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.from(String(document.seed), "hex")]);
+    try {
+      const privateKey = createPrivateKey({ key: encoded, format: "der", type: "pkcs8" });
+      const publicKey = createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32);
+      expect(key.publicKeyHex === publicKey.toString("hex")).toBe(true);
+    } finally { encoded.fill(0); }
     expect(key.signingPublicKey === document.publicKey).toBe(true);
   });
+
+  for (const mismatch of [false, true]) {
+    it(`device zeroes the seed and derived secretKey on ${mismatch ? "public_mismatch" : "successful load"}`, async () => {
+      const document = deviceDocument();
+      if (mismatch) document.publicKey = deviceDocument().publicKey;
+      const path = await writeDocument(document);
+      mocks.captureDeviceBuffers = true;
+      if (mismatch) await expect(loadDeviceKey(path, { now })).rejects.toMatchObject({ code: "public_mismatch" });
+      else await loadDeviceKey(path, { now });
+      expect(mocks.deviceSeeds.length).toBe(1);
+      expect(mocks.deviceSecretKeys.length).toBe(1);
+      expect(mocks.deviceSeeds[0].length).toBe(32);
+      expect(mocks.deviceSecretKeys[0].length).toBe(64);
+      expect(mocks.deviceSeeds[0].every((byte) => byte === 0), "device seed was retained").toBe(true);
+      expect(mocks.deviceSecretKeys[0].every((byte) => byte === 0), "derived secretKey was retained").toBe(true);
+    });
+  }
 
   it("operator exposes only its public address and narrow signing closures", async () => {
     const document = operatorDocument();
