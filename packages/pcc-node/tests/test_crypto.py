@@ -1121,7 +1121,11 @@ def _write_pair(path, public_hex, secret_hex, mode=0o600):
     os.chmod(path, mode)
 
 
+# Without PyNaCl, every key operation is refused first (#374; see
+# TestWithoutPyNaClNoKeyIsUsed). Guarded file refusals need PyNaCl;
+# CI step 3 runs them with nothing skipped.
 class TestKeyFileSafety:
+    @needs_nacl
     @posix_only
     def test_a_new_key_file_is_owner_only_in_a_private_directory(self, tmp_path):
         path = tmp_path / "node" / "keys.json"
@@ -1129,6 +1133,7 @@ class TestKeyFileSafety:
         assert (os.stat(path).st_mode & 0o777) == 0o600
         assert (os.stat(path.parent).st_mode & 0o777) == 0o700
 
+    @needs_nacl
     @posix_only
     def test_a_key_file_others_can_read_is_refused(self, tmp_path):
         path = str(tmp_path / "keys.json")
@@ -1137,6 +1142,7 @@ class TestKeyFileSafety:
         with pytest.raises(KeyFileError, match="chmod 600"):
             load_or_create_keys(path)
 
+    @needs_nacl
     def test_a_mismatched_pair_is_refused(self, tmp_path):
         pub, _sec = generate_node_keys()
         _other_pub, other_sec = generate_node_keys()
@@ -1145,6 +1151,7 @@ class TestKeyFileSafety:
         with pytest.raises(KeyFileError, match="does not belong"):
             load_or_create_keys(path)
 
+    @needs_nacl
     def test_a_file_that_is_not_a_key_pair_is_refused(self, tmp_path):
         for text in ("not json", "{}", '{"public": "zz", "secret": "zz"}', '{"public": "00", "secret": "00"}'):
             path = tmp_path / "keys.json"
@@ -1153,6 +1160,7 @@ class TestKeyFileSafety:
             with pytest.raises(KeyFileError):
                 load_or_create_keys(str(path))
 
+    @needs_nacl
     def test_the_default_never_writes_into_the_working_directory(self, tmp_path, monkeypatch):
         work = tmp_path / "checkout"
         work.mkdir()
@@ -1167,6 +1175,7 @@ class TestKeyFileSafety:
         expected = os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
         assert crypto.default_keys_path() == expected
 
+    @needs_nacl
     def test_a_0_1_x_key_file_is_kept_only_by_an_explicit_move(self, tmp_path, monkeypatch):
         # Verdict 105c, finding 2: a key file in the working directory is never
         # adopted automatically. The operator keeps it by moving it into place.
@@ -1188,6 +1197,7 @@ class TestKeyFileSafety:
         os.replace(LEGACY_KEYS_PATH, new_path)
         assert load_or_create_keys() == (legacy_pub, legacy_sec)
 
+    @needs_nacl
     def test_a_broken_0_1_x_key_file_stops_the_node_rather_than_minting_a_new_identity(self, tmp_path, monkeypatch):
         work = tmp_path / "checkout"
         work.mkdir()
@@ -1199,6 +1209,7 @@ class TestKeyFileSafety:
             load_or_create_keys()
         assert not new_path.exists()
 
+    @needs_nacl
     def test_a_file_created_by_another_process_first_is_used(self, tmp_path, monkeypatch):
         path = str(tmp_path / "keys.json")
         theirs = load_or_create_keys(path)
@@ -1238,6 +1249,9 @@ class TestVerifyFailsClosedWithoutPynacl:
 # ---------------------------------------------------------------------------
 
 
+# Without PyNaCl, every key operation is refused first (#374; see
+# TestWithoutPyNaClNoKeyIsUsed). Guarded file refusals need PyNaCl;
+# CI step 3 runs them with nothing skipped.
 @posix_only
 class TestKeyFileTrust:
     def _legacy_setup(self, tmp_path, monkeypatch):
@@ -1248,6 +1262,7 @@ class TestKeyFileTrust:
         monkeypatch.setenv("PCC_NODE_KEYS_FILE", str(new_path))
         return work, new_path
 
+    @needs_nacl
     def test_a_legacy_key_file_others_could_read_is_locked_down_not_adopted(self, tmp_path, monkeypatch):
         work, new_path = self._legacy_setup(tmp_path, monkeypatch)
         pub, sec = generate_node_keys()
@@ -1257,6 +1272,7 @@ class TestKeyFileTrust:
         assert not new_path.exists()
         assert (os.stat(LEGACY_KEYS_PATH).st_mode & 0o777) == 0o600  # no longer readable by others
 
+    @needs_nacl
     def test_a_symlinked_legacy_key_file_is_not_adopted(self, tmp_path, monkeypatch):
         work, new_path = self._legacy_setup(tmp_path, monkeypatch)
         planted = tmp_path / "planted.json"
@@ -1267,6 +1283,7 @@ class TestKeyFileTrust:
             load_or_create_keys()
         assert not new_path.exists()
 
+    @needs_nacl
     def test_a_legacy_key_file_in_a_directory_others_can_write_is_not_adopted(self, tmp_path, monkeypatch):
         work, new_path = self._legacy_setup(tmp_path, monkeypatch)
         pub, sec = generate_node_keys()
@@ -1276,6 +1293,7 @@ class TestKeyFileTrust:
             load_or_create_keys()
         assert not new_path.exists()
 
+    @needs_nacl
     def test_a_legacy_key_file_owned_by_another_account_is_not_adopted(self, tmp_path, monkeypatch):
         work, new_path = self._legacy_setup(tmp_path, monkeypatch)
         pub, sec = generate_node_keys()
@@ -1300,6 +1318,7 @@ class TestKeyFileTrust:
             load_or_create_keys()
         assert not new_path.exists()
 
+    @needs_nacl
     def test_a_symlink_at_the_key_path_is_refused(self, tmp_path):
         planted = tmp_path / "planted.json"
         pub, sec = generate_node_keys()
@@ -1309,6 +1328,7 @@ class TestKeyFileTrust:
         with pytest.raises(KeyFileError, match="symbolic link"):
             load_or_create_keys(str(link))
 
+    @needs_nacl
     def test_a_key_directory_others_can_write_is_refused(self, tmp_path):
         shared = tmp_path / "shared"
         shared.mkdir()
@@ -1318,6 +1338,7 @@ class TestKeyFileTrust:
         with pytest.raises(KeyFileError, match="writable by other users"):
             load_or_create_keys(str(path))
 
+    @needs_nacl
     def test_no_key_is_created_in_a_directory_others_can_write(self, tmp_path):
         shared = tmp_path / "shared"
         shared.mkdir()
@@ -1326,6 +1347,7 @@ class TestKeyFileTrust:
             load_or_create_keys(str(shared / "keys.json"))
         assert not (shared / "keys.json").exists()
 
+    @needs_nacl
     def test_a_failed_key_write_leaves_no_partial_key_file(self, tmp_path, monkeypatch):
         path = tmp_path / "node" / "keys.json"
         real_dump = json.dump
