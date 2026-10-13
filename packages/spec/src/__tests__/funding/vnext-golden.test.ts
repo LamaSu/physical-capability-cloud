@@ -92,6 +92,9 @@ describe("jobIdHashOf matches the canonical compiler's UTF-8 convention", () => 
     ["UUID", "550e8400-e29b-41d4-a716-446655440000", "0x2f779c94a35dceba72fe536ce28c5fea7566753044cdf9da29f6402ea964b7f9"],
     ["empty", "", "0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470"],
     ["non-ASCII", "job-" + String.fromCodePoint(0x00e9, 0x5236, 0x1f680), "0x1ac77bc57577bbd13c8ad3398c4aeb284c754754804da522054d15230b264a71"],
+    ["mixed-case", "job-MiXeD-611", "0xdc9a06035fe8ce09e4e155be16c63b114998d84a6c337b7d47524c56385b2d55"],
+    ["leading/trailing spaces", " job-611-spaces ", "0x8f149ea280f850e7af958d43018b7ec73cd46152c1937e459fc3beb3e49e6c21"],
+    ["decomposed", "job-e" + String.fromCodePoint(0x0301), "0xa90ffb7b92574cd885df4f91e06234ab58f5b104b947b436255517309b57c5eb"],
   ])("%s job id", (_label, jobId, hash) => {
     expect(jobIdHashOf(jobId!)).toBe(hash);
   });
