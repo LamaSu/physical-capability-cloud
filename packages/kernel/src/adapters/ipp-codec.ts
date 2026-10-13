@@ -14,6 +14,7 @@ export interface IppMessage {
 }
 
 export const IPP_INT_MAX = 0x7fffffff;
+/** Shared decoded-object cap for groups, named attributes and all values. */
 export const IPP_MAX_ATTRIBUTES = 10_000;
 export const IPP_TAG = {
   OPERATION_ATTRIBUTES: 0x01, JOB_ATTRIBUTES: 0x02, END_OF_ATTRIBUTES: 0x03,
@@ -113,6 +114,10 @@ export function decodeIppMessage(bytes: Uint8Array): IppMessage {
   const groups: IppGroup[] = [];
   let pos = 8;
   let attributeCount = 0;
+  function countObject(): void {
+    attributeCount += 1;
+    if (attributeCount > IPP_MAX_ATTRIBUTES) throw new IppDecodeError("attribute count exceeds limit");
+  }
   function length(what: string): number {
     if (pos + 2 > input.byteLength) throw new IppDecodeError(`truncated in ${what}`);
     const count = input.readInt16BE(pos); pos += 2;
@@ -123,10 +128,12 @@ export function decodeIppMessage(bytes: Uint8Array): IppMessage {
     if (pos >= input.byteLength) throw new IppDecodeError("no end-of-attributes-tag");
     const tag = input[pos++];
     if (tag === IPP_TAG.END_OF_ATTRIBUTES) break;
-    if (tag <= 0x0f) { groups.push({ tag, attributes: [] }); continue; }
+    if (tag <= 0x0f) { countObject(); groups.push({ tag, attributes: [] }); continue; }
+    countObject(); // Each value, including a zero-name additional value, allocates.
     const group = groups[groups.length - 1];
     if (!group) throw new IppDecodeError("attribute before any attribute group");
     const nameLength = length("name-length");
+    if (nameLength !== 0) countObject();
     if (pos + nameLength > input.byteLength) throw new IppDecodeError("truncated in name");
     // Match pcc-node's ASCII decoder: non-ASCII octets become U+FFFD, never low-bit aliases.
     let name = "";
@@ -141,8 +148,6 @@ export function decodeIppMessage(bytes: Uint8Array): IppMessage {
       if (!previous) throw new IppDecodeError("additional-value with no attribute before it");
       previous.values.push(value);
     } else {
-      attributeCount += 1;
-      if (attributeCount > IPP_MAX_ATTRIBUTES) throw new IppDecodeError("attribute count exceeds limit");
       group.attributes.push({ name, values: [value] });
     }
   }

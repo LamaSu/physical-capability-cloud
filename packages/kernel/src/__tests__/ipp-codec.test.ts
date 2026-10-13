@@ -169,6 +169,24 @@ describe("RFC 8010 pure codec", () => {
     expect(() => decodeIppMessage(encodeIppMessage(message))).toThrow("attribute count exceeds limit");
   });
 
+  it("decodeIppMessage counts empty groups against the same 10000-object allocation cap", () => {
+    const message = base();
+    message.groups = Array.from({ length: IPP_MAX_ATTRIBUTES }, () => ({ tag: 1, attributes: [] }));
+    expect(decodeIppMessage(encodeIppMessage(message)).groups).toHaveLength(IPP_MAX_ATTRIBUTES);
+    message.groups.push({ tag: 1, attributes: [] });
+    expect(() => decodeIppMessage(encodeIppMessage(message))).toThrow("attribute count exceeds limit");
+  });
+
+  it("decodeIppMessage counts every additional value together with its attribute and group", () => {
+    const message = base();
+    // One group + one attribute + 9998 values reaches the shared cap exactly.
+    const values = Array.from({ length: IPP_MAX_ATTRIBUTES - 2 }, () => ({ tag: 0x10, bytes: new Uint8Array() }));
+    message.groups = [{ tag: 1, attributes: [attribute("a", ...values)] }];
+    expect(decodeIppMessage(encodeIppMessage(message)).groups[0]!.attributes[0]!.values).toHaveLength(IPP_MAX_ATTRIBUTES - 2);
+    message.groups[0]!.attributes[0]!.values.push({ tag: 0x10, bytes: new Uint8Array() });
+    expect(() => decodeIppMessage(encodeIppMessage(message))).toThrow("attribute count exceeds limit");
+  });
+
   it.each([0, -1, IPP_INT_MAX + 1, 1.5, NaN, Infinity])("encodeIppMessage rejects request-id %s", (requestId) => {
     expect(() => encodeIppMessage({ ...base(), requestId })).toThrow(IppEncodeError);
   });
