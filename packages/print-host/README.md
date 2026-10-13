@@ -2,7 +2,8 @@
 
 Private workspace package for the N144 October MVP print host. The host application
 comes in later PRs. This package contains host configuration, testnet key custody,
-deterministic test support, and repros of the toolkit gaps that prevent REAL-mode
+deterministic test support, V-next package construction and one-shot evidence
+broadcasting, and repros of the toolkit gaps that prevent REAL-mode
 IPP printing and production of the oracle's required evidence.
 Its source enters the gateway image through `COPY . .`; only the build skips it
 via the Dockerfile's turbo filter.
@@ -29,7 +30,8 @@ the spec's exact MVP action set, and a distinct 32-byte session public key. Thei
 whole-second issuance lies between funding and the first event, expiry equals
 reclaimAt, and maxSignatures equals the finalized event count (1–1000).
 `signD2` accepts exactly 32 raw bytes or their `0x`-prefixed lowercase hex encoding.
-The toolkit still needs the unit session and bundle builders recorded by GAP-7.
+The local unit session supplies the delegated bundle while the toolkit's GAP-7
+remains open.
 
 The operator key has
 three scoped uses: D1 `FinalMilestonePackageV2` signatures, zero-value EIP-1559
@@ -102,8 +104,8 @@ the private data directory, then returns only the public identity. It can throw
 `HostConfigError`, `KeyFileError`, or `SecretFileError`.
 
 Testnet-only is a policy enforced on the configuration's `chainId`. The operator
-EOA has the same address on every chain: never fund it on mainnet. The runtime PR
-will check `eth_chainId` against the configuration before any signing.
+EOA has the same address on every chain: never fund it on mainnet. The evidence
+broadcaster checks `eth_chainId` against the configuration before transaction signing.
 
 Secret reads compare the checked path's device/inode with the opened descriptor,
 then recheck its permissions and ownership before reading bounded bytes from that
@@ -120,8 +122,9 @@ The host must produce ONE signed bundle per settlement unit: print events plus p
 events on success, or `execution_failed` evidence on failure. The reference is
 pcc-oracle's B5 print-host bundle contract (bus #7386; on the Spark:
 `/mnt/sparkbulk/pcc-reconciliation/returns/pcc-oracle-work/print-host-bundle-contract-20261009.md`),
-sections 3.0, 4.2 and 5. Toolkit changes belong to pcc-adk; this package records the needed
-behavior without changing or working around the toolkit.
+sections 3.0, 4.2 and 5. These repros track the needed pcc-adk toolkit changes;
+the local session and package library supply the MVP pipeline while those APIs
+remain parked.
 
 ## Operator relay gateway client
 
@@ -195,6 +198,89 @@ Label-before-print integration comes in a later PR: the host must buy the label
 and read `commitment.committedAt` before it prints. TEST-mode carrier events have
 `source.simulated: true`, and `/settle` refuses them. The oracle and evidence
 requirements govern the demo's release basis (bus #7765).
+
+## V-next package pipeline
+
+This is a library pipeline. The run loop will connect these calls in a later PR.
+The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803).
+
+1. Finalize the unit session's ONE delegated, signed bundle containing the print
+   events and pulled carrier events. The bundle's session signature covers the
+   71 UTF-8 bytes of its `sha256:` hash; its device delegation covers LO-EV-1.
+2. Supply `UnitContext` from the funded unit and gateway challenge: chain, escrow,
+   settlement unit id, job hash, milestone, step, composition root and version,
+   accepted envelope hash, nonzero challenge nonce and reference, operator,
+   kernel, funded device public key, and decimal Unix-second evidence bounds.
+   Supply `ProgramContext` with `programHash`, `attestationSetRoot`, and
+   `workProductRoot`, each a lowercase bytes32. These values have no defaults.
+3. `buildMilestonePackage(bundle, unitContext, programContext)` checks bundle
+   bindings and signatures and returns the closed FinalMilestonePackageV2 body,
+   EvidenceBlockV2 and their hashes without signing. The unit-context digest
+   binds the nonce. D3 v2 commits the exact spec delegation bytes, parent
+   signature, funded device public key, ed25519 scheme 1 and key version 1.
+4. `signMilestonePackage(built, operatorKey, deviceKey)` adds mandatory D1
+   (`secp256k1-eip712`, operator address) and D2 (`ed25519-raw32`, device public
+   key). Both bind `packageBodyHash`; D2 signs its raw 32 bytes. The body hash
+   uses SHA-256 over raw32(keccak256(`PCC:vnext:evidence-package-sig:v1`)), a
+   big-endian uint64 UTF-8 byte length, then JCS(body). The package digest is
+   SHA-256(JCS({body, signatures})), after lowercase-signer, first-wins
+   deduplication and sorting as the oracle contract specifies.
+5. The operator broadcasts `submitEvidence(unitId, packageDigest)` once while
+   FUNDED_ACTIVE and before reclaimAt. The escrow's commitment uses layout
+   format 1 even though the body's package format is `"2"`. A successful receipt
+   must be followed by comparing `evidenceBundleHashOf(unitId)` with the
+   domain-separated commitment for the exact chain, escrow, unit, composition
+   version and package digest.
+
+Inputs still owed by other lanes: evidence supplies the committed program hash
+and the attestation/work-product roots (Q-E3 and S2 goldens); gateway N149 supplies
+the receipt, challenge and unit block; economics N150 supplies the canonical
+escrow record. This package does not create a receipt, choose a profile or tier,
+or attest a settlement verdict. A locally valid package is only one input to the
+gateway and oracle checks.
+
+Parity tests import the public gateway's body validator/body hash,
+signature canonicalizer, digest preimage and operator verifier by relative path.
+Gateway canonicalization refuses duplicate or mixed-case signers, so parity
+uses valid unique lowercase sets; separate tests pin the oracle's first-wins
+repair rule. The public repo has no unit-context, D3 v2 or EvidenceBlockV2 hash
+implementation: tests pin independently encoded contract-formula goldens for
+those hashes. No oracle implementation is imported.
+
+## Evidence transaction caps
+
+The `chain` configuration accepts `maxFeePerGasCap` and
+`maxPriorityFeePerGasCap` in wei, plus `gasCap` in gas units. Each is a canonical
+unsigned decimal string fitting uint256. The priority cap must not exceed the
+total fee cap. Omitted caps mean zero and disable broadcasting; supply all three
+before sending. The broadcaster snapshots and validates these caps even for
+manually constructed config and refuses excessive estimated fees or gas before
+calling the operator signer.
+
+Optional controls are `confirmations` (1–64, default 1), `rpcTimeoutMs`
+(1–60,000, default 10,000), `receiptTimeoutMs` (1–3,600,000, default 60,000), and
+`pollingIntervalMs` (1–60,000, default 1,000). The RPC URL comes only from
+`chain.rpcUrlFile` through the secret-file reader. RPC URLs, raw transactions
+and server text are excluded from results and logs. Sends have no retries.
+
+`createEvidenceBroadcaster(config, operatorKey)` returns `submit(input)` and
+`readBack(input)`. The input is `{escrow, unitId, packageDigest,
+compositionSchemaVersion}`. `readBack` never signs or sends. An uncommitted getter
+returns `refused` with `EvidenceNotCommitted`. Factory configuration errors carry
+only `bad_config`.
+
+The closed outcomes are `submitted`, `already_committed`, `conflict`,
+`indeterminate`, `refused`, `caps_exceeded` and `rpc_unavailable`. Matching
+read-back means `already_committed`; a different stored commitment means
+`conflict`. After a send with no confirmed receipt in time, `indeterminate`
+requires caller reconciliation by read-back. Never automatically resend it.
+The broadcaster serializes submissions within its instance for operator nonce
+safety and remembers sent units, including ambiguous sends. The later run loop
+must persist transaction intent and hash to preserve
+that rule across process restarts.
+The caller must reconcile an indeterminate operator transaction before
+submitting another unit or creating a new broadcaster, so an unseen pending
+transaction cannot compete for the same nonce.
 
 ## Repros for pcc-adk
 
