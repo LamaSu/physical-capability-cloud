@@ -80,6 +80,20 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
     }, skip);
   });
 
+  for (const [name, body] of [
+    ["chunk-framed", "3\r\nIPP\r\n0\r\n\r\n"],
+    ["raw close-delimited", "RAW-BODY-NOT-CHUNKED"],
+  ]) {
+    it(`R4 F-4/PF: production transport refuses trailing HTAB with a ${name} body`, async ({ skip }) => {
+      // Kills PF-trim over agent:false when sockets are available.
+      await withServer((_req, res) => {
+        res.socket?.end(`HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\n${body}`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
+      }, skip);
+    });
+  }
+
   it("T7: a silent connected server is bounded by the total deadline", async ({ skip }) => {
     // Revert the transport's total deadline timer to fail.
     await withServer(() => {}, async (transport, request) => {

@@ -1,5 +1,5 @@
 /** Bounded HTTP exchange for IPP. A failure never implies the device received nothing. */
-import { Agent, request as httpRequest } from "node:http";
+import { Agent, maxHeaderSize, request as httpRequest } from "node:http";
 import type { ClientRequest, IncomingMessage, RequestOptions } from "node:http";
 import { Buffer } from "node:buffer";
 import type { Duplex } from "node:stream";
@@ -51,12 +51,19 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
     let timer: ReturnType<typeof setTimeout> | undefined;
     let testAgent: Agent | undefined;
     let abortSignal: AbortSignal | undefined;
+    let framingSocket: Duplex | undefined;
+    // Node can strip trailing HTAB from rawHeaders even when it reads to close.
+    // Keep a bounded wire view until the final header block has been checked.
+    const headerPrefix = Buffer.alloc(maxHeaderSize * 2);
+    let headerSize = 0;
+    let headersChecked = false;
 
     const finish = (result: IppTransportResult): void => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
       abortSignal?.removeEventListener("abort", onAbort);
+      framingSocket?.removeListener("data", inspectRawHeaders);
       // Destroy on success as well: Connection: close never leaves reusable sockets.
       req?.destroy();
       testAgent?.destroy();
@@ -64,6 +71,32 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
     };
     const fail = (kind: FailureKind, message: string): void => finish({ ok: false, kind, sent, message });
     const onAbort = (): void => fail("aborted", "IPP request was aborted");
+    const inspectRawHeaders = (chunk: Buffer): void => {
+      if (settled || headersChecked) return;
+      for (const byte of chunk) {
+        if (headerSize === headerPrefix.length) {
+          fail("framing", "IPP response headers exceeded the framing scan limit");
+          return;
+        }
+        headerPrefix[headerSize++] = byte;
+        if (headerSize < 4 || headerPrefix[headerSize - 4] !== 13 || headerPrefix[headerSize - 3] !== 10
+            || headerPrefix[headerSize - 2] !== 13 || headerPrefix[headerSize - 1] !== 10) continue;
+        const lines = headerPrefix.subarray(0, headerSize - 4).toString("latin1").split("\r\n");
+        for (const line of lines.slice(1)) {
+          const colon = line.indexOf(":");
+          if (colon >= 0 && line.slice(0, colon).toLowerCase() === "transfer-encoding"
+              && !/^[ \t]*chunked *$/i.test(line.slice(colon + 1))) {
+            fail("framing", "IPP response has malformed Transfer-Encoding");
+            return;
+          }
+        }
+        // An informational response is followed by another header block.
+        if (/^HTTP\/\d+\.\d+ 1\d\d(?: |$)/.test(lines[0])) { headerSize = 0; continue; }
+        headersChecked = true;
+        framingSocket?.removeListener("data", inspectRawHeaders);
+        return;
+      }
+    };
 
     try {
       if (!Number.isInteger(input.deadlineMs) || input.deadlineMs < 1 || input.deadlineMs > 0x7fffffff
@@ -106,13 +139,17 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
         // Install this before a framing refusal destroys the request/response.
         res.on("error", () => fail("incomplete", "IPP response failed before completion"));
         if (settled) { res.destroy(); return; }
+        if (!headersChecked) {
+          fail("framing", "IPP response headers could not be checked before parsing");
+          return;
+        }
 
         const lengths: string[] = [];
         const transfers: string[] = [];
         for (let index = 0; index < res.rawHeaders.length; index += 2) {
           const name = res.rawHeaders[index].toLowerCase();
           if (name === "content-length") lengths.push(trimOptionalWhitespace(res.rawHeaders[index + 1]));
-          if (name === "transfer-encoding") transfers.push(trimOptionalWhitespace(res.rawHeaders[index + 1]));
+          if (name === "transfer-encoding") transfers.push(res.rawHeaders[index + 1]);
         }
         if (lengths.length && transfers.length) {
           fail("framing", "IPP response has both Content-Length and Transfer-Encoding");
@@ -122,7 +159,9 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
           fail("framing", "IPP response has malformed or duplicate Content-Length");
           return;
         }
-        if (transfers.length > 1 || (transfers.length === 1 && transfers[0].toLowerCase() !== "chunked")) {
+        // Match Node's chunked framing: leading SP/HTAB and trailing SP are valid,
+        // but a trailing HTAB makes its parser read to close. Refuse that ambiguity.
+        if (transfers.length > 1 || (transfers.length === 1 && !/^[ \t]*chunked *$/i.test(transfers[0]))) {
           fail("framing", "IPP response has unsupported or duplicate Transfer-Encoding");
           return;
         }
@@ -160,6 +199,8 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
         });
       });
       req.on("socket", (socket) => {
+        framingSocket = socket;
+        socket.prependListener("data", inspectRawHeaders);
         // Duplex test connections are already established. Real sockets keep
         // sent:false until connect, so DNS/refused connections are clean failures.
         if (!(socket as typeof socket & { connecting?: boolean }).connecting) sent = true;

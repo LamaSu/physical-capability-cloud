@@ -100,6 +100,31 @@ describe("HTTP IPP transport, socket-free", () => {
   });
 
   it.each([
+    ["chunk-framed", "3\r\nIPP\r\n0\r\n\r\n"],
+    ["raw close-delimited", "RAW-BODY-NOT-CHUNKED"],
+  ])("R4 F-4/PF: refuses chunked plus trailing HTAB with a %s body", async (_name, body) => {
+    // Kills PF-trim: trimming trailing HTAB before checking Transfer-Encoding.
+    const { transport, connection } = scripted(`HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\n${body}`);
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+    expect(connection.destroyed).toBe(true);
+  });
+
+  it("R4 F-4/PF: trailing SP remains valid chunked framing", async () => {
+    // Kills PF-no-SP: refusing the trailing SP that Node de-chunks correctly.
+    const { transport } = scripted("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked \r\n\r\n3\r\nIPP\r\n0\r\n\r\n");
+    expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+  });
+
+  it("R4 F-4/PF: split trailing HTAB after informational headers is refused", async () => {
+    // Kills PF-first-block and PF-per-chunk: inspecting only the first block or chunk.
+    const { transport } = scripted(stream => {
+      stream.respond("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked", false);
+      queueMicrotask(() => stream.respond("\t\r\n\r\nRAW-BODY-NOT-CHUNKED"));
+    });
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
+  it.each([
     ["identical duplicate Content-Length", "Content-Length: 3\r\nContent-Length: 3"],
     ["different duplicate Content-Length", "Content-Length: 3\r\nContent-Length: 4"],
     ["comma Content-Length", "Content-Length: 3, 3"],
