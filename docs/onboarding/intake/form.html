@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PCC Device Intake</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.6rem; }
+  h2 { font-size: 1.15rem; margin-top: 2.5rem; border-bottom: 1px solid #ccc; padding-bottom: 0.25rem; }
+  .field { margin: 1.25rem 0; padding: 0.75rem 1rem; border: 1px solid #ddd; border-radius: 6px; }
+  .field-id { font-family: monospace; font-size: 0.8rem; color: #666; }
+  .question { font-weight: 600; margin: 0.25rem 0; }
+  .why { color: #444; font-size: 0.92rem; margin-bottom: 0.5rem; }
+  .meta { font-size: 0.8rem; color: #666; margin-top: 0.4rem; }
+  .if-unknown { font-size: 0.85rem; color: #444; margin-top: 0.4rem; font-style: italic; }
+  .badge { display: inline-block; font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 999px; margin: 0.1rem 0.3rem 0.1rem 0; border: 1px solid #999; }
+  .badge-class { background: #eef; }
+  .badge-never-default { background: #fee; border-color: #c33; color: #900; }
+  .badge-self-declared { background: #ffe; border-color: #a90; color: #740; }
+  .badge-sensitive { background: #fee; border-color: #c33; color: #900; }
+  .badge-evidence { background: #eee; }
+  @media print { .field { break-inside: avoid; } }
+</style>
+</head>
+<body>
+  <h1>PCC Device Intake</h1>
+  <p>One question per field. Fields marked &quot;never defaulted&quot; or &quot;sensitive&quot; are never guessed or filled in for you &mdash; an empty answer blocks the step that needs it. Fields marked &quot;self-declared&quot; record only what you attest, never a researched or inferred value. An evidence badge marked &quot;stub&quot; proves nothing yet: the vocabulary defines it, but no verifier is live for it today.</p>
+    <section class="group">
+      <h2>Identity</h2>
+      <div class="field" id="operator.displayName">
+        <div class="field-id">operator.displayName</div>
+        <div class="question">What name should buyers see as the operator of this device?</div>
+        <div class="why">This is the name that appears on every listing and job you accept.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: register</div>
+      </div>
+      <div class="field" id="operator.contactEmail">
+        <div class="field-id">operator.contactEmail</div>
+        <div class="question">What email should account and job notices go to?</div>
+        <div class="why">We need a channel to reach you about jobs, approvals, and account security.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: register</div>
+      </div>
+      <div class="field" id="operator.authority">
+        <div class="field-id">operator.authority</div>
+        <div class="question">Is this device yours to offer, or are you setting it up for someone who decides about it?</div>
+        <div class="why">Only the person who controls a device can offer it for work — this is never assumed.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: register</div>
+        <div class="if-unknown">If you don't know: Pause here and check with whoever owns or controls this device before continuing — don&#39;t guess or decide on someone else&#39;s behalf.</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Device</h2>
+      <div class="field" id="device.description">
+        <div class="field-id">device.description</div>
+        <div class="question">In your own words, what is this device and what should buyers expect to get from it?</div>
+        <div class="why">This seeds device identification and the search for a matching capability contract.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: identify</div>
+        <div class="if-unknown">If you don't know: Take a photo of the label and describe whatever you see — a rough guess of what it does is enough for the agent to search from.</div>
+      </div>
+      <div class="field" id="device.vendor">
+        <div class="field-id">device.vendor</div>
+        <div class="question">Confirm the device&#39;s manufacturer/vendor.</div>
+        <div class="why">The vendor name drives the adapter config and which kits can match this device.</div>
+        <span class="badge badge-class">class A</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;identify-make-model&quot; in the research library)</div>
+      </div>
+      <div class="field" id="device.model">
+        <div class="field-id">device.model</div>
+        <div class="question">Confirm the device&#39;s exact model.</div>
+        <div class="why">The exact model is how we find the right manual, safety limits, and remote-control protocol.</div>
+        <span class="badge badge-class">class A</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;identify-make-model&quot; in the research library)</div>
+      </div>
+      <div class="field" id="device.serialNumber">
+        <div class="field-id">device.serialNumber</div>
+        <div class="question">What is the device&#39;s serial number (from its label)?</div>
+        <div class="why">The serial number ties this specific unit to its device record.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: Look for a printed serial number on the device&#39;s data plate or a sticker near the power input. If it truly has none, say so.</div>
+      </div>
+      <div class="field" id="device.firmware">
+        <div class="field-id">device.firmware</div>
+        <div class="question">Confirm the device&#39;s firmware version.</div>
+        <div class="why">Firmware version affects which commands and safety behaviors are available (N83 G8).</div>
+        <span class="badge badge-class">class A</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: Check the device&#39;s display, status page, or companion app&#39;s &quot;About&quot; or &quot;System Info&quot; screen for a firmware or software version.</div>
+      </div>
+      <div class="field" id="device.adapterType">
+        <div class="field-id">device.adapterType</div>
+        <div class="question">Confirm the adapter type PCC should use to talk to this device.</div>
+        <div class="why">This selects the real adapter that will run jobs — it is never &quot;mock&quot; for a live device.</div>
+        <span class="badge badge-class">class A</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-remote-interface&quot; in the research library)</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Location</h2>
+      <div class="field" id="location.cityCountry">
+        <div class="field-id">location.cityCountry</div>
+        <div class="question">What city and country is this device located in? (Shown publicly on your listing.)</div>
+        <div class="why">Buyers need this to judge shipping time and jurisdiction — it&#39;s shown publicly, so keep it to city and country, never a street address.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: publish</div>
+      </div>
+      <div class="field" id="location.streetAddress">
+        <div class="field-id">location.streetAddress</div>
+        <div class="question">What is the device&#39;s street address? (Private — never shown publicly; used for logistics only.)</div>
+        <div class="why">We need this for couriers and installers, but it is never published — public listings only ever show city and country.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-sensitive">sensitive: do not write it here</span>
+        <div class="meta">required for: optional</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Network</h2>
+      <div class="field" id="network.reachability">
+        <div class="field-id">network.reachability</div>
+        <div class="question">Is this device on the same local network as the agent host, and does it have a static IP?</div>
+        <div class="why">This decides whether we can reach it directly or need pcc-node as a relay.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: Ask whoever manages your network whether this device has a fixed IP, and whether it&#39;s on the same network segment as the machine running the agent.</div>
+      </div>
+      <div class="field" id="network.outboundHttps">
+        <div class="field-id">network.outboundHttps</div>
+        <div class="question">Can this device (or its host) make outbound HTTPS calls?</div>
+        <div class="why">Outbound-only connectivity lets us use pcc-node without opening any inbound ports.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: Try loading any https:// page from a browser on the same network as the device — if that works, outbound HTTPS is very likely allowed.</div>
+      </div>
+      <div class="field" id="network.inboundBlocked">
+        <div class="field-id">network.inboundBlocked</div>
+        <div class="question">Is inbound access to this device blocked by a firewall or NAT?</div>
+        <div class="why">This confirms whether pcc-node&#39;s outbound-only design is required.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: register-device</div>
+        <div class="if-unknown">If you don't know: Ask whoever manages your router or firewall whether inbound connections to this device are blocked — most home and office routers block inbound by default.</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Safety</h2>
+      <div class="field" id="safety.supervision">
+        <div class="field-id">safety.supervision</div>
+        <div class="question">When it runs a job, will someone be nearby, or will it run unattended? If someone&#39;s nearby, who?</div>
+        <div class="why">Supervision level is never assumed — it directly bounds which jobs are safe to accept.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: publish, accept-jobs</div>
+        <div class="if-unknown">If you don't know: Decide whether someone will be physically present, watching remotely, or nobody at all while a job runs — this is a decision only you can make.</div>
+      </div>
+      <div class="field" id="safety.estop">
+        <div class="field-id">safety.estop</div>
+        <div class="question">How do you stop this device in an emergency — for example a stop button, a power switch, or a lid switch — and where is it?</div>
+        <div class="why">Before anything runs, we need a way to stop it that doesn&#39;t depend on software — this is never assumed.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: publish, accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-safety-limits&quot; in the research library)</div>
+      </div>
+      <div class="field" id="safety.hazards">
+        <div class="field-id">safety.hazards</div>
+        <div class="question">What hazards does this device present (chemical, laser, heat, mechanical, biological)?</div>
+        <div class="why">Hazard classes shape the safety envelope — an empty answer blocks job acceptance rather than assuming &quot;none&quot;.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-safety-limits&quot; in the research library)</div>
+      </div>
+      <div class="field" id="safety.limits">
+        <div class="field-id">safety.limits</div>
+        <div class="question">Here are the safety limits we found for this device, with where each came from — confirm each one, or correct it.</div>
+        <div class="why">The device refuses any operation outside these limits, so they must be right for your unit — never a guess.</div>
+        <span class="badge badge-class">class B</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-safety-limits&quot; in the research library)</div>
+      </div>
+      <div class="field" id="safety.commandRate">
+        <div class="field-id">safety.commandRate</div>
+        <div class="question">At most how many commands per minute may PCC send to this device?</div>
+        <div class="why">The safety envelope refuses commands faster than this, so a runaway job can&#39;t overload the device.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-safety-limits&quot; in the research library)</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Consumables</h2>
+      <div class="field" id="consumables.items">
+        <div class="field-id">consumables.items</div>
+        <div class="question">What does each job use up — for example tips, reagents, filament, or paper?</div>
+        <div class="why">This lets buyers and the scheduler know what&#39;s needed to run a job.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-consumables&quot; in the research library)</div>
+      </div>
+      <div class="field" id="consumables.restockedBy">
+        <div class="field-id">consumables.restockedBy</div>
+        <div class="question">Who refills these consumables, and how often?</div>
+        <div class="why">This sets expectations for availability and avoids mid-job surprises.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-consumables&quot; in the research library)</div>
+      </div>
+      <div class="field" id="consumables.loadedMaterial">
+        <div class="field-id">consumables.loadedMaterial</div>
+        <div class="question">What material or consumable is currently loaded?</div>
+        <div class="why">The loaded material determines which operating bands from the manual actually apply right now.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: accept-jobs</div>
+        <div class="if-unknown">If you don't know: Look at what&#39;s physically loaded right now and name it as specifically as you can (brand and material, not just &quot;filament&quot;).</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Calibration</h2>
+      <div class="field" id="calibration.lastDate">
+        <div class="field-id">calibration.lastDate</div>
+        <div class="question">When did you last calibrate this device? (self-declared)</div>
+        <div class="why">This is self-declared only — we never infer or default a calibration date.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-self-declared">self-declared</span>
+        <span class="badge badge-evidence">evidence: decl.self_attested (live)</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: Check your maintenance log or the device&#39;s calibration sticker. If you&#39;re still not sure, calibrate it now and record today&#39;s date.</div>
+      </div>
+      <div class="field" id="calibration.procedureRef">
+        <div class="field-id">calibration.procedureRef</div>
+        <div class="question">Which calibration procedure did you follow? (self-declared)</div>
+        <div class="why">Research can suggest a procedure, but only your confirmation makes it the record — self-declared only.</div>
+        <span class="badge badge-class">class B</span>
+        <span class="badge badge-self-declared">self-declared</span>
+        <span class="badge badge-evidence">evidence: decl.self_attested (live)</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-calibration&quot; in the research library)</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Evidence</h2>
+      <div class="field" id="evidence.executorDeviceId">
+        <div class="field-id">evidence.executorDeviceId</div>
+        <div class="question">Which device id actually executes the job?</div>
+        <div class="why">This is the raw fact the evidence plan is built from — independence is derived from it, never asked directly.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: Name the device id of the machine that actually performs the job — not a camera or sensor only watching it.</div>
+      </div>
+      <div class="field" id="evidence.observerDeviceIds">
+        <div class="field-id">evidence.observerDeviceIds</div>
+        <div class="question">Which device ids (if any) only observe the job, without executing it?</div>
+        <div class="why">An observer that isn&#39;t also the executor is what makes an inspection independent — we derive that, we don&#39;t ask you to assert it.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: List the device ids of any camera or sensor that watches the job without controlling it. Leave it empty if nothing else observes.</div>
+      </div>
+      <div class="field" id="evidence.executionMode">
+        <div class="field-id">evidence.executionMode</div>
+        <div class="question">Is this run against the real device, or a mock/dry-run adapter?</div>
+        <div class="why">A mock or dry-run answer caps the job&#39;s evidence at tier 0 — it can lower the tier, never raise it.</div>
+        <span class="badge badge-class">class A</span>
+        <span class="badge badge-evidence">evidence: confirm.execution_mode (live)</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+      </div>
+      <div class="field" id="evidence.camera">
+        <div class="field-id">evidence.camera</div>
+        <div class="question">Where could a camera see this job&#39;s result — does it see the work area, does it see the output, is it fixed or handheld, and which device id captures it?</div>
+        <div class="why">Buyers pay against evidence that the work happened, and what the camera can see decides how strong that evidence is.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-evidence">evidence: capture.photo_nonced (stub — stub = proves nothing yet)</span>
+        <div class="meta">required for: tier2-intake-complete</div>
+        <div class="if-unknown">If you don't know: Look for a camera already pointed at the work area or output — a webcam, a phone on a stand, a security camera. If there isn&#39;t one yet, say so; the agent can suggest a placement.</div>
+      </div>
+      <div class="field" id="evidence.operatorPresence">
+        <div class="field-id">evidence.operatorPresence</div>
+        <div class="question">Is an operator present always, sometimes, or never during a job?</div>
+        <div class="why">Operator presence shapes what kind of evidence and approval is realistic to collect.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: Think about your usual routine: are you standing at the device while it runs, checking in occasionally, or away entirely?</div>
+      </div>
+      <div class="field" id="evidence.approver">
+        <div class="field-id">evidence.approver</div>
+        <div class="question">Who is the person who will approve evidence for this device? (identity only — their signing key is registered separately later.)</div>
+        <div class="why">We need to know who will attest to job quality before we register how they sign.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-evidence">evidence: approval.expert (stub — stub = proves nothing yet)</span>
+        <div class="meta">required for: tier2-intake-complete</div>
+        <div class="if-unknown">If you don't know: Name the specific person who will review job evidence for this device — a name and contact, not a role or team.</div>
+      </div>
+      <div class="field" id="evidence.controllerRunLog">
+        <div class="field-id">evidence.controllerRunLog</div>
+        <div class="question">Can the controller export its own execution log per job? If so, via API or file?</div>
+        <div class="why">A per-job exportable log is what lets us build a trustworthy machine execution record.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-evidence">evidence: machine.execution_log (stub — stub = proves nothing yet)</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-evidence-signals&quot; in the research library)</div>
+      </div>
+      <div class="field" id="evidence.instrumentSignsOutput">
+        <div class="field-id">evidence.instrumentSignsOutput</div>
+        <div class="question">Does the instrument cryptographically sign its own output?</div>
+        <div class="why">A self-signing instrument raises the evidence ceiling — but only once its signing key is registered (companion primitive: receipt.kernel_signed).</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-evidence">evidence: ident.registered_key (stub — stub = proves nothing yet)</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-evidence-signals&quot; in the research library)</div>
+      </div>
+      <div class="field" id="evidence.referenceSample">
+        <div class="field-id">evidence.referenceSample</div>
+        <div class="question">Do you have a reference sample with a known expected result?</div>
+        <div class="why">A known-good test pair is the strongest cheap proof that the capability actually works.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-evidence">evidence: measure.io_test_pair (stub — stub = proves nothing yet)</span>
+        <div class="meta">required for: tier1-intake-complete</div>
+        <div class="if-unknown">If you don't know: Check whether you have a past output with a known-good result to compare a new job against. If not, say so — this proof method just isn&#39;t available yet.</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Capability</h2>
+      <div class="field" id="capability.type">
+        <div class="field-id">capability.type</div>
+        <div class="question">Confirm the capability contract (CSD) this device implements.</div>
+        <div class="why">We search the registry before authoring anything new — reuse comes first.</div>
+        <span class="badge badge-class">class A</span>
+        <div class="meta">required for: publish</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;search-existing-csd&quot; in the research library)</div>
+      </div>
+      <div class="field" id="capability.parameters">
+        <div class="field-id">capability.parameters</div>
+        <div class="question">Confirm the typed parameters and ranges we found for this capability.</div>
+        <div class="why">Buyers configure jobs against these typed ranges — they must be confirmed, not guessed.</div>
+        <span class="badge badge-class">class B</span>
+        <div class="meta">required for: publish</div>
+        <div class="if-unknown">If you don't know: the agent will research this (see &quot;find-io-ranges&quot; in the research library)</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Pricing</h2>
+      <div class="field" id="pricing.unitPrice">
+        <div class="field-id">pricing.unitPrice</div>
+        <div class="question">What should one job cost? During the public beta, payments settle on a test network, so no real money moves yet.</div>
+        <div class="why">Only you decide what your work costs — this is never assumed or guessed.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: publish</div>
+        <div class="if-unknown">If you don't know: Look at what comparable services charge as a reference point, then decide your own price — a reference is never the answer itself.</div>
+      </div>
+      <div class="field" id="pricing.minimum">
+        <div class="field-id">pricing.minimum</div>
+        <div class="question">Is there a minimum charge per job?</div>
+        <div class="why">A minimum protects you from unprofitable small jobs — never assumed.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: publish</div>
+        <div class="if-unknown">If you don't know: Decide whether a small job would be unprofitable at your per-unit price. If so, set a minimum; if not, say there isn&#39;t one.</div>
+      </div>
+      <div class="field" id="pricing.currency">
+        <div class="field-id">pricing.currency</div>
+        <div class="question">What currency is your price in?</div>
+        <div class="why">This is never assumed — it changes what buyers actually pay.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <div class="meta">required for: publish</div>
+        <div class="if-unknown">If you don't know: Decide which currency you want to be paid in — this is never assumed on your behalf.</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Payout</h2>
+      <div class="field" id="payout.destination">
+        <div class="field-id">payout.destination</div>
+        <div class="question">Which wallet address should your payments go to? (During the beta this is a test-network address. Never a private key or recovery phrase.)</div>
+        <div class="why">Your earnings go only where you say — this is never assumed, and the address itself is never written into this record; it goes straight to the payout store.</div>
+        <span class="badge badge-class">class C</span>
+        <span class="badge badge-never-default">never defaulted</span>
+        <span class="badge badge-sensitive">sensitive: do not write it here</span>
+        <div class="meta">required for: get-paid</div>
+        <div class="if-unknown">If you don't know: Have your wallet address ready (a test-network address during the beta). Never type a private key or recovery phrase here.</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>Availability</h2>
+      <div class="field" id="availability.schedule">
+        <div class="field-id">availability.schedule</div>
+        <div class="question">When can this device take jobs — for example &quot;weekdays 9 to 5&quot; or &quot;any time&quot;? Tell us the mode (always, specific windows, a cron schedule, or manual claim) and the timezone.</div>
+        <div class="why">Buyers plan around it, and jobs shouldn&#39;t arrive when nobody can refill or supervise it.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: accept-jobs</div>
+      </div>
+    </section>
+    <section class="group">
+      <h2>SLA</h2>
+      <div class="field" id="sla.acceptanceWindowSec">
+        <div class="field-id">sla.acceptanceWindowSec</div>
+        <div class="question">How many seconds do you have to accept an offered job before it expires?</div>
+        <div class="why">This sets buyer expectations for how quickly you respond.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: optional</div>
+      </div>
+      <div class="field" id="sla.completionDeadlineSec">
+        <div class="field-id">sla.completionDeadlineSec</div>
+        <div class="question">How many seconds should a job take at most before it&#39;s considered late?</div>
+        <div class="why">This sets the SLA buyers see and what counts as a late job.</div>
+        <span class="badge badge-class">class C</span>
+        <div class="meta">required for: optional</div>
+      </div>
+    </section>
+</body>
+</html>

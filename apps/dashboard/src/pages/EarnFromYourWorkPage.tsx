@@ -19,13 +19,7 @@
 
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-
-const API_BASE =
-  (import.meta as { env?: { VITE_API_URL?: string; PROD?: boolean } }).env
-    ?.VITE_API_URL ??
-  ((import.meta as { env?: { PROD?: boolean } }).env?.PROD
-    ? "https://capability.network"
-    : "http://localhost:3200");
+import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
 
 const sg = "'Space Grotesk', sans-serif";
 const inter = "'Inter', sans-serif";
@@ -112,7 +106,7 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
     setErrorMessage(null);
     setStage("loading");
     try {
-      const res = await fetch(`${API_BASE}/api/contributors/quickstart`, {
+      const res = await fetch(gatewayUrl("/api/contributors/quickstart"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -170,12 +164,10 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
   async function openOnramp(): Promise<void> {
     if (!response) return;
     try {
-      const res = await fetch(`${API_BASE}/api/fiat-ramp/onramp/session`, {
+      // The new key goes to the gateway that issued it and nowhere else.
+      const res = await fetchWithKey("/api/fiat-ramp/onramp/session", response.apiKey, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${response.apiKey}`,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           destinationAddress: response.walletAddress,
           amountUsd: 20,
@@ -314,7 +306,9 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
             12 words. Write them on paper. Whoever has these words can move your money. We don't keep
             them.
           </p>
+          {/* ph-no-capture: session recording and autocapture never see the words (N50). */}
           <div
+            className="ph-no-capture"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(3, 1fr)",
@@ -389,7 +383,10 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           <div style={codeBlock}>{response.walletAddress}</div>
 
           <div style={label}>Your API key (save it — we won't show it again)</div>
-          <div style={codeBlock}>{response.apiKey}</div>
+          {/* ph-no-capture: session recording and autocapture never see the key (N50). */}
+          <div className="ph-no-capture" style={codeBlock}>
+            {response.apiKey}
+          </div>
 
           <div style={label}>Your published rate</div>
           <div style={codeBlock}>

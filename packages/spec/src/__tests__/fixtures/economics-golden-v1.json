@@ -1,0 +1,206 @@
+{
+  "_comment": "Economic agreements v1 golden outputs for the five worked examples (docs/ECONOMIC_AGREEMENTS.md). Amounts are USDC base units. Amounts hand-checked; all 27 payout legs and all 15 hashes independently reproduced from the spec alone by a clean-room Python implementation (returns/pcc-economics-work/cleanroom, 2026-09-24, after the spec's payee.distribution sort was stated). Changing any value is a spec change.",
+  "schedules": "examples.ts PRINTER_KIT_SCHEDULE is supplied as the rate schedule body",
+  "agreements": {
+    "ex1-spare-printer": {
+      "agreementHash": "0xe3441aee9bc6d4a3f313af5c316a9bdf1a55a737d54254fa1af79ecc29b6465f",
+      "economicTermsHash": "0xf4e303b2b9dd3f3fd2bc3fed6d72069c2c501bd570cb30073b7b969c81b62d21",
+      "rightsTermsHash": "0xae352124c22f63382795002d7c5b2c990d503d2a4e92b516935e9f471f224dbb",
+      "units": {
+        "print": {
+          "gross": "25000000",
+          "fee": "587500",
+          "net": "24412500",
+          "payouts": [
+            [
+              "0x00000000000000000000000000000000005a0002",
+              "24312500"
+            ],
+            [
+              "0x00000000000000000000000000000000009a1a03",
+              "100000"
+            ]
+          ]
+        }
+      }
+    },
+    "ex2-print-and-mail": {
+      "agreementHash": "0x7b0314dfe34e3a760af43386aa3a9e6f943088bcf9e27c09b17355806870154e",
+      "economicTermsHash": "0xb12981491848f1adcbce1758e02c4accb1f9646cc9995ef41ad2fd84588d45ac",
+      "rightsTermsHash": "0x37af2501e5d9f4aec2cca8f84a4640953c822340a918470781e64941b74ba812",
+      "units": {
+        "a-print": {
+          "gross": "14000000",
+          "fee": "329000",
+          "net": "13671000",
+          "payouts": [
+            [
+              "0x0000000000000000000000000000000000b17002",
+              "1671000"
+            ],
+            [
+              "0x000000000000000000000000000000000c0a0003",
+              "12000000"
+            ]
+          ]
+        },
+        "b-mail": {
+          "gross": "8000000",
+          "fee": "188000",
+          "net": "7812000",
+          "payouts": [
+            [
+              "0x0000000000000000000000000000000000b17002",
+              "1882000"
+            ],
+            [
+              "0x0000000000000000000000000000000003e10005",
+              "250000"
+            ],
+            [
+              "0x000000000000000000000000000000000c0a1004",
+              "680000"
+            ],
+            [
+              "0x000000000000000000000000000000000c0a1004",
+              "5000000"
+            ]
+          ]
+        }
+      }
+    },
+    "ex3-guild-repair": {
+      "agreementHash": "0x040c8258a7ff6874397ebebb435fa396de04810cff77262b6d8d08ff9861f248",
+      "economicTermsHash": "0x9b7d9e9589b60439d2c6e8218c5e67687e9819be8c0424e6b62ddd8ad766df91",
+      "rightsTermsHash": "0x5b91c1299aa54841d0480d390dbb8e1d139db1c8be36d2f5a1de98362e6bb208",
+      "units": {
+        "repair": {
+          "gross": "180010000",
+          "fee": "4230235",
+          "net": "175779765",
+          "payouts": [
+            [
+              "0x0000000000000000000000000000000000a0a003",
+              "65289807"
+            ],
+            [
+              "0x0000000000000000000000000000000000be0004",
+              "39173884"
+            ],
+            [
+              "0x0000000000000000000000000000000000c10005",
+              "13057962"
+            ],
+            [
+              "0x00000000000000000000000000000000015e0007",
+              "2700150"
+            ],
+            [
+              "0x0000000000000000000000000000000001ee0006",
+              "42500000"
+            ],
+            [
+              "0x0000000000000000000000000000000007ea5002",
+              "13057962"
+            ]
+          ]
+        }
+      }
+    },
+    "ex4-lab-assay": {
+      "agreementHash": "0x9882e856ecc0ae27de73d047fbead3199b7832c82a1d9b348edc5eb8f2c56dcd",
+      "economicTermsHash": "0xf63b0ebbc8e4618f94e1a5699592dd6c477b36260ad7ea68229e2683273dd0f9",
+      "rightsTermsHash": "0x14eca04c115bbc46b919498f451ea31c238d53e817005a1d113d8b8a57f2b796",
+      "units": {
+        "assay": {
+          "gross": "400000000",
+          "fee": "9400000",
+          "net": "390600000",
+          "payouts": [
+            [
+              "0x00000000000000000000000000000000001e5006",
+              "1953000"
+            ],
+            [
+              "0x0000000000000000000000000000000001ab0002",
+              "53647000"
+            ],
+            [
+              "0x0000000000000000000000000000000001ab0002",
+              "320000000"
+            ],
+            [
+              "0x0000000000000000000000000000000003a10003",
+              "10500000"
+            ],
+            [
+              "0x000000000000000000000000000000000da7a004",
+              "2700000"
+            ],
+            [
+              "0x000000000000000000000000000000000da7b005",
+              "1800000"
+            ]
+          ]
+        }
+      }
+    },
+    "ex5-deck-milestones": {
+      "agreementHash": "0x4e26705a390648b0c415945804fde58b3e90ff82f3893a0d76efb50a089362b8",
+      "economicTermsHash": "0x5ee6a8b7f83b73088edd0297ece2dd6b85ccab631ecb0c898a4634d366ed5c24",
+      "rightsTermsHash": "0xe24d8dc38d35bf140f9ccb2a5683d7a61234567ab980c96d205a5c04318136ca",
+      "units": {
+        "m1-design": {
+          "gross": "800000000",
+          "fee": "18800000",
+          "net": "781200000",
+          "payouts": [
+            [
+              "0x000000000000000000000000000000000b1c0102",
+              "181200000"
+            ],
+            [
+              "0x000000000000000000000000000000000de50103",
+              "600000000"
+            ]
+          ]
+        },
+        "m2-build": {
+          "gross": "6500000000",
+          "fee": "152750000",
+          "net": "6347250000",
+          "payouts": [
+            [
+              "0x0000000000000000000000000000000001250105",
+              "78000000"
+            ],
+            [
+              "0x000000000000000000000000000000000b1c0102",
+              "3058850000"
+            ],
+            [
+              "0x000000000000000000000000000000000ced0104",
+              "3210400000"
+            ]
+          ]
+        },
+        "m3-inspect": {
+          "gross": "700000000",
+          "fee": "16450000",
+          "net": "683550000",
+          "payouts": [
+            [
+              "0x00000000000000000000000000000000015e0106",
+              "250000000"
+            ],
+            [
+              "0x000000000000000000000000000000000b1c0102",
+              "433550000"
+            ]
+          ]
+        }
+      }
+    }
+  },
+  "compileOptions": "{ schedules: [PRINTER_KIT_SCHEDULE] } and defaults otherwise: authorityFloor counterparty-accepted, no forbidden recipients beyond the zero address."
+}

@@ -7,6 +7,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import { OutstandingWork } from "./outstanding-work.js";
 
 /** Status a machine adapter can report */
 export type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance";
@@ -99,6 +100,9 @@ export class GenericHttpAdapter {
   private lastProgress = 0;
   private mockStatus: MachineStatus = "idle";
   private mockProgress = 0;
+  /** What can still emit: the poll loop, each poll and command in flight, each mock run. */
+  private readonly work = new OutstandingWork();
+  private endPolling: (() => void) | null = null;
 
   constructor(id: string, config: GenericHttpAdapterConfig) {
     this.id = id;
@@ -140,9 +144,12 @@ export class GenericHttpAdapter {
     }
   }
 
-  async execute(command: MachineCommand): Promise<MachineCommandResult> {
-    if (this.config.mockMode) return this.executeMock(command);
+  execute(command: MachineCommand): Promise<MachineCommandResult> {
+    if (this.config.mockMode) return Promise.resolve(this.executeMock(command));
+    return this.work.track(this.executeReal(command));
+  }
 
+  private async executeReal(command: MachineCommand): Promise<MachineCommandResult> {
     try {
       switch (command.type) {
         case "load_gcode": {
@@ -207,6 +214,18 @@ export class GenericHttpAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Required by the PCC kernel: resolves once every evidence event of the work this adapter
+   * was given has been emitted, and never while that work can still emit. Here: once the
+   * poll loop has reported the completion or the error and stopped (or "stop" stopped it), no
+   * poll or command is in flight, and each mock run has emitted its completion. A device
+   * whose loop never ends (it never reaches 100% and never reports error) keeps this pending,
+   * and the kernel keeps the device from the next job until it resolves.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {
@@ -281,45 +300,50 @@ export class GenericHttpAdapter {
     const interval = this.config.pollIntervalMs ?? 2000;
     this.lastProgress = 0;
 
-    this.pollTimer = setInterval(async () => {
-      try {
-        const progress = await this.getProgress();
-        const status = await this.getStatus();
-
-        if (Math.floor(progress / 25) > Math.floor(this.lastProgress / 25)) {
-          this.emit({
-            type: "execution_progress",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { progress },
-          });
-        }
-
-        if (this.lastProgress < 100 && progress >= 100) {
-          this.emit({
-            type: "execution_completed",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { progress: 100 },
-          });
-          this.stopPolling();
-        }
-
-        if (status === "error") {
-          this.emit({
-            type: "execution_failed",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { error: "Device reported error status" },
-          });
-          this.stopPolling();
-        }
-
-        this.lastProgress = progress;
-      } catch {
-        // Silently handle poll failures
-      }
+    this.endPolling = this.work.begin();
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.poll());
     }, interval);
+  }
+
+  private async poll(): Promise<void> {
+    try {
+      const progress = await this.getProgress();
+      const status = await this.getStatus();
+
+      if (Math.floor(progress / 25) > Math.floor(this.lastProgress / 25)) {
+        this.emit({
+          type: "execution_progress",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress },
+        });
+      }
+
+      if (this.lastProgress < 100 && progress >= 100) {
+        this.emit({
+          type: "execution_completed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress: 100 },
+        });
+        this.stopPolling();
+      }
+
+      if (status === "error") {
+        this.emit({
+          type: "execution_failed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { error: "Device reported error status" },
+        });
+        this.stopPolling();
+      }
+
+      this.lastProgress = progress;
+    } catch {
+      // Silently handle poll failures
+    }
   }
 
   private stopPolling(): void {
@@ -327,6 +351,8 @@ export class GenericHttpAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   // ── Mock mode ─────────────────────────────────────────────────────
@@ -352,6 +378,7 @@ export class GenericHttpAdapter {
           payload: { mock: true },
         });
         // Simulate progress
+        const endRun = this.work.begin();
         const timer = setInterval(() => {
           this.mockProgress = Math.min(100, this.mockProgress + 10);
           if (this.mockProgress % 25 === 0 && this.mockProgress < 100) {
@@ -371,6 +398,8 @@ export class GenericHttpAdapter {
               source: this.source,
               payload: { progress: 100, mock: true },
             });
+            // Ended only after the completion is emitted.
+            endRun();
           }
         }, 500);
         return { success: true, message: "Started (mock)" };

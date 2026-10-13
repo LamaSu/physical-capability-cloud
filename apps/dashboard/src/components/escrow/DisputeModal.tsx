@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { GlassPanel } from "@pcc/ui";
-import { getAuthHeaders } from "../../stores/auth-store.js";
-
-const API_ROOT = (import.meta.env.VITE_PCC_URL ?? "");
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
 
 /**
  * T2.8 — dispute UI surface.
@@ -47,9 +45,9 @@ export function DisputeModal({
       if (milestoneStepId) body.milestoneStepId = milestoneStepId;
       if (evidenceHash.trim()) body.challengerEvidenceHash = evidenceHash.trim();
 
-      const res = await fetch(`${API_ROOT}/api/escrow/${encodeURIComponent(escrowId)}/dispute`, {
+      const res = await authorizedFetch(`/api/escrow/${encodeURIComponent(escrowId)}/dispute`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
 

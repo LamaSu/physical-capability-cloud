@@ -6,9 +6,11 @@ import { jobRoutes } from "../routes/jobs.js";
 import { escrowRoutes } from "../routes/escrow.js";
 import { agentRoutes } from "../routes/agents.js";
 import { registryRoutes } from "../routes/registry.js";
+import { healthRoutes } from "../routes/health.js";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { initStore, closeStore } from "../db.js";
 import cookie from "@fastify/cookie";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,22 +27,13 @@ async function buildApp(): Promise<FastifyInstance> {
 
   const app = Fastify({ logger: false });
 
+  actAsJobParty(app); // job reads are object-authorized (F3)
+
   // Cookie support (needed by siweAuthPlugin for session cookies)
   await app.register(cookie);
 
-  // Health check (copied from server.ts — no deps)
-  app.get("/api/health", async () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "0.1.0",
-  }));
-
-  // Bare /health alias (copied from server.ts — no deps)
-  app.get("/health", async () => ({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "0.1.0",
-  }));
+  // Health check + bare /health alias (the real plugin server.ts registers)
+  await app.register(healthRoutes);
 
   // Register route plugins
   await app.register(capabilityRoutes);

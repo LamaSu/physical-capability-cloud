@@ -20,7 +20,7 @@ import type {
   SessionKey,
   SHA256,
 } from "@pcc/spec";
-import { ids, canonicalize, sha256 } from "@pcc/spec";
+import { ids, canonicalize, canonicalSnapshot, sha256, signingPreimage } from "@pcc/spec";
 
 // ---------------------------------------------------------------------------
 // Domain types
@@ -122,17 +122,29 @@ export class AccountingReconcileKernel {
 
     const executionStartTime = new Date().toISOString();
 
-    // ── Lifecycle: input verification (equivalent to gcode_hash_verified) ──
-    const inputHash = await sha256(canonicalize({
+    // ── Snapshot the inputs ──
+    // Canonicalize FIRST and parse the canonical text ONCE; from here on only
+    // that snapshot is read. The input commitment hashes its text and every step
+    // runs on its data, so the evidence covers exactly what was executed. The
+    // caller's objects may be Proxies or mutable; they are never read again.
+    const inputs = canonicalSnapshot<{
+      ledgerData: Record<string, unknown>;
+      invoiceData?: Record<string, unknown>;
+    }>({
       ledgerData: params.ledgerData,
       invoiceData: params.invoiceData,
-    }));
+    });
+    const { ledgerData, invoiceData } = inputs.value;
+
+    // ── Lifecycle: input verification (equivalent to gcode_hash_verified) ──
+    const inputHash = await sha256(inputs.text);
     const inputVerifiedEvent: EvidenceEvent = {
       id: ids.evidence(),
       type: "gcode_hash_verified",
       timestamp: executionStartTime,
       source,
       payload: {
+        jobId: params.jobId,
         description: "Digital workflow input data verified",
         inputHash,
         workflowType: "accounting-reconcile",
@@ -171,9 +183,10 @@ export class AccountingReconcileKernel {
 
     // ── Step 1: fetch_ledger ──────────────────────────────────────────
     const step1 = await this.runStep({
+      jobId: params.jobId,
       stepId: "fetch_ledger",
       source,
-      input: params.ledgerData,
+      input: ledgerData,
       execute: (input) => this.fetchLedger(input),
     });
     events.push(step1.event);
@@ -181,6 +194,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 2: parse_entries ─────────────────────────────────────────
     const step2 = await this.runStep({
+      jobId: params.jobId,
       stepId: "parse_entries",
       source,
       input: step1.output,
@@ -192,9 +206,10 @@ export class AccountingReconcileKernel {
     // ── Step 3: match_invoices ────────────────────────────────────────
     const matchInput = {
       ledgerEntries: step2.output.entries,
-      invoices: (params.invoiceData as any)?.invoices ?? [],
+      invoices: (invoiceData as any)?.invoices ?? [],
     };
     const step3 = await this.runStep({
+      jobId: params.jobId,
       stepId: "match_invoices",
       source,
       input: matchInput,
@@ -205,6 +220,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 4: compute_adjustments ───────────────────────────────────
     const step4 = await this.runStep({
+      jobId: params.jobId,
       stepId: "compute_adjustments",
       source,
       input: {
@@ -218,6 +234,7 @@ export class AccountingReconcileKernel {
 
     // ── Step 5: emit_report ───────────────────────────────────────────
     const step5 = await this.runStep({
+      jobId: params.jobId,
       stepId: "emit_report",
       source,
       input: {
@@ -263,8 +280,7 @@ export class AccountingReconcileKernel {
     const bundleHash = await sha256(canonicalize(sortedHashes));
 
     // Sign the bundle with the session key
-    const bundleHashBytes = new TextEncoder().encode(bundleHash);
-    const sig = nacl.sign.detached(bundleHashBytes, params.sessionPrivateKey);
+    const sig = nacl.sign.detached(signingPreimage(bundleHash), params.sessionPrivateKey);
 
     const evidenceBundle: EvidenceBundle = {
       id: ids.bundle(),
@@ -290,6 +306,7 @@ export class AccountingReconcileKernel {
   // ─────────────────────────────────────────────────────────────────────
 
   private async runStep<I, O>(params: {
+    jobId: string;
     stepId: string;
     source: EvidenceSource;
     input: I;
@@ -299,16 +316,20 @@ export class AccountingReconcileKernel {
     trace: StepTrace;
     output: O;
   }> {
-    const inputHash = await sha256(canonicalize(params.input));
+    // Hash and execute ONE snapshot: canonicalize first, parse once, hand the
+    // step the parsed copy of exactly the text that was hashed.
+    const input = canonicalSnapshot<I>(params.input);
+    const inputHash = await sha256(input.text);
     const t0 = Date.now();
 
-    const output = params.execute(params.input);
+    const output = params.execute(input.value);
 
     const durationMs = Date.now() - t0;
     const outputHash = await sha256(canonicalize(output));
     const outputSummary = JSON.stringify(output).slice(0, 200);
 
     const payload = {
+      jobId: params.jobId,
       stepId: params.stepId,
       inputHash,
       outputHash,

@@ -28,8 +28,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
-import { ot2RelayRoutes } from "../routes/ot2-relay.js";
-import { ot2ScopeRoutes } from "../routes/ot2-scope.js";
+import { deviceRelayRoutes } from "../routes/device-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { initStore, closeStore, getRepos } from "../db.js";
 import { getKernelService } from "../services/kernel-service.js";
@@ -92,16 +91,23 @@ vi.mock("../services/kernel-service.js", async (importActual) => {
 // Test app builder
 // ---------------------------------------------------------------------------
 
+// N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven wallet, or the
+// gateway admin acts for it. This suite has no caller stand-in and its buyers are not wallets, so
+// the admin submits each fast-track job for its buyer.
+const ADMIN = "paid-job-flow-dispatch-admin";
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
   await app.register(negotiationRoutes);
-  await app.register(ot2RelayRoutes);
-  await app.register(ot2ScopeRoutes);
+  await app.register(deviceRelayRoutes);
   await app.register(jobRoutes);
   await app.ready();
   return app;
@@ -112,7 +118,10 @@ async function submitJob(app: FastifyInstance, kernelId: string, userAgentId: st
   const res = await app.inject({
     method: "POST",
     url: "/api/jobs/submit-from-discovery",
-    payload: { kernelId, capabilityType: "liquid-handler", userAgentId },
+    headers: { "x-admin-key": ADMIN },
+    // A type the kernel actually registers: the quote is the registered capability's price (N98),
+    // so a type the kernel does not offer is refused before any job exists.
+    payload: { kernelId, capabilityType: "fdm", userAgentId },
   });
   expect(res.statusCode).toBe(201);
   const body = res.json();
@@ -142,6 +151,8 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   it("dispatches a job as 'queued' when the gateway has NO local kernel (remote node picks it up)", async () => {

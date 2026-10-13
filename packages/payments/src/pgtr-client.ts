@@ -1,6 +1,9 @@
 /**
  * PGTR Client -- Payment-Gated Transaction Relay (ERC-8194) client.
  *
+ * DISABLED on the gateway: POST /api/pgtr/relay answers 501 PGTR_RELAY_DISABLED
+ * (see PGTRClient below).
+ *
  * Enables keyless agent authentication by bundling EIP-3009 USDC payment
  * authorizations with target contract calls. The client:
  *
@@ -42,8 +45,14 @@ export interface PGTRClientConfig {
 /**
  * Client for the PCC PGTR relay system.
  *
- * Sends relay requests to the gateway, which forwards them to the
- * PCCForwarder contract on-chain.
+ * Sends relay requests to the gateway's POST /api/pgtr/relay, which used to
+ * forward them to the PCCForwarder contract on-chain.
+ *
+ * DISABLED: the gateway's POST /api/pgtr/relay guard answers 501 PGTR_RELAY_DISABLED
+ * until the relay binds the target and the calldata to the payer's signature.
+ * relayAction() throws for every non-2xx: "PGTR relay failed (501): ..." when the
+ * request reaches that guard, or 401, 403, 429 and so on when a global hook refuses
+ * it first. A status request the gateway admits reports enabled: false.
  */
 export class PGTRClient {
   private gatewayUrl: string;
@@ -101,9 +110,15 @@ export class PGTRClient {
   }
 
   /**
-   * Check if the PGTR relay endpoint is available.
+   * An HTTP-success check: GETs /api/pgtr/status and returns response.ok. It does not
+   * send the configured authToken and does not read the body's enabled field.
    *
-   * @returns true if the relay endpoint responds, false otherwise
+   * Against a gateway with apiGate, an unauthenticated status request gets 401, so this
+   * returns false. A request admitted another way (a session cookie, or a fetchFn that
+   * injects auth) gets 200 with enabled: false, so this returns true. Either way, true
+   * never means relayAction() can succeed.
+   *
+   * @returns response.ok for GET /api/pgtr/status, or false if the request throws
    */
   async isAvailable(): Promise<boolean> {
     try {

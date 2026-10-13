@@ -1,6 +1,6 @@
 import React, { useRef, useState, useCallback, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -74,7 +74,7 @@ function statusColor(status: Job["status"]): string {
 
 async function fetchActiveJobs(): Promise<Job[]> {
   try {
-    const res = await fetch("/api/jobs?status=active", { headers: { ...getAuthHeaders() } });
+    const res = await authorizedFetch("/api/jobs?status=active");
     if (res.ok) return res.json() as Promise<Job[]>;
   } catch {
     // fall through to mock
@@ -111,9 +111,9 @@ async function uploadPhoto(
   notes: string
 ): Promise<UploadResult> {
   try {
-    const res = await fetch("/api/photo/upload", {
+    const res = await authorizedFetch("/api/photo/upload", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: base64, sha256: hash, notes }),
     });
     if (res.ok) return res.json() as Promise<UploadResult>;
@@ -130,9 +130,9 @@ async function uploadPhoto(
 
 async function comparePhoto(base64: string, jobId: string): Promise<CompareResult> {
   try {
-    const res = await fetch("/api/photo/compare", {
+    const res = await authorizedFetch("/api/photo/compare", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: base64, jobId }),
     });
     if (res.ok) return res.json() as Promise<CompareResult>;
@@ -149,9 +149,9 @@ async function reportIssue(
   jobId: string | null
 ): Promise<{ issueId: string }> {
   try {
-    const res = await fetch("/api/issues", {
+    const res = await authorizedFetch("/api/issues", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: base64, text, jobId }),
     });
     if (res.ok) return res.json() as Promise<{ issueId: string }>;

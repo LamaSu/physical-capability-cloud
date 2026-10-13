@@ -5,6 +5,7 @@ import {
   DataCell, AddressDisplay, AmountDisplay, TierBadge, DIDBadge,
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
+import { siteAddressLabel, siteLocationLabel } from "./kernel-location.js";
 import { mockKernels, mockDevices, mockJobs, jobMeta } from "../api/mock-data.js";
 
 export function KernelDetailPage() {
@@ -116,10 +117,8 @@ export function KernelDetailPage() {
           {/* Location */}
           <h3 className="text-sm font-semibold text-white/60 uppercase tracking-wider">Location</h3>
           <GlassPanel padding="md">
-            <div className="text-sm text-white/60">{kernel.physicalAddress}</div>
-            <div className="text-xs text-white/25 font-mono mt-1">
-              {kernel.location.lat.toFixed(4)}, {kernel.location.lng.toFixed(4)}
-            </div>
+            <div className="text-sm text-white/60">{siteAddressLabel(kernel)}</div>
+            <div className="text-xs text-white/25 font-mono mt-1">{siteLocationLabel(kernel)}</div>
           </GlassPanel>
         </div>
       </div>

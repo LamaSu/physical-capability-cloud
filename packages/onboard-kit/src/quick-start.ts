@@ -170,6 +170,8 @@ export async function quickStart(config: QuickStartConfig): Promise<QuickStartRe
     getProgress: () => machine.getProgress(),
     execute: (cmd: any) => machine.execute(cmd),
     onEvidence: (cb: any) => machine.onEvidence(cb),
+    // Required by the JobRunner, which refuses an adapter without it.
+    quiesceEvidence: () => machine.quiesceEvidence(),
     dispose: () => machine.dispose(),
   };
 
@@ -181,6 +183,7 @@ export async function quickStart(config: QuickStartConfig): Promise<QuickStartRe
     stopRecording: () => sensor.stopRecording(),
     getCurrentReading: () => sensor.getCurrentReading(),
     onEvidence: (cb: any) => sensor.onEvidence(cb),
+    quiesceEvidence: () => sensor.quiesceEvidence(),
     dispose: () => sensor.dispose(),
   };
 
@@ -190,6 +193,7 @@ export async function quickStart(config: QuickStartConfig): Promise<QuickStartRe
     captureSnapshot: () => camera.captureSnapshot(),
     runInspection: (ref?: string) => camera.runInspection(ref),
     onEvidence: (cb: any) => camera.onEvidence(cb),
+    quiesceEvidence: () => camera.quiesceEvidence(),
     dispose: () => camera.dispose(),
   };
 

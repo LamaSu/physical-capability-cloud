@@ -112,9 +112,19 @@ vi.mock("../services/oracle-client.js", async (importOriginal) => {
 const KERNEL = "kernel-biolab-01";
 const CAP = "liquid-handler";
 
+// N133 (the steward's DECISIONS 01:01): a paid job's or session's buyer is the caller's proven
+// wallet, or the gateway admin acts for it, and only the buyer or the admin commits a session.
+// This suite has no caller stand-in and its buyers are not wallets, so the admin creates and
+// commits each session and submits the fast-track job for its buyer.
+const ADMIN = "completion-real-tier-admin";
+const asAdmin = { "x-admin-key": ADMIN };
+let savedAdminKey: string | undefined;
+
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
   process.env.MOCK_SETTLEMENT = "true";
+  savedAdminKey = process.env.PCC_ADMIN_KEY;
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
@@ -134,12 +144,15 @@ describe("completion attests at the job's real assurance tier (finding #3 / A-3)
   afterEach(async () => {
     await app.close();
     closeStore();
+    if (savedAdminKey === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = savedAdminKey;
   });
 
   async function negotiateJob(agent: string, selections: Record<string, unknown>): Promise<string> {
     const create = await app.inject({
       method: "POST",
       url: "/api/negotiate/session",
+      headers: asAdmin,
       payload: { userAgentId: agent, kernelId: KERNEL, capabilityType: CAP },
     });
     expect(create.statusCode).toBe(200);
@@ -147,7 +160,7 @@ describe("completion attests at the job's real assurance tier (finding #3 / A-3)
     expect((await app.inject({ method: "PATCH", url: `/api/negotiate/session/${id}/select`, payload: { selections } })).statusCode).toBe(200);
     expect((await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/quote` })).statusCode).toBe(200);
     expect((await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/review` })).statusCode).toBe(200);
-    const commit = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit` });
+    const commit = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit`, headers: asAdmin });
     expect(commit.statusCode).toBe(200);
     const jobId = commit.json().jobId as string;
     expect(jobId).toMatch(/^job-/);
@@ -187,6 +200,7 @@ describe("completion attests at the job's real assurance tier (finding #3 / A-3)
     const ft = await app.inject({
       method: "POST",
       url: "/api/jobs/submit-from-discovery",
+      headers: asAdmin,
       payload: { kernelId: KERNEL, capabilityType: CAP, userAgentId: "a3-ft" },
     });
     expect(ft.statusCode).toBe(201);

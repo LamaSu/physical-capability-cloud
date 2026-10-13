@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { GlassPanel, GlowBadge } from "@pcc/ui";
-import { getAuthHeaders } from "../../stores/auth-store.js";
-
-const API_ROOT = (import.meta.env.VITE_PCC_URL ?? "");
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
 
 interface Diagnostics {
   operatorId: string;
@@ -28,9 +26,7 @@ export function DiscoverabilityPanel({ operatorId }: { operatorId: string }) {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_ROOT}/api/operators/${encodeURIComponent(operatorId)}/discoverability`, {
-          headers: { ...getAuthHeaders() },
-        });
+        const res = await authorizedFetch(`/api/operators/${encodeURIComponent(operatorId)}/discoverability`);
         if (!res.ok) {
           setError(`HTTP ${res.status}`);
           return;
