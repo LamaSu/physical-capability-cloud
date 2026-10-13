@@ -3,11 +3,15 @@ import type { MachineAdapter, PrintJobOptions, PrintJobResult } from "@pcc/kerne
 // as kernel-signer does, until the toolkit publishes a print-job subpath.
 import { runPrintJob } from "../../kernel/dist/printer-job.js";
 import { EvidenceEmitter } from "../../kernel/dist/evidence-emitter.js";
+import type { EvidenceBundle } from "@pcc/spec";
+import { getAddress, type Hex } from "viem";
+import type { EvidenceBroadcaster, EvidenceBroadcastOutcome, EvidenceSubmission } from "./chain.js";
 import type { HostConfig } from "./config.js";
 import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue } from "./gateway-client.js";
-import { isUnitBinding, JOB_INPUT_CODES, type JobInputSource, type JobInputs } from "./job-inputs.js";
-import type { JobJournal, JournalState } from "./journal.js";
-import type { DeviceKey } from "./keys.js";
+import { hasPackageInputs, isUnitBinding, JOB_INPUT_CODES, type JobInputSource, type JobInputs } from "./job-inputs.js";
+import { SUBMIT_CODES, type JobJournal, type JournalCode, type JournalState, type PackageHashes } from "./journal.js";
+import type { DeviceKey, OperatorKey } from "./keys.js";
+import { buildMilestonePackage, computePackageBodyHash, computePackageDigest, signMilestonePackage } from "./package-builder.js";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
 import { openUnitEvidenceSession, UnitSessionError, type UnitEvidenceSession } from "./unit-session.js";
 
@@ -27,7 +31,8 @@ export const HOST_LOG_CODES = [
   "evidence_stored", "evidence_indeterminate", "evidence_refused", "abandoned",
   "interrupted", "simulated_refused", "no_bundle", "journal_failed", "host_shutdown",
   "reader_unavailable", "stopped", "absent", "malformed", "poll_failed", "session_failed",
-  ...gatewayCodes, ...JOB_INPUT_CODES,
+  "package_built", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
+  ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
 ] as const;
 export type HostLogCode = typeof HOST_LOG_CODES[number];
 export type HostPrintOptions = PrintJobOptions;
@@ -42,8 +47,11 @@ export interface HostDeps {
   journal: JobJournal;
   adapter?: MachineAdapter;
   deviceKey?: DeviceKey;
-  /** Public EOA read from the operator key file; no operator signer enters the host. */
+  /** Public EOA used for the delegated evidence session. */
   operatorAddress?: string;
+  /** Only the operator's package signer enters the host; the broadcaster owns its tx signer. */
+  operatorKey?: Pick<OperatorKey, "address" | "signD1">;
+  broadcaster?: EvidenceBroadcaster;
   print?: (options: HostPrintOptions) => Promise<PrintJobResult>;
   clock?: () => number;
   timers?: HostTimers;
@@ -90,6 +98,8 @@ export function createHost(deps: HostDeps): {
   const interval = config.eStopPollIntervalMs ?? 5_000;
   if (!Number.isSafeInteger(interval) || interval < 1 || interval > 60_000) throw new Error("bad_host_interval");
   const print = deps.print ?? runPrintJob;
+  const sendEnabled = deps.realMode !== false && [config.chain.maxFeePerGasCap,
+    config.chain.maxPriorityFeePerGasCap, config.chain.gasCap].every((cap) => cap !== undefined && BigInt(cap) > 0n);
   let initialized = false;
   let halted = false;
   let stopped = deps.stopSignal?.aborted === true;
@@ -129,10 +139,115 @@ export function createHost(deps: HostDeps): {
     const why = ["reader_unavailable", "stopped", "unavailable", "absent", "malformed", "poll_failed"] as const;
     log(why.includes(stop.why) ? stop.why : "malformed");
   }
-  async function append(state: JournalState, code?: HostGatewayCode | "busy_retry_limit" | "no_bundle"): Promise<void> {
-    await journal.append(pending!.jobId, state, code);
+  async function record(jobId: string, state: JournalState, code?: JournalCode, hashes?: PackageHashes): Promise<void> {
+    await journal.append(jobId, state, code, hashes);
     log(state);
-    if (code) log(code);
+    if (code && (HOST_LOG_CODES as readonly string[]).includes(code)) log(code as HostLogCode);
+  }
+  async function append(state: JournalState, code?: HostGatewayCode | "busy_retry_limit" | "no_bundle"): Promise<void> {
+    await record(pending!.jobId, state, code);
+  }
+  function skipSubmission(inputs: JobInputs): "package_inputs_missing" | "submit_disabled" | undefined {
+    if (!hasPackageInputs(inputs)) return "package_inputs_missing";
+    if (!sendEnabled || !deps.operatorKey || !deps.broadcaster || !deps.deviceKey) return "submit_disabled";
+    return undefined;
+  }
+  async function outcome(jobId: string, result: EvidenceBroadcastOutcome, readOnly: boolean): Promise<JournalState> {
+    if (result.code === "already_committed" || result.code === "conflict" || (!readOnly && result.code === "submitted")) {
+      await record(jobId, result.code);
+      return result.code;
+    }
+    // An attempt's absence does not authorize another send: a node can have
+    // accepted the transaction without mining it or returning its result yet.
+    const state = readOnly || result.code === "indeterminate" || result.code === "rpc_unavailable"
+      ? "submit_indeterminate" : "refused";
+    const code = result.code === "rpc_unavailable" ? "submit_rpc_unavailable"
+      : result.code === "caps_exceeded" ? "submit_caps_exceeded"
+      : result.code === "refused" ? result.reason === "EvidenceNotCommitted" ? "submit_absent" : "submit_refused"
+      : "submit_unknown";
+    if (readOnly) {
+      const previous = (await journal.read(jobId)).at(-1);
+      if (previous?.state === state && previous.code === code) {
+        log(state); log(code);
+        return state;
+      }
+    }
+    await record(jobId, state, code);
+    return state;
+  }
+  async function submitStored(jobId: string, inputs?: JobInputs, bundle?: EvidenceBundle): Promise<JournalState> {
+    const entries = await journal.read(jobId);
+    const last = entries.at(-1)!;
+    // The receipt is an independent, durable prerequisite, including on restart.
+    if (!entries.some((entry) => entry.state === "evidence_stored")) throw new Error("journal_invalid");
+    const readOnly = last.state === "submit_attempted" || last.state === "submit_indeterminate";
+    let signed = await journal.readPackage(jobId);
+    const builtRecord = entries.find((entry) => entry.state === "package_built");
+    if ((builtRecord || readOnly) && !signed) throw new Error("journal_invalid");
+    if (!signed) {
+      if (!inputs) {
+        let result;
+        try { result = await deps.inputSource(jobId); } catch { result = undefined; }
+        if (result?.ok) inputs = result.value;
+      }
+      if (!inputs) {
+        await record(jobId, "evidence_stored", "package_inputs_missing");
+        return "evidence_stored";
+      }
+      const skip = skipSubmission(inputs);
+      if (skip) {
+        await record(jobId, "evidence_stored", skip);
+        return "evidence_stored";
+      }
+      if (!hasPackageInputs(inputs)) throw new Error("package_inputs_missing");
+      bundle ??= await journal.readBundle(jobId) as EvidenceBundle;
+      try {
+        if (inputs.unit.chainId !== config.chain.chainId) throw new Error("chain_mismatch");
+        const { fundedAt: _fundedAt, reclaimAt: _reclaimAt, ...unit } = inputs.unit;
+        const built = buildMilestonePackage(bundle, { ...unit, settlementUnitId: unit.settlementUnitId as Hex,
+          challengeNonce: unit.challengeNonce as Hex, operator: deps.operatorKey!.address,
+          kernelId: config.kernelId, devicePublicKey: `0x${deps.deviceKey!.publicKeyHex}` }, inputs.program);
+        // The immutable builder reads only address/signD1. Its older full-key
+        // type does not widen the two-field object passed by the CLI.
+        signed = await signMilestonePackage(built, deps.operatorKey as OperatorKey, deps.deviceKey!);
+      } catch {
+        await record(jobId, "refused", "package_invalid");
+        return "refused";
+      }
+      await journal.savePackage(jobId, signed);
+    }
+    let submission: EvidenceSubmission;
+    try {
+      const u = signed.body.unitBinding;
+      if (u.chainId !== String(config.chain.chainId) || computePackageBodyHash(signed.body) !== signed.packageBodyHash
+        || computePackageDigest(signed.body, signed.signatures) !== signed.packageDigest
+        || signed.body.evidence.evidenceBlockHash !== signed.evidenceBlockHash
+        || (builtRecord && (builtRecord.packageDigest !== signed.packageDigest || builtRecord.evidenceBlockHash !== signed.evidenceBlockHash))) {
+        throw new Error("journal_invalid");
+      }
+      submission = { escrow: getAddress(u.escrow), unitId: u.settlementUnitId,
+        packageDigest: signed.packageDigest, compositionSchemaVersion: Number(signed.body.compositionSchemaVersion) };
+    } catch { throw new Error("journal_invalid"); }
+    if (!builtRecord) await record(jobId, "package_built", undefined, {
+      packageDigest: signed.packageDigest, evidenceBlockHash: signed.evidenceBlockHash,
+    });
+    if (readOnly) {
+      let result: EvidenceBroadcastOutcome;
+      try { result = deps.broadcaster ? await deps.broadcaster.readBack(submission) : { code: "rpc_unavailable" }; }
+      catch { result = { code: "rpc_unavailable" }; }
+      return outcome(jobId, result, true);
+    }
+    if (!sendEnabled || !deps.broadcaster) {
+      await record(jobId, "refused", "submit_disabled");
+      return "refused";
+    }
+    // append resolves only after the file AND directory have been fsynced.
+    // Everything after this boundary is read-back-only after any crash.
+    await record(jobId, "submit_attempted");
+    let result: EvidenceBroadcastOutcome;
+    try { result = await deps.broadcaster.submit(submission); }
+    catch { result = { code: "indeterminate" }; }
+    return outcome(jobId, result, false);
   }
   async function tick(): Promise<HostTickResult> {
     if (halted) return { kind: "halted", waitMs: 5_000 };
@@ -143,6 +258,18 @@ export function createHost(deps: HostDeps): {
     }
     if (stopped) return { kind: "blocked", waitMs: 5_000 };
     await heartbeat();
+    if (!deps.pollOnly) {
+      // Settlement continues even if the gateway no longer lists this job.
+      // Recovery never drives the printer or re-posts a relay bundle.
+      const records = await journal.list();
+      // A possibly pending transaction owns the operator's nonce stream.
+      const recoverable = records.find((entry) => entry.state === "submit_attempted" || entry.state === "submit_indeterminate")
+        ?? records.find((entry) => entry.state === "package_built" || (entry.state === "evidence_stored" && entry.code === undefined));
+      if (recoverable) {
+        const state = await submitStored(recoverable.jobId);
+        return { kind: "job", jobId: recoverable.jobId, state, waitMs: 5_000 };
+      }
+    }
     if (now() < nextPollAt) return { kind: "backoff", waitMs: nextPollAt - now() };
     const initial = await poll();
     if (!initial.ok) {
@@ -329,7 +456,11 @@ export function createHost(deps: HostDeps): {
     let receipt;
     try { receipt = await gateway.postRelayEvidence(jobId, bundle); }
     catch { receipt = { ok: false as const, code: "indeterminate" as const, status: null }; }
-    if (receipt.ok) { await append("evidence_stored"); return done("evidence_stored"); }
+    if (receipt.ok) {
+      const skip = skipSubmission(pending.inputs);
+      await record(jobId, "evidence_stored", skip);
+      return done(skip ? "evidence_stored" : await submitStored(jobId, pending.inputs, bundle));
+    }
     const code = safeGwCode(receipt.code);
     if (code === "indeterminate") {
       await append("evidence_indeterminate");

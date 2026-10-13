@@ -2,16 +2,24 @@ import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import type { GwCode, RelayEvidenceBundle } from "./gateway-client.js";
+import type { signMilestonePackage } from "./package-builder.js";
 import { jobFileStem } from "./job-inputs.js";
 
 export const JOURNAL_STATES = [
   "claimed", "in_progress_reported", "printing", "printed", "print_failed", "busy",
   "bundle_saved", "evidence_stored", "evidence_indeterminate", "evidence_refused",
   "abandoned", "interrupted", "simulated_refused",
+  "package_built", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
 ] as const;
 export type JournalState = typeof JOURNAL_STATES[number];
-export type JournalCode = GwCode | "no_bundle" | "busy_retry_limit" | "host_shutdown";
-export interface JournalRecord { at: string; jobId: string; state: JournalState; code?: JournalCode }
+export const SUBMIT_CODES = [
+  "package_inputs_missing", "submit_disabled", "package_invalid", "submit_absent",
+  "submit_rpc_unavailable", "submit_refused", "submit_caps_exceeded", "submit_unknown",
+] as const;
+export type JournalCode = GwCode | "no_bundle" | "busy_retry_limit" | "host_shutdown" | typeof SUBMIT_CODES[number];
+export interface PackageHashes { packageDigest: string; evidenceBlockHash: string }
+export type SignedMilestonePackage = Awaited<ReturnType<typeof signMilestonePackage>>;
+export interface JournalRecord extends Partial<PackageHashes> { at: string; jobId: string; state: JournalState; code?: JournalCode }
 
 export type JournalErrorCode =
   | "journal_bad_id" | "journal_bad_directory" | "journal_bad_file" | "journal_invalid"
@@ -25,18 +33,23 @@ export interface JobJournal {
   readonly directory: string;
   initialize(): Promise<void>;
   has(jobId: string): Promise<boolean>;
-  append(jobId: string, state: JournalState, code?: JournalCode): Promise<void>;
+  append(jobId: string, state: JournalState, code?: JournalCode, hashes?: PackageHashes): Promise<void>;
   saveBundle(jobId: string, bundle: RelayEvidenceBundle): Promise<void>;
+  readBundle(jobId: string): Promise<RelayEvidenceBundle>;
+  savePackage(jobId: string, value: SignedMilestonePackage): Promise<void>;
+  readPackage(jobId: string): Promise<SignedMilestonePackage | undefined>;
   read(jobId: string): Promise<readonly JournalRecord[]>;
   /** Last record of every existing journal, including completed jobs. */
   list(): Promise<readonly JournalRecord[]>;
   journalPath(jobId: string): string;
   bundlePath(jobId: string): string;
+  packagePath(jobId: string): string;
   /** The unit session creates this private per-job directory after claim. */
   sessionDirectory(jobId: string): string;
 }
 
 const codes = new Set<string>([
+  ...SUBMIT_CODES,
   "unauthenticated", "not_kernel_operator", "operator_proof_required", "job_has_no_kernel",
   "insufficient_scope", "blocked_by_policy", "forbidden", "kernel_not_found", "route_unavailable",
   "rate_limited", "bad_request", "unavailable", "server_error", "network", "timeout",
@@ -51,6 +64,11 @@ const codes = new Set<string>([
 ]);
 const states = new Set<string>(JOURNAL_STATES);
 const interruptedStates = new Set<JournalState>(["claimed", "in_progress_reported", "printing"]);
+function validHashes(state: unknown, value: Partial<PackageHashes>): boolean {
+  const valid = (word: unknown) => typeof word === "string" && /^0x[0-9a-f]{64}$/.test(word);
+  return state === "package_built" ? valid(value.packageDigest) && valid(value.evidenceBlockHash)
+    : !Object.hasOwn(value, "packageDigest") && !Object.hasOwn(value, "evidenceBlockHash");
+}
 
 function isMissing(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
@@ -135,10 +153,11 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
         try { record = JSON.parse(line); } catch { throw new JournalError("journal_invalid"); }
         if (typeof record !== "object" || record === null || Array.isArray(record)) throw new JournalError("journal_invalid");
         const value = record as Record<string, unknown>;
-        if (Object.keys(value).some((key) => !["at", "jobId", "state", "code"].includes(key))
+        if (Object.keys(value).some((key) => !["at", "jobId", "state", "code", "packageDigest", "evidenceBlockHash"].includes(key))
           || value.jobId !== jobId || typeof value.at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value.at)
           || !Number.isFinite(Date.parse(value.at)) || typeof value.state !== "string" || !states.has(value.state)
-          || (Object.hasOwn(value, "code") && (typeof value.code !== "string" || !codes.has(value.code)))) {
+          || (Object.hasOwn(value, "code") && (typeof value.code !== "string" || !codes.has(value.code)))
+          || !validHashes(value.state, value)) {
           throw new JournalError("journal_invalid");
         }
         return value as unknown as JournalRecord;
@@ -146,10 +165,14 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
     } finally { await handle.close(); }
   }
 
-  async function appendRaw(jobId: string, state: JournalState, code?: JournalCode): Promise<void> {
-    if (!states.has(state) || (code !== undefined && !codes.has(code))) throw new JournalError("journal_invalid");
+  async function appendRaw(jobId: string, state: JournalState, code?: JournalCode, hashes?: PackageHashes): Promise<void> {
+    // Snapshot before validation so an accessor or concurrent caller cannot
+    // substitute non-hash text between the check and JSON serialization.
+    const publicHashes = hashes === undefined ? {} : { packageDigest: hashes.packageDigest, evidenceBlockHash: hashes.evidenceBlockHash };
+    if (!states.has(state) || (code !== undefined && !codes.has(code)) || !validHashes(state, publicHashes)
+      || (hashes && Object.keys(hashes).some((key) => !["packageDigest", "evidenceBlockHash"].includes(key)))) throw new JournalError("journal_invalid");
     const at = new Date(clock()).toISOString();
-    const record: JournalRecord = { at, jobId, state, ...(code === undefined ? {} : { code }) };
+    const record: JournalRecord = { at, jobId, state, ...(code === undefined ? {} : { code }), ...publicHashes };
     await checkDirectory();
     const filePath = path(jobId, ".jsonl");
     let before;
@@ -205,7 +228,8 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
           if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== expectedUid
             || (stat.mode & 0o777) !== 0o700) throw new JournalError("journal_bad_directory");
           const last = latest.get(jobId);
-          if (last?.state !== "evidence_stored" && last?.state !== "interrupted") {
+          const stored = last && (await readRaw(jobId)).some((record) => record.state === "evidence_stored");
+          if (!stored && last?.state !== "interrupted") {
             await appendRaw(jobId, "interrupted");
           }
         }
@@ -221,11 +245,58 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
     try { return await result; } catch (error) { throw safe(error, fallback); }
   }
 
+  async function readArtifact(jobId: string, suffix: string, limit: number): Promise<unknown | undefined> {
+    await checkDirectory();
+    const filePath = path(jobId, suffix);
+    let before;
+    try { before = await fs.lstat(filePath); } catch (error) { if (isMissing(error)) return undefined; throw error; }
+    if (!before.isFile() || before.isSymbolicLink() || before.uid !== expectedUid
+      || (before.mode & 0o777) !== 0o600) throw new JournalError("journal_bad_file");
+    const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const opened = await handle.stat();
+      if (opened.dev !== before.dev || opened.ino !== before.ino || !opened.isFile()
+        || opened.uid !== expectedUid || (opened.mode & 0o777) !== 0o600) throw new JournalError("journal_bad_file");
+      if (opened.size > limit) throw new JournalError("journal_invalid");
+      const bytes = Buffer.alloc(limit + 1);
+      try {
+        let length = 0;
+        while (length < bytes.length) {
+          const { bytesRead } = await handle.read(bytes, length, bytes.length - length, null);
+          if (!bytesRead) break;
+          length += bytesRead;
+        }
+        if (length > limit) throw new JournalError("journal_invalid");
+        try { return JSON.parse(bytes.subarray(0, length).toString("utf8")); }
+        catch { throw new JournalError("journal_invalid"); }
+      } finally { bytes.fill(0); }
+    } finally { await handle.close(); }
+  }
+
+  async function saveArtifact(jobId: string, suffix: string, value: unknown): Promise<void> {
+    await checkDirectory();
+    const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+    let handle;
+    try {
+      handle = await fs.open(path(jobId, suffix), constants.O_WRONLY | constants.O_CREAT
+        | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.uid !== expectedUid || (opened.mode & 0o777) !== 0o600) throw new JournalError("journal_bad_file");
+      await handle.writeFile(bytes);
+      await handle.sync();
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") throw new JournalError("journal_bundle_exists");
+      throw error;
+    } finally { bytes.fill(0); await handle?.close(); }
+    await syncDirectory(directory);
+  }
+
   return {
     directory,
     initialize,
     journalPath: (jobId) => path(jobId, ".jsonl"),
     bundlePath: (jobId) => path(jobId, ".bundle.json"),
+    packagePath: (jobId) => path(jobId, ".package.json"),
     sessionDirectory,
     has: (jobId) => serial(async () => {
       await checkDirectory();
@@ -236,25 +307,16 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
         return true;
       } catch (error) { if (isMissing(error)) return false; throw error; }
     }, "journal_read_failed"),
-    append: (jobId, state, code) => serial(() => appendRaw(jobId, state, code), "journal_write_failed"),
+    append: (jobId, state, code, hashes) => serial(() => appendRaw(jobId, state, code, hashes), "journal_write_failed"),
     read: (jobId) => serial(() => readRaw(jobId), "journal_read_failed"),
     list: () => serial(listRaw, "journal_read_failed"),
-    saveBundle: (jobId, bundle) => serial(async () => {
-      await checkDirectory();
-      const bytes = Buffer.from(`${JSON.stringify(bundle)}\n`, "utf8");
-      let handle;
-      try {
-        handle = await fs.open(path(jobId, ".bundle.json"), constants.O_WRONLY | constants.O_CREAT
-          | constants.O_EXCL | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
-        const opened = await handle.stat();
-        if (!opened.isFile() || opened.uid !== expectedUid || (opened.mode & 0o777) !== 0o600) throw new JournalError("journal_bad_file");
-        await handle.writeFile(bytes);
-        await handle.sync();
-      } catch (error) {
-        if (typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST") throw new JournalError("journal_bundle_exists");
-        throw error;
-      } finally { bytes.fill(0); await handle?.close(); }
-      await syncDirectory(directory);
-    }, "journal_write_failed"),
+    saveBundle: (jobId, bundle) => serial(() => saveArtifact(jobId, ".bundle.json", bundle), "journal_write_failed"),
+    readBundle: (jobId) => serial(async () => {
+      const bundle = await readArtifact(jobId, ".bundle.json", 4 * 1024 * 1024);
+      if (!bundle) throw new JournalError("journal_invalid");
+      return bundle as RelayEvidenceBundle;
+    }, "journal_read_failed"),
+    savePackage: (jobId, value) => serial(() => saveArtifact(jobId, ".package.json", value), "journal_write_failed"),
+    readPackage: (jobId) => serial(async () => await readArtifact(jobId, ".package.json", 128 * 1024) as SignedMilestonePackage | undefined, "journal_read_failed"),
   };
 }

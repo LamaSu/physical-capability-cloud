@@ -1,8 +1,10 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { defaultJobInputSource, fileJobInputSource, isUnitBinding, JOB_INPUT_CODES } from "../src/job-inputs.js";
+import { getAddress } from "viem";
+import { defaultJobInputSource, fileJobInputSource, hasPackageInputs, isUnitBinding, JOB_INPUT_CODES } from "../src/job-inputs.js";
 
 let dir: string;
 const jobId = "job-input-1";
@@ -11,6 +13,15 @@ const unit = {
   settlementUnitId: `0x${"a".repeat(64)}`, challengeNonce: `0x${"0".repeat(64)}`,
   fundedAt: 1_792_083_600, reclaimAt: 1_792_087_200,
 };
+const hash = (label: string) => `0x${createHash("sha256").update(label).digest("hex")}`;
+const packageFields = {
+  chainId: 84532, escrow: getAddress(hash("escrow").slice(0, 42)),
+  jobIdHash: hash(jobId), milestoneIndex: 0, stepId: hash("step"),
+  compositionRoot: hash("composition"), acceptedEnvelopeHash: hash("accepted"),
+  compositionSchemaVersion: 2, tChallengeRef: "challenge:input-1",
+  evidenceTimeBounds: { start: String(unit.fundedAt), end: String(unit.reclaimAt) },
+};
+const program = { programHash: hash("program"), attestationSetRoot: hash("attestations"), workProductRoot: hash("work") };
 
 beforeEach(async () => { dir = await fs.mkdtemp(join(tmpdir(), "print-host-inputs-")); });
 afterEach(async () => { vi.restoreAllMocks(); await fs.rm(dir, { recursive: true, force: true }); });
@@ -25,6 +36,69 @@ describe("fileJobInputSource", () => {
     await fixture();
     const result = await fileJobInputSource(dir)(jobId);
     expect(result).toEqual({ ok: true, value: { documentData: pdf, jobName: "Operator rehearsal", totalPages: 2, unit } });
+  });
+
+  it("accepts complete settlement and canonical program contexts", async () => {
+    await fixture({ unit: { ...unit, ...packageFields }, program });
+    const result = await fileJobInputSource(dir)(jobId);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.unit).toEqual({ ...unit, ...packageFields });
+      expect(result.value.program).toEqual(program);
+      expect(hasPackageInputs(result.value)).toBe(true);
+      expect(isUnitBinding(result.value.unit)).toBe(true);
+    }
+  });
+
+  it.each(Object.keys(packageFields))("keeps printing inputs when package unit field %s is absent", async (field) => {
+    await fixture({ unit: { ...unit, ...packageFields, [field]: undefined }, program });
+    const result = await fileJobInputSource(dir)(jobId);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(hasPackageInputs(result.value)).toBe(false);
+  });
+
+  it.each([undefined, {}, { programHash: program.programHash },
+    { programHash: program.programHash, attestationSetRoot: program.attestationSetRoot }])(
+    "keeps printing inputs with an absent or incomplete program %#", async (partialProgram) => {
+      await fixture({ unit: { ...unit, ...packageFields }, program: partialProgram });
+      const result = await fileJobInputSource(dir)(jobId);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(hasPackageInputs(result.value)).toBe(false);
+    },
+  );
+
+  it.each([{}, { start: "1" }, { end: "2" }])("keeps printing inputs with incomplete package time bounds %#", async (bounds) => {
+    await fixture({ unit: { ...unit, ...packageFields, evidenceTimeBounds: bounds }, program });
+    const result = await fileJobInputSource(dir)(jobId);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(hasPackageInputs(result.value)).toBe(false);
+  });
+
+  it.each([
+    { chainId: 1 }, { chainId: "84532" }, { escrow: packageFields.escrow.toLowerCase() },
+    { escrow: `0x${"0".repeat(40)}` }, { escrow: "bad address" },
+    { jobIdHash: packageFields.jobIdHash.toUpperCase() }, { jobIdHash: "0x1234" },
+    { milestoneIndex: -1 }, { milestoneIndex: 0.5 }, { milestoneIndex: Number.MAX_SAFE_INTEGER + 1 },
+    { milestoneIndex: "0" }, { stepId: null }, { compositionRoot: "invalid" }, { acceptedEnvelopeHash: "invalid" },
+    { compositionSchemaVersion: -1 }, { compositionSchemaVersion: 65_536 }, { compositionSchemaVersion: "2" },
+    { tChallengeRef: "" }, { tChallengeRef: "line\nbreak" }, { tChallengeRef: "\uD800" },
+    { evidenceTimeBounds: { start: "01", end: "2" } },
+    { evidenceTimeBounds: { start: "2", end: "1" } },
+    { evidenceTimeBounds: { start: "1.0", end: "2" } },
+    { evidenceTimeBounds: { start: "9007199254740992", end: "9007199254740992" } },
+    { evidenceTimeBounds: { start: "1", end: "2", extra: true } },
+    { operator: packageFields.escrow }, { devicePublicKey: hash("device") }, { kernelId: "kernel:injected" },
+  ])("refuses malformed or injected package unit values %#", async (change) => {
+    await fixture({ unit: { ...unit, ...packageFields, ...change }, program });
+    expect(await fileJobInputSource(dir)(jobId)).toEqual({ ok: false, code: "job_inputs_bad_schema" });
+  });
+
+  it.each([
+    { programHash: "bad" }, { attestationSetRoot: program.attestationSetRoot.toUpperCase() },
+    { workProductRoot: null }, { extra: "server text" },
+  ])("refuses malformed or extra program fields %#", async (change) => {
+    await fixture({ unit: { ...unit, ...packageFields }, program: { ...program, ...change } });
+    expect(await fileJobInputSource(dir)(jobId)).toEqual({ ok: false, code: "job_inputs_bad_schema" });
   });
 
   it("refuses a manifest without the required unit evidence binding", async () => {

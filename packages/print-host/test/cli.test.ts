@@ -3,11 +3,13 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getAddress, keccak256, parseTransaction, toBytes } from "viem";
 import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { createGatewayClient } from "../src/gateway-client.js";
 import { HOST_LOG_CODES } from "../src/host.js";
 import { FakeMachineAdapter } from "../src/testing/fake-machine-adapter.js";
+import type { createEvidenceBroadcaster, EvidenceBroadcaster } from "../src/chain.js";
 
 vi.mock("../src/keygen.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/keygen.js")>();
@@ -250,6 +252,46 @@ describe("print-host CLI", () => {
     assertRunOutput(captured, fixture.secrets);
   });
 
+  it("run binds the operator transaction signer to the config chain and gives the broadcaster only its scoped authority", async () => {
+    const fixture = await runFixture();
+    const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+    config.chain = { ...config.chain, chainId: 31337, maxFeePerGasCap: "100", maxPriorityFeePerGasCap: "10", gasCap: "250000" };
+    await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
+    fixture.adapter.scriptStart({ outcome: "busy" });
+    const broadcaster: EvidenceBroadcaster = {
+      submit: vi.fn(async () => ({ code: "already_committed" as const })),
+      readBack: vi.fn(async () => ({ code: "already_committed" as const })),
+    };
+    let transaction: Promise<`0x${string}`> | undefined;
+    const createBroadcaster = vi.fn((settings: Parameters<typeof createEvidenceBroadcaster>[0],
+      operator: Parameters<typeof createEvidenceBroadcaster>[1]) => {
+      expect(settings).toEqual({ chain: config.chain });
+      expect(Object.keys(operator).sort()).toEqual(["address", "signSubmitEvidenceTx"]);
+      transaction = operator.signSubmitEvidenceTx({
+        escrow: getAddress(keccak256(toBytes("cli escrow")).slice(0, 42)),
+        unitId: keccak256(toBytes("cli unit")), packageDigest: keccak256(toBytes("cli package")),
+        nonce: 0, gas: 21000n, maxFeePerGas: 100n, maxPriorityFeePerGas: 10n,
+      });
+      return broadcaster;
+    });
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--inputs-dir", fixture.inputsDir], captured.io, {
+      createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+      createPrinter: fixture.createPrinter, createBroadcaster,
+    })).toBe(0);
+    expect(createBroadcaster).toHaveBeenCalledOnce();
+    expect(parseTransaction(await transaction!).chainId).toBe(31337);
+    expect(broadcaster.submit).not.toHaveBeenCalled();
+    assertRunOutput(captured, fixture.secrets);
+  });
+
+  it("run failures report only closed codes", async () => {
+    const root = await temporaryDirectory();
+    const captured = capture();
+    expect(await main(["run", "--config", join(root, "missing.json"), "--once"], captured.io)).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "not_found\n" });
+  });
+
   it("run --poll-only never claims even with clear e-stop and available inputs", async () => {
     const fixture = await runFixture();
     // If --poll-only is removed, the real host can reach start and finish this
@@ -277,12 +319,14 @@ describe("print-host CLI", () => {
       rm(config.keys.deviceKeyFile), rm(config.keys.operatorKeyFile), rm(config.chain.rpcUrlFile),
     ]);
     const captured = capture();
+    const createBroadcaster = vi.fn(() => { throw new Error("poll-only cannot construct a broadcaster"); });
     expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
       createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
-      createPrinter: fixture.createPrinter,
+      createPrinter: fixture.createPrinter, createBroadcaster,
     })).toBe(0);
     expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
     expect(fixture.createPrinter).not.toHaveBeenCalled();
+    expect(createBroadcaster).not.toHaveBeenCalled();
     expect(await readdir(join(fixture.dataDir, "journal"))).toEqual([]);
     assertRunOutput(captured, fixture.secrets);
   });

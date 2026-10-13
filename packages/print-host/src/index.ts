@@ -25,10 +25,10 @@ export type {
 } from "./gateway-client.js";
 export { createHost, HOST_LOG_CODES } from "./host.js";
 export type { HostDeps, HostLogCode, HostPrintOptions, HostTickResult, HostTimers } from "./host.js";
-export { createJobJournal, JournalError, JOURNAL_STATES } from "./journal.js";
-export type { JobJournal, JournalRecord, JournalState, JournalCode, JournalErrorCode } from "./journal.js";
-export { defaultJobInputSource, fileJobInputSource, JOB_INPUT_CODES } from "./job-inputs.js";
-export type { JobInputs, JobInputSource, JobInputResult, JobInputCode } from "./job-inputs.js";
+export { createJobJournal, JournalError, JOURNAL_STATES, SUBMIT_CODES } from "./journal.js";
+export type { JobJournal, JournalRecord, JournalState, JournalCode, JournalErrorCode, PackageHashes, SignedMilestonePackage } from "./journal.js";
+export { defaultJobInputSource, fileJobInputSource, JOB_INPUT_CODES, hasPackageInputs } from "./job-inputs.js";
+export type { JobInputs, JobInputSource, JobInputResult, JobInputCode, PackageJobInputs, PackageUnitInputs } from "./job-inputs.js";
 export { createCarrierClient } from "./carrier-client.js";
 export { openUnitEvidenceSession, resumeUnitEvidenceSession, UnitSessionError } from "./unit-session.js";
 export type {

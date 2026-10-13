@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +19,49 @@ beforeEach(async () => { dir = await fs.mkdtemp(join(tmpdir(), "print-host-journ
 afterEach(async () => { vi.restoreAllMocks(); await fs.rm(dir, { recursive: true, force: true }); });
 
 describe("job journal", () => {
+  it.each(["package_built", "submit_attempted", "submit_indeterminate", "submitted", "already_committed", "conflict", "refused"] as const)(
+    "a stored receipt preserves %s and its public package hashes across restart", async (state) => {
+      const original = createJobJournal(dir, time);
+      const hashes = { packageDigest: `0x${randomBytes(32).toString("hex")}`, evidenceBlockHash: `0x${randomBytes(32).toString("hex")}` };
+      await original.append(jobId, "evidence_stored");
+      await original.append(jobId, "package_built", undefined, hashes);
+      if (state !== "package_built") await original.append(jobId, state);
+      await fs.mkdir(original.sessionDirectory(jobId), { mode: 0o700 });
+      const restarted = createJobJournal(dir, time);
+      const records = await restarted.read(jobId);
+      expect(records.at(-1)?.state).toBe(state);
+      expect(records[1]).toEqual({ at, jobId, state: "package_built", ...hashes });
+      expect(records.some((record) => record.state === "interrupted")).toBe(false);
+    },
+  );
+
+  it("refuses missing or nonpublic package metadata without persisting it", async () => {
+    const journal = createJobJournal(dir, time);
+    await expect(journal.append(jobId, "package_built")).rejects.toMatchObject({ code: "journal_invalid" });
+    const hashes = { packageDigest: `0x${randomBytes(32).toString("hex")}`, evidenceBlockHash: `0x${randomBytes(32).toString("hex")}` };
+    await expect(journal.append(jobId, "submit_attempted", undefined, hashes)).rejects.toMatchObject({ code: "journal_invalid" });
+    const nonpublic = { ...hashes, rawTransaction: "PRIVATE_CANARY" };
+    await expect(journal.append(jobId, "package_built", undefined, nonpublic))
+      .rejects.toMatchObject({ code: "journal_invalid" });
+    await expect(journal.append(jobId, "package_built", undefined, { ...hashes, packageDigest: "PRIVATE_CANARY" }))
+      .rejects.toMatchObject({ code: "journal_invalid" });
+    expect(await journal.has(jobId)).toBe(false);
+  });
+
+  it("recovery artifact reads refuse symlinks, insecure files and partial JSON", async () => {
+    const journal = createJobJournal(dir, time);
+    await journal.saveBundle(jobId, bundle);
+    expect(await journal.readBundle(jobId)).toEqual(bundle);
+    await fs.symlink(journal.bundlePath(jobId), journal.packagePath(jobId));
+    await expect(journal.readPackage(jobId)).rejects.toMatchObject({ code: "journal_bad_file" });
+    await fs.unlink(journal.packagePath(jobId));
+    await fs.writeFile(journal.packagePath(jobId), "{}", { mode: 0o644 });
+    await expect(journal.readPackage(jobId)).rejects.toMatchObject({ code: "journal_bad_file" });
+    await fs.chmod(journal.packagePath(jobId), 0o600);
+    await fs.writeFile(journal.packagePath(jobId), '{"body":');
+    await expect(journal.readPackage(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
+  });
+
   it("writes only ordered closed records with private file and directory modes", async () => {
     const journal = createJobJournal(dir, time);
     const states: JournalState[] = ["claimed", "in_progress_reported", "printing", "printed", "bundle_saved", "evidence_stored"];

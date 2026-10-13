@@ -2,13 +2,35 @@ import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { z } from "zod";
+import { parseEvidenceTimeBound } from "@pcc/spec";
+import { getAddress, zeroAddress, type Address, type Hex } from "viem";
+import type { ProgramContext } from "./package-builder.js";
+
+/** Public funded-unit fields supplied by settlement; the host owns producer identity. */
+export interface PackageUnitInputs {
+  chainId: 84532 | 31337;
+  escrow: Address;
+  jobIdHash: Hex;
+  milestoneIndex: number;
+  stepId: Hex;
+  compositionRoot: Hex;
+  acceptedEnvelopeHash: Hex;
+  compositionSchemaVersion: number;
+  tChallengeRef: string;
+  evidenceTimeBounds: { start: string; end: string };
+}
 
 export interface JobInputs {
   documentData: Buffer;
   jobName: string;
   totalPages: number;
-  unit: { settlementUnitId: string; challengeNonce: string; fundedAt: number; reclaimAt: number };
+  unit: { settlementUnitId: string; challengeNonce: string; fundedAt: number; reclaimAt: number }
+    & Partial<Omit<PackageUnitInputs, "evidenceTimeBounds">>
+    & { evidenceTimeBounds?: Partial<PackageUnitInputs["evidenceTimeBounds"]> };
+  program?: Partial<ProgramContext>;
 }
+
+export type PackageJobInputs = JobInputs & { unit: JobInputs["unit"] & PackageUnitInputs; program: ProgramContext };
 
 export const JOB_INPUT_CODES = [
   "job_inputs_unavailable", "job_inputs_bad_id", "job_inputs_bad_directory",
@@ -21,7 +43,10 @@ export type JobInputCode = typeof JOB_INPUT_CODES[number];
 export type JobInputResult = { ok: true; value: JobInputs } | { ok: false; code: JobInputCode };
 export type JobInputSource = (jobId: string) => Promise<JobInputResult>;
 
-/** The gateway inputs route is a future seam; absence never authorises a print. */
+/**
+ * Future source seam: gateway settlement supplies unit package fields, and the
+ * economics canonical record supplies program. Absence never authorises a print.
+ */
 export const defaultJobInputSource: JobInputSource = async () => ({ ok: false, code: "job_inputs_unavailable" });
 
 /** A stable basename shared with the journal; it never introduces path separators. */
@@ -39,22 +64,58 @@ const plainFileName = z.string().min(1).max(240).refine((value) =>
   value !== "." && value !== ".." && Buffer.byteLength(value) <= 240
     && !/[\/\\\u0000-\u001f\u007f-\u009f]/.test(value),
 );
+const word = z.string().regex(/^0x[0-9a-f]{64}$/).transform((value) => value as Hex);
+const safeUint = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const escrow = z.string().regex(/^0x[0-9a-fA-F]{40}$/).refine((value) => {
+  try { return getAddress(value) === value && value !== zeroAddress; } catch { return false; }
+}).transform((value) => value as Address);
+const challengeRef = z.string().min(1).max(256).refine((value) =>
+  !/[\u0000-\u001f\u007f-\u009f]/.test(value)
+    && !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(value));
+const timeBound = z.string().max(16).refine((value) => parseEvidenceTimeBound(value) !== null);
+const timeBoundsSchema = z.object({ start: timeBound, end: timeBound }).strict();
+const evidenceTimeBounds = timeBoundsSchema
+  .refine((value) => Number(value.start) <= Number(value.end));
+const packageUnitFields = {
+  chainId: z.union([z.literal(84532), z.literal(31337)]), escrow,
+  jobIdHash: word, milestoneIndex: safeUint, stepId: word,
+  compositionRoot: word, acceptedEnvelopeHash: word,
+  compositionSchemaVersion: z.number().int().min(0).max(65_535),
+  tChallengeRef: challengeRef, evidenceTimeBounds,
+};
+const optionalPackageUnitFields = {
+  ...z.object(packageUnitFields).partial().shape,
+  evidenceTimeBounds: timeBoundsSchema.partial().refine((value) => value.start === undefined
+    || value.end === undefined || Number(value.start) <= Number(value.end)).optional(),
+};
 const unitSchema = z.object({
   settlementUnitId: z.string().regex(/^0x[0-9a-f]{64}$/),
   challengeNonce: z.string().regex(/^0x[0-9a-f]{64}$/),
   fundedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   reclaimAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  ...optionalPackageUnitFields,
+}).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
+const programSchema = z.object({ programHash: word, attestationSetRoot: word, workProductRoot: word }).strict();
+const completeUnitSchema = z.object({
+  settlementUnitId: word, challengeNonce: word, fundedAt: safeUint, reclaimAt: safeUint,
+  ...packageUnitFields,
 }).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
 
 /** Custom input sources must meet the same unit binding requirements before claim. */
 export function isUnitBinding(value: unknown): value is JobInputs["unit"] {
   return unitSchema.safeParse(value).success;
 }
+
+/** Incomplete package contexts still permit print/relay evidence, never settlement. */
+export function hasPackageInputs(value: JobInputs): value is PackageJobInputs {
+  return completeUnitSchema.safeParse(value.unit).success && programSchema.safeParse(value.program).success;
+}
 const manifestSchema = z.object({
   jobName: z.string().min(1).max(256).refine((value) => !/[\u0000-\u001f\u007f-\u009f]/.test(value)),
   totalPages: z.number().int().min(1).max(50),
   documentFile: plainFileName,
   unit: unitSchema,
+  program: programSchema.partial().optional(),
 }).strict();
 
 class InputFileError extends Error {
@@ -127,6 +188,7 @@ export function fileJobInputSource(dir: string): JobInputSource {
           jobName: parsed.data.jobName,
           totalPages: parsed.data.totalPages,
           unit: parsed.data.unit,
+          ...(parsed.data.program === undefined ? {} : { program: parsed.data.program }),
         },
       };
     } catch (error) {

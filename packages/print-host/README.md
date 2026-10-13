@@ -1,7 +1,7 @@
 # @pcc/print-host
 
-Private workspace package for the N144 October MVP print host. The host application
-comes in later PRs. This package contains host configuration, testnet key custody,
+Private workspace package for the N144 October MVP print host. This package contains
+the run loop, host configuration, testnet key custody,
 deterministic test support, V-next package construction and one-shot evidence
 broadcasting, and repros of the toolkit gaps that prevent REAL-mode
 IPP printing and production of the oracle's required evidence.
@@ -120,11 +120,115 @@ message once; sign-policy prints only the code.
 
 The host must produce ONE signed bundle per settlement unit: print events plus pulled carrier
 events on success, or `execution_failed` evidence on failure. The reference is
-pcc-oracle's B5 print-host bundle contract (bus #7386; on the Spark:
+pcc-oracle's B5 print-host bundle contract, **including the 10/10 amendment**
+(pcc-oracle `16aa336b`; on the Spark:
 `/mnt/sparkbulk/pcc-reconciliation/returns/pcc-oracle-work/print-host-bundle-contract-20261009.md`),
-sections 3.0, 4.2 and 5. These repros track the needed pcc-adk toolkit changes;
+sections 3.0, 4.2 and 5, and amended hazards H1 and H6. Q-E2 was ruled yes
+(evidence #7539): H1(b) mints the session key at finalization and permits its
+delegation's `issuedAt` to precede signing time. Producer rules require
+`fundedAt <= issuedAt <= first event`, `expiresAt = reclaimAt`, exactly
+`contractIds: [jobId]`, `maxSignatures` equal to the event count, and the operator
+principal as `parentAgentId`. H6 gives the device key exactly two uses: LO-EV-1
+delegation signing and D2 over raw32(packageBodyHash). The session key signs the
+bundle once; the mandatory MVP package signature set is exactly D1 and D2.
+These repros track the needed pcc-adk toolkit changes;
 the local session and package library supply the MVP pipeline while those APIs
 remain parked.
+
+## Run loop
+
+```bash
+print-host run --config /absolute/host.json [--once] [--poll-only] [--inputs-dir /absolute/inputs]
+```
+
+The equivalent direct invocation is
+`node packages/print-host/dist/cli.js run ...`. `--config` is required.
+`--once` runs one tick; otherwise the host polls until SIGINT or SIGTERM.
+`--poll-only` polls and heartbeats without opening the printer or loading signing
+keys. `--inputs-dir` selects the local manifest/document source. Without it,
+the default source returns `job_inputs_unavailable` and no job is claimed.
+All run logs contain closed codes only.
+
+The CLI uses the **STRICT e-stop reader by default**. Execution requires a parsed
+poll with an own `emergencyStop: "clear"` field and an own `jobs` array.
+`"stopped"`, `"unavailable"`, missing or malformed stop data, and poll errors
+prevent execution. The host polls again immediately before printing, watches
+the stop while printing, and cancels on shutdown or a stopped poll.
+
+The local source reads `<encodeURIComponent(jobId)>.json` and the named PDF in
+the same directory. A manifest contains these fields:
+
+| Field | Shape |
+| --- | --- |
+| `jobName` | Nonempty string, at most 256 characters, with no control characters |
+| `totalPages` | Integer 1–50 |
+| `documentFile` | A plain basename, at most 240 UTF-8 bytes; the file must begin `%PDF-` |
+| `unit.settlementUnitId`, `unit.challengeNonce` | Lowercase `0x`-prefixed bytes32; the challenge nonce must be nonzero for packaging |
+| `unit.fundedAt`, `unit.reclaimAt` | Nonnegative safe-integer Unix seconds, with `reclaimAt > fundedAt` |
+| `unit.chainId` | 84532 or 31337, matching the configured chain |
+| `unit.escrow` | Nonzero EIP-55 address |
+| `unit.jobIdHash`, `unit.stepId`, `unit.compositionRoot`, `unit.acceptedEnvelopeHash` | Lowercase `0x`-prefixed bytes32 |
+| `unit.milestoneIndex` | Nonnegative safe integer |
+| `unit.compositionSchemaVersion` | Unsigned 16-bit integer |
+| `unit.tChallengeRef` | Nonempty challenge reference string, at most 256 characters, with no control characters or unpaired surrogates |
+| `unit.evidenceTimeBounds` | `{ "start": "...", "end": "..." }`, canonical decimal Unix-second strings with `start <= end`, covering every event |
+| `program` | `{ "programHash": "...", "attestationSetRoot": "...", "workProductRoot": "..." }`, each lowercase `0x`-prefixed bytes32 |
+
+The first five table rows are the printing inputs. Package fields are optional
+for compatibility with existing manifests; missing fields still allow printing
+and relay storage, then journal `package_inputs_missing` and skip settlement
+submission. Supplied fields are strictly validated, including partial package
+inputs, and unknown fields are refused. Operator, kernel and funded device
+identities come from the configured runtime. The gateway settlement block and
+economics' canonical funded record are the future source of the unit context;
+the evidence lane owns the three program roots. The file source is the seam
+for those inputs and invents no package defaults.
+
+The private `dataDir/journal/` contains per-job mode-0600 JSONL records and the
+saved signed bundle. Appends sync their file and directory before returning.
+The mode-0700 `dataDir/sessions/` holds each unit session's public journal;
+device and session seeds are never written there. The session opens after
+`in_progress_reported`, adds every result event in order, then mints and
+delegates its session key at finalization. Finalization is repeatable from its
+public records and retains one signed bundle.
+
+Normal job order is `claimed`, `in_progress_reported`, `printing`, `printed`
+or `print_failed`, `bundle_saved`, then `evidence_stored`. A failed-print
+bundle is still the unit's evidence: it follows the same package and submission
+path, leaving the verdict to the oracle. Busy jobs retry within the host's bound
+and produce no bundle; empty-event jobs end with `no_bundle`, and simulated
+evidence ends with `simulated_refused`. None submits. An explicit `realMode: false`
+library rehearsal may relay simulated evidence, but records `submit_disabled`
+and never packages or submits it. An ambiguous relay post
+ends with `evidence_indeterminate`; a refusal ends with `evidence_refused`.
+Neither reaches package submission.
+
+Only after durable `evidence_stored` does the host build and sign D1 and D2.
+It saves and fsyncs the full signed public package as a mode-0600
+`<encodeURIComponent(jobId)>.package.json` artifact in the job journal directory,
+then journals `package_built` with only the public `packageDigest` and
+`evidenceBlockHash`. It journals and fsyncs `submit_attempted` **before**
+`sendRawTransaction`. Chain outcomes are `submitted`, `already_committed`,
+`conflict`, `refused`, or `submit_indeterminate`. A matching existing commitment
+requires no send; a conflict halts that job. All three positive transaction
+caps must be configured; omitted caps attach `submit_disabled` to
+`evidence_stored` and invoke neither package signers nor transaction signer.
+`package_inputs_missing` is likewise an `evidence_stored` code.
+
+On restart, `submit_attempted` and `submit_indeterminate` reconcile by read-back
+only, using the persisted package's chain, escrow, unit, schema and digest rather
+than a reloaded manifest. The exact digest commitment becomes `already_committed`;
+a different commitment becomes `conflict`. Confirmed absence after a journaled attempt
+stays `submit_indeterminate` for operator reconciliation. The host never
+automatically resends and exposes no resubmit flag. Interrupted printing or
+partial session work is journaled `interrupted` and never reprinted or reposted.
+`evidence_stored` without a skip code and `package_built` can resume safe local
+work before the first submit attempt.
+Unresolved attempts take priority over every new send on the operator's nonce
+stream. Repeated unchanged read-back outcomes log their code without growing
+the durable journal.
+Escrow accepts one `submitEvidence` per unit; preserving the attempt before
+sending prevents restart from consuming that slot twice.
 
 ## Operator relay gateway client
 
@@ -147,11 +251,11 @@ and keeps the API key in a closure. The frozen client exposes four calls:
   only for `stored: true` with the sent job id, `event_bundle_hash` model, and
   matching `sha256:` content hash. A `stored: false` receipt is an error.
 
-The default e-stop reader always returns
-`{proceed: false, why: "reader_unavailable"}`, even if a future response says
-`emergencyStop: "clear"`. **Production must keep this default until PR5 lands**
-with pcc-adk's `readEmergencyStop`. Tests may inject an `EmergencyStopReader`;
-only a successfully parsed poll reaches it. Reader failures prevent execution.
+The library client's fallback e-stop reader returns
+`{proceed: false, why: "reader_unavailable"}`. The CLI explicitly selects the
+strict reader described above. Library callers and tests may inject an
+`EmergencyStopReader`; only a successfully parsed poll reaches it. Reader
+failures prevent execution.
 
 Each call uses redirect refusal, a single 15-second timeout covering headers
 and streamed body reads, and a 1 MiB response limit. These defaults may be
@@ -172,8 +276,8 @@ must reconcile from its journal before deciding what to do next. The known
 
 bundleHash is spec's tagged SHA256, as hashBundle produces it.
 
-The unit route, settlement block, and job inputs come in later PRs; none are
-available through this client yet.
+The unit route and settlement block are future gateway inputs; the local
+manifest source supplies job and package context until those routes exist.
 
 ## Carrier gateway client
 
@@ -201,7 +305,7 @@ requirements govern the demo's release basis (bus #7765).
 
 ## V-next package pipeline
 
-This is a library pipeline. The run loop will connect these calls in a later PR.
+The run loop connects this library pipeline after durable relay storage.
 The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803).
 
 1. Finalize the unit session's ONE delegated, signed bundle containing the print
@@ -275,9 +379,9 @@ read-back means `already_committed`; a different stored commitment means
 `conflict`. After a send with no confirmed receipt in time, `indeterminate`
 requires caller reconciliation by read-back. Never automatically resend it.
 The broadcaster serializes submissions within its instance for operator nonce
-safety and remembers sent units, including ambiguous sends. The later run loop
-must persist transaction intent and hash to preserve
-that rule across process restarts.
+safety and remembers sent units, including ambiguous sends. The run loop's
+durable `submit_attempted` record preserves the no-resend rule across process
+restarts.
 The caller must reconcile an indeterminate operator transaction before
 submitting another unit or creating a new broadcaster, so an unseen pending
 transaction cannot compete for the same nonce.
@@ -345,8 +449,9 @@ PRINT_HOST_SHOW_GAPS=1 pnpm --filter @pcc/print-host test
 pnpm --filter @pcc/print-host typecheck
 ```
 
-The second test run reports eleven failures across eight gaps (GAP-5 has two
-cancel/event orders, and GAP-4 and GAP-5 each have a silent-printer variant).
+The default run has nine flipped expected-failure registrations; the SHOW run
+reports only GAP-1 and GAP-7 as actual unmet assertions. GAP-5 has two
+cancel/event orders, and GAP-4 and GAP-5 each have a silent-printer variant.
 A root `pnpm test` may drop `PRINT_HOST_SHOW_GAPS` under turbo's strict environment
 mode; use the `--filter` commands above.
 Typecheck `test/` separately as well: the production tsconfig deliberately excludes

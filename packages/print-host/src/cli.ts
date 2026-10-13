@@ -4,6 +4,7 @@ import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { acceptanceDigest, domainSeparator, jobPolicyHash } from "@pcc/contracts/vnext";
 import { getAddress } from "viem";
+import { createEvidenceBroadcaster, EvidenceChainConfigError } from "./chain.js";
 import { checkHostConfig, HostConfigError, loadHostConfig } from "./config.js";
 import type { HostConfig } from "./config.js";
 import { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
@@ -39,6 +40,7 @@ export interface CliPrintComponents {
 export interface CliRunRuntime {
   createGateway?: (config: GatewayClientConfig) => GatewayClient;
   createPrinter?: (config: HostConfig) => CliPrintComponents;
+  createBroadcaster?: typeof createEvidenceBroadcaster;
 }
 
 interface RunOptions {
@@ -84,12 +86,16 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
   try {
     const config = await loadHostConfig(options.configPath);
     // Poll-only is usable before key provisioning and never opens the printer.
-    // Real mode uses only checkHostConfig's public operator address; the
-    // operator's signing authority is never passed into the run loop.
     const identity = options.pollOnly ? undefined : await checkHostConfig(config);
-    const deviceKey = identity ? await loadDeviceKey(config.keys.deviceKeyFile, {
-      delegationBinding: { chainId: config.chain.chainId, operator: getAddress(identity.operatorAddress) },
+    const operator = identity ? await loadOperatorKey(config.keys.operatorKeyFile, config.chain.chainId) : undefined;
+    const deviceKey = operator ? await loadDeviceKey(config.keys.deviceKeyFile, {
+      delegationBinding: { chainId: config.chain.chainId, operator: getAddress(operator.address) },
     }) : undefined;
+    // Each consumer receives only its own scoped closure; no policy acceptance
+    // authority or general transaction signer enters the host run loop.
+    const operatorKey = operator ? Object.freeze({ address: operator.address, signD1: operator.signD1 }) : undefined;
+    const broadcaster = operator ? (runtime.createBroadcaster ?? createEvidenceBroadcaster)({ chain: config.chain },
+      Object.freeze({ address: operator.address, signSubmitEvidenceTx: operator.signSubmitEvidenceTx })) : undefined;
     const apiBytes = await readSecretFile(config.gateway.apiKeyFile);
     let gateway: GatewayClient;
     try {
@@ -104,7 +110,8 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
     } finally { apiBytes.fill(0); }
     if (!options.pollOnly) printer = (runtime.createPrinter ?? createPrinter)(config);
     const host = createHost({
-      config, gateway, adapter: printer?.adapter, deviceKey, operatorAddress: identity?.operatorAddress,
+      config, gateway, adapter: printer?.adapter, deviceKey, operatorAddress: operator?.address,
+      operatorKey, broadcaster,
       inputSource: options.inputsDir ? fileJobInputSource(options.inputsDir) : defaultJobInputSource,
       journal: createJobJournal(config.dataDir), pollOnly: options.pollOnly,
       stopSignal: shutdown.signal,
@@ -224,12 +231,13 @@ export async function main(argv: string[], io: CliIo, runtime: CliRunRuntime = {
   } catch (error) {
     if (error instanceof SecretFileError || error instanceof KeyFileError
       || error instanceof HostConfigError || error instanceof KeyGenerationError) {
-      io.stderr.write(`${error.message}\n`);
-    } else if (error instanceof GatewayClientError || error instanceof JournalError) {
+      io.stderr.write(`${argv[0] === "run" ? error.code : error.message}\n`);
+    } else if (error instanceof GatewayClientError || error instanceof JournalError
+      || error instanceof EvidenceChainConfigError || error instanceof OperatorSigningError) {
       io.stderr.write(`${error.code}\n`);
     } else {
       // Native/library errors may contain input values. Never format them.
-      io.stderr.write("internal_error: print-host operation failed\n");
+      io.stderr.write(argv[0] === "run" ? "internal_error\n" : "internal_error: print-host operation failed\n");
     }
     return 1;
   }

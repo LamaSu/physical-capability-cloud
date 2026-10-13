@@ -380,14 +380,22 @@ describe("print-host run loop", () => {
     expect(order).toEqual([...result.events.map((event) => event.id), "finalize"]);
     const bundle = setup.gw.postRelayEvidence.mock.calls[0]![1];
     expect(bundle.events).toEqual(result.events);
+    const capturePath = "../../gateway/src/services/device-evidence-settlement.ts";
+    const { extractNodeSignedBundle } = await import(capturePath) as { extractNodeSignedBundle: (
+      evidence: unknown,
+    ) => { bundleHash: string; kernelSignature: RelayEvidenceBundle["kernelSignature"] } | null };
     const modulePath = "../../gateway/src/services/relay-evidence-commitment.ts";
     const { commitRelayEvidence } = await import(modulePath) as { commitRelayEvidence: (
-      evidence: unknown, captured: null, job: { jobId: string; kernelId: string },
+      evidence: unknown, captured: ReturnType<typeof extractNodeSignedBundle>, job: { jobId: string; kernelId: string },
     ) => Promise<{ ok: boolean; commitment?: { bundleHash: string; hashModel: string; events: unknown[] } }> };
     let sent: { jobId: string; kernelId: string; evidence: RelayEvidenceBundle } | undefined;
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, options?: RequestInit) => {
       sent = JSON.parse(String(options?.body));
-      const committed = await commitRelayEvidence(sent!.evidence, null, { jobId, kernelId: setup.config.kernelId });
+      // Match operator-relay.ts: capture the signed bundle from the received
+      // body before committing it against the gateway-owned job context.
+      const captured = extractNodeSignedBundle(sent!.evidence);
+      expect(captured).toMatchObject({ bundleHash: bundle.bundleHash, kernelSignature: bundle.kernelSignature });
+      const committed = await commitRelayEvidence(sent!.evidence, captured, { jobId, kernelId: setup.config.kernelId });
       expect(committed).toMatchObject({ ok: true, commitment: {
         bundleHash: bundle.bundleHash, hashModel: "event_bundle_hash",
         events: bundle.events.map(({ id: _id, ...event }) => event),
