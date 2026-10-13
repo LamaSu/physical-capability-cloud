@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { getAbiItem, getAddress, hashTypedData, maxUint256, recoverAddress, toFunctionSelector, zeroAddress, zeroHash, type Hex, type LocalAccount } from "viem";
-import { FundingRefusal, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs } from "../../funding/index.js";
+import { FundingRefusal, jobIdHashOf, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs } from "../../funding/index.js";
 import { CIRCLE_USDC } from "../../funding/pins.js";
 import { parsePreparePayload } from "../../funding/payload.js";
 import { ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
@@ -198,6 +198,21 @@ describe("buyer intent from the caller's own records", () => {
     await expect(prepare(fx.wire(), { expect: { ...testExpect(fx), jobPolicyHash: zeroHash } })).rejects.toMatchObject({
       code: "INTENT_MISMATCH", message: expect.stringContaining(`jobPolicyHash is ${fx.jobPolicyHash}`),
     });
+  });
+
+  it("INTENT_MISMATCH: jobId reports only hashes, never the raw buyer id or its distinctive substrings", async () => {
+    const { fx, chain, prepare } = await setup();
+    const jobId = "job-SECRETMARK-1";
+    const result = prepare(fx.wire(), { expect: { ...testExpect(fx), jobId } });
+    await expect(result).rejects.toMatchObject({ code: "INTENT_MISMATCH" });
+    const error = await result.catch((e: FundingRefusal) => e) as FundingRefusal;
+    expect(error.message).toContain(jobIdHashOf(jobId));
+    expect(error.message).toContain(fx.message.jobIdHash);
+    expect(error.message).not.toContain(jobId);
+    expect(error.message).not.toContain("SECRETMARK");
+    const withoutHashes = error.message.replace(/0x[0-9a-fA-F]{64}/g, "");
+    for (let i = 0; i + 4 <= jobId.length; i++) expect(withoutHashes).not.toContain(jobId.slice(i, i + 4));
+    expect(chain.sends()).toEqual([]);
   });
 
   for (const field of ["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const) {

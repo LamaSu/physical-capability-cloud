@@ -219,7 +219,7 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
   const mismatch = (field: string, got: unknown, want: unknown): never =>
     refuse("INTENT_MISMATCH", `${field} is ${display(got)}; the buyer expects ${display(want)}`);
   const expectedJob = jobIdHashOf(e.jobId);
-  if (!same(m.jobIdHash, expectedJob)) mismatch("jobId (message.jobIdHash)", m.jobIdHash, `${expectedJob} from jobId ${e.jobId}`);
+  if (!same(m.jobIdHash, expectedJob)) mismatch("jobId (message.jobIdHash)", m.jobIdHash, expectedJob);
   if (!same(m.operator, e.operator)) mismatch("operator", m.operator, e.operator);
   if (e.termsHash !== "unchecked" && !same(m.termsHash, e.termsHash)) mismatch("termsHash", m.termsHash, e.termsHash);
   if (e.acceptedPolicyDigest !== "unchecked" && !same(m.acceptedPolicyDigest, e.acceptedPolicyDigest)) mismatch("acceptedPolicyDigest", m.acceptedPolicyDigest, e.acceptedPolicyDigest);
