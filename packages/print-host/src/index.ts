@@ -2,8 +2,11 @@ export { FakeMachineAdapter } from "./testing/fake-machine-adapter.js";
 export type { FakeStartOutcome } from "./testing/fake-machine-adapter.js";
 export { readSecretFile, SecretFileError } from "./secret-file.js";
 export type { SecretFileOptions, SecretFileErrorCode } from "./secret-file.js";
-export { DeviceKey, OperatorKey, KeyFileError, loadDeviceKey, loadOperatorKey } from "./keys.js";
-export type { KeyLoadOptions, KeyFileErrorCode } from "./keys.js";
+export { DeviceKey, KeyFileError, OperatorSigningError, loadDeviceKey, loadOperatorKey } from "./keys.js";
+export type {
+  OperatorKey, KeyLoadOptions, KeyFileErrorCode, D1Input, OperatorChainId,
+  OperatorSigningErrorCode, SubmitEvidenceTxInput,
+} from "./keys.js";
 export { generateHostKeys, KeyGenerationError } from "./keygen.js";
 export type {
   GenerateHostKeysOptions, GeneratedHostKeys, KeyGenerationErrorCode,

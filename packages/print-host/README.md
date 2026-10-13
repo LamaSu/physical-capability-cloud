@@ -20,7 +20,18 @@ existing files and writes the device and operator keys at 0600 inside a private
 directory. An optional `--not-after` must be later than the current time and the
 keys' `createdAt`. Keep the funded Ed25519 device principal separate from the secp256k1
 operator EOA. This package delegates bundle signing to the kernel's existing
-`signFn`; D1, D2, and delegation signing belong to the toolkit.
+`signFn`; D2 and delegation signing belong to the toolkit. The operator key signs
+only D1 `FinalMilestonePackageV2` signatures and zero-value EIP-1559
+`submitEvidence(unitId, packageDigest)` transactions. Loading the key binds both
+signing methods to the configured chain. D1 uses the fixed domain name
+`PCC FinalMilestonePackage`, version `2`, and the supplied escrow address for both
+the message and verifying contract. The escrow address is supplied per signing
+call until canonical deployment binding is added; no escrow configuration field
+is needed yet.
+
+October ships no `invokeBackup` path. A recursive source guard test enforces the
+absence of its name and selector and checks the host's `submitEvidence` selector
+against the repository escrow ABI.
 
 The strict JSON configuration has `kernelId`, `deviceId`, `printer.uri`,
 `chain.chainId`, `chain.rpcUrlFile`, `gateway.baseUrl`, `gateway.apiKeyFile`,

@@ -1,7 +1,13 @@
 import { inspect } from "node:util";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
-import { getAddress, type LocalAccount } from "viem";
+import { getAddress, type Address, type Hex, type LocalAccount } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import {
+  OperatorSigningError, prepareD1, prepareSubmitEvidenceTx,
+  type D1Input, type OperatorChainId, type SubmitEvidenceTxInput,
+} from "./operator-signing.js";
+export { OperatorSigningError } from "./operator-signing.js";
+export type { D1Input, OperatorChainId, OperatorSigningErrorCode, SubmitEvidenceTxInput } from "./operator-signing.js";
 import {
   readSecretFile,
   SecretFileError,
@@ -10,7 +16,7 @@ import {
 } from "./secret-file.js";
 
 export type KeyFileErrorCode = SecretFileErrorCode | "bad_json" | "bad_schema" |
-  "wrong_kind" | "public_mismatch" | "bad_key" | "expired";
+  "wrong_kind" | "public_mismatch" | "bad_key" | "expired" | "bad_chain";
 
 type KeyField = "object" | "unknown_field" | "kind" | "version" | "algorithm" |
   "purpose" | "createdAt" | "notAfter" | "publicKey" | "seed" | "address" | "privateKey";
@@ -53,20 +59,37 @@ export class DeviceKey {
   [inspect.custom]() { return this.toString(); }
 }
 
-/** viem holds the private scalar only in its signing closures. */
-export class OperatorKey {
-  readonly address: LocalAccount["address"];
-  readonly account: LocalAccount;
+/** Public identity and two scoped closures; no general signer is reachable. */
+export interface OperatorKey {
+  readonly address: Address;
+  readonly signD1: (input: D1Input) => Promise<Hex>;
+  readonly signSubmitEvidenceTx: (input: SubmitEvidenceTxInput) => Promise<Hex>;
+  toJSON(): { kind: "pcc-printhost.operator-key"; address: Address };
+  toString(): string;
+  [inspect.custom](): string;
+}
 
-  constructor(account: LocalAccount) {
-    this.address = account.address;
-    this.account = Object.freeze(account);
-    Object.freeze(this);
-  }
+// No inherited constructor function or mutable prototype can expose a wider API.
+const operatorKeyPrototype = Object.freeze(Object.assign(Object.create(null), {
+  toJSON(this: OperatorKey) { return { kind: "pcc-printhost.operator-key", address: this.address }; },
+  toString(this: OperatorKey) { return `[OperatorKey ${this.address}]`; },
+  [inspect.custom](this: OperatorKey) { return this.toString(); },
+}));
 
-  toJSON() { return { kind: "pcc-printhost.operator-key", address: this.address }; }
-  toString() { return `[OperatorKey ${this.address}]`; }
-  [inspect.custom]() { return this.toString(); }
+function operatorKey(account: LocalAccount, chainId: OperatorChainId): OperatorKey {
+  return Object.freeze(Object.assign(Object.create(operatorKeyPrototype), {
+    address: account.address,
+    async signD1(input: D1Input): Promise<Hex> {
+      const typedData = prepareD1(input, chainId);
+      try { return await account.signTypedData(typedData); }
+      catch { throw new OperatorSigningError("signing_failed"); }
+    },
+    async signSubmitEvidenceTx(input: SubmitEvidenceTxInput): Promise<Hex> {
+      const transaction = prepareSubmitEvidenceTx(input, chainId);
+      try { return await account.signTransaction(transaction); }
+      catch { throw new OperatorSigningError("signing_failed"); }
+    },
+  })) as OperatorKey;
 }
 
 /** UTC timestamps with seconds; rejects Date.parse's normalization of invalid days. */
@@ -142,7 +165,8 @@ export async function loadDeviceKey(path: string, options: KeyLoadOptions = {}):
 // The public secp256k1 order, expressed without a key-shaped literal.
 const secp256k1Order = (1n << 256n) - BigInt("0x14551231950b75fc4402da1732fc9bebf");
 
-export async function loadOperatorKey(path: string, options: KeyLoadOptions = {}): Promise<OperatorKey> {
+export async function loadOperatorKey(path: string, chainId: OperatorChainId, options: KeyLoadOptions = {}): Promise<OperatorKey> {
+  if (chainId !== 84532 && chainId !== 31337) throw new KeyFileError("bad_chain", path);
   const bytes = await keyBytes(path, options);
   try {
     const record = parseObject(bytes, path);
@@ -156,7 +180,7 @@ export async function loadOperatorKey(path: string, options: KeyLoadOptions = {}
     if (scalar <= 0n || scalar >= secp256k1Order) throw new KeyFileError("bad_key", path);
     const account = privateKeyToAccount(record.privateKey as `0x${string}`);
     if (account.address.toLowerCase() !== record.address.toLowerCase()) throw new KeyFileError("public_mismatch", path);
-    return new OperatorKey(account);
+    return operatorKey(account, chainId);
   } catch (error) {
     if (error instanceof KeyFileError) throw error;
     throw new KeyFileError("bad_key", path);

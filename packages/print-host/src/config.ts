@@ -204,7 +204,7 @@ export async function checkHostConfig(config: HostConfig, options: HostConfigOpt
   const expectedUid = uid(options);
   const keyOptions = { expectedUid, now: options.now };
   const device = await loadDeviceKey(checked.keys.deviceKeyFile, keyOptions);
-  const operator = await loadOperatorKey(checked.keys.operatorKeyFile, keyOptions);
+  const operator = await loadOperatorKey(checked.keys.operatorKeyFile, checked.chain.chainId, keyOptions);
   const rpcBytes = await readSecretFile(checked.chain.rpcUrlFile, { expectedUid });
   try {
     const line = singleLine(rpcBytes);

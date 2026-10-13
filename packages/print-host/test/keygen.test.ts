@@ -49,7 +49,7 @@ describe("host key generation", () => {
     expect((await fs.lstat(result.paths.operatorKeyFile)).mode & 0o777).toBe(0o600);
     expect((await fs.lstat(result.paths.publicIdentityFile)).mode & 0o777).toBe(0o644);
     const device = await loadDeviceKey(result.paths.deviceKeyFile);
-    const operator = await loadOperatorKey(result.paths.operatorKeyFile);
+    const operator = await loadOperatorKey(result.paths.operatorKeyFile, 84532);
     expect(device.signingPublicKey === result.identity.devicePublicKey).toBe(true);
     expect(operator.address === result.identity.operatorAddress).toBe(true);
     const rawSecrets = await secrets(directory);
@@ -262,7 +262,7 @@ describe("host key generation", () => {
     const rawSecrets = await secrets(directory);
     assertNoLeak(failure.reason, rawSecrets);
     const device = await loadDeviceKey(join(directory, "device-key.json"));
-    const operator = await loadOperatorKey(join(directory, "operator-key.json"));
+    const operator = await loadOperatorKey(join(directory, "operator-key.json"), 84532);
     assertNoLeak(device, rawSecrets);
     assertNoLeak(operator, rawSecrets);
     expect((await fs.readdir(directory)).length).toBe(3);

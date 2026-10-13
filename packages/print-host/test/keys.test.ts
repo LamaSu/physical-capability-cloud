@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeKernelEd25519Signer } from "../src/kernel-signer.js";
 import { verifyBundleSignature } from "@pcc/kernel-sdk";
 import type { EvidenceBundle } from "@pcc/spec";
-import { recoverTypedDataAddress } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { KeyFileError, loadDeviceKey, loadOperatorKey, type KeyFileErrorCode } from "../src/keys.js";
 import type * as secretFile from "../src/secret-file.js";
@@ -102,7 +101,9 @@ async function writeDocument(document: Document | string, name = "key.json"): Pr
 async function refused(document: Document | string, type: "device" | "operator", code: KeyFileErrorCode, secrets: string[]): Promise<void> {
   const path = await writeDocument(document);
   let error: unknown;
-  try { await (type === "device" ? loadDeviceKey : loadOperatorKey)(path, { now }); }
+  try {
+    await (type === "device" ? loadDeviceKey(path, { now }) : loadOperatorKey(path, 84532, { now }));
+  }
   catch (caught) { error = caught; }
   expect(error instanceof KeyFileError).toBe(true);
   expect((error as KeyFileError).code).toBe(code);
@@ -132,21 +133,13 @@ describe("host key loading and redaction", () => {
     expect(key.signingPublicKey === document.publicKey).toBe(true);
   });
 
-  it("operator account signs typed data and recovers its public address", async () => {
+  it("operator exposes only its public address and narrow signing closures", async () => {
     const document = operatorDocument();
-    const key = await loadOperatorKey(await writeDocument(document), { now });
+    const key = await loadOperatorKey(await writeDocument(document), 84532, { now });
     assertNoLeak(key, [secret(document)]);
-    assertNoLeak(key.account, [secret(document)]);
-    expect(Reflect.ownKeys(key).sort()).toEqual(["address", "account"].sort());
+    expect(Reflect.ownKeys(key).sort()).toEqual(["address", "signD1", "signSubmitEvidenceTx"].sort());
     assertNoOwnedSecretMaterial(key);
-    const typedData = {
-      domain: { name: "Print host loader test", version: "1", chainId: 84532 },
-      types: { LoaderProbe: [{ name: "sequence", type: "uint256" }] },
-      primaryType: "LoaderProbe" as const, message: { sequence: 1n },
-    };
-    const signature = await key.account.signTypedData(typedData);
-    const recovered = await recoverTypedDataAddress({ ...typedData, signature });
-    expect(recovered.toLowerCase() === key.address.toLowerCase()).toBe(true);
+    expect(key.address === document.address).toBe(true);
   });
 
   for (const type of ["device", "operator"] as const) {
@@ -193,7 +186,7 @@ describe("host key loading and redaction", () => {
     });
     it(`${type} zeroes the file buffer after a successful load`, async () => {
       const path = await writeDocument(build());
-      await (type === "device" ? loadDeviceKey : loadOperatorKey)(path, { now });
+      await (type === "device" ? loadDeviceKey(path, { now }) : loadOperatorKey(path, 84532, { now }));
       expect(mocks.fileBuffers.length).toBe(1);
       expect(mocks.fileBuffers[0].length > 0).toBe(true);
       expect(mocks.fileBuffers[0].every((byte) => byte === 0), "loaded file bytes were retained").toBe(true);
@@ -233,7 +226,7 @@ describe("host key loading and redaction", () => {
       const path = await writeDocument(document);
       await chmod(path, 0o644);
       let error: unknown;
-      try { await (type === "device" ? loadDeviceKey : loadOperatorKey)(path); }
+      try { await (type === "device" ? loadDeviceKey(path) : loadOperatorKey(path, 84532)); }
       catch (caught) { error = caught; }
       expect(error instanceof KeyFileError).toBe(true);
       expect((error as KeyFileError).code).toBe("bad_mode");
@@ -288,7 +281,7 @@ describe("host key loading and redaction", () => {
     const device = deviceDocument();
     const operator = operatorDocument();
     const loadedDevice = await loadDeviceKey(await writeDocument(device, "device.json"), { now });
-    const loadedOperator = await loadOperatorKey(await writeDocument(operator, "operator.json"), { now });
+    const loadedOperator = await loadOperatorKey(await writeDocument(operator, "operator.json"), 84532, { now });
     assertNoLeak(loadedDevice, [secret(device)]);
     assertNoLeak(loadedOperator, [secret(operator)]);
     expect(spies.every((spy) => spy.mock.calls.length === 0)).toBe(true);
