@@ -51,7 +51,10 @@ export type IppGetJobAttributesResult = (IppClientSuccess & {
 /** Printable, bounded diagnostic text. URI text is never copied to diagnostics. */
 export function sanitizeIppMessage(message: string): string {
   return message
-    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s<>"']*/gi, "[redacted URI]")
+    .slice(0, 512)
+    // A scheme-like token can start only at a boundary. Failed matches cannot
+    // retry each suffix, so scanning is linear. Redact malformed prefixes too.
+    .replace(/(^|[^a-z0-9+.-])[a-z0-9+.-]+:\/\/[^\s<>"']*/gi, "$1[redacted URI]")
     .replace(/[^\x20-\x7e]/g, "?")
     .slice(0, 200);
 }

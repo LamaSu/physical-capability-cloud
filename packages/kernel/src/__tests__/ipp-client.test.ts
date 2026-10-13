@@ -1,6 +1,6 @@
 /** C4/C5 and operation contracts. Each guard named here is the client line under test. */
 import { Buffer } from "node:buffer";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import vectors from "./fixtures/ipp-vectors.json" with { type: "json" };
 import {
   IPP_INT_MAX, IPP_OPERATION, IPP_TAG, IPP_VALUE,
@@ -181,6 +181,32 @@ describe("IppClient answer validation guards", () => {
       expect(result.message).not.toMatch(/password|printer\.test|ipp:\/\//);
     }
     expect(sanitizeIppMessage("bad\u0000text")).toBe("bad?text");
+  });
+
+  it("sanitizeIppMessage bounds every redaction input to 512 characters before regex work", () => {
+    const replace = RegExp.prototype[Symbol.replace];
+    const lengths: number[] = [];
+    const spy = vi.spyOn(RegExp.prototype, Symbol.replace).mockImplementation(function (
+      this: RegExp, input: string, replacement: string | ((substring: string, ...args: unknown[]) => string),
+    ): string {
+      lengths.push(input.length);
+      return Reflect.apply(replace, this, [input, replacement]) as string;
+    });
+    let result: string;
+    try { result = sanitizeIppMessage("a".repeat(32767)); }
+    finally { spy.mockRestore(); }
+    expect(result).toBe("a".repeat(200));
+    expect(lengths.length).toBeGreaterThan(0);
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(512);
+  });
+
+  it("sanitizeIppMessage processes the 32767-character hostile status probe within 500 ms", () => {
+    const status = "a".repeat(32767);
+    const started = performance.now();
+    expect(sanitizeIppMessage(status)).toBe("a".repeat(200));
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(sanitizeIppMessage("prefix https://user:password@printer.test/path suffix")).toBe("prefix [redacted URI] suffix");
+    expect(sanitizeIppMessage("prefix 1ipp://user:password@printer.test/path suffix")).toBe("prefix [redacted URI] suffix");
   });
 
   it.each([0, -1, 1.5, IPP_INT_MAX + 1, NaN])("job-id input guard refuses %s before transport", async (jobId) => {
