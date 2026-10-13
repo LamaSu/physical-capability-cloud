@@ -151,6 +151,15 @@ describe("PR2 round 2 regressions", () => {
     expect(events.map(e => e.type)).toEqual(["execution_started"]);
     expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ kind: "job_unreadable" }));
   });
+  it("R4 F-3: idle readiness with exactly 32 reasons reaches Print-Job", async () => {
+    // Kills B2: keywordList's > 32 cap changed to > 31.
+    const reasons = Array.from({ length: 32 }, () => "none");
+    const { adapter, printer, events } = make(new FakeIppPrinter().setHandler(OP.GET_PRINTER_ATTRIBUTES,
+      request => printerResponse(request, { printerState: 3, printerStateReasons: reasons })));
+    expect(await start(adapter)).toEqual({ success: true, message: "IPP job 77 submitted", data: { jobId: 77 } });
+    expect(printer.operationRequests(OP.PRINT_JOB)).toHaveLength(1);
+    expect(events.map(event => event.type)).toEqual(["execution_started"]);
+  });
   it("F3/F10: readiness refuses 33 reasons before joining or Print-Job", async () => {
     const { adapter, printer } = make(new FakeIppPrinter().setHandler(OP.GET_PRINTER_ATTRIBUTES, request => printerResponse(request, { printerState: 5, printerStateReasons: Array.from({ length: 33 }, () => "media-jam-error") })));
     expect(await start(adapter)).toMatchObject({ success: false, message: "IPP readiness attributes are unreadable" });
