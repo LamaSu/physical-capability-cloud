@@ -933,7 +933,7 @@ describe("IppAdapter names its device job on every event, so a print excludes no
     const result = await drive(runPrintJob({ adapter, emitter, jobId: "print-real-aborted", jobName: "a.pdf", totalPages: 1, documentData: "%PDF-1.4" }));
     await adapter.dispose();
 
-    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: 'printer reported failure: {"ippJobId":43,"state":"aborted"}', durationMs: expect.any(Number) });
+    expect.soft(result, "the print's result").toEqual({ success: false, events: [], error: 'printer reported failure: {"ippJobId":43,"state":"aborted","origin":"device"}', durationMs: expect.any(Number) });
     expect(bundles, "bundles finalized").toEqual([]);
   });
 

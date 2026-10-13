@@ -101,7 +101,7 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
     expect(rejected, "runPrintJob rejected").toBeUndefined();
     // It ends on the execution_failed of its own device job, bound by ippJobId. A failed print
     // returns no events (its step is detached).
-    expect(result).toEqual({ success: false, events: [], error: 'printer reported failure: {"ippJobId":77,"state":"aborted"}', durationMs: expect.any(Number) });
+    expect(result).toEqual({ success: false, events: [], error: 'printer reported failure: {"ippJobId":77,"state":"aborted","origin":"device"}', durationMs: expect.any(Number) });
     expect(console.warn, "an event excluded as naming no device job").not.toHaveBeenCalledWith(expect.stringContaining("names no device job"));
   });
 
