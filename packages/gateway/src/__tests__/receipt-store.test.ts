@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { sql } from "@pcc/store";
+import { schema, sql } from "@pcc/store";
 import type Database from "better-sqlite3";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { createJobChallengeReader, gatewayKernelRegistry } from "../settlement/receipt-store.js";
@@ -14,6 +14,12 @@ describe("durable job-bound settlement challenge reader", () => {
   let jobId: string;
   let otherJobId: string;
   const db = () => getStore().db;
+  const insertRegistryKernel = (id: string, algorithm: string | null, publicKey: string | null, address: string | null = null) => {
+    const template = db().select().from(schema.shopKernels).get()!;
+    db().insert(schema.shopKernels).values({
+      ...template, id, signingKeyAlgorithm: algorithm, signingKeyPublicKey: publicKey, signingAddress: address,
+    }).run();
+  };
   const previousPath = process.env.PCC_DB_PATH;
   beforeAll(() => {
     process.env.PCC_DB_PATH = ":memory:";
@@ -28,7 +34,10 @@ describe("durable job-bound settlement challenge reader", () => {
     db().run(sql`DELETE FROM settlement_challenges`);
     db().run(sql`INSERT INTO settlement_challenges (id, job_id, chain_id, escrow, settlement_unit_id, nonce, t_challenge_ref, state, issued_at, expires_at) VALUES ('challenge-reader-test', ${jobId}, 8453, ${UNIT.escrow}, ${UNIT.settlementUnitId}, ${EXPECTED.nonce}, ${EXPECTED.tChallengeRef}, 'issued', ${NOW - 1}, ${NOW + 60})`);
   });
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    db().run(sql`DELETE FROM shop_kernels WHERE id IN ('receipt-registry-a', 'receipt-registry-b')`);
+    vi.restoreAllMocks();
+  });
   afterAll(() => {
     closeStore();
     if (previousPath === undefined) delete process.env.PCC_DB_PATH;
@@ -80,5 +89,33 @@ describe("durable job-bound settlement challenge reader", () => {
 
   it("returns no registry signer for a missing kernel row", async () => {
     expect(await gatewayKernelRegistry.signerForKernel("kernel-not-in-registry")).toBeNull();
+  });
+
+  it("returns the requested kernel signer when a different keyed kernel was inserted first", async () => {
+    insertRegistryKernel("receipt-registry-b", "ed25519", H("b"));
+    insertRegistryKernel("receipt-registry-a", "ed25519", H("a"));
+
+    expect(await gatewayKernelRegistry.signerForKernel("receipt-registry-a")).toEqual({ algorithm: "ed25519", publicKey: H("a") });
+    expect(await gatewayKernelRegistry.signerForKernel("receipt-registry-b")).toEqual({ algorithm: "ed25519", publicKey: H("b") });
+  });
+
+  it("returns no signer for a keyless kernel when another keyed kernel was inserted first", async () => {
+    insertRegistryKernel("receipt-registry-b", "ed25519", H("b"));
+    insertRegistryKernel("receipt-registry-a", null, null);
+
+    expect(await gatewayKernelRegistry.signerForKernel("receipt-registry-a")).toBeNull();
+  });
+
+  it("returns no signer for a public key without a proven algorithm", async () => {
+    insertRegistryKernel("receipt-registry-a", null, H("a"));
+
+    expect(await gatewayKernelRegistry.signerForKernel("receipt-registry-a")).toBeNull();
+  });
+
+  it("returns the secp256k1 signer when its row also contains an Ed25519 public key", async () => {
+    const address = "0x0000000000000000000000000000000000000001";
+    insertRegistryKernel("receipt-registry-a", "secp256k1", H("a"), address);
+
+    expect(await gatewayKernelRegistry.signerForKernel("receipt-registry-a")).toEqual({ algorithm: "secp256k1", address });
   });
 });

@@ -8,6 +8,7 @@ import { getRepos, getStore } from "../db.js";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { computePackageBodyHash, PACKAGE_FORMAT, PACKAGE_SCHEMA_VERSION, type FinalMilestonePackageV2Body, type Hex } from "../settlement/final-milestone-package-v2.js";
 import { computeGatewayReceiptDigest } from "../settlement/gateway-receipt.js";
+import * as operatorVerifierModule from "../settlement/operator-signature-verifier.js";
 
 // Only existing modules are imported: on the base tree these tests reach the
 // real app and fail on the absent HTTP routes, rather than missing modules.
@@ -133,6 +134,27 @@ describe("durable settlement receipts through the gateway app", () => {
     expect(result.json().error).toBe(error);
     expect(receipts()).toHaveLength(0);
   }
+  async function withEarlierRegisteredKernel(test: () => Promise<void>) {
+    const savedKernel = db().select().from(schema.shopKernels).where(eq(schema.shopKernels.id, kernelId)).get()!;
+    const earlierKernelId = "receipt-route-earlier-kernel";
+    // Reinsert the job's kernel after the competing row, preserving its job/device references.
+    db().run(sql`PRAGMA foreign_keys = OFF`);
+    try {
+      db().run(sql`DELETE FROM shop_kernels WHERE id = ${kernelId}`);
+      db().insert(schema.shopKernels).values({ ...savedKernel, id: earlierKernelId, signingKeyPublicKey: otherDevice.hex }).run();
+    } finally {
+      try {
+        db().insert(schema.shopKernels).values(savedKernel).run();
+      } finally {
+        db().run(sql`PRAGMA foreign_keys = ON`);
+      }
+    }
+    try {
+      await test();
+    } finally {
+      db().run(sql`DELETE FROM shop_kernels WHERE id = ${earlierKernelId}`);
+    }
+  }
 
   it("issues a real signed receipt and atomically consumes the issued challenge", async () => {
     const binding = await issued();
@@ -180,6 +202,39 @@ describe("durable settlement receipts through the gateway app", () => {
     if (variant === "missing proven key") db().run(sql`UPDATE shop_kernels SET signing_key_algorithm = NULL, signing_key_public_key = NULL WHERE id = ${kernelId}`);
     if (variant === "different registered key") db().run(sql`UPDATE shop_kernels SET signing_key_public_key = ${otherDevice.hex} WHERE id = ${kernelId}`);
     if (variant === "secp256k1 only") db().run(sql`UPDATE shop_kernels SET signing_key_algorithm = 'secp256k1', signing_key_public_key = NULL, signing_address = ${operator.address.toLowerCase()} WHERE id = ${kernelId}`);
+    await expectRefused(await envelope(binding), "package_registry_refused");
+    expect(challenge()?.state).toBe("issued");
+  });
+
+  it("refuses another kernel's earlier registered device key and accepts the job kernel's key", async () => {
+    await withEarlierRegisteredKernel(async () => {
+      const binding = await issued();
+      await expectRefused(await envelope(binding, { d2: otherDevice }), "package_registry_refused");
+      expect(challenge()?.state).toBe("issued");
+
+      const accepted = await post(await envelope(binding));
+      expect(accepted.statusCode).toBe(200);
+      expect(receipts()).toHaveLength(1);
+      expect(challenge()?.state).toBe("consumed");
+    });
+  });
+
+  it("refuses another kernel's key when the job kernel has no proven signer", async () => {
+    await withEarlierRegisteredKernel(async () => {
+      const binding = await issued();
+      db().run(sql`UPDATE shop_kernels SET signing_key_algorithm = NULL, signing_key_public_key = NULL WHERE id = ${kernelId}`);
+      await expectRefused(await envelope(binding, { d2: otherDevice }), "package_registry_refused");
+      expect(challenge()?.state).toBe("issued");
+    });
+  });
+
+  it.each([
+    ["no algorithm", null],
+    ["secp256k1 algorithm", "secp256k1"],
+  ] as const)("refuses an Ed25519 public key registered with %s", async (_name, algorithm) => {
+    const binding = await issued();
+    const address = algorithm === "secp256k1" ? operator.address.toLowerCase() : null;
+    db().run(sql`UPDATE shop_kernels SET signing_key_algorithm = ${algorithm}, signing_key_public_key = ${device.hex}, signing_address = ${address} WHERE id = ${kernelId}`);
     await expectRefused(await envelope(binding), "package_registry_refused");
     expect(challenge()?.state).toBe("issued");
   });
@@ -251,6 +306,42 @@ describe("durable settlement receipts through the gateway app", () => {
     expect(responses[0].json()).toEqual(responses[1].json());
     expect(receipts()).toHaveLength(1);
     expect(challenge()?.state).toBe("consumed");
+  });
+
+  it("concurrent different packages return one receipt and one conflict from the stored winner", async () => {
+    const binding = await issued();
+    const firstPackage = await envelope(binding);
+    const secondPackage = await envelope(binding, { evidence: H("8") });
+    const realFactory = operatorVerifierModule.createEip712OperatorVerifier;
+    let releaseFirst!: () => void;
+    const firstLookupGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let lookups = 0;
+    const factory = vi.spyOn(operatorVerifierModule, "createEip712OperatorVerifier").mockImplementation((deps) => realFactory({
+      ...deps,
+      async operatorForUnit(unitBinding, options) {
+        // Hold the first request after its pre-check until the competing receipt is stored.
+        if (++lookups === 1) await firstLookupGate;
+        return deps.operatorForUnit(unitBinding, options);
+      },
+    }));
+    const responses = await Promise.all([
+      Promise.resolve(post(firstPackage)).finally(releaseFirst),
+      Promise.resolve(post(secondPackage)).finally(releaseFirst),
+    ]);
+    // Both factories/lookup calls prove the loser passed the pre-check and read an issued challenge.
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(lookups).toBe(2);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    const winner = responses.find((response) => response.statusCode === 200)!;
+    const loser = responses.find((response) => response.statusCode === 409)!;
+    expect(loser.json()).toEqual({ error: "receipt_exists" });
+    const rows = db().select().from(schema.gatewayReceipts).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].packageDigest).toBe(winner.json().receipt.packageDigest);
+    expect(challenge()?.state).toBe("consumed");
+    const read = await app.inject({ method: "GET", url: url(), headers: adminHeaders() });
+    expect(read.statusCode).toBe(200);
+    expect(read.json()).toEqual(winner.json());
   });
 
   it.each(["missing seed", "future validFrom"])("refuses an unavailable signer (%s) before burning the challenge", async (variant) => {
