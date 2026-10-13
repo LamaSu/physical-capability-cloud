@@ -22,7 +22,7 @@ keys' `createdAt`. Keep the funded Ed25519 device principal separate from the se
 operator EOA. The per-unit SESSION key signs the bundle (H1(b)). The device key
 signs LO-EV-1 delegations through `signDelegation`; `signD2` signs the 32 bytes
 the caller supplies, behind a guard that refuses bytes beginning with the UTF-8
-prefix `pcc-kernel-signing-key:` in either raw or hex form.
+prefixes `pcc-kernel-signing-key:` and `sha256:` in either raw or hex form.
 Load it with `delegationBinding: { chainId, operator }` from the host's configured
 chain and operator identity; loading without that binding permits public identity
 checks and D2, but refuses delegation signing. Delegations name one bounded job id
@@ -39,6 +39,11 @@ refused. `sessionId` must match `/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/`.
 in the range `1_600_000_000 <= t < 2^32`. `firstEventAt` uses the same range and
 may include a fractional second for event timing.
 `signD2` accepts exactly 32 raw bytes or their `0x`-prefixed lowercase hex encoding.
+Both UTF-8 prefixes, `pcc-kernel-signing-key:` and `sha256:`, are refused after decoding.
+An honest D2 input is a SHA-256 output, so the `sha256:` guard's false refusal has
+probability 2^-56 per unit; grinding a package body to force a single-unit refusal
+costs about 2^56 SHA-256 evaluations, acceptable for the MVP. The durable fix is a
+typed package body hashed inside the key module.
 The toolkit still needs the unit session and bundle builders recorded by GAP-7.
 The operator key's uses are D1 `FinalMilestonePackageV2` signatures, zero-value
 EIP-1559 `submitEvidence(unitId, packageDigest)` transactions, and JobPolicy

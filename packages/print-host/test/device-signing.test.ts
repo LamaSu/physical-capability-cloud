@@ -1,4 +1,4 @@
-import { createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -113,7 +113,7 @@ describe("narrow device signing", () => {
   });
 
   it("signD2 signs exactly raw32 for byte and lowercase hex inputs", async () => {
-    const hash = randomBytes(32);
+    const hash = createHash("sha256").update(randomBytes(32)).digest();
     const before = Buffer.from(hash);
     const signature = signatureBytes(await key.signD2(hash));
     expect(verify(null, hash, devicePublicKey(), signature)).toBe(true);
@@ -151,10 +151,23 @@ describe("narrow device signing", () => {
     expect(longerRegistration.length).toBe(33);
     await closedRefusal(() => key.signD2(longerRegistration), "bad_bytes32");
     await closedRefusal(() => key.signD2(`0x${longerRegistration.toString("hex")}`), "bad_bytes32");
+    const entryHash = Buffer.from(`sha256:${randomBytes(13).toString("hex").slice(0, 25)}`, "utf8");
+    expect(entryHash.length).toBe(32);
+    await closedRefusal(() => key.signD2(entryHash), "forbidden_protocol");
+    await closedRefusal(() => key.signD2(`0x${entryHash.toString("hex")}`), "forbidden_protocol");
+    const shorterEntryHash = entryHash.subarray(0, 31);
+    expect(shorterEntryHash.length).toBe(31);
+    await closedRefusal(() => key.signD2(shorterEntryHash), "bad_bytes32");
+    await closedRefusal(() => key.signD2(`0x${shorterEntryHash.toString("hex")}`), "bad_bytes32");
   });
 
   it.each([8453, 1, 11155111])("loadDeviceKey refuses delegation binding chainId %i", async (chainId) => {
     const invalidBinding = { ...binding, chainId } as DeviceDelegationBinding;
+    await closedRefusal(() => loadDeviceKey(keyPath, { now, delegationBinding: invalidBinding }), "bad_binding");
+  });
+
+  it("loadDeviceKey refuses an extra key in the delegation binding", async () => {
+    const invalidBinding = { ...binding, extra: 1 };
     await closedRefusal(() => loadDeviceKey(keyPath, { now, delegationBinding: invalidBinding }), "bad_binding");
   });
 

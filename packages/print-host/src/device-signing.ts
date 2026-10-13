@@ -165,9 +165,12 @@ export function prepareDelegation(input: DelegationInput, parent: SessionKey["pa
 // packages/spec/src/identity/ephemeral.ts: DEFAULT_SESSION_KEY_CONFIG's MVP actions.
 const mvpActions: readonly string[] = Object.freeze(["evidence_submit", "workflow_step_complete"]);
 
-const kernelRegistrationPrefix = Buffer.from("pcc-kernel-signing-key:", "utf8");
+const forbiddenD2Prefixes = Object.freeze([
+  Buffer.from("pcc-kernel-signing-key:", "utf8"),
+  Buffer.from("sha256:", "utf8"),
+]);
 
-/** D2 signs caller-supplied raw32, excluding the kernel-registration challenge. */
+/** D2 signs caller-supplied raw32, excluding kernel-registration challenges and log-entry hashes. */
 export function prepareD2(input: Uint8Array | string): Uint8Array {
   let bytes: Uint8Array;
   try {
@@ -180,7 +183,7 @@ export function prepareD2(input: Uint8Array | string): Uint8Array {
     }
     if (bytes.length !== 32) throw new Error();
   } catch { throw new DeviceSigningError("bad_bytes32"); }
-  if (kernelRegistrationPrefix.every((byte, index) => bytes[index] === byte)) {
+  if (forbiddenD2Prefixes.some((prefix) => prefix.every((byte, index) => bytes[index] === byte))) {
     throw new DeviceSigningError("forbidden_protocol");
   }
   return bytes;
