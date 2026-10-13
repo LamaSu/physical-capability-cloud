@@ -132,7 +132,7 @@ export class FakeMachineAdapter implements MachineAdapter {
     if (this.disposed || !this.active || this.activeJobId !== numericJobId) return;
     const reportCanceled = () => {
       if (!this.disposed && this.active && this.activeJobId === numericJobId) {
-        this.emit("execution_failed", { ippJobId: numericJobId, state: "canceled" });
+        this.emit("execution_failed", { ippJobId: numericJobId, state: "canceled", origin: "device" });
       }
     };
     // Cancellation leaves polling active, with either ordering of the state-7 event.

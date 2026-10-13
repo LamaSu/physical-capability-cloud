@@ -326,6 +326,34 @@ describe("N144 print-host toolkit gap repros", () => {
     },
   );
 
+  it("the fake reports a device cancellation only once per job under both cancel/event orders", async () => {
+    for (const cancelEventOrder of ["before-resolve", "after-resolve"] as const) {
+      const setup = harness(`cancel-once-${cancelEventOrder}`, { cancelEventOrder });
+      const ippJobId = cancelEventOrder === "before-resolve" ? 110 : 120;
+      setup.adapter.scriptStart({ outcome: "success", jobId: ippJobId });
+      await setup.adapter.execute({ type: "start" });
+      const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
+      setup.adapter.onEvidence((event) => events.push(event));
+      await setup.adapter.cancelJob(ippJobId + 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(events, "a cancel for a different job must report nothing").toEqual([]);
+      expect(await setup.adapter.getStatus()).toBe("busy");
+      // Both calls enter while active, exercising the guard on the later report.
+      await expect(Promise.all([
+        setup.adapter.cancelJob(ippJobId), setup.adapter.cancelJob(ippJobId),
+      ]), "repeated cancels of the same device job must remain accepted")
+        .resolves.toEqual([undefined, undefined]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(events, "repeated cancels must report exactly one execution_failed").toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: "execution_failed", payload: { ippJobId, state: "canceled", origin: "device" },
+      });
+      expect(setup.adapter.cancels).toEqual([ippJobId + 1, ippJobId, ippJobId]);
+      expect(await setup.adapter.getStatus()).toBe("idle");
+      await setup.adapter.quiesceEvidence();
+    }
+  });
+
   gap("GAP-1 real mode never simulates", async () => {
     vi.useFakeTimers();
     let kernel: IppPrintKernel;
@@ -411,10 +439,11 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
     expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
     expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
-    expect(bundle.events.some((event) => event.type === "execution_failed"
-      && event.payload.ippJobId === 104
-      && event.payload.origin === "kernel"
-      && event.payload.reason === "timeout"), "a timeout must include kernel-originated failure evidence").toBe(true);
+    const failures = bundle.events.filter((event) => event.type === "execution_failed");
+    expect(failures, "a device-confirmed timeout must include exactly one execution_failed").toHaveLength(1);
+    expect(failures[0]!.payload).toMatchObject({ ippJobId: 104, origin: "device" });
+    expect(result).toMatchObject({ failure: { kind: "timeout" } });
+    expect((result as PrintJobResult & { cancelRequested?: unknown }).cancelRequested).toBeTruthy();
   });
 
   for (const cancelEventOrder of ["before-resolve", "after-resolve"] as const) {
@@ -449,10 +478,11 @@ describe("N144 print-host toolkit gap repros", () => {
       expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
       expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
       expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
-      expect(bundle.events.some((event) => event.type === "execution_failed"
-        && event.payload.ippJobId === ippJobId
-        && event.payload.origin === "kernel"
-        && event.payload.reason === "aborted"), "an abort must include kernel-originated failure evidence").toBe(true);
+      const failures = bundle.events.filter((event) => event.type === "execution_failed");
+      expect(failures, "a device-confirmed abort must include exactly one execution_failed").toHaveLength(1);
+      expect(failures[0]!.payload).toMatchObject({ ippJobId, origin: "device" });
+      expect(result).toMatchObject({ failure: { kind: "aborted" } });
+      expect((result as PrintJobResult & { cancelRequested?: unknown }).cancelRequested).toBeTruthy();
     });
   }
 
@@ -622,7 +652,7 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(result.events.filter((event) => event.type === "execution_failed")).toEqual([]);
     expect(setup.emitter.getEvents("busy-refusal", "busy-refusal-print")).toEqual([]);
     // Requested structured result field; no parsing of error/message text.
-    const busy = (result as PrintJobResult & { busy?: true }).busy;
-    expect(busy, "a busy start refusal must expose top-level busy: true").toBe(true);
+    const busy = (result as PrintJobResult & { busy?: unknown }).busy;
+    expect(busy, "a busy refusal must expose a structured busy object").toMatchObject({ reason: "device" });
   });
 });
