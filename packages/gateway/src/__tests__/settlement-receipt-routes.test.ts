@@ -47,10 +47,13 @@ describe("durable settlement receipts through the gateway app", () => {
   let otherJobId: string;
   let kernelId: string;
   let bearer: string;
+  let basicBearer: string;
+  let contributorBearer: string;
   let now: number;
   const envNames = ["PCC_DB_PATH", "DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_SEED_DATA", "PCC_ADMIN_KEY", "PCC_GATEWAY_RECEIPT_SEED", "PCC_GATEWAY_RECEIPT_VALID_FROM"] as const;
   const savedEnv = new Map(envNames.map((name) => [name, process.env[name]]));
   const adminHeaders = () => ({ "x-admin-key": ADMIN, authorization: `Bearer ${bearer}` });
+  const basicHeaders = () => ({ authorization: `Bearer ${basicBearer}` });
   const url = (id = jobId) => `/api/operator/jobs/${id}/receipt`;
   const unit = () => ({ chainId: "8453", escrow: ESCROW, settlementUnitId: H("1"), jobIdHash: H("2"), milestoneIndex: "0", stepId: H("3"), compositionRoot: H("4"), acceptedEnvelopeHash: H("5") });
   const db = () => getStore().db;
@@ -79,6 +82,8 @@ describe("durable settlement receipts through the gateway app", () => {
     otherJobId = jobs[1].id;
     kernelId = jobs[0].kernelId!;
     bearer = provisionApiKey({ operatorId: operator.address.toLowerCase(), name: "Receipt test credential", scopes: ["*"] }).rawKey;
+    basicBearer = provisionApiKey({ operatorId: operator.address.toLowerCase(), name: "Basic operator receipt credential", scopes: ["operator:basic"] }).rawKey;
+    contributorBearer = provisionApiKey({ operatorId: operator.address.toLowerCase(), name: "Contributor receipt credential", scopes: ["contributor:read"] }).rawKey;
   }, 120_000);
 
   beforeEach(() => {
@@ -403,6 +408,31 @@ describe("durable settlement receipts through the gateway app", () => {
     const result = await app.inject({ method: "GET", url: url(), headers: adminHeaders() });
     expect(result.statusCode).toBe(200);
     expect(result.json()).toEqual(first.json());
+  });
+
+  it("POST lets a basic operator key reach the kernel refusal without writing a receipt or changing challenges", async () => {
+    const payload = await envelope(await issued());
+    const challengesBefore = db().all(sql`SELECT * FROM settlement_challenges`);
+    expect(challenge()?.state).toBe("issued");
+    const result = await post(payload, basicHeaders());
+    expect(result.statusCode).toBe(403);
+    expect(result.json()).toEqual({ error: "forbidden", reason: "operator_proof_required", message: expect.any(String) });
+    expect(receipts()).toHaveLength(0);
+    expect(db().all(sql`SELECT * FROM settlement_challenges`)).toEqual(challengesBefore);
+  });
+
+  it("GET lets the same basic operator key reach the kernel refusal for a stored receipt", async () => {
+    const minted = await post(await envelope(await issued()));
+    expect(minted.statusCode).toBe(200);
+    const result = await app.inject({ method: "GET", url: url(), headers: basicHeaders() });
+    expect(result.statusCode).toBe(403);
+    expect(result.json()).toEqual({ error: "forbidden", reason: "operator_proof_required", message: expect.any(String) });
+  });
+
+  it.each(["POST", "GET"] as const)("%s refuses a key without operator scopes at the scope layer", async (method) => {
+    const result = await app.inject({ method, url: url(), headers: { authorization: `Bearer ${contributorBearer}` }, ...(method === "POST" ? { payload: {} } : {}) });
+    expect(result.statusCode).toBe(403);
+    expect(result.json().error).toBe("insufficient_scope");
   });
 
   it("a key provisioned with a claimed operator wallet cannot POST or GET receipts", async () => {
