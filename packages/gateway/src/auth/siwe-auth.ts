@@ -153,6 +153,26 @@ function parseSiweMessage(message: string): ParsedSiweMessage | null {
 // Session helpers (exported for use by require-auth and other modules)
 // ---------------------------------------------------------------------------
 
+/** End a session and its own keys atomically, preserving keys from other sessions. */
+function deleteSessionAndRevokeKeys(token: string) {
+  const repos = getRepos();
+  getStore().db.transaction(() => {
+    const session = repos.sessions.findByToken(token);
+    if (!session) return;
+
+    // Minting preserves the stored session address, including its casing.
+    for (const key of repos.apiKeys.findByOperator(session.walletAddress)) {
+      if (key.revokedAt) continue;
+      let metadata;
+      try { metadata = JSON.parse(key.metadata ?? "{}"); } catch { continue; }
+      if (metadata?.source === "siwe-session" && metadata.sessionId === session.id) {
+        repos.apiKeys.revoke(key.id);
+      }
+    }
+    repos.sessions.deleteByToken(token);
+  });
+}
+
 /**
  * Resolve a session from the request.
  * Checks both cookie (`pcc_session`) and Authorization Bearer header.
@@ -362,7 +382,7 @@ export async function siweAuthPlugin(app: FastifyInstance) {
       });
   });
 
-  // Session keys hold only self-service scopes and never outlive their session or twelve hours.
+  // Session keys hold self-service scopes, expire within twelve hours or at session expiry, and are revoked on logout.
   app.post("/api/auth/session-key", async (req, reply) => {
     if (req.apiKeyId != null) {
       return reply.status(403).send({
@@ -450,8 +470,6 @@ export async function siweAuthPlugin(app: FastifyInstance) {
 
   // ----- POST /api/auth/logout -----
   app.post("/api/auth/logout", async (req, reply) => {
-    const repo = getRepos().sessions;
-
     // Clear cookie-based session — verify signature before deletion
     const rawCookie = req.cookies?.pcc_session;
     if (rawCookie) {
@@ -464,15 +482,15 @@ export async function siweAuthPlugin(app: FastifyInstance) {
           cookieToken = rawCookie;
         }
       } catch {
-        cookieToken = rawCookie;
+        cookieToken = null;
       }
-      if (cookieToken) repo.deleteByToken(cookieToken);
+      if (cookieToken) deleteSessionAndRevokeKeys(cookieToken);
     }
 
     // Clear bearer-based session
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith("Bearer ")) {
-      repo.deleteByToken(authHeader.slice(7));
+      deleteSessionAndRevokeKeys(authHeader.slice(7));
     }
 
     return reply.clearCookie("pcc_session", { path: "/" }).send({ ok: true });
