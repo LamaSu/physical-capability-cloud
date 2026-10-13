@@ -22,3 +22,8 @@ export type {
   EStopDecision, EmergencyStopReader, RelayEvidenceBundle, PollJobsValue,
   HeartbeatValue, InProgressValue, RelayEvidenceReceipt,
 } from "./gateway-client.js";
+export { createCarrierClient } from "./carrier-client.js";
+export type {
+  CarrierClient, CarrierClientConfig, BuyLabelInput, LabelReceipt,
+  CarrierEvent, CarrierShipmentValue, CarrierEventsValue,
+} from "./carrier-client.js";

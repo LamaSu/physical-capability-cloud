@@ -1,6 +1,7 @@
 import { inspect } from "node:util";
 import type { EvidenceBundle } from "@pcc/spec";
 import { isGatewayBaseUrl } from "./config.js";
+import { createGatewayRequest, isRequestFailure } from "./gateway-request.js";
 
 export type GwCode =
   | "unauthenticated" | "not_kernel_operator" | "operator_proof_required"
@@ -9,7 +10,12 @@ export type GwCode =
   | "unavailable" | "server_error" | "network" | "timeout" | "malformed_response"
   | "job_not_found" | "settlement_owned_status" | "job_kernel_changed" | "invalid_status"
   | "payload_too_large" | "bad_bundle" | "stored_mismatch" | "not_stored"
-  | "evidence_refused" | "indeterminate";
+  | "evidence_refused" | "indeterminate"
+  | "spend_not_approved" | "idempotency_conflict" | "reconciliation_required"
+  | "kernel_unowned" | "kernel_mismatch" | "job_not_active"
+  | "carrier_record_ownership_mismatch" | "carrier_not_configured"
+  | "missing_fields" | "invalid_parcel" | "invalid_document_hash"
+  | "provider_mode_not_production" | "weight_exceeds_ceiling" | "rate_exceeds_ceiling";
 
 export type GwSubCode =
   | "job_not_found" | "storage_failed" | "kernel_mismatch" | "job_mismatch"
@@ -191,45 +197,6 @@ function classify(status: number, body: ObjectBody, headers: Headers, kind: Call
   return failure("route_unavailable", status);
 }
 
-const aborted = Symbol("gateway timeout");
-const tooLarge = Symbol("gateway response limit");
-
-/** Fetch implementations and streams need not implement abort themselves. */
-function withinDeadline<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const onAbort = () => reject(aborted);
-    signal.addEventListener("abort", onAbort, { once: true });
-    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
-    if (signal.aborted) onAbort();
-  });
-}
-
-async function boundedBody(response: Response, signal: AbortSignal, limit: number): Promise<string> {
-  if (response.body === null) return "";
-  const reader = response.body.getReader();
-  const cancel = () => { void reader.cancel().catch(() => undefined); };
-  signal.addEventListener("abort", cancel, { once: true });
-  try {
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    while (true) {
-      const next = await withinDeadline(reader.read(), signal);
-      if (signal.aborted) throw aborted;
-      if (next.done) break;
-      size += next.value.byteLength;
-      if (size > limit) { cancel(); throw tooLarge; }
-      chunks.push(next.value);
-    }
-    return Buffer.concat(chunks, size).toString("utf8");
-  } catch (error) {
-    cancel();
-    throw error;
-  } finally {
-    signal.removeEventListener("abort", cancel);
-    reader.releaseLock();
-  }
-}
-
 export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayClient> {
   let input: GatewayClientConfig;
   try {
@@ -254,39 +221,17 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
   if (typeof emergencyStopReader !== "function") throw new GatewayClientError("bad_reader");
   const endpoint = (name: string) => `${baseUrl.replace(/\/+$/, "")}/api/operator/${encodeURIComponent(name)}`;
 
+  const transport = createGatewayRequest({ apiKey, fetchImpl, timeoutMs, maxResponseBytes });
   async function request(kind: CallKind, url: string, body?: string): Promise<Reply | Failure> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let status: number | null = null;
+    const reply = await transport(url, body);
+    if (isRequestFailure(reply)) return kind === "evidence" ? failure("indeterminate", reply.status) : reply;
     try {
-      const response = await withinDeadline(fetchImpl(url, {
-        method: body === undefined ? "GET" : "POST",
-        redirect: "error",
-        headers: { Authorization: `Bearer ${apiKey}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-        ...(body === undefined ? {} : { body }),
-        signal: controller.signal,
-      }), controller.signal);
-      status = response.status;
-      const text = await boundedBody(response, controller.signal, maxResponseBytes);
-      if (controller.signal.aborted) throw aborted;
-      const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
-      const isJson = contentType === "application/json" || /^application\/[a-z0-9!#$&^_.+-]+\+json$/.test(contentType ?? "");
-      // Success bodies are parsed only for JSON 200s. Non-200 JSON is decoded
-      // solely to classify the route's allowlisted error discriminators.
-      let parsed: unknown;
-      if (isJson) {
-        try { parsed = JSON.parse(text); } catch { /* never retain parse exceptions */ }
-      }
-      if (status !== 200) return classify(status, object(parsed) ? parsed : {}, response.headers, kind);
-      if (!isJson || !object(parsed)) return failure(kind === "evidence" ? "indeterminate" : "malformed_response", status);
-      return { status: 200, body: parsed };
-    } catch (error) {
-      if (kind === "evidence") return failure("indeterminate", status);
-      if (error === tooLarge) return failure("malformed_response", status);
-      const timedOut = controller.signal.aborted || error === aborted;
-      return failure(timedOut ? "timeout" : status === null ? "network" : "malformed_response", status);
-    } finally {
-      clearTimeout(timer);
+      // Non-200 JSON is decoded solely to classify allowlisted discriminators.
+      if (reply.status !== 200) return classify(reply.status, reply.body ?? {}, reply.headers, kind);
+      if (reply.body === null) return failure(kind === "evidence" ? "indeterminate" : "malformed_response", 200);
+      return { status: 200, body: reply.body };
+    } catch {
+      return failure(kind === "evidence" ? "indeterminate" : "malformed_response", reply.status);
     }
   }
 

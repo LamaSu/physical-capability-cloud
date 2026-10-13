@@ -157,8 +157,32 @@ must reconcile from its journal before deciding what to do next. The known
 
 bundleHash is spec's tagged SHA256, as hashBundle produces it.
 
-The unit route, settlement block, job inputs, and carrier calls come in later
-PRs; none are available through this client yet.
+The unit route, settlement block, and job inputs come in later PRs; none are
+available through this client yet.
+
+## Carrier gateway client
+
+`createCarrierClient({baseUrl, apiKey, kernelId, spendApprovalId})` buys labels
+with `buyLabel({jobId, documentHash, toAddress, fromAddress, parcel})` through
+`POST /api/carrier/shipments`. `getShipment(jobId)` reads the shipment and
+`pullCarrierEvents(jobId)` reads its carrier evidence through the gateway.
+The host never calls EasyPost and holds no EasyPost key. The frozen client keeps
+its gateway API key in a closure and uses the same bounded requests and redirect
+refusal as the operator relay client.
+
+Every label requires the operator's go: configure a non-empty `spendApprovalId`
+before calling `buyLabel`, including in TEST mode to preserve the approval habit.
+The client refuses before sending without it. Purchase retries occur only for a
+`502` whose JSON has `retry: true`, at most twice, with byte-identical bodies.
+An HTTP `200` replay succeeds with `replayed: true`. The receipt includes the
+label and tracking identifiers, provider mode, mock flag, and the commitment's
+hash and `committedAt` timestamp. Provider mode is recorded; the host decides
+which modes it accepts.
+
+Label-before-print integration comes in a later PR: the host must buy the label
+and read `commitment.committedAt` before it prints. TEST-mode carrier events have
+`source.simulated: true`, and `/settle` refuses them. The oracle and evidence
+requirements govern the demo's release basis (bus #7765).
 
 ## Repros for pcc-adk
 
