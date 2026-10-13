@@ -931,6 +931,13 @@ describe("checkCommittedProgramForTier — independence rests on evidence-owned 
     expect(violationsFor(program)).toEqual([NOT_INDEPENDENT]);
     // Canonicalization refuses the hole before a registry entry can be built.
     expect(() => computeCommittedProgramHash(program)).toThrow(NonCanonicalValueError);
+    // The gate fails closed on it too: a registry entry claiming any hash for it throws at the recompute.
+    const claimed: CommittedProgramEntry = { csd: CSD, tier: "tier2", program, programHash: HASH };
+    expect(() =>
+      assertAcceptedProgramForTierWith({ csd: CSD, tierKey: "tier2", evidence: fixedTiers(), committedProgramHash: HASH }, [claimed], {
+        primitiveIndex: LIVE,
+      }),
+    ).toThrow(NonCanonicalValueError);
   });
 
   it("independence is event-specific: a label listed for the carrier scan does not make execution_completed independent", () => {
