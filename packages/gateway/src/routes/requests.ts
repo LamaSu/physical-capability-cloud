@@ -58,6 +58,7 @@ import {
   isUnmetCaptureEnabled,
 } from "../services/unmet-capture.js";
 import { schema } from "@pcc/store";
+import { shouldSeedDemoData } from "../config/seed-policy.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -333,9 +334,11 @@ export function resetRequestsStore(): void {
 // ---------------------------------------------------------------------------
 
 export async function requestRoutes(app: FastifyInstance) {
-  // Ensure seed on registration (idempotent; safe if called repeatedly)
+  // Preserve this demo's existing always-on default; explicit false opts out.
   try {
-    seedRequests();
+    if (shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV, true)) {
+      seedRequests();
+    }
   } catch (err) {
     // If repos aren't initialized yet in some test paths, skip silently.
     // The route handlers will fail loudly if the DB is truly missing.
