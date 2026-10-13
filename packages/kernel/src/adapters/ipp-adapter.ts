@@ -559,10 +559,13 @@ export class IppAdapter implements MachineAdapter {
       }
 
       case "stop": {
-        if (this.activeRealJobId !== null) {
-          await this.cancelJob(this.activeRealJobId);
-          this.activeRealJobId = null;
-          this.stopPolling();
+        const jobId = this.activeRealJobId;
+        if (jobId !== null) {
+          await this.cancelJob(jobId);
+          if (this.activeRealJobId === jobId) {
+            this.activeRealJobId = null;
+            this.stopPolling();
+          }
         }
         return { success: true, message: "IPP job cancelled" };
       }
