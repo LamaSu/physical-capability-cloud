@@ -107,6 +107,50 @@ describe("wallet key storage invariant", () => {
     expect(sqlite.pragma("secure_delete", { simple: true })).toBe(0);
   });
 
+  it.each([
+    { mode: "OFF", value: 0, restorePattern: /secure_delete\s*=\s*(OFF|0)\b/i },
+    { mode: "FAST", value: 2, restorePattern: /secure_delete\s*=\s*(FAST|2)\b/i },
+  ])("enables secure_delete for the scrub and restores $mode after success or an UPDATE error", ({ mode, value, restorePattern }) => {
+    const statements: string[] = [];
+    const sqlite = new Database(":memory:", { verbose: (sql) => statements.push(sql) });
+    connections.add(sqlite);
+    migrateDatabase(sqlite);
+    insertLegacyKey(sqlite, "secure-delete-key", markerDecoy);
+    sqlite.pragma(`secure_delete = ${mode}`);
+    expect(sqlite.pragma("secure_delete", { simple: true })).toBe(value);
+
+    const expectScrubOrder = () => {
+      const enableIndex = statements.findIndex((sql) => /secure_delete\s*=\s*(ON|1)\b/i.test(sql));
+      const updateIndex = statements.findIndex((sql) => /UPDATE\s+api_keys\s+SET\s+operator_wallet_private_key\s*=\s*NULL\b/i.test(sql));
+      const restoreIndex = statements.findIndex((sql) => restorePattern.test(sql));
+      expect(enableIndex).toBeGreaterThanOrEqual(0);
+      expect(updateIndex).toBeGreaterThan(enableIndex);
+      expect(restoreIndex).toBeGreaterThan(updateIndex);
+      expect(sqlite.pragma("secure_delete", { simple: true })).toBe(value);
+    };
+
+    statements.length = 0;
+    migrateDatabase(sqlite);
+
+    expectScrubOrder();
+    expect(remainingKeyCount(sqlite)).toBe(0);
+
+    insertLegacyKey(sqlite, "secure-delete-aborted-key", hexDecoy);
+    sqlite.exec(`
+      CREATE TRIGGER abort_wallet_key_scrub
+      BEFORE UPDATE OF operator_wallet_private_key ON api_keys
+      BEGIN
+        SELECT RAISE(ABORT, 'x');
+      END
+    `);
+    statements.length = 0;
+
+    expect(() => migrateDatabase(sqlite)).toThrow("x");
+
+    expectScrubOrder();
+    expect(remainingKeyCount(sqlite)).toBe(1);
+  });
+
   it("keeps keys absent and other columns unchanged on a third migration", () => {
     const { sqlite } = memoryDatabase();
     insertLegacyKey(sqlite, "idempotent", markerDecoy);
