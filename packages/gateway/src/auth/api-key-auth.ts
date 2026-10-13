@@ -10,9 +10,9 @@
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import { PCC_API_KEY_LIVE_PREFIX } from "@pcc/spec";
 import { getRepos } from "../db.js";
-import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import {
   generateEd25519Keypair,
   normalizePublicKeyHex,
@@ -138,6 +138,7 @@ export function provisionApiKey(opts: {
   description?: string;
   scopes?: string[];
   rateLimit?: string;
+  expiresAt?: string;
   expiresInDays?: number;
   metadata?: Record<string, unknown>;
   /**
@@ -207,9 +208,9 @@ export function provisionApiKey(opts: {
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),
-      expiresAt: opts.expiresInDays
+      expiresAt: opts.expiresAt ?? (opts.expiresInDays
         ? new Date(now.getTime() + opts.expiresInDays * 86400000).toISOString()
-        : null,
+        : null),
       metadata: opts.metadata ? JSON.stringify(opts.metadata) : null,
       publicKey: storedPublicKeyHex,
     });

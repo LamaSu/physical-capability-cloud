@@ -16,8 +16,12 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { randomBytes, randomUUID } from "node:crypto";
 import { verifyMessage } from "viem";
-import { getRepos } from "../db.js";
+import { eq, schema } from "@pcc/store";
+import { getRepos, getStore } from "../db.js";
+import { classifyProvisionError, provisionApiKey } from "./api-key-auth.js";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import { canSiweVerify } from "../middleware/security-hardening.js";
+import { auditService } from "../services/audit-service.js";
 
 // ---------------------------------------------------------------------------
 // In-memory nonce store (ephemeral, no DB persistence needed)
@@ -356,6 +360,83 @@ export async function siweAuthPlugin(app: FastifyInstance) {
         address: parsed.address,
         expiresAt,
       });
+  });
+
+  // Session keys hold only self-service scopes and never outlive their session or twelve hours.
+  app.post("/api/auth/session-key", async (req, reply) => {
+    if (req.apiKeyId != null) {
+      return reply.status(403).send({
+        error: "session_required", message: "A SIWE session is required to mint a session key",
+      });
+    }
+
+    try {
+      const repos = getRepos();
+      const session = resolveSession(req);
+      const sessionRow = session ? repos.sessions.findByToken(session.token) : undefined;
+      const now = new Date();
+      const sessionExpiry = sessionRow ? new Date(sessionRow.expiresAt).getTime() : NaN;
+      if (!session || !sessionRow || !(sessionExpiry > now.getTime())) {
+        return reply.status(401).send({
+          error: "session_required", message: "A valid SIWE session is required to mint a session key",
+        });
+      }
+
+      const expiresAt = new Date(Math.min(sessionExpiry, now.getTime() + 12 * 60 * 60 * 1000)).toISOString();
+      const { rawKey, record } = getStore().db.transaction((db) => {
+        // Replace this session's key and exclude expired session keys from the active-key cap.
+        for (const key of repos.apiKeys.findByOperator(session.address)) {
+          if (key.revokedAt) continue;
+          let metadata;
+          try { metadata = JSON.parse(key.metadata ?? "{}"); } catch { continue; }
+          if (metadata?.source === "siwe-session" && (
+            metadata.sessionId === sessionRow.id || (key.expiresAt && new Date(key.expiresAt).getTime() <= now.getTime())
+          )) {
+            repos.apiKeys.revoke(key.id);
+          }
+        }
+
+        const { rawKey, record } = provisionApiKey({
+          operatorId: session.address,
+          scopes: [...SELF_SERVICE_KEY_SCOPES],
+          expiresAt,
+          metadata: { source: "siwe-session", sessionId: sessionRow.id, provisionedAt: now.toISOString() },
+        });
+        if (!record) throw new Error("Failed to provision key");
+
+        // A session key has no custodial wallet and cannot enter the identity-write retry queue.
+        db.update(schema.apiKeys).set({
+          operatorWalletCustody: null,
+          onchainStatus: "disabled",
+          agentWalletOnchainStatus: null,
+        }).where(eq(schema.apiKeys.id, record.id)).run();
+        return { rawKey, record };
+      });
+
+      auditService.log({
+        eventType: "auth.session_key_minted",
+        actor: session.address,
+        resourceType: "api_key",
+        resourceId: record.id,
+        action: "create",
+        metadata: { expires_at: record.expiresAt },
+      });
+      return reply.status(201).send({
+        api_key: rawKey,
+        key_id: record.id,
+        operator_id: session.address,
+        scopes: JSON.parse(record.scopes),
+        expires_at: record.expiresAt,
+        created_at: record.createdAt,
+      });
+    } catch (err: unknown) {
+      if (classifyProvisionError(err) === "too_many_keys") {
+        return reply.status(429).send({
+          error: "too_many_keys", message: "Maximum 5 active API keys per operator",
+        });
+      }
+      return reply.status(500).send({ error: "provision_failed", message: "Failed to provision key" });
+    }
   });
 
   // ----- GET /api/auth/me -----
