@@ -1996,7 +1996,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "onchain_chain_id", "INTEGER");
   safeAddColumn("api_keys", "onchain_attempted_at", "TEXT");
   safeAddColumn("api_keys", "onchain_error", "TEXT");
-  // Option A ownership stopgap: per-operator operational wallet.
+  // Wallet metadata columns remain compatible with existing table definitions.
   safeAddColumn("api_keys", "operator_wallet_address", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_private_key", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_custody", "TEXT DEFAULT 'gateway'");
@@ -2026,6 +2026,34 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS passkey_sessions_expires_at ON passkey_sessions(expires_at);
   `);
+
+  scrubOperatorWalletPrivateKeys(sqlite);
+}
+
+/** The gateway stores no operator wallet private keys, including freed page bytes. */
+export function scrubOperatorWalletPrivateKeys(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "operator_wallet_private_key")) return;
+
+  const previousSecureDelete = sqlite.pragma("secure_delete", { simple: true }) as number;
+  let changes: number;
+  try {
+    sqlite.pragma("secure_delete = ON");
+    changes = sqlite.prepare(
+      "UPDATE api_keys SET operator_wallet_private_key = NULL WHERE operator_wallet_private_key IS NOT NULL",
+    ).run().changes;
+  } finally {
+    sqlite.pragma(`secure_delete = ${previousSecureDelete === 2 ? "FAST" : previousSecureDelete}`);
+  }
+
+  const remaining = sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM api_keys WHERE operator_wallet_private_key IS NOT NULL",
+  ).get() as { count: number };
+  if (remaining.count !== 0) {
+    throw new Error(`Wallet private key scrub verification failed: ${remaining.count}`);
+  }
+
+  if (changes > 0) sqlite.pragma("wal_checkpoint(TRUNCATE)");
 }
 
 /**

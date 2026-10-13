@@ -240,34 +240,6 @@ function extractEscrowCreatedAddress(
  * This is the core wiring logic shared by the commit handler and the fast-track endpoint.
  */
 /**
- * Resolve the per-operator payout address for a kernel (option A revenue routing).
- * Looks up the kernel's operator, then finds the api_keys row with the operator's
- * per-operator EOA (set by /api/auth/provision + best-effort setAgentWallet). If
- * none found, returns null so callers can fall back to the gateway signer
- * (preserves existing behavior for legacy operators not yet migrated).
- *
- * Cf. coord bulletin 235: without this, V3 releases route funds to the gateway
- * signer (self-pay). With this, funds route to the operator's operational EOA.
- */
-function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
-  try {
-    const repos = getRepos();
-    const kernel = repos.kernels.findById(kernelId);
-    if (!kernel?.operatorAddress) return null;
-    const keys = repos.apiKeys.findByOperator(kernel.operatorAddress);
-    for (const k of keys) {
-      const addr = (k as { operatorWalletAddress?: string | null }).operatorWalletAddress;
-      if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) {
-        return addr as `0x${string}`;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * N133: the status createJobFromSession mints a paid job's write scope with (exported for its
  * tests). Its caller inserts the
  * scope with no await after this call, so the policy and the stop are read as they are at the mint;
@@ -425,13 +397,7 @@ export async function createJobFromSession(
           `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
         );
 
-        // Add each milestone (V2 ABI is byte-identical on V3). Operator payout
-        // address prefers the per-operator EOA from option A (revenue routes to
-        // the operator's own wallet, not the gateway signer). Falls back to
-        // account.address for legacy operators that haven't been minted A yet.
-        // requiredTier is carried for parity; Mode A ignores it at release.
-        const v3OperatorPayout =
-          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
+        // Every milestone pays the gateway signer.
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
           const addTx = await walletClient.writeContract({
@@ -440,7 +406,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              v3OperatorPayout,
+              account.address,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -547,11 +513,7 @@ export async function createJobFromSession(
 
         // createEscrowV2 mints an EMPTY escrow; without >=1 milestone fund() reverts.
         // Add each milestone in sequence on the same (locked) signer, BEFORE fund().
-        // Operator payout prefers the per-operator EOA from option A (revenue
-        // routes to the operator, not the gateway); falls back to account.address
-        // for legacy operators. Cf. coord bulletin 235.
-        const v2OperatorPayout =
-          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
+        // Every milestone pays the gateway signer.
         let dropped = false;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
@@ -561,7 +523,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              v2OperatorPayout,
+              account.address,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
