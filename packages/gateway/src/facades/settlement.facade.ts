@@ -11,7 +11,8 @@
  *   - On-chain writes (fundEscrow, approveToken, releaseMilestone, fileDispute, depositBond,
  *     submitEvidenceHash, submitAttestation)
  *   - Batch settlement (getBatchStatus, getEpochHistory, submitBatchIntent, flushBatch)
- *   - Job settlement (releaseMilestoneForJob, getJobSettlementStatus, getJobEvidence)
+ *   - Job settlement (releaseMilestoneForJob, getJobEvidence; GET /api/settlement/:jobId is
+ *     readmodels/legacy-settlement.ts, a projection of the execution read model)
  */
 
 import { type Result, ok, err, Errors } from "@pcc/spec";
@@ -70,7 +71,6 @@ import {
   getQueueStatus,
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
-import { swfAccrue } from "../routes/swf.js";
 
 /**
  * Whether on-chain escrow operations route through the EAS-gated
@@ -687,10 +687,9 @@ export class SettlementFacade extends BaseFacade {
         throw new Error(result.error ?? "Release failed");
       }
 
-      // SWF accrual: 2% of released milestone value
-      if (result.status === "released") {
-        swfAccrue("settlement", result.jobId, 1000, "USDC", "base");
-      }
+      // No SWF accrual here. The fund's ledger is in memory and the escrow routes no share of a release to it,
+      // so any accrual would record money that never moved (this used to accrue a constant 1000 for every
+      // release, whatever was paid). The SWF's accrual helper (routes/swf.ts) is for a real flow into the fund, once one exists.
 
       return {
         jobId: result.jobId,
@@ -700,33 +699,6 @@ export class SettlementFacade extends BaseFacade {
         protocolFee: "0",
         txHash: result.txHash,
         chain: "base",
-      };
-    });
-  }
-
-  /**
-   * Get settlement status for a completed job.
-   * Replaces: GET /api/settlement/:jobId
-   */
-  async getJobSettlementStatus(jobId: string): Promise<Result<unknown>> {
-    return this.execute("getJobSettlementStatus", async () => {
-      const job = this.repos.jobs.findById(jobId);
-      if (!job) {
-        throw new NotFoundError("job", jobId);
-      }
-
-      const bundles = this.repos.evidence.findByJob(jobId);
-      const latestBundle = bundles[bundles.length - 1] ?? null;
-      const settled = job.status === "settled" || job.status === "completed";
-
-      return {
-        jobId: job.id,
-        status: job.status,
-        evidenceBundleId: latestBundle?.id ?? job.evidenceBundleId ?? null,
-        evidenceHash: latestBundle?.bundleHash ?? null,
-        assuranceTier: latestBundle?.assuranceTier ?? null,
-        settled,
-        settledAt: job.completedAt ?? null,
       };
     });
   }

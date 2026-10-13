@@ -198,6 +198,118 @@ export function scoreCapability(
 /** Default minimum confidence for a match to count. */
 export const DEFAULT_MATCH_THRESHOLD = 0.3;
 
+/** Valid legacy assurance tier values (board N23). */
+const VALID_TIERS = new Set([0, 1, 2, 3]);
+
+/**
+ * Dense (no holes), non-empty array of integers restricted to VALID_TIERS.
+ * `Array.prototype.every` silently SKIPS holes (`[0,,1].every(...)` never
+ * inspects index 1), so a sparse array like `[0,,1]` would otherwise pass
+ * with an uninspected hole that `new Set()` then materializes as `undefined`
+ * (board N23 follow-up #439-D). Scanning by bounded index with
+ * `hasOwnProperty` catches the hole instead of skipping it.
+ */
+function isDenseValidTierArray(value: unknown): value is number[] {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  for (let i = 0; i < value.length; i++) {
+    if (!Object.prototype.hasOwnProperty.call(value, i)) return false;
+    const t = (value as unknown[])[i];
+    if (typeof t !== "number" || !VALID_TIERS.has(t)) return false;
+  }
+  return true;
+}
+
+/**
+ * Does this decimal-string headline survive the legacy representation
+ * unchanged (board N23 follow-up #439-A/#439-B)? This path stores the price
+ * as a JS `number` (`capPrice`'s `Number.parseFloat`) and hashes it via
+ * `price.toFixed(2)` (`matchedCapabilityDigest`'s v1 preimage). Both steps
+ * silently lose information for values this rejects instead of rounding:
+ *
+ *   - a non-zero digit past the 2nd decimal place ("0.001", "0.004") would
+ *     truncate to "0.00" in the v1 digest while `capPrice` still returns a
+ *     nonzero `estimatedCost` — two different declared prices could end up
+ *     sharing one commitment, or a declared price could show as zero.
+ *   - an integer part above `Number.MAX_SAFE_INTEGER` ("9007199254740993",
+ *     or 30 nines) is not exactly representable as a JS double:
+ *     `parseFloat` silently rounds it (…993 -> …992), and huge magnitudes
+ *     serialize via `toFixed(2)` in exponential notation ("1e+30") instead
+ *     of a decimal price.
+ *
+ * Deliberately LOCAL to this legacy (string -> JS `number` -> v1 digest)
+ * representation — not a general PCC pricing constraint.
+ */
+function isSafeTwoDecimalHeadline(headline: string): boolean {
+  const m = /^([0-9]{1,30})(?:\.([0-9]{1,30}))?$/.exec(headline);
+  if (!m) return false;
+  const [, integerPart, decimalPart = ""] = m;
+  // Any non-zero digit from the 3rd decimal place onward is lost by toFixed(2).
+  if (/[1-9]/.test(decimalPart.slice(2))) return false;
+  // The v1 digest writes Number(headline).toFixed(2). Accept a headline only when that is EXACTLY
+  // the two-decimal value it spells: leading zeros carry no value ("00000000000000001" is 1), while
+  // a value a double cannot hold ("9007199254740991.01", "99999999999999.99") or one that toFixed
+  // writes in exponential notation (1e21 and up) can never become a different declared price
+  // (astra 130, 439-B).
+  const exact = `${integerPart.replace(/^0+(?=[0-9])/, "")}.${(decimalPart + "00").slice(0, 2)}`;
+  return Number(headline).toFixed(2) === exact;
+}
+
+/**
+ * Does a capability's registry row actually DECLARE the terms a match would
+ * be priced and evidenced against, or would matching it require INVENTING
+ * one? `toMatched` used to default a missing `assuranceTiers` to `[0, 1]`
+ * and a missing/zero price to `"USDC" 0` — so the planner could propose,
+ * and show a buyer, a price and an evidence tier that no provider ever
+ * declared (board N23). `createMatcher` calls this for every candidate and
+ * skips (never matches) any capability that fails it, instead of matching
+ * it with invented terms.
+ */
+export function matchableTerms(
+  cap: CapabilityLite,
+):
+  | { ok: true; price: number; currency: string; assuranceTiers: number[] }
+  | {
+      ok: false;
+      reason:
+        | "no-declared-tiers"
+        | "invalid-tiers"
+        | "no-declared-pricing"
+        | "invalid-pricing"
+        | "zero-price";
+    } {
+  if (cap.assuranceTiers === undefined || cap.assuranceTiers === null) {
+    return { ok: false, reason: "no-declared-tiers" };
+  }
+  if (!isDenseValidTierArray(cap.assuranceTiers)) {
+    return { ok: false, reason: "invalid-tiers" };
+  }
+  // Sorted set: deduplicated, ascending — matches matchedCapabilityDigest's
+  // own sort so a differently-ordered (or duplicated) declaration can never
+  // change the digest.
+  const assuranceTiers = [...new Set(cap.assuranceTiers)].sort((a, b) => a - b);
+
+  if (cap.pricing === undefined || cap.pricing === null) {
+    return { ok: false, reason: "no-declared-pricing" };
+  }
+  const { currency } = cap.pricing;
+  // Must be a non-empty string with no surrounding whitespace: " " and
+  // " USDC " are not an interpretable denomination (board N23 follow-up
+  // #439-C). Does not otherwise narrow which currencies are accepted.
+  if (typeof currency !== "string" || currency.length === 0 || currency.trim() !== currency) {
+    return { ok: false, reason: "invalid-pricing" };
+  }
+  // Same headline capPrice reads: baseCost if present, else minimum.
+  const headline = cap.pricing.baseCost ?? cap.pricing.minimum;
+  if (typeof headline !== "string" || !isSafeTwoDecimalHeadline(headline)) {
+    return { ok: false, reason: "invalid-pricing" };
+  }
+  const price = capPrice(cap);
+  if (price === 0) {
+    return { ok: false, reason: "zero-price" };
+  }
+  return { ok: true, price, currency, assuranceTiers };
+}
+
 /**
  * Build a CapabilityMatcher over a capability source. The source is a thunk so
  * the route can back it with the live CapabilityFacade and tests can back it
@@ -223,8 +335,13 @@ export function createMatcher(
         if (effScore < threshold) continue;
         if (!strongHit && !hintHit) continue;
 
+        // Never match a capability whose price/currency/tiers would have to
+        // be invented rather than read from its declaration (board N23).
+        const terms = matchableTerms(cap);
+        if (!terms.ok) continue;
+
         if (!best || effScore > best.score) {
-          best = toMatched(cap, effScore);
+          best = toMatched(cap, effScore, terms);
         }
       }
       return best;
@@ -232,10 +349,12 @@ export function createMatcher(
   };
 }
 
-function toMatched(cap: CapabilityLite, score: number): MatchedCapability {
-  const price = capPrice(cap);
-  const currency = cap.pricing?.currency ?? "USDC";
-  const assuranceTiers = cap.assuranceTiers ?? [0, 1];
+function toMatched(
+  cap: CapabilityLite,
+  score: number,
+  terms: { price: number; currency: string; assuranceTiers: number[] },
+): MatchedCapability {
+  const { price, currency, assuranceTiers } = terms;
   return {
     capabilityId: cap.id,
     capabilityType: cap.type,

@@ -9,6 +9,7 @@ verifies.
 """
 
 import errno
+import hmac
 import json
 import os
 import logging
@@ -190,19 +191,33 @@ def verify_signature(announcement, signature_hex, public_key_hex):
 # ---------------------------------------------------------------------------
 
 KEY_PATH_ENV = "PCC_NODE_KEY_PATH"
+DEFAULT_KEYS_PATH = os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
+LEGACY_KEYS_PATH = "pcc-keys.json"
+_POSIX = os.name != "nt"
+_FSYNC_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+_WINDOWS_REFUSAL = (
+    "pcc-node does not keep a node key on Windows: owner-only ACLs and checked no-follow "
+    "directory opens are unavailable. Run the node on Linux or macOS (WSL works)."
+)
 
 
 def default_key_path():
     """Where a node keeps its key pair: ``$PCC_NODE_KEY_PATH`` when set,
-    otherwise ``~/.pcc-node/keys.json``. Either way the location is checked when
+    else master's ``$PCC_NODE_KEYS_FILE``, else ``~/.pcc-node/keys.json``.
+    Either override receives the same location and file checks when
     the key is loaded or created (see :func:`load_or_create_keys`), and the file
     must then lie outside every source checkout. The old default,
     ``./pcc-keys.json``, resolved to a key file committed to the repository
     whenever the node ran from the package directory."""
-    override = os.environ.get(KEY_PATH_ENV)
+    override = os.environ.get(KEY_PATH_ENV) or os.environ.get("PCC_NODE_KEYS_FILE")
     if override:
         return override
     return os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
+
+
+def default_keys_path():
+    """Compatibility spelling of :func:`default_key_path`; both overrides are checked alike."""
+    return default_key_path()
 
 
 # A sanity bound, not a limit anyone meets: ".." reaches the filesystem root long before.
@@ -214,7 +229,7 @@ def _require_descriptor_support():
     the key file is opened through.
 
     That binding needs file calls relative to a directory descriptor (``dir_fd``
-    on ``os.open``, ``os.stat``, ``os.mkdir`` and ``os.unlink``, and
+    on ``os.open``, ``os.stat``, ``os.mkdir``, ``os.unlink`` and ``os.link``, and
     ``follow_symlinks=False`` on ``os.stat``) and the ``O_DIRECTORY`` and
     ``O_NOFOLLOW`` open flags. POSIX systems have them; native Windows has
     none. Falling back to pathnames there would bring back the race this design
@@ -225,19 +240,19 @@ def _require_descriptor_support():
     """
     with_dir_fd = {call.__name__ for call in os.supports_dir_fd}
     if (
-        not {"open", "stat", "mkdir", "unlink"} <= with_dir_fd
+        not {"open", "stat", "mkdir", "unlink", "link"} <= with_dir_fd
         or "stat" not in {call.__name__ for call in os.supports_follow_symlinks}
         or not hasattr(os, "O_DIRECTORY")
         or not hasattr(os, "O_NOFOLLOW")
     ):
         raise KeyFileError(
             "this platform cannot open a key file relative to a verified directory (that needs dir_fd "
-            "support in os.open, os.stat, os.mkdir and os.unlink, and the O_DIRECTORY and O_NOFOLLOW "
+            "support in os.open, os.stat, os.mkdir, os.unlink and os.link, and the O_DIRECTORY and O_NOFOLLOW "
             "flags), so it cannot prove where the key lives; refusing to load or create a key here"
         )
 
 
-_LINUX = sys.platform.startswith("linux")
+_LINUX = sys.platform[:5] == "linux"
 
 
 def _unescape_mountinfo(field):
@@ -435,6 +450,24 @@ def _directory_flags():
     return os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
 
 
+def _fsync_dir(directory):
+    """Sync a directory descriptor or path; tolerate only unsupported directory syncs."""
+    if not _POSIX:
+        return
+    # The path form remains available for callers of master's helper. Key
+    # creation always supplies its already-checked descriptor.
+    opened = not isinstance(directory, int)
+    dir_fd = os.open(directory, _directory_flags()) if opened else directory
+    try:
+        os.fsync(dir_fd)
+    except OSError as err:
+        if err.errno not in _FSYNC_UNSUPPORTED:
+            raise
+    finally:
+        if opened:
+            os.close(dir_fd)
+
+
 def _refuse_checkout(dir_fd, key_path, aliases=True):
     """Refuse when the directory open as *dir_fd* lies inside a git work tree.
 
@@ -557,6 +590,8 @@ def _open_key_directory(parent, key_path):
                     os.mkdir(name, 0o700, dir_fd=dir_fd)
                 except FileExistsError:
                     pass
+                else:
+                    _fsync_dir(dir_fd)
                 child = os.open(name, flags | os.O_NOFOLLOW, dir_fd=dir_fd)
                 dir_fd, above = child, dir_fd
                 os.close(above)
@@ -568,12 +603,12 @@ def _open_key_directory(parent, key_path):
         raise
 
 
-def _judge_key_file(fd, key_path):
+def _judge_key_file(fd, key_path, legacy=False):
     """Judge the open file itself, never a name that may lead elsewhere: a
     regular file owned by this user, with exactly one name (a second hard link
     may sit inside a source checkout, where this file is published with it),
-    readable by the owner only (a wider mode is corrected on this descriptor,
-    or refused)."""
+    readable by the owner only. A wider mode is corrected on this descriptor
+    and refused: another account may already have copied the secret."""
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         raise KeyFileError(key_path + " is not a regular file")
@@ -581,7 +616,7 @@ def _judge_key_file(fd, key_path):
     # above it, adds a name without adding a link (review A02d).
     _refuse_bind_mounted(fd, key_path, "itself")
     if st.st_uid != os.getuid():
-        raise KeyFileError(key_path + " is not owned by this user")
+        raise KeyFileError(key_path + " is not owned by this user (owned by another account)")
     if st.st_nlink != 1:
         raise KeyFileError(
             "%s has %d hard links; a key file must have exactly one name, because another may sit "
@@ -596,6 +631,17 @@ def _judge_key_file(fd, key_path):
                 "%s is readable by other users (mode %o) and cannot be corrected: %s" % (key_path, mode, err)
             ) from None
         log.warning("%s was mode %o; corrected to 0600", key_path, mode)
+        if legacy:
+            raise KeyFileError(
+                "%s, pcc-node 0.1.x's key file, was readable by other users (mode %o). It is now "
+                "0600 and will not be adopted: move it aside to create a new identity, then register "
+                "the node again." % (key_path, mode)
+            )
+        raise KeyFileError(
+            "%s was readable or writable by other users (mode %o). It is now 0600 (chmod 600), "
+            "but its secret may already have been copied. Move it aside to create a new identity, "
+            "then register the node again." % (key_path, mode)
+        )
 
 
 _MAX_KEY_FILE_BYTES = 64 * 1024
@@ -611,7 +657,7 @@ def _read_key_file(dir_fd, name, key_path):
     try:
         fd = os.open(name, flags, dir_fd=dir_fd)
     except OSError as err:
-        if err.errno == errno.ELOOP:
+        if err.errno in (errno.ELOOP, errno.EMLINK):
             raise KeyFileError(key_path + " is a symbolic link; a key file must be a regular file") from None
         raise
     try:
@@ -637,24 +683,51 @@ def _read_key_file(dir_fd, name, key_path):
 
 
 def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
-    """Create the key file *name* in the verified directory: 0600 from the
-    first byte, never over an existing name, never through a link. The new
-    descriptor is judged like an existing key file before the secret is
-    written. Returns the descriptor, still OPEN: the caller judges the same
-    file again as its last step, and on any refusal scrubs it through this
-    descriptor before removing it (review A02c)."""
+    """Publish a complete, fsynced, owner-only key atomically without replacing a key.
+
+    All names are relative to the verified directory. The temporary file is
+    judged before writing, then linked exclusively to *name*. Its temporary
+    name is removed before returning the SAME still-open descriptor for the
+    terminal checks. A failed hard link has no rename fallback. Any failed
+    creation scrubs through that descriptor and removes its new names.
+    """
+    tmp = ".%s.%d.%s.tmp" % (name, os.getpid(), os.urandom(4).hex())
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+    installed = False
+    temp_exists = True
     try:
         _judge_key_file(fd, key_path)
-        payload = json.dumps({"public": public_hex, "secret": secret_hex}, indent=2).encode("utf-8")
-        written = 0
-        while written < len(payload):
-            written += os.write(fd, payload[written:])
-        os.fsync(fd)
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as f:
+            json.dump({"public": public_hex, "secret": secret_hex}, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+        except FileExistsError:
+            _scrub_and_remove(dir_fd, tmp, fd, key_path, None)
+            temp_exists = False
+            os.close(fd)
+            return None  # another process published an identity first; load its checked file
+        except OSError as err:
+            raise KeyFileError(
+                "cannot install %s atomically: the filesystem refused a hard link (%s). Keep "
+                "the key on a local filesystem, for example with %s or PCC_NODE_KEYS_FILE."
+                % (key_path, errno.errorcode.get(err.errno, err.errno), KEY_PATH_ENV)
+            ) from None
+        installed = True
+        os.unlink(tmp, dir_fd=dir_fd)
+        temp_exists = False
+        _fsync_dir(dir_fd)
     except BaseException as err:
         try:
-            _scrub_and_remove(dir_fd, name, fd, key_path, err)
+            # Attempt both cleanups even when the first reports a failure.
+            try:
+                if temp_exists:
+                    _scrub_and_remove(dir_fd, tmp, fd, key_path, err)
+            finally:
+                if installed:
+                    _scrub_and_remove(dir_fd, name, fd, key_path, err)
         finally:
             os.close(fd)
         raise
@@ -712,9 +785,83 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
     ) from cause
 
 
+def _refuse_legacy(legacy, path):
+    """Check and refuse a legacy file, without reading or adopting its secret.
+
+    A legacy file others could read is locked down on its descriptor first,
+    then refused. Ownership, unsafe directories and symlinks get their
+    specific refusals. Moving a node's own file into the selected location is
+    the operator's explicit act; mere presence in the working directory never
+    supplies an identity.
+    """
+    old = os.path.abspath(legacy)
+    parent, name = os.path.split(old)
+    dir_fd = os.open(parent, _directory_flags())
+    key_fd = None
+    try:
+        _check_directory(dir_fd, parent)
+        try:
+            key_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+        except OSError as err:
+            if err.errno in (errno.ELOOP, errno.EMLINK):
+                raise KeyFileError(old + " is a symbolic link: a legacy key will not be adopted") from None
+            raise
+        _judge_key_file(key_fd, old, legacy=True)
+        directory = os.path.dirname(os.path.abspath(path))
+        raise KeyFileError(
+            "%s is a pcc-node 0.1.x key file. pcc-node no longer adopts a key from the working "
+            "directory by itself, because a checkout or an archive can carry a key someone else knows. "
+            "If it is this node's own key, move it into place yourself: mkdir -p -m 700 %s && mv %s %s. "
+            "Otherwise move it aside to create a new identity, then register the node again."
+            % (old, directory, old, path)
+        )
+    finally:
+        if key_fd is not None:
+            os.close(key_fd)
+        os.close(dir_fd)
+
+
+def _check_key_location(dir_fd, key_fd, key_path):
+    """Terminal checks on the same open directory and file used for the key."""
+    _refuse_checkout(dir_fd, key_path)
+    _check_directory(dir_fd, os.path.dirname(key_path))
+    _judge_key_file(key_fd, key_path)
+    _refuse_file_aliases(key_fd, key_path)
+
+
+def _create_exclusive(path, public_hex, secret_hex):
+    """Master's helper, using the same checked, atomic creation implementation."""
+    _require_nacl("create the node's key pair")
+    if not _POSIX:
+        raise KeyFileError(_WINDOWS_REFUSAL)
+    _require_descriptor_support()
+    key_path = os.path.abspath(path)
+    parent, name = os.path.split(key_path)
+    dir_fd = _open_key_directory(parent, key_path)
+    key_fd = None
+    try:
+        _checked_pair({"public": public_hex, "secret": secret_hex}, key_path)
+        key_fd = _create_key_file(dir_fd, name, key_path, public_hex, secret_hex)
+        if key_fd is None:
+            return False
+        try:
+            _check_key_location(dir_fd, key_fd, key_path)
+        except BaseException as err:
+            _scrub_and_remove(dir_fd, name, key_fd, key_path, err)
+            raise
+        return True
+    finally:
+        if key_fd is not None:
+            os.close(key_fd)
+        os.close(dir_fd)
+
+
 def load_or_create_keys(path=None):
     """Load existing keys from *path* (default :func:`default_key_path`), or
-    create and save new ones there.
+    create and atomically publish new ones there. The compatibility override
+    PCC_NODE_KEYS_FILE is also supported, after PCC_NODE_KEY_PATH. A legacy
+    working-directory key is refused when the default selection is missing,
+    never adopted or silently ignored.
 
     The location is checked when the key is loaded or created, which for a
     daemon means at every start; nothing watches it afterwards, so a repository
@@ -778,8 +925,15 @@ def load_or_create_keys(path=None):
         (public_key_hex, secret_key_hex)
     """
     _require_nacl("load or create the node's key pair")
+    if not _POSIX:
+        raise KeyFileError(_WINDOWS_REFUSAL)
     _require_descriptor_support()
-    abs_path = os.path.abspath(path if path is not None else default_key_path())
+    if path is None:
+        selected = default_key_path()
+        if not os.path.lexists(selected) and os.path.lexists(LEGACY_KEYS_PATH):
+            _refuse_legacy(LEGACY_KEYS_PATH, selected)
+        path = selected
+    abs_path = os.path.abspath(path)
     parent, name = os.path.split(abs_path)
     if not name:
         raise KeyFileError(abs_path + " does not name a file")
@@ -793,6 +947,9 @@ def load_or_create_keys(path=None):
         except FileNotFoundError:
             created = generate_node_keys()
             key_fd = _create_key_file(dir_fd, name, abs_path, *created)
+            if key_fd is None:
+                created = None
+                key_fd, data = _read_key_file(dir_fd, name, abs_path)
         try:
             public_hex, secret_hex = created if created is not None else _checked_pair(data, abs_path)
             # The LAST step before the key is returned, on the same open directory and the
@@ -800,9 +957,7 @@ def load_or_create_keys(path=None):
             # regular, owner-only file of this user with exactly one name (review A02c). A
             # change another process of this user makes after this point is outside what any
             # check can stop: such a process can read the key anyway.
-            _refuse_checkout(dir_fd, abs_path)
-            _judge_key_file(key_fd, abs_path)
-            _refuse_file_aliases(key_fd, abs_path)
+            _check_key_location(dir_fd, key_fd, abs_path)
         except BaseException as err:
             if created is not None:
                 _scrub_and_remove(dir_fd, name, key_fd, abs_path, err)
@@ -832,9 +987,9 @@ def _checked_pair(data, abs_path):
             abs_path + " holds a key pair whose secret was published in a public "
             "repository; delete the file and restart to generate a new key pair"
         )
-    if derived != public:
+    if not hmac.compare_digest(derived, public):
         raise KeyFileError(
             abs_path + " holds a public key that does not belong to its secret key; "
-            "delete it to generate a new pair"
+            "move it aside, run again to create a real key, and register the node again"
         )
     return public_hex, secret_hex

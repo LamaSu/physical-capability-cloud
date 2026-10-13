@@ -205,11 +205,19 @@ const capabilities: Capability[] = [
 
 Adapters wrap your device's API into PCC's standard interface. You implement **three adapter types** depending on your equipment:
 
+**Every adapter must implement `quiesceEvidence()`, the evidence handshake.** The kernel records an evidence event under whichever job is recording when the event arrives. So it hands your device to the next job only once your adapter says it is done:
+- It resolves once your adapter has emitted every evidence event of the work it was given, and it emits nothing for that work afterwards.
+- It must NOT resolve while that work can still emit: a poll loop that may still report the completion or a failure, a sampling timer, a command or callback in flight.
+- Called again with no new work, it resolves at once.
+
+The JobRunner refuses an adapter without it. It waits for it at the end of every job, bounded, and keeps the device from the next job until it resolves. Count what is outstanding with `OutstandingWork` from `@pcc/kernel`, as below. Make your poll loop report how a job ends, whether it completes, fails or is cancelled, and then stop. A loop that never ends keeps the device from every later job.
+
 ### 2.1 MachineAdapter (required for any machine that runs jobs)
 
 ```typescript
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "@pcc/kernel/adapters";
+import { OutstandingWork } from "@pcc/kernel";
 
 export class YourMachineAdapter implements MachineAdapter {
   readonly id: string;
@@ -217,6 +225,8 @@ export class YourMachineAdapter implements MachineAdapter {
   readonly source: EvidenceSource;
 
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  /** What can still emit: the progress loop, each poll and each command in flight. */
+  private readonly work = new OutstandingWork();
 
   constructor(id: string, kernelId: string, private config: YourDeviceConfig) {
     this.id = id;
@@ -252,8 +262,12 @@ export class YourMachineAdapter implements MachineAdapter {
     return data.percentComplete ?? 0;
   }
 
-  /** Execute commands on your device */
-  async execute(command: MachineCommand): Promise<MachineCommandResult> {
+  /** Execute commands on your device. A command in flight can still emit, so it is counted. */
+  execute(command: MachineCommand): Promise<MachineCommandResult> {
+    return this.work.track(this.runCommand(command));
+  }
+
+  private async runCommand(command: MachineCommand): Promise<MachineCommandResult> {
     switch (command.type) {
       case "load_gcode": {
         // Upload the file/program to your machine
@@ -324,6 +338,14 @@ export class YourMachineAdapter implements MachineAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * REQUIRED: resolves once the progress loop has reported how the job ended (completed or
+   * failed) and stopped, and no poll or command is in flight.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     this.stopProgressPolling();
     this.listeners = [];
@@ -332,41 +354,56 @@ export class YourMachineAdapter implements MachineAdapter {
   // ── Progress polling ──────────────────────────────────────────
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private endPolling: (() => void) | null = null;
   private lastProgress = 0;
 
   private startProgressPolling(): void {
     this.stopProgressPolling();
-    this.pollTimer = setInterval(async () => {
-      try {
-        const progress = await this.getProgress();
-        const status = await this.getStatus();
-
-        // Emit progress at 25% intervals
-        if (Math.floor(progress / 25) > Math.floor(this.lastProgress / 25)) {
-          this.emit({
-            type: "execution_progress",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { progress },
-          });
-        }
-
-        // Detect completion
-        if (this.lastProgress < 100 && progress >= 100) {
-          this.emit({
-            type: "execution_completed",
-            timestamp: new Date().toISOString(),
-            source: this.source,
-            payload: { progress: 100 },
-          });
-          this.stopProgressPolling();
-        }
-
-        this.lastProgress = progress;
-      } catch {
-        // Handle poll failure gracefully
-      }
+    this.endPolling = this.work.begin(); // the loop is outstanding until it stops
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.pollProgress()); // so is each poll in flight
     }, this.config.pollIntervalMs ?? 2000);
+  }
+
+  private async pollProgress(): Promise<void> {
+    try {
+      const progress = await this.getProgress();
+      const status = await this.getStatus();
+
+      // Emit progress at 25% intervals
+      if (Math.floor(progress / 25) > Math.floor(this.lastProgress / 25)) {
+        this.emit({
+          type: "execution_progress",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress },
+        });
+      }
+
+      // Detect completion, then stop: the job's evidence is complete
+      if (this.lastProgress < 100 && progress >= 100) {
+        this.emit({
+          type: "execution_completed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress: 100 },
+        });
+        this.stopProgressPolling();
+      } else if (status === "error") {
+        // Report a failure too, then stop: a loop that never ends holds the device
+        this.emit({
+          type: "execution_failed",
+          timestamp: new Date().toISOString(),
+          source: this.source,
+          payload: { progress },
+        });
+        this.stopProgressPolling();
+      }
+
+      this.lastProgress = progress;
+    } catch {
+      // Handle poll failure gracefully
+    }
   }
 
   private stopProgressPolling(): void {
@@ -374,6 +411,8 @@ export class YourMachineAdapter implements MachineAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endPolling?.();
+    this.endPolling = null;
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
@@ -391,6 +430,7 @@ If your device has sensors (power, temperature, vibration, etc.), or if you have
 ```typescript
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { SensorAdapter } from "@pcc/kernel/adapters";
+import { OutstandingWork } from "@pcc/kernel";
 
 export class YourSensorAdapter implements SensorAdapter {
   readonly id: string;
@@ -401,6 +441,9 @@ export class YourSensorAdapter implements SensorAdapter {
   private recording = false;
   private samples: Array<{ timestamp: string; value: number }> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** What can still emit: the recording (until stopRecording) and each read in flight. */
+  private readonly work = new OutstandingWork();
+  private endRecording: (() => void) | null = null;
 
   constructor(id: string, kernelId: string, private config: YourSensorConfig) {
     this.id = id;
@@ -415,31 +458,36 @@ export class YourSensorAdapter implements SensorAdapter {
   async startRecording(jobId: string): Promise<void> {
     this.recording = true;
     this.samples = [];
+    this.endRecording = this.work.begin();
 
-    this.pollTimer = setInterval(async () => {
-      // Read from YOUR sensor API
-      const response = await fetch(`${this.config.sensorUrl}/reading`);
-      const data = await response.json();
-
-      const sample = {
-        timestamp: new Date().toISOString(),
-        value: data.watts ?? data.temperature ?? data.value,
-      };
-      this.samples.push(sample);
-
-      // Emit live reading as evidence
-      this.emit({
-        type: "sensor_reading",
-        timestamp: sample.timestamp,
-        source: this.source,
-        payload: {
-          channel: this.config.channel,    // e.g., "spindle_power", "bed_temp"
-          value: sample.value,
-          unit: this.config.unit,          // e.g., "W", "degC"
-          jobId,
-        },
-      });
+    this.pollTimer = setInterval(() => {
+      void this.work.track(this.sample(jobId)); // a read in flight can emit after stopRecording
     }, this.config.sampleIntervalMs ?? 1000);
+  }
+
+  private async sample(jobId: string): Promise<void> {
+    // Read from YOUR sensor API
+    const response = await fetch(`${this.config.sensorUrl}/reading`);
+    const data = await response.json();
+
+    const sample = {
+      timestamp: new Date().toISOString(),
+      value: data.watts ?? data.temperature ?? data.value,
+    };
+    this.samples.push(sample);
+
+    // Emit live reading as evidence
+    this.emit({
+      type: "sensor_reading",
+      timestamp: sample.timestamp,
+      source: this.source,
+      payload: {
+        channel: this.config.channel,    // e.g., "spindle_power", "bed_temp"
+        value: sample.value,
+        unit: this.config.unit,          // e.g., "W", "degC"
+        jobId,
+      },
+    });
   }
 
   async stopRecording(): Promise<Omit<EvidenceEvent, "id" | "hash">> {
@@ -448,6 +496,8 @@ export class YourSensorAdapter implements SensorAdapter {
       clearInterval(this.pollTimer);
       this.pollTimer = null;
     }
+    this.endRecording?.(); // reads still in flight are counted on their own
+    this.endRecording = null;
 
     // Compute summary statistics
     const values = this.samples.map(s => s.value);
@@ -480,8 +530,14 @@ export class YourSensorAdapter implements SensorAdapter {
     this.listeners.push(callback);
   }
 
+  /** REQUIRED: resolves once recording has stopped and no read is in flight (the kernel calls it after stopRecording). */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     if (this.pollTimer) clearInterval(this.pollTimer);
+    this.endRecording?.();
     this.listeners = [];
   }
 
@@ -498,12 +554,15 @@ If you have cameras for QC inspection:
 ```typescript
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { CameraAdapter } from "@pcc/kernel/adapters";
+import { OutstandingWork } from "@pcc/kernel";
 
 export class YourCameraAdapter implements CameraAdapter {
   readonly id: string;
   readonly source: EvidenceSource;
 
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  /** Captures and inspections in flight: the only things that emit. */
+  private readonly work = new OutstandingWork();
 
   constructor(id: string, kernelId: string, private config: YourCameraConfig) {
     this.id = id;
@@ -515,7 +574,22 @@ export class YourCameraAdapter implements CameraAdapter {
     };
   }
 
-  async captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+    return this.work.track(this.capture());
+  }
+
+  runInspection(referenceHash?: string): Promise<{
+    passed: boolean; confidence: number; findings: string[]; imageHash: string;
+  }> {
+    return this.work.track(this.inspect(referenceHash));
+  }
+
+  /** REQUIRED: resolves once no capture or inspection is in flight. */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
+  private async capture(): Promise<{ imageHash: string; storageRef: string }> {
     // Call YOUR camera API to capture an image
     const response = await fetch(`${this.config.cameraUrl}/capture`, { method: "POST" });
     const data = await response.json();
@@ -536,7 +610,7 @@ export class YourCameraAdapter implements CameraAdapter {
     return { imageHash, storageRef: data.imageUrl };
   }
 
-  async runInspection(referenceHash?: string): Promise<{
+  private async inspect(referenceHash?: string): Promise<{
     passed: boolean; confidence: number; findings: string[]; imageHash: string;
   }> {
     // Call YOUR vision/QC system
@@ -1050,7 +1124,7 @@ Evidence is the core of PCC's trust model. Every job produces a cryptographic **
 - `execution_started` — when the machine starts
 - `execution_progress` — at 25% intervals
 - `execution_completed` — when the job finishes
-- `execution_error` — if something goes wrong
+- `execution_failed` — if it fails or is cancelled (then stop your loop: see `quiesceEvidence()` in Step 2)
 
 **From SensorAdapter:**
 - `sensor_reading` — each data sample during the job

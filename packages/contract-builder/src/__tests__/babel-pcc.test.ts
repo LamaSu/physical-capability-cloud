@@ -365,10 +365,10 @@ describe("TestDataGenerator", () => {
 // ── CompileAll ───────────────────────────────────────────────────────
 
 describe("BabelPCC.compileAll", () => {
-  it("compiles all 8 built-in CSDs", () => {
+  it("compiles all 9 built-in CSDs, including the reference vertical's workflow CSD", () => {
     const results = compiler.compileAll(registry);
 
-    expect(results.size).toBe(8);
+    expect(results.size).toBe(9);
     expect(results.has("pcc://capabilities/fdm/v2")).toBe(true);
     expect(results.has("pcc://capabilities/sla/v2")).toBe(true);
     expect(results.has("pcc://capabilities/cnc-3axis/v2")).toBe(true);
@@ -377,6 +377,7 @@ describe("BabelPCC.compileAll", () => {
     expect(results.has("pcc://capabilities/make-pizza/v1")).toBe(true);
     expect(results.has("pcc://capabilities/courier-route/v1")).toBe(true);
     expect(results.has("pcc://capabilities/hot-food-prep/v1")).toBe(true);
+    expect(results.has("pcc://capabilities/document-print-and-mail/v1")).toBe(true);
   });
 
   it("all results have all 4 code artifacts", () => {

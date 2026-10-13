@@ -457,7 +457,7 @@ export function RateSchedulePublishPage() {
       });
 
       const result = await apiPost<PublishResponse>(
-        "/api/contributors/schedules",
+        "/contributors/schedules",
         {
           publishedBy: walletAddress,
           schedule: {
@@ -475,7 +475,7 @@ export function RateSchedulePublishPage() {
       // schedule is already on-record.
       if (ipId) {
         try {
-          await apiPost("/api/contributors", {
+          await apiPost("/contributors", {
             address: walletAddress,
             role,
             scheduleHash: result.scheduleHash,

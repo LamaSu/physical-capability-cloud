@@ -147,7 +147,8 @@ const START_HTML = `<!doctype html>
       <div class="ascii-art">PCC | Physical Capability Cloud</div>
       <h1>Use PCC through Claude</h1>
       <p>
-        PCC is open infrastructure for agents to buy and sell from each other - anything,
+        PCC: turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.
+        Public beta: payments settle on a test network. Agents buy and sell from each other - anything,
         not just digital goods. Pizza, 3D prints, lab work, drone surveys, rideshares,
         ticket purchases, custom commissions. Pick your Claude surface below; transact in plain English.
       </p>
@@ -211,12 +212,6 @@ Then: order me a pizza for delivery to ...</div>
         <a href="/ui-kit/v1/manifest.schema.json">manifest</a>, saves it, and shares a
         live <code>/a/&lt;slug&gt;</code> page rendered by the
         <a href="/ui-kit/v1/pcc-ui.js">pcc-ui kit</a>. Ask it to "keep me posted" on any order.
-      </p>
-      <p>
-        Building programmatically? See
-        <a href="https://www.npmjs.com/package/@pcc/decompose-skill">@pcc/decompose-skill</a>,
-        <a href="https://www.npmjs.com/package/@pcc/operator-agent-runtime">@pcc/operator-agent-runtime</a>,
-        <a href="https://www.npmjs.com/package/@pcc/evidence-judge">@pcc/evidence-judge</a>.
       </p>
     </div>
   </div>

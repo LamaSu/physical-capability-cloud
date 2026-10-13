@@ -36,6 +36,8 @@ import {
   getCarrierBridge,
   type HandoffRecord,
 } from "../services/print-and-mail-handoff-store.js";
+import { refuseJobRead } from "../readmodels/job-read-gate.js";
+import { jobReadCallerOf, precheckJobRead } from "../readmodels/job-execution.js";
 
 interface HandoffBody {
   driverAgent?: string;
@@ -241,16 +243,26 @@ export async function printAndMailRoutes(app: FastifyInstance) {
   );
 
   // ── GET /api/print-and-mail/:jobId ──────────────────────────────────────
+  // A courier job's evidence (F3 round 2). Its :jobId names a courier job in the job-offers
+  // store, not a PCC job row, so the PCC job gate cannot decide it; the identity rule still
+  // applies. No credential is 401 and an unproven one 403, before any record is read. The
+  // courier job records its poster (x-posted-by) and its driver (the claim's driverAgent) as
+  // self-declared ids that prove no one, so only an admin reads this evidence until they are
+  // bound to proven wallets. Anyone else gets the 404 a job with no evidence gets.
   app.get<{ Params: { jobId: string } }>(
     "/api/print-and-mail/:jobId",
     async (req: FastifyRequest<{ Params: { jobId: string } }>, reply: FastifyReply) => {
       const { jobId } = req.params;
+      const noEvidence = { error: "not_found", message: `No print-and-mail evidence for job ${jobId}` };
+      const pre = precheckJobRead(jobReadCallerOf(req as unknown as { headers: Record<string, unknown> }));
+      if (!pre.proceed) return refuseJobRead(reply, { ok: false, kind: pre.reason });
+      if (pre.as !== "admin") return reply.code(404).send(noEvidence);
       const record = getPrintAndMailHandoffStore().getByJobId(jobId);
       const bridge = getCarrierBridge();
       const carrierEvents: readonly EvidenceEvent[] = bridge?.getEvents(jobId) ?? [];
 
       if (!record && carrierEvents.length === 0) {
-        return reply.code(404).send({ error: "not_found", message: `No print-and-mail evidence for job ${jobId}` });
+        return reply.code(404).send(noEvidence);
       }
 
       const handoffEvents = record?.events ?? [];

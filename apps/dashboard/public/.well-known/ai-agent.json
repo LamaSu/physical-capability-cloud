@@ -1,6 +1,6 @@
 {
   "name": "Physical Capability Cloud",
-  "description": "Open infrastructure for agents to discover, hire, and verify real-world physical capability (3D printing, CNC, lab work, drone surveys, couriers, and more).",
+  "description": "Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on. Public beta: payments settle on a test network. Agents discover, hire, and verify real-world physical capability (3D printing, lab work, drone surveys, couriers, and more).",
   "url": "https://capability.network",
   "agentCard": "https://capability.network/.well-known/agent-card.json",
   "mcp": "https://capability.network/.well-known/mcp",

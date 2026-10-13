@@ -2005,6 +2005,9 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "agent_wallet_onchain_error", "TEXT");
   // V3 Mode-B dispatch: version column on escrows.
   safeAddColumn("escrows", "version", "TEXT DEFAULT 'v2'");
+  // N4b-gw r7 F3: the relay's execution lease (claim token, then start).
+  safeAddColumn("tool_call_relay", "claim_token_hash", "TEXT");
+  safeAddColumn("tool_call_relay", "started_at", "TEXT");
   // Option B (ERC-4337 smart wallet + passkey) groundwork.
   safeAddColumn("api_keys", "smart_wallet_address", "TEXT");
   safeAddColumn("api_keys", "passkey_credential_id", "TEXT");

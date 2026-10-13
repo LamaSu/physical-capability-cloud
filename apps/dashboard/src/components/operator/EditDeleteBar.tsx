@@ -1,8 +1,6 @@
 import React, { useState } from "react";
 import { GlassPanel } from "@pcc/ui";
-import { getAuthHeaders } from "../../stores/auth-store.js";
-
-const API_ROOT = (import.meta.env.VITE_PCC_URL ?? "");
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
 
 /**
  * T2.2 — owner-only edit + delete UI for an operator registration.
@@ -41,9 +39,9 @@ export function EditDeleteBar({
       body.description = description;
       const splitRegs = regs.split(",").map((s) => s.trim()).filter(Boolean);
       body.complianceRegulations = splitRegs;
-      const res = await fetch(`${API_ROOT}/api/onboard/registrations/${encodeURIComponent(operatorId)}`, {
+      const res = await authorizedFetch(`/api/onboard/registrations/${encodeURIComponent(operatorId)}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (res.ok) {
@@ -71,9 +69,8 @@ export function EditDeleteBar({
     setBusy(true);
     setStatus(null);
     try {
-      const res = await fetch(`${API_ROOT}/api/onboard/registrations/${encodeURIComponent(operatorId)}`, {
+      const res = await authorizedFetch(`/api/onboard/registrations/${encodeURIComponent(operatorId)}`, {
         method: "DELETE",
-        headers: { ...getAuthHeaders() },
       });
       if (res.ok) {
         setStatus({ kind: "ok", msg: "Registration deleted (soft)." });

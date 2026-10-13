@@ -12,6 +12,7 @@ from pcc_node.register import (
     send_heartbeat,
     register_signing_key,
     kernel_signing_proof_message,
+    RegistrationError,
 )
 from pcc_node.log_capture import LogSigningRefused, _HAS_NACL
 from pcc_node.config import NodeConfig
@@ -67,12 +68,16 @@ class TestRegisterKernel:
             result = register_kernel("http://pcc", "key", cfg)
         assert result["status"] == "registered"
 
-    def test_failure(self):
+    def test_failure_raises(self):
+        # item 133: a non-2xx must RAISE (not return a dict a caller could mistake for success), so
+        # `start` and the daemon fail closed and never claim the node is registered after a 401.
         cfg = NodeConfig(kernel_id="k1", kernel_name="test")
         with mock.patch("pcc_node.register.pcc_request") as mock_pcc:
             mock_pcc.return_value = (400, {"error": "bad request"})
-            result = register_kernel("http://pcc", "key", cfg)
-        assert "error" in result
+            with pytest.raises(RegistrationError) as ei:
+                register_kernel("http://pcc", "key", cfg)
+        assert ei.value.status == 400
+        assert ei.value.data == {"error": "bad request"}
 
 
 class TestAnnounceCapabilities:
