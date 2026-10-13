@@ -31,12 +31,19 @@ The on-chain write is best-effort:
 | What happens on-chain | DB columns set                                              | Response field                                |
 |-----------------------|-------------------------------------------------------------|-----------------------------------------------|
 | Success               | `onchain_status='written'`, `onchain_agent_id`, `onchain_tx_hash` | `{onchain: {status:'written', agentId, txHash, registryAddress, chainId}}` |
-| Write throws (RPC fail, gas, nonce) | `onchain_status='pending'`, `onchain_error`        | `{onchain: {status:'pending', registryAddress}}` |
+| Write throws (RPC fail, gas, nonce) | `onchain_status='pending'`, `onchain_error` holds a closed code | `{onchain: {status:'pending', registryAddress}}` |
 | Write disabled (no `PCC_GATEWAY_PRIVATE_KEY`) | unchanged                                  | `{onchain: {status:'disabled'}}`               |
 
 A failed on-chain write **never** fails the HTTP request. The API key
 is always issued. The retry sweeper picks up `pending` rows on the
 next pass.
+
+`onchain_error`, `agent_wallet_onchain_error`, and the response's
+`operator_wallet.onchain_error` hold only closed codes, never provider error
+text. Failure logs and audit metadata also carry codes only. The codes are
+`identity_write_disabled`, `config_invalid`, `rpc_unavailable`,
+`insufficient_funds`, `rpc_rejected`, `tx_reverted`, `tx_missing_event`,
+`signing_failed`, `wallet_generation_failed`, and `unknown`.
 
 ## Retry sweeper
 

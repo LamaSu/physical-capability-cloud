@@ -18,7 +18,11 @@ curl -sf "$(cat .pcc/base)/api/health" && echo " gateway OK"
 ```
 **Check:** `/api/health` answers 200 with JSON. If not, stop and report `prerequisites blocked`. Don't guess another address.
 
-**The gateway must enforce ownership.** It must check that each operator call names a kernel or job its caller owns. Master does not do that yet for every operator route: jobs, evidence, job status and the emergency stop. The gateway's WP-C (#445) adds it. Until your gateway carries it, onboard only on a private gateway that no other tenant uses, and tell the human why.
+**The gateway must enforce operator ownership checks.** The kernel-authority `operate` rule (board N85 for job polling, job status and heartbeat; #579 for the kernel heartbeat) permits the kernel's recorded operator identity, its proven operator wallet, or the gateway admin secret. `POST /api/kernels` records the registering caller as `operatorAddress`. Keep using a key for that same identity for these three calls; another identity gets 403 even if its key has `scopes: ["*"]`. The emergency stop uses the shared `stop_or_submit` rule, which also permits the kernel's own identity. Until your gateway carries these checks, onboard only on a private gateway that no other tenant uses, and tell the human why.
+
+**Evidence needs proven authority.** `POST /api/operator/evidence` takes `decide`, so a matching claimed operator key gets 403 `operator_proof_required`. Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c). Evidence is posted with the kernel's proven operator wallet authority (`decide`).
+
+Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).
 
 ## 2. pcc-node, with the crypto extra
 pcc-node runs next to the device. It registers the kernel, signs its evidence and runs jobs. The `crypto` extra (pynacl) is **not optional**: without it the node cannot register a signing key or sign evidence, so its work can never verify.
@@ -78,7 +82,7 @@ open(".pcc/auth.header", "w").write("Authorization: Bearer " + key + "\n")
 EOF
 chmod 600 .pcc/api-key .pcc/auth.header .pcc/provision.json
 ```
-Every later call sends the key with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written.
+Node calls that use the operator API key send it with `curl -H @.pcc/auth.header`. That keeps it off the command line, where other users of this machine could read it (`ps`). The key can do everything the account can, so treat it like a password. Keep `.pcc/` out of any repository or chat. Delete `.pcc/provision.json` once `.pcc/api-key` is written.
 
 **Check:**
 ```bash
