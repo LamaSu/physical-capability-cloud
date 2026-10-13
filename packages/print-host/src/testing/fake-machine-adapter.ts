@@ -6,6 +6,13 @@ import type {
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
 type MachineStatus = Awaited<ReturnType<MachineAdapter["getStatus"]>>;
+type BusyResult = MachineCommandResult & { busy?: true };
+
+// A later poll must run even while a repro fakes the global timers.
+const realSetImmediate = setImmediate;
+const realClearImmediate = clearImmediate;
+const realSetTimeout = setTimeout;
+const realClearTimeout = clearTimeout;
 
 export type FakeStartOutcome =
   | { outcome: "success"; jobId: number }
@@ -18,7 +25,7 @@ type PrintEventType =
   | "execution_completed"
   | "execution_failed";
 
-/** A scripted printer: tests drive evidence, and cancellation models the state-7 poll. */
+/** A scripted printer: cancellation reports state 7 or reaches its own confirmation deadline. */
 export class FakeMachineAdapter implements MachineAdapter {
   readonly type = "ipp-2d";
   readonly source: EvidenceSource;
@@ -30,6 +37,8 @@ export class FakeMachineAdapter implements MachineAdapter {
   private active = false;
   private activeJobId: number | undefined;
   private disposed = false;
+  private cancelPoll: ReturnType<typeof setImmediate> | undefined;
+  private cancelDeadline: ReturnType<typeof setTimeout> | undefined;
   private eventNumber = 0;
   private readonly starts: FakeStartOutcome[] = [];
   private readonly unobservedStarts: MachineCommand[] = [];
@@ -42,7 +51,15 @@ export class FakeMachineAdapter implements MachineAdapter {
   >();
   private readonly quiesceWaiters: Array<() => void> = [];
 
-  constructor(readonly id: string, kernelId: string) {
+  constructor(
+    readonly id: string,
+    kernelId: string,
+    private readonly options: {
+      cancelEventOrder?: "before-resolve" | "after-resolve";
+      cancelBehavior?: "report" | "silent";
+      cancelConfirmMs?: number;
+    } = {},
+  ) {
     this.source = {
       deviceId: id,
       deviceType: "controller",
@@ -88,7 +105,10 @@ export class FakeMachineAdapter implements MachineAdapter {
       if (!outcome) return { success: false, message: "no scripted start result" };
       if (outcome.outcome === "busy") {
         this.status = "busy";
-        return { success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" } };
+        const result: BusyResult = {
+          success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" },
+        };
+        return result;
       }
       if (outcome.outcome === "error") {
         this.status = "error";
@@ -106,15 +126,46 @@ export class FakeMachineAdapter implements MachineAdapter {
     return { success: true };
   }
 
-  async cancelJob(jobId: number): Promise<void> {
-    this.cancels.push(jobId);
-    if (this.disposed || !this.active || this.activeJobId !== jobId) return;
-    // The next IPP poll observes job-state 7; cancellation does not stop polling.
-    await Promise.resolve().then(() => {
-      if (!this.disposed && this.active && this.activeJobId === jobId) {
-        this.emit("execution_failed", { ippJobId: jobId, state: "canceled" });
+  async cancelJob(jobId: number | string): Promise<void> {
+    const numericJobId = Number(jobId);
+    if (
+      (typeof jobId !== "number" && typeof jobId !== "string") ||
+      (typeof jobId === "string" && !/^[1-9][0-9]*$/.test(jobId)) ||
+      !Number.isSafeInteger(numericJobId) || numericJobId <= 0
+    ) {
+      throw new Error("cancelJob requires a numeric job id");
+    }
+    this.cancels.push(numericJobId);
+    if (this.disposed || !this.active || this.activeJobId !== numericJobId) return;
+    if (this.options.cancelBehavior === "silent") {
+      this.cancelDeadline ??= realSetTimeout(() => {
+        this.cancelDeadline = undefined;
+        if (!this.disposed && this.active && this.activeJobId === numericJobId) {
+          this.emit("execution_failed", {
+            ippJobId: numericJobId,
+            state: "processing",
+            reason: "cancel-unconfirmed",
+            jobStateReasons: [],
+            origin: "device",
+          });
+        }
+      }, this.options.cancelConfirmMs ?? 50);
+      return;
+    }
+    const reportCanceled = () => {
+      if (!this.disposed && this.active && this.activeJobId === numericJobId) {
+        this.emit("execution_failed", { ippJobId: numericJobId, state: "canceled", origin: "device" });
       }
-    });
+    };
+    // Cancellation leaves polling active, with either ordering of the state-7 event.
+    if (this.options.cancelEventOrder === "after-resolve") {
+      this.cancelPoll ??= realSetImmediate(() => {
+        this.cancelPoll = undefined;
+        reportCanceled();
+      });
+    } else {
+      await Promise.resolve().then(reportCanceled);
+    }
   }
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
@@ -151,6 +202,10 @@ export class FakeMachineAdapter implements MachineAdapter {
   }
 
   private finishWork(): void {
+    if (this.cancelPoll) realClearImmediate(this.cancelPoll);
+    this.cancelPoll = undefined;
+    if (this.cancelDeadline) realClearTimeout(this.cancelDeadline);
+    this.cancelDeadline = undefined;
     this.active = false;
     this.activeJobId = undefined;
     this.status = "idle";
