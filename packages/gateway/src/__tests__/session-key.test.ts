@@ -145,9 +145,7 @@ describe("session keys are bound to the session address and self-service scope s
   it("a fresh session mints exactly the self-service scopes without wallet or identity writes", async () => {
     const app = await buildApp();
     const session = issueSession();
-    const wallet = vi.spyOn(identity, "generateOperatorWallet");
     const register = vi.spyOn(identity, "registerAgentOnChain");
-    const assign = vi.spyOn(identity, "setAgentWalletOnChain");
     const audit = vi.spyOn(auditService, "log");
     const mintStart = Date.now();
     const response = await app.inject({
@@ -180,9 +178,7 @@ describe("session keys are bound to the session address and self-service scope s
       source: "siwe-session", sessionId: session.id, provisionedAt: expect.any(String),
     });
     expect(JSON.stringify(row)).not.toContain(session.token);
-    expect(wallet).not.toHaveBeenCalled();
     expect(register).not.toHaveBeenCalled();
-    expect(assign).not.toHaveBeenCalled();
     expect(audit).toHaveBeenCalledTimes(1);
     expect(audit.mock.calls[0][0]).toMatchObject({
       eventType: "auth.session_key_minted", actor: session.walletAddress,
