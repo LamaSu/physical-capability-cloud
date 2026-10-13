@@ -323,6 +323,7 @@ describe("buyer intent from the caller's own records", () => {
     ["bad termsHash", (own) => ({ ...own, termsHash: "0x12" })],
     ["bad acceptedPolicyDigest", (own) => ({ ...own, acceptedPolicyDigest: null })],
     ["compositionRoots not an array", (own) => ({ ...own, compositionRoots: zeroHash })],
+    ["empty compositionRoots", (own) => ({ ...own, compositionRoots: [] })],
     ["bad compositionRoot", (own) => ({ ...own, compositionRoots: ["0x12"] })],
     ["sparse compositionRoots", (own) => ({ ...own, compositionRoots: Array(1) })],
     ["bad second compositionRoot", (own) => ({ ...own, compositionRoots: [zeroHash, "0x12"] })],

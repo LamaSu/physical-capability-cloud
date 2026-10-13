@@ -20,6 +20,8 @@
  *
  * THREE OUTCOMES describe the ESCROW'S FUNDING ONLY (verify-writes-three-outcomes). "unchanged" means funding
  * unchanged; token allowance may have changed. Every result after an approve send preserves its actual SendResult.
+ * With a standing allowance, the buyer can approve(escrow, 0) or call the factory's revokePolicy; the reclaim
+ * ceiling also bounds any relayed funding.
  *   committed      the read-back shows this exact policy funded;
  *   unchanged      fund() was certainly not broadcast (with no unresolved approve), or mined and reverted, AND
  *                  the read-back shows the escrow unfunded;
@@ -48,6 +50,10 @@ export interface FundedState {
   unitStates: readonly number[];
 }
 
+/**
+ * viem's receipt waiter can return a replacement transaction's receipt, so txHash (also approveTx or fundTx) may
+ * name a transaction that never mined; the allowance and the read-back classify the outcome.
+ */
 export type SendResult =
   | { kind: "not_sent"; reason: string }
   | { kind: "unknown"; txHash?: Hex; reason: string }
@@ -64,9 +70,11 @@ export interface FundingResult {
   stage: "precheck" | "approve" | "fund";
   /** Actual approve outcome, whenever approve was sent or may have been sent. Token state may have changed. */
   approve?: SendResult;
+  /** Original approve hash; replacement receipts are possible (see SendResult). */
   approveTx?: Hex;
   /** Allowance observed at a successful approve's block; "unreadable" if that read failed. */
   allowance?: bigint | "unreadable";
+  /** Original fund hash; replacement receipts are possible (see SendResult). */
   fundTx?: Hex;
   /** The funding read-back the outcome rests on. */
   readBack: FundedState;

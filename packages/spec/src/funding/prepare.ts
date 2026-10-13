@@ -205,7 +205,7 @@ function copyExpectations(raw: unknown): FundingExpectations {
   let compositionRoots: readonly Hex[] | "unchecked";
   if (e.compositionRoots === "unchecked") compositionRoots = e.compositionRoots;
   else {
-    if (!Array.isArray(e.compositionRoots)) refuse("BAD_EXPECTATION", "expect.compositionRoots must be a bytes32 array or the literal unchecked");
+    if (!Array.isArray(e.compositionRoots) || e.compositionRoots.length === 0) refuse("BAD_EXPECTATION", "expect.compositionRoots must be a non-empty bytes32 array or the literal unchecked");
     compositionRoots = Array.from(e.compositionRoots, (root, i) => hash(root, `compositionRoots[${i}]`));
   }
   return { jobId: e.jobId, operator, payees, maxFeeBps: e.maxFeeBps, feeRecipients, tiers,
