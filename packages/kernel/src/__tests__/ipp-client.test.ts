@@ -225,6 +225,23 @@ describe("IppClient answer validation guards", () => {
 });
 
 describe("C5: every golden Print-Job answer (readJobId exact-single integer guard)", () => {
+  it.each([0x0400, 0x0504, 0x0507, 0x0508].flatMap(statusCode =>
+    [false, true].map(withJobId => ({ statusCode, withJobId })),
+  ))("Print-Job status $statusCode with job-id=$withJobId remains an uncertain submission without busy", async ({ statusCode, withJobId }) => {
+    const printer = new FakeIppPrinter(request => ippResponse(request, {
+      statusCode, groups: withJobId ? [{ tag: IPP_TAG.JOB_ATTRIBUTES, attributes: [
+        { name: "job-id", values: [integerValue(77)] },
+      ] }] : [],
+    }));
+    const result = await client(printer).printJob({ jobName: "job.pdf", documentFormat: "application/pdf", document: DOCUMENT });
+    expect(result).toEqual({
+      ok: false, kind: "ipp_status", sent: true, httpStatus: 200, statusCode,
+      deviceStateUnknown: true, message: `IPP ${ippStatusName(statusCode)}`,
+    });
+    expect(result).not.toHaveProperty("busy");
+    expect(printer.operationRequests(IPP_OPERATION.PRINT_JOB)).toHaveLength(1);
+  });
+
   it.each(Object.entries(vectors.print_job_answers))("%s returns only a proven job-id and never resends", async (_name, vector) => {
     const printer = new FakeIppPrinter(() => ({ ok: true, httpStatus: 200, body: Buffer.from(vector.hex, "hex") }));
     const api = client(printer, { version: [2, 0], nextRequestId: () => vector.requestId });

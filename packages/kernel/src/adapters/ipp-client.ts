@@ -27,6 +27,8 @@ export interface IppClientFailure {
   sent: boolean;
   httpStatus?: number;
   statusCode?: number;
+  /** A non-success Print-Job answer can still name or create a printing job. */
+  deviceStateUnknown?: true;
   message: string;
 }
 
@@ -263,7 +265,7 @@ export class IppClient {
       { name: "job-name", values: [nameValue(input.jobName)] },
       { name: "document-format", values: [mimeMediaTypeValue(input.documentFormat)] },
     ], input.document);
-    if (!answer.ok) return answer;
+    if (!answer.ok) return answer.kind === "ipp_status" ? { ...answer, deviceStateUnknown: true } : answer;
     const id = readJobId(answer.message);
     if ("problem" in id) return { ok: false, kind: "job_id", sent: true, httpStatus: 200, statusCode: answer.statusCode, message: sanitizeIppMessage(id.problem) };
     return { ...answer, jobId: id.value };
