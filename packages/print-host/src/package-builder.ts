@@ -151,13 +151,18 @@ export function validateUnitContext(input: UnitContext) {
   });
 }
 
-/** The challenge nonce is part of the unit context, while the settlement unit id excludes it. */
-export function computeUnitContextDigest(input: UnitContext): Hex {
-  const c = validateUnitContext(input);
+function unitContextDigest(c: Pick<ReturnType<typeof validateUnitContext>,
+  "chainId" | "escrow" | "settlementUnitId" | "jobIdHash" | "milestoneIndex" | "stepId">, challengeNonce: Hex): Hex {
   return keccak256(encodeAbiParameters([
     { type: "bytes32" }, { type: "uint256" }, { type: "address" }, { type: "bytes32" },
     { type: "bytes32" }, { type: "uint256" }, { type: "bytes32" }, { type: "bytes32" },
-  ], [domain("PCC:vnext:unit-context:v1"), c.chainId, c.escrow, c.settlementUnitId, c.jobIdHash, c.milestoneIndex, c.stepId, c.challengeNonce]));
+  ], [domain("PCC:vnext:unit-context:v1"), c.chainId, c.escrow, c.settlementUnitId, c.jobIdHash, c.milestoneIndex, c.stepId, challengeNonce]));
+}
+
+/** The challenge nonce is part of the unit context, while the settlement unit id excludes it. */
+export function computeUnitContextDigest(input: UnitContext): Hex {
+  const c = validateUnitContext(input);
+  return unitContextDigest(c, c.challengeNonce);
 }
 
 function delegation(input: EvidenceBundle["sessionKeyAuthorization"]) {
@@ -317,6 +322,10 @@ export async function signMilestonePackage(input: BuiltMilestonePackage, operato
   if (computeEvidenceBlockHash(block.unitContextDigest, block.kernelSignedEventsRoot, block.sessionKeyAuthDigest,
     { attestationSetRoot: block.attestationSetRoot, workProductRoot: block.workProductRoot, programHash: block.programHash }) !== built.evidenceBlockHash) fail("bad_body");
   const { unitBinding: u, producer } = built.body;
+  const expectedContextDigest = guarded("bad_body", () => unitContextDigest({ chainId: BigInt(u.chainId), escrow: u.escrow,
+    settlementUnitId: u.settlementUnitId, jobIdHash: u.jobIdHash, milestoneIndex: BigInt(u.milestoneIndex), stepId: u.stepId },
+  built.body.challengeBinding.nonce));
+  if (expectedContextDigest !== block.unitContextDigest) fail("bad_body");
   const operator = operatorKey.address.toLowerCase();
   const device = `0x${deviceKey.publicKeyHex}`;
   if (producer.operatorPrincipalId !== `eip155:${u.chainId}:${operator}` || producer.devicePrincipalId !== `ed25519:${device}`) fail("key_mismatch");

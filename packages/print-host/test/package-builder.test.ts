@@ -108,7 +108,7 @@ async function fixture() {
   }
   const bundle = await session.finalize();
   const built = buildMilestonePackage(bundle, context, program);
-  return { bundle, context, built, operatorKey, deviceKey, generated, now };
+  return { bundle, context, built, operatorKey, deviceKey, generated, now, directory };
 }
 
 describe("V-next package hash parity", () => {
@@ -234,6 +234,46 @@ describe("package construction and mandatory signatures", () => {
     const signD1 = vi.fn(f.operatorKey.signD1);
     await expect(signMilestonePackage(forged, { ...f.operatorKey, signD1 }, f.deviceKey)).rejects.toMatchObject({ code: "bad_body" });
     expect(signD1).not.toHaveBeenCalled();
+  });
+  it.each(["challenge nonce", "unit binding"] as const)("rejects a self-consistent block spliced from another %s before either signature", async (difference) => {
+    const f = await fixture();
+    const siblingContext = { ...f.context };
+    if (difference === "challenge nonce") siblingContext.challengeNonce = word("sibling:nonce");
+    else {
+      siblingContext.milestoneIndex = BigInt(f.context.milestoneIndex) + 1n;
+      siblingContext.stepId = word("sibling:step");
+      siblingContext.settlementUnitId = settlementUnitId({ ...siblingContext, chainId: BigInt(siblingContext.chainId),
+        milestoneIndex: BigInt(siblingContext.milestoneIndex) });
+    }
+    const auth = f.bundle.sessionKeyAuthorization!;
+    const session = await openUnitEvidenceSession({ settlementUnitId: siblingContext.settlementUnitId,
+      challengeNonce: siblingContext.challengeNonce, jobId: f.bundle.jobId, parentAgentId: auth.parentAgentId,
+      fundedAt: auth.issuedAt, expiresAt: auth.expiresAt, deviceKey: f.deviceKey,
+      journalDir: join(f.directory, "sibling-journal"), now: () => auth.issuedAt + 150 });
+    for (const event of f.bundle.events) {
+      const base = { type: event.type, timestamp: event.timestamp, source: structuredClone(event.source),
+        payload: { ...structuredClone(event.payload), settlementUnitId: siblingContext.settlementUnitId,
+          challengeNonce: siblingContext.challengeNonce } };
+      await session.addEvent({ ...base, id: event.id, hash: await hashEvent(base) });
+    }
+    const sibling = buildMilestonePackage(await session.finalize(), siblingContext, program);
+    const spliced = structuredClone(f.built);
+    spliced.body.evidence.evidenceBlockHash = sibling.evidenceBlockHash;
+    spliced.evidenceBlock = sibling.evidenceBlock;
+    spliced.evidenceBlockHash = sibling.evidenceBlockHash;
+    spliced.packageBodyHash = computePackageBodyHash(spliced.body);
+    expect(computeEvidenceBlockHash(spliced.evidenceBlock.unitContextDigest, spliced.evidenceBlock.kernelSignedEventsRoot,
+      spliced.evidenceBlock.sessionKeyAuthDigest, { programHash: spliced.evidenceBlock.programHash,
+        attestationSetRoot: spliced.evidenceBlock.attestationSetRoot, workProductRoot: spliced.evidenceBlock.workProductRoot })).toBe(spliced.evidenceBlockHash);
+    expect(spliced.evidenceBlock.unitContextDigest).not.toBe(computeUnitContextDigest(f.context));
+    const signD1 = vi.fn(f.operatorKey.signD1); const signD2 = vi.fn(f.deviceKey.signD2);
+    const operator = { ...f.operatorKey, signD1 }; const device = { ...f.deviceKey, signD2 };
+    const control = await signMilestonePackage(f.built, operator, device);
+    expect(control.signatures).toHaveLength(2);
+    expect(signD1).toHaveBeenCalledTimes(1); expect(signD2).toHaveBeenCalledTimes(1);
+    signD1.mockClear(); signD2.mockClear();
+    await expect(signMilestonePackage(spliced, operator, device)).rejects.toMatchObject({ code: "bad_body" });
+    expect(signD1).not.toHaveBeenCalled(); expect(signD2).not.toHaveBeenCalled();
   });
   it.each(["programHash", "attestationSetRoot", "workProductRoot"] as const)("requires the evidence lane's bytes32 %s", async (field) => {
     const f = await fixture();

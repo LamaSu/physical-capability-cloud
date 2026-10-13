@@ -61,12 +61,18 @@ type FakeOptions = {
   priorityFee?: bigint;
   gas?: bigint;
   commitment?: Hex;
-  afterSendCommitment?: Hex;
+  afterSendCommitment?: Hex | null;
   estimateRevert?: "NotActive" | "OnlyOperator" | "TooLateForEvidence" | "EvidenceAlreadyCommitted";
+  sendRevert?: "NotActive" | "EvidenceAlreadyCommitted" | "unknown_revert";
   readRevert?: "UnitNotFound";
+  postSendReadRevert?: "UnitNotFound";
   receiptStatus?: "success" | "reverted" | "timeout";
   failureMethod?: string;
   postSendReadFailure?: boolean;
+  pendingMissesUnminedSends?: boolean;
+  pendingNonce?: number;
+  latestNonce?: number;
+  latestFailure?: boolean;
 };
 
 async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeOptions = {}) {
@@ -96,6 +102,8 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
   const calls: { method: string; params: unknown }[] = [];
   let estimatedUnit = input.unitId;
   const sentUnits = new Set<Hex>();
+  let sentCount = 0;
+  let minedCount = 0;
   const logs = ["log", "warn", "error", "debug", "info"].map((method) =>
     vi.spyOn(console, method as "log").mockImplementation(() => undefined));
   const serverText = `${rpcUrl} ${raw} ${randomBytes(24).toString("base64url")}`;
@@ -106,6 +114,12 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
     }) };
   function reject(errorName: typeof errorAbi[number]["name"]): never {
     throw { code: 3, message: serverText, data: encodeErrorResult({ abi: errorAbi, errorName }) };
+  }
+  function escrowCommitment(unitId: Hex) {
+    if (!sentUnits.has(unitId)) return fake.commitment;
+    if (fake.afterSendCommitment !== undefined) return fake.afterSendCommitment;
+    if (fake.sendRevert !== undefined || fake.receiptStatus === "reverted" || fake.receiptStatus === "timeout") return undefined;
+    return contractCommitment({ ...input, unitId, compositionSchemaVersion: fake.storedVersion ?? 0 }, unitChainId);
   }
   const transport = custom({ request: async ({ method, params }) => {
     calls.push({ method, params });
@@ -126,16 +140,24 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
           const terms = units.get(unitId);
           if (terms === undefined) return reject("UnitNotFound");
           return encodeFunctionResult({ abi: functions, functionName: "unitTerms",
-            result: [terms.milestoneIndex, terms.stepId, 0, 100n, bytes32(), fake.storedVersion ?? 0, sent] });
+            result: [terms.milestoneIndex, terms.stepId, 0, 100n, bytes32(), fake.storedVersion ?? 0,
+              escrowCommitment(unitId) != null] });
         }
         if (fake.readRevert !== undefined) reject(fake.readRevert);
+        if (sent && fake.postSendReadRevert !== undefined) reject(fake.postSendReadRevert);
         if (sent && fake.postSendReadFailure) throw { code: -32603, message: serverText };
-        const commitment = sent ? fake.afterSendCommitment ?? contractCommitment({ ...input, unitId,
-          compositionSchemaVersion: fake.storedVersion ?? 0 }, unitChainId) : fake.commitment;
-        if (commitment === undefined) reject("EvidenceNotCommitted");
+        const commitment = escrowCommitment(unitId);
+        if (commitment === undefined || commitment === null) reject("EvidenceNotCommitted");
         return commitment;
       }
-      case "eth_getTransactionCount": return numberToHex(7 + sentUnits.size);
+      case "eth_getTransactionCount": {
+        const tag = (params as [Hex, string])[1];
+        if (tag === "latest") {
+          if (fake.latestFailure) throw { code: -32603, message: serverText };
+          return numberToHex(fake.latestNonce ?? 7 + minedCount);
+        }
+        return numberToHex(fake.pendingNonce ?? 7 + (fake.pendingMissesUnminedSends ? minedCount : sentCount));
+      }
       case "eth_getBlockByNumber": return { number: "0x1", hash: bytes32(), parentHash: bytes32(),
         timestamp: "0x1", baseFeePerGas: numberToHex(fake.baseFee ?? 10n),
         gasLimit: "0xffffff", gasUsed: "0x0", transactions: [] };
@@ -147,9 +169,16 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
         estimatedUnit = decoded.args[0];
         return numberToHex(fake.gas ?? 50_000n);
       }
-      case "eth_sendRawTransaction": sentUnits.add(estimatedUnit); return hash;
+      case "eth_sendRawTransaction": {
+        sentUnits.add(estimatedUnit);
+        if (fake.sendRevert === "unknown_revert") throw { code: 3, message: serverText, data: "0xdeadbeef" };
+        if (fake.sendRevert !== undefined) reject(fake.sendRevert);
+        sentCount++;
+        return hash;
+      }
       case "eth_getTransactionReceipt":
         if (fake.receiptStatus === "timeout") return null;
+        minedCount = sentCount;
         return { transactionHash: hash, blockHash: bytes32(), blockNumber: "0x1", transactionIndex: "0x0",
           from: signer.address, to: input.escrow, cumulativeGasUsed: "0xc350", gasUsed: "0xc350",
           contractAddress: null, logs: [], logsBloom: "0x", status: fake.receiptStatus === "reverted" ? "0x0" : "0x1",
@@ -169,8 +198,14 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
     return calls.filter(({ method, params }) => method === "eth_call"
       && decodeFunctionData({ abi: functions, data: (params as [{ data: Hex }])[0].data }).functionName === name);
   }
+  function expectPostSendRead(after: "eth_sendRawTransaction" | "eth_getTransactionReceipt") {
+    expect(calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    const reads = contractReads("evidenceBundleHashOf");
+    expect(reads).toHaveLength(2);
+    expect(calls.indexOf(reads[1])).toBeGreaterThan(calls.findIndex(({ method }) => method === after));
+  }
   return { broadcaster, input, signer, chain, raw, hash, calls, rpcUrl, expectRedacted, fake, transport,
-    addUnit, contractReads };
+    addUnit, contractReads, expectPostSendRead };
 }
 
 afterEach(async () => {
@@ -407,8 +442,43 @@ describe("submitEvidence broadcaster", () => {
     const setup = await fixture({}, { receiptStatus: "reverted" });
     const result = await setup.broadcaster.submit(setup.input);
     expect(result).toEqual({ code: "refused", reason: "transaction_reverted" });
+    setup.expectPostSendRead("eth_getTransactionReceipt");
     setup.expectRedacted(result);
   });
+
+  it.each(["ours", "different"] as const)("a reverted receipt reconciles an %s commitment", async (commitment) => {
+    const setup = await fixture({}, { receiptStatus: "reverted" });
+    setup.fake.afterSendCommitment = commitment === "ours" ? contractCommitment(setup.input) : bytes32();
+    const result = await setup.broadcaster.submit(setup.input);
+    expect(result).toEqual({ code: commitment === "ours" ? "already_committed" : "conflict" });
+    setup.expectPostSendRead("eth_getTransactionReceipt");
+    setup.expectRedacted(result);
+  });
+
+  it.each(["transport", "revert"] as const)("a reverted receipt with a failed %s read is indeterminate", async (failure) => {
+    const setup = await fixture({}, { receiptStatus: "reverted", postSendReadFailure: failure === "transport",
+      postSendReadRevert: failure === "revert" ? "UnitNotFound" : undefined });
+    const result = await setup.broadcaster.submit(setup.input);
+    expect(result).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    setup.expectPostSendRead("eth_getTransactionReceipt");
+    setup.expectRedacted(result);
+  });
+
+  it.each((["NotActive", "EvidenceAlreadyCommitted", "unknown_revert"] as const).flatMap((reason) =>
+    (["ours", "different", "uncommitted", "transport", "revert"] as const).map((state) => ({ reason, state }))))(
+    "a send-time $reason revert reconciles the $state escrow outcome", async ({ reason, state }) => {
+      const setup = await fixture({}, { sendRevert: reason, postSendReadFailure: state === "transport",
+        postSendReadRevert: state === "revert" ? "UnitNotFound" : undefined });
+      setup.fake.afterSendCommitment = state === "ours" ? contractCommitment(setup.input)
+        : state === "different" ? bytes32() : null;
+      const result = await setup.broadcaster.submit(setup.input);
+      expect(result).toEqual(state === "ours" ? { code: "already_committed" }
+        : state === "different" ? { code: "conflict" }
+        : state === "uncommitted" ? { code: "refused", reason }
+        : { code: "indeterminate", transactionHash: setup.hash });
+      setup.expectPostSendRead("eth_sendRawTransaction");
+      setup.expectRedacted(result);
+    });
 
   it("a successful receipt with unavailable read-back remains indeterminate", async () => {
     const setup = await fixture({}, { postSendReadFailure: true });
@@ -435,7 +505,89 @@ describe("submitEvidence broadcaster", () => {
     expect(results.map((result) => result.code)).toEqual(["submitted", "submitted"]);
     expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 8]);
     expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
+    expect(setup.calls.filter(({ method, params }) => method === "eth_getTransactionCount"
+      && (params as [Hex, string])[1] === "latest")).toHaveLength(0);
     setup.expectRedacted(results);
+  });
+
+  it.each([true, false])("refuses another unit while a transaction is unmined (pending misses it=%s)", async (misses) => {
+    const setup = await fixture({}, { receiptStatus: "timeout", pendingMissesUnminedSends: misses });
+    const second = setup.addUnit(4n);
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    const boundary = setup.calls.length;
+    const result = await setup.broadcaster.submit(second);
+    expect(result).toEqual({ code: "refused", reason: "unreconciled_transaction" });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    const later = setup.calls.slice(boundary);
+    expect(later.filter(({ method }) => method === "eth_getTransactionCount").map(({ params }) => params))
+      .toEqual([[setup.signer.address, "latest"]]);
+    for (const method of ["eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas"]) {
+      expect(later.some((call) => call.method === method)).toBe(false);
+    }
+    setup.expectRedacted({ first, result });
+  });
+
+  it("allows another unit with nonce 8 after the latest nonce passes a timed-out transaction", async () => {
+    const setup = await fixture({}, { receiptStatus: "timeout" });
+    const second = setup.addUnit(4n);
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    const blocked = await setup.broadcaster.submit(second);
+    expect(blocked).toEqual({ code: "refused", reason: "unreconciled_transaction" });
+    setup.fake.receiptStatus = "success";
+    setup.fake.latestNonce = 8;
+    const result = await setup.broadcaster.submit(second);
+    expect(result).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 8]);
+    expect(setup.signer.signSubmitEvidenceTx.mock.calls.filter(([input]) => input.unitId === setup.input.unitId)).toHaveLength(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
+    setup.expectRedacted({ first, blocked, result });
+  });
+
+  it("refuses a lagging pending nonce after a successful receipt", async () => {
+    const setup = await fixture();
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "submitted", transactionHash: setup.hash });
+    setup.fake.pendingNonce = 7;
+    const result = await setup.broadcaster.submit(setup.addUnit(4n));
+    expect(result).toEqual({ code: "refused", reason: "unreconciled_transaction" });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_estimateGas")).toHaveLength(1);
+    setup.expectRedacted({ first, result });
+  });
+
+  it("a reverted receipt settles its nonce so another unit proceeds without a latest read", async () => {
+    const setup = await fixture({}, { receiptStatus: "reverted" });
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "refused", reason: "transaction_reverted" });
+    setup.fake.receiptStatus = "success";
+    const result = await setup.broadcaster.submit(setup.addUnit(4n));
+    expect(result).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 8]);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
+    expect(setup.calls.filter(({ method, params }) => method === "eth_getTransactionCount"
+      && (params as [Hex, string])[1] === "latest")).toHaveLength(0);
+    setup.expectRedacted({ first, result });
+  });
+
+  it("a failed latest nonce read while another unit is unsettled gives rpc_unavailable", async () => {
+    const setup = await fixture({}, { receiptStatus: "timeout" });
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    setup.fake.latestFailure = true;
+    const boundary = setup.calls.length;
+    const result = await setup.broadcaster.submit(setup.addUnit(4n));
+    expect(result).toEqual({ code: "rpc_unavailable" });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    const later = setup.calls.slice(boundary);
+    expect(later.filter(({ method }) => method === "eth_getTransactionCount").map(({ params }) => params))
+      .toEqual([[setup.signer.address, "latest"]]);
+    expect(later.some(({ method }) => method === "eth_estimateGas")).toBe(false);
+    setup.expectRedacted({ first, result });
   });
 
   it.each(["eth_chainId", "eth_call", "eth_getTransactionCount", "eth_getBlockByNumber", "eth_estimateGas"])(

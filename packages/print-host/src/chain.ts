@@ -28,7 +28,7 @@ export interface EvidenceSubmission {
 }
 
 export type EvidenceRefusalCode = "bad_input" | "chain_mismatch" | "unit_mismatch" | "signing_failed" |
-  "transaction_reverted" | "unknown_revert" | "EvidenceNotCommitted" | "EvidenceAlreadyCommitted" |
+  "transaction_reverted" | "unreconciled_transaction" | "unknown_revert" | "EvidenceNotCommitted" | "EvidenceAlreadyCommitted" |
   "OnlyOperator" | "NotActive" | "TooLateForEvidence" | "ZeroEvidenceDigest" |
   "UnitNotFound" | "Reentrancy";
 
@@ -142,7 +142,7 @@ export function createEvidenceBroadcaster(
   const receiptTimeoutMs = settings.receiptTimeoutMs ?? 60_000;
   const confirmations = settings.confirmations ?? 1;
   const pollingInterval = settings.pollingIntervalMs ?? 1_000;
-  const attempted = new Map<string, Hex>();
+  const attempted = new Map<string, { transactionHash: Hex; nonce: number; settled: boolean }>();
   // One operator has one pending nonce stream, including across distinct units.
   let queue = Promise.resolve();
 
@@ -199,6 +199,14 @@ export function createEvidenceBroadcaster(
     }
   }
 
+  async function reconcileRefusal(client: Client, input: EvidenceSubmission, expected: Hex,
+    transactionHash: Hex, reason: EvidenceRefusalCode): Promise<EvidenceBroadcastOutcome> {
+    const reconciled = await read(client, input, expected);
+    if (reconciled.code === "already_committed" || reconciled.code === "conflict") return reconciled;
+    return reconciled.code === "uncommitted" ? { code: "refused", reason }
+      : { code: "indeterminate", transactionHash };
+  }
+
   async function connect(): Promise<Client | undefined> {
     try { return await publicClient(); } catch { return undefined; }
   }
@@ -221,13 +229,23 @@ export function createEvidenceBroadcaster(
     const before = await read(client, input, expected);
     if (before.code !== "uncommitted") return before;
     const previous = attempted.get(key);
-    if (previous !== undefined) return { code: "indeterminate", transactionHash: previous };
+    if (previous !== undefined) return { code: "indeterminate", transactionHash: previous.transactionHash };
     let nonce: number;
     let gas: bigint;
     let maxFeePerGas: bigint;
     let maxPriorityFeePerGas: bigint;
     try {
+      const unsettled = [...attempted.entries()].filter(([otherKey, attempt]) => otherKey !== key && !attempt.settled);
+      if (unsettled.length > 0) {
+        const latest = await client.getTransactionCount({ address, blockTag: "latest" });
+        for (const [, attempt] of unsettled) if (attempt.nonce < latest) attempt.settled = true;
+        if (unsettled.some(([, attempt]) => !attempt.settled)) return { code: "refused", reason: "unreconciled_transaction" };
+      }
       nonce = await client.getTransactionCount({ address, blockTag: "pending" });
+      // Even a settled transaction must not be replaced by a lagging pending view.
+      for (const attempt of attempted.values()) {
+        if (nonce <= attempt.nonce) return { code: "refused", reason: "unreconciled_transaction" };
+      }
       const fees = await client.estimateFeesPerGas({ type: "eip1559" });
       maxFeePerGas = fees.maxFeePerGas;
       maxPriorityFeePerGas = fees.maxPriorityFeePerGas;
@@ -254,22 +272,21 @@ export function createEvidenceBroadcaster(
       transactionHash = keccak256(serializedTransaction);
     } catch { return { code: "refused", reason: "signing_failed" }; }
     // Latch BEFORE sending: an RPC timeout may mean the node accepted the tx.
-    attempted.set(key, transactionHash);
+    const attempt = { transactionHash, nonce, settled: false };
+    attempted.set(key, attempt);
     try {
       const sentHash = await client.sendRawTransaction({ serializedTransaction });
       if (sentHash.toLowerCase() !== transactionHash) return { code: "indeterminate", transactionHash };
     } catch (error) {
       const reason = revertCode(error);
-      if (reason === "EvidenceAlreadyCommitted") {
-        const reconciled = await read(client, input, expected);
-        if (reconciled.code === "already_committed" || reconciled.code === "conflict") return reconciled;
-      }
-      return reason === undefined ? { code: "indeterminate", transactionHash } : { code: "refused", reason };
+      return reason === undefined ? { code: "indeterminate", transactionHash }
+        : reconcileRefusal(client, input, expected, transactionHash, reason);
     }
     try {
       const receipt = await client.waitForTransactionReceipt({ hash: transactionHash, confirmations,
         timeout: receiptTimeoutMs, pollingInterval, retryCount: 0 });
-      if (receipt.status !== "success") return { code: "refused", reason: "transaction_reverted" };
+      attempt.settled = true;
+      if (receipt.status !== "success") return reconcileRefusal(client, input, expected, transactionHash, "transaction_reverted");
     } catch { return { code: "indeterminate", transactionHash }; }
     const after = await read(client, input, expected);
     if (after.code === "already_committed") return { code: "submitted", transactionHash };
