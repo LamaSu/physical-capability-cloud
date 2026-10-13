@@ -3,14 +3,16 @@ import {
   http, keccak256, parseAbi, zeroAddress, zeroHash,
   type Address, type Hex, type Transport,
 } from "viem";
-import { evidenceCommitment } from "@pcc/contracts/vnext";
+import { evidenceCommitment, settlementUnitId } from "@pcc/contracts/vnext";
 import { validateHostChainConfig, type HostConfig } from "./config.js";
 import type { OperatorKey } from "./keys.js";
 import { readSecretFile } from "./secret-file.js";
 
-// The compiler ABI does not expose this getter or all submitEvidence errors yet.
-// Source: VNextSettlementEscrow.sol evidenceBundleHashOf / submitEvidence.
+// Escrow views and submitEvidence errors used by this broadcaster.
+// Source: VNextSettlementEscrow.sol and contracts/ts/vnext/abi.ts.
 const evidenceAbi = parseAbi([
+  "function unitTerms(bytes32 unitId) view returns (uint256 milestoneIndex_, bytes32 stepId_, uint8 requestedTier_, uint256 reclaimAt_, bytes32 payoutConfigHash_, uint16 compositionSchemaVersion_, bool evidenceCommitted_)",
+  "function jobIdHash() view returns (bytes32)",
   "function evidenceBundleHashOf(bytes32 unitId) view returns (bytes32)",
   "function submitEvidence(bytes32 unitId, bytes32 packageDigest)",
   "error EvidenceNotCommitted()", "error EvidenceAlreadyCommitted()",
@@ -25,7 +27,7 @@ export interface EvidenceSubmission {
   readonly compositionSchemaVersion: number;
 }
 
-export type EvidenceRefusalCode = "bad_input" | "chain_mismatch" | "signing_failed" |
+export type EvidenceRefusalCode = "bad_input" | "chain_mismatch" | "unit_mismatch" | "signing_failed" |
   "transaction_reverted" | "unknown_revert" | "EvidenceNotCommitted" | "EvidenceAlreadyCommitted" |
   "OnlyOperator" | "NotActive" | "TooLateForEvidence" | "ZeroEvidenceDigest" |
   "UnitNotFound" | "Reentrancy";
@@ -162,13 +164,33 @@ export function createEvidenceBroadcaster(
 
   type Client = Awaited<ReturnType<typeof publicClient>>;
   type Read = { code: "uncommitted" } | EvidenceBroadcastOutcome;
-  async function read(client: Client, input: EvidenceSubmission): Promise<Read> {
+  async function frozenCommitment(client: Client, input: EvidenceSubmission): Promise<
+    { expected: Hex } | EvidenceBroadcastOutcome
+  > {
+    try {
+      const [milestoneIndex, stepId, , , , compositionSchemaVersion] = await client.readContract({
+        address: input.escrow, abi: evidenceAbi, functionName: "unitTerms", args: [input.unitId] });
+      const jobIdHash = await client.readContract({ address: input.escrow, abi: evidenceAbi,
+        functionName: "jobIdHash" });
+      const chainId = BigInt(settings.chainId);
+      // fund() derived the id with block.chainid and these frozen fields.
+      // Equality proves the configured chain is the unit's frozen chain.
+      if (settlementUnitId({ chainId, escrow: input.escrow, jobIdHash, milestoneIndex, stepId }) !== input.unitId) {
+        return { code: "refused", reason: "chain_mismatch" };
+      }
+      if (compositionSchemaVersion !== input.compositionSchemaVersion) return { code: "refused", reason: "unit_mismatch" };
+      return { expected: evidenceCommitment({ chainId, escrow: input.escrow, settlementUnitId: input.unitId,
+        compositionSchemaVersion, packageDigest: input.packageDigest }) };
+    } catch (error) {
+      const reason = revertCode(error);
+      return reason === undefined ? { code: "rpc_unavailable" } : { code: "refused", reason };
+    }
+  }
+
+  async function read(client: Client, input: EvidenceSubmission, expected: Hex): Promise<Read> {
     try {
       const actual = await client.readContract({ address: input.escrow, abi: evidenceAbi,
         functionName: "evidenceBundleHashOf", args: [input.unitId] });
-      const expected = evidenceCommitment({ chainId: BigInt(settings.chainId), escrow: input.escrow,
-        settlementUnitId: input.unitId, compositionSchemaVersion: input.compositionSchemaVersion,
-        packageDigest: input.packageDigest });
       return { code: actual.toLowerCase() === expected ? "already_committed" : "conflict" };
     } catch (error) {
       const reason = revertCode(error);
@@ -193,7 +215,10 @@ export function createEvidenceBroadcaster(
   async function submit(input: EvidenceSubmission, key: string): Promise<EvidenceBroadcastOutcome> {
     const client = await checkedClient();
     if ("code" in client) return client;
-    const before = await read(client, input);
+    const frozen = await frozenCommitment(client, input);
+    if ("code" in frozen) return frozen;
+    const { expected } = frozen;
+    const before = await read(client, input, expected);
     if (before.code !== "uncommitted") return before;
     const previous = attempted.get(key);
     if (previous !== undefined) return { code: "indeterminate", transactionHash: previous };
@@ -215,7 +240,7 @@ export function createEvidenceBroadcaster(
     } catch (error) {
       const reason = revertCode(error);
       if (reason === "EvidenceAlreadyCommitted") {
-        const reconciled = await read(client, input);
+        const reconciled = await read(client, input, expected);
         if (reconciled.code === "already_committed" || reconciled.code === "conflict") return reconciled;
       }
       return reason === undefined ? { code: "rpc_unavailable" } : { code: "refused", reason };
@@ -236,7 +261,7 @@ export function createEvidenceBroadcaster(
     } catch (error) {
       const reason = revertCode(error);
       if (reason === "EvidenceAlreadyCommitted") {
-        const reconciled = await read(client, input);
+        const reconciled = await read(client, input, expected);
         if (reconciled.code === "already_committed" || reconciled.code === "conflict") return reconciled;
       }
       return reason === undefined ? { code: "indeterminate", transactionHash } : { code: "refused", reason };
@@ -246,7 +271,7 @@ export function createEvidenceBroadcaster(
         timeout: receiptTimeoutMs, pollingInterval, retryCount: 0 });
       if (receipt.status !== "success") return { code: "refused", reason: "transaction_reverted" };
     } catch { return { code: "indeterminate", transactionHash }; }
-    const after = await read(client, input);
+    const after = await read(client, input, expected);
     if (after.code === "already_committed") return { code: "submitted", transactionHash };
     if (after.code === "conflict") return after;
     return { code: "indeterminate", transactionHash };
@@ -267,7 +292,9 @@ export function createEvidenceBroadcaster(
       if (snapshot === undefined) return { code: "refused", reason: "bad_input" };
       const client = await checkedClient();
       if ("code" in client) return client;
-      const outcome = await read(client, snapshot);
+      const frozen = await frozenCommitment(client, snapshot);
+      if ("code" in frozen) return frozen;
+      const outcome = await read(client, snapshot, frozen.expected);
       return outcome.code === "uncommitted" ? { code: "refused", reason: "EvidenceNotCommitted" } : outcome;
     },
   });

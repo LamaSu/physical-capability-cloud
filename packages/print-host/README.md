@@ -229,8 +229,8 @@ The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803)
    FUNDED_ACTIVE and before reclaimAt. The escrow's commitment uses layout
    format 1 even though the body's package format is `"2"`. A successful receipt
    must be followed by comparing `evidenceBundleHashOf(unitId)` with the
-   domain-separated commitment for the exact chain, escrow, unit, composition
-   version and package digest.
+   domain-separated commitment for the unit's frozen chain id (proven through
+   its settlement unit id), escrow, unit, stored schema version and package digest.
 
 Inputs still owed by other lanes: evidence supplies the committed program hash
 and the attestation/work-product roots (Q-E3 and S2 goldens); gateway N149 supplies
@@ -265,7 +265,10 @@ and server text are excluded from results and logs. Sends have no retries.
 
 `createEvidenceBroadcaster(config, operatorKey)` returns `submit(input)` and
 `readBack(input)`. The input is `{escrow, unitId, packageDigest,
-compositionSchemaVersion}`. `readBack` never signs or sends. An uncommitted getter
+compositionSchemaVersion}`. Both calls use the unit's frozen chain id, proven
+through its settlement unit id, and its stored schema version for the expected
+commitment; a version mismatch is refused as `unit_mismatch` before any send.
+`readBack` never signs or sends. An uncommitted getter
 returns `refused` with `EvidenceNotCommitted`. Factory configuration errors carry
 only `bad_config`.
 
