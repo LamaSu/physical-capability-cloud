@@ -41,18 +41,15 @@
  * keys across the API. Narrowing to the money path closes the actual exposure
  * (funds movement) with no breakage, and leaves the global flip as a follow-up
  * that needs a per-route requirement sweep first.
- *
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { getRepos } from "../db.js";
+import { parseStoredScopes, SELF_SERVICE_OPERATOR_SCOPE } from "../auth/key-scopes.js";
+export { SELF_SERVICE_OPERATOR_SCOPE, SELF_SERVICE_KEY_SCOPES } from "../auth/key-scopes.js";
 
 // ── Default Scope Requirements ───────────────────────────────────
-
-// Self-service authority derives from rules listing operator, minus money-write and admin rules.
-export const SELF_SERVICE_OPERATOR_SCOPE = "operator:basic";
-export const SELF_SERVICE_KEY_SCOPES = Object.freeze([SELF_SERVICE_OPERATOR_SCOPE]);
 
 const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   method: string;
@@ -244,8 +241,7 @@ function firstMatch(
 // ── Scope Extraction ─────────────────────────────────────────────
 
 /**
- * Extract scopes from the API key record.
- * Falls back to ["*"] for backwards compatibility when scopes are not set.
+ * Extract scopes from the API key record; missing or unreadable scopes grant nothing.
  */
 function getCallerScopes(req: FastifyRequest): string[] {
   if (!req.apiKeyId) return [];
@@ -254,30 +250,11 @@ function getCallerScopes(req: FastifyRequest): string[] {
     const keyRecord = getRepos().apiKeys.findById(req.apiKeyId);
     if (!keyRecord) return [];
 
-    let scopesRaw: unknown;
-    try {
-      scopesRaw = JSON.parse(keyRecord.scopes);
-    } catch {
-      scopesRaw = keyRecord.scopes;
-    }
-
-    if (Array.isArray(scopesRaw)) {
-      return (scopesRaw as string[]).filter((s) => typeof s === "string");
-    }
-    if (typeof scopesRaw === "string" && scopesRaw.length > 0) {
-      return scopesRaw.split(",").map((s) => s.trim()).filter(Boolean);
-    }
+    return parseStoredScopes(keyRecord.scopes);
   } catch {
     // Non-fatal
   }
 
-  // FAIL CLOSED. This path is reached only when a key record exists but its
-  // `scopes` column is neither a JSON array nor a non-empty string — i.e. it is
-  // malformed. The previous behaviour returned ["*"], so a corrupt scopes value
-  // silently granted WILDCARD access to every endpoint. A security control must
-  // not fail open: an unreadable scope set grants nothing.
-  // (A legitimately empty scope set stored as "[]" parses as an array and
-  // returns [] above, so it never reaches here.)
   return [];
 }
 
