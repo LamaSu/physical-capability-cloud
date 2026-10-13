@@ -2,7 +2,7 @@
 
 Private workspace package for the N144 October MVP print host. The host application
 comes in later PRs. This package contains host configuration, testnet key custody,
-deterministic test support, and repros of the toolkit gaps that prevent REAL-mode
+local per-unit evidence sessions, deterministic test support, and repros of the toolkit gaps that prevent REAL-mode
 IPP printing and production of the oracle's required evidence.
 Its source enters the gateway image through `COPY . .`; only the build skips it
 via the Dockerfile's turbo filter.
@@ -29,7 +29,8 @@ the spec's exact MVP action set, and a distinct 32-byte session public key. Thei
 whole-second issuance lies between funding and the first event, expiry equals
 reclaimAt, and maxSignatures equals the finalized event count (1–1000).
 `signD2` accepts exactly 32 raw bytes or their `0x`-prefixed lowercase hex encoding.
-The toolkit still needs the unit session and bundle builders recorded by GAP-7.
+The local per-unit session implementation is described below. The unchanged GAP-7
+repro still checks for the requested session API in the toolkit's exports.
 
 The operator key has
 three scoped uses: D1 `FinalMilestonePackageV2` signatures, zero-value EIP-1559
@@ -120,8 +121,50 @@ The host must produce ONE signed bundle per settlement unit: print events plus p
 events on success, or `execution_failed` evidence on failure. The reference is
 pcc-oracle's B5 print-host bundle contract (bus #7386; on the Spark:
 `/mnt/sparkbulk/pcc-reconciliation/returns/pcc-oracle-work/print-host-bundle-contract-20261009.md`),
-sections 3.0, 4.2 and 5. Toolkit changes belong to pcc-adk; this package records the needed
-behavior without changing or working around the toolkit.
+sections 3.0, 4.2 and 5. This package implements the unit session locally while
+retaining the separate repros for the toolkit changes owned by pcc-adk.
+
+## Per-unit evidence session
+
+`openUnitEvidenceSession` and `resumeUnitEvidenceSession` expose `addEvent`,
+`addPrintResult`, and `finalize`. The device key is used only through
+`publicKeyHex` and `signDelegation`. Finalization mints a separate session key,
+authorizes it for the unit's job, signs one bundle, and erases the session secret.
+The complete signed bundle is journaled before return; repeated or resumed
+finalization returns the same bundle, including after expiry. An unfinalized
+session refuses finalization before funding or at or after expiry.
+
+Both add methods stamp absent `settlementUnitId` and `challengeNonce` fields and
+refuse conflicting values with `event_binding`. Every committed event carries
+both fields. Events must bind the job and one consistent kernel, fall within the
+inclusive funded interval, and on addition be no later than the session clock
+plus 300 seconds. That future limit is never reapplied during journal replay.
+Present `source.simulated` or `payload.mock` tags are refused with
+`event_fabricated` unless exactly `false`. A print result's entire event batch is
+validated before any event is appended, including unit binding, kernel
+consistency, and the session's 1000-event limit. The print's already signed
+success bundle is not consumed. Session errors contain only closed
+`UnitSessionError` codes, without paths, values, or library messages.
+
+The journal directory has mode 0700 and committed record files have mode 0600;
+both must belong to the process's effective uid. Records use sequential
+`%08d.json` names. Each append first exclusively creates a same-directory temp
+named `.%08d.json.<uuidv4>.tmp` with `O_CREAT | O_EXCL | O_NOFOLLOW`, writes its
+bytes, fsyncs and closes it, then atomically links it to the final record name.
+The temp is unlinked and the directory is fsynced. Exclusive linking preserves
+the refusal when another writer has already created that final record. Replay
+ignores orphan temps matching that exact pattern and remains strict about all
+other entries and committed bytes. A directory containing only orphan temps
+can be opened again. A crash before the final link leaves no committed final
+record, so a retry may mint and sign a fresh bundle. The hash chain detects
+corruption and naive edits, not a writer with access to the directory.
+
+The local GAP-7 port keeps the frozen carrier fixture without unit fields. Its
+one deliberate fixture difference sets the fake print adapter's
+`source.simulated` to `false` before printing so the session can accept those
+events. A separate test feeds the frozen simulated print result and verifies
+`event_fabricated` with nothing journaled. The original toolkit GAP repro stays
+unchanged.
 
 ## Operator relay gateway client
 
