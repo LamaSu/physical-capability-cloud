@@ -21,6 +21,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@pcc/contracts": "workspace:*",
     "@pcc/kernel": "workspace:*",
     "@pcc/kernel-sdk": "workspace:*",
     "@pcc/spec": "workspace:*",

@@ -10,7 +10,7 @@ via the Dockerfile's turbo filter.
 ## Configuration and testnet keys
 
 Build from the workspace root with `pnpm --filter "@pcc/print-host..." build` to
-build the host and its kernel, kernel-sdk, and spec dependencies. Run the CLI with
+build the host and its contracts, kernel, kernel-sdk, and spec dependencies. Run the CLI with
 `node packages/print-host/dist/cli.js keygen --out <absolute-directory> [--not-after <UTC-timestamp>]` and
 `node packages/print-host/dist/cli.js check-config <absolute-config-path>`.
 The `print-host` bin is available through pnpm linking; `dist/cli.js` has mode 0644.
@@ -20,10 +20,13 @@ existing files and writes the device and operator keys at 0600 inside a private
 directory. An optional `--not-after` must be later than the current time and the
 keys' `createdAt`. Keep the funded Ed25519 device principal separate from the secp256k1
 operator EOA. This package delegates bundle signing to the kernel's existing
-`signFn`; D2 and delegation signing belong to the toolkit. The operator key signs
-only D1 `FinalMilestonePackageV2` signatures and zero-value EIP-1559
-`submitEvidence(unitId, packageDigest)` transactions. Loading the key binds both
-signing methods to the configured chain. D1 uses the fixed domain name
+`signFn`; D2 and delegation signing belong to the toolkit. The operator key has
+three scoped uses: D1 `FinalMilestonePackageV2` signatures, zero-value EIP-1559
+`submitEvidence(unitId, packageDigest)` transactions, and EIP-712 `JobPolicy`
+acceptance signatures. V-next `fund()` always requires the operator acceptance:
+the operator never sends the funding transaction
+(`packages/contracts/src/VNextSettlementEscrow.sol:346`). Loading the key binds
+all three signing methods to the configured chain. D1 uses the fixed domain name
 `PCC FinalMilestonePackage`, version `2`, and the supplied escrow address for both
 the message and verifying contract. The escrow address is supplied per signing
 call until canonical deployment binding is added; no escrow configuration field
@@ -32,6 +35,49 @@ is needed yet.
 October ships no `invokeBackup` path. A recursive source guard test enforces the
 absence of its name and selector and checks the host's `submitEvidence` selector
 against the repository escrow ABI.
+
+For the Thursday acceptance hand-off, run:
+
+```bash
+node packages/print-host/dist/cli.js sign-policy --config /absolute/host.json --terms /absolute/terms.json --input /absolute/policy.json --out /absolute/signature.json
+```
+
+The terms file strictly contains `minG` (an unsigned decimal string),
+`allowedRequiredTiers` (an array of numbers), `reclaimMinSeconds`,
+`reclaimMaxSeconds`, `maxFeeBps`, `allowedFeeRecipients` (an array of addresses),
+`allowedPayoutRecipients` (a required, non-empty array of addresses with no
+case-insensitive duplicates), `maxUnits`, and `maxAcceptanceSeconds`. The payout
+allowlist binds acceptance to who receives each unit's net payment. All remaining scalar terms are integer
+numbers. Loaders validate and freeze the terms; a key loaded without terms refuses
+policy acceptance signing.
+
+The strict input JSON is `{ "policy": { ... }, "units": [ ... ] }`, using the
+exported `JobPolicyFields` and `UnitConfig` shapes from `@pcc/contracts/vnext`.
+Every compiler `bigint` field is an unsigned decimal string: policy `chainId`,
+`policyNonce`, and `expiry`; unit `milestoneIndex`, `g`, `f`, `n`, and `reclaimAt`;
+and each payout's `amount`. Tier, fee-basis-point, and composition-version fields
+remain integer numbers. Unknown fields and a caller-supplied clock are refused.
+
+Before signing, the host checks the operator address and bound chain, recomputes
+the ordered units root with the compiler's helpers, and checks every unit against
+the terms. It also checks the compiler's pre-policy root, which commits the checked
+economic configuration. Gross payment must meet `minG`, the required tier and fee recipient must
+be allowed, fees must be at most `maxFeeBps`, and reclaim time must lie within the
+inclusive configured window from the current time. The zero fee recipient is
+allowed only with zero fees. Every payout recipient must be allowed, compared
+case-insensitively. The compiler's `computeFee` must match both `f` and `n`, and
+non-empty, positive payouts must sum exactly to `n`. The host also calls the
+compiler's `buildUnitConfig` for context-free validation, checks the supplied
+`requestedTier` against its derived value, and maps validation failures to
+`bad_input`. Unit count must be between one and `maxUnits`, and
+acceptance expiry must be in the future and no farther away than
+`maxAcceptanceSeconds`. The signature uses the compiler's `jobPolicyTypedData`
+unchanged; its verifying contract is `policy.escrow`.
+
+Success creates a new mode-0644 JSON file containing exactly `operator`, `chainId`
+(a number), `escrow`, `acceptanceDigest`, and `signature`. Existing output files
+are refused. This command prints no policy or private key data; on failure it
+prints only a closed error code.
 
 The strict JSON configuration has `kernelId`, `deviceId`, `printer.uri`,
 `chain.chainId`, `chain.rpcUrlFile`, `gateway.baseUrl`, `gateway.apiKeyFile`,
@@ -55,7 +101,8 @@ only public data and signing functions, and their JSON/string/inspection methods
 redact private state. Parser and validation errors use fixed codes and trusted
 field labels without retaining input values or exception causes. All custody
 errors use `<code>: <path>`, with a field label for `bad_schema` or the fixed
-testnet-only sentence for `testnet_only`. The CLI prints that message once.
+testnet-only sentence for `testnet_only`. Keygen and check-config print that
+message once; sign-policy prints only the code.
 
 The host must produce ONE signed bundle per settlement unit: print events plus pulled carrier
 events on success, or `execution_failed` evidence on failure. The reference is

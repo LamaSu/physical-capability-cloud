@@ -3,11 +3,13 @@ import { makeKernelEd25519Signer } from "./kernel-signer.js";
 import { getAddress, type Address, type Hex, type LocalAccount } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
-  OperatorSigningError, prepareD1, prepareSubmitEvidenceTx,
-  type D1Input, type OperatorChainId, type SubmitEvidenceTxInput,
+  OperatorSigningError, prepareD1, prepareJobPolicyAcceptance, prepareSubmitEvidenceTx, validateHostTerms,
+  type D1Input, type HostTerms, type JobPolicyAcceptanceInput, type OperatorChainId, type SubmitEvidenceTxInput,
 } from "./operator-signing.js";
 export { OperatorSigningError } from "./operator-signing.js";
-export type { D1Input, OperatorChainId, OperatorSigningErrorCode, SubmitEvidenceTxInput } from "./operator-signing.js";
+export type {
+  D1Input, HostTerms, JobPolicyAcceptanceInput, OperatorChainId, OperatorSigningErrorCode, SubmitEvidenceTxInput,
+} from "./operator-signing.js";
 import {
   readSecretFile,
   SecretFileError,
@@ -40,6 +42,10 @@ export interface KeyLoadOptions extends SecretFileOptions {
   now?: Date;
 }
 
+export interface OperatorKeyLoadOptions extends KeyLoadOptions {
+  terms?: HostTerms;
+}
+
 /** Only the public material and the toolkit signing closure survive loading. */
 export class DeviceKey {
   readonly publicKeyHex: string;
@@ -59,11 +65,12 @@ export class DeviceKey {
   [inspect.custom]() { return this.toString(); }
 }
 
-/** Public identity and two scoped closures; no general signer is reachable. */
+/** Public identity and three scoped closures; no general signer is reachable. */
 export interface OperatorKey {
   readonly address: Address;
   readonly signD1: (input: D1Input) => Promise<Hex>;
   readonly signSubmitEvidenceTx: (input: SubmitEvidenceTxInput) => Promise<Hex>;
+  readonly signJobPolicyAcceptance: (input: JobPolicyAcceptanceInput) => Promise<Hex>;
   toJSON(): { kind: "pcc-printhost.operator-key"; address: Address };
   toString(): string;
   [inspect.custom](): string;
@@ -76,7 +83,7 @@ const operatorKeyPrototype = Object.freeze(Object.assign(Object.create(null), {
   [inspect.custom](this: OperatorKey) { return this.toString(); },
 }));
 
-function operatorKey(account: LocalAccount, chainId: OperatorChainId): OperatorKey {
+function operatorKey(account: LocalAccount, chainId: OperatorChainId, terms: HostTerms | undefined): OperatorKey {
   return Object.freeze(Object.assign(Object.create(operatorKeyPrototype), {
     address: account.address,
     async signD1(input: D1Input): Promise<Hex> {
@@ -87,6 +94,11 @@ function operatorKey(account: LocalAccount, chainId: OperatorChainId): OperatorK
     async signSubmitEvidenceTx(input: SubmitEvidenceTxInput): Promise<Hex> {
       const transaction = prepareSubmitEvidenceTx(input, chainId);
       try { return await account.signTransaction(transaction); }
+      catch { throw new OperatorSigningError("signing_failed"); }
+    },
+    async signJobPolicyAcceptance(input: JobPolicyAcceptanceInput): Promise<Hex> {
+      const typedData = prepareJobPolicyAcceptance(input, chainId, account.address, terms);
+      try { return await account.signTypedData(typedData); }
       catch { throw new OperatorSigningError("signing_failed"); }
     },
   })) as OperatorKey;
@@ -165,8 +177,9 @@ export async function loadDeviceKey(path: string, options: KeyLoadOptions = {}):
 // The public secp256k1 order, expressed without a key-shaped literal.
 const secp256k1Order = (1n << 256n) - BigInt("0x14551231950b75fc4402da1732fc9bebf");
 
-export async function loadOperatorKey(path: string, chainId: OperatorChainId, options: KeyLoadOptions = {}): Promise<OperatorKey> {
+export async function loadOperatorKey(path: string, chainId: OperatorChainId, options: OperatorKeyLoadOptions = {}): Promise<OperatorKey> {
   if (chainId !== 84532 && chainId !== 31337) throw new KeyFileError("bad_chain", path);
+  const terms = options.terms === undefined ? undefined : validateHostTerms(options.terms);
   const bytes = await keyBytes(path, options);
   try {
     const record = parseObject(bytes, path);
@@ -180,7 +193,7 @@ export async function loadOperatorKey(path: string, chainId: OperatorChainId, op
     if (scalar <= 0n || scalar >= secp256k1Order) throw new KeyFileError("bad_key", path);
     const account = privateKeyToAccount(record.privateKey as `0x${string}`);
     if (account.address.toLowerCase() !== record.address.toLowerCase()) throw new KeyFileError("public_mismatch", path);
-    return operatorKey(account, chainId);
+    return operatorKey(account, chainId, terms);
   } catch (error) {
     if (error instanceof KeyFileError) throw error;
     throw new KeyFileError("bad_key", path);

@@ -124,7 +124,7 @@ function levels(object: object): object[] {
   return result;
 }
 function assertNarrowSurface(operator: OperatorKey): void {
-  const allowed = new Set<PropertyKey>(["signD1", "signSubmitEvidenceTx", "toJSON", "toString", inspect.custom]);
+  const allowed = new Set<PropertyKey>(["signD1", "signSubmitEvidenceTx", "signJobPolicyAcceptance", "toJSON", "toString", inspect.custom]);
   const found = new Set<PropertyKey>();
   for (const level of levels(operator)) {
     for (const name of Reflect.ownKeys(level)) {
@@ -233,7 +233,7 @@ async function assertTx(operator: OperatorKey, chainId: number,
   })).toBe(operator.address);
 }
 
-describe("operator key only exposes the two authorized signatures", () => {
+describe("operator key only exposes the three authorized signatures", () => {
   it("walks every own and inherited string and symbol property and admits only the narrow surface", () => {
     assertNarrowSurface(key);
     expect(Object.isFrozen(key)).toBe(true);

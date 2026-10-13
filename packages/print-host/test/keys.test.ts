@@ -137,7 +137,7 @@ describe("host key loading and redaction", () => {
     const document = operatorDocument();
     const key = await loadOperatorKey(await writeDocument(document), 84532, { now });
     assertNoLeak(key, [secret(document)]);
-    expect(Reflect.ownKeys(key).sort()).toEqual(["address", "signD1", "signSubmitEvidenceTx"].sort());
+    expect(Reflect.ownKeys(key).sort()).toEqual(["address", "signD1", "signSubmitEvidenceTx", "signJobPolicyAcceptance"].sort());
     assertNoOwnedSecretMaterial(key);
     expect(key.address === document.address).toBe(true);
   });

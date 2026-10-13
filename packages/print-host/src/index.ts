@@ -4,7 +4,8 @@ export { readSecretFile, SecretFileError } from "./secret-file.js";
 export type { SecretFileOptions, SecretFileErrorCode } from "./secret-file.js";
 export { DeviceKey, KeyFileError, OperatorSigningError, loadDeviceKey, loadOperatorKey } from "./keys.js";
 export type {
-  OperatorKey, KeyLoadOptions, KeyFileErrorCode, D1Input, OperatorChainId,
+  OperatorKey, KeyLoadOptions, OperatorKeyLoadOptions, KeyFileErrorCode, D1Input, OperatorChainId,
+  HostTerms, JobPolicyAcceptanceInput,
   OperatorSigningErrorCode, SubmitEvidenceTxInput,
 } from "./keys.js";
 export { generateHostKeys, KeyGenerationError } from "./keygen.js";

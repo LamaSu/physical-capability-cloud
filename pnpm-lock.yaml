@@ -1215,6 +1215,9 @@ importers:
 
   packages/print-host:
     dependencies:
+      '@pcc/contracts':
+        specifier: workspace:*
+        version: link:../contracts
       '@pcc/kernel':
         specifier: workspace:*
         version: link:../kernel
