@@ -288,6 +288,49 @@ describe("PR2 round 2 regressions", () => {
     expect(events.at(-1)?.payload).toEqual({ ippJobId: 77, state: "unobservable", reason: "cancel-unconfirmed", jobStateReasons: [], origin: "device" });
     await adapter.quiesceEvidence();
   });
+  it("R4 #7962(a): real IPP defaults fit within the documented kernel cancel window", () => {
+    // No kernel cancelWindowMs default is exported on this PR2 branch. 30000 is
+    // documented in IppAdapterConfig.cancelConfirmMs (ipp-adapter.ts); the kernel
+    // default lives in PR1 @226e8a04 printer-job.ts:329, pending the merge.
+    // Kills cancel-default-28000 and poll-default-10000 (sum reaches 30000).
+    const adapter = new IppAdapter("cancel-defaults", { uri: "ipp://printer.test/ipp/print", kernelId: "k", transport: new FakeIppPrinter().transport });
+    adapters.push(adapter);
+    const defaults = Reflect.get(adapter, "config") as Required<Pick<IppAdapterConfig, "cancelConfirmMs" | "pollIntervalMs">>;
+    expect(defaults.cancelConfirmMs + defaults.pollIntervalMs).toBeLessThan(30_000);
+  });
+  it("R4 #7962(b): a silent printer with real defaults records one device cancel-unconfirmed", async () => {
+    // PR1's cancellation-aware runPrintJob is absent here; the lane must test
+    // this silent printer through runPrintJob on the PR1+PR2 merge for the race.
+    // Kills cancel-no-arm and cancel-default-28000 before waiting on quiesce.
+    const printer = new FakeIppPrinter();
+    const adapter = new IppAdapter("silent-defaults", { uri: "ipp://printer.test/ipp/print", kernelId: "k", transport: printer.transport });
+    adapters.push(adapter);
+    const events: Event[] = [];
+    adapter.onEvidence(event => events.push(structuredClone(event)));
+    expect((await start(adapter)).success).toBe(true);
+    await vi.advanceTimersByTimeAsync(2000);
+    // After cancellation the printer never answers a poll, including state 7.
+    printer.setHandler(OP.GET_JOB_ATTRIBUTES, (_request, raw) => new Promise<IppTransportResult>(resolve => {
+      const aborted = () => resolve({ ok: false, kind: "aborted", sent: true, message: "Silent stub poll aborted" });
+      if (raw.signal?.aborted) aborted();
+      else raw.signal?.addEventListener("abort", aborted, { once: true });
+    }));
+    await adapter.cancelJob(77);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(events.filter(event => event.type === "execution_failed")).toEqual([]);
+    expect(printer.operationRequests(OP.GET_JOB_ATTRIBUTES)).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1);
+    const failures = () => events.filter(event => event.type === "execution_failed");
+    expect(failures().map(event => event.payload)).toEqual([
+      { ippJobId: 77, state: "processing", reason: "cancel-unconfirmed", jobStateReasons: ["job-printing"], origin: "device" },
+    ]);
+    expect(failures().filter(event => event.payload.origin === "kernel")).toEqual([]);
+    expect(printer.transportRequests.at(-1)?.signal?.aborted).toBe(true);
+    await adapter.quiesceEvidence();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(failures()).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("F2: repeated cancels retain the first deadline and terminal event is emitted once", async () => {
     const { adapter, events } = make(undefined, { cancelConfirmMs: 100 });
     await start(adapter); await adapter.cancelJob(77); await poll(); await adapter.cancelJob(77); await poll(); await poll();
