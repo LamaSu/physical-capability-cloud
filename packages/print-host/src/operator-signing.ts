@@ -47,6 +47,7 @@ export interface SubmitEvidenceTxInput {
 
 /** Local operator limits, snapshotted at key load; never supplied by the signing caller. */
 export interface HostTerms {
+  readonly chainId: OperatorChainId;
   readonly factory: Address;
   readonly implementation: Address;
   readonly operatorPayoutRecipient: Address;
@@ -185,9 +186,11 @@ function numberField(value: unknown, max: number): number {
 /** Strict validation also copies and freezes the lists, closing mutation after key load. */
 export function validateHostTerms(input: HostTerms): HostTerms {
   try {
-    const r = inputRecord(input, ["factory", "implementation", "operatorPayoutRecipient", "maxPassThrough",
+    const r = inputRecord(input, ["chainId", "factory", "implementation", "operatorPayoutRecipient", "maxPassThrough",
       "minG", "allowedRequiredTiers", "reclaimMinSeconds", "reclaimMaxSeconds",
       "maxFeeBps", "allowedFeeRecipients", "allowedPayoutRecipients", "maxUnits", "maxAcceptanceSeconds"]);
+    const chainId = r.chainId;
+    if (chainId !== 84532 && chainId !== 31337) throw new OperatorSigningError("bad_terms");
     const factory = policyAddress(r.factory);
     const implementation = policyAddress(r.implementation);
     const operatorPayoutRecipient = policyAddress(r.operatorPayoutRecipient);
@@ -211,7 +214,7 @@ export function validateHostTerms(input: HostTerms): HostTerms {
       || reclaimMinSeconds > reclaimMaxSeconds || maxUnits === 0 || maxAcceptanceSeconds === 0) {
       throw new OperatorSigningError("bad_terms");
     }
-    return Object.freeze({ factory, implementation, operatorPayoutRecipient, maxPassThrough,
+    return Object.freeze({ chainId, factory, implementation, operatorPayoutRecipient, maxPassThrough,
       minG, allowedRequiredTiers: Object.freeze(allowedRequiredTiers), reclaimMinSeconds,
       reclaimMaxSeconds, maxFeeBps, allowedFeeRecipients: Object.freeze(allowedFeeRecipients),
       allowedPayoutRecipients: Object.freeze(allowedPayoutRecipients), maxUnits, maxAcceptanceSeconds });

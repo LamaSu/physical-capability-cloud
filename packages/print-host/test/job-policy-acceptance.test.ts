@@ -66,9 +66,9 @@ let path: string;
 let secret: Hex;
 let key: OperatorKey;
 
-function terms() {
+function terms(chainId: 84532 | 31337 = 84532) {
   return {
-    factory, implementation,
+    chainId, factory, implementation,
     operatorPayoutRecipient: payoutRecipient,
     maxPassThrough: 20_000n,
     minG: 1_000n,
@@ -163,7 +163,7 @@ afterEach(async () => { vi.restoreAllMocks(); await rm(directory, { recursive: t
 describe("JobPolicy acceptance uses the canonical compiler bytes", () => {
   for (const chainId of [84532, 31337] as const) {
     it(`recovers over the compiler acceptanceDigest with policy.escrow as the domain on chain ${chainId}`, async () => {
-      const bound = await loadOperatorKey(path, chainId, { now, clock: () => now, terms: terms() });
+      const bound = await loadOperatorKey(path, chainId, { now, clock: () => now, terms: terms(chainId) });
       const candidate = input([unit()], { chainId: BigInt(chainId) });
       const signature = await bound.signJobPolicyAcceptance(candidate);
       const digest = acceptanceDigest(domainSeparator(candidate.policy.chainId, candidate.policy.escrow),
@@ -565,6 +565,37 @@ describe("HostTerms cap total pass-through across the policy", () => {
     await refusal(() => bound.signJobPolicyAcceptance(input([unit()], { implementation: otherRecipient })),
       "deployment_mismatch");
   });
+});
+
+describe("HostTerms bind authorization to the key's chain", () => {
+  for (const chainId of [84532, 31337] as const) {
+    const otherChainId = chainId === 84532 ? 31337 : 84532;
+    it(`loads terms for chain ${chainId} with a key bound to chain ${chainId}`, async () => {
+      const supplied = terms(chainId);
+      expect(validateHostTerms(supplied).chainId).toBe(chainId);
+      const bound = await loadOperatorKey(path, chainId, { now, clock: () => now, terms: supplied });
+      expect(bound.address).toBe(key.address);
+    });
+    it(`refuses terms for chain ${chainId} with a key bound to chain ${otherChainId}`, async () => {
+      await refusal(() => loadOperatorKey(path, otherChainId, { now, clock: () => now,
+        terms: terms(chainId) }), "bad_terms");
+    });
+    it(`refuses terms for chain ${chainId} before reading a key file bound to chain ${otherChainId}`, async () => {
+      await refusal(() => loadOperatorKey(join(directory, "missing-operator.json"), otherChainId,
+        { now, clock: () => now, terms: terms(chainId) }), "bad_terms");
+    });
+  }
+  for (const [label, chainId] of [["missing chainId", undefined], ["string chainId 84532", "84532"],
+    ["chainId 1", 1], ["chainId 84533", 84533]] as const) {
+    it(`refuses terms with ${label} at validation and key load with bad_terms`, async () => {
+      const supplied: Record<string, unknown> = { ...terms() };
+      if (chainId === undefined) delete supplied.chainId;
+      else supplied.chainId = chainId;
+      await refusal(async () => validateHostTerms(supplied as unknown as HostTerms), "bad_terms");
+      await refusal(() => loadOperatorKey(path, 84532, { now, clock: () => now,
+        terms: supplied as unknown as HostTerms }), "bad_terms");
+    });
+  }
 });
 
 describe("HostTerms loading refuses malformed authorizations", () => {

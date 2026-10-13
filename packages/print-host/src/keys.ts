@@ -217,6 +217,7 @@ export async function loadOperatorKey(path: string, chainId: OperatorChainId, op
   if (suppliedClock !== undefined && typeof suppliedClock !== "function") throw new OperatorSigningError("bad_input");
   const clock = suppliedClock === undefined ? () => new Date() : suppliedClock;
   const terms = options.terms === undefined ? undefined : validateHostTerms(options.terms);
+  if (terms !== undefined && terms.chainId !== chainId) throw new OperatorSigningError("bad_terms");
   const bytes = await keyBytes(path, options);
   try {
     const record = parseObject(bytes, path);

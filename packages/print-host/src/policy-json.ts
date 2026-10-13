@@ -41,6 +41,7 @@ const unitSchema = z.object({
 }).strict();
 const inputSchema = z.object({ policy: policySchema, units: z.array(unitSchema) }).strict();
 const termsSchema = z.object({
+  chainId: z.union([z.literal(84532), z.literal(31337)]),
   factory: address, implementation: address,
   minG: decimal, allowedRequiredTiers: z.array(integer),
   reclaimMinSeconds: integer, reclaimMaxSeconds: integer, maxFeeBps: integer,

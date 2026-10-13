@@ -55,7 +55,8 @@ For the Thursday acceptance hand-off, run:
 node packages/print-host/dist/cli.js sign-policy --config /absolute/host.json --terms /absolute/terms.json --input /absolute/policy.json --out /absolute/signature.json
 ```
 
-The terms file strictly contains `factory` and `implementation` (required,
+The terms file strictly contains `chainId` (a required integer number, 84532 or
+31337), `factory` and `implementation` (required,
 valid non-zero deployment addresses), `minG` (an unsigned decimal string),
 `allowedRequiredTiers` (an array of numbers), `reclaimMinSeconds`,
 `reclaimMaxSeconds`, `maxFeeBps`, `allowedFeeRecipients` (an array of addresses),
@@ -69,7 +70,9 @@ must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
 its entire `n`; the cap applies across the policy, including all its units.
 Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
 864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
-Loaders validate and freeze all terms at key load; a key loaded without terms
+Terms for one chain never load for a key bound to another chain; the loader
+refuses them before reading the key file. Loaders validate and freeze all terms
+at key load; a key loaded without terms
 refuses policy acceptance signing. The explicit deployment terms will be replaced
 by economics' N150 canonical deployment record when it lands.
 

@@ -37,6 +37,12 @@ type EditableInput = Record<string, unknown> & {
   policy: Record<string, unknown>;
   units: Array<Record<string, unknown> & { payouts: Array<Record<string, unknown>> }>;
 };
+const malformedTermsChainCases: Array<[string, (value: Record<string, unknown>) => void]> = [
+  ["missing chainId", (value) => { delete value.chainId; }],
+  ["string chainId", (value) => { value.chainId = "84532"; }],
+  ["chainId 1", (value) => { value.chainId = 1; }],
+  ["chainId 84533", (value) => { value.chainId = 84533; }],
+];
 
 function bindEscrow(input: { policy: JobPolicyFields; units: ReturnType<typeof buildUnitConfig>[] }) {
   input.policy.prePolicyRoot = prePolicyRoot(input.units);
@@ -97,6 +103,7 @@ async function fixture() {
   const input = { policy, units: [unit] };
   bindEscrow(input);
   const terms = {
+    chainId: 84532,
     minG: 100n, allowedRequiredTiers: [1], reclaimMinSeconds: 864000,
     reclaimMaxSeconds: 31536000, maxFeeBps: 100, allowedFeeRecipients: [address("cc")],
     allowedPayoutRecipients: [address("dd")],
@@ -166,6 +173,21 @@ describe("print-host sign-policy CLI", () => {
     await expect(stat(current.outputFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it.each([[84532, 31337], [31337, 84532]] as const)(
+    "refuses terms chain %s for config chain %s without creating output", async (termsChainId, configChainId) => {
+      const current = await fixture();
+      current.terms.chainId = termsChainId;
+      await writeFile(current.termsFile, json(current.terms));
+      const config = JSON.parse(await readFile(current.configFile, "utf8"));
+      config.chain.chainId = configChainId;
+      await writeFile(current.configFile, json(config));
+      const captured = capture();
+      expect(await main(current.argv, captured.io)).toBe(1);
+      expect(captured.output()).toEqual({ stdout: "", stderr: "bad_terms\n" });
+      await expect(stat(current.outputFile)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
   const malformedInputCases: Array<[string, (value: EditableInput) => void]> = [
     ["an extra top-level field", (value) => { value.personal = randomBytes(24).toString("base64"); }],
     ["an extra policy field", (value) => { value.policy.personal = "private-policy-value"; }],
@@ -203,6 +225,7 @@ describe("print-host sign-policy CLI", () => {
   });
 
   const malformedTermsCases: Array<[string, (value: Record<string, unknown>) => void]> = [
+    ...malformedTermsChainCases,
     ["an extra terms field", (value) => { value.personal = "private-terms-value"; }],
     ["numeric minG", (value) => { value.minG = 100; }],
     ["a fractional time limit", (value) => { value.maxAcceptanceSeconds = 1.5; }],
@@ -309,6 +332,16 @@ async function expectJsonFailure(operation: () => Promise<unknown>, code: string
 }
 
 describe("policy JSON file boundaries", () => {
+  it.each(malformedTermsChainCases)("refuses %s in terms JSON with bad_terms", async (_name, mutate) => {
+    const current = await fixture();
+    const terms = JSON.parse(json(current.terms));
+    mutate(terms);
+    await writeFile(current.termsFile, json(terms));
+    await expect(loadHostTerms(current.termsFile)).rejects.toMatchObject({
+      name: "OperatorSigningError", code: "bad_terms", message: "bad_terms",
+    });
+  });
+
   it.each([0o666, 0o620, 0o602])("refuses writable terms mode %s", async (mode) => {
     const current = await fixture();
     await chmod(current.termsFile, mode);
