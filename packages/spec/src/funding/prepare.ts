@@ -62,6 +62,11 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
  * (N150's canonical funded policy or the CANONICAL record), held like the pins, never copied from the payload or
  * any gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true and leave
  * the terms, evidence policy or composition to the payload's author; prepared.unchecked lists them.
+ * Unless jobPolicyHash is bound, the payload's author still chooses the unit count, each unit's g, milestoneIndex
+ * and stepId, the split among payees, each unit's tier within the allowed set, reclaimAt below latestReclaimAt,
+ * expiry, policyNonce and compositionSchemaVersion. A mixed tier set hands the choice of release authority to the
+ * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
+ * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
  */
 export interface FundingExpectations {
   jobId: string;
@@ -103,7 +108,15 @@ export interface PrepareFundingArgs {
   marginSeconds?: bigint;
 }
 
-/** A payload that passed every check, with every value the SDK recomputed. Deep-frozen. */
+/**
+ * A payload that passed every check, with every value the SDK recomputed. Deep-frozen.
+ * Unless jobPolicyHash is bound, the payload's author still chooses the unit count, each unit's g, milestoneIndex
+ * and stepId, the split among payees, each unit's tier within the allowed set, reclaimAt below latestReclaimAt,
+ * expiry, policyNonce and compositionSchemaVersion. A mixed tier set hands the choice of release authority to the
+ * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
+ * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
+ * These choices are not waivers and do not appear in unchecked.
+ */
 export interface PreparedFunding {
   /** A frozen copy of the caller's independent intent, captured before any RPC call. */
   readonly expect: Readonly<FundingExpectations>;

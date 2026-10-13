@@ -14,13 +14,20 @@
  * PAYER_TX_PENDING, sending nothing, while the payer still has a transaction pending.
  *
  * A gateway (or anything else) never gets the buyer's key: the SDK signs and sends from the caller's own wallet,
- * and only after verifying every term. There is no x402 path: x402 cannot fund a V-next escrow (plan G10).
+ * and only after verifying the payload against caller intent and trusted pins. There is no x402 path: x402 cannot
+ * fund a V-next escrow (plan G10).
  * Fix expect in your own submit record, operator choice and payee list before requesting the prepare payload.
  * PCC MVP units bind termsHash, acceptedPolicyDigest and compositionRoots exactly (or bind jobPolicyHash, which
  * commits to everything), and must not waive them. Trusted values come from the caller's own trusted record
  * (N150's canonical funded policy or the CANONICAL record), held like the pins, never copied from the payload or
  * any gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
  * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.
+ * Unless jobPolicyHash is bound, the payload's author still chooses the unit count, each unit's g, milestoneIndex
+ * and stepId, the split among payees, each unit's tier within the allowed set, reclaimAt below latestReclaimAt,
+ * expiry, policyNonce and compositionSchemaVersion. A mixed tier set hands the choice of release authority to the
+ * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
+ * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
+ * These choices are not waivers and do not appear in prepared.unchecked.
  * Every pin, especially the factory, must come from the caller's own trusted configuration,
  * never from the gateway payload or any gateway response.
  */
