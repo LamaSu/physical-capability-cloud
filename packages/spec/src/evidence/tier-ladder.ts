@@ -296,12 +296,16 @@ export async function compileTierLadder(csd: CSD): Promise<TierLadderV1> {
 /**
  * Ladder commitments pinned by capability contract id, so a funded policy and
  * the oracle's service-pinned ladder can be checked against one public value.
- * Each is reproduced from the bundled CSD by tier-ladder.test.ts, and the full
- * ladders are in tier-ladder.vectors.json.
+ * The DPM and Thursday PRINT unit's print-leg ladders are reproduced from the
+ * bundled CSDs by tier-ladder.test.ts and mvp-print-leg.test.ts. Their full
+ * ladders are in tier-ladder.vectors.json; the print-leg pin serves the oracle
+ * and the host.
  */
 export const PINNED_TIER_LADDER_DIGESTS: Readonly<Record<string, `0x${string}`>> = deepFreeze({
   "pcc://capabilities/document-print-and-mail/v1":
     "0xe9cf2a2f9f6dcc355a5c71cd503b7598c0cbf1b58429e452adfafe6cf0fe0560",
+  "pcc://capabilities/document-print-leg/v1":
+    "0x8d353c7ce7a41e60c1e6167ccd7a7fe0f66d7d031c3c8db45127b2c53b0cf14b",
 });
 
 function hasFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {

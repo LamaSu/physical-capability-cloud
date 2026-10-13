@@ -278,6 +278,61 @@
           }
         ]
       }
+    },
+    {
+      "csd": "csds/document-print-leg.csd.json",
+      "ladderDigest": "0x8d353c7ce7a41e60c1e6167ccd7a7fe0f66d7d031c3c8db45127b2c53b0cf14b",
+      "ladder": {
+        "version": 1,
+        "schemaHash": "tier-ladder/v1",
+        "capabilityContractId": "pcc://capabilities/document-print-leg/v1",
+        "capabilityContractDigest": "sha256:e24f691b9dbe5fcb519782cc0d57ddfca2439f9d5841b76b5636cc6138e3d837",
+        "tiers": [
+          {
+            "tier": 0,
+            "description": "The authenticated floor (evidence Q-E1): the operator's committed package declares the job (decl.self_attested), the bundle is signed by the unit's session key under the funded device key with every event bound to the unit and its challenge nonce, and the print started (execution_started). Tier 0 never releases on chain (Tier0NotEvidence); it gives a failed print a signed verdict.",
+            "requiredEventTypes": [
+              [
+                "execution_started"
+              ]
+            ],
+            "minimumEvents": 1,
+            "nonEventRequirements": [],
+            "primitives": [
+              {
+                "id": "decl.self_attested",
+                "bind": null,
+                "supporting": false,
+                "params": null
+              }
+            ]
+          },
+          {
+            "tier": 1,
+            "description": "The print-leg release tier: tier 0 plus the kernel-signed success receipt (execution_completed, receipt.kernel_signed). The committed program also requires execution_failed to be absent and no simulated event; event absence is a program predicate, never a CSD binding.",
+            "requiredEventTypes": [
+              [
+                "execution_completed"
+              ],
+              [
+                "execution_started"
+              ]
+            ],
+            "minimumEvents": 2,
+            "nonEventRequirements": [],
+            "primitives": [
+              {
+                "id": "receipt.kernel_signed",
+                "bind": "execution_completed",
+                "supporting": false,
+                "params": {
+                  "capability": "document-printing"
+                }
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }
