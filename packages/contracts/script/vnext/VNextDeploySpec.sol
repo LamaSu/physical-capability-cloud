@@ -37,7 +37,8 @@ library VNextDeploySpec {
     string internal constant NAMESPACE = "pcc.vnext.settlement";
     /// @notice Deploy-spec revision. Bump ONLY to deliberately re-address a cohort; it is inside every
     ///         salt, so a bump is the sanctioned way to publish a second, non-conflicting deployment.
-    uint256 internal constant SPEC_VERSION = 1;
+    /// @dev Revision 2 binds the compiled settlement schedule into the deployment-record digest.
+    uint256 internal constant SPEC_VERSION = 2;
 
     // ── Modes ───────────────────────────────────────────────────────────────────────────────────────
     /// @notice The canonical, pinnable deployment. One per (chainId, SPEC_VERSION).

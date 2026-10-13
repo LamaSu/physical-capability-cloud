@@ -39,10 +39,11 @@ contract VNextScheduleTest is Test {
             assertEq(SCHEDULE_ID, bytes32("vnext-mainnet-v1"), "mainnet schedule identity");
         } else if (expectedHash == keccak256("testnet")) {
             assertEq(VNextSettlementLib.CHALLENGE_WINDOW, 600, "testnet challenge window");
-            assertEq(VNextSettlementLib.APPEAL_WINDOW, 600, "testnet appeal window");
+            // Mainnet's 2:5 ordering is retained; reclaim includes the unchanged 30-minute work margin.
+            assertEq(VNextSettlementLib.APPEAL_WINDOW, 1500, "testnet appeal window");
             assertEq(VNextSettlementLib.BACKUP_WINDOW, 600, "testnet backup window");
-            assertEq(VNextSettlementLib.EMERGENCY_REVIEW_WINDOW, 600, "testnet emergency review window");
-            assertEq(VNextSettlementLib.MIN_RECLAIM_DELAY, 3600, "testnet minimum reclaim delay");
+            assertEq(VNextSettlementLib.EMERGENCY_REVIEW_WINDOW, 1500, "testnet emergency review window");
+            assertEq(VNextSettlementLib.MIN_RECLAIM_DELAY, 4500, "testnet minimum reclaim delay");
             assertTrue(SCHEDULE_IS_TESTNET, "testnet schedule marker");
             assertEq(SCHEDULE_ID, bytes32("vnext-testnet-short-v1"), "testnet schedule identity");
         } else {

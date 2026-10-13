@@ -233,15 +233,14 @@ contract DeployVNextSettlement is Script {
         address escalationAttester;
         address usdc;
         /// @dev GATE 4's subject: the provenance registry BOTH cohorts mirror into, read from the attesters
-        ///      themselves. Recorded in the artifact but deliberately NOT added to {_digest}'s fifteen-word
-        ///      preimage — adding a word would silently re-address every digest published to date, and the
-        ///      field needs no digest protection because {_verify} re-derives it from chain state anyway.
+        ///      themselves. Recorded in the artifact but deliberately NOT added to {_digest}'s preimage:
+        ///      {_verify} re-derives it from chain state. Revision 2 extends that preimage only with the schedule.
         address eas;
         bytes32 schemaUid;
         bytes32 typeHash;
         uint64 primaryCohortId;
         uint64 escalationCohortId;
-        // ── Deploy-gate results. Diagnostics, deliberately OUTSIDE {_digest}'s fifteen-word preimage. ──
+        // ── Deploy-gate results. Diagnostics, deliberately OUTSIDE {_digest}'s preimage. ───────────────
         //    They are not signed into the digest because they do not need to be: {verify} RE-DERIVES and
         //    RE-ENFORCES both gates from chain state, so a doctored artifact field is contradicted by the
         //    next `--sig 'verify(address)'` run rather than merely mismatching a hash. Adding them to the
@@ -1239,11 +1238,24 @@ contract DeployVNextSettlement is Script {
         _assertRecordRootContained(_recordRoot());
         string memory path = _artifactPath(i);
         if (!vm.exists(path)) return;
-        address recorded = vm.parseJsonAddress(vm.readFile(path), ".factory");
+        string memory record = vm.readFile(path);
+        address recorded = vm.parseJsonAddress(record, ".factory");
         require(
             recorded == predictedFactory,
             "an artifact already records a DIFFERENT factory for this mode/chain/label - inputs changed. "
             "Bump VNextDeploySpec.SPEC_VERSION (or use a new VNEXT_LABEL) to publish deliberately."
+        );
+        // A factory match alone must not let a modified record claim a different build-time schedule.
+        require(
+            keccak256(bytes(vm.parseJsonString(record, ".scheduleId"))) == keccak256(bytes(_scheduleIdString()))
+                && vm.parseJsonBool(record, ".scheduleTestnetOnly") == SCHEDULE_IS_TESTNET
+                && vm.parseJsonUint(record, ".challengeWindowSec") == VNextSettlementLib.CHALLENGE_WINDOW
+                && vm.parseJsonUint(record, ".appealWindowSec") == VNextSettlementLib.APPEAL_WINDOW
+                && vm.parseJsonUint(record, ".backupWindowSec") == VNextSettlementLib.BACKUP_WINDOW
+                && vm.parseJsonUint(record, ".emergencyReviewWindowSec") == VNextSettlementLib.EMERGENCY_REVIEW_WINDOW
+                && vm.parseJsonUint(record, ".minReclaimDelaySec") == VNextSettlementLib.MIN_RECLAIM_DELAY
+                && vm.parseJsonUint(record, ".maxReclaimDelaySec") == VNextSettlementLib.MAX_RECLAIM_DELAY,
+            "recorded settlement schedule != this build"
         );
     }
 
@@ -1339,6 +1351,15 @@ contract DeployVNextSettlement is Script {
         vm.serializeUint(j, "chainId", block.chainid);
         vm.serializeUint(j, "specVersion", VNextDeploySpec.SPEC_VERSION);
         vm.serializeUint(j, "blockNumber", block.number);
+        // State THIS build's money-path schedule, including the short-window demo restriction.
+        vm.serializeString(j, "scheduleId", _scheduleIdString());
+        vm.serializeBool(j, "scheduleTestnetOnly", SCHEDULE_IS_TESTNET);
+        vm.serializeUint(j, "challengeWindowSec", VNextSettlementLib.CHALLENGE_WINDOW);
+        vm.serializeUint(j, "appealWindowSec", VNextSettlementLib.APPEAL_WINDOW);
+        vm.serializeUint(j, "backupWindowSec", VNextSettlementLib.BACKUP_WINDOW);
+        vm.serializeUint(j, "emergencyReviewWindowSec", VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        vm.serializeUint(j, "minReclaimDelaySec", VNextSettlementLib.MIN_RECLAIM_DELAY);
+        vm.serializeUint(j, "maxReclaimDelaySec", VNextSettlementLib.MAX_RECLAIM_DELAY);
         // A codehash is only meaningful relative to a build, so the build is part of the record.
         vm.serializeString(j, "solc", "0.8.24");
         vm.serializeString(j, "optimizer", "enabled, runs=200");
@@ -1361,16 +1382,20 @@ contract DeployVNextSettlement is Script {
 
     /// @notice Self-digest over the tuple. Cheap integrity for the FILE; the real tamper-evidence is
     ///         {verify}, which re-derives every field from chain state and needs no digest at all.
-    /// @dev    PREIMAGE, so an off-chain consumer can reproduce it: fifteen 32-byte STATIC words, in this
-    ///         order, ABI-encoded and hashed —
+    /// @dev    SPEC_VERSION 2 PREIMAGE, so an off-chain consumer can reproduce it: twenty-three 32-byte
+    ///         STATIC words, in this order, ABI-encoded and hashed —
     ///           keccak256(NAMESPACE), SPEC_VERSION, chainId, factory, implementation, library,
     ///           implementationCodehash, libraryCodehash, primaryAttester, escalationAttester, usdc,
-    ///           o5SchemaUid, o5TypeHash, primaryCohortId, escalationCohortId.
+    ///           o5SchemaUid, o5TypeHash, primaryCohortId, escalationCohortId,
+    ///           keccak256(bytes(scheduleId)), scheduleTestnetOnly, challengeWindowSec, appealWindowSec, backupWindowSec,
+    ///           emergencyReviewWindowSec, minReclaimDelaySec, maxReclaimDelaySec.
+    ///         Hash the exact unpadded scheduleId string, encode the testnet flag as bool, and encode each
+    ///         duration as uint256. Editing any schedule field changes the digest, including string padding.
     ///         The namespace is HASHED rather than embedded so every word is static — which is what lets
-    ///         the encoding be split across two `abi.encode` calls without changing the result. The split
+    ///         the encoding be split across three `abi.encode` calls without changing the result. The split
     ///         itself is the stack-too-deep remedy the factory already uses for the same reason
     ///         (`VNextSettlementEscrowFactory.sol:293-319`): with all-static members,
-    ///         `bytes.concat(abi.encode(a..h), abi.encode(i..o))` is byte-identical to `abi.encode(a..o)`.
+    ///         `bytes.concat(abi.encode(a..h), abi.encode(i..o), abi.encode(p..w))` is byte-identical to `abi.encode(a..w)`.
     function _digest(Tuple memory t) internal view returns (bytes32) {
         return keccak256(
             bytes.concat(
@@ -1392,9 +1417,30 @@ contract DeployVNextSettlement is Script {
                     t.typeHash,
                     t.primaryCohortId,
                     t.escalationCohortId
+                ),
+                abi.encode(
+                    keccak256(bytes(_scheduleIdString())),
+                    SCHEDULE_IS_TESTNET,
+                    VNextSettlementLib.CHALLENGE_WINDOW,
+                    VNextSettlementLib.APPEAL_WINDOW,
+                    VNextSettlementLib.BACKUP_WINDOW,
+                    VNextSettlementLib.EMERGENCY_REVIEW_WINDOW,
+                    VNextSettlementLib.MIN_RECLAIM_DELAY,
+                    VNextSettlementLib.MAX_RECLAIM_DELAY
                 )
             )
         );
+    }
+
+    /// @dev SCHEDULE_ID is a bytes32 constant; the JSON record and its digest use the unpadded string.
+    function _scheduleIdString() internal pure returns (string memory) {
+        uint256 length = 32;
+        while (length > 0 && SCHEDULE_ID[length - 1] == bytes1(0)) --length;
+        bytes memory id = new bytes(length);
+        for (uint256 k; k < length; ++k) {
+            id[k] = SCHEDULE_ID[k];
+        }
+        return string(id);
     }
 
     // ════════════════════════════════════════════════════════════════════════════════════════════════

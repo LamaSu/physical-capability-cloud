@@ -4,6 +4,8 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {DeployVNextSettlement} from "../script/DeployVNextSettlement.s.sol";
 import {VNextDeploySpec} from "../script/vnext/VNextDeploySpec.sol";
+import {VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
+import {SCHEDULE_ID, SCHEDULE_IS_TESTNET} from "vnext-schedule/VNextSchedule.sol";
 
 /**
  * @title VNextDeployRecordTest
@@ -96,6 +98,84 @@ contract VNextDeployRecordTest is Test {
         string memory path = _writeRecord(VNextDeploySpec.MODE_PROVISIONAL, label, FACTORY_A);
         _assertGuardAborts(VNextDeploySpec.MODE_PROVISIONAL, label, FACTORY_B, RIVAL);
         _clear(path);
+    }
+
+    /// @notice Exercises the actual canonical writer, including its asset and provenance gates, in either build.
+    /// @dev Forge's test context writes DRYRUN-CANONICAL.json. A disposable contained root keeps both real and
+    ///      existing dry-run records untouched; the assertions inspect JSON read back from the writer's file.
+    function test_Record_WriterScheduleMatchesCompiledBuild() public {
+        (string memory root, string memory path, string memory record) = _writeCanonicalFixture("schedule-fields");
+        _clearCanonicalFixture(root, path);
+        string memory scheduleId = vm.parseJsonString(record, ".scheduleId");
+        assertEq(_paddedScheduleId(scheduleId), SCHEDULE_ID, "record schedule identity != compiled schedule");
+        uint256 expectedLength = 32;
+        while (expectedLength != 0 && SCHEDULE_ID[expectedLength - 1] == 0) --expectedLength;
+        assertEq(bytes(scheduleId).length, expectedLength, "record schedule identity has trailing zero bytes");
+        assertEq(vm.parseJsonBool(record, ".scheduleTestnetOnly"), SCHEDULE_IS_TESTNET, "record schedule marker");
+        assertEq(vm.parseJsonUint(record, ".challengeWindowSec"), VNextSettlementLib.CHALLENGE_WINDOW);
+        assertEq(vm.parseJsonUint(record, ".appealWindowSec"), VNextSettlementLib.APPEAL_WINDOW);
+        assertEq(vm.parseJsonUint(record, ".backupWindowSec"), VNextSettlementLib.BACKUP_WINDOW);
+        assertEq(vm.parseJsonUint(record, ".emergencyReviewWindowSec"), VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        assertEq(vm.parseJsonUint(record, ".minReclaimDelaySec"), VNextSettlementLib.MIN_RECLAIM_DELAY);
+        assertEq(vm.parseJsonUint(record, ".maxReclaimDelaySec"), VNextSettlementLib.MAX_RECLAIM_DELAY);
+        assertEq(vm.parseJsonUint(record, ".specVersion"), VNextDeploySpec.SPEC_VERSION);
+        assertEq(vm.parseJsonString(record, ".mode"), "CANONICAL");
+        assertEq(vm.parseJsonString(record, ".label"), "");
+        assertTrue(vm.parseJsonBool(record, ".canonical"));
+        assertFalse(vm.parseJsonBool(record, ".doNotPin"));
+        assertEq(vm.parseJsonUint(record, ".chainId"), 84532);
+        if (SCHEDULE_IS_TESTNET) {
+            assertEq(scheduleId, "vnext-testnet-short-v1");
+            assertTrue(vm.parseJsonBool(record, ".scheduleTestnetOnly"));
+            assertEq(vm.parseJsonUint(record, ".challengeWindowSec"), 600);
+            assertEq(vm.parseJsonUint(record, ".appealWindowSec"), 1500);
+            assertEq(vm.parseJsonUint(record, ".backupWindowSec"), 600);
+            assertEq(vm.parseJsonUint(record, ".emergencyReviewWindowSec"), 1500);
+            assertEq(vm.parseJsonUint(record, ".minReclaimDelaySec"), 4500);
+            assertEq(vm.parseJsonUint(record, ".maxReclaimDelaySec"), 31536000);
+        }
+    }
+
+    /// @notice An off-chain reader can reproduce the digest using only the serialized record and namespace.
+    function test_Record_WriterDigestReproducedFromJson() public {
+        (string memory root, string memory path, string memory record) = _writeCanonicalFixture("digest-roundtrip");
+        _clearCanonicalFixture(root, path);
+        assertEq(_recordDigest(record), vm.parseJsonBytes32(record, ".digest"), "serialized record digest mismatch");
+    }
+
+    /// @notice Editing any one schedule field makes the independent record digest disagree with the writer's.
+    function test_Record_DigestBindsEveryScheduleField() public {
+        (string memory root, string memory path, string memory record) = _writeCanonicalFixture("digest-tampering");
+        _clearCanonicalFixture(root, path);
+        bytes32 publishedDigest = vm.parseJsonBytes32(record, ".digest");
+        string[8] memory fields = _scheduleFields();
+        for (uint256 k; k < fields.length; ++k) {
+            string memory edited = _editScheduleField(record, fields[k], k);
+            assertNotEq(_recordDigest(edited), publishedDigest, string.concat("digest did not bind ", fields[k]));
+        }
+        vm.serializeJson("edited-scheduleId-nul", record);
+        string memory withNul = vm.serializeString(
+            "edited-scheduleId-nul",
+            "scheduleId",
+            string.concat(vm.parseJsonString(record, ".scheduleId"), string(hex"00"))
+        );
+        assertNotEq(_recordDigest(withNul), publishedDigest, "digest did not bind a trailing NUL in scheduleId");
+    }
+
+    /// @notice A matching factory does not let a rival record claim a different compiled schedule.
+    function test_Record_GuardRefusesEveryEditedScheduleField() public {
+        (string memory root, string memory path, string memory record) = _writeCanonicalFixture("guard-tampering");
+        _assertGuardPasses(VNextDeploySpec.MODE_CANONICAL, "", FACTORY_A);
+        string[8] memory fields = _scheduleFields();
+        for (uint256 k; k < fields.length; ++k) {
+            string memory edited = _editScheduleField(record, fields[k], k);
+            harness.assertRecordRootContained(root);
+            vm.writeFile(path, edited);
+            _assertGuardAborts(
+                VNextDeploySpec.MODE_CANONICAL, "", FACTORY_A, "recorded settlement schedule != this build"
+            );
+        }
+        _clearCanonicalFixture(root, path);
     }
 
     // ── 3-4. paths ───────────────────────────────────────────────────────────────────────────────
@@ -402,7 +482,108 @@ contract VNextDeployRecordTest is Test {
         harness.assertRecordRootContained(harness.recordRoot());
         path = harness.artifactPath(mode, label);
         vm.createDir(string.concat(harness.recordRoot(), "/", VNextDeploySpec.networkSlug(block.chainid)), true);
-        vm.writeFile(path, string.concat('{"factory":"', vm.toString(factory), '"}'));
+        string memory objectKey = "guard-fixture";
+        vm.serializeAddress(objectKey, "factory", factory);
+        vm.serializeString(objectKey, "scheduleId", harness.scheduleIdString());
+        vm.serializeBool(objectKey, "scheduleTestnetOnly", SCHEDULE_IS_TESTNET);
+        vm.serializeUint(objectKey, "challengeWindowSec", VNextSettlementLib.CHALLENGE_WINDOW);
+        vm.serializeUint(objectKey, "appealWindowSec", VNextSettlementLib.APPEAL_WINDOW);
+        vm.serializeUint(objectKey, "backupWindowSec", VNextSettlementLib.BACKUP_WINDOW);
+        vm.serializeUint(objectKey, "emergencyReviewWindowSec", VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        vm.serializeUint(objectKey, "minReclaimDelaySec", VNextSettlementLib.MIN_RECLAIM_DELAY);
+        string memory record = vm.serializeUint(objectKey, "maxReclaimDelaySec", VNextSettlementLib.MAX_RECLAIM_DELAY);
+        vm.writeFile(path, record);
+    }
+
+    function _writeCanonicalFixture(string memory suffix)
+        internal
+        returns (string memory root, string memory path, string memory record)
+    {
+        vm.chainId(84532);
+        vm.etch(VNextDeploySpec.USDC_BASE_SEPOLIA, hex"00");
+        vm.etch(VNextDeploySpec.EAS, hex"00");
+        vm.etch(VNextDeploySpec.EAS_SCHEMA_REGISTRY, hex"00");
+        root = string.concat("deployments/vnext/.n150-", suffix);
+        // Check the real root before creating a child, and the disposable root before every subsequent write.
+        harness.assertRecordRootContained("deployments/vnext");
+        assertFalse(vm.exists(root), "a disposable record root from an earlier run still exists");
+        vm.createDir(root, false);
+        harness.setRecordRoot(root);
+        harness.assertRecordRootContained(root);
+        harness.writeArtifactCanonical();
+        path = harness.artifactPath(VNextDeploySpec.MODE_CANONICAL, "");
+        record = vm.readFile(path);
+    }
+
+    function _clearCanonicalFixture(string memory root, string memory path) internal {
+        _clear(path);
+        harness.assertRecordRootContained(root);
+        vm.removeDir(root, true);
+    }
+
+    function _scheduleFields() internal pure returns (string[8] memory) {
+        return [
+            "scheduleId",
+            "scheduleTestnetOnly",
+            "challengeWindowSec",
+            "appealWindowSec",
+            "backupWindowSec",
+            "emergencyReviewWindowSec",
+            "minReclaimDelaySec",
+            "maxReclaimDelaySec"
+        ];
+    }
+
+    function _editScheduleField(string memory record, string memory field, uint256 index)
+        internal
+        returns (string memory)
+    {
+        string memory objectKey = string.concat("edited-", field);
+        vm.serializeJson(objectKey, record);
+        if (index == 0) return vm.serializeString(objectKey, field, "vnext-edited-v1");
+        if (index == 1) {
+            return vm.serializeBool(objectKey, field, !vm.parseJsonBool(record, string.concat(".", field)));
+        }
+        return vm.serializeUint(objectKey, field, vm.parseJsonUint(record, string.concat(".", field)) + 1);
+    }
+
+    /// @dev JSON readers encode SPEC_VERSION 2's twenty-three static words. This uses a fixed array and reads
+    ///      all variable data from the record rather than calling the script's digest or reading build constants.
+    ///      The identifier word hashes the exact UTF-8 string; addresses, booleans and uints are left-padded.
+    function _recordDigest(string memory record) internal pure returns (bytes32) {
+        bytes32[23] memory words;
+        words[0] = keccak256(bytes(VNextDeploySpec.NAMESPACE));
+        words[1] = bytes32(vm.parseJsonUint(record, ".specVersion"));
+        words[2] = bytes32(vm.parseJsonUint(record, ".chainId"));
+        words[3] = bytes32(uint256(uint160(vm.parseJsonAddress(record, ".factory"))));
+        words[4] = bytes32(uint256(uint160(vm.parseJsonAddress(record, ".implementation"))));
+        words[5] = bytes32(uint256(uint160(vm.parseJsonAddress(record, ".library"))));
+        words[6] = vm.parseJsonBytes32(record, ".implementationCodehash");
+        words[7] = vm.parseJsonBytes32(record, ".libraryCodehash");
+        words[8] = bytes32(uint256(uint160(vm.parseJsonAddress(record, ".primaryAttester"))));
+        words[9] = bytes32(uint256(uint160(vm.parseJsonAddress(record, ".escalationAttester"))));
+        words[10] = bytes32(uint256(uint160(vm.parseJsonAddress(record, ".usdc"))));
+        words[11] = vm.parseJsonBytes32(record, ".o5SchemaUid");
+        words[12] = vm.parseJsonBytes32(record, ".o5TypeHash");
+        words[13] = bytes32(vm.parseJsonUint(record, ".primaryCohortId"));
+        words[14] = bytes32(vm.parseJsonUint(record, ".escalationCohortId"));
+        words[15] = keccak256(bytes(vm.parseJsonString(record, ".scheduleId")));
+        words[16] = bytes32(uint256(vm.parseJsonBool(record, ".scheduleTestnetOnly") ? 1 : 0));
+        words[17] = bytes32(vm.parseJsonUint(record, ".challengeWindowSec"));
+        words[18] = bytes32(vm.parseJsonUint(record, ".appealWindowSec"));
+        words[19] = bytes32(vm.parseJsonUint(record, ".backupWindowSec"));
+        words[20] = bytes32(vm.parseJsonUint(record, ".emergencyReviewWindowSec"));
+        words[21] = bytes32(vm.parseJsonUint(record, ".minReclaimDelaySec"));
+        words[22] = bytes32(vm.parseJsonUint(record, ".maxReclaimDelaySec"));
+        return keccak256(abi.encode(words));
+    }
+
+    function _paddedScheduleId(string memory scheduleId) internal pure returns (bytes32 padded) {
+        bytes memory value = bytes(scheduleId);
+        require(value.length <= 32, "schedule identity exceeds bytes32");
+        for (uint256 k; k < value.length; ++k) {
+            padded |= bytes32(uint256(uint8(value[k])) << (248 - 8 * k));
+        }
     }
 
     function _clear(string memory path) internal {
@@ -541,6 +722,38 @@ contract DeployRecordHarness is DeployVNextSettlement {
         i.label = label;
         Tuple memory t;
         _writeArtifact(i, t);
+    }
+
+    /// @dev Nonzero dummy tuple for the actual writer; pinned registries are etched by the fixture test.
+    function writeArtifactCanonical() external {
+        Inputs memory i;
+        i.mode = VNextDeploySpec.MODE_CANONICAL;
+        i.label = "";
+        Tuple memory t;
+        t.factory = address(0xFAC701);
+        t.implementation = address(0x1111);
+        t.settlementLib = address(0x2222);
+        t.implementationCodehash = keccak256("fixture implementation");
+        t.libraryCodehash = keccak256("fixture library");
+        t.primaryAttester = address(0x3333);
+        t.escalationAttester = address(0x4444);
+        t.usdc = VNextDeploySpec.USDC_BASE_SEPOLIA;
+        t.eas = VNextDeploySpec.EAS;
+        t.schemaUid = keccak256("fixture O5 schema");
+        t.typeHash = keccak256("fixture O5 type");
+        t.primaryCohortId = 100;
+        t.escalationCohortId = 101;
+        t.signerOverlap = 0;
+        t.quorumFloor = 2;
+        t.primaryEnabled = true;
+        t.escalationEnabled = true;
+        t.primaryDisabledAt = 0;
+        t.escalationDisabledAt = 0;
+        _writeArtifact(i, t);
+    }
+
+    function scheduleIdString() external pure returns (string memory) {
+        return _scheduleIdString();
     }
 
     function removeFile(string calldata path) external {
