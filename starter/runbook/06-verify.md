@@ -58,7 +58,7 @@ bin/pcc-report verify blocked "the stop read STOPPED then CLEAR and the device s
 The test job runs as in section 3 once the gateway offers a server-enforced queue-only submission (a gateway row). Then check, before running it: the submission answered `"status": "queued"` with no `deviceId`, and `GET $BASE/api/jobs/<jobId>/settlement` shows `"session": null` and `"escrow": null`.
 
 ## 3. Run it the way the operating loop will (phase 7), once, by hand
-Only once a queue-only test submission exists (section 2). Every step either passes, or refuses **without touching the device**.
+Only once a queue-only test submission exists (section 2). `POST /api/operator/evidence` requires `decide` authority (DECISIONS 2026-10-04 01:25, N31c). Every step either passes, or refuses **without touching the device**.
 1. **See the job:** `curl -s "$BASE/api/operator/jobs?kernelId=$KID" -H @.pcc/auth.header`.
 2. **Resolve its parameters.** For a test job, they are the ones you sent with its submission. A buyer's job carries none on the current gateway (board G6): they sit in the job's negotiation session (`GET $BASE/api/jobs/<jobId>/settlement` gives `session.id`, then `GET $BASE/api/negotiate/session/<sessionId>` gives the `selections`), and phase 7 does not run buyers' jobs yet.
 3. **Re-check the envelope's confirmation, then type-check and envelope-check the parameters.**
@@ -67,9 +67,9 @@ Only once a queue-only test submission exists (section 2). Every step either pas
 4. **Check the device is idle:** `curl -s $DEV/status` shows `idle`. `busy` or `estopped` means don't run.
 5. **Read the stop, then run.** Read the stop (section 1's check) immediately before the run: anything but `CLEAR` means don't run. Then set status `in_progress`, and `POST $DEV/runs` with exactly the checked parameters. Poll `GET $DEV/runs/<runId>` until it is `succeeded`, `failed` or `stopped`, and save that last answer as `.pcc/run.json`. Then fetch `GET $DEV/runs/<runId>/log`.
 6. **Finish, the node's way:** evidence first. Then send the final status that the code below computes, never one you type. It is `completed` only for a run that `succeeded` whose evidence receipt says `"stored": true` for this `jobId` with a non-empty `bundleId`. Anything else is `failed`, with the reasons.
+
+Evidence is posted with the kernel's proven operator wallet authority (`decide`). Save its receipt as `.pcc/evidence-receipt.json`; `.pcc/evidence.json` holds `{jobId, kernelId, evidence: {run, readings, log, bundleHash}}` for the check below.
 ```bash
-curl -s -X POST "$BASE/api/operator/evidence" -H @.pcc/auth.header -H 'Content-Type: application/json' \
-  -d @.pcc/evidence.json > .pcc/evidence-receipt.json        # .pcc/evidence.json: {jobId, kernelId, evidence: {run, readings, log, bundleHash}}
 python3 - <<'EOF' > .pcc/final-status.json
 import json
 job = json.load(open(".pcc/evidence.json"))["jobId"]

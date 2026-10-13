@@ -13,6 +13,8 @@ import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { jobRoutes } from "../routes/jobs.js";
 import { kernelRoutes } from "../routes/kernels.js";
 import { initStore, closeStore, getRepos } from "../db.js";
+import { provisionApiKey } from "../auth/api-key-auth.js";
+import { apiGate } from "../middleware/api-gate.js";
 import { canonicalize, hashBundle, hashEvent, sha256, type EvidenceEvent } from "@pcc/spec";
 
 /** A real device-signed (#236) evidence bundle in the wire form the node produces (hex Ed25519
@@ -47,6 +49,9 @@ function seededJob() {
   return job!;
 }
 const bundlesFor = (jobId: string) => getRepos().evidence.findByJob(jobId).length;
+const asDecidingOperator = () => ({
+  "x-test-proven-wallet": getRepos().kernels.findById("kernel-nyc")!.operatorAddress,
+});
 
 // ---------------------------------------------------------------------------
 // Test app builder
@@ -57,6 +62,18 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+  // Relay behavior tests act as the seeded kernel's recorded operator through real API-key
+  // authentication. Evidence requests explicitly simulate its proven wallet: DECISIONS
+  // 2026-10-04 01:25 (N31c) keeps evidence at decide until all three conditions hold.
+  // Authentication and kernel authority cases are covered by the N85 authority suite.
+  const operator = getRepos().kernels.findById("kernel-nyc")!.operatorAddress;
+  const { rawKey } = provisionApiKey({ operatorId: operator, name: "operator-relay-test", scopes: ["*"] });
+  app.addHook("onRequest", async (req) => {
+    req.headers.authorization ??= `Bearer ${rawKey}`;
+    const proven = req.headers["x-test-proven-wallet"];
+    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+  });
+  await app.register(apiGate);
   await app.register(kernelRoutes);
   await app.register(jobRoutes);
   await app.register(operatorRelayRoutes);
@@ -117,14 +134,14 @@ describe("Operator Relay Routes", () => {
       expect(body.error).toBe("kernelId query param required");
     });
 
-    it("returns empty jobs for unknown kernel", async () => {
+    it("refuses an unknown kernel to a non-admin operator", async () => {
       const res = await app.inject({
         method: "GET",
         url: "/api/operator/jobs?kernelId=kernel-unknown-xyz&status=queued",
       });
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
       const body = res.json();
-      expect(body.jobs).toEqual([]);
+      expect(body.error).toBe("kernel_not_found");
     });
 
     it("returns jobs for known kernel with status filter", async () => {
@@ -160,6 +177,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asDecidingOperator(),
         payload: { evidence: { printed: true } },
       });
       expect(res.statusCode).toBe(400);
@@ -171,6 +189,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asDecidingOperator(),
         payload: { jobId: "j-test" },
       });
       expect(res.statusCode).toBe(400);
@@ -182,6 +201,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asDecidingOperator(),
         payload: {
           jobId: "job-totally-unknown-12345",
           kernelId: "kernel-1",
@@ -202,6 +222,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asDecidingOperator(),
         payload: {
           jobId,
           kernelId,
@@ -230,6 +251,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asDecidingOperator(),
         payload: { jobId, kernelId, evidence: bundle, timestamp: Date.now() / 1000 },
       });
       expect(res.statusCode).toBe(200);
@@ -256,6 +278,7 @@ describe("Operator Relay Routes", () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/evidence",
+        headers: asDecidingOperator(),
         payload: { jobId, kernelId, evidence: { printed: true, returncode: 0 } },
       });
       expect(res.statusCode).toBe(422);
@@ -270,7 +293,7 @@ describe("Operator Relay Routes", () => {
       const job = seededJob();
       const before = bundlesFor(job.id);
       const evidence = { deviceId: "SIM-0001", run: { runId: "run-1", result: { readings: { A1: 0.412 } } } };
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
       expect(res.statusCode).toBe(422);
       expect(res.json()).toMatchObject({ error: "evidence_not_lo_ev", stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -285,7 +308,7 @@ describe("Operator Relay Routes", () => {
         throw new Error("injected insertEvents failure");
       });
       try {
-        const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
+        const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
         expect(res.json()).toMatchObject({ stored: false, error: "storage_failed" });
         expect(spy).toHaveBeenCalledTimes(1);
       } finally {
@@ -302,7 +325,7 @@ describe("Operator Relay Routes", () => {
         bundle: { events: [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: {} }] },
         bundleHash: `sha256:${"ab".repeat(32)}`,
       };
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence } });
       expect(res.statusCode).toBe(422);
       expect(res.json()).toMatchObject({ error: "ambiguous_envelope", stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -315,7 +338,7 @@ describe("Operator Relay Routes", () => {
         { type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: { ok: true, jobId: job.id } },
         { type: "cv_inspection_result", timestamp: "2026-09-29T22:35:02.000Z", source: src, payload: { passed: true, jobId: job.id } },
       ];
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(body).toMatchObject({ stored: true, hashModel: "event_bundle_hash", eventsStored: 2, signatureVerified: false });
@@ -332,7 +355,7 @@ describe("Operator Relay Routes", () => {
       const before = bundlesFor(job.id);
       const src = { deviceId: "reader-1", deviceType: "plate_reader", kernelId: job.kernelId };
       const events = [{ type: "execution_completed", timestamp: "2026-09-29T22:35:01.000Z", source: src, payload: {}, hash: `sha256:${"ab".repeat(32)}` }];
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { events } } });
       expect(res.statusCode).toBe(422);
       expect(res.json()).toMatchObject({ error: "event_hash_mismatch", eventIndex: 0, stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -341,7 +364,7 @@ describe("Operator Relay Routes", () => {
     it("NEGATIVE: evidence naming another kernel than the job's is refused with 409, and nothing is stored", async () => {
       const job = seededJob();
       const before = bundlesFor(job.id);
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: `${job.kernelId}-not-this-job`, evidence: { ok: true } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: `${job.kernelId}-not-this-job`, evidence: { ok: true } } });
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toBe("kernel_mismatch");
       expect(bundlesFor(job.id)).toBe(before);
@@ -372,7 +395,7 @@ describe("Operator Relay Routes", () => {
       const job = seededJob();
       const before = bundlesFor(job.id);
       const bundle = await signedDocument(`${job.id}-another-job`, job.kernelId!);
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({ error: "job_mismatch", stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -382,7 +405,7 @@ describe("Operator Relay Routes", () => {
       const job = seededJob();
       const before = bundlesFor(job.id);
       const bundle = await signedDocument(job.id, `${job.kernelId}-not-this-job`);
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({ error: "kernel_mismatch", stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -393,7 +416,7 @@ describe("Operator Relay Routes", () => {
       const before = bundlesFor(job.id);
       const bundle = await signedDocument(job.id, job.kernelId!);
       const edited = { ...bundle, record: { state: "completed", result: { wavelengthNm: 450, readings: { A1: 0.999 } } } };
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: edited } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: edited } } });
       expect(res.statusCode).toBe(422);
       expect(res.json()).toMatchObject({ error: "bundle_hash_mismatch", stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -404,7 +427,7 @@ describe("Operator Relay Routes", () => {
       const before = bundlesFor(job.id);
       const a = await signedDocument(`${job.id}-job-a`, job.kernelId!);
       const bare = { bundleHash: a.bundleHash, kernelSignature: a.kernelSignature };
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: bare } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: bare } } });
       expect(res.statusCode).toBe(422);
       expect(res.json()).toMatchObject({ stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -413,7 +436,7 @@ describe("Operator Relay Routes", () => {
     it("a signed document that names this job and kernel and reproduces its hash is stored as device_signed_document", async () => {
       const job = seededJob();
       const bundle = await signedDocument(job.id, job.kernelId!);
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle } } });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toMatchObject({ stored: true, hashModel: "device_signed_document", contentHash: bundle.bundleHash, deviceSigned: true, signatureVerified: false });
     });
@@ -424,7 +447,7 @@ describe("Operator Relay Routes", () => {
       const job = seededJob();
       const before = bundlesFor(job.id);
       const bundle = await realDeviceBundle(`${job.id}-another-job`, job.kernelId!);
-      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: { ...bundle, jobId: job.id } } } });
+      const res = await app.inject({ method: "POST", url: "/api/operator/evidence", headers: asDecidingOperator(), payload: { jobId: job.id, kernelId: job.kernelId, evidence: { bundle: { ...bundle, jobId: job.id } } } });
       expect(res.statusCode).toBe(409);
       expect(res.json()).toMatchObject({ error: "job_mismatch", stored: false });
       expect(bundlesFor(job.id)).toBe(before);
@@ -486,7 +509,7 @@ describe("Operator Relay Routes", () => {
       expect(body.capabilitiesReceived).toBe(2);
     });
 
-    it("accepts unknown kernel gracefully (no 404)", async () => {
+    it("refuses a heartbeat before the kernel is registered", async () => {
       const res = await app.inject({
         method: "POST",
         url: "/api/operator/heartbeat",
@@ -495,8 +518,8 @@ describe("Operator Relay Routes", () => {
           status: "online",
         },
       });
-      // Should not 404 — pcc-node may heartbeat before registration
-      expect(res.statusCode).toBe(200);
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error).toBe("kernel_not_found");
     });
   });
 

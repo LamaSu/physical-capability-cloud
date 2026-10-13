@@ -4582,7 +4582,7 @@
     },
     {
       "name": "operator_poll_jobs",
-      "description": "Operator polls for pending jobs assigned to their kernel. Returns queued jobs ready for execution. The pcc-node 0.1.1 daemon does not call it: it takes no jobs.",
+      "description": "Operator polls jobs assigned to their kernel; status defaults to queued, and the route can filter any status. Requires operate authority for this kernel: its recorded operator identity (the caller that registered it), its proven operator wallet, or the gateway admin authority. Another identity gets 403; no credentials gets 401; an unregistered kernel gets 404 for a non-admin. Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138). The pcc-node 0.1.1 daemon does not call it: it takes no jobs.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4602,7 +4602,7 @@
     },
     {
       "name": "operator_push_evidence",
-      "description": "Operator pushes evidence bundle from a completed job execution. Contains device ID, execution timestamp, result payload, and event timeline. Success is a receipt with stored: true naming this jobId. HTTP 200 with stored: false means nothing was stored: never follow it with status completed.",
+      "description": "Operator pushes evidence bundle from a completed job execution. Requires decide authority for the stored job's kernel: its proven operator wallet or the gateway admin authority. A matching claimed operator key gets 403 operator_proof_required. Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c). Evidence is posted with the kernel's proven operator wallet authority (decide). The body's kernelId cannot choose the authorization target. No credentials gets 401 before the job read; a job without a kernel gets 403 for a non-admin. Contains device ID, execution timestamp, result payload, and event timeline. Success is a receipt with stored: true naming this jobId. HTTP 200 with stored: false means nothing was stored: never follow it with status completed.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4629,7 +4629,7 @@
     },
     {
       "name": "operator_heartbeat",
-      "description": "Operator sends heartbeat with capability re-announcement. Keeps the kernel alive on the network and updates available capabilities.",
+      "description": "Operator sends heartbeat with capability re-announcement. Keeps the kernel alive on the network and updates its own capability rows. Requires operate authority for this kernel: its recorded operator identity (the caller that registered it), its proven operator wallet, or the gateway admin authority. Another identity gets 403; no credentials gets 401; an unregistered kernel gets 404 for a non-admin. Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4654,7 +4654,7 @@
     },
     {
       "name": "operator_update_job_status",
-      "description": "Operator reports a job's status (in_progress, completed, failed). The node path finishes a job in two calls: submit its evidence (POST /api/operator/evidence; pcc-node does this), and only if that receipt says stored: true for this jobId, set status completed here. HTTP 200 alone is not enough: the relay answers 200 with stored: false when it could not store the evidence (an unknown job, a storage failure); then set failed with the reason evidence_not_stored. On the current gateway, completed marks the job done and its timeline then says settled, but the escrow is not released yet (board G1). Do not call pcc_job_complete after this: it answers 409.",
+      "description": "Operator reports a job's status (in_progress, completed, failed). Requires operate authority for the stored job's kernel: its recorded operator identity (the caller that registered it), its proven operator wallet, or the gateway admin authority. The body's kernelId cannot choose the authorization target. Another identity gets 403; no credentials gets 401 before the job read; a job without a kernel gets 403 for a non-admin. Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138). The node path finishes a job in two calls: submit its evidence (POST /api/operator/evidence, posted with the kernel's proven operator wallet authority, decide), and only if that receipt says stored: true for this jobId, set status completed here. HTTP 200 alone is not enough: the relay answers 200 with stored: false when it could not store the evidence (an unknown job, a storage failure); then set failed with the reason evidence_not_stored. On the current gateway, completed marks the job done and its timeline then says settled, but the escrow is not released yet (board G1). Do not call pcc_job_complete after this: it answers 409.",
       "input_schema": {
         "type": "object",
         "properties": {
