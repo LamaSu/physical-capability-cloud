@@ -329,12 +329,14 @@ The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803)
    big-endian uint64 UTF-8 byte length, then JCS(body). The package digest is
    SHA-256(JCS({body, signatures})), after lowercase-signer, first-wins
    deduplication and sorting as the oracle contract specifies.
+   Before signing, it checks the block's unit-context digest against the body's
+   unit binding and challenge nonce, rejecting a mismatch as `bad_body`.
 5. The operator broadcasts `submitEvidence(unitId, packageDigest)` once while
    FUNDED_ACTIVE and before reclaimAt. The escrow's commitment uses layout
    format 1 even though the body's package format is `"2"`. A successful receipt
    must be followed by comparing `evidenceBundleHashOf(unitId)` with the
-   domain-separated commitment for the exact chain, escrow, unit, composition
-   version and package digest.
+   domain-separated commitment for the unit's frozen chain id (proven through
+   its settlement unit id), escrow, unit, stored schema version and package digest.
 
 Inputs still owed by other lanes: evidence supplies the committed program hash
 and the attestation/work-product roots (Q-E3 and S2 goldens); gateway N149 supplies
@@ -360,6 +362,10 @@ total fee cap. Omitted caps mean zero and disable broadcasting; supply all three
 before sending. The broadcaster snapshots and validates these caps even for
 manually constructed config and refuses excessive estimated fees or gas before
 calling the operator signer.
+These caps bound only the L2 execution fee (gas × maxFeePerGas); on an OP-stack
+chain such as Base Sepolia, an L1 data fee is charged on top and is not covered
+by any cap. That fee is small for a `submitEvidence` transaction of about 150
+bytes, so fund the operator with a margin.
 
 Optional controls are `confirmations` (1–64, default 1), `rpcTimeoutMs`
 (1–60,000, default 10,000), `receiptTimeoutMs` (1–3,600,000, default 60,000), and
@@ -369,7 +375,10 @@ and server text are excluded from results and logs. Sends have no retries.
 
 `createEvidenceBroadcaster(config, operatorKey)` returns `submit(input)` and
 `readBack(input)`. The input is `{escrow, unitId, packageDigest,
-compositionSchemaVersion}`. `readBack` never signs or sends. An uncommitted getter
+compositionSchemaVersion}`. Both calls use the unit's frozen chain id, proven
+through its settlement unit id, and its stored schema version for the expected
+commitment; a version mismatch is refused as `unit_mismatch` before any send.
+`readBack` never signs or sends. An uncommitted getter
 returns `refused` with `EvidenceNotCommitted`. Factory configuration errors carry
 only `bad_config`.
 
@@ -378,13 +387,18 @@ The closed outcomes are `submitted`, `already_committed`, `conflict`,
 read-back means `already_committed`; a different stored commitment means
 `conflict`. After a send with no confirmed receipt in time, `indeterminate`
 requires caller reconciliation by read-back. Never automatically resend it.
+A refusal after the send is reported only after a read-back: a committed unit
+returns `already_committed` or `conflict`, and an unreadable unit is `indeterminate`.
 The broadcaster serializes submissions within its instance for operator nonce
 safety and remembers sent units, including ambiguous sends. The run loop's
 durable `submit_attempted` record preserves the no-resend rule across process
 restarts.
-The caller must reconcile an indeterminate operator transaction before
-submitting another unit or creating a new broadcaster, so an unseen pending
-transaction cannot compete for the same nonce.
+Within an instance, `submit` refuses another unit as `unreconciled_transaction`
+until each earlier transaction it sent has a receipt or the operator's latest
+nonce has passed its nonce, and also refuses when the RPC's pending nonce does
+not exceed every nonce it signed. Across instances, including a new broadcaster
+or a restart, the caller must reconcile an indeterminate operator transaction
+first, so an unseen pending transaction cannot compete for the same nonce.
 
 ## Repros for pcc-adk
 
