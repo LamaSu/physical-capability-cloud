@@ -31,6 +31,7 @@ import {
 } from "viem";
 import { MilestoneEscrowV3ABI } from "@pcc/contracts/abi";
 import { getContractAddress } from "@pcc/contracts";
+import { sql } from "@pcc/store";
 import { PCCProtocolV3FactoryABI } from "../contracts/escrow-client.js";
 
 /**
@@ -298,8 +299,20 @@ describe("createJobFromSession V3 Mode-A on-chain wiring (mocked wallet, real st
 
   it("selects the V3 factory + createEscrowV3, then addMilestone + approve + fund", { timeout: 15000 }, async () => {
     const { initStore, closeStore } = await import("../db.js");
-    initStore({ seed: true });
+    const store = initStore({ seed: true });
     try {
+      const operator = "0x" + "27".repeat(20);
+      const legacyWallet = "0x" + "38".repeat(20);
+      store.repos.kernels.update("kernel-nyc", { operatorAddress: operator });
+      store.db.run(sql`
+        INSERT INTO api_keys (
+          id, key_hash, key_prefix, operator_id, scopes, rate_limit, created_at,
+          operator_wallet_address
+        ) VALUES (
+          'key-v3-legacy-wallet', 'hash-v3-legacy-wallet', 'pcc_v3', ${operator},
+          '[]', '{}', '2026-01-01T00:00:00.000Z', ${legacyWallet}
+        )
+      `);
       const { createJobFromSession } = await import("../routes/paid-job-flow.js");
 
       const session = {
@@ -316,7 +329,8 @@ describe("createJobFromSession V3 Mode-A on-chain wiring (mocked wallet, real st
         quote: { totalPrice: "10.00", currency: "USDC", bondAmount: "0.00" },
         contractTerms: {
           milestones: [
-            { stepId: "step-aaa", amount: "10.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
+            { stepId: "step-aaa", amount: "4.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
+            { stepId: "step-bbb", amount: "6.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
           ],
           deadline: new Date(Date.now() + 86_400_000).toISOString(),
           assuranceTier: 0,
@@ -356,6 +370,14 @@ describe("createJobFromSession V3 Mode-A on-chain wiring (mocked wallet, real st
       expect((addCall![0].address as string).toLowerCase()).toBe(NEW_ESCROW.toLowerCase());
       expect(addCall![0].args).toHaveLength(7);
       expect(addCall![0].args[6]).toBe("job-v3-modea");
+      const milestoneCalls = writeContract.mock.calls.filter(
+        (c) => c[0].functionName === "addMilestone",
+      );
+      expect(milestoneCalls).toHaveLength(2);
+      for (const [call] of milestoneCalls) {
+        expect(call.args[1]).toBe(createCall![0].args[0]);
+        expect((call.args[1] as string).toLowerCase()).not.toBe(legacyWallet);
+      }
 
       // approve (MockUSDC) then fund (V3 escrow) — the upfront-funding Mode-A step.
       const approveCall = writeContract.mock.calls.find((c) => c[0].functionName === "approve");
