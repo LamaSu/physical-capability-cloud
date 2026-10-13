@@ -176,6 +176,7 @@ export interface PrintJobOptions {
   signal?: AbortSignal;
   /**
    * Wait for terminal evidence after cancelJob, before recording a kernel failure. Default 30 s.
+   * The adapter's cancel-confirm deadline plus one poll must fit within this window (MachineAdapter.cancelJob).
    * That failure is signed only once the adapter confirms quiescence; a live silent job
    * instead fails without a bundle and leaves the device quiescing.
    */
