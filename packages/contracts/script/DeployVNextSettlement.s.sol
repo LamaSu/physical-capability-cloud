@@ -311,6 +311,7 @@ contract DeployVNextSettlement is Script {
     ///         build's O5 type hash (see {_o5TypeHashOfThisBuild}). Created outside any broadcast, so it is
     ///         never a transaction.
     function predict() external {
+        _assertScheduleChain();
         string memory mode = vm.envOr("VNEXT_MODE", VNextDeploySpec.MODE_CANONICAL);
         string memory label = vm.envOr("VNEXT_LABEL", string(""));
         Inputs memory i = _readInputs(mode, label);
@@ -382,6 +383,7 @@ contract DeployVNextSettlement is Script {
     ///         optimizer settings stand in for the commit, and pinning the actual commit is the
     ///         publisher's responsibility, not something an address can certify by itself.
     function verify(address factory) external view returns (Tuple memory t) {
+        _assertScheduleChain();
         t = _verify(factory);
         console2.log("== V-next settlement stack : VERIFY (read-only) ==");
         _printTuple(t);
@@ -1364,7 +1366,12 @@ contract DeployVNextSettlement is Script {
         vm.serializeString(j, "solc", "0.8.24");
         vm.serializeString(j, "optimizer", "enabled, runs=200");
         vm.serializeString(
-            j, "reverify", "forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>"
+            j,
+            "reverify",
+            string.concat(
+                SCHEDULE_IS_TESTNET ? "FOUNDRY_PROFILE=testnet " : "",
+                "forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>"
+            )
         );
         string memory finalJson = vm.serializeBytes32(j, "digest", _digest(t));
         string memory path = _artifactPath(i);

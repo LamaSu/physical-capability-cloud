@@ -40,6 +40,6 @@
   "maxReclaimDelaySec": 31536000,
   "solc": "0.8.24",
   "optimizer": "enabled, runs=200",
-  "reverify": "forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>",
+  "reverify": "FOUNDRY_PROFILE=testnet forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>",
   "digest": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 }

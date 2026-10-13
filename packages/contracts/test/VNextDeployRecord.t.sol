@@ -106,6 +106,7 @@ contract VNextDeployRecordTest is Test {
     function test_Record_WriterScheduleMatchesCompiledBuild() public {
         (string memory root, string memory path, string memory record) = _writeCanonicalFixture("schedule-fields");
         _clearCanonicalFixture(root, path);
+        _assertWriterKeysMatchSchema(record);
         string memory scheduleId = vm.parseJsonString(record, ".scheduleId");
         assertEq(_paddedScheduleId(scheduleId), SCHEDULE_ID, "record schedule identity != compiled schedule");
         uint256 expectedLength = 32;
@@ -124,6 +125,14 @@ contract VNextDeployRecordTest is Test {
         assertTrue(vm.parseJsonBool(record, ".canonical"));
         assertFalse(vm.parseJsonBool(record, ".doNotPin"));
         assertEq(vm.parseJsonUint(record, ".chainId"), 84532);
+        assertEq(
+            vm.parseJsonString(record, ".reverify"),
+            string.concat(
+                SCHEDULE_IS_TESTNET ? "FOUNDRY_PROFILE=testnet " : "",
+                "forge script script/DeployVNextSettlement.s.sol --sig 'verify(address)' <factory>"
+            ),
+            "record reverify command must select the compiled schedule profile"
+        );
         if (SCHEDULE_IS_TESTNET) {
             assertEq(scheduleId, "vnext-testnet-short-v1");
             assertTrue(vm.parseJsonBool(record, ".scheduleTestnetOnly"));
@@ -134,6 +143,33 @@ contract VNextDeployRecordTest is Test {
             assertEq(vm.parseJsonUint(record, ".minReclaimDelaySec"), 4500);
             assertEq(vm.parseJsonUint(record, ".maxReclaimDelaySec"), 31536000);
         }
+    }
+
+    /// @notice Each profile's schema tuple must describe the constants compiled into that build.
+    function test_Record_SchemaScheduleMatchesCompiledBuild() public view {
+        string memory schema = vm.readFile("deployments/vnext/CANONICAL.schema.json");
+        string memory tuple = SCHEDULE_IS_TESTNET ? ".oneOf[0].properties." : ".oneOf[1].properties.";
+        assertEq(vm.parseJsonUint(schema, ".properties.specVersion.const"), VNextDeploySpec.SPEC_VERSION);
+        assertEq(_paddedScheduleId(vm.parseJsonString(schema, string.concat(tuple, "scheduleId.const"))), SCHEDULE_ID);
+        assertEq(vm.parseJsonBool(schema, string.concat(tuple, "scheduleTestnetOnly.const")), SCHEDULE_IS_TESTNET);
+        assertEq(
+            vm.parseJsonUint(schema, string.concat(tuple, "challengeWindowSec.const")),
+            VNextSettlementLib.CHALLENGE_WINDOW
+        );
+        assertEq(vm.parseJsonUint(schema, string.concat(tuple, "appealWindowSec.const")), VNextSettlementLib.APPEAL_WINDOW);
+        assertEq(vm.parseJsonUint(schema, string.concat(tuple, "backupWindowSec.const")), VNextSettlementLib.BACKUP_WINDOW);
+        assertEq(
+            vm.parseJsonUint(schema, string.concat(tuple, "emergencyReviewWindowSec.const")),
+            VNextSettlementLib.EMERGENCY_REVIEW_WINDOW
+        );
+        assertEq(
+            vm.parseJsonUint(schema, string.concat(tuple, "minReclaimDelaySec.const")),
+            VNextSettlementLib.MIN_RECLAIM_DELAY
+        );
+        assertEq(
+            vm.parseJsonUint(schema, string.concat(tuple, "maxReclaimDelaySec.const")),
+            VNextSettlementLib.MAX_RECLAIM_DELAY
+        );
     }
 
     /// @notice An off-chain reader can reproduce the digest using only the serialized record and namespace.
@@ -503,11 +539,10 @@ contract VNextDeployRecordTest is Test {
         vm.etch(VNextDeploySpec.USDC_BASE_SEPOLIA, hex"00");
         vm.etch(VNextDeploySpec.EAS, hex"00");
         vm.etch(VNextDeploySpec.EAS_SCHEMA_REGISTRY, hex"00");
-        root = string.concat("deployments/vnext/.n150-", suffix);
-        // Check the real root before creating a child, and the disposable root before every subsequent write.
-        harness.assertRecordRootContained("deployments/vnext");
-        assertFalse(vm.exists(root), "a disposable record root from an earlier run still exists");
-        vm.createDir(root, false);
+        // These per-test roots are outside deployments/vnext: other tests walk the real root concurrently.
+        // Creation is idempotent and cleanup removes only the file, so even a failed test cannot poison a rerun.
+        root = string.concat("tmp/vnext-record-test/", suffix);
+        vm.createDir(root, true);
         harness.setRecordRoot(root);
         harness.assertRecordRootContained(root);
         harness.writeArtifactCanonical();
@@ -516,9 +551,22 @@ contract VNextDeployRecordTest is Test {
     }
 
     function _clearCanonicalFixture(string memory root, string memory path) internal {
-        _clear(path);
         harness.assertRecordRootContained(root);
-        vm.removeDir(root, true);
+        _clear(path);
+    }
+
+    /// @dev Inspect the actual writer output, including keys written through helpers or nonliteral names.
+    function _assertWriterKeysMatchSchema(string memory record) internal view {
+        string memory schema = vm.readFile("deployments/vnext/CANONICAL.schema.json");
+        string[] memory recordKeys = vm.parseJsonKeys(record, "$");
+        string[] memory schemaKeys = vm.parseJsonKeys(schema, ".properties");
+        assertEq(recordKeys.length, schemaKeys.length, "written record/schema key count differs");
+        for (uint256 k; k < recordKeys.length; ++k) {
+            assertTrue(
+                vm.keyExistsJson(schema, string.concat(".properties.", recordKeys[k])),
+                string.concat("written record key is absent from schema: ", recordKeys[k])
+            );
+        }
     }
 
     function _scheduleFields() internal pure returns (string[8] memory) {

@@ -126,9 +126,9 @@ jobs:
         working-directory: packages/contracts
         run: forge test -vvv
 
-      - name: Check testnet V-next schedule and deploy guard
+      - name: Check testnet V-next schedule, deploy guard and records
         working-directory: packages/contracts
-        run: FOUNDRY_PROFILE=testnet VNEXT_EXPECT_SCHEDULE=testnet forge test --match-path test/VNextSchedule.t.sol -vvv
+        run: FOUNDRY_PROFILE=testnet VNEXT_EXPECT_SCHEDULE=testnet python3 script/check-vnext-testnet-tests.py
 
   # Build a single Docker artifact on every master push.
   # The same SHA-tagged image is later retagged to `staging` and `prod`

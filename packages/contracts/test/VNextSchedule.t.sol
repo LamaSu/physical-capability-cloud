@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import {VNextSettlementLib} from "../src/libraries/VNextSettlementLib.sol";
 import {DeployVNextSettlement} from "../script/DeployVNextSettlement.s.sol";
-import {SCHEDULE_IS_TESTNET, SCHEDULE_ID} from "vnext-schedule/VNextSchedule.sol";
+import {SCHEDULE_IS_TESTNET, SCHEDULE_ID, SCHEDULE_WORK_MARGIN} from "vnext-schedule/VNextSchedule.sol";
 
 /// @dev Exposes the production deploy guard without reading deployment inputs or broadcasting.
 contract VNextScheduleDeployHarness is DeployVNextSettlement {
@@ -52,6 +52,33 @@ contract VNextScheduleTest is Test {
         assertEq(VNextSettlementLib.MAX_RECLAIM_DELAY, 365 days, "maximum reclaim delay remains one year");
     }
 
+    function test_Schedule_WorkMarginIsPositive() public pure {
+        assertGt(SCHEDULE_WORK_MARGIN, 0, "work margin must be positive");
+    }
+
+    function test_Schedule_ChallengeDoesNotExceedAppeal() public pure {
+        assertLe(VNextSettlementLib.CHALLENGE_WINDOW, VNextSettlementLib.APPEAL_WINDOW, "challenge <= appeal");
+    }
+
+    function test_Schedule_ChallengePrecedesEmergencyReview() public pure {
+        assertLt(
+            VNextSettlementLib.CHALLENGE_WINDOW, VNextSettlementLib.EMERGENCY_REVIEW_WINDOW, "challenge < emergency"
+        );
+    }
+
+    function test_Schedule_ReclaimFloorIncludesMarginAndWindows() public pure {
+        assertEq(
+            VNextSettlementLib.MIN_RECLAIM_DELAY,
+            SCHEDULE_WORK_MARGIN + VNextSettlementLib.CHALLENGE_WINDOW + VNextSettlementLib.APPEAL_WINDOW
+                + VNextSettlementLib.BACKUP_WINDOW,
+            "minimum reclaim delay = margin + challenge + appeal + backup"
+        );
+    }
+
+    function test_Schedule_ReclaimFloorDoesNotExceedCeiling() public pure {
+        assertLe(VNextSettlementLib.MIN_RECLAIM_DELAY, VNextSettlementLib.MAX_RECLAIM_DELAY, "minimum <= maximum");
+    }
+
     function test_DeployGuard_BaseMainnet() public {
         vm.chainId(8453);
         if (SCHEDULE_IS_TESTNET) vm.expectRevert(bytes(TESTNET_CHAIN_GUARD));
@@ -59,11 +86,13 @@ contract VNextScheduleTest is Test {
     }
 
     function test_DeployGuard_BaseSepolia() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
         vm.chainId(84532);
         deploy.assertScheduleChain();
     }
 
     function test_DeployGuard_Anvil() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
         vm.chainId(31337);
         deploy.assertScheduleChain();
     }
@@ -76,7 +105,7 @@ contract VNextScheduleTest is Test {
 
     /// @dev Checks the real canonical entrypoint, before its deployment env reads or any broadcast.
     function test_DeployGuard_RunAbortsBeforeDeploymentInputs() public {
-        if (!SCHEDULE_IS_TESTNET) return;
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
         vm.chainId(8453);
         vm.expectRevert(bytes(TESTNET_CHAIN_GUARD));
         deploy.run();
@@ -84,9 +113,53 @@ contract VNextScheduleTest is Test {
 
     /// @dev Checks the real provisional entrypoint before it can deploy its throwaway token.
     function test_DeployGuard_ProvisionalAbortsBeforeDeploymentInputs() public {
-        if (!SCHEDULE_IS_TESTNET) return;
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
         vm.chainId(1);
         vm.expectRevert(bytes(TESTNET_CHAIN_GUARD));
         deploy.provisional();
+    }
+
+    function test_DeployGuard_PredictAbortsBeforeDeploymentInputs() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
+        vm.chainId(8453);
+        vm.expectRevert(bytes(TESTNET_CHAIN_GUARD));
+        deploy.predict();
+    }
+
+    function test_DeployGuard_VerifyAbortsBeforeFactoryRead() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
+        vm.chainId(8453);
+        vm.expectRevert(bytes(TESTNET_CHAIN_GUARD));
+        deploy.verify(address(0));
+    }
+
+    // As with the run/provisional abort tests, prediction tests run with deployment inputs absent.
+    // Reaching the first input read proves that these chains passed the production entrypoint guard.
+    function test_DeployGuard_PredictBaseSepoliaPassesGuard() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
+        vm.chainId(84532);
+        vm.expectRevert(bytes('vm.envAddress: environment variable "VNEXT_EAS" not found'));
+        deploy.predict();
+    }
+
+    function test_DeployGuard_PredictAnvilPassesGuard() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
+        vm.chainId(31337);
+        vm.expectRevert(bytes('vm.envAddress: environment variable "VNEXT_EAS" not found'));
+        deploy.predict();
+    }
+
+    function test_DeployGuard_VerifyBaseSepoliaPassesGuard() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
+        vm.chainId(84532);
+        vm.expectRevert(bytes("verify: no code at the factory address"));
+        deploy.verify(address(0));
+    }
+
+    function test_DeployGuard_VerifyAnvilPassesGuard() public {
+        vm.skip(!SCHEDULE_IS_TESTNET, "testnet profile only");
+        vm.chainId(31337);
+        vm.expectRevert(bytes("verify: no code at the factory address"));
+        deploy.verify(address(0));
     }
 }

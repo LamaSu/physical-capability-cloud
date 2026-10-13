@@ -146,11 +146,12 @@ library VNextDeploySpec {
     ///         reports "No transactions to broadcast"), so nothing is lost.
     ///
     ///         Consequences worth stating plainly:
-    ///           1. the library address is CHAIN- and MODE-independent — one address, one codehash, for
-    ///              canonical and provisional, Base and Base Sepolia. "The same audited bytecode backs
-    ///              both networks" becomes a one-command check: compare the two chains' `EXTCODEHASH`.
+    ///           1. within ONE schedule profile, the library address is CHAIN- and MODE-independent —
+    ///              one address, one codehash, for canonical and provisional on both chains allowed by
+    ///              that profile. Different schedule profiles can have different metadata and codehashes;
+    ///              consumers must pin per (chainId, scheduleId).
     ///           2. a consumer that pins the library codehash off a PROVISIONAL stack does not have to
-    ///              re-pin when the canonical stack lands.
+    ///              re-pin when the canonical stack lands within that same schedule profile.
     ///         Contrast {contractSalt}: the factory and attesters carry NETWORK-SPECIFIC configuration
     ///         (settlement asset, signer set, cohort), so their addresses are chain- AND mode-scoped on
     ///         purpose — a Base Sepolia factory must never be confusable with a Base one by address alone.
