@@ -7,6 +7,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { SensorAdapter } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 
 export class MockPowerMonitorAdapter implements SensorAdapter {
   readonly id: string;
@@ -18,6 +19,9 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
   private samples: Array<{ timestamp: string; watts: number }> = [];
   private sampleTimer: ReturnType<typeof setInterval> | null = null;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
+  /** The recording: from startRecording until stopRecording has emitted its summary. */
+  private readonly work = new OutstandingWork();
+  private endRecording: (() => void) | null = null;
 
   /** Simulated base wattage when idle */
   private idleWatts: number;
@@ -39,11 +43,15 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
   }
 
   async startRecording(jobId: string): Promise<void> {
+    // A recording already running is replaced: its timer used to be overwritten and left
+    // sampling forever.
+    this.stopSampling();
     this.recording = true;
     this.jobId = jobId;
     this.samples = [];
 
     // Sample every 2 seconds
+    this.endRecording = this.work.begin();
     this.sampleTimer = setInterval(() => {
       const watts = this.activeWatts + (Math.random() - 0.5) * 20;
       const sample = { timestamp: new Date().toISOString(), watts };
@@ -92,6 +100,8 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
     this.emit(summaryEvent);
     this.samples = [];
     this.jobId = null;
+    // Ended only after the summary is emitted.
+    this.stopSampling();
 
     return summaryEvent;
   }
@@ -107,10 +117,25 @@ export class MockPowerMonitorAdapter implements SensorAdapter {
     this.listeners.push(callback);
   }
 
+  /**
+   * Resolves once no recording is running: stopRecording has stopped the sampling timer
+   * (whose callback emits synchronously) and emitted the summary. At once when none is.
+   * A recording nobody stops keeps this pending.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
+    this.stopSampling();
+    this.listeners = [];
+  }
+
+  private stopSampling(): void {
     if (this.sampleTimer) clearInterval(this.sampleTimer);
     this.sampleTimer = null;
-    this.listeners = [];
+    this.endRecording?.();
+    this.endRecording = null;
   }
 
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {

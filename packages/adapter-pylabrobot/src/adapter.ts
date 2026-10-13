@@ -21,6 +21,7 @@ import { EventEmitter } from "node:events";
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 
 import { EvidenceCollector, type CameraHook, type SensorHook } from "./evidence.js";
+import { OutstandingWork } from "./outstanding-work.js";
 import {
   RPC_ERROR_CODES,
   RPC_METHODS,
@@ -31,6 +32,7 @@ import {
   type BackendRunResult,
   type BackendStatusResult,
   type EvidenceNotificationParams,
+  type EvidenceWindowAttestation,
 } from "./protocol.js";
 import {
   SidecarClient,
@@ -101,6 +103,36 @@ export interface PyLabRobotConfig {
  * `PyLabRobotAdapter` — implements PCC's `MachineAdapter` shape and
  * delegates execution to a Python sidecar over JSON-RPC 2.0 stdio.
  */
+/**
+ * What a held adapter waits to see proven, by the sidecar process that recorded the job (its
+ * generation): that the job's window is closed (an attested close), or, when the window's
+ * opening was never confirmed (requireWindow false), that process's own word that it never
+ * opened one.
+ */
+interface HoldSpec {
+  jobId: string;
+  generation: string;
+  requireWindow: boolean;
+}
+
+/** Lifecycle events are the adapter's own; the sidecar cannot send them (astra pack 194). */
+const ADAPTER_LIFECYCLE: ReadonlySet<string> = new Set(["execution_started", "execution_completed", "execution_failed"]);
+
+/** Whether a sidecar answer attests the job's recording window in the given sidecar process. */
+function attests(answer: unknown, jobId: string, generation: string): boolean {
+  if (typeof answer !== "object" || answer === null) return false;
+  const a = answer as Partial<EvidenceWindowAttestation>;
+  return a.ok === true && a.jobId === jobId && a.generation === generation;
+}
+
+function describeAnswer(answer: unknown): string {
+  try {
+    return JSON.stringify(answer) ?? String(answer);
+  } catch {
+    return String(answer);
+  }
+}
+
 export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   readonly id: string;
   readonly type: string;
@@ -118,6 +150,23 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
   private disposed = false;
   /** Have we wired crash/notification/stderr handlers to the current sidecar? */
   private sidecarHandlersWired = false;
+  /**
+   * Set while a job's window is not proven closed: its barrier failed, or its opening was not
+   * confirmed. Nothing proves that job's notifications are all out, so the adapter holds one
+   * unit of outstanding work (quiesceEvidence() waits), refuses a new start, and retries until
+   * the sidecar process that recorded the job proves the window closed (astra packs 191, 194).
+   * The sidecar is not recycled for it (steward #5409): stopping it could interrupt the
+   * instrument. Another process's answer never releases it: only dispose() does.
+   */
+  private unproven: (HoldSpec & { end: () => void; timer: ReturnType<typeof setTimeout> | null }) | null = null;
+  /** The sidecar process backend.init named. Its recording windows are attested with it. */
+  private generation: string | null = null;
+  /**
+   * What can still emit for work given: each command and status call in flight (a start
+   * runs the whole protocol; any call may initialise the sidecar and emit device_birth),
+   * and each mock completion not yet emitted.
+   */
+  private readonly work = new OutstandingWork();
 
   constructor(config: PyLabRobotConfig) {
     super();
@@ -135,7 +184,11 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
 
   // ── MachineAdapter ─────────────────────────────────────────────────────
 
-  async getStatus(): Promise<MachineStatus> {
+  getStatus(): Promise<MachineStatus> {
+    return this.work.track(this.readStatus());
+  }
+
+  private async readStatus(): Promise<MachineStatus> {
     if (this.disposed) return "offline";
     if (this.config.mockMode) return this.mockStatus;
     try {
@@ -167,7 +220,11 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     }
   }
 
-  async execute(command: MachineCommand): Promise<MachineCommandResult> {
+  execute(command: MachineCommand): Promise<MachineCommandResult> {
+    return this.work.track(this.executeCommand(command));
+  }
+
+  private async executeCommand(command: MachineCommand): Promise<MachineCommandResult> {
     if (this.disposed) {
       return { success: false, message: "adapter disposed" };
     }
@@ -179,6 +236,12 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     // triggers `ensureInitialized()` + `backend.init` + the actual run.
     if (command.type === "load_gcode") {
       return this.handleLoadGcode(command.payload);
+    }
+    if (command.type === "start" && this.unproven !== null) {
+      return {
+        success: false,
+        message: `the evidence of job ${this.unproven.jobId} is not yet proven complete (its barrier has not answered), so no new run starts`,
+      };
     }
     try {
       await this.ensureInitialized();
@@ -216,6 +279,23 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     this.evidenceListeners.push(callback);
   }
 
+  /**
+   * Resolves once no command or status call is in flight and every mock completion has
+   * been emitted; at once when none is. A real run is one `start` call, which returns only
+   * after the sidecar has answered evidence.stopRecording. The sidecar sends that answer
+   * only after writing every notification it scheduled for the job (a barrier, astra pack
+   * 186), so each one has been forwarded by then. A barrier that fails (an error, the 5 s
+   * timeout) proves nothing: the run fails, with no execution_completed, and this stays
+   * pending, and a new start is refused, until a retried barrier answers (astra pack 191).
+   * Only a notification bound to the job recording now is evidence: one of another job is
+   * late, and one bound to no job is unattributable, so both are dropped, never forwarded
+   * (steward #5413). So is anything a replaced sidecar still sends. Its stderr is a
+   * diagnostic ("sidecar_stderr"), not evidence.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -234,6 +314,13 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       } catch {
         // ignore
       }
+    }
+    // The sidecar is stopped, so it can send nothing more: a job held unproven is released.
+    if (this.unproven !== null) {
+      const held = this.unproven;
+      this.unproven = null;
+      if (held.timer) clearTimeout(held.timer);
+      held.end();
     }
     this.evidenceListeners = [];
     this.currentCollector = null;
@@ -263,20 +350,30 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     payload: Record<string, unknown> | undefined,
   ): Promise<MachineCommandResult> {
     const merged = { ...this.pendingProtocol, ...(payload ?? {}) };
-    const jobId = String(merged.jobId ?? `job-${Date.now()}`);
+    // The run is the caller's job, and its id binds every event of it (astra pack 194): never
+    // invented here. A start without one is refused before anything reaches the sidecar.
+    const jobId = merged.jobId;
+    if (typeof jobId !== "string" || jobId.length === 0) {
+      return { success: false, message: "start needs the job's id (payload.jobId), so the run's evidence is bound to its job" };
+    }
+    const generation = this.generation;
+    if (generation === null) {
+      return { success: false, message: "the sidecar has named no generation, so it cannot attest the job's recording window" };
+    }
     const collector = this.makeCollector();
     this.currentCollector = collector;
     this.currentJobId = jobId;
     collector.startRecording(jobId);
-    try {
-      await this.sidecar!.call(
-        RPC_METHODS.EVIDENCE_START_RECORDING,
-        { deviceId: this.id, jobId },
-        5_000,
-      );
-    } catch {
-      // tolerate — sidecar might not have a separate recording-channel
-      // implementation in early versions
+    // The job's recording window, attested by this sidecar process: nothing physical runs
+    // without it (astra pack 194). A window that failed to open may be open after all, so the
+    // adapter is held until that process says which (requireWindow: false).
+    const opening = await this.openWindow(jobId, generation);
+    if (opening !== null) {
+      return await this.failRun(collector, jobId, `evidence recording could not be opened: ${opening}`, undefined, {
+        jobId,
+        generation,
+        requireWindow: false,
+      });
     }
     const runParams: BackendRunParams = {
       deviceId: this.id,
@@ -292,27 +389,32 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         runParams as unknown as Record<string, unknown>,
         this.config.runTimeoutMs ?? 3_600_000,
       );
+      // The run's notifications can still be on their way: the barrier first, so each has
+      // reached the collector before it emits execution_completed and stops.
+      const barrier = await this.sidecarBarrier(jobId, generation);
+      if (barrier !== null) {
+        // Nothing proves the job's evidence complete: the run fails, with no execution_completed,
+        // and the adapter is held until the process that recorded the job proves its window
+        // closed (astra packs 191 and 194).
+        return await this.failRun(collector, jobId, `evidence barrier failed: ${barrier}`, undefined, {
+          jobId,
+          generation,
+          requireWindow: true,
+        });
+      }
       const bufferedEvents = collector.stopRecording(jobId, {
         opCount: result.opCount,
         durationMs: result.durationMs,
         summary: result.summary,
       });
+      this.currentCollector = null;
+      this.currentJobId = null;
+      this.pendingProtocol = {};
+      // Recycled only after the barrier, which the old sidecar must answer.
       this.completedJobs += 1;
       if (this.completedJobs >= (this.config.restartAfterJobs ?? 100)) {
         await this.recycleSidecar();
       }
-      try {
-        await this.sidecar?.call(
-          RPC_METHODS.EVIDENCE_STOP_RECORDING,
-          { deviceId: this.id, jobId },
-          5_000,
-        );
-      } catch {
-        // tolerate
-      }
-      this.currentCollector = null;
-      this.currentJobId = null;
-      this.pendingProtocol = {};
       return {
         success: true,
         message: `run complete — ${result.opCount} ops in ${result.durationMs}ms`,
@@ -325,28 +427,41 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
       };
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      collector.failRecording(jobId, reason, {
-        rpcCode: err instanceof SidecarError ? err.code : undefined,
-        rpcData: err instanceof SidecarError ? err.data : undefined,
-      });
-      this.currentCollector = null;
-      this.currentJobId = null;
-      this.pendingProtocol = {};
-      try {
-        await this.sidecar?.call(
-          RPC_METHODS.EVIDENCE_STOP_RECORDING,
-          { deviceId: this.id, jobId },
-          5_000,
-        );
-      } catch {
-        // tolerate
-      }
-      return {
-        success: false,
-        message: reason,
-        data: err instanceof SidecarError ? { code: err.code, data: err.data ?? null } : undefined,
-      };
+      const barrier = await this.sidecarBarrier(jobId, generation);
+      return await this.failRun(
+        collector,
+        jobId,
+        barrier === null ? reason : `${reason}; evidence barrier failed: ${barrier}`,
+        err,
+        barrier === null ? null : { jobId, generation, requireWindow: true },
+      );
     }
+  }
+
+  /**
+   * Fail the job's recording (execution_failed) and end the job. When its window is not proven
+   * closed, the adapter is held (holdUntilProven) until it is.
+   */
+  private async failRun(
+    collector: EvidenceCollector,
+    jobId: string,
+    reason: string,
+    err: unknown,
+    hold: HoldSpec | null,
+  ): Promise<MachineCommandResult> {
+    collector.failRecording(jobId, reason, {
+      rpcCode: err instanceof SidecarError ? err.code : undefined,
+      rpcData: err instanceof SidecarError ? err.data : undefined,
+    });
+    this.currentCollector = null;
+    this.currentJobId = null;
+    this.pendingProtocol = {};
+    if (hold !== null) this.holdUntilProven(hold);
+    return {
+      success: false,
+      message: reason,
+      data: err instanceof SidecarError ? { code: err.code, data: err.data ?? null } : undefined,
+    };
   }
 
   private async handleStop(): Promise<MachineCommandResult> {
@@ -411,6 +526,7 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
             },
           });
         }
+        const endRun = this.work.begin();
         setTimeout(() => {
           this.mockStatus = "idle";
           this.forwardEvent({
@@ -420,6 +536,8 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
             payload: { mock: true, jobId, opCount: 5, durationMs: 1 },
           });
           this.emit("mock_run_complete", { jobId });
+          // Ended only after the completion is emitted.
+          endRun();
         }, 0);
         return { success: true, message: `mock run ${jobId} started` };
       }
@@ -451,29 +569,34 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     // Wire handlers exactly once per sidecar instance — covers both
     // "we constructed it" and "test injected an already-started one".
     if (!this.sidecarHandlersWired) {
-      this.sidecar.on("crash", () => {
+      // Bound to this sidecar: once it is replaced or stopped (recycleSidecar detaches it
+      // first), nothing it still sends reaches the adapter.
+      const client = this.sidecar;
+      client.on("crash", () => {
+        if (client !== this.sidecar) return;
         this.initialized = false;
+        this.generation = null;
+        // Evidence only when a job is recording, and bound to it: with none, the failure names
+        // no job, so it is not forwarded (steward #5413). The run in flight fails on its own.
+        if (this.currentJobId === null) return;
         this.forwardEvent({
           type: "execution_failed",
           timestamp: new Date().toISOString(),
           source: this.source,
           payload: {
             reason: "sidecar crash; pending RPC invalidated",
-            jobId: this.currentJobId ?? undefined,
+            jobId: this.currentJobId,
           },
         });
       });
-      this.sidecar.onNotification(RPC_NOTIFICATIONS.EVIDENCE, (params) => {
+      client.onNotification(RPC_NOTIFICATIONS.EVIDENCE, (params) => {
+        if (client !== this.sidecar) return;
         this.handleEvidenceNotification(params as unknown as EvidenceNotificationParams);
       });
-      this.sidecar.on("stderr", (msg: string) => {
-        if (!this.currentCollector || !msg.trim()) return;
-        this.currentCollector.emit({
-          type: "process_log_summary",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: { stderr: msg.trim() },
-        });
+      // Its stderr names no job, so it is a diagnostic, never evidence (steward #5413).
+      client.on("stderr", (msg: string) => {
+        if (client !== this.sidecar || !msg.trim()) return;
+        this.emit("sidecar_stderr", msg.trim());
       });
       this.sidecarHandlersWired = true;
     }
@@ -491,6 +614,12 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         initParams as unknown as Record<string, unknown>,
         this.config.rpcTimeoutMs ?? 30_000,
       );
+      if (typeof result.generation !== "string" || result.generation.length === 0) {
+        throw new SidecarError(
+          RPC_ERROR_CODES.NON_RETRYABLE,
+          "the sidecar named no generation, so it cannot attest its recording windows",
+        );
+      }
       this.forwardEvent({
         type: "device_birth",
         timestamp: new Date().toISOString(),
@@ -501,25 +630,30 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
         },
       });
       this.initialized = true;
+      this.generation = result.generation;
       this.completedJobs = 0;
     }
   }
 
   private async recycleSidecar(): Promise<void> {
-    if (!this.sidecar) return;
-    try {
-      await this.sidecar.call(RPC_METHODS.BACKEND_SHUTDOWN, { deviceId: this.id }, 5_000);
-    } catch {
-      // tolerate
-    }
-    try {
-      await this.sidecar.stop();
-    } catch {
-      // tolerate
-    }
+    const old = this.sidecar;
+    if (!old) return;
+    // Detached first: the handlers ignore a sidecar that is no longer this.sidecar, so nothing
+    // it still sends (a buffered line, the "crash" its own stop emits) reaches the adapter.
     this.sidecar = null;
     this.initialized = false;
+    this.generation = null;
     this.sidecarHandlersWired = false;
+    try {
+      await old.call(RPC_METHODS.BACKEND_SHUTDOWN, { deviceId: this.id }, 5_000);
+    } catch {
+      // tolerate
+    }
+    try {
+      await old.stop();
+    } catch {
+      // tolerate
+    }
   }
 
   private makeCollector(): EvidenceCollector {
@@ -534,22 +668,114 @@ export class PyLabRobotAdapter extends EventEmitter implements MachineAdapter {
     return collector;
   }
 
+  /**
+   * Hold the adapter until the job's window is proven closed: one unit of outstanding work, so
+   * the hook waits, and a retry with backoff (1 s, doubling to 30 s). dispose() ends the hold.
+   */
+  private holdUntilProven(spec: HoldSpec): void {
+    if (this.unproven !== null) return;
+    const held = { ...spec, end: this.work.begin(), timer: null as ReturnType<typeof setTimeout> | null };
+    this.unproven = held;
+    const retry = (delayMs: number): void => {
+      held.timer = setTimeout(() => {
+        held.timer = null;
+        void this.provenClosed(spec).then((proven) => {
+          if (this.unproven !== held) return;
+          if (proven) {
+            this.unproven = null;
+            held.end();
+          } else {
+            retry(Math.min(delayMs * 2, 30_000));
+          }
+        });
+      }, delayMs);
+    };
+    retry(1_000);
+  }
+
+  /**
+   * Whether the sidecar process that recorded the job (spec.generation) proves its window
+   * closed: an attested close of it, or, when its opening was never confirmed, that process's
+   * own word that it never opened one. Another process's answer proves nothing: a restarted
+   * sidecar holds no window of the job and answers with its own generation, so the hold stays
+   * until the adapter is disposed (astra pack 194).
+   */
+  private async provenClosed(spec: HoldSpec): Promise<boolean> {
+    if (!this.sidecar) return false;
+    try {
+      const answer = await this.sidecar.call<EvidenceWindowAttestation>(
+        RPC_METHODS.EVIDENCE_STOP_RECORDING,
+        { deviceId: this.id, jobId: spec.jobId },
+        5_000,
+      );
+      return attests(answer, spec.jobId, spec.generation);
+    } catch (err) {
+      return (
+        !spec.requireWindow &&
+        err instanceof SidecarError &&
+        err.code === RPC_ERROR_CODES.NO_RECORDING_WINDOW &&
+        (err.data as { generation?: unknown } | undefined)?.generation === spec.generation
+      );
+    }
+  }
+
+  /**
+   * Close the sidecar's recording window, a barrier: the sidecar answers only after writing
+   * every notification it scheduled for the job. Null once the process that recorded the job
+   * attests the close (its generation, this job); otherwise why not (an error, the 5 s
+   * timeout, no sidecar, or an answer that attests nothing). A barrier that fails proves
+   * nothing about what is still on its way, so the caller fails the run and holds the adapter.
+   */
+  private async sidecarBarrier(jobId: string, generation: string): Promise<string | null> {
+    if (!this.sidecar) return "no sidecar to answer evidence.stopRecording";
+    try {
+      const answer = await this.sidecar.call<EvidenceWindowAttestation>(
+        RPC_METHODS.EVIDENCE_STOP_RECORDING,
+        { deviceId: this.id, jobId },
+        5_000,
+      );
+      if (attests(answer, jobId, generation)) return null;
+      return `evidence.stopRecording did not attest job ${jobId}'s window in sidecar ${generation}: ${describeAnswer(answer)}`;
+    } catch (err) {
+      return `evidence.stopRecording did not answer: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /** Open the job's recording window: null once this sidecar process attests it; else why not. */
+  private async openWindow(jobId: string, generation: string): Promise<string | null> {
+    try {
+      const answer = await this.sidecar!.call<EvidenceWindowAttestation>(
+        RPC_METHODS.EVIDENCE_START_RECORDING,
+        { deviceId: this.id, jobId },
+        5_000,
+      );
+      if (attests(answer, jobId, generation)) return null;
+      return `the sidecar did not attest it: ${describeAnswer(answer)}`;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
   private handleEvidenceNotification(params: EvidenceNotificationParams): void {
-    if (this.currentCollector) {
-      this.currentCollector.ingestSidecarNotification(params);
+    // Only a notification bound to the job recording now is evidence of it. One bound to
+    // another job is late: that job's window is closed, and its hook may have answered. One
+    // bound to no job is unattributable. Forwarded, either would be recorded under whichever
+    // job holds the device, so both are dropped (astra packs 186 and 191, steward #5413).
+    const collector = this.currentCollector;
+    if (collector === null || params.jobId == null || params.jobId !== this.currentJobId) {
+      console.warn(
+        `[pylabrobot-adapter] ${this.id}: dropped a ${params.type} notification ` +
+          (params.jobId == null ? "bound to no job" : `of job ${String(params.jobId)}, which is not recording`),
+      );
       return;
     }
-    // Outside a recording window — still forward the event but with a flag
-    this.forwardEvent({
-      type: "instrument_result",
-      timestamp: params.timestamp ?? new Date().toISOString(),
-      source: this.source,
-      payload: {
-        ...params.payload,
-        sidecarType: params.type,
-        outsideRecordingWindow: true,
-      },
-    });
+    // Lifecycle is the adapter's own: a completion is published only after the barrier has
+    // proven the job's evidence complete. One the sidecar sends is dropped (astra pack 194).
+    if (ADAPTER_LIFECYCLE.has(params.type)) {
+      console.warn(`[pylabrobot-adapter] ${this.id}: dropped a ${params.type} notification: lifecycle events are the adapter's own`);
+      return;
+    }
+    collector.ingestSidecarNotification(params);
   }
 
   private forwardEvent(event: Omit<EvidenceEvent, "id" | "hash">): void {

@@ -18,6 +18,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import { OutstandingWork } from "../outstanding-work.js";
 import type {
   SiLADevice,
   SiLADeviceStatus,
@@ -55,6 +56,8 @@ export class SiLAAdapter {
   private status: SiLADeviceStatus = "idle";
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private disposed = false;
+  /** Assay and calibration calls in flight: the only things that emit. */
+  private readonly work = new OutstandingWork();
 
   constructor(config: SiLAAdapterConfig) {
     this.id = config.deviceId;
@@ -97,6 +100,14 @@ export class SiLAAdapter {
   /** Subscribe to evidence events from this instrument */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Resolves once no assay or calibration call is in flight (each emits its events before
+   * it returns); at once when none is.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   /** Get current device status */
@@ -185,7 +196,11 @@ export class SiLAAdapter {
    * Execute an assay run, collecting evidence events for every liquid handling
    * action. Returns the completed assay result with QC metrics.
    */
-  async executeAssay(config: AssayRunConfig): Promise<AssayResult> {
+  executeAssay(config: AssayRunConfig): Promise<AssayResult> {
+    return this.work.track(this.runAssay(config));
+  }
+
+  private async runAssay(config: AssayRunConfig): Promise<AssayResult> {
     this.assertNotDisposed();
     // Real mode: refuse — everything below fabricates per-well instrument
     // results and QC verdicts and emits them into the evidence pipeline.
@@ -286,7 +301,11 @@ export class SiLAAdapter {
    * Execute a failing assay run (for testing error paths).
    * Simulates a device error mid-run and emits error evidence.
    */
-  async executeFailingAssay(config: AssayRunConfig): Promise<AssayResult> {
+  executeFailingAssay(config: AssayRunConfig): Promise<AssayResult> {
+    return this.work.track(this.runFailingAssay(config));
+  }
+
+  private async runFailingAssay(config: AssayRunConfig): Promise<AssayResult> {
     this.assertNotDisposed();
     // Real mode: refuse — simulated failure narratives are still fabrication.
     this.assertMockOnly("executeFailingAssay");
@@ -345,7 +364,11 @@ export class SiLAAdapter {
    * Collect calibration evidence — gravimetric calibration data.
    * Returns evidence events with measured weights for each channel.
    */
-  async collectCalibrationEvidence(): Promise<Array<Omit<EvidenceEvent, "id" | "hash">>> {
+  collectCalibrationEvidence(): Promise<Array<Omit<EvidenceEvent, "id" | "hash">>> {
+    return this.work.track(this.calibrationEvidence());
+  }
+
+  private async calibrationEvidence(): Promise<Array<Omit<EvidenceEvent, "id" | "hash">>> {
     this.assertNotDisposed();
     // Real mode: refuse — gravimetric calibration_record events with passed:
     // verdicts below are generated from Math.random(), not a balance.

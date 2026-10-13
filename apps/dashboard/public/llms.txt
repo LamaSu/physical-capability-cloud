@@ -1,6 +1,7 @@
 # Physical Capability Cloud (PCC)
 
-> The cloud instance for the physical world. Machines, human skills, and autonomous
+> Turn abilities and inventions into trusted, economically callable capacity that other agents can immediately build on.
+> Public beta: payments settle on a test network. Machines, human skills, and autonomous
 > assets register as callable, composable capabilities. AI agents and humans use the
 > SAME API to discover, price, orchestrate, and settle physical work — with evidence
 > verification and on-chain milestone escrow. Live gateway: https://capability.network

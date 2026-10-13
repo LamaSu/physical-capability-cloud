@@ -2,7 +2,7 @@ import React from "react";
 import { GlassPanel } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useQuery } from "@tanstack/react-query";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,9 +81,7 @@ interface SponsorsPayload {
 // ---------------------------------------------------------------------------
 
 async function fetchSponsors(): Promise<SponsorsPayload> {
-  const res = await fetch("/api/status/integrations", {
-    headers: { ...getAuthHeaders() },
-  });
+  const res = await authorizedFetch("/api/status/integrations");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json() as Promise<SponsorsPayload>;
 }

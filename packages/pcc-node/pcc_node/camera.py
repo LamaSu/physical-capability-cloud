@@ -10,6 +10,7 @@ import os
 import platform
 import subprocess
 import time
+from urllib.parse import quote
 
 from .http_util import pcc_request
 
@@ -169,9 +170,8 @@ def push_camera_frame(pcc_base, api_key, kernel_id):
 
         frame_b64 = base64.b64encode(frame).decode("ascii")
         status, _data = pcc_request(
-            "POST", "/api/ot2/camera/frame",
+            "POST", f"/api/relay/{quote(str(kernel_id), safe='')}/camera/frame",
             body={
-                "kernelId": kernel_id,
                 "frame": frame_b64,
                 "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             },

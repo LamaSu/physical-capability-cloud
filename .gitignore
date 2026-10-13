@@ -31,3 +31,7 @@ ai/research/judges-complete.md
 ai/supervisor/vetting-staging/
 private-strategy/
 ai/
+
+# Python bytecode (N4a: a tracked .pyc of ot2-executor.py was a runnable copy of the unguarded executor)
+__pycache__/
+*.py[cod]

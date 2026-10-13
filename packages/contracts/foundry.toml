@@ -8,6 +8,39 @@ solc_version = "0.8.24"
 # runs=200 is the standard size/gas balance; verified all contracts fit (see PR).
 optimizer = true
 optimizer_runs = 200
+# DeployVNextSettlement.s.sol persists its address/codehash record under `deployments/vnext/` (vm.writeJson)
+# and reads an existing record back to refuse publishing a rival deployment (vm.exists / vm.readFile). Grant
+# exactly that directory, nothing wider: the rest of `deployments/` holds the live Base Sepolia records
+# (PCCProtocolV2, CaptureClassRegistry, EASSchema, SampleEscrow), which no forge test or script may overwrite.
+# `VNextDeployRecordTest.test_Record_GrantDoesNotReachOtherDeploymentRecords` fails if this is widened.
+# The two older scripts that write elsewhere in `deployments/` (DeployCaptureClassRegistry,
+# DeployReceiptAnchorRegistry) are RETIRED (steward ruling #3434): kept, never run, and not a reason to widen this.
+# The grant is NOT a containment boundary against symlinks. Forge follows links on the way to a path that exists;
+# 1.7.1 checks a not-yet-existing path by its lexical form, and 1.8.0 (pinned in CI) resolves every link, so either
+# way a symlink at, above or below `deployments/vnext` can put a record write outside it. The deploy script
+# therefore refuses to read or write a record unless `deployments/vnext` (committed) exists with no symlink at,
+# above or below it, and CI refuses a committed symlink anywhere under `deployments/`
+# (ts/__tests__/deployments-no-symlinks.test.ts).
+# The other entries are READ-only, one per committed test fixture, so those refusals are tested
+# (test/fixtures/fs-symlinks/README.md). Keep them one per fixture root, and never add a grant ABOVE a record root
+# (not `./deployments`, not `.`), not even read: on 1.7.1 the at-or-above check relies on forge refusing to look
+# below a symlinked root, which a wider grant would silently allow (VNextDeployRecordTest pins this).
+#
+# NOTE — deliberately ABSENT: a `libraries = [...]` entry. {VNextSettlementLib} is an external linked
+# library, and pinning its address here would link the TEST build against an address holding no code,
+# breaking every funding test. Never pass `--libraries` either: it changes the library's own bytecode. The V-next
+# deploy script lets forge deploy and link the library during the run, and asserts the address forge chose. See
+# the header of script/DeployVNextSettlement.s.sol.
+fs_permissions = [
+    { access = "read-write", path = "./deployments/vnext" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/walk" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/real" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/link" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/parent-link/root" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/dangling" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/absent" },
+    { access = "read", path = "./test/fixtures/fs-symlinks/roots/planted-link" },
+]
 
 [profile.default.fmt]
 line_length = 120

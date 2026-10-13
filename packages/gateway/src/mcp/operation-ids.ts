@@ -22,3 +22,13 @@ export const REGISTERED_OPERATION_IDS = [
 ] as const;
 
 export type RegisteredOperationId = (typeof REGISTERED_OPERATION_IDS)[number];
+
+/**
+ * The typed operations a HOSTED view (an MCP App) may run from a click (astra r2 on #342, F2). The kit
+ * runs an injected operation with no kit-side approval and may run it again, which is safe ONLY for
+ * read-only, approval-"none" operations. So the view injects THIS list, not every registered id, and
+ * operation-policy.ts asserts at load time that each id here is registered with stateChanging:false
+ * and approval:"none". A state-changing or money operation can therefore never reach a hosted view's
+ * allowlist, whatever else is registered later (the full /mcp surface keeps its own server policy).
+ */
+export const APP_HOST_OPERATION_IDS = ["capability.request_quote"] as const;

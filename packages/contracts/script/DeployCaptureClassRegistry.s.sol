@@ -7,6 +7,12 @@ import "../src/CaptureClassRegistry.sol";
 
 /**
  * @title DeployCaptureClassRegistry
+ * @dev RETIRED (steward ruling #3434, 2026-09-28): kept, never run. It made one deployment (CaptureClassRegistry on
+ *      Base Sepolia, 2026-04-22), whose record it wrote to deployments/base-sepolia/CaptureClassRegistry.json. No
+ *      lane owns or runs it. The default fs_permissions grant (foundry.toml) deliberately does not reach
+ *      deployments/base-sepolia/: with PCC_NETWORK=base-sepolia a run stops at its record write, before anything is
+ *      broadcast; without PCC_NETWORK it would still deploy and record nothing. Do not run it, and do not widen the
+ *      grant to revive it: a revival needs a new ruling and a profile of its own.
  * @notice Deploys CaptureClassRegistry — the on-chain anchor for the PCC Capture Verification Protocol.
  *
  * Design doc: ai/research/capture-verification-protocol.md §6.1

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useUIStore } from "../../../stores/ui-store.js";
-import { getAuthHeaders } from "../../../stores/auth-store.js";
+import { authorizedFetch } from "../../../lib/authorized-fetch.js";
 import { ChatThread, type ChatMessage } from "../../../components/onboard/ChatThread.js";
 import { ActivityFeed } from "../../../components/onboard/ActivityFeed.js";
 import { parseInputIntent } from "../../../components/onboard/input-parser.js";
@@ -69,11 +69,10 @@ export function OnboardChatPage() {
       init?: RequestInit,
     ): Promise<T | null> => {
       try {
-        const res = await fetch(`${ONBOARD}${path}`, {
+        const res = await authorizedFetch(`/api/onboard${path}`, {
           ...init,
           headers: {
             "Content-Type": "application/json",
-            ...getAuthHeaders(),
             ...(init?.headers ?? {}),
           },
         });

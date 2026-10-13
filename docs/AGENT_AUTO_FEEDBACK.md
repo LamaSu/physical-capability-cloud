@@ -114,6 +114,38 @@ then converged (sol began oscillating on auth-scoping). Findings/round 6→4→3
 on prod AFTER this PR merges + the manual deploy promotes it. Steps to run then are in the
 PR / the assistant's handoff. No prod writes were made pre-deploy (nothing new to verify).
 
+## Attempt reports (ADK track item 3, contract `attempt.v1`)
+
+Every onboarding or operating attempt reports each runbook phase, successful or not, plus a
+`session` roll-up at the end. This covers the whole experience (operator R7), not only failures.
+Agents send it to the same public `POST /api/feedback` with `kind: "attempt"`. A report without
+`kind` is a classic report, unchanged.
+
+- **Required:**
+  - `sessionId`: a client-generated UUID v4, the same for every report of one attempt;
+  - `seq`: a per-session counter;
+  - `phase`: `prerequisites` · `identify` · `intake` · `research` · `build` · `register` · `verify` · `operate` · `publish` · `session`;
+  - `outcome`: `ok` · `failed` · `blocked` · `skipped` · `budget_stop` · `abandoned` · `in_progress`.
+- **Optional:** `durationMs`, `summary`, `detail`, `logs[]`, `phases[]` (on `session` only),
+  `ids{kernelId,capabilityId,kitId,jobId}`, `device{make,model,class}`, `harness{name,version,model}`,
+  `pack{version,digest}`, `env{os,python,pccNode}`, `tokens{in,out,source}`,
+  `proposal{target,path,text}`, `traceId`, `consent{transcript}`.
+  - Unknown fields are ignored.
+  - An unknown phase or outcome is stored as `other` / `unknown` with a label, never rejected.
+  - Tokens are never guessed: null plus `source: "unknown"`.
+- **Differences from a classic report:**
+  - dedup keys on `(sessionId, seq)`;
+  - emails in free text are redacted, as well as secrets;
+  - ids must be id-shaped;
+  - a pack digest is stored as a 16-hex prefix;
+  - no raw IP is stored, and an authenticated principal is stored only as a hash;
+  - Discord hears only `failed`, `blocked` and `budget_stop`;
+  - the audit event is `agent.attempt` and the PostHog event is `attempt_reported`.
+- **Transcripts:** never read or stored until the operator decides consent, redaction and
+  retention. The server records only that one was sent (`transcriptDropped`).
+- **Admin:** `GET /api/admin/feedback?kind=attempt&sessionId=<uuid>`. Without filters, the
+  response is unchanged.
+
 ## Where feedback + logs land (for analysis)
 
 - **Durable JSONL** — `${dirname(PCC_DB_PATH)}/feedback.jsonl` (prod: `/app/data/feedback.jsonl`, on the volume).
@@ -131,7 +163,7 @@ PR / the assistant's handoff. No prod writes were made pre-deploy (nothing new t
 ## Test surface
 
 `packages/gateway/src/__tests__/`: `report-hint.test.ts`, `feedback.test.ts`,
-`agent-package-auto-feedback.test.ts`. Wiring script:
+`feedback-attempt.test.ts`, `agent-package-auto-feedback.test.ts`. Wiring script:
 `scripts/update-agent-package-auto-feedback.mjs` (idempotent). Server:
 `packages/gateway/src/server.ts` (setErrorHandler + onSend), `report-hint.ts`,
 `routes/feedback.ts`.

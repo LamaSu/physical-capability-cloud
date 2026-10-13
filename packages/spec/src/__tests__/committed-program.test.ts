@@ -25,6 +25,7 @@ import { DIGEST_PATTERN, deriveCapabilityContractRoot, validatePlan, type Matche
 import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { EVIDENCE_PRIMITIVES } from "../evidence/primitives.js";
 import type { CsdEvidenceTier } from "../csd/schema.js";
+import { NonCanonicalValueError } from "../util/canonical.js";
 
 const CSD = "document-print-and-mail";
 const tiers = (printAndMailCsd as unknown as { evidence: Record<string, CsdEvidenceTier> }).evidence;
@@ -912,14 +913,6 @@ describe("checkCommittedProgramForTier — independence rests on evidence-owned 
     ["an object instead of an array", (p) => void (stageOf(p, "mail").allowedProvenance = { 0: "independent_carrier_scan", length: 1 } as unknown as string[])],
     ["a non-string element", (p) => void (stageOf(p, "mail").allowedProvenance = ["independent_carrier_scan", 1 as unknown as string])],
     ["a nested array element", (p) => void (stageOf(p, "mail").allowedProvenance = [["independent_carrier_scan"] as unknown as string])],
-    [
-      "a sparse array: the hole is not a label",
-      (p) => {
-        const sparse: string[] = [];
-        sparse[1] = "independent_carrier_scan";
-        stageOf(p, "mail").allowedProvenance = sparse;
-      },
-    ],
   ];
   for (const [name, mutate] of attacks) {
     it(`an independent stage with ${name} is refused by the check and by the gate`, () => {
@@ -928,6 +921,17 @@ describe("checkCommittedProgramForTier — independence rests on evidence-owned 
       expect(gateWithRegistered(program)).toEqual({ ok: false, code: "program-fails-tier-check", violations: [NOT_INDEPENDENT] });
     });
   }
+
+  it("a sparse provenance array is refused by the check and cannot have a committed hash", () => {
+    const program = variant((p) => {
+      const sparse: string[] = [];
+      sparse[1] = "independent_carrier_scan";
+      stageOf(p, "mail").allowedProvenance = sparse;
+    });
+    expect(violationsFor(program)).toEqual([NOT_INDEPENDENT]);
+    // Canonicalization refuses the hole before a registry entry can be built.
+    expect(() => computeCommittedProgramHash(program)).toThrow(NonCanonicalValueError);
+  });
 
   it("independence is event-specific: a label listed for the carrier scan does not make execution_completed independent", () => {
     const program = variant((p) => {
