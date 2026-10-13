@@ -24,6 +24,10 @@ export type {
   HeartbeatValue, InProgressValue, RelayEvidenceReceipt,
 } from "./gateway-client.js";
 export { createCarrierClient } from "./carrier-client.js";
+export { openUnitEvidenceSession, resumeUnitEvidenceSession, UnitSessionError } from "./unit-session.js";
+export type {
+  UnitEvidenceSession, OpenUnitEvidenceSessionOptions, ResumeUnitEvidenceSessionOptions, UnitSessionErrorCode,
+} from "./unit-session.js";
 export type {
   CarrierClient, CarrierClientConfig, BuyLabelInput, LabelReceipt,
   CarrierEvent, CarrierShipmentValue, CarrierEventsValue,
