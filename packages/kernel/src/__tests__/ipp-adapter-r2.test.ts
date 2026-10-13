@@ -248,6 +248,22 @@ describe("PR2 round 2 regressions", () => {
     let idle = false; void adapter.quiesceEvidence().then(() => { idle = true; }); await flush(); expect(idle).toBe(false);
     await adapter.dispose(); await adapter.quiesceEvidence();
   });
+  it("R4 F-6/PD1: repeated purged polls leave no terminal timers after expiry", async () => {
+    // Kills M10: removing armTerminalDeadline's terminalTimer !== null guard.
+    const { adapter, printer, events } = make(new FakeIppPrinter().setHandler(OP.GET_JOB_ATTRIBUTES,
+      request => ippResponse(request, { statusCode: 0x0406 })), { cancelConfirmMs: 200 });
+    await start(adapter);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(printer.operationRequests(OP.GET_JOB_ATTRIBUTES)).toHaveLength(4);
+    expect(events.filter(event => event.type === "execution_failed")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(events.filter(event => event.type === "execution_failed").map(event => event.payload)).toEqual([
+      { ippJobId: 77, state: "unobservable", reason: "job-unobservable", jobStateReasons: [], origin: "device" },
+    ]);
+    // Check before advancing again or teardown can hide generation-fenced orphan timers.
+    expect(vi.getTimerCount()).toBe(0);
+    await adapter.quiesceEvidence();
+  });
   it("F2: the default cancel deadline is 20 seconds and does not wait for a poll tick", async () => {
     const { adapter, events } = make(undefined, { pollIntervalMs: 600000 });
     await start(adapter); await adapter.cancelJob(77);
