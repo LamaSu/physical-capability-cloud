@@ -235,6 +235,25 @@ describe("package construction and mandatory signatures", () => {
     await expect(signMilestonePackage(forged, { ...f.operatorKey, signD1 }, f.deviceKey)).rejects.toMatchObject({ code: "bad_body" });
     expect(signD1).not.toHaveBeenCalled();
   });
+  it("rejects a self-consistent package whose unit id does not derive from its own fields before either signature (RV-L3b)", async () => {
+    const f = await fixture(); const forged = structuredClone(f.built);
+    forged.body.unitBinding.settlementUnitId = word("forged:unit-id");
+    const forgedContext = { ...f.context, settlementUnitId: forged.body.unitBinding.settlementUnitId };
+    expect(settlementUnitId({ ...forgedContext, chainId: BigInt(forgedContext.chainId),
+      milestoneIndex: BigInt(forgedContext.milestoneIndex) })).not.toBe(forgedContext.settlementUnitId);
+    forged.evidenceBlock.unitContextDigest = independentContext(forgedContext);
+    forged.evidenceBlockHash = independentBlock(forged.evidenceBlock.unitContextDigest,
+      forged.evidenceBlock.kernelSignedEventsRoot, forged.evidenceBlock.sessionKeyAuthDigest);
+    forged.body.evidence.evidenceBlockHash = forged.evidenceBlockHash;
+    forged.packageBodyHash = computePackageBodyHash(forged.body);
+    expect(forged.evidenceBlock.unitContextDigest).toBe(computeUnitContextDigest(forgedContext));
+    expect(computeEvidenceBlockHash(forged.evidenceBlock.unitContextDigest, forged.evidenceBlock.kernelSignedEventsRoot,
+      forged.evidenceBlock.sessionKeyAuthDigest, program)).toBe(forged.evidenceBlockHash);
+    const signD1 = vi.fn(f.operatorKey.signD1); const signD2 = vi.fn(f.deviceKey.signD2);
+    await expect(signMilestonePackage(forged, { ...f.operatorKey, signD1 }, { ...f.deviceKey, signD2 }))
+      .rejects.toMatchObject({ code: "bad_body" });
+    expect(signD1).not.toHaveBeenCalled(); expect(signD2).not.toHaveBeenCalled();
+  });
   it.each(["challenge nonce", "unit binding"] as const)("rejects a self-consistent block spliced from another %s before either signature", async (difference) => {
     const f = await fixture();
     const siblingContext = { ...f.context };

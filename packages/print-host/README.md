@@ -225,8 +225,10 @@ The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803)
    big-endian uint64 UTF-8 byte length, then JCS(body). The package digest is
    SHA-256(JCS({body, signatures})), after lowercase-signer, first-wins
    deduplication and sorting as the oracle contract specifies.
-   Before signing, it checks the block's unit-context digest against the body's
-   unit binding and challenge nonce, rejecting a mismatch as `bad_body`.
+   Before signing, it derives the settlement unit id from the body's own fields
+   and checks the block's unit-context digest against the body's unit binding
+   and challenge nonce, rejecting a mismatch as `bad_body`. It trusts the block's
+   events root and D3 digest to come from `buildMilestonePackage`.
 5. The operator broadcasts `submitEvidence(unitId, packageDigest)` once while
    FUNDED_ACTIVE and before reclaimAt. The escrow's commitment uses layout
    format 1 even though the body's package format is `"2"`. A successful receipt
@@ -260,7 +262,7 @@ manually constructed config and refuses excessive estimated fees or gas before
 calling the operator signer.
 These caps bound only the L2 execution fee (gas × maxFeePerGas); on an OP-stack
 chain such as Base Sepolia, an L1 data fee is charged on top and is not covered
-by any cap. That fee is small for a `submitEvidence` transaction of about 150
+by any cap. That fee is small for a `submitEvidence` transaction of about 180
 bytes, so fund the operator with a margin.
 
 Optional controls are `confirmations` (1–64, default 1), `rpcTimeoutMs`
@@ -268,12 +270,19 @@ Optional controls are `confirmations` (1–64, default 1), `rpcTimeoutMs`
 `pollingIntervalMs` (1–60,000, default 1,000). The RPC URL comes only from
 `chain.rpcUrlFile` through the secret-file reader. RPC URLs, raw transactions
 and server text are excluded from results and logs. Sends have no retries.
+Before latching or sending, the broadcaster parses the signed transaction and
+checks its chain, escrow, call data, nonce, gas and fee values against what it
+validated, and requires EIP-1559 type and zero value. A mismatch is
+`refused/signing_failed`, with no latch or send.
 
 `createEvidenceBroadcaster(config, operatorKey)` returns `submit(input)` and
 `readBack(input)`. The input is `{escrow, unitId, packageDigest,
 compositionSchemaVersion}`. Both calls use the unit's frozen chain id, proven
 through its settlement unit id, and its stored schema version for the expected
-commitment; a version mismatch is refused as `unit_mismatch` before any send.
+commitment; a version mismatch is refused as `unit_mismatch` before an initial send.
+Submitting an already latched unit returns `indeterminate` with its retained
+transaction hash after snapshotting the input and before frozen-unit or RPC
+checks, including after a refused send.
 `readBack` never signs or sends. An uncommitted getter
 returns `refused` with `EvidenceNotCommitted`. Factory configuration errors carry
 only `bad_config`.
@@ -283,17 +292,26 @@ The closed outcomes are `submitted`, `already_committed`, `conflict`,
 read-back means `already_committed`; a different stored commitment means
 `conflict`. After a send with no confirmed receipt in time, `indeterminate`
 requires caller reconciliation by read-back. Never automatically resend it.
-A refusal after the send is reported only after a read-back: a committed unit
-returns `already_committed` or `conflict`, and an unreadable unit is `indeterminate`.
+A send-time refusal requires a decoded escrow error. Undecoded hex data or a
+transport error is `indeterminate` with the transaction hash unless read-back
+shows a commitment. Every post-send refusal includes the transaction hash for
+journaling. Reconciliation returns `already_committed` or `conflict` for a
+committed unit, and an unreadable unit is `indeterminate`.
 The broadcaster serializes submissions within its instance for operator nonce
 safety and remembers sent units, including ambiguous sends. The later run loop
 must persist transaction intent and hash to preserve
 that rule across process restarts.
-Within an instance, `submit` refuses another unit as `unreconciled_transaction`
-until each earlier transaction it sent has a receipt or the operator's latest
-nonce has passed its nonce, and also refuses when the RPC's pending nonce does
-not exceed every nonce it signed. Across instances, including a new broadcaster
-or a restart, the caller must still reconcile first.
+Within an instance, a decoded send-time escrow error releases that attempt's
+nonce from both cross-unit checks, whatever its read-back outcome, while the
+unit's own latch remains. Otherwise, `submit` refuses another unit as
+`unreconciled_transaction` until each earlier transaction it sent has a receipt
+or the operator's latest nonce has passed its nonce, and also refuses when the
+RPC's pending nonce does not exceed every unreleased nonce it signed. A send
+that never reached the chain blocks other units in that instance until its
+nonce is consumed. The operator can consume nonce N with any transaction from
+the operator EOA, after which the same instance settles it; or reconcile, then
+start a new broadcaster. Across instances, including a restart, the caller
+must still reconcile first.
 
 ## Repros for pcc-adk
 
