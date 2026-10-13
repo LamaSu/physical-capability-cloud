@@ -635,7 +635,80 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(bundle.events.filter((event) => event.type === "execution_failed")).toHaveLength(1);
   });
 
-  it("LOW-C: defense in depth, kernel contradiction during quiesce (fixture breaching the quiesce contract)", async () => {
+  it.each([10, 50, 100])("LOW-2 LOW-1: honest option-(a) cancel-confirm deadline %i ms pins the signed or quiescing outcome", async (cancelConfirmMs) => {
+    const f = fixture({ cancel: (printer) => {
+      printer.later(cancelConfirmMs, () => printer.emit("execution_failed", {
+        state: "processing", reason: "cancel-unconfirmed", jobStateReasons: [], origin: "device",
+      }));
+    } });
+    const result = await drive(runPrintJob(f.options));
+    expect(result.success).toBe(false);
+    expect(result.cancelRequested).toBe("timeout");
+    expect(f.printer.cancels).toEqual([f.printer.job]);
+
+    if (cancelConfirmMs === 100) {
+      eventless(result);
+      expect(result.error).toBe("evidence did not quiesce within 40 ms");
+      expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
+      // Check the refusal before the adapter's late terminal timer ends its work.
+      const next = await drive(runPrintJob({ ...f.options, jobId: `${f.options.jobId}-next` }));
+      eventless(next);
+      expect(next.busy).toEqual({ reason: "quiescing", adapterId: f.printer.id, jobId: f.options.jobId });
+      expect(f.printer.commands.map((command) => command.type)).toEqual(["start"]);
+      await vi.advanceTimersByTimeAsync(30); // The adapter's failure now ends the job and quiesces.
+    } else {
+      const bundle = signed(result, f.signer.publicKeyHex);
+      expect(result.failure).toEqual({ kind: "timeout", origin: cancelConfirmMs === 10 ? "device" : "kernel" });
+      expect(result.error).toBe(`print job ${f.options.jobId} timed out after 50ms`);
+      const failures = bundle.events.filter((event) => event.type === "execution_failed");
+      expect(failures.map((event) => event.payload.origin)).toEqual(cancelConfirmMs === 10 ? ["device"] : ["kernel", "device"]);
+      expect(failures.at(-1)!.payload).toEqual({
+        ippJobId: f.printer.job, state: "processing", reason: "cancel-unconfirmed",
+        jobStateReasons: [], origin: "device", jobId: f.options.jobId,
+      });
+      expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
+      // Drive the second print too: it has its own timeout and cancel-confirm timer.
+      const next = await drive(runPrintJob({ ...f.options, jobId: `${f.options.jobId}-next` }));
+      signed(next, f.signer.publicKeyHex);
+      expect(next.busy).toBeUndefined();
+      expect(f.printer.commands.map((command) => command.type)).toEqual(["start", "start"]);
+    }
+    await f.printer.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("LOW-C: late-report path signs a kernel contradiction when the honest device completes after the cancel window", async () => {
+    const quiet = deferred<void>();
+    const f = fixture({ quiesce: () => quiet.promise });
+    const pending = runPrintJob({ ...f.options, evidenceQuiesceTimeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(81); // The kernel failure is admitted before the late terminal report.
+    f.printer.emit("execution_completed", { totalPages: 3 });
+    quiet.resolve();
+    const result = await drive(pending);
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(result.success).toBe(false);
+    expect(result.failure).toEqual({ kind: "contradiction", origin: "kernel" });
+    expect(result.cancelRequested).toBe("timeout");
+    expect(result.error).toBe(`kernel reported failure and printer reported completion for device job ${f.printer.job}`);
+    expect(bundle.events.map((event) => event.type)).toEqual(["execution_started", "execution_failed", "execution_completed"]);
+    expect(bundle.events[1]!.payload.origin).toBe("kernel");
+  });
+
+  it("INFO-1: late-report path keeps the first bound failure's origin when the honest device fails after the cancel window", async () => {
+    const quiet = deferred<void>();
+    const f = fixture({ quiesce: () => quiet.promise });
+    const pending = runPrintJob({ ...f.options, evidenceQuiesceTimeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(81); // The device's late report ends work, then quiesce can resolve.
+    f.printer.emit("execution_failed", { state: "canceled", origin: "device" });
+    quiet.resolve();
+    const result = await drive(pending);
+    const bundle = signed(result, f.signer.publicKeyHex);
+    expect(result.success).toBe(false);
+    expect(result.failure).toEqual({ kind: "timeout", origin: "kernel" });
+    expect(bundle.events.filter((event) => event.type === "execution_failed").map((event) => event.payload.origin)).toEqual(["kernel", "device"]);
+  });
+
+  it("LOW-C: defence in depth signs a kernel contradiction during quiesce (fixture breaching the quiesce contract)", async () => {
     const quiet = deferred<void>();
     const f = fixtureBreachingQuiesceContract({ quiesce: () => quiet.promise });
     const pending = runPrintJob({ ...f.options, evidenceQuiesceTimeoutMs: 1_000 });
@@ -652,7 +725,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(bundle.events[1]!.payload.origin).toBe("kernel");
   });
 
-  it("INFO-1: defense in depth, the first signed failure decides the verdict (fixture breaching the quiesce contract)", async () => {
+  it("INFO-1: defence in depth keeps the first bound failure's origin (fixture breaching the quiesce contract)", async () => {
     const quiet = deferred<void>();
     const f = fixtureBreachingQuiesceContract({ quiesce: () => quiet.promise });
     const pending = runPrintJob({ ...f.options, evidenceQuiesceTimeoutMs: 1_000 });
