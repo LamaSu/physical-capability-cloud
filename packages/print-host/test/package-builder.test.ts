@@ -5,15 +5,22 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { concatHex, encodeAbiParameters, getAddress, keccak256, toBytes, toHex, zeroHash, type Hex } from "viem";
 import { settlementUnitId } from "@pcc/contracts/vnext";
-import { canonicalize, hashEvent, sessionKeyDelegationPreimage, type EvidenceBundle, type EvidenceEvent, type SessionKey } from "@pcc/spec";
+import { canonicalize, COMPROMISED_DEVICE_PUBLIC_KEYS, formatDevicePrincipalId, formatOperatorPrincipalId,
+  hashEvent, sessionKeyDelegationPreimage, type EvidenceBundle, type EvidenceEvent, type SessionKey } from "@pcc/spec";
 import { generateHostKeys } from "../src/keygen.js";
 import { loadDeviceKey, loadOperatorKey } from "../src/keys.js";
 import { openUnitEvidenceSession } from "../src/unit-session.js";
 import {
   buildMilestonePackage, canonicalSignatures, computeEvidenceBlockHash, computePackageBodyHash, computePackageDigest,
   computeSessionKeyAuthDigest, computeUnitContextDigest, signMilestonePackage, validateUnitContext,
-  type BuiltMilestonePackage, type UnitContext,
+  PackageBuilderError, type BuiltMilestonePackage, type UnitContext,
 } from "../src/package-builder.js";
+
+vi.mock("@pcc/spec", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pcc/spec")>();
+  return { ...actual, formatOperatorPrincipalId: vi.fn(actual.formatOperatorPrincipalId),
+    formatDevicePrincipalId: vi.fn(actual.formatDevicePrincipalId) };
+});
 
 const directories: string[] = [];
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -183,6 +190,51 @@ describe("V-next package hash parity", () => {
 });
 
 describe("package construction and mandatory signatures", () => {
+  it("constructs and verifies both producer ids through the shared spec formatters (P1)", async () => {
+    const f = await fixture();
+    vi.mocked(formatOperatorPrincipalId).mockClear();
+    vi.mocked(formatDevicePrincipalId).mockClear();
+    const built = buildMilestonePackage(f.bundle, f.context, program);
+    expect(formatOperatorPrincipalId).toHaveBeenCalledWith(Number(f.context.chainId), f.context.operator.toLowerCase());
+    expect(formatDevicePrincipalId).toHaveBeenCalledWith(`0x${f.deviceKey.publicKeyHex.toLowerCase()}`);
+    expect(built.body.producer.operatorPrincipalId).toBe(formatOperatorPrincipalId(Number(f.context.chainId), f.operatorKey.address));
+    expect(built.body.producer.devicePrincipalId).toBe(formatDevicePrincipalId(f.deviceKey.signingPublicKey));
+    vi.mocked(formatOperatorPrincipalId).mockClear();
+    vi.mocked(formatDevicePrincipalId).mockClear();
+    await signMilestonePackage(built, f.operatorKey, f.deviceKey);
+    expect(formatOperatorPrincipalId).toHaveBeenCalledWith(Number(f.context.chainId), f.operatorKey.address.toLowerCase());
+    expect(formatDevicePrincipalId).toHaveBeenCalledWith(`0x${f.deviceKey.publicKeyHex.toLowerCase()}`);
+  });
+
+  it("refuses a compromised device context with a closed code before producing a package", async () => {
+    const f = await fixture();
+    const compromised = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]! as Hex;
+    let caught: unknown;
+    try { buildMilestonePackage(f.bundle, { ...f.context, devicePublicKey: compromised }, program); }
+    catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(PackageBuilderError);
+    expect(caught).toMatchObject({ code: "compromised_device", message: "compromised_device" });
+    expect(Object.keys(caught as object).sort()).toEqual(["code", "name"].sort());
+    expect(String(caught)).not.toContain(compromised);
+  });
+
+  it("refuses a compromised signing device with a closed code before D1 or D2", async () => {
+    const f = await fixture();
+    const compromised = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!;
+    const signD1 = vi.fn(f.operatorKey.signD1);
+    const signD2 = vi.fn(f.deviceKey.signD2);
+    let caught: unknown;
+    try { await signMilestonePackage(f.built, { ...f.operatorKey, signD1 }, {
+      ...f.deviceKey, publicKeyHex: compromised.slice(2), signingPublicKey: compromised, signD2,
+    }); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(PackageBuilderError);
+    expect(caught).toMatchObject({ code: "compromised_device", message: "compromised_device" });
+    expect(Object.keys(caught as object).sort()).toEqual(["code", "name"].sort());
+    expect(String(caught)).not.toContain(compromised);
+    expect(signD1).not.toHaveBeenCalled();
+    expect(signD2).not.toHaveBeenCalled();
+  });
+
   it("builds the #622 session output, verifies mandatory D1 with gateway and D2 over raw32 only (B4)", async () => {
     const { bundle, built, deviceKey, operatorKey } = await fixture(); const gw = await gateway();
     expect(bundle.sessionKeyAuthorization!.expiresAt - bundle.sessionKeyAuthorization!.issuedAt).toBeGreaterThan(3600);

@@ -144,6 +144,33 @@ describe("fileJobInputSource", () => {
     expect(isUnitBinding({ ...unit, reclaimAt: Number.POSITIVE_INFINITY })).toBe(false);
   });
 
+  it.each(["fundedAt", "reclaimAt"] as const)("refuses %s outside protocol integer seconds at load and custom binding (T1)", async (field) => {
+    const open = vi.spyOn(fs, "open");
+    for (const value of [1_599_999_999, 2 ** 32, unit[field] * 1_000, 1_600_000_000.5]) {
+      const changedUnit = { ...unit, fundedAt: 1_600_000_000, reclaimAt: 2 ** 32 - 1, [field]: value };
+      await fixture({ unit: changedUnit });
+      expect(await fileJobInputSource(dir)(jobId)).toEqual({ ok: false, code: "job_inputs_bad_schema" });
+      expect(isUnitBinding(changedUnit)).toBe(false);
+    }
+    expect(open.mock.calls.some(([path]) => path === join(dir, "document.pdf"))).toBe(false);
+  });
+
+  it.each([[1_600_000_000, 1_600_000_001], [2 ** 32 - 2, 2 ** 32 - 1]])(
+    "accepts protocol range boundaries %i to %i for loaded and complete inputs", async (fundedAt, reclaimAt) => {
+      const completeUnit = { ...unit, ...packageFields, challengeNonce: hash("range-boundary-challenge"), fundedAt, reclaimAt };
+      await fixture({ unit: completeUnit, program });
+      const result = await fileJobInputSource(dir)(jobId);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(isUnitBinding(result.value.unit)).toBe(true);
+        expect(hasPackageInputs(result.value)).toBe(true);
+        for (const field of ["fundedAt", "reclaimAt"] as const) {
+          expect(hasPackageInputs({ ...result.value, unit: { ...result.value.unit, [field]: 2 ** 32 } })).toBe(false);
+        }
+      }
+    },
+  );
+
   it.each(["../document.pdf", "/document.pdf", "child/document.pdf", String.raw`child\document.pdf`, ".", "..", "document\u0000.pdf"])(
     "refuses traversal or a non-plain documentFile %s", async (documentFile) => {
       await fixture({ documentFile });

@@ -9,7 +9,7 @@ import { checkHostConfig, HostConfigError, loadHostConfig, requireSubmissionCaps
 import type { HostConfig } from "./config.js";
 import { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
 import type { GatewayClient, GatewayClientConfig } from "./gateway-client.js";
-import { createHost, HOST_LOG_CODES } from "./host.js";
+import { createHost, HOST_LOG_CODES, HostIdentityError } from "./host.js";
 import { createJobJournal, JournalError } from "./journal.js";
 import { defaultJobInputSource, fileJobInputSource } from "./job-inputs.js";
 import { generateHostKeys, KeyGenerationError } from "./keygen.js";
@@ -110,6 +110,7 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
       if (!apiKey || /\s/.test(apiKey)) throw new HostConfigError("bad_api_key", config.gateway.apiKeyFile);
       gateway = (runtime.createGateway ?? createGatewayClient)({
         baseUrl: config.gateway.baseUrl, kernelId: config.kernelId, apiKey,
+        ...(operator === undefined ? {} : { wallet: operator.address }),
         emergencyStopReader: strictEmergencyStopReader,
       });
     } finally { apiBytes.fill(0); }
@@ -128,7 +129,10 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
     });
     if (options.once) {
       const tick = await host.runOnce();
-      if (tick.kind === "halted") throw new JournalError(tick.code === "data_dir_locked" ? "data_dir_locked" : "journal_write_failed");
+      if (tick.kind === "halted") {
+        if (tick.code === "device_identity_mismatch" || tick.code === "compromised_device") throw new HostIdentityError(tick.code);
+        throw new JournalError(tick.code === "data_dir_locked" ? "data_dir_locked" : "journal_write_failed");
+      }
     }
     else await host.run(shutdown.signal);
   } finally {
@@ -239,7 +243,7 @@ export async function main(argv: string[], io: CliIo, runtime: CliRunRuntime = {
     if (error instanceof SecretFileError || error instanceof KeyFileError
       || error instanceof HostConfigError || error instanceof KeyGenerationError) {
       io.stderr.write(`${argv[0] === "run" ? error.code : error.message}\n`);
-    } else if (error instanceof GatewayClientError || error instanceof JournalError
+    } else if (error instanceof GatewayClientError || error instanceof JournalError || error instanceof HostIdentityError
       || error instanceof EvidenceChainConfigError || error instanceof OperatorSigningError) {
       io.stderr.write(`${error.code}\n`);
     } else {

@@ -69,7 +69,7 @@ async function closedRefusal(operation: () => Promise<unknown>, code: string): P
 
 describe("narrow device signing", () => {
   it("DeviceKey exposes exactly two signing methods over a frozen null-root prototype", () => {
-    expect(Reflect.ownKeys(key).sort()).toEqual(["publicKeyHex", "signingPublicKey", "signDelegation", "signD2"].sort());
+    expect(Reflect.ownKeys(key).sort()).toEqual(["publicKeyHex", "signingPublicKey", "delegationParent", "signDelegation", "signD2"].sort());
     const prototype = Object.getPrototypeOf(key) as object;
     expect(Object.isFrozen(key)).toBe(true);
     expect(Object.isFrozen(prototype)).toBe(true);

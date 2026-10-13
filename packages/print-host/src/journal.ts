@@ -39,6 +39,8 @@ export interface JobJournal {
   /** Release this instance's data-directory lock after outstanding writes. */
   close(): Promise<void>;
   has(jobId: string): Promise<boolean>;
+  /** Durably consume a funded unit before claim; even an orphan reservation blocks reuse. */
+  reserveUnit(jobId: string, settlementUnitId: string): Promise<boolean>;
   append(jobId: string, state: JournalState, code?: JournalCode, metadata?: JournalMetadata): Promise<void>;
   saveBundle(jobId: string, bundle: RelayEvidenceBundle): Promise<void>;
   readBundle(jobId: string): Promise<RelayEvidenceBundle>;
@@ -70,7 +72,7 @@ const codes = new Set<string>([
   "carrier_record_ownership_mismatch", "carrier_not_configured",
   "missing_fields", "invalid_parcel", "invalid_document_hash",
   "provider_mode_not_production", "weight_exceeds_ceiling", "rate_exceeds_ceiling",
-  "receipt_exists", "receipt_signer_unavailable",
+  "receipt_exists", "receipt_signer_unavailable", "kernel_emergency_stopped",
 ]);
 const states = new Set<string>(JOURNAL_STATES);
 const interruptedStates = new Set<JournalState>(["claimed", "in_progress_reported", "printing"]);
@@ -362,9 +364,8 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
     try { return await result; } catch (error) { throw safe(error, fallback); }
   }
 
-  async function readArtifact(jobId: string, suffix: string, limit: number): Promise<unknown | undefined> {
+  async function readPrivateArtifact(filePath: string, limit: number): Promise<unknown | undefined> {
     await checkDirectory();
-    const filePath = path(jobId, suffix);
     let before;
     try { before = await fs.lstat(filePath); } catch (error) { if (isMissing(error)) return undefined; throw error; }
     if (!before.isFile() || before.isSymbolicLink() || before.uid !== expectedUid
@@ -388,6 +389,71 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
         catch { throw new JournalError("journal_invalid"); }
       } finally { bytes.fill(0); }
     } finally { await handle.close(); }
+  }
+
+  function readArtifact(jobId: string, suffix: string, limit: number): Promise<unknown | undefined> {
+    return readPrivateArtifact(path(jobId, suffix), limit);
+  }
+
+  function object(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function boundUnit(value: unknown): string | undefined {
+    if (!object(value) || !Object.hasOwn(value, "settlementUnitId")) return undefined;
+    if (typeof value.settlementUnitId !== "string" || !/^0x[0-9a-f]{64}$/.test(value.settlementUnitId)) {
+      throw new JournalError("journal_invalid");
+    }
+    return value.settlementUnitId;
+  }
+
+  /** Old JSONL records contain no unit id. Recover their binding from public artifacts. */
+  async function priorJobUsesUnit(jobId: string, unit: string): Promise<boolean> {
+    const packaged = await readArtifact(jobId, ".package.json", 128 * 1024);
+    if (object(packaged) && object(packaged.body) && boundUnit(packaged.body.unitBinding) === unit) return true;
+    const bundled = await readArtifact(jobId, ".bundle.json", 4 * 1024 * 1024);
+    if (object(bundled) && Array.isArray(bundled.events)) {
+      for (const event of bundled.events) {
+        if (object(event) && boundUnit(event.payload) === unit) return true;
+      }
+    }
+    const receipt = await readArtifact(jobId, ".receipt.json", 16 * 1024);
+    if (object(receipt) && boundUnit(receipt.receipt) === unit) return true;
+    const dir = sessionDirectory(jobId);
+    let stat;
+    try { stat = await fs.lstat(dir); } catch (error) { if (isMissing(error)) return false; throw error; }
+    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== expectedUid
+      || (stat.mode & 0o777) !== 0o700) throw new JournalError("journal_bad_directory");
+    const opened = await readPrivateArtifact(join(dir, "00000000.json"), 128 * 1024);
+    return object(opened) && object(opened.record) && opened.record.kind === "open"
+      && boundUnit(opened.record.binding) === unit;
+  }
+
+  async function reserveUnitRaw(jobId: string, settlementUnitId: string): Promise<boolean> {
+    path(jobId, ".jsonl");
+    if (typeof settlementUnitId !== "string" || !/^0x[0-9a-f]{64}$/.test(settlementUnitId)) {
+      throw new JournalError("journal_invalid");
+    }
+    await checkDirectory();
+    const markerId = `.unit-${settlementUnitId.slice(2)}`;
+    const marker = await readArtifact(markerId, ".used.json", 2_048);
+    if (marker !== undefined) {
+      if (!object(marker) || Object.keys(marker).sort().join(",") !== "jobId,settlementUnitId,version"
+        || marker.version !== 1 || marker.settlementUnitId !== settlementUnitId
+        || typeof marker.jobId !== "string" || jobFileStem(marker.jobId) === undefined) {
+        throw new JournalError("journal_invalid");
+      }
+      return false;
+    }
+    // A crash can leave the reservation without a host journal, or even leave
+    // only its temporary file. Both retain the funded unit, failing closed.
+    const tempPrefix = `${markerId}.used.json.tmp-`;
+    if ((await fs.readdir(directory)).some((name) => name.startsWith(tempPrefix))) return false;
+    for (const record of await listRaw()) {
+      if (await priorJobUsesUnit(record.jobId, settlementUnitId)) return false;
+    }
+    await saveArtifact(markerId, ".used.json", { version: 1, jobId, settlementUnitId });
+    return true;
   }
 
   async function saveArtifact(jobId: string, suffix: string, value: unknown): Promise<void> {
@@ -453,6 +519,7 @@ export function createJobJournal(dataDir: string, clock: () => number = Date.now
         return true;
       } catch (error) { if (isMissing(error)) return false; throw error; }
     }, "journal_read_failed"),
+    reserveUnit: (jobId, settlementUnitId) => writing(() => reserveUnitRaw(jobId, settlementUnitId)),
     append: (jobId, state, code, hashes) => writing(() => appendRaw(jobId, state, code, hashes)),
     read: (jobId) => serial(() => readRaw(jobId), "journal_read_failed"),
     list: () => serial(listRaw, "journal_read_failed"),

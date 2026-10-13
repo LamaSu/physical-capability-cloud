@@ -16,6 +16,7 @@ const bundle = { events: [], bundleHash };
 const apiKey = ["pcc", "test", randomBytes(24).toString("hex")].join("_");
 const canary = `server-canary-${randomBytes(24).toString("hex")}`;
 const noiseString = `${canary} ${apiKey}`;
+const wallet = `0x${randomBytes(20).toString("hex")}`;
 
 type Client = ReturnType<typeof createGatewayClient>;
 type ClientConfig = Parameters<typeof createGatewayClient>[0];
@@ -115,6 +116,31 @@ describe("gateway client construction and public surface", () => {
     }
   });
 
+  it.each(["", wallet.slice(0, -1), `${wallet}0`, `${wallet}\n`, wallet.replace("0x", "0X"), canary, null, 3, []])(
+    "rejects a malformed wallet with bad_wallet before any request (%#)", (invalidWallet) => {
+      const fetchImpl = vi.fn(async () => json({ jobs: [] }));
+      let caught: unknown;
+      try { createGatewayClient({ baseUrl, apiKey, kernelId, fetchImpl, wallet: invalidWallet as string }); }
+      catch (error) { caught = error; }
+      expect(caught).toBeInstanceOf(GatewayClientError);
+      expect((caught as GatewayClientError).code).toBe("bad_wallet");
+      expect((caught as Error).message).toBe("bad_wallet");
+      expect(Object.keys(caught as object).sort()).toEqual(["code", "name"]);
+      expect(Object.hasOwn(caught as object, "cause")).toBe(false);
+      expectNoCanaries(caught);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reads the wallet once and keeps it out of client displays", () => {
+    const readWallet = vi.fn(() => wallet);
+    const client = createGatewayClient({ baseUrl, apiKey, kernelId, get wallet() { return readWallet(); } });
+    expect(readWallet).toHaveBeenCalledOnce();
+    for (const rendered of [JSON.stringify(client), String(client), inspect(client, { showHidden: true })]) {
+      expect(rendered).not.toContain(wallet);
+    }
+  });
+
   it.each(["", "a".repeat(201), "kernel\nother", "kernel\u007fother", "kernel\u0000other"])("rejects invalid kernel identity %j", (id) => {
     expect(() => fixture(undefined, { kernelId: id })).toThrow(GatewayClientError);
   });
@@ -174,6 +200,41 @@ describe("gateway client construction and public surface", () => {
 });
 
 describe("the four operator relay requests", () => {
+  it("sends one lowercase X-PCC-Wallet only on the two DECIDE calls", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/jobs")) return json({ jobs: [] });
+      if (path.endsWith("/heartbeat")) return json({ acknowledged: true });
+      if (path.endsWith("/job-status")) return json({ updated: true });
+      if (path.endsWith("/evidence")) return json(stored());
+      return json({});
+    });
+    const client = createGatewayClient({ baseUrl, apiKey, kernelId, fetchImpl, wallet: `0x${wallet.slice(2).toUpperCase()}` });
+    await client.pollJobs();
+    await client.heartbeat();
+    await client.reportInProgress(jobId);
+    await client.postRelayEvidence(jobId, bundle as Evidence);
+    await client.postReceipt(jobId, { body: {}, signatures: [] });
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
+    for (const [url, init] of fetchImpl.mock.calls) {
+      const path = new URL(String(url)).pathname;
+      const decide = path.endsWith("/evidence") || path.endsWith("/receipt");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("X-PCC-Wallet")).toBe(decide ? wallet : null);
+      expect([...headers].filter(([name]) => name === "x-pcc-wallet")).toHaveLength(decide ? 1 : 0);
+      expect(headers.get("Authorization") === `Bearer ${apiKey}`).toBe(true);
+      expect(init?.redirect).toBe("error");
+    }
+  });
+
+  it("omits X-PCC-Wallet on both DECIDE calls when no operator wallet is configured", async () => {
+    const { client, fetchImpl } = fixture(() => json(stored()));
+    await client.postRelayEvidence(jobId, bundle as Evidence);
+    await client.postReceipt(jobId, { body: {}, signatures: [] });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchImpl.mock.calls) expect(new Headers(init?.headers).has("X-PCC-Wallet")).toBe(false);
+  });
+
   it("polls queued jobs with the exact encoded URL and bearer header", async () => {
     const encodedKernel = "kernel:n144 /?#";
     const { client, fetchImpl } = fixture(json({ jobs: [{ id: jobId, kernelId: encodedKernel, status: "queued", inputs: canary }] }), { kernelId: encodedKernel });
@@ -540,6 +601,30 @@ describe("strict successful response parsing and emergency stop", () => {
     });
   });
 
+  it("an inherited ok never makes a 503 poll successful or reaches the e-stop reader", async () => {
+    await withInherited("ok", false, async () => {
+      const reader = vi.fn(() => ({ proceed: true as const }));
+      const { client } = fixture(json({ jobs: [], emergencyStop: "clear" }, 503), { emergencyStopReader: reader });
+      expect(await client.pollJobs()).toEqual({ ok: false, code: "unavailable", status: 503 });
+      expect(reader).not.toHaveBeenCalled();
+    });
+  });
+
+  it("an inherited ok keeps a stored evidence receipt accepted", async () => {
+    await withInherited("ok", false, async () => {
+      const { client } = fixture(json(stored()));
+      expect(await client.postRelayEvidence(jobId, bundle as Evidence))
+        .toEqual({ ok: true, value: { jobId, contentHash: bundleHash, hashModel: "event_bundle_hash" } });
+    });
+  });
+
+  it("an inherited ok makes a 200 non-JSON poll malformed_response without throwing", async () => {
+    await withInherited("ok", false, async () => {
+      const { client } = fixture(new Response('{"jobs":[]}', { headers: { "Content-Type": "text/plain" } }));
+      expect(await client.pollJobs()).toEqual({ ok: false, code: "malformed_response", status: 200 });
+    });
+  });
+
   it("never classifies an inherited server error or reason", async () => {
     await withInherited("reason", "not_kernel_operator", async () => {
       expect(await fixture(json({ error: "forbidden" }, 403)).client.pollJobs())
@@ -581,7 +666,7 @@ describe("strict successful response parsing and emergency stop", () => {
       start(controller) { controller.enqueue(new Uint8Array(33)); }, cancel,
     }), { headers: { "Content-Type": "application/json" } });
     const { client } = fixture(response, { maxResponseBytes: 32 });
-    expect(await client.pollJobs()).toMatchObject({ ok: false, code: "malformed_response", status: 200 });
+    expect(await client.pollJobs()).toEqual({ ok: false, code: "malformed_response", status: 200 });
     expect(cancel).toHaveBeenCalledOnce();
   });
 
@@ -594,7 +679,7 @@ describe("strict successful response parsing and emergency stop", () => {
       }, cancel,
     }), { headers: { "Content-Type": "application/json" } });
     const { client } = fixture(response, { maxResponseBytes: 32 });
-    expect(await client.pollJobs()).toMatchObject({ ok: false, code: "malformed_response", status: 200 });
+    expect(await client.pollJobs()).toEqual({ ok: false, code: "malformed_response", status: 200 });
     expect(cancel).toHaveBeenCalledOnce();
   });
 });
@@ -858,6 +943,7 @@ describe("N149 receipt posting", () => {
 
   it.each([
     [409, "receipt_exists", "receipt_exists"],
+    [409, "kernel_emergency_stopped", "kernel_emergency_stopped"],
     [503, "receipt_signer_unavailable", "receipt_signer_unavailable"],
     [429, "unknown", "rate_limited"], [500, "unknown", "server_error"],
     [503, "unknown", "unavailable"], [401, "unknown", "unauthenticated"],

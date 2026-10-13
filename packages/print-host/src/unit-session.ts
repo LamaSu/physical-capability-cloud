@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
-  canonicalize, hashBundle, hashEvent, sessionKeyDelegationPreimage, signingPreimage,
+  canonicalize, hashBundle, hashEvent, isCompromisedDevicePublicKey, sessionKeyDelegationPreimage, signingPreimage,
   type EvidenceBundle, type EvidenceEvent, type SessionKey,
 } from "@pcc/spec";
 import type { PrintJobResult } from "@pcc/kernel";
@@ -13,7 +13,7 @@ import { makeKernelEd25519Signer } from "./kernel-signer.js";
 export type UnitSessionErrorCode = "bad_options" | "clock_skew" | "expired" |
   "bad_event" | "event_binding" | "event_time" | "event_limit" | "empty_session" |
   "finalized" | "journal_exists" | "journal_io" | "journal_integrity" |
-  "unit_mismatch" | "device_mismatch" | "signing_failed";
+  "unit_mismatch" | "device_mismatch" | "compromised_device" | "signing_failed";
 
 /** Deliberately contains no path, input, cause, or library error. */
 export class UnitSessionError extends Error {
@@ -64,6 +64,7 @@ const systemNow = () => Math.floor(Date.now() / 1_000);
 // deliberately have independent paths; they remain portable public journals.
 const queues = new Map<string, Promise<unknown>>();
 const seconds = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const fundingSeconds = (value: unknown): value is number => seconds(value) && value >= 1_600_000_000 && value < 2 ** 32;
 const bytes32 = (value: unknown): value is string => typeof value === "string" && /^0x[0-9a-f]{64}$/.test(value);
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const clone = <T>(value: T): T => JSON.parse(canonicalize(value)) as T;
@@ -74,7 +75,7 @@ function checkBinding(binding: Binding): void {
   if (!bytes32(binding.settlementUnitId) || !bytes32(binding.challengeNonce) ||
     typeof binding.jobId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(binding.jobId) ||
     typeof binding.parentAgentId !== "string" || !/^eip155:(84532|31337):0x[0-9a-f]{40}$/.test(binding.parentAgentId) ||
-    !seconds(binding.fundedAt) || !seconds(binding.expiresAt) || binding.expiresAt <= binding.fundedAt ||
+    !fundingSeconds(binding.fundedAt) || !fundingSeconds(binding.expiresAt) || binding.expiresAt <= binding.fundedAt ||
     typeof binding.devicePublicKey !== "string" || !/^[0-9a-f]{64}$/.test(binding.devicePublicKey)) throw new UnitSessionError("bad_options");
 }
 
@@ -326,6 +327,8 @@ export async function openUnitEvidenceSession(options: OpenUnitEvidenceSessionOp
     const { settlementUnitId, challengeNonce, jobId, parentAgentId, fundedAt, expiresAt, deviceKey } = options;
     const binding: Binding = { settlementUnitId, challengeNonce, jobId, parentAgentId, fundedAt, expiresAt, devicePublicKey: deviceKey.publicKeyHex };
     checkBinding(binding);
+    if (parentAgentId !== deviceKey.delegationParent) throw new UnitSessionError("bad_options");
+    if (isCompromisedDevicePublicKey(deviceKey.publicKeyHex)) throw new UnitSessionError("compromised_device");
     if (typeof options.journalDir !== "string" || options.journalDir.length === 0) throw new UnitSessionError("bad_options");
     const journalDir = resolve(options.journalDir);
     const now = options.now ?? systemNow;

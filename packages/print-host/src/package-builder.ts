@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import {
-  canonicalize, checkDelegationScope, checkEventTimes, isValidKernelId,
-  parseDevicePrincipalId, parseEvidenceTimeBound, sessionKeyDelegationPreimage,
+  canonicalize, checkDelegationScope, checkEventTimes, formatDevicePrincipalId, formatOperatorPrincipalId,
+  isCompromisedDevicePublicKey, isValidKernelId, parseEvidenceTimeBound, sessionKeyDelegationPreimage,
   type EvidenceBundle, type SessionKey,
 } from "@pcc/spec";
 import { settlementUnitId } from "@pcc/contracts/vnext";
@@ -11,7 +11,7 @@ import { prepareD1 } from "./operator-signing.js";
 
 export type PackageBuilderErrorCode = "bad_context" | "bad_program" | "bad_bundle" |
   "event_binding" | "event_time" | "fabricated_event" | "bad_delegation" |
-  "bad_signature" | "bad_body" | "bad_signatures" | "key_mismatch" | "signing_failed";
+  "bad_signature" | "bad_body" | "bad_signatures" | "key_mismatch" | "compromised_device" | "signing_failed";
 
 /** No inputs, crypto exceptions or server text escape through errors. */
 export class PackageBuilderError extends Error {
@@ -136,19 +136,20 @@ const publicKey = (hex: Hex) => createPublicKey({
 });
 
 export function validateUnitContext(input: UnitContext) {
-  return guarded("bad_context", () => {
+  const context = guarded("bad_context", () => {
     const c = record(input, contextFields);
     const chainId = uint(c.chainId);
     const challengeNonce = word(c.challengeNonce);
     const devicePublicKey = word(c.devicePublicKey);
-    if (chainId === 0n || challengeNonce === zeroHash || !isValidKernelId(c.kernelId) ||
-      parseDevicePrincipalId(`ed25519:${devicePublicKey}`) === null) fail("bad_context");
+    if (chainId === 0n || chainId > BigInt(Number.MAX_SAFE_INTEGER) || challengeNonce === zeroHash || !isValidKernelId(c.kernelId)) fail("bad_context");
     return freeze({ chainId, escrow: address(c.escrow), settlementUnitId: word(c.settlementUnitId), jobIdHash: word(c.jobIdHash),
       milestoneIndex: uint(c.milestoneIndex), stepId: word(c.stepId), compositionRoot: word(c.compositionRoot),
       acceptedEnvelopeHash: word(c.acceptedEnvelopeHash), challengeNonce, compositionSchemaVersion: uint(c.compositionSchemaVersion, 65535n),
       operator: address(c.operator), kernelId: c.kernelId, devicePublicKey, tChallengeRef: text(c.tChallengeRef),
       evidenceTimeBounds: bounds(c.evidenceTimeBounds) });
   });
+  if (isCompromisedDevicePublicKey(context.devicePublicKey)) fail("compromised_device");
+  return context;
 }
 
 function unitContextDigest(c: Pick<ReturnType<typeof validateUnitContext>,
@@ -217,7 +218,8 @@ function createPackageBody(c: ReturnType<typeof validateUnitContext>, evidenceBl
     compositionSchemaVersion: String(c.compositionSchemaVersion),
     unitBinding: { chainId: String(c.chainId), escrow: c.escrow, settlementUnitId: c.settlementUnitId, jobIdHash: c.jobIdHash,
       milestoneIndex: String(c.milestoneIndex), stepId: c.stepId, compositionRoot: c.compositionRoot, acceptedEnvelopeHash: c.acceptedEnvelopeHash },
-    producer: { operatorPrincipalId: `eip155:${c.chainId}:${c.operator}`, kernelId: c.kernelId, devicePrincipalId: `ed25519:${c.devicePublicKey}` },
+    producer: { operatorPrincipalId: guarded("bad_context", () => formatOperatorPrincipalId(Number(c.chainId), c.operator)),
+      kernelId: c.kernelId, devicePrincipalId: guarded("bad_context", () => formatDevicePrincipalId(c.devicePublicKey)) },
     challengeBinding: { nonce: c.challengeNonce, tChallengeRef: c.tChallengeRef },
     evidence: { evidenceBlockHash }, evidenceTimeBounds: c.evidenceTimeBounds,
   };
@@ -247,7 +249,7 @@ export function buildMilestonePackage(bundle: EvidenceBundle, unit: UnitContext,
   const bundleHash = `sha256:${kernelSignedEventsRoot.slice(2)}`;
   if (typeof b.bundleHash !== "string" || b.bundleHash.toLowerCase() !== bundleHash) fail("bad_bundle");
   const d = delegation(b.sessionKeyAuthorization);
-  const operatorPrincipalId = `eip155:${c.chainId}:${c.operator}`;
+  const operatorPrincipalId = guarded("bad_context", () => formatOperatorPrincipalId(Number(c.chainId), c.operator));
   if (!checkDelegationScope(d.body, { settlingJobId: b.jobId, sessionSignedEventCount: b.events.length, operatorPrincipalId }).ok ||
     !d.body.scope.allowedActions.includes("evidence_submit") || d.body.issuedAt >= d.body.expiresAt) fail("bad_delegation");
   if (!checkEventTimes(b.events, { notBefore: d.body.issuedAt, notAfter: d.body.expiresAt }, c.evidenceTimeBounds).ok) fail("event_time");
@@ -327,8 +329,10 @@ export async function signMilestonePackage(input: BuiltMilestonePackage, operato
   built.body.challengeBinding.nonce));
   if (expectedContextDigest !== block.unitContextDigest) fail("bad_body");
   const operator = operatorKey.address.toLowerCase();
-  const device = `0x${deviceKey.publicKeyHex}`;
-  if (producer.operatorPrincipalId !== `eip155:${u.chainId}:${operator}` || producer.devicePrincipalId !== `ed25519:${device}`) fail("key_mismatch");
+  const device = guarded("key_mismatch", () => word(`0x${deviceKey.publicKeyHex.toLowerCase()}`));
+  if (isCompromisedDevicePublicKey(device)) fail("compromised_device");
+  if (producer.operatorPrincipalId !== guarded("key_mismatch", () => formatOperatorPrincipalId(Number(u.chainId), operator)) ||
+    producer.devicePrincipalId !== guarded("key_mismatch", () => formatDevicePrincipalId(device))) fail("key_mismatch");
   try {
     if (u.chainId !== "84532" && u.chainId !== "31337") fail("key_mismatch");
     const d1Input = { escrow: getAddress(u.escrow), settlementUnitId: u.settlementUnitId, jobIdHash: u.jobIdHash,

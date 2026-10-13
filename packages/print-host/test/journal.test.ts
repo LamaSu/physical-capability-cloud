@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { constants } from "node:fs";
-import { createJobJournal, JournalError, type JournalCode, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
+import { createJobJournal, JOURNAL_STATES, JournalError, type JournalCode, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
 import type { ReceiptEnvelope, RelayEvidenceBundle } from "../src/gateway-client.js";
 
 let dir: string;
@@ -28,6 +28,159 @@ beforeEach(async () => { dir = await fs.mkdtemp(join(tmpdir(), "print-host-journ
 afterEach(async () => { vi.restoreAllMocks(); await fs.rm(dir, { recursive: true, force: true }); });
 
 describe("job journal", () => {
+  it.each(JOURNAL_STATES)("a funded unit stays used in %s, for the same job and every later job", async (state) => {
+    const unit = publicWord();
+    const journal = createJobJournal(dir, time);
+    expect(await journal.reserveUnit(jobId, unit)).toBe(true);
+    const metadata = state === "package_built" ? { packageDigest: publicWord(), evidenceBlockHash: publicWord() } : undefined;
+    await journal.append(jobId, state, undefined, metadata);
+    expect(await journal.reserveUnit(jobId, unit)).toBe(false);
+    expect(await journal.reserveUnit("another-job", unit)).toBe(false);
+    expect(await journal.has("another-job")).toBe(false);
+    expect(await journal.reserveUnit("another-job", publicWord())).toBe(true);
+  });
+
+  it("an orphan reservation survives a crash before the claim's first side effect", async () => {
+    const unit = publicWord();
+    const original = createJobJournal(dir, time);
+    expect(await original.reserveUnit(jobId, unit)).toBe(true);
+    expect(await original.has(jobId)).toBe(false);
+    expect(await original.list()).toEqual([]);
+    await original.close();
+    const restarted = createJobJournal(dir, time);
+    expect(await restarted.reserveUnit(jobId, unit)).toBe(false);
+    expect(await restarted.reserveUnit("new-job", unit)).toBe(false);
+    expect(await restarted.has(jobId)).toBe(false);
+    expect(await restarted.has("new-job")).toBe(false);
+    expect(await restarted.reserveUnit("new-job", publicWord())).toBe(true);
+  });
+
+  it("serializes competing reservations so exactly one job consumes the unit", async () => {
+    const unit = publicWord();
+    const journal = createJobJournal(dir, time);
+    expect(await Promise.all([journal.reserveUnit(jobId, unit), journal.reserveUnit("new-job", unit)]))
+      .toEqual([true, false]);
+    expect(await journal.list()).toEqual([]);
+  });
+
+  it.each(["package", "bundle", "receipt", "session"] as const)(
+    "refuses a legacy journal's funded unit recovered from its %s artifact", async (kind) => {
+      const unit = publicWord();
+      const journal = createJobJournal(dir, time);
+      await journal.append(jobId, "print_failed");
+      if (kind === "package") {
+        await journal.savePackage(jobId, { body: { unitBinding: { settlementUnitId: unit } } } as unknown as SignedMilestonePackage);
+      } else if (kind === "bundle") {
+        await journal.saveBundle(jobId, { ...bundle, events: [{ payload: { settlementUnitId: unit } }] } as unknown as RelayEvidenceBundle);
+      } else if (kind === "receipt") {
+        const value = receipt();
+        await journal.saveReceipt(jobId, { ...value, receipt: { ...value.receipt, settlementUnitId: unit } });
+      } else {
+        await fs.mkdir(journal.sessionDirectory(jobId), { mode: 0o700 });
+        await fs.writeFile(join(journal.sessionDirectory(jobId), "00000000.json"), JSON.stringify({
+          record: { kind: "open", binding: { settlementUnitId: unit } },
+        }), { mode: 0o600 });
+      }
+      const before = await fs.readFile(journal.journalPath(jobId), "utf8");
+      expect(await journal.reserveUnit("new-job", unit)).toBe(false);
+      expect(await journal.has("new-job")).toBe(false);
+      expect(await fs.readFile(journal.journalPath(jobId), "utf8")).toBe(before);
+      expect(await journal.reserveUnit("new-job", publicWord())).toBe(true);
+    },
+  );
+
+  it("a leftover temporary reservation also retains the unit after restart", async () => {
+    const unit = publicWord();
+    const original = createJobJournal(dir, time);
+    await original.initialize();
+    await fs.writeFile(join(original.directory, `.unit-${unit.slice(2)}.used.json.tmp-${randomBytes(16).toString("hex")}`), '{"version":', { mode: 0o600 });
+    await original.close();
+    const restarted = createJobJournal(dir, time);
+    expect(await restarted.reserveUnit("new-job", unit)).toBe(false);
+    expect(await restarted.has("new-job")).toBe(false);
+    expect(await restarted.reserveUnit("different-unit-job", publicWord())).toBe(true);
+  });
+
+  it.each(["malformed", "partial", "wrong_unit", "insecure", "symlink"] as const)(
+    "fails closed on an existing %s reservation without changing any journal", async (kind) => {
+      const unit = publicWord();
+      const journal = createJobJournal(dir, time);
+      await journal.initialize();
+      const marker = join(journal.directory, `.unit-${unit.slice(2)}.used.json`);
+      if (kind === "symlink") {
+        const target = join(dir, "other-file");
+        await fs.writeFile(target, "PRIVATE_CANARY", { mode: 0o600 });
+        await fs.symlink(target, marker);
+      } else {
+        const value = kind === "partial" ? '{"version":' : kind === "malformed" ? "{}"
+          : JSON.stringify({ version: 1, jobId, settlementUnitId: kind === "wrong_unit" ? publicWord() : unit });
+        await fs.writeFile(marker, value, { mode: kind === "insecure" ? 0o644 : 0o600 });
+      }
+      const code = ["insecure", "symlink"].includes(kind) ? "journal_bad_file" : "journal_invalid";
+      await expect(journal.reserveUnit("new-job", unit)).rejects.toMatchObject({ code, message: code });
+      expect(await journal.has("new-job")).toBe(false);
+      expect(await journal.list()).toEqual([]);
+    },
+  );
+
+  it("rejects nonlowercase bytes32 unit ids with a closed code before publishing a marker", async () => {
+    const journal = createJobJournal(dir, time);
+    const unit = publicWord();
+    for (const invalid of ["", "PRIVATE_CANARY", `${unit}00`, unit.slice(2), `0xA${unit.slice(3)}`]) {
+      await expect(journal.reserveUnit(jobId, invalid)).rejects.toMatchObject({ code: "journal_invalid", message: "journal_invalid" });
+    }
+    expect(await journal.has(jobId)).toBe(false);
+    expect(await fs.readdir(journal.directory)).toEqual([".lock"]);
+  });
+
+  it("publishes and syncs a reservation before allowing the claim side effect", async () => {
+    const journal = createJobJournal(dir, time);
+    await journal.initialize();
+    const unit = publicWord();
+    const final = join(journal.directory, `.unit-${unit.slice(2)}.used.json`);
+    const open = fs.open.bind(fs);
+    const link = fs.link.bind(fs);
+    const calls: string[] = [];
+    let release!: () => void;
+    let reached!: () => void;
+    const reachedDirectorySync = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      if (String(args[0]).startsWith(`${final}.tmp-`)) {
+        const sync = handle.sync.bind(handle);
+        vi.spyOn(handle, "sync").mockImplementation(async () => { await sync(); calls.push("file_synced"); });
+      } else if (args[0] === journal.directory) {
+        const sync = handle.sync.bind(handle);
+        vi.spyOn(handle, "sync").mockImplementation(async () => {
+          reached(); await gate; await sync(); calls.push("directory_synced");
+        });
+      }
+      return handle;
+    });
+    vi.spyOn(fs, "link").mockImplementation(async (...args) => {
+      expect(calls).toEqual(["file_synced"]);
+      await link(...args); calls.push("linked");
+    });
+    const claim = vi.fn(() => { calls.push("claimed"); });
+    const pending = journal.reserveUnit(jobId, unit).then((reserved) => { if (reserved) claim(); });
+    await reachedDirectorySync;
+    expect(claim).not.toHaveBeenCalled();
+    expect(JSON.parse(await fs.readFile(final, "utf8"))).toEqual({ version: 1, jobId, settlementUnitId: unit });
+    expect((await fs.stat(final)).mode & 0o777).toBe(0o600);
+    release();
+    await pending;
+    expect(calls).toEqual(["file_synced", "linked", "directory_synced", "claimed"]);
+  });
+
+  it("allows the closed retryable emergency-stop code to persist and reload", async () => {
+    const journal = createJobJournal(dir, time);
+    await journal.append(jobId, "package_built", undefined, { packageDigest: publicWord(), evidenceBlockHash: publicWord() });
+    await journal.append(jobId, "receipt_stored", "kernel_emergency_stopped");
+    await journal.close();
+    expect((await createJobJournal(dir, time).read(jobId)).at(-1)?.code).toBe("kernel_emergency_stopped");
+  });
+
   it.each(["package_built", "receipt_stored", "submit_attempted", "submit_indeterminate", "submitted", "already_committed", "conflict", "refused"] as const)(
     "a stored receipt preserves %s and its public package hashes across restart", async (state) => {
       const original = createJobJournal(dir, time);

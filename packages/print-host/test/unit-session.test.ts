@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EvidenceEmitter, makeKernelEd25519Signer, runPrintJob,
   type PrintJobOptions, type PrintJobResult } from "@pcc/kernel";
 import { verifyBundleSignature } from "@pcc/kernel-sdk";
-import { canonicalize, hashBundle, hashEvent, sessionKeyDelegationPreimage,
+import { canonicalize, COMPROMISED_DEVICE_PUBLIC_KEYS, hashBundle, hashEvent, sessionKeyDelegationPreimage,
   type EvidenceEvent, type SessionAction } from "@pcc/spec";
 import { FakeMachineAdapter } from "../src/index.js";
 import { loadDeviceKey, type DeviceKey } from "../src/keys.js";
@@ -183,6 +183,71 @@ afterEach(async () => {
 });
 
 describe("print-host per-unit evidence session", () => {
+  it.each(["missing", "different"] as const)("refuses a %s load-time delegation parent before creating a journal or signing (I2)", async (variant) => {
+    const setup = await fixture(`parent-${variant}`);
+    const before = await readdir(setup.directory);
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, signDelegation,
+      delegationParent: variant === "missing" ? undefined : `eip155:84532:0x${randomBytes(20).toString("hex")}`,
+    }) as DeviceKey;
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    let caught: unknown;
+    try { await api.openUnitEvidenceSession({ ...setup.options, deviceKey }); } catch (error) { caught = error; }
+    expect(caught).toMatchObject({ code: "bad_options", message: "bad_options" });
+    expect(Object.keys(caught as object).sort()).toEqual(["code", "name"].sort());
+    expect(await readdir(setup.directory)).toEqual(before);
+    expect(mint).not.toHaveBeenCalled();
+    expect(signDelegation).not.toHaveBeenCalled();
+  });
+
+  it("refuses a compromised device with a closed code before creating a journal or signing", async () => {
+    const setup = await fixture("compromised-device");
+    const before = await readdir(setup.directory);
+    const compromised = [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!;
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, publicKeyHex: compromised.slice(2), signingPublicKey: compromised, signDelegation,
+    }) as DeviceKey;
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    let caught: unknown;
+    try { await api.openUnitEvidenceSession({ ...setup.options, deviceKey }); } catch (error) { caught = error; }
+    expect(caught).toMatchObject({ code: "compromised_device", message: "compromised_device" });
+    expect(Object.keys(caught as object).sort()).toEqual(["code", "name"].sort());
+    expect(String(caught)).not.toContain(compromised);
+    expect(await readdir(setup.directory)).toEqual(before);
+    expect(mint).not.toHaveBeenCalled();
+    expect(signDelegation).not.toHaveBeenCalled();
+  });
+
+  it.each(["fundedAt", "expiresAt"] as const)("refuses %s outside protocol integer seconds before creating a journal (T2)", async (field) => {
+    const setup = await fixture(`range-${field}`);
+    const before = await readdir(setup.directory);
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, signDelegation,
+    }) as DeviceKey;
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    for (const value of [1_599_999_999, 2 ** 32, setup.options[field] * 1_000, 1_600_000_000.5]) {
+      const options = { ...setup.options, fundedAt: 1_600_000_000, expiresAt: 2 ** 32 - 1, deviceKey,
+        [field]: value, now: () => 1_800_000_000 };
+      let caught: unknown;
+      try { await api.openUnitEvidenceSession(options); } catch (error) { caught = error; }
+      expect(caught).toMatchObject({ code: "bad_options", message: "bad_options" });
+      expect(Object.keys(caught as object).sort()).toEqual(["code", "name"].sort());
+      expect(await readdir(setup.directory)).toEqual(before);
+    }
+    expect(mint).not.toHaveBeenCalled();
+    expect(signDelegation).not.toHaveBeenCalled();
+  });
+
+  it.each([[1_600_000_000, 1_600_000_001], [2 ** 32 - 2, 2 ** 32 - 1]])(
+    "opens valid protocol range boundaries %i to %i", async (fundedAt, expiresAt) => {
+      const setup = await fixture(`range-boundary-${fundedAt}`);
+      await expect(api.openUnitEvidenceSession({ ...setup.options, fundedAt, expiresAt, now: () => fundedAt })).resolves.toBeDefined();
+    },
+  );
+
   it("GAP-7 a unit-level evidence session signs ONE journaled bundle under a delegated session key", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-09T00:00:00.000Z"));

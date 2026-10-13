@@ -611,7 +611,7 @@ describe("pre-send retries and gateway receipts", () => {
     expect(setup.sentData).toHaveLength(1);
   });
 
-  it.each(["receipt_exists", "route_unavailable"] as const)("a 409 %s receipt conflict is terminal and never submits across ticks or restart", async (code) => {
+  it.each(["receipt_exists"] as const)("a 409 %s receipt conflict is terminal and never submits across ticks or restart", async (code) => {
     const setup = await fixture();
     setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code, status: 409 });
     expect(await finish(setup)).toMatchObject({ state: "refused" });
@@ -624,6 +624,94 @@ describe("pre-send retries and gateway receipts", () => {
     expect(setup.broadcaster.submit).not.toHaveBeenCalled();
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
     expect(setup.sentData).toHaveLength(0);
+  });
+
+  it.each(["kernel_emergency_stopped", "route_unavailable", "bad_request"] as const)(
+    "a 409 %s keeps the package retryable and never submits until a successful receipt", async (code) => {
+      const setup = await fixture();
+      setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code, status: 409 });
+      expect(await finish(setup)).toMatchObject({ state: "package_built", waitMs: 5_000 });
+      expect((await setup.journal.read(jobId)).at(-1)?.state).toBe("package_built");
+      expect(await states(setup)).not.toContain("refused");
+      expect(await states(setup)).not.toContain("submit_attempted");
+      expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+      expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+      expect(setup.sentData).toHaveLength(0);
+      expect(setup.logs).toContain(code);
+      expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff" });
+      expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+      const recovered = await restart(setup);
+      expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+      expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(2);
+      expect(recovered.broadcaster.submit).toHaveBeenCalledTimes(1);
+      expect(setup.sentData).toHaveLength(1);
+      expect(await states(setup)).toEqual(completedStates);
+    },
+  );
+
+  it.each(["package_built", "receipt_stored"] as const)(
+    "disabled sending preserves %s across polls and e-stop checks, then submits on an enabled run", async (boundary) => {
+      for (const disabled of ["no_submit", "real_mode", "caps", "broadcaster"] as const) {
+        const setup = await fixture();
+        const original = setup.journal.append;
+        vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+          await original(...args);
+          if (args[1] === boundary) throw new Error("crash after durable package");
+        });
+        expect(await finish(setup)).toMatchObject({ kind: "halted" });
+        const before = await setup.diskRecords();
+        const pkg = await setup.diskPackage();
+        const receiptPosts = setup.gateway.postReceipt.mock.calls.length;
+        const overrides: Partial<HostDeps> = disabled === "no_submit" ? { noSubmit: true }
+          : disabled === "real_mode" ? { realMode: false }
+          : disabled === "caps" ? { config: { ...setup.config, chain: { ...setup.config.chain,
+            maxFeePerGasCap: undefined, maxPriorityFeePerGasCap: undefined, gasCap: undefined } } }
+          : { broadcaster: undefined };
+        const recovered = await restart(setup, overrides);
+        setup.gateway.pollJobs.mockResolvedValueOnce({ ok: true, value: { jobs: [], stop: { proceed: false, why: "stopped" }, foreignJobsDropped: 0, truncated: false } });
+        expect(await recovered.host.runOnce()).toEqual({ kind: "blocked", waitMs: 5_000 });
+        expect(await recovered.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+        expect(await setup.diskRecords()).toEqual(before);
+        expect(await setup.diskPackage()).toEqual(pkg);
+        expect(setup.logs).toContain("submit_disabled");
+        expect(setup.logs).toContain("stopped");
+        expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(receiptPosts);
+        expect(setup.gateway.reportInProgress).toHaveBeenCalledTimes(1);
+        expect(setup.adapter.commands).toHaveLength(1);
+        expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+        expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+        expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+        expect(setup.sentData).toHaveLength(0);
+        await recovered.journal.close();
+        const enabled = await restart(setup);
+        expect(await enabled.host.runOnce()).toMatchObject({ state: "submitted" });
+        expect(enabled.broadcaster.submit).toHaveBeenCalledTimes(1);
+        expect(setup.operatorKey.signD1).toHaveBeenCalledTimes(1);
+        expect(setup.deviceKey.signD2).toHaveBeenCalledTimes(1);
+        expect(setup.sentData).toHaveLength(1);
+        await enabled.journal.close();
+      }
+    },
+  );
+
+  it("--no-submit recovery does not starve a new claim on a different funded unit", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code: "kernel_emergency_stopped", status: 409 });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    const before = await setup.diskRecords();
+    const newJob = "job:new-funded-unit";
+    const newInputs = { ...setup.inputs, unit: { ...setup.inputs.unit, settlementUnitId: word() } };
+    setup.inputSource.mockResolvedValue({ ok: true, value: newInputs });
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { jobs: [{ jobId: newJob, status: "queued" }], stop: { proceed: true }, foreignJobsDropped: 0, truncated: false } });
+    const print = vi.fn(async () => ({ success: false, events: [], durationMs: 0 }));
+    const recovered = await restart(setup, { noSubmit: true, print });
+    expect(await recovered.host.runOnce()).toMatchObject({ jobId: newJob, state: "print_failed" });
+    expect(setup.gateway.reportInProgress).toHaveBeenCalledWith(newJob);
+    expect(print).toHaveBeenCalledTimes(1);
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    await recovered.journal.close();
   });
 
   it.each(["chainId", "escrow", "settlementUnitId", "packageDigest"] as const)("a receipt with mismatched %s is terminal and never submits", async (field) => {

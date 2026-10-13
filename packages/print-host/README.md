@@ -172,7 +172,7 @@ the same directory. A manifest contains these fields:
 | `totalPages` | Integer 1–50 |
 | `documentFile` | A plain basename, at most 240 UTF-8 bytes; the file must begin `%PDF-` |
 | `unit.settlementUnitId`, `unit.challengeNonce` | Lowercase `0x`-prefixed bytes32; the challenge nonce must be nonzero for packaging |
-| `unit.fundedAt`, `unit.reclaimAt` | Nonnegative safe-integer Unix seconds, with `reclaimAt > fundedAt` |
+| `unit.fundedAt`, `unit.reclaimAt` | Integer Unix seconds in `[1_600_000_000, 2^32)`, with `reclaimAt > fundedAt` |
 | `unit.chainId` | 84532 or 31337, matching the configured chain |
 | `unit.escrow` | Nonzero EIP-55 address |
 | `unit.jobIdHash`, `unit.stepId`, `unit.compositionRoot`, `unit.acceptedEnvelopeHash` | Lowercase `0x`-prefixed bytes32 |
@@ -182,7 +182,8 @@ the same directory. A manifest contains these fields:
 | `unit.evidenceTimeBounds` | `{ "start": "...", "end": "..." }`, canonical decimal Unix-second strings with `start <= end`, covering every event |
 | `program` | `{ "programHash": "...", "attestationSetRoot": "...", "workProductRoot": "..." }`, each lowercase `0x`-prefixed bytes32 |
 
-The first five table rows are the printing inputs. Package fields are optional
+The printer job name is host-derived from the PCC job id; the manifest's `jobName` is metadata only.
+Package fields are optional
 for compatibility with existing manifests; missing fields still allow printing
 and relay storage, then journal `package_inputs_missing` and skip settlement
 submission. Supplied fields are strictly validated, including partial package
@@ -198,6 +199,11 @@ unit-context sources. The file source invents no package defaults.
 
 The private `dataDir/journal/` contains per-job mode-0600 JSONL records and the
 saved signed bundle. Appends sync their file and directory before returning.
+Before recording or reporting a claim, the host reserves its lowercase bytes32
+settlement unit in a mode-0600 `.unit-<hex>.used.json` sidecar and syncs the file
+and directory. Every job state retains this reservation. A crash after the marker
+leaves the unit used even if no claim was recorded. Older public package, bundle,
+receipt and session artifacts also establish a used unit.
 The bundle, package, and receipt artifacts share an atomic save: a unique
 exclusive temporary file is written and fsynced, linked to its final name,
 then unlinked and the directory fsynced. A leftover temporary file is ignored
@@ -226,7 +232,10 @@ narrow race between two concurrent replacements.
 Normal job order is `claimed`, `in_progress_reported`, `printing`, `printed`
 or `print_failed`, `bundle_saved`, then `evidence_stored`. A failed-print
 bundle is still the unit's evidence: it follows the same package and submission
-path, leaving the verdict to the oracle. Busy jobs retry within the host's bound
+path, leaving the verdict to the oracle. Any `execution_failed` in the unit's
+signed history blocks release, even if a later event records completion. A re-run
+requires a NEW funded unit. A failed unit pays nothing; the payer reclaims its
+refund at `reclaimAt`. Busy jobs retry within the host's bound
 and produce no bundle; empty-event jobs end with `no_bundle`, and simulated
 evidence ends with `simulated_refused`. None submits. An explicit `realMode: false`
 library rehearsal may relay simulated evidence, but records `submit_disabled`
@@ -257,13 +266,22 @@ requires no send; a conflict halts that job. In real CLI mode all three positive
 transaction caps must be configured unless `--no-submit` is explicit; disabled
 submission invokes neither package signers nor transaction signer.
 `package_inputs_missing` is likewise an `evidence_stored` code.
+An already saved package or receipt keeps its state while sending is disabled
+and logs `submit_disabled`. Recovery continues polling and checking e-stop,
+allows new claims, and an enabled run can submit the saved package later.
+Funding and expiry times must be integer Unix seconds in `[1_600_000_000, 2^32)`;
+millisecond values are refused before claim or session opening. Before running,
+the host checks the device key's load-time delegation parent against its operator
+principal and refuses missing, mismatched or compromised device identities.
 
 A pre-send RPC failure, `unreconciled_transaction`, or `caps_exceeded` leaves the
 job at its previous state and writes no attempt. Receipt 503, 429, 5xx, network,
 timeout, and other refusals also retry without a new journal record. Failures
 back off per job from 5 seconds, doubling to 60 seconds; a low cap keeps logging
-`submit_caps_exceeded` until the operator raises it. Receipt 409 is terminal
-`receipt_conflict`; a receipt for a different package is terminal `receipt_mismatch`.
+`submit_caps_exceeded` until the operator raises it. Only receipt 409
+`receipt_exists` is terminal `receipt_conflict`. A 409 `kernel_emergency_stopped`
+and other 409 errors retry without submission; a receipt for a different package
+is terminal `receipt_mismatch`.
 A source failure on restart logs its closed input code and retries from
 `evidence_stored`; only a returned incomplete manifest writes `package_inputs_missing`.
 
@@ -291,7 +309,7 @@ sending prevents restart from consuming that slot twice.
 
 ## Operator relay gateway client
 
-`createGatewayClient({baseUrl, apiKey, kernelId})` uses the Node 20+ global fetch
+`createGatewayClient({baseUrl, apiKey, kernelId, wallet?})` uses the Node 20+ global fetch
 and keeps the API key in a closure. The frozen client exposes five calls:
 
 - `pollJobs()` requests `GET /api/operator/jobs?kernelId=...&status=queued`,
@@ -316,6 +334,11 @@ and keeps the API key in a closure. The frozen client exposes five calls:
   settlementUnitId, packageDigest, receivedAt}`. The same package digest returns
   the original receipt. A different digest returns `409 receipt_exists`; a
   missing gateway signer returns `503 receipt_signer_unavailable`.
+
+The optional wallet must be `0x` followed by 40 hex digits and is normalized to
+lowercase once. Only evidence and receipt POSTs carry one `X-PCC-Wallet` header;
+poll, heartbeat and status requests omit it. The CLI uses the loaded operator
+address and reads its API key from the configured mode-0600 `apiKeyFile`.
 
 The library client's fallback e-stop reader returns
 `{proceed: false, why: "reader_unavailable"}`. The CLI explicitly selects the

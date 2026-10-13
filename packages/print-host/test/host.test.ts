@@ -12,12 +12,12 @@ import { makeKernelEd25519Signer } from "../src/kernel-signer.js";
 import * as kernelSigners from "../src/kernel-signer.js";
 import * as unitSessions from "../src/unit-session.js";
 import { loadDeviceKey, type DeviceKey } from "../src/keys.js";
-import { checkDelegationScope, hashEvent, sessionKeyDelegationPreimage, type EvidenceBundle, type EvidenceEvent, type SessionAction } from "@pcc/spec";
+import { COMPROMISED_DEVICE_PUBLIC_KEYS, checkDelegationScope, formatOperatorPrincipalId, hashEvent, sessionKeyDelegationPreimage, type EvidenceBundle, type EvidenceEvent, type SessionAction } from "@pcc/spec";
 import type { HostConfig } from "../src/config.js";
 import { createGatewayClient, type GatewayClient, type GwCode, type GwResult, type PollJobsValue, type RelayEvidenceBundle } from "../src/gateway-client.js";
 import { createHost, HOST_LOG_CODES, type HostLogCode } from "../src/host.js";
 import { createJobJournal } from "../src/journal.js";
-import { defaultJobInputSource, type JobInputSource } from "../src/job-inputs.js";
+import { defaultJobInputSource, fileJobInputSource, jobFileStem, type JobInputSource } from "../src/job-inputs.js";
 import { FakeMachineAdapter } from "../src/testing/fake-machine-adapter.js";
 
 const jobId = "job:buyer";
@@ -240,6 +240,108 @@ afterEach(async () => {
 });
 
 describe("print-host run loop", () => {
+  it.each(["missing", "other_operator", "other_chain", "compromised"] as const)(
+    "startup refuses %s device identity with a closed code before any side effect", async (identity) => {
+      const setup = await fixture();
+      const deviceKey = { ...setup.deviceKey,
+        delegationParent: identity === "missing" ? undefined : identity === "other_operator"
+          ? formatOperatorPrincipalId(31337, getAddress(`0x${randomBytes(20).toString("hex")}`))
+          : identity === "other_chain" ? formatOperatorPrincipalId(84532, setup.operatorAddress) : setup.deviceKey.delegationParent,
+        publicKeyHex: identity === "compromised" ? [...COMPROMISED_DEVICE_PUBLIC_KEYS][0]!.slice(2) : setup.deviceKey.publicKeyHex,
+      };
+      const initialize = vi.spyOn(setup.journal, "initialize");
+      const print = vi.fn();
+      const code = identity === "compromised" ? "compromised_device" : "device_identity_mismatch";
+      const host = createHost({ ...setup.deps, deviceKey, print });
+      expect(await host.runOnce()).toEqual({ kind: "halted", waitMs: 5_000, code });
+      expect(await host.runOnce()).toEqual({ kind: "halted", waitMs: 5_000, code });
+      expect(setup.logs).toEqual([code]);
+      expect(initialize).not.toHaveBeenCalled();
+      expect(setup.gw.heartbeat).not.toHaveBeenCalled();
+      expect(setup.gw.pollJobs).not.toHaveBeenCalled();
+      expect(setup.inputSource).not.toHaveBeenCalled();
+      expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+      expect(print).not.toHaveBeenCalled();
+      expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
+      expect(setup.gw.postReceipt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["fundedAt", "reclaimAt"] as const)("claim refuses out-of-range %s before reserving, claiming or printing", async (field) => {
+    for (const value of [1_599_999_999, 2 ** 32, Date.now(), 1_800_000_000.5]) {
+      const setup = await fixture();
+      setup.unit[field] = value;
+      const reserve = vi.spyOn(setup.journal, "reserveUnit");
+      const print = vi.fn();
+      const host = createHost({ ...setup.deps, print });
+      expect(await host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+      expect(setup.logs).toContain("job_inputs_bad_schema");
+      expect(reserve).not.toHaveBeenCalled();
+      expect(await setup.journal.has(jobId)).toBe(false);
+      expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+      expect(print).not.toHaveBeenCalled();
+      expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
+      expect(setup.gw.postReceipt).not.toHaveBeenCalled();
+    }
+  });
+
+  it("two queued jobs on one funded unit claim and print only the first", async () => {
+    const setup = await fixture();
+    setup.gw.pollJobs.mockResolvedValue(poll([jobId, anotherJob]));
+    await complete(setup);
+    expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(setup.gw.reportInProgress.mock.calls).toEqual([[jobId]]);
+    expect(setup.adapter.commands).toHaveLength(1);
+    expect(await setup.journal.has(anotherJob)).toBe(false);
+    expect(setup.logs).toContain("unit_already_used");
+    expect(setup.gw.postRelayEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("a new job cannot reuse a print_failed unit, but a different funded unit is claimed normally", async () => {
+    const print = vi.fn(async (): Promise<PrintJobResult> => ({ success: false, events: [], durationMs: 0 }));
+    const setup = await fixture({ print });
+    expect(await setup.host.runOnce()).toMatchObject({ state: "print_failed" });
+    setup.gw.pollJobs.mockResolvedValue(poll([anotherJob]));
+    expect(await setup.host.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(await setup.journal.has(anotherJob)).toBe(false);
+    expect(print).toHaveBeenCalledTimes(1);
+    expect(setup.gw.reportInProgress.mock.calls).toEqual([[jobId]]);
+    expect(setup.logs).toContain("unit_already_used");
+    setup.unit.settlementUnitId = `0x${randomBytes(32).toString("hex")}`;
+    expect(await setup.host.runOnce()).toMatchObject({ jobId: anotherJob, state: "print_failed" });
+    expect(print).toHaveBeenCalledTimes(2);
+    expect(setup.gw.reportInProgress.mock.calls).toEqual([[jobId], [anotherJob]]);
+    expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
+    expect(setup.gw.postReceipt).not.toHaveBeenCalled();
+  });
+
+  it("a crash between the durable unit marker and claim leaves the unit used on restart", async () => {
+    const print = vi.fn(async (): Promise<PrintJobResult> => ({ success: false, events: [], durationMs: 0 }));
+    const setup = await fixture({ print });
+    vi.spyOn(setup.journal, "append").mockImplementationOnce(async (_id, state) => {
+      expect(state).toBe("claimed");
+      expect(await readFile(join(setup.journal.directory, `.unit-${setup.unit.settlementUnitId.slice(2)}.used.json`), "utf8"))
+        .toBe(`${JSON.stringify({ version: 1, jobId, settlementUnitId: setup.unit.settlementUnitId })}\n`);
+      throw new Error("crash before claim");
+    });
+    expect(await setup.host.runOnce()).toEqual({ kind: "halted", waitMs: 5_000, code: "journal_failed" });
+    expect(await setup.journal.has(jobId)).toBe(false);
+    expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+    expect(print).not.toHaveBeenCalled();
+    await setup.journal.close();
+    const journal = createJobJournal(setup.dir, () => setup.timers.now);
+    const restarted = createHost({ ...setup.deps, journal });
+    setup.gw.pollJobs.mockResolvedValue(poll([jobId, anotherJob]));
+    expect(await restarted.runOnce()).toEqual({ kind: "idle", waitMs: 5_000 });
+    expect(setup.logs).toContain("unit_already_used");
+    expect(await journal.has(jobId)).toBe(false);
+    expect(await journal.has(anotherJob)).toBe(false);
+    expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+    expect(print).not.toHaveBeenCalled();
+    expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
+    expect(setup.gw.postReceipt).not.toHaveBeenCalled();
+    await journal.close();
+  });
   it("claims, reports, re-polls and saves the signed bundle before posting with exact private journal order", async () => {
     const setup = await fixture();
     const actions: string[] = [];
@@ -274,6 +376,46 @@ describe("print-host run loop", () => {
     for (const log of setup.logs) expect(HOST_LOG_CODES).toContain(log);
     expect(JSON.stringify(setup.logs)).not.toContain(documentCanary);
     expect(JSON.stringify(setup.logs)).not.toContain(secretCanary);
+  });
+
+  it.each([
+    { label: "non-ASCII", manifestName: "Café menu.pdf" },
+    { label: "256-character", manifestName: "x".repeat(256) },
+  ])("prints a $label manifest name under the exact host name without event leakage", async ({ manifestName }) => {
+    const results: PrintJobResult[] = [];
+    const print = vi.fn(async (options: PrintJobOptions) => {
+      const result = await runPrintJob(options);
+      results.push(result);
+      return result;
+    });
+    const setup = await fixture({ print });
+    await writeFile(join(setup.dir, "document.pdf"), "%PDF-1.7\n%%EOF");
+    await writeFile(join(setup.dir, `${jobFileStem(jobId)}.json`), JSON.stringify({
+      jobName: manifestName, totalPages: 2, documentFile: "document.pdf", unit: setup.unit,
+    }));
+    const inputSource = fileJobInputSource(setup.dir);
+    const loaded = await inputSource(jobId);
+    expect(loaded).toMatchObject({ ok: true, value: { jobName: manifestName } });
+    const host = createHost({ ...setup.deps, inputSource });
+    setup.adapter.scriptStart({ outcome: "success", jobId: 810 });
+    const started = setup.adapter.started();
+    const tick = host.runOnce();
+    const command = await finishedWithin(started);
+    const printerName = command.payload?.jobName;
+    setup.adapter.emit("execution_started", { ippJobId: 810, jobName: printerName });
+    setup.adapter.emit("execution_completed", { ippJobId: 810, totalPages: 2 });
+    expect(await finishedWithin(tick)).toMatchObject({ state: "evidence_stored" });
+    expect(print.mock.calls[0]![0].jobName).toBe("pcc-job job:buyer");
+    expect(printerName).toBe("pcc-job job:buyer");
+    expect(setup.adapter.commands).toHaveLength(1);
+    expect(setup.gw.postRelayEvidence).toHaveBeenCalledTimes(1);
+    const posted = setup.gw.postRelayEvidence.mock.calls[0]![1];
+    const saved = JSON.parse(await readFile(setup.journal.bundlePath(jobId), "utf8")) as EvidenceBundle;
+    for (const events of [results[0]!.events, results[0]!.bundle!.events, posted.events, saved.events]) {
+      expect(events.length).toBeGreaterThan(0);
+      for (const event of events) expect(JSON.stringify(event.payload)).not.toContain(manifestName);
+    }
+    expect(posted.events.some((event) => event.payload.jobName === "pcc-job job:buyer")).toBe(true);
   });
 
   it("opens the per-unit SESSION after in_progress with the public operator and exact funded binding", async () => {
@@ -317,6 +459,7 @@ describe("print-host run loop", () => {
     const host = createHost({ ...setup.deps, print });
     setup.gw.pollJobs.mockResolvedValue(poll([jobId, anotherJob]));
     for (const ippJobId of [811, 812]) {
+      if (ippJobId === 812) setup.unit.settlementUnitId = `0x${randomBytes(32).toString("hex")}`;
       setup.adapter.scriptStart({ outcome: "success", jobId: ippJobId });
       const started = setup.adapter.started();
       const tick = host.runOnce();
@@ -752,6 +895,7 @@ describe("print-host run loop", () => {
     await finishedWithin(Promise.all([first, second]));
     expect(setup.gw.postRelayEvidence).toHaveBeenCalledTimes(1);
     expect(await setup.journal.has(anotherJob)).toBe(false);
+    setup.unit.settlementUnitId = `0x${randomBytes(32).toString("hex")}`;
     setup.adapter.scriptStart({ outcome: "success", jobId: 607 });
     const next = host.runOnce();
     await finishedWithin(setup.adapter.started());
@@ -788,7 +932,7 @@ describe("print-host run loop", () => {
     await complete(setup);
     expect(await states(setup)).toEqual(["claimed", "in_progress_reported", "printing", "simulated_refused"]);
     expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
-    expect(await readdir(setup.journal.directory)).toEqual([".lock", "job%3Abuyer.jsonl"]);
+    expect(await readdir(setup.journal.directory)).toEqual([".lock", `.unit-${setup.unit.settlementUnitId.slice(2)}.used.json`, "job%3Abuyer.jsonl"]);
     expect(setup.logs).toContain("simulated_refused");
     expect(finalize).not.toHaveBeenCalled();
     const records = await Promise.all((await readdir(setup.journal.sessionDirectory(jobId)))
@@ -962,7 +1106,7 @@ describe("print-host run loop", () => {
     const records = await Promise.all((await readdir(setup.journal.sessionDirectory(jobId)))
       .map(async (name) => JSON.parse(await readFile(join(setup.journal.sessionDirectory(jobId), name), "utf8"))));
     expect(records.map((record) => record.record.kind)).toEqual(["open"]);
-    expect(await readdir(setup.journal.directory)).toEqual([".lock", "job%3Abuyer.jsonl"]);
+    expect(await readdir(setup.journal.directory)).toEqual([".lock", `.unit-${setup.unit.settlementUnitId.slice(2)}.used.json`, "job%3Abuyer.jsonl"]);
     expect(JSON.stringify(setup.logs)).not.toContain(serverCanary);
     expect(setup.timers.count).toBe(0);
   });

@@ -6,6 +6,7 @@ import { inspect } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeKernelEd25519Signer } from "../src/kernel-signer.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { formatOperatorPrincipalId } from "@pcc/spec";
 import { KeyFileError, loadDeviceKey, loadOperatorKey, type KeyFileErrorCode } from "../src/keys.js";
 import type * as secretFile from "../src/secret-file.js";
 
@@ -133,7 +134,8 @@ describe("host key loading and redaction", () => {
     const document = deviceDocument();
     const key = await loadDeviceKey(await writeDocument(document), { now });
     assertNoLeak(key, [secret(document)]);
-    expect(Reflect.ownKeys(key).sort()).toEqual(["publicKeyHex", "signingPublicKey", "signDelegation", "signD2"].sort());
+    expect(Reflect.ownKeys(key).sort()).toEqual(["publicKeyHex", "signingPublicKey", "delegationParent", "signDelegation", "signD2"].sort());
+    expect(key.delegationParent).toBeUndefined();
     assertNoOwnedSecretMaterial(key);
     expect(Object.hasOwn(key, "secretKey")).toBe(false);
     expect(Object.hasOwn(key, "seed")).toBe(false);
@@ -144,6 +146,24 @@ describe("host key loading and redaction", () => {
       expect(key.publicKeyHex === publicKey.toString("hex")).toBe(true);
     } finally { encoded.fill(0); }
     expect(key.signingPublicKey === document.publicKey).toBe(true);
+  });
+
+  it("exposes the load-time delegation parent as a frozen public identity field", async () => {
+    const document = deviceDocument();
+    const operator = privateKeyToAccount(generatePrivateKey()).address;
+    const binding = { chainId: 84532 as const, operator };
+    const key = await loadDeviceKey(await writeDocument(document), { now, delegationBinding: binding });
+    const expected = formatOperatorPrincipalId(binding.chainId, operator);
+    binding.operator = privateKeyToAccount(generatePrivateKey()).address;
+    expect(key.delegationParent).toBe(expected);
+    expect(Object.getOwnPropertyDescriptor(key, "delegationParent")).toEqual({
+      value: expected, writable: false, enumerable: true, configurable: false,
+    });
+    expect(Reflect.set(key, "delegationParent", "changed")).toBe(false);
+    expect(key.delegationParent).toBe(expected);
+    expect(key.toJSON()).toEqual({ kind: "pcc-printhost.device-key", publicKey: key.signingPublicKey });
+    assertNoLeak(key, [secret(document)]);
+    assertNoOwnedSecretMaterial(key);
   });
 
   for (const mismatch of [false, true]) {

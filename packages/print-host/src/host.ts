@@ -3,7 +3,7 @@ import type { MachineAdapter, PrintJobOptions, PrintJobResult } from "@pcc/kerne
 // as kernel-signer does, until the toolkit publishes a print-job subpath.
 import { runPrintJob } from "../../kernel/dist/printer-job.js";
 import { EvidenceEmitter } from "../../kernel/dist/evidence-emitter.js";
-import type { EvidenceBundle } from "@pcc/spec";
+import { formatOperatorPrincipalId, isCompromisedDevicePublicKey, type EvidenceBundle } from "@pcc/spec";
 import { getAddress, type Hex } from "viem";
 import type { EvidenceBroadcaster, EvidenceBroadcastOutcome, EvidenceSubmission } from "./chain.js";
 import type { HostConfig } from "./config.js";
@@ -13,6 +13,7 @@ import { JournalError, SUBMIT_CODES, type JobJournal, type JournalCode, type Jou
 import type { DeviceKey, OperatorKey } from "./keys.js";
 import { buildMilestonePackage, computePackageBodyHash, computePackageDigest, signMilestonePackage } from "./package-builder.js";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
+import { derivePrinterJobName } from "./printer-job-name.js";
 import { openUnitEvidenceSession, UnitSessionError, type UnitEvidenceSession } from "./unit-session.js";
 
 const gatewayCodes = [
@@ -21,7 +22,7 @@ const gatewayCodes = [
   "rate_limited", "bad_request", "unavailable", "server_error", "network", "timeout",
   "malformed_response", "job_not_found", "settlement_owned_status", "job_kernel_changed",
   "invalid_status", "payload_too_large", "bad_bundle", "stored_mismatch", "not_stored",
-  "evidence_refused", "indeterminate",
+  "evidence_refused", "indeterminate", "kernel_emergency_stopped",
 ] as const satisfies readonly GwCode[];
 
 /** No caller, server, document, or device text is passed to the host logger. */
@@ -32,10 +33,15 @@ export const HOST_LOG_CODES = [
   "interrupted", "simulated_refused", "no_bundle", "journal_failed", "host_shutdown",
   "reader_unavailable", "stopped", "absent", "malformed", "poll_failed", "session_failed",
   "package_built", "receipt_stored", "data_dir_locked", "receipt_exists", "receipt_signer_unavailable", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
+  "device_identity_mismatch", "compromised_device", "unit_already_used",
   ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
 ] as const;
 export type HostLogCode = typeof HOST_LOG_CODES[number];
 export type HostPrintOptions = PrintJobOptions;
+export type HostIdentityCode = "device_identity_mismatch" | "compromised_device";
+export class HostIdentityError extends Error {
+  constructor(readonly code: HostIdentityCode) { super(code); this.name = "HostIdentityError"; }
+}
 export interface HostTimers {
   setTimeout(callback: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
@@ -69,7 +75,7 @@ export interface HostTickResult {
   waitMs: number;
   jobId?: string;
   state?: JournalState;
-  code?: "data_dir_locked" | "journal_failed";
+  code?: "data_dir_locked" | "journal_failed" | HostIdentityCode;
 }
 
 const terminalReportCodes = new Set<GwCode>([
@@ -104,7 +110,18 @@ export function createHost(deps: HostDeps): {
     config.chain.maxPriorityFeePerGasCap, config.chain.gasCap].every((cap) => cap !== undefined && BigInt(cap) > 0n);
   let initialized = false;
   let halted = false;
-  let haltCode: "data_dir_locked" | "journal_failed" = "journal_failed";
+  let haltCode: NonNullable<HostTickResult["code"]> = "journal_failed";
+  let parentAgentId: string | undefined;
+  let identityFailure: HostIdentityCode | undefined;
+  if (deps.deviceKey) {
+    try {
+      parentAgentId = formatOperatorPrincipalId(config.chain.chainId, deps.operatorAddress!);
+      if (!deps.deviceKey.delegationParent || deps.deviceKey.delegationParent !== parentAgentId) {
+        identityFailure = "device_identity_mismatch";
+      }
+      if (isCompromisedDevicePublicKey(deps.deviceKey.publicKeyHex)) identityFailure = "compromised_device";
+    } catch { identityFailure = "device_identity_mismatch"; }
+  }
   const retries = new Map<string, { failures: number; until: number }>();
   let stopped = deps.stopSignal?.aborted === true;
   let lastHeartbeat = -Infinity;
@@ -264,8 +281,8 @@ export function createHost(deps: HostDeps): {
       return outcome(jobId, result, true);
     }
     if (!sendEnabled || !deps.broadcaster) {
-      await record(jobId, "refused", "submit_disabled");
-      return "refused";
+      log("submit_disabled");
+      return entries.some((entry) => entry.state === "receipt_stored") ? "receipt_stored" : "package_built";
     }
     const storedRecord = entries.some((entry) => entry.state === "receipt_stored");
     if (storedRecord) {
@@ -276,7 +293,7 @@ export function createHost(deps: HostDeps): {
       try { result = await gateway.postReceipt(jobId, { body: signed.body, signatures: signed.signatures }); }
       catch { result = { ok: false as const, code: "network" as const, status: null }; }
       if (!result.ok) {
-        if (result.status === 409 || result.code === "receipt_exists") {
+        if (result.status === 409 && result.code === "receipt_exists") {
           await record(jobId, "refused", "receipt_conflict");
           return "refused";
         }
@@ -324,6 +341,12 @@ export function createHost(deps: HostDeps): {
   }
   async function tick(): Promise<HostTickResult> {
     if (halted) return { kind: "halted", waitMs: 5_000, code: haltCode };
+    if (identityFailure) {
+      halted = true;
+      haltCode = identityFailure;
+      log(identityFailure);
+      return { kind: "halted", waitMs: 5_000, code: identityFailure };
+    }
     if (!initialized) {
       await journal.initialize();
       initialized = true;
@@ -337,7 +360,14 @@ export function createHost(deps: HostDeps): {
       const records = await journal.list();
       // A possibly pending transaction owns the operator's nonce stream.
       const recoverable = records.find((entry) => entry.state === "submit_attempted" || entry.state === "submit_indeterminate")
-        ?? records.find((entry) => entry.state === "package_built" || entry.state === "receipt_stored" || (entry.state === "evidence_stored" && entry.code === undefined));
+        ?? records.find((entry) => {
+          if (entry.state !== "package_built" && entry.state !== "receipt_stored" && entry.state !== "evidence_stored") return false;
+          if (!sendEnabled || !deps.broadcaster) {
+            if (entry.state === "package_built" || entry.state === "receipt_stored") log("submit_disabled");
+            return false;
+          }
+          return entry.state !== "evidence_stored" || entry.code === undefined || entry.code === "submit_disabled";
+        });
       if (recoverable) {
         const until = retries.get(recoverable.jobId)?.until;
         if (until !== undefined && now() < until) return { kind: "backoff", jobId: recoverable.jobId, waitMs: until - now() };
@@ -377,6 +407,12 @@ export function createHost(deps: HostDeps): {
           return { kind: "idle", waitMs: 5_000 };
         }
         if (stopped) return { kind: "blocked", waitMs: 5_000 };
+        // The fsynced reservation consumes this funded unit even if the process
+        // dies before recording or reporting the claim.
+        if (!(await journal.reserveUnit(job.jobId, input.value.unit.settlementUnitId))) {
+          log("unit_already_used");
+          continue;
+        }
         pending = { jobId: job.jobId, inputs: input.value, reported: false, reports: 0, prints: 0 };
         await append("claimed");
         break;
@@ -415,7 +451,7 @@ export function createHost(deps: HostDeps): {
         const { settlementUnitId, challengeNonce, fundedAt, reclaimAt } = pending.inputs.unit;
         pending.session = await openUnitEvidenceSession({
           settlementUnitId, challengeNonce, jobId,
-          parentAgentId: `eip155:${config.chain.chainId}:${deps.operatorAddress.toLowerCase()}`,
+          parentAgentId: parentAgentId!,
           fundedAt, expiresAt: reclaimAt, deviceKey: deps.deviceKey,
           journalDir: journal.sessionDirectory(jobId), now: () => Math.floor(now() / 1_000),
         });
@@ -492,7 +528,8 @@ export function createHost(deps: HostDeps): {
         // authority, and its bundle is discarded without saving or posting it.
         throwaway = makeKernelEd25519Signer();
         result = await print({
-          jobId, ...pending.inputs, ...pending.inputs.unit,
+          ...pending.inputs.unit, jobId, jobName: derivePrinterJobName(jobId),
+          documentData: pending.inputs.documentData, totalPages: pending.inputs.totalPages,
           adapter: deps.adapter!, emitter: new EvidenceEmitter(config.kernelId, throwaway.signFn),
           signal: controller.signal, timeoutMs: deps.timeoutMs, cancelWindowMs: deps.cancelWindowMs,
         });
@@ -587,6 +624,7 @@ export function createHost(deps: HostDeps): {
           const result = await runOnce();
           if (result.kind === "halted") {
             if (haltCode === "data_dir_locked") throw new JournalError("data_dir_locked");
+            if (haltCode === "device_identity_mismatch" || haltCode === "compromised_device") throw new HostIdentityError(haltCode);
             throw new Error(haltCode);
           }
           // Backoff delays job polling, while heartbeat attempts retain their

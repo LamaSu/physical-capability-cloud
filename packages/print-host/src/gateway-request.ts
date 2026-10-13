@@ -11,6 +11,9 @@ export type RequestFailure = {
   status: number | null;
 };
 
+/** Callers can request the configured wallet only; arbitrary headers are closed. */
+export type RequestOptions = { readonly wallet?: true };
+
 export function isRequestFailure(reply: RequestReply | RequestFailure): reply is RequestFailure {
   return Object.hasOwn(reply, "ok");
 }
@@ -74,9 +77,10 @@ export function createGatewayRequest(cfg: {
   fetchImpl: typeof fetch;
   timeoutMs: number;
   maxResponseBytes: number;
+  wallet?: string;
 }) {
-  const { apiKey, fetchImpl, timeoutMs, maxResponseBytes } = cfg;
-  return async (url: string, body?: string): Promise<RequestReply | RequestFailure> => {
+  const { apiKey, fetchImpl, timeoutMs, maxResponseBytes, wallet } = cfg;
+  return async (url: string, body?: string, options?: RequestOptions): Promise<RequestReply | RequestFailure> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let status: number | null = null;
@@ -84,7 +88,11 @@ export function createGatewayRequest(cfg: {
       const response = await withinDeadline(fetchImpl(url, {
         method: body === undefined ? "GET" : "POST",
         redirect: "error",
-        headers: { Authorization: `Bearer ${apiKey}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+          ...(options?.wallet === true && wallet !== undefined ? { "X-PCC-Wallet": wallet } : {}),
+        },
         ...(body === undefined ? {} : { body }),
         signal: controller.signal,
       }), controller.signal);

@@ -2,7 +2,7 @@ import { inspect } from "node:util";
 import type { EvidenceBundle } from "@pcc/spec";
 import type { Hex } from "viem";
 import { isGatewayBaseUrl } from "./config.js";
-import { createGatewayRequest, isRequestFailure } from "./gateway-request.js";
+import { createGatewayRequest, isRequestFailure, object, own, validId, type ObjectBody, type RequestOptions } from "./gateway-request.js";
 
 export type GwCode =
   | "unauthenticated" | "not_kernel_operator" | "operator_proof_required"
@@ -12,7 +12,7 @@ export type GwCode =
   | "job_not_found" | "settlement_owned_status" | "job_kernel_changed" | "invalid_status"
   | "payload_too_large" | "bad_bundle" | "stored_mismatch" | "not_stored"
   | "evidence_refused" | "indeterminate"
-  | "receipt_exists" | "receipt_signer_unavailable"
+  | "receipt_exists" | "receipt_signer_unavailable" | "kernel_emergency_stopped"
   | "spend_not_approved" | "idempotency_conflict" | "reconciliation_required"
   | "kernel_unowned" | "kernel_mismatch" | "job_not_active"
   | "carrier_record_ownership_mismatch" | "carrier_not_configured"
@@ -34,7 +34,7 @@ export type GwResult<T> = { ok: true; value: T } | {
 };
 
 export type GatewayClientErrorCode =
-  | "bad_config" | "bad_base_url" | "bad_api_key" | "bad_kernel_id"
+  | "bad_config" | "bad_base_url" | "bad_api_key" | "bad_kernel_id" | "bad_wallet"
   | "bad_timeout" | "bad_response_limit" | "bad_fetch" | "bad_reader";
 
 /** Input values and underlying exceptions are never retained. */
@@ -59,6 +59,7 @@ export interface GatewayClientConfig {
   baseUrl: string;
   apiKey: string;
   kernelId: string;
+  wallet?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxResponseBytes?: number;
@@ -135,7 +136,6 @@ export interface GatewayClient {
 }
 
 type Failure = Extract<GwResult<never>, { ok: false }>;
-type ObjectBody = Record<string, unknown>;
 type Reply = { body: ObjectBody; status: 200 };
 type CallKind = "poll" | "heartbeat" | "status" | "evidence" | "receipt";
 
@@ -147,22 +147,8 @@ function failure(code: GwCode, status: number | null, sub?: GwSubCode): Failure 
   return { ok: false, code, status, ...(sub === undefined ? {} : { sub }) };
 }
 
-function object(value: unknown): value is ObjectBody {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function own(value: ObjectBody, key: string): unknown {
-  return Object.hasOwn(value, key) ? value[key] : undefined;
-}
-
 function exactKeys(value: ObjectBody, keys: string[]): boolean {
   return Reflect.ownKeys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-}
-
-function validId(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > 200
-    || /[\u0000-\u001f\u007f-\u009f]/.test(value)) return false;
-  try { encodeURIComponent(value); return true; } catch { return false; }
 }
 
 function defaultEmergencyStopReader(): EStopDecision {
@@ -211,6 +197,7 @@ function classify(status: number, body: ObjectBody, headers: Headers, kind: Call
   const error = own(body, "error");
   if (kind === "receipt") {
     if (status === 409 && error === "receipt_exists") return failure("receipt_exists", status);
+    if (status === 409 && error === "kernel_emergency_stopped") return failure("kernel_emergency_stopped", status);
     if (status === 503 && error === "receipt_signer_unavailable") return failure("receipt_signer_unavailable", status);
   }
   if (status === 401) return failure("unauthenticated", status);
@@ -267,7 +254,7 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
   try {
     if (!object(cfg)) throw undefined;
     input = {
-      baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, kernelId: cfg.kernelId,
+      baseUrl: cfg.baseUrl, apiKey: cfg.apiKey, kernelId: cfg.kernelId, wallet: cfg.wallet,
       fetchImpl: cfg.fetchImpl, timeoutMs: cfg.timeoutMs,
       maxResponseBytes: cfg.maxResponseBytes, emergencyStopReader: cfg.emergencyStopReader,
     };
@@ -276,6 +263,10 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
   if (typeof baseUrl !== "string" || !isGatewayBaseUrl(baseUrl)) throw new GatewayClientError("bad_base_url");
   if (typeof apiKey !== "string" || !/^pcc_(live|test)_[A-Za-z0-9_-]{16,256}$/.test(apiKey)) throw new GatewayClientError("bad_api_key");
   if (!validId(kernelId)) throw new GatewayClientError("bad_kernel_id");
+  if (input.wallet !== undefined && (typeof input.wallet !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(input.wallet))) {
+    throw new GatewayClientError("bad_wallet");
+  }
+  const wallet = input.wallet?.toLowerCase();
   const timeoutMs = input.timeoutMs === undefined ? 15_000 : input.timeoutMs;
   const maxResponseBytes = input.maxResponseBytes === undefined ? 1024 * 1024 : input.maxResponseBytes;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) throw new GatewayClientError("bad_timeout");
@@ -286,10 +277,10 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
   if (typeof emergencyStopReader !== "function") throw new GatewayClientError("bad_reader");
   const endpoint = (name: string) => `${baseUrl.replace(/\/+$/, "")}/api/operator/${encodeURIComponent(name)}`;
 
-  const transport = createGatewayRequest({ apiKey, fetchImpl, timeoutMs, maxResponseBytes });
-  async function request(kind: CallKind, url: string, body?: string): Promise<Reply | Failure> {
-    const reply = await transport(url, body);
-    if (isRequestFailure(reply)) return kind === "evidence" ? failure("indeterminate", reply.status) : reply;
+  const transport = createGatewayRequest({ apiKey, fetchImpl, timeoutMs, maxResponseBytes, wallet });
+  async function request(kind: CallKind, url: string, body?: string, options?: RequestOptions): Promise<Reply | Failure> {
+    const reply = await transport(url, body, options);
+    if (isRequestFailure(reply)) return kind === "evidence" ? failure("indeterminate", reply.status) : failure(reply.code, reply.status);
     try {
       // Non-200 JSON is decoded solely to classify allowlisted discriminators.
       if (reply.status !== 200) return classify(reply.status, reply.body ?? {}, reply.headers, kind);
@@ -347,7 +338,7 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
         body = JSON.stringify({ jobId, kernelId, evidence: bundle });
       } catch { return failure("bad_bundle", null); }
       if (Buffer.byteLength(body, "utf8") > 1_000_000) return failure("payload_too_large", null);
-      const reply = await request("evidence", endpoint("evidence"), body);
+      const reply = await request("evidence", endpoint("evidence"), body, { wallet: true });
       if (isFailure(reply)) return reply;
       if (own(reply.body, "stored") === false) {
         if (own(reply.body, "warning") === "job_not_found") return failure("not_stored", 200, "job_not_found");
@@ -369,7 +360,7 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
         body = JSON.stringify({ packageEnvelope: { body: packageEnvelope.body, signatures: packageEnvelope.signatures } });
       } catch { return failure("bad_request", null); }
       if (Buffer.byteLength(body, "utf8") > 1_000_000) return failure("payload_too_large", null);
-      const reply = await request("receipt", `${endpoint("jobs")}/${encodeURIComponent(jobId)}/receipt`, body);
+      const reply = await request("receipt", `${endpoint("jobs")}/${encodeURIComponent(jobId)}/receipt`, body, { wallet: true });
       if (isFailure(reply)) return reply;
       const receipt = parseReceipt(reply.body);
       return receipt ? { ok: true, value: receipt } : failure("malformed_response", 200);

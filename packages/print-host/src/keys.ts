@@ -62,6 +62,8 @@ export interface OperatorKeyLoadOptions extends KeyLoadOptions {
 export interface DeviceKey {
   readonly publicKeyHex: string;
   readonly signingPublicKey: string;
+  /** Public parent pinned when this key was loaded; no binding means no delegation. */
+  readonly delegationParent: string | undefined;
   readonly signDelegation: (input: DelegationInput) => Promise<Hex>;
   readonly signD2: (packageBodyHash: Uint8Array | string) => Promise<Hex>;
   toJSON(): { kind: "pcc-printhost.device-key"; publicKey: string };
@@ -84,7 +86,7 @@ function deviceKey(seed: Buffer, publicKeyHex: string, signingPublicKey: string,
   try { privateKey = createPrivateKey({ key: encoded, format: "der", type: "pkcs8" }); }
   finally { encoded.fill(0); }
   return Object.freeze(Object.assign(Object.create(deviceKeyPrototype), {
-    publicKeyHex, signingPublicKey,
+    publicKeyHex, signingPublicKey, delegationParent: parent,
     async signDelegation(input: DelegationInput): Promise<Hex> {
       const preimage = prepareDelegation(input, parent, publicKeyHex);
       try { return `0x${sign(null, preimage, privateKey).toString("hex")}`; }

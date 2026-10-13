@@ -23,8 +23,9 @@ export type {
   EStopDecision, EmergencyStopReader, RelayEvidenceBundle, PollJobsValue,
   HeartbeatValue, InProgressValue, RelayEvidenceReceipt,
 } from "./gateway-client.js";
-export { createHost, HOST_LOG_CODES } from "./host.js";
-export type { HostDeps, HostLogCode, HostPrintOptions, HostTickResult, HostTimers } from "./host.js";
+export { createHost, HOST_LOG_CODES, HostIdentityError } from "./host.js";
+export { derivePrinterJobName } from "./printer-job-name.js";
+export type { HostDeps, HostLogCode, HostPrintOptions, HostTickResult, HostTimers, HostIdentityCode } from "./host.js";
 export { createJobJournal, JournalError, JOURNAL_STATES, SUBMIT_CODES } from "./journal.js";
 export type { JobJournal, JournalRecord, JournalState, JournalCode, JournalErrorCode, PackageHashes, SignedMilestonePackage } from "./journal.js";
 export { defaultJobInputSource, fileJobInputSource, JOB_INPUT_CODES, hasPackageInputs } from "./job-inputs.js";

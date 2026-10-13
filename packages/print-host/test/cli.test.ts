@@ -98,7 +98,7 @@ async function runFixture(stopFields: Record<string, unknown> = { emergencyStop:
   }));
   const device = JSON.parse(await readFile(generated.paths.deviceKeyFile, "utf8"));
   const operator = JSON.parse(await readFile(generated.paths.operatorKeyFile, "utf8"));
-  return { configFile, inputsDir, dataDir, calls, fetchImpl, adapter, dispose, createPrinter,
+  return { configFile, inputsDir, dataDir, calls, fetchImpl, adapter, dispose, createPrinter, operatorAddress: generated.identity.operatorAddress,
     secrets: [apiToken, providerToken, device.seed, operator.privateKey.slice(2), jobName, "private buyer document"] };
 }
 
@@ -250,6 +250,8 @@ describe("print-host CLI", () => {
     expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
     expect(fixture.adapter.commands).toEqual([]);
     expect(await readdir(join(fixture.dataDir, "journal"))).toEqual([]);
+    expect(createGateway).toHaveBeenCalledOnce();
+    expect(createGateway.mock.calls[0]![0].wallet).toBe(fixture.operatorAddress);
     expect(fixture.dispose).toHaveBeenCalledOnce();
     assertRunOutput(captured, fixture.secrets);
   });
@@ -386,13 +388,16 @@ describe("print-host CLI", () => {
     await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
     const captured = capture();
     const createBroadcaster = vi.fn(() => { throw new Error("poll-only cannot construct a broadcaster"); });
+    const createGateway = vi.fn((settings: Parameters<typeof createGatewayClient>[0]) =>
+      createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }));
     expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
-      createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+      createGateway,
       createPrinter: fixture.createPrinter, createBroadcaster,
     })).toBe(0);
     expect(fixture.calls).toEqual(["/api/operator/heartbeat", "/api/operator/jobs"]);
     expect(fixture.createPrinter).not.toHaveBeenCalled();
     expect(createBroadcaster).not.toHaveBeenCalled();
+    expect(createGateway.mock.calls[0]![0]).not.toHaveProperty("wallet");
     expect(await readdir(join(fixture.dataDir, "journal"))).toEqual([]);
     assertRunOutput(captured, fixture.secrets);
   });

@@ -67,6 +67,7 @@ const plainFileName = z.string().min(1).max(240).refine((value) =>
 );
 const word = z.string().regex(/^0x[0-9a-f]{64}$/).transform((value) => value as Hex);
 const safeUint = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const fundingSeconds = z.number().int().min(1_600_000_000).max(2 ** 32 - 1);
 const escrow = z.string().regex(/^0x[0-9a-fA-F]{40}$/).refine((value) => {
   try { return getAddress(value) === value && value !== zeroAddress; } catch { return false; }
 }).transform((value) => value as Address);
@@ -92,13 +93,13 @@ const optionalPackageUnitFields = {
 const unitSchema = z.object({
   settlementUnitId: z.string().regex(/^0x[0-9a-f]{64}$/),
   challengeNonce: z.string().regex(/^0x[0-9a-f]{64}$/),
-  fundedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-  reclaimAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  fundedAt: fundingSeconds,
+  reclaimAt: fundingSeconds,
   ...optionalPackageUnitFields,
 }).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
 const programSchema = z.object({ programHash: word, attestationSetRoot: word, workProductRoot: word }).strict();
 const completeUnitSchema = z.object({
-  settlementUnitId: word, challengeNonce: word.refine(value => value !== `0x${"0".repeat(64)}`), fundedAt: safeUint, reclaimAt: safeUint,
+  settlementUnitId: word, challengeNonce: word.refine(value => value !== `0x${"0".repeat(64)}`), fundedAt: fundingSeconds, reclaimAt: fundingSeconds,
   ...packageUnitFields,
 }).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
 
