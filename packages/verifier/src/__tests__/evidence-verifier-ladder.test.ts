@@ -106,17 +106,25 @@ describe("EvidenceVerifier — tier requirements from the funded CSD's ladder (N
   });
 
   it("(b) a funded ladder without an accepted tier fails critically and applies no ladder requirements", async () => {
-    const a = await verifier.verify(await bundleOf(TIER1), { tierRequirements: await ladder() });
-    expect(a.result).toBe("invalid");
-    expect(a.findings).toContainEqual({
-      evidenceEventId: "",
-      check: "assurance_tier_accepted",
-      passed: false,
-      details:
-        "No accepted tier was supplied: the bundle's own assuranceTier is not signed, so it cannot choose the evidence required",
-      severity: "critical",
-    });
-    expect(tierFindings(a)).toEqual([]);
+    const tierRequirements = await ladder();
+    const base = await bundleOf(TIER1);
+    const results = [];
+    for (const assuranceTier of [0, 1, 2, 3] as const) {
+      const a = await verifier.verify({ ...base, assuranceTier }, { tierRequirements });
+      results.push(a);
+      expect(a.result).toBe("invalid");
+      expect(a.findings).toContainEqual({
+        evidenceEventId: "",
+        check: "assurance_tier_accepted",
+        passed: false,
+        details:
+          "No accepted tier was supplied: the bundle's own assuranceTier is not signed, so it cannot choose the evidence required",
+        severity: "critical",
+      });
+      expect(tierFindings(a)).toEqual([]);
+      expect(a.findings).toEqual(results[0]!.findings);
+      expect(a.attestationHash).toBe(results[0]!.attestationHash);
+    }
   });
 
   it("(c) accepted tier 2 fails critically when the funded ladder only defines tiers 0 and 1", async () => {
@@ -153,6 +161,140 @@ describe("EvidenceVerifier — tier requirements from the funded CSD's ladder (N
           check: "tier_requirement_cv_inspection_result_or_camera_snapshot", passed: false, severity: "critical",
         }));
       }
+    }
+  });
+
+  it("(c) an empty ladder fails critically instead of falling back to the FDM defaults", async () => {
+    const a = await verifier.verify(
+      await bundleOf(["gcode_hash_verified", "execution_completed", "power_profile_summary"]),
+      { acceptedTier: 1, tierRequirements: [] },
+    );
+    expect(a.result).toBe("invalid");
+    expect(tierFindings(a)).toEqual([{
+      evidenceEventId: "",
+      check: "tier_requirement_defined",
+      passed: false,
+      details: "Tier 1 is not defined by the tier requirements in force",
+      severity: "critical",
+    }]);
+  });
+
+  async function expectRefused(tierRequirements: unknown, acceptedTier: 1 | 3 = 1) {
+    // A complete PM tier-1 bundle would pass a valid supplied PM ladder; a hash-valid empty
+    // bundle would pass E15's crafted tier 3. The refusal must be its own critical finding.
+    const a = await verifier.verify(await bundleOf(acceptedTier === 3 ? [] : TIER1), {
+      acceptedTier,
+      tierRequirements: tierRequirements as never,
+    });
+    expect(a.result).toBe("invalid");
+    expect(a.findings).toContainEqual(expect.objectContaining({
+      check: "tier_requirements_valid", passed: false, severity: "critical",
+    }));
+    expect(tierFindings(a)).toEqual([]);
+  }
+
+  it("E15 Q3 refuses a crafted isolated empty tier 3", async () => {
+    await expectRefused([{
+      tier: 3, requiredEventTypes: [], minimumEvents: 0, description: "crafted",
+    }], 3);
+  });
+
+  it("E15 Q3 refuses a weak duplicate tier placed before the genuine tier", async () => {
+    const tierRequirements = await ladder();
+    await expectRefused([
+      { tier: 3, requiredEventTypes: [], minimumEvents: 0, description: "crafted" },
+      ...tierRequirements,
+    ], 3);
+  });
+
+  it.each([
+    ["explicit null", null],
+    ["a non-array object", {}],
+    ["a non-array string", "ladder"],
+  ])("E15 Q3 refuses %s tier requirements without using defaults", async (_name, value) => {
+    await expectRefused(value);
+  });
+
+  it.each([
+    ["a null entry", () => null],
+    ["an invalid tier", (tier: TierEvidenceRequirements) => ({ ...tier, tier: "1" })],
+    ["missing groups", (tier: TierEvidenceRequirements) => ({ ...tier, requiredEventTypes: undefined })],
+    ["an empty OR group", (tier: TierEvidenceRequirements) => ({ ...tier, requiredEventTypes: [[]] })],
+    ["an unknown event", (tier: TierEvidenceRequirements) => ({ ...tier, requiredEventTypes: [["not_an_event"]] })],
+    ["a negative minimum", (tier: TierEvidenceRequirements) => ({ ...tier, minimumEvents: -1 })],
+    ["a fractional minimum", (tier: TierEvidenceRequirements) => ({ ...tier, minimumEvents: 0.5 })],
+    ["a missing description", (tier: TierEvidenceRequirements) => ({ ...tier, description: undefined })],
+  ])("E15 Q3 refuses malformed entries containing %s", async (_name, malformed) => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    tiers[1] = malformed(tiers[1]!) as never;
+    await expectRefused(tiers);
+  });
+
+  it.each(["tiers", "groups", "events"])("E15 Q3 refuses a sparse %s array", async (part) => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    if (part === "tiers") delete tiers[0];
+    if (part === "groups") delete tiers[1]!.requiredEventTypes[0];
+    if (part === "events") delete tiers[1]!.requiredEventTypes[0]![0];
+    await expectRefused(tiers);
+  });
+
+  it("E15 Q3 refuses a non-monotone ladder that drops a lower tier's event", async () => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    tiers[2]!.requiredEventTypes = tiers[2]!.requiredEventTypes.filter((group) => !group.includes("printer_log_captured"));
+    await expectRefused(tiers);
+  });
+
+  it("E15 Q3 refuses a non-monotone ladder that lowers minimumEvents", async () => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    tiers[2]!.minimumEvents = 0;
+    await expectRefused(tiers);
+  });
+
+  it("E15 Q3 refuses an upper OR group that weakens a lower event requirement", async () => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    const printerLog = tiers[2]!.requiredEventTypes.find((group) => group.includes("printer_log_captured"))!;
+    printerLog.push("camera_snapshot");
+    await expectRefused(tiers);
+  });
+
+  it("E15 Q3 owns supplied requirements before the first await", async () => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    const bundle = await bundleOf(TIER1.filter((event) => event !== "printer_log_captured"));
+    const pending = verifier.verify(bundle, { acceptedTier: 1, tierRequirements: tiers });
+    tiers[1]!.requiredEventTypes.length = 0;
+    const a = await pending;
+    expect(a.result).toBe("invalid");
+    expect(tierFindings(a)).toContainEqual(expect.objectContaining({
+      check: "tier_requirement_printer_log_captured", passed: false, severity: "critical",
+    }));
+  });
+
+  it("E15 Q3 owns the accepted tier before the first await", async () => {
+    const options = { acceptedTier: 1 as 0 | 1, tierRequirements: await ladder() };
+    const bundle = await bundleOf(TIER1.filter((event) => event !== "printer_log_captured"));
+    const pending = verifier.verify(bundle, options);
+    options.acceptedTier = 0;
+    expect((await pending).result).toBe("invalid");
+  });
+
+  it("E15 Q3 clearing default requirements during verification throws or changes nothing", async () => {
+    const required = DEFAULT_TIER_REQUIREMENTS[3]!.requiredEventTypes;
+    const original = required.map((group) => [...group]);
+    const pending = verifier.verify(await bundleOf([]), { acceptedTier: 3 });
+    try {
+      try { required.length = 0; } catch (error) { expect(error).toBeInstanceOf(TypeError); }
+      const a = await pending;
+      expect(a.result).toBe("invalid");
+      expect(required).toEqual(original);
+      expect(Object.isFrozen(DEFAULT_TIER_REQUIREMENTS)).toBe(true);
+      for (const tier of DEFAULT_TIER_REQUIREMENTS) {
+        expect(Object.isFrozen(tier)).toBe(true);
+        expect(Object.isFrozen(tier.requiredEventTypes)).toBe(true);
+        for (const group of tier.requiredEventTypes) expect(Object.isFrozen(group)).toBe(true);
+      }
+    } finally {
+      // Keep the negative-control run against the mutable old export isolated from other tests.
+      if (!Object.isFrozen(required)) required.splice(0, required.length, ...original);
     }
   });
 });

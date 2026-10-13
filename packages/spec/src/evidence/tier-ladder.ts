@@ -28,8 +28,8 @@
  * adds no event type over the tier below. The last matters because the
  * recompute reads event types only: such a tier would be granted on the lower
  * tier's evidence. Legacy CSDs whose required[] lists field names rather than
- * event types (fdm, sla, and the other built-ins today) therefore have no
- * ladder above tier 0, matching the eligibility rule that caps them there. A `role:
+ * event types (fdm, sla, and the other built-ins today) are refused entirely
+ * with tier-adds-no-event-type; compilation returns no tier-0-only ladder. A `role:
  * "supporting"` flag never removes a bind from the ladder, so a tier's promise
  * cannot be weakened by relabelling its evidence (N19).
  *
@@ -42,12 +42,13 @@
  */
 
 import { createHash } from "node:crypto";
+import { types as nodeTypes } from "node:util";
 
 import type { CSD } from "../csd/schema.js";
 import { computeContractDigest } from "../csd/capability-contract-identity.js";
 import type { AssuranceTier } from "../types/common.js";
-import { EVIDENCE_EVENT_TYPES, type EvidenceEventType } from "../types/evidence.js";
-import { canonicalize } from "../util/canonical.js";
+import { DEFAULT_TIER_REQUIREMENTS, EVIDENCE_EVENT_TYPES, type EvidenceEventType } from "../types/evidence.js";
+import { canonicalize, canonicalSnapshot } from "../util/canonical.js";
 
 export const TIER_LADDER_SCHEMA = "tier-ladder/v1" as const;
 
@@ -84,6 +85,8 @@ export interface TierLadderV1 {
 }
 
 export type TierLadderErrorCode =
+  | "non-canonical-input"
+  | "malformed-ladder"
   | "no-evidence-tiers"
   | "unknown-tier-key"
   | "tiers-not-contiguous"
@@ -110,8 +113,76 @@ function isNonEmptyString(v: unknown): v is string {
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+  return typeof v === "object" && v !== null &&
+    (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
 }
+
+/**
+ * Read caller data once, by own descriptors, before interpreting any fields.
+ * Node can detect Proxies; refuse them before reflection can run a trap. The
+ * shared canonicalizer then validates the owned tree's JSON values and makes
+ * the canonical snapshot. No caller iterator, getter or toJSON is invoked.
+ */
+function ownedSnapshot<T>(input: unknown): T {
+  const copies = new WeakMap<object, object>();
+  function copy(value: unknown): unknown {
+    if (value === null || typeof value !== "object") return value;
+    if (nodeTypes.isProxy(value)) throw new Error("Proxy input");
+    const previous = copies.get(value);
+    if (previous) return previous;
+    const array = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
+      throw new Error("non-plain input");
+    }
+    const result: Record<string, unknown> | unknown[] = array ? [] : Object.create(null);
+    copies.set(value, result);
+    let length = 0;
+    if (array) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, "length");
+      if (!descriptor || !Object.hasOwn(descriptor, "value") || !Number.isSafeInteger(descriptor.value) || descriptor.value < 0) {
+        throw new Error("invalid array length");
+      }
+      length = descriptor.value;
+    }
+    const keys = Reflect.ownKeys(value);
+    // An array must own every index and nothing else besides length.
+    if (array && keys.length !== length + 1) throw new Error("sparse or extended array");
+    for (const key of keys) {
+      if (array && key === "length") continue;
+      if (typeof key !== "string") throw new Error("symbol property");
+      if (array && !(Number.isInteger(Number(key)) && Number(key) >= 0 && Number(key) < length && String(Number(key)) === key)) {
+        throw new Error("non-index array property");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !Object.hasOwn(descriptor, "value") || !descriptor.enumerable) {
+        throw new Error("accessor or non-enumerable property");
+      }
+      Object.defineProperty(result, key, {
+        value: copy(descriptor.value), enumerable: true, writable: true, configurable: true,
+      });
+    }
+    return result;
+  }
+  try {
+    return canonicalSnapshot<T>(copy(input)).value;
+  } catch {
+    // Never inspect a thrown caller value (it could itself be a hostile Proxy).
+    throw new TierLadderError("non-canonical-input", "expected plain JSON data with dense arrays and no accessors or Proxies");
+  }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+// The public spec barrel loads this module. Keep initialization here because
+// types/evidence.ts also serves as the wire-type source of truth.
+deepFreeze(DEFAULT_TIER_REQUIREMENTS);
 
 function compileTier(k: number, raw: unknown): { tier: TierLadderTier; required: Set<string> } {
   if (!isPlainObject(raw) || typeof raw.description !== "string" || !Array.isArray(raw.required)) {
@@ -164,21 +235,25 @@ function compileTier(k: number, raw: unknown): { tier: TierLadderTier; required:
  * `resolveCapabilityContractIdentity` reports. Throws TierLadderError.
  */
 export async function compileTierLadder(csd: CSD): Promise<TierLadderV1> {
-  const evidence: unknown = csd.evidence;
+  const snapshot = ownedSnapshot<CSD>(csd);
+  if (!isPlainObject(snapshot) || !isNonEmptyString(snapshot.url)) {
+    throw new TierLadderError("non-canonical-input", "the CSD must be an object with a non-empty url");
+  }
+  const evidence: unknown = snapshot.evidence;
   if (!isPlainObject(evidence) || Object.keys(evidence).length === 0) {
-    throw new TierLadderError("no-evidence-tiers", `${csd.url}: the CSD declares no evidence tiers`);
+    throw new TierLadderError("no-evidence-tiers", `${snapshot.url}: the CSD declares no evidence tiers`);
   }
   const present: number[] = [];
   for (const key of Object.keys(evidence)) {
     const m = TIER_KEY.exec(key);
-    if (!m) throw new TierLadderError("unknown-tier-key", `${csd.url}: evidence key "${key}" is not tier0..tier3`);
+    if (!m) throw new TierLadderError("unknown-tier-key", `${snapshot.url}: evidence key "${key}" is not tier0..tier3`);
     present.push(Number(m[1]));
   }
   present.sort((a, b) => a - b);
   if (present.some((t, i) => t !== i)) {
     throw new TierLadderError(
       "tiers-not-contiguous",
-      `${csd.url}: tiers [${present.join(", ")}] must run from tier0 without gaps`,
+      `${snapshot.url}: tiers [${present.join(", ")}] must run from tier0 without gaps`,
     );
   }
 
@@ -195,7 +270,8 @@ export async function compileTierLadder(csd: CSD): Promise<TierLadderV1> {
         );
       }
       // The recompute reads event types only, so a tier that adds none over the
-      // tier below would be granted on the lower tier's evidence.
+      // tier below would be granted on the lower tier's evidence. Refuse the
+      // entire compilation, including legacy/FDM CSDs; return no partial ladder.
       const added = tier.requiredEventTypes.filter(([e]) => !below!.has(e!));
       if (added.length === 0) {
         throw new TierLadderError(
@@ -208,13 +284,13 @@ export async function compileTierLadder(csd: CSD): Promise<TierLadderV1> {
     below = required;
   }
 
-  return {
+  return deepFreeze({
     version: 1,
     schemaHash: TIER_LADDER_SCHEMA,
-    capabilityContractId: csd.url,
-    capabilityContractDigest: await computeContractDigest(csd),
+    capabilityContractId: snapshot.url,
+    capabilityContractDigest: await computeContractDigest(snapshot),
     tiers,
-  };
+  });
 }
 
 /**
@@ -223,14 +299,49 @@ export async function compileTierLadder(csd: CSD): Promise<TierLadderV1> {
  * Each is reproduced from the bundled CSD by tier-ladder.test.ts, and the full
  * ladders are in tier-ladder.vectors.json.
  */
-export const PINNED_TIER_LADDER_DIGESTS: Readonly<Record<string, `0x${string}`>> = {
+export const PINNED_TIER_LADDER_DIGESTS: Readonly<Record<string, `0x${string}`>> = deepFreeze({
   "pcc://capabilities/document-print-and-mail/v1":
     "0xe9cf2a2f9f6dcc355a5c71cd503b7598c0cbf1b58429e452adfafe6cf0fe0560",
-};
+});
 
-/** The ladder commitment: 0x + SHA-256 of the canonical ladder. */
+function hasFields(value: unknown, fields: readonly string[]): value is Record<string, unknown> {
+  return isPlainObject(value) && Object.keys(value).length === fields.length &&
+    fields.every((field) => Object.hasOwn(value, field));
+}
+
+/** Validate all V1 fields on the owned snapshot, before hashing any bytes. */
+function assertLadderShape(value: unknown): asserts value is TierLadderV1 {
+  const fail: () => never = () => { throw new TierLadderError("malformed-ladder", "expected a complete tier-ladder/v1 ladder"); };
+  if (!hasFields(value, ["version", "schemaHash", "capabilityContractId", "capabilityContractDigest", "tiers"]) ||
+    value.version !== 1 || value.schemaHash !== TIER_LADDER_SCHEMA ||
+    !isNonEmptyString(value.capabilityContractId) ||
+    typeof value.capabilityContractDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value.capabilityContractDigest) ||
+    !Array.isArray(value.tiers) || value.tiers.length === 0 || value.tiers.length > 4) fail();
+  for (const [i, tier] of value.tiers.entries()) {
+    if (!hasFields(tier, ["tier", "description", "requiredEventTypes", "minimumEvents", "nonEventRequirements", "primitives"]) ||
+      tier.tier !== i || typeof tier.description !== "string" ||
+      !Array.isArray(tier.requiredEventTypes) || tier.minimumEvents !== tier.requiredEventTypes.length ||
+      !tier.requiredEventTypes.every((group: unknown) => Array.isArray(group) && group.length > 0 &&
+        group.every((event: unknown) => typeof event === "string" && EVENT_TYPES.has(event))) ||
+      !Array.isArray(tier.nonEventRequirements) || !tier.nonEventRequirements.every(isNonEmptyString) ||
+      !Array.isArray(tier.primitives)) fail();
+    for (const primitive of tier.primitives) {
+      if (!hasFields(primitive, ["id", "bind", "supporting", "params"]) ||
+        !isNonEmptyString(primitive.id) || (primitive.bind !== null && !isNonEmptyString(primitive.bind)) ||
+        typeof primitive.supporting !== "boolean" || (primitive.params !== null && !isPlainObject(primitive.params))) fail();
+    }
+  }
+}
+
+/**
+ * The ladder commitment: 0x + SHA-256 of the canonical V1 ladder. Refuses other
+ * runtime shapes with TierLadderError; the fixed schema tag separates this
+ * domain without changing the pinned canonical bytes.
+ */
 export function computeTierLadderDigest(ladder: TierLadderV1): `0x${string}` {
-  return `0x${createHash("sha256").update(canonicalize(ladder), "utf8").digest("hex")}`;
+  const snapshot = ownedSnapshot<unknown>(ladder);
+  assertLadderShape(snapshot);
+  return `0x${createHash("sha256").update(canonicalize(snapshot), "utf8").digest("hex")}`;
 }
 
 /**

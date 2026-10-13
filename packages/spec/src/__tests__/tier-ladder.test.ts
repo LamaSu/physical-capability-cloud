@@ -11,6 +11,7 @@ import printAndMail from "../csds/document-print-and-mail.csd.json" with { type:
 import vectors from "../evidence/tier-ladder.vectors.json" with { type: "json" };
 import { CsdSchema, type CSD } from "../csd/schema.js";
 import { computeContractDigest } from "../csd/capability-contract-identity.js";
+import { computeVerificationProgramHash } from "../types/verification-program.js";
 import {
   achievedTierFromEventTypes,
   compileTierLadder,
@@ -173,7 +174,7 @@ describe("tier ladder — compilation fails closed", () => {
     expect(await codeOf(notArray)).toBe("malformed-tier");
   });
 
-  it("legacy CSDs whose required[] names fields, not events, get no ladder above tier 0", async () => {
+  it("legacy CSDs whose required[] names fields, not events, are refused entirely with tier-adds-no-event-type", async () => {
     const dir = fileURLToPath(new URL("../csds/", import.meta.url));
     const results: Record<string, string> = {};
     for (const f of readdirSync(dir).filter((f) => f.endsWith(".csd.json")).sort()) {
@@ -186,6 +187,106 @@ describe("tier ladder — compilation fails closed", () => {
   });
 });
 
+describe("tier ladder — one owned snapshot (E15 Q1)", () => {
+  const twoTierCsd = (): CSD => ({
+    ...csd(),
+    evidence: {
+      tier0: { description: "declaration", required: [] },
+      tier1: { description: "execution and photo", required: ["execution_completed", "photo_captured"] },
+    },
+  });
+
+  async function expectRefusalOrSameSnapshot(pending: Promise<TierLadderV1>, expected: CSD) {
+    const outcome = await pending.then((ladder) => ({ ladder }), (error: unknown) => ({ error }));
+    if ("error" in outcome) {
+      expect(outcome.error).toBeInstanceOf(TierLadderError);
+    } else {
+      expect(eventsOf(outcome.ladder, 1)).toEqual(tierOf(expected, 1).required);
+      expect(outcome.ladder.capabilityContractDigest).toBe(await computeContractDigest(expected));
+    }
+  }
+
+  it("the third-read required getter cannot weaken the ladder while committing the restored full list", async () => {
+    const c = twoTierCsd();
+    const expected = structuredClone(c);
+    const tier = tierOf(c, 1);
+    const full = [...tier.required];
+    let reads = 0;
+    Object.defineProperty(tier, "required", {
+      enumerable: true, configurable: true,
+      get() {
+        if (++reads <= 2) return full;
+        Object.defineProperty(tier, "required", { value: full, enumerable: true, configurable: true, writable: true });
+        return ["execution_completed"];
+      },
+    });
+    await expectRefusalOrSameSnapshot(compileTierLadder(c), expected);
+  });
+
+  it("a Proxy array iterator cannot weaken the ladder while committing the full array descriptors", async () => {
+    const c = twoTierCsd();
+    const expected = structuredClone(c);
+    const tier = tierOf(c, 1);
+    tier.required = new Proxy(tier.required, {
+      get(target, property, receiver) {
+        if (property === Symbol.iterator) return function* () { yield "execution_completed"; };
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    await expectRefusalOrSameSnapshot(compileTierLadder(c), expected);
+  });
+
+  it("primitive parameters retain strict and an owned identity when the caller mutates before await", async () => {
+    const c = twoTierCsd();
+    const params = { integrityGrade: "strict" };
+    tierOf(c, 1).primitives = [{ id: "machine.execution_log", bind: "execution_completed", params }];
+    const expected = structuredClone(c);
+    const pending = compileTierLadder(c);
+    params.integrityGrade = "none";
+    const ladder = await pending;
+    expect(ladder.tiers[1]!.primitives[0]!.params).toEqual({ integrityGrade: "strict" });
+    expect(ladder.tiers[1]!.primitives[0]!.params).not.toBe(params);
+    expect(ladder.capabilityContractDigest).toBe(await computeContractDigest(expected));
+  });
+
+  it.each([1, 3])("a sparse tier %i required array throws TierLadderError", async (k) => {
+    const c = csd();
+    // Preserve every promise so an earlier bind/drop check cannot hide the
+    // sparse-array error contract; append a hole that .every() would skip.
+    tierOf(c, k).required.length += 1;
+    const pending = compileTierLadder(c);
+    await expect(pending).rejects.toBeInstanceOf(TierLadderError);
+    await expect(pending).rejects.toHaveProperty("code", "non-canonical-input");
+  });
+
+  it("a sparse primitive list throws TierLadderError", async () => {
+    const c = csd();
+    delete tierOf(c, 3).primitives![0];
+    await expect(compileTierLadder(c)).rejects.toBeInstanceOf(TierLadderError);
+  });
+
+  it("the returned ladder is frozen at every depth, including parameter objects", async () => {
+    const ladder = await compileTierLadder(csd());
+    function expectDeeplyFrozen(value: unknown): void {
+      if (value !== null && typeof value === "object") {
+        expect(Object.isFrozen(value)).toBe(true);
+        for (const child of Object.values(value)) expectDeeplyFrozen(child);
+      }
+    }
+    expectDeeplyFrozen(ladder);
+  });
+
+  it.each([
+    ["non-plain object", () => new Date()],
+    ["symbol property", () => ({ [Symbol("hidden")]: true })],
+    ["non-enumerable property", () => Object.defineProperty({}, "hidden", { value: true })],
+  ] as const)("caller input containing a %s throws TierLadderError", async (_label, makeValue) => {
+    const c = csd();
+    (c as unknown as Record<string, unknown>).extra = makeValue();
+    await expect(compileTierLadder(c)).rejects.toBeInstanceOf(TierLadderError);
+  });
+});
+
 describe("tier ladder — the digest", () => {
   it("ignores key order and moves with any committed field", async () => {
     const ladder = await compileTierLadder(csd());
@@ -194,5 +295,42 @@ describe("tier ladder — the digest", () => {
     const edited = structuredClone(ladder);
     edited.tiers[1]!.description += ".";
     expect(computeTierLadderDigest(edited)).not.toBe(computeTierLadderDigest(ladder));
+  });
+
+  it("refuses the verification-program payload instead of sharing its digest domain", () => {
+    const payload = { version: 1, schemaHash: `0x${"a".repeat(64)}`, stages: [] };
+    expect(computeVerificationProgramHash(payload as never)).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(() => computeTierLadderDigest(payload as unknown as TierLadderV1)).toThrow(TierLadderError);
+  });
+
+  it.each([
+    ["wrong version", (l: TierLadderV1) => { (l as { version: number }).version = 2; }],
+    ["wrong schema tag", (l: TierLadderV1) => { (l as { schemaHash: string }).schemaHash = "other/v1"; }],
+    ["missing contract id", (l: TierLadderV1) => { delete (l as Partial<TierLadderV1>).capabilityContractId; }],
+    ["malformed contract digest", (l: TierLadderV1) => { l.capabilityContractDigest = "sha256:bad"; }],
+    ["missing tier field", (l: TierLadderV1) => { delete (l.tiers[0] as Partial<TierLadderV1["tiers"][number]>).description; }],
+    ["unknown event", (l: TierLadderV1) => { l.tiers[1]!.requiredEventTypes[0]![0] = "unknown_event" as never; }],
+    ["empty OR group", (l: TierLadderV1) => { l.tiers[1]!.requiredEventTypes[0] = []; }],
+    ["wrong minimumEvents", (l: TierLadderV1) => { l.tiers[1]!.minimumEvents = 0; }],
+    ["malformed non-event requirement", (l: TierLadderV1) => { l.tiers[0]!.nonEventRequirements[0] = ""; }],
+    ["malformed primitive", (l: TierLadderV1) => { l.tiers[0]!.primitives[0]!.supporting = "yes" as never; }],
+    ["noncontiguous tiers", (l: TierLadderV1) => { l.tiers[1]!.tier = 2; }],
+    ["extra field", (l: TierLadderV1) => { (l as unknown as Record<string, unknown>).stages = []; }],
+  ])("refuses a runtime ladder with %s", async (_label, mutate) => {
+    const ladder = structuredClone(await compileTierLadder(csd()));
+    mutate(ladder);
+    expect(() => computeTierLadderDigest(ladder)).toThrow(TierLadderError);
+  });
+
+  it("a sparse tier list throws TierLadderError at the digest boundary", async () => {
+    const ladder = structuredClone(await compileTierLadder(csd()));
+    delete ladder.tiers[1];
+    expect(() => computeTierLadderDigest(ladder)).toThrow(TierLadderError);
+  });
+
+  it("pinned ladder digests are runtime immutable", () => {
+    expect(Object.isFrozen(PINNED_TIER_LADDER_DIGESTS)).toBe(true);
+    expect(Reflect.set(PINNED_TIER_LADDER_DIGESTS, PRINT_AND_MAIL, "0x00")).toBe(false);
+    expect(PINNED_TIER_LADDER_DIGESTS[PRINT_AND_MAIL]).toBe(vectors.vectors[0]!.ladderDigest);
   });
 });

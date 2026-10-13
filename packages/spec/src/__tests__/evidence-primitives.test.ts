@@ -253,6 +253,49 @@ describe("eligibility — an unknown primitive caps at tier 0", () => {
 });
 
 describe("eligibility — tier floors (§5)", () => {
+  it("an unknown primitive at tier 0 reports the listable floor and blocks ascent", () => {
+    const report = computeCsdEligibility({
+      url: "pcc://capabilities/unknown-at-floor/v1",
+      evidence: {
+        tier0: { description: "", required: [], primitives: [{ id: "unknown.floor" }] },
+        tier1: { description: "", required: [], primitives: [{ id: "artifact.hash" }] },
+      },
+    });
+
+    expect(report.eligibleTier).toBe(0);
+    expect(report.verdict).toBe("CAPPED");
+    expect(report.perTier.find((t) => t.tier === 0)?.eligible).toBe(false);
+    expect(report.cappedReason).toBe(
+      'tier0: unknown primitive "unknown.floor" — blocks ascent above the listable tier-0 floor',
+    );
+    expect(report.cappedReason).not.toContain("below tier 0");
+  });
+
+  it("a reserved primitive at tier 0 reports the listable floor and blocks ascent", () => {
+    const reserved: EvidencePrimitiveDef = {
+      ...getPrimitive("decl.self_attested")!,
+      id: "reserved.floor",
+      status: "reserved",
+    };
+    const index = new Map(EVIDENCE_PRIMITIVES.map((def) => [def.id, def]));
+    index.set(reserved.id, reserved);
+    const report = computeCsdEligibility({
+      url: "pcc://capabilities/reserved-at-floor/v1",
+      evidence: {
+        tier0: { description: "", required: [], primitives: [{ id: reserved.id }] },
+        tier1: { description: "", required: [], primitives: [{ id: "artifact.hash" }] },
+      },
+    }, { index });
+
+    expect(report.eligibleTier).toBe(0);
+    expect(report.verdict).toBe("CAPPED");
+    expect(report.perTier.find((t) => t.tier === 0)?.eligible).toBe(false);
+    expect(report.cappedReason).toBe(
+      'tier0: primitive "reserved.floor" is status:reserved — blocks ascent above the listable tier-0 floor',
+    );
+    expect(report.cappedReason).not.toContain("below tier 0");
+  });
+
   it("tier ≥ 1 with only decl.self_attested caps below that tier", () => {
     const report = computeCsdEligibility({
       url: "pcc://capabilities/only-decl/v1",

@@ -5,8 +5,8 @@
  *
  *   A CSD is tier-N eligible iff for every k ≤ N its tier-k evidence set
  *     (a) is non-empty,
- *     (b) references only status:"active" primitives (unknown/reserved cap at
- *         tier 0), each with tierSupport ∋ k,
+ *     (b) references only status:"active" primitives (unknown/reserved make the
+ *         containing tier ineligible), each with tierSupport ∋ k,
  *     (c) satisfies dependency closure (every dependsOn present in the same or
  *         lower tier),
  *     (d) for k ≥ 2 includes ≥1 Family-G (human-attestation) primitive — the
@@ -14,10 +14,11 @@
  *     (e) for k ≥ 1 includes ≥1 primitive that is NOT decl.self_attested (the
  *         typed tier-0 floor grants only tier 0).
  *   Anything else (an unknown id, a reserved primitive, a free-text-only
- *   required[]) makes THAT tier ineligible, so the CSD caps below it: at
- *   tier 0 when it sits in tier 1, at tier k-1 when it sits in tier k. Tiers
- *   below it do not depend on it, and the ascent is monotone. The CSD stays
- *   listable (tier 0 is the permissionless on-ramp).
+ *   required[]) makes THAT tier ineligible, so for k ≥ 1 the CSD caps below
+ *   it: at tier 0 when it sits in tier 1, at tier k-1 when it sits in tier k.
+ *   An unknown/reserved primitive in tier 0 blocks ascent while retaining the
+ *   listable tier-0 floor. Tiers below an ineligible higher tier do not depend
+ *   on it, and the ascent is monotone. Tier 0 is the permissionless on-ramp.
  *
  * This is REPORT-ONLY by default: it returns an ELIGIBLE/CAPPED(reason) verdict;
  * callers do not (yet) reject registration on it. Pass
@@ -103,16 +104,19 @@ function evaluateTier(
 
   let hasNonDecl = false;
   let hasHumanAttestation = false;
+  const capEffect = k === 0
+    ? "blocks ascent above the listable tier-0 floor"
+    : `caps the CSD below tier ${k}`;
 
   for (const ref of refs) {
     const def = index.get(ref.id);
     if (!def) {
-      reasons.push(`tier${k}: unknown primitive "${ref.id}" — caps the CSD below tier ${k}`);
+      reasons.push(`tier${k}: unknown primitive "${ref.id}" — ${capEffect}`);
       continue;
     }
     if (def.status !== "active") {
       reasons.push(
-        `tier${k}: primitive "${ref.id}" is status:${def.status} — caps the CSD below tier ${k}`,
+        `tier${k}: primitive "${ref.id}" is status:${def.status} — ${capEffect}`,
       );
       continue;
     }
