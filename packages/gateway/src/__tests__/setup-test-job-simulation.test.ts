@@ -9,8 +9,8 @@
  * from fire-and-forget jobs can SIGABRT during test teardown). That tradeoff
  * is wrong for F2 specifically — F2 is about what the simulation check does
  * against a REAL adapter instance (an IppAdapter defaulting to mock, an
- * OctoPrintAdapter in mockMode, an IppAdapter that downgrades from real to
- * mock at runtime because the optional 'ipp' package isn't installed). A
+ * OctoPrintAdapter in mockMode, an IppAdapter that refuses a document-free
+ * test job in real mode). A
  * mocked KernelService can't exercise any of that. Round 4 adds an adapter
  * replaced mid-run (the check must judge the adapter that RAN) and a
  * registered extension that leaves the marker out (it must count as simulated).
@@ -347,7 +347,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     unregisterMachineAdapter(UNMARKED_EXTENSION_TYPE);
   });
 
-  const post = (payload: unknown) =>
+  const post = (payload: Record<string, unknown>) =>
     app.inject({ method: "POST", url: "/api/setup/test-job", headers: { "x-test-key": OWNER }, payload });
 
   // ── 1. IPP, no adapterConfig -> defaults to mock ─────────────────────────
@@ -421,7 +421,9 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       const machine = svcInternals.machines.get("dev-ipp-downgrade") as IppAdapter;
       const client = (machine as unknown as { ippClient: { config: { transport: () => Promise<unknown> } } }).ippClient;
       const transport = vi.spyOn(client.config, "transport");
-      const body = (await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-downgrade", assuranceTier: 0 })).json();
+      const res = await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-downgrade", assuranceTier: 0 });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
       expect(body).toMatchObject({ ran: true, status: "failed", simulated: false, passed: false });
       expect(transport).not.toHaveBeenCalled();
     }, 20_000);

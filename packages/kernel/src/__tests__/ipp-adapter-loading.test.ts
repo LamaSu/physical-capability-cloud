@@ -101,7 +101,10 @@ describe("IPP construction and disposal fences (replaces optional-module loading
     await flush();
     await ipp.dispose();
     gate.resolve(jobResponse(printer.requests[1], { jobId: 46 }));
-    expect(await pending).toMatchObject({ success: true, data: { jobId: 46, monitored: false }, message: expect.stringContaining("not monitored") });
+    const result = await pending;
+    expect(result.success).toBe(true);
+    expect(result.message).toMatch(/IPP job 46 was submitted, but .* was disposed meanwhile, so the job is not monitored/);
+    expect(result.data).toEqual({ jobId: 46, monitored: false });
     await vi.advanceTimersByTimeAsync(200);
     expect(printer.requests.map(r => r.code)).toEqual([11, 2]);
     expect(events).toEqual([]);
