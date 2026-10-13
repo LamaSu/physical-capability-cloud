@@ -97,6 +97,47 @@ afterEach(async () => {
 });
 
 describe("host configuration", () => {
+  it("loads explicit broadcaster caps and receipt controls", async () => {
+    const setup = await fixture();
+    const chain = { ...setup.config.chain, maxFeePerGasCap: "100000000000", maxPriorityFeePerGasCap: "2000000000",
+      gasCap: "150000", confirmations: 2, rpcTimeoutMs: 5000, receiptTimeoutMs: 45000, pollingIntervalMs: 500 };
+    await setup.save({ ...setup.config, chain });
+    expect((await loadHostConfig(setup.path)).chain).toEqual(chain);
+  });
+
+  it.each(["maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"])("validates %s as canonical uint256 decimal text", async (field) => {
+    const setup = await fixture();
+    for (const value of [0, -1, "-1", "01", "1.5", "1e3", " 1", "", (1n << 256n).toString()]) {
+      await setup.save({ ...setup.config, chain: { ...setup.config.chain, [field]: value } });
+      const error = await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema");
+      expect(error.field).toBe(`chain.${field}`);
+    }
+    for (const value of ["0", "1", ((1n << 256n) - 1n).toString()]) {
+      await setup.save({ ...setup.config, chain: { ...setup.config.chain, [field]: value } });
+      expect((await loadHostConfig(setup.path)).chain[field as "gasCap"]).toBe(value);
+    }
+  });
+
+  it("refuses a priority fee cap above the total fee cap", async () => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, chain: { ...setup.config.chain, maxFeePerGasCap: "1", maxPriorityFeePerGasCap: "2" } });
+    await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema");
+  });
+
+  it.each([
+    ["confirmations", 64], ["rpcTimeoutMs", 60000], ["receiptTimeoutMs", 3600000], ["pollingIntervalMs", 60000],
+  ])("bounds %s to positive integer values up to %s", async (field, maximum) => {
+    const setup = await fixture();
+    for (const value of [0, -1, 0.5, "1", Number(maximum) + 1]) {
+      await setup.save({ ...setup.config, chain: { ...setup.config.chain, [field]: value } });
+      await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema");
+    }
+    for (const value of [1, Number(maximum)]) {
+      await setup.save({ ...setup.config, chain: { ...setup.config.chain, [field]: value } });
+      expect((await loadHostConfig(setup.path)).chain[field as "confirmations"]).toBe(value);
+    }
+  });
+
   it("loads a valid config and freezes each nested object", async () => {
     const setup = await fixture();
     const config = await loadHostConfig(setup.path);

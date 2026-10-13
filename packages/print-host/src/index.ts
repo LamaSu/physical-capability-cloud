@@ -38,3 +38,16 @@ export type {
   CarrierClient, CarrierClientConfig, BuyLabelInput, LabelReceipt,
   CarrierEvent, CarrierShipmentValue, CarrierEventsValue,
 } from "./carrier-client.js";
+export {
+  PackageBuilderError, validateUnitContext, validateProgramContext, computeUnitContextDigest,
+  computeSessionKeyAuthDigest, computeEvidenceBlockHash, buildMilestonePackage,
+  computePackageBodyHash, canonicalSignatures, computePackageDigest, signMilestonePackage,
+} from "./package-builder.js";
+export type {
+  UnitContext, ProgramContext, BuiltMilestonePackage, PackageBuilderErrorCode,
+} from "./package-builder.js";
+export { createEvidenceBroadcaster, EvidenceChainConfigError } from "./chain.js";
+export type {
+  EvidenceSubmission, EvidenceRefusalCode, EvidenceBroadcastOutcome,
+  EvidenceBroadcaster, EvidenceBroadcasterOptions,
+} from "./chain.js";

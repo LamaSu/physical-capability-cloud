@@ -56,6 +56,24 @@ export function isGatewayBaseUrl(value: string): boolean {
 
 const absolutePath = z.string().refine(isAbsolute, "must be an absolute path");
 const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
+// JSON-safe quantities in wei (fees) or gas units. Omission keeps legacy
+// read-only configurations valid, but the broadcaster treats omitted caps as zero.
+const cap = z.string().max(78).regex(/^(0|[1-9][0-9]*)$/)
+  .refine((value) => value.length <= 78 && /^(0|[1-9][0-9]*)$/.test(value)
+    && BigInt(value) <= (1n << 256n) - 1n, "must fit uint256");
+const chainConfigSchema = z.object({
+  chainId: z.union([z.literal(84532), z.literal(31337)]),
+  rpcUrlFile: absolutePath,
+  maxFeePerGasCap: cap.optional(),
+  maxPriorityFeePerGasCap: cap.optional(),
+  gasCap: cap.optional(),
+  confirmations: z.number().int().min(1).max(64).optional(),
+  rpcTimeoutMs: z.number().int().min(1).max(60_000).optional(),
+  receiptTimeoutMs: z.number().int().min(1).max(3_600_000).optional(),
+  pollingIntervalMs: z.number().int().min(1).max(60_000).optional(),
+}).strict().refine((value) => value.maxFeePerGasCap === undefined || value.maxPriorityFeePerGasCap === undefined
+  || !/^(0|[1-9][0-9]*)$/.test(value.maxFeePerGasCap) || !/^(0|[1-9][0-9]*)$/.test(value.maxPriorityFeePerGasCap)
+  || BigInt(value.maxPriorityFeePerGasCap) <= BigInt(value.maxFeePerGasCap), "priority fee cap must not exceed total fee cap");
 const hostConfigSchema = z.object({
   kernelId: id,
   deviceId: id,
@@ -66,10 +84,7 @@ const hostConfigSchema = z.object({
         && (url.protocol === "ipp:" || url.protocol === "ipps:");
     }, "must be an IPP URL with a host"),
   }).strict(),
-  chain: z.object({
-    chainId: z.union([z.literal(84532), z.literal(31337)]),
-    rpcUrlFile: absolutePath,
-  }).strict(),
+  chain: chainConfigSchema,
   gateway: z.object({
     baseUrl: z.string().refine(isGatewayBaseUrl, "must be HTTPS or loopback HTTP without credentials, query, or fragment"),
     apiKeyFile: absolutePath,
@@ -86,7 +101,17 @@ export type HostConfig = Readonly<{
   kernelId: string;
   deviceId: string;
   printer: Readonly<{ uri: string }>;
-  chain: Readonly<{ chainId: 84532 | 31337; rpcUrlFile: string }>;
+  chain: Readonly<{
+    chainId: 84532 | 31337;
+    rpcUrlFile: string;
+    maxFeePerGasCap?: string;
+    maxPriorityFeePerGasCap?: string;
+    gasCap?: string;
+    confirmations?: number;
+    rpcTimeoutMs?: number;
+    receiptTimeoutMs?: number;
+    pollingIntervalMs?: number;
+  }>;
   gateway: Readonly<{ baseUrl: string; apiKeyFile: string }>;
   keys: Readonly<{ deviceKeyFile: string; operatorKeyFile: string }>;
   dataDir: string;
@@ -111,8 +136,19 @@ export interface HostPublicIdentity {
 
 const knownFields = new Set([
   "kernelId", "deviceId", "printer", "uri", "chain", "chainId", "rpcUrlFile",
+  "maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap", "confirmations",
+  "rpcTimeoutMs", "receiptTimeoutMs", "pollingIntervalMs",
   "gateway", "baseUrl", "apiKeyFile", "keys", "deviceKeyFile", "operatorKeyFile", "dataDir", "eStopPollIntervalMs",
 ]);
+
+/** Snapshot and validate manually constructed chain config as well as file config. */
+export function validateHostChainConfig(input: unknown): HostConfig["chain"] {
+  try {
+    const parsed = chainConfigSchema.safeParse(input);
+    if (!parsed.success) throw new HostConfigError("bad_schema", "config", "chain");
+    return Object.freeze(parsed.data);
+  } catch { throw new HostConfigError("bad_schema", "config", "chain"); }
+}
 
 function validateConfig(value: unknown, path: string): HostConfig {
   if (typeof value === "object" && value !== null && "chain" in value) {
