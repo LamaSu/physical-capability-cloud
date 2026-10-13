@@ -131,6 +131,18 @@ describe("PR2 round 2 regressions", () => {
     expect(afterThrower).toHaveBeenCalledTimes(2); expect(thrower).toHaveBeenCalledTimes(2);
   });
 
+  it.each([6, 9])("F10: state %s with exactly 32 reasons remains usable", async jobState => {
+    const reasons = Array.from({ length: 32 }, () => "job-restartable");
+    const { adapter, events } = make(new FakeIppPrinter().setHandler(OP.GET_JOB_ATTRIBUTES, request => jobResponse(request, { jobState, jobStateReasons: reasons })));
+    const diagnostics = vi.fn(); adapter.onDiagnostic(diagnostics);
+    await start(adapter); await poll();
+    expect(events.map(e => e.type)).toEqual(["execution_started", jobState === 6 ? "execution_progress" : "execution_completed"]);
+    expect(events.at(-1)?.payload).toEqual(jobState === 6
+      ? { ippJobId: 77, state: "processing-stopped", jobStateReasons: reasons }
+      : { ippJobId: 77 });
+    expect(diagnostics).not.toHaveBeenCalled();
+    if (jobState === 9) await adapter.quiesceEvidence();
+  });
   it.each([6, 9])("F10: state %s with 33 reasons is unusable, never truncated evidence", async jobState => {
     const reasons = Array.from({ length: 33 }, () => "job-restartable");
     const { adapter, events } = make(new FakeIppPrinter().setHandler(OP.GET_JOB_ATTRIBUTES, request => jobResponse(request, { jobState, jobStateReasons: reasons })));
