@@ -59,6 +59,7 @@ import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import {
   DashboardManifestSchema,
   containsApiKey,
+  isIdentifierClaim,
   type DashboardManifest,
 } from "@pcc/spec";
 import {
@@ -68,6 +69,8 @@ import {
   hashLookupKey,
 } from "../routes/artifacts.js";
 import { APP_HOST_OPERATION_IDS } from "./operation-ids.js";
+import { identifierText } from "./dashboard-ir.js";
+import { classifyHostText, hostDocumentTitle } from "./host-page-text.js";
 
 // ---------------------------------------------------------------------------
 // Constants — MIME, tool name, and the FIXED predeclared UI resource URIs.
@@ -879,6 +882,10 @@ export function mountManifestIntoView(
  * untrusted content. Removes the "waiting" placeholder on first render.
  */
 export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): boolean {
+  // Mirrored PCC constants: this function is inlined via .toString() and may
+  // not reference module imports. Real-boot tests assert parity with the IR.
+  var WITHHELD_PROSE = "Agent text withheld: it stated an amount or a payment or verification status. Money facts appear only in PCC cards.";
+  var WITHHELD_IDENTIFIER = "withheld: stated money or verification";
   if (win.__PCC_BOOTED__) return false;
   win.__PCC_BOOTED__ = true;
   var doc = win.document;
@@ -894,17 +901,35 @@ export function renderGalleryIntoView(win: ViewWindow, entries: unknown[]): bool
   var list = doc.createElement("ul");
   list.className = "pcc-gallery";
   for (var i = 0; i < entries.length; i++) {
-    var e = (entries[i] || {}) as { slug?: unknown; name?: unknown; title?: unknown };
+    var raw = entries[i];
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    var e = raw as Record<string, unknown>;
+    // Only the server's closed projection is displayable. A withheld flag
+    // excludes raw text; ordinary text requires an explicit false flag.
+    var valid = true;
+    var keys = ["title", "name", "slug", "titleWithheld", "nameWithheld", "slugWithheld"];
+    for (var key of Object.keys(e)) if (keys.indexOf(key) < 0) valid = false;
+    for (var field of ["title", "name", "slug"]) {
+      var flag = e[field + "Withheld"];
+      var value = e[field];
+      if (flag === undefined && value === undefined) continue;
+      if (flag === true && value === undefined) continue;
+      if (flag === false && typeof value === "string" && value.length > 0) continue;
+      valid = false;
+    }
+    if (!valid || !Object.keys(e).length) continue;
     var li = doc.createElement("li");
     var titleNode = doc.createElement("span");
     titleNode.className = "pcc-gallery-title";
-    var title = e.title || e.name || e.slug || "Untitled dashboard";
-    titleNode.textContent = String(title);
+    var title = typeof e.title === "string" ? e.title : typeof e.name === "string" ? e.name : undefined;
+    var titleWithheld = e.titleWithheld === true || (e.title === undefined && e.nameWithheld === true);
+    titleNode.textContent = titleWithheld ? WITHHELD_PROSE
+      : title !== undefined ? title + " (agent-authored)" : "Untitled dashboard";
     li.appendChild(titleNode);
-    if (e.slug) {
+    if (e.slug !== undefined || e.slugWithheld === true) {
       var slugNode = doc.createElement("code");
       slugNode.className = "pcc-gallery-slug";
-      slugNode.textContent = String(e.slug);
+      slugNode.textContent = e.slugWithheld === true ? WITHHELD_IDENTIFIER : "reported: " + e.slug;
       li.appendChild(slugNode);
     }
     list.appendChild(li);
@@ -1420,7 +1445,7 @@ function buildMcpAppDashboardHtmlForManifest(
   const withApiBase: DashboardManifest =
     manifest.api_base ? manifest : { ...manifest, api_base: MCP_APP_API_BASE_URL };
   const manifestJson = inlineJsonForScriptData(withApiBase);
-  const title = escapeHtmlText(displayTitle);
+  const title = escapeHtmlText(hostDocumentTitle(classifyHostText(displayTitle, manifest.description)));
 
   return `<!doctype html>
 <html lang="en">
@@ -1429,7 +1454,7 @@ function buildMcpAppDashboardHtmlForManifest(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${buildMcpAppCsp(nonce)}">
 <meta name="color-scheme" content="dark light">
-<title>${title} - PCC</title>
+<title>${title}</title>
 </head>
 <body>
 <main id="pcc-root">
@@ -1459,7 +1484,7 @@ function buildMcpAppDashboardHtmlForManifest(
  * (missing, retired, private, or malformed) — a valid resource read, never a
  * thrown error, so the host renders a friendly page. */
 function buildDashboardNotFoundHtml(slug: string, nonce: string = cspNonce()): string {
-  const s = escapeHtmlText(slug);
+  const s = escapeHtmlText(identifierText("slug", slug));
   return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1715,6 +1740,9 @@ export const GALLERY_OUTPUT_SCHEMA = {
           slug: { type: "string" },
           name: { type: "string" },
           title: { type: "string" },
+          titleWithheld: { type: "boolean" },
+          nameWithheld: { type: "boolean" },
+          slugWithheld: { type: "boolean" },
         },
         additionalProperties: false,
       },
@@ -1776,18 +1804,27 @@ function stringField(obj: Record<string, unknown> | undefined, key: string): str
   return typeof v === "string" && v.length ? v : undefined;
 }
 
-/** Project one search entry (a full UiArtifact) to the compact {slug,name,title}
- * shape the gallery outputSchema declares. */
-function projectGalleryEntry(entry: unknown): { slug?: string; name?: string; title?: string } | undefined {
+/** Classify full search entries on the PCC server. Never copy supplied flags
+ * or notices, and never send withheld strings to the gallery DOM producer. */
+function projectGalleryEntry(entry: unknown): Record<string, string | boolean> | undefined {
   const o = asObject(entry);
   if (!o) return undefined;
-  const out: { slug?: string; name?: string; title?: string } = {};
+  const out: Record<string, string | boolean> = {};
   const slug = stringField(o, "slug");
   const name = stringField(o, "name");
-  const title = stringField(asObject(o.manifest), "title") ?? name;
-  if (slug) out.slug = slug;
-  if (name) out.name = name;
-  if (title) out.title = title;
+  const manifest = asObject(o.manifest);
+  const title = stringField(manifest, "title") || name;
+  const description = stringField(manifest, "description") ?? stringField(o, "description");
+  if (slug) {
+    out.slugWithheld = isIdentifierClaim(slug);
+    if (!out.slugWithheld) out.slug = slug;
+  }
+  for (const [field, value] of [["name", name], ["title", title]] as const) {
+    if (!value) continue;
+    const fields = classifyHostText(value, description);
+    out[field + "Withheld"] = fields.titleWithheld;
+    if (!fields.titleWithheld) out[field] = value;
+  }
   return Object.keys(out).length ? out : undefined;
 }
 
@@ -1811,7 +1848,7 @@ export function enrichOnRampToolResult(
     const rawEntries = Array.isArray(obj?.entries) ? (obj!.entries as unknown[]) : [];
     const entries = rawEntries
       .map(projectGalleryEntry)
-      .filter((e): e is { slug?: string; name?: string; title?: string } => e !== undefined);
+      .filter((e): e is Record<string, string | boolean> => e !== undefined);
     const total = typeof obj?.total === "number" ? (obj.total as number) : entries.length;
     const structuredContent = { entries, total };
     if (!structuredContentConformsTo(GALLERY_OUTPUT_SCHEMA, structuredContent)) {

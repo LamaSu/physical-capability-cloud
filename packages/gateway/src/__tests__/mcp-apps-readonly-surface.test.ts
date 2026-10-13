@@ -407,7 +407,7 @@ describe("full /mcp prod domain gate on MCP App views (D14)", () => {
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       expect(call.body.result.isError).not.toBe(true);
       expect(call.body.result.structuredContent).toEqual({
-        entries: [{ slug: "a-dash-1111", name: "Alpha", title: "Alpha" }],
+        entries: [{ slug: "a-dash-1111", name: "Alpha", title: "Alpha", slugWithheld: false, nameWithheld: false, titleWithheld: false }],
         total: 1,
       });
       expect(call.body.result.content[0].text).toContain("a-dash-1111");

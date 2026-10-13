@@ -46,6 +46,7 @@ import {
 import { schema, eq } from "@pcc/store";
 import { getStore, initStore } from "../db.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
+import { classifyHostText, hostDocumentTitle, HOST_WITHHELD_PROSE } from "../mcp/host-page-text.js";
 
 // ---------------------------------------------------------------------------
 // Legacy share-slug rotation + expiring aliases (R4 PR4 / D13)
@@ -486,8 +487,11 @@ function inlineManifestJson(manifest: unknown): string {
  * in the DOM as HTML.
  */
 function renderShell(a: UiArtifact): string {
-  const title = escapeHtml(a.manifest.title || a.name);
-  const desc = a.manifest.description ? `<p>${escapeHtml(a.manifest.description)}</p>` : "";
+  const fields = classifyHostText(a.manifest.title || a.name, a.manifest.description);
+  const title = fields.titleWithheld ? HOST_WITHHELD_PROSE : `${fields.title} (agent-authored)`;
+  const desc = a.manifest.description
+    ? `<p>${escapeHtml(fields.descriptionWithheld ? HOST_WITHHELD_PROSE : `${fields.description} (agent-authored)`)}</p>`
+    : "";
   const theme = escapeHtml(a.manifest.theme ?? "auto");
   const slug = escapeHtml(a.slug);
   const manifestJson = inlineManifestJson(a.manifest);
@@ -496,12 +500,12 @@ function renderShell(a: UiArtifact): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} - PCC</title>
+<title>${escapeHtml(hostDocumentTitle(fields))}</title>
 </head>
 <body>
 <main id="pcc-root" data-slug="${slug}">
   <header>
-    <h1>${title}</h1>
+    <h1>${escapeHtml(title)}</h1>
     ${desc}
   </header>
   <p id="pcc-kit-status">Loading the PCC dashboard kit&hellip;</p>
