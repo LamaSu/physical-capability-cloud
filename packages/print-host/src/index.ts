@@ -15,3 +15,9 @@ export type {
 export { loadHostConfig, checkHostConfig, HostConfigError } from "./config.js";
 export type { HostConfig, HostConfigOptions, HostConfigErrorCode, HostPublicIdentity } from "./config.js";
 export type { CliIo } from "./cli.js";
+export { createGatewayClient, GatewayClientError } from "./gateway-client.js";
+export type {
+  GatewayClient, GatewayClientConfig, GatewayClientErrorCode, GwCode, GwSubCode, GwResult,
+  EStopDecision, EmergencyStopReader, RelayEvidenceBundle, PollJobsValue,
+  HeartbeatValue, InProgressValue, RelayEvidenceReceipt,
+} from "./gateway-client.js";

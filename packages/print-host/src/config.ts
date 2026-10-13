@@ -46,6 +46,14 @@ function hasCanonicalHttpAuthority(value: string): boolean {
   return /^https?:\/\/[^/\\?#]/i.test(value) && !value.includes("\\");
 }
 
+/** Shared gateway URL policy for configuration and the operator relay client. */
+export function isGatewayBaseUrl(value: string): boolean {
+  const url = parseUrl(value);
+  return !!url?.hostname && hasCanonicalHttpAuthority(value) && !url.username && !url.password
+    && !hasUserInfo(value) && !value.includes("?") && !value.includes("#")
+    && (url.protocol === "https:" || (url.protocol === "http:" && isLoopback(url)));
+}
+
 const absolutePath = z.string().refine(isAbsolute, "must be an absolute path");
 const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const hostConfigSchema = z.object({
@@ -63,12 +71,7 @@ const hostConfigSchema = z.object({
     rpcUrlFile: absolutePath,
   }).strict(),
   gateway: z.object({
-    baseUrl: z.string().refine((value) => {
-      const url = parseUrl(value);
-      return !!url?.hostname && hasCanonicalHttpAuthority(value) && !url.username && !url.password
-        && !hasUserInfo(value) && !value.includes("?") && !value.includes("#")
-        && (url.protocol === "https:" || (url.protocol === "http:" && isLoopback(url)));
-    }, "must be HTTPS or loopback HTTP without credentials, query, or fragment"),
+    baseUrl: z.string().refine(isGatewayBaseUrl, "must be HTTPS or loopback HTTP without credentials, query, or fragment"),
     apiKeyFile: absolutePath,
   }).strict(),
   keys: z.object({

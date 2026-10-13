@@ -64,6 +64,55 @@ pcc-oracle's B5 print-host bundle contract (bus #7386; on the Spark:
 sections 3.0, 4.2 and 5. Toolkit changes belong to pcc-adk; this package records the needed
 behavior without changing or working around the toolkit.
 
+## Operator relay gateway client
+
+`createGatewayClient({baseUrl, apiKey, kernelId})` uses the Node 20+ global fetch
+and keeps the API key in a closure. The frozen client exposes four calls:
+
+- `pollJobs()` requests `GET /api/operator/jobs?kernelId=...&status=queued`,
+  validates the job list, drops foreign-kernel jobs, and marks lists of 50 or
+  more as truncated. The gateway offers no paging and returns an empty list
+  on facade failure, so an empty poll alone is not proof that the site is idle.
+- `heartbeat()` sends only `{kernelId, status: "online"}` to
+  `POST /api/operator/heartbeat`. Capability announcements are omitted because
+  the gateway automatically creates missing capability rows with zero pricing.
+- `reportInProgress(jobId)` sends only `"in_progress"` to
+  `POST /api/operator/job-status`: **never a terminal status**. Settlement owns
+  a paid job's terminal status; the client accepts no status parameter.
+- `postRelayEvidence(jobId, bundle)` sends `{jobId, kernelId, evidence: bundle}`
+  to `POST /api/operator/evidence`, using the key's `decide` authority on its
+  own kernel. The other three calls need `operate`. Acknowledgment is accepted
+  only for `stored: true` with the sent job id, `event_bundle_hash` model, and
+  matching `sha256:` content hash. A `stored: false` receipt is an error.
+
+The default e-stop reader always returns
+`{proceed: false, why: "reader_unavailable"}`, even if a future response says
+`emergencyStop: "clear"`. **Production must keep this default until PR5 lands**
+with pcc-adk's `readEmergencyStop`. Tests may inject an `EmergencyStopReader`;
+only a successfully parsed poll reaches it. Reader failures prevent execution.
+
+Each call uses redirect refusal, a single 15-second timeout covering headers
+and streamed body reads, and a 1 MiB response limit. These defaults may be
+configured for tests. Error results contain only closed codes, HTTP status,
+allowlisted subcodes, and a bounded integer retry delay. Success parsing requires
+a JSON 200 response. Non-200 JSON bodies are decoded only to classify the
+gateway's allowlisted refusal fields; server messages and unknown fields are
+never returned. JSON, strings, and inspection of the client expose only its
+base URL and kernel id.
+
+Evidence is limited to 1,000,000 serialized UTF-8 bytes and a tagged
+`sha256:` hash with 64 lowercase hex digits before any request. Evidence posts are
+not idempotent and are never retried. An unreadable or malformed acknowledgment,
+timeout, network failure, or unrecognized 5xx returns `indeterminate`; the host
+must reconcile from its journal before deciding what to do next. The known
+`500 evidence_store_failed` and `503 read_failed` or
+`scope_requirements_unavailable` refusals establish that nothing was stored.
+
+bundleHash is spec's tagged SHA256, as hashBundle produces it.
+
+The unit route, settlement block, job inputs, and carrier calls come in later
+PRs; none are available through this client yet.
+
 ## Repros for pcc-adk
 
 Each `GAP-n` calls the exported toolkit and asserts what the host needs. By default,
