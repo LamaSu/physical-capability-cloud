@@ -130,12 +130,12 @@ describe("real-mode construction and submission", () => {
   });
   it("A3/A4: idle readiness sends one Print-Job then emits the unchanged start payload", async () => {
     const { adapter, printer, events } = make();
-    expect(await start(adapter, { jobName: "café.pdf" })).toEqual({ success: true, message: "IPP job 77 submitted", data: { jobId: 77 } });
+    expect(await start(adapter, { jobName: "cafe.pdf" })).toEqual({ success: true, message: "IPP job 77 submitted", data: { jobId: 77 } });
     expect(printer.requests.map(request => request.code)).toEqual([OP.GET_PRINTER_ATTRIBUTES, OP.PRINT_JOB]);
     expect(printer.requests[0].groups[0].attributes.at(-1)?.values.map(value => Buffer.from(value.bytes).toString()))
       .toEqual(["printer-state", "printer-state-reasons", "printer-is-accepting-jobs"]);
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ type: "execution_started", source: { simulated: false }, payload: { ippJobId: 77, jobName: "café.pdf" } });
+    expect(events[0]).toMatchObject({ type: "execution_started", source: { simulated: false }, payload: { ippJobId: 77, jobName: "cafe.pdf" } });
     await poll();
     expect(printer.operationRequests(OP.GET_JOB_ATTRIBUTES)).toHaveLength(1);
   });
@@ -151,6 +151,7 @@ describe("real-mode construction and submission", () => {
     expect(result).toMatchObject({ success: false, message: expect.stringContaining(message) });
     expect(result).not.toHaveProperty("data.deviceStateUnknown");
     expect(result).not.toHaveProperty("data.busy");
+    if (printerState === 4) expect(result.data).toEqual({ printerState: "processing" });
     if (busy) expect(result).toHaveProperty("busy", true);
     else expect(result).not.toHaveProperty("busy");
     expect(printer.operationRequests(OP.PRINT_JOB)).toHaveLength(0);
@@ -179,10 +180,10 @@ describe("real-mode construction and submission", () => {
       expect(result.success).toBe(false);
       expect(events).toHaveLength(0);
       if (name === "busy_0x0507" || name === "not_accepting_0x0506") {
-        expect(result.data).toEqual({ ippStatusCode: name === "busy_0x0507" ? 0x0507 : 0x0506 });
+        expect(result.data).toEqual({ ippStatusCode: name === "busy_0x0507" ? 0x0507 : 0x0506, deviceStateUnknown: true });
         expect(result.message).toContain(name === "busy_0x0507" ? "server-error-busy" : "server-error-not-accepting-jobs");
       } else expect(result.data).toEqual({ deviceStateUnknown: true });
-      if (name === "busy_0x0507") expect(result).toHaveProperty("busy", true);
+      expect(result).not.toHaveProperty("busy");
       expect(result).not.toHaveProperty("data.busy");
     }
   });
@@ -206,6 +207,7 @@ describe("real-mode construction and submission", () => {
       await vi.advanceTimersByTimeAsync(1000);
       expect(printer.operationRequests(OP.PRINT_JOB)).toHaveLength(1);
       expect(events).toHaveLength(0);
+      expect(result).not.toHaveProperty("busy");
       expect(result.message).not.toContain("secret");
       expect(result.message).not.toContain("raw response bytes");
       if (kind === "version") {
@@ -232,11 +234,20 @@ describe("real polling, diagnostics and printer controls", () => {
       } else if (fixture.pccnodeVerdict === "failed" || fixture.pccnodeVerdict === "unobservable") {
         expect(terminal).toHaveLength(1);
         expect(terminal[0].type).toBe("execution_failed");
-        if (name === "canceled" || name === "aborted") expect(terminal[0].payload).toEqual({ ippJobId: 77, state: name });
-        else expect(terminal[0].payload).toMatchObject({ ippJobId: 77, state: "completed",
-          completion: fixture.pccnodeVerdict === "unobservable" ? "unobservable" : name === "completed_with_errors" ? "with-errors" : "stopped",
-          jobStateReasons: expect.any(Array),
-        });
+        if (name === "canceled" || name === "aborted") expect(terminal[0].payload).toEqual({ ippJobId: 77, state: name, origin: "device" });
+        else {
+          const literalReasons: Record<string, string[]> = {
+            completed_with_errors: ["job-completed-with-errors"],
+            completed_but_canceled_reason: ["job-canceled-at-device"],
+            completed_with_warnings: ["job-completed-with-warnings"],
+            completed_queued_in_device: ["queued-in-device"],
+            completed_none_beside_ok_H3: ["none", "job-completed-successfully"],
+          };
+          expect(terminal[0].payload).toEqual({ ippJobId: 77, state: "completed",
+            completion: fixture.pccnodeVerdict === "unobservable" ? "unobservable" : name === "completed_with_errors" ? "with-errors" : "stopped",
+            jobStateReasons: literalReasons[name], origin: "device",
+          });
+        }
       } else {
         expect(terminal).toHaveLength(0);
         if (name !== "processing" && name !== "stopped_jam") expect(diagnostics).toHaveLength(1);
@@ -254,7 +265,7 @@ describe("real polling, diagnostics and printer controls", () => {
     for (let i = 0; i < 4; i += 1) await poll();
     expect(events.slice(1).map(event => ({ type: event.type, payload: event.payload }))).toEqual(Array.from({ length: 4 }, () => ({ type: "execution_progress", payload: { ippJobId: 77, completedSheets: 1 } })));
   });
-  it("A5: state 6 emits on entry, changed reasons, and reentry; unreadable reasons are null", async () => {
+  it("A5: state 6 emits exact evidence on entry, changed reasons, and reentry; unreadable reasons wait", async () => {
     const printer = new FakeIppPrinter();
     for (const [jobState, jobStateReasons] of [
       [6, ["media-jam-error"]], [6, ["media-jam-error"]], [6, ["printer-stopped"]],
@@ -262,15 +273,15 @@ describe("real polling, diagnostics and printer controls", () => {
     ] as Array<[number, string[] | null]>) {
       printer.enqueue(OP.GET_JOB_ATTRIBUTES, request => jobResponse(request, { jobState, jobStateReasons, impressionsCompleted: 2 }));
     }
-    const { adapter, events } = make(printer);
+    const { adapter, events, diagnostics } = make(printer);
     await start(adapter);
     for (let i = 0; i < 7; i += 1) await poll();
-    expect(events.filter(event => event.payload.jobState === 6).map(event => event.payload)).toEqual([
-      { ippJobId: 77, jobState: 6, jobStateReasons: ["media-jam-error"], completedSheets: 2 },
-      { ippJobId: 77, jobState: 6, jobStateReasons: ["printer-stopped"], completedSheets: 2 },
-      { ippJobId: 77, jobState: 6, jobStateReasons: ["printer-stopped"], completedSheets: 2 },
-      { ippJobId: 77, jobState: 6, jobStateReasons: null, completedSheets: 2 },
+    expect(events.filter(event => event.payload.state === "processing-stopped").map(event => event.payload)).toEqual([
+      { ippJobId: 77, state: "processing-stopped", jobStateReasons: ["media-jam-error"] },
+      { ippJobId: 77, state: "processing-stopped", jobStateReasons: ["printer-stopped"] },
+      { ippJobId: 77, state: "processing-stopped", jobStateReasons: ["printer-stopped"] },
     ]);
+    expect(diagnostics.map(d => d.kind)).toEqual(["job_unreadable", "job_unreadable"]);
   });
   it("A5/A6: unknown or unreadable job-state emits only a job_unreadable diagnostic and keeps polling", async () => {
     const printer = new FakeIppPrinter();
@@ -339,7 +350,7 @@ describe("real polling, diagnostics and printer controls", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(printer.operationRequests(OP.GET_JOB_ATTRIBUTES)).toHaveLength(2);
   });
-  it("A7: pollInFlight also prevents overlap when a new start replaces a job with a pending poll", async () => {
+  it("A7: pollInFlight prevents overlap when a new start follows stop with a pending poll", async () => {
     const answer = deferred<IppTransportResult>();
     let pendingRequest!: IppMessage;
     const printer = new FakeIppPrinter()
@@ -350,6 +361,7 @@ describe("real polling, diagnostics and printer controls", () => {
     const { adapter, events } = make(printer);
     await start(adapter);
     await poll();
+    await adapter.execute({ type: "stop" });
     await start(adapter, { jobName: "replacement.pdf" });
     await vi.advanceTimersByTimeAsync(500);
     expect(printer.operationRequests(OP.GET_JOB_ATTRIBUTES)).toHaveLength(1);
@@ -372,7 +384,7 @@ describe("real polling, diagnostics and printer controls", () => {
     expect(events).toHaveLength(1);
     await poll();
     expect(events.at(-1)).toMatchObject({ type: "execution_failed", payload: { ippJobId: 77, state: "canceled" } });
-    expect(events.at(-1)?.payload).toEqual({ ippJobId: 77, state: "canceled" });
+    expect(events.at(-1)?.payload).toEqual({ ippJobId: 77, state: "canceled", origin: "device" });
     await poll();
     expect(printer.operationRequests(OP.GET_JOB_ATTRIBUTES)).toHaveLength(1);
     await adapter.quiesceEvidence();
