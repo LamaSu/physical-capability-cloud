@@ -1,0 +1,78 @@
+import { authorizedFetch } from "./authorized-fetch.js";
+
+const UNREACHABLE = "Could not reach PCC. Nothing was linked.";
+
+class WalletLinkError extends Error {
+  constructor(status: number, code: unknown) {
+    let message = UNREACHABLE;
+    if (status === 404) {
+      message = "No pending request with this code. It may have expired, been used, or the terminal has not finished signing; check the code and try again.";
+    } else if (status === 429) {
+      message = "Too many attempts; wait 10 minutes before trying again.";
+    } else if (status === 410) {
+      message = "This request expired; start again in the terminal.";
+    } else if (status === 409 && code === "consent_changed") {
+      message = "The terms changed; reload the request by entering the code again.";
+    } else if (status === 409 && (code === "already_decided" || code === "already_linked")) {
+      message = "This request was already handled.";
+    } else if (status === 403) {
+      message = "The code does not match. Check the code and try again.";
+    }
+    super(message);
+  }
+}
+
+export function walletLinkErrorMessage(error: unknown): string {
+  return error instanceof WalletLinkError ? error.message : UNREACHABLE;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function send(path: string, init: RequestInit): Promise<unknown> {
+  // Relative API paths resolve against the configured gateway inside authorizedFetch.
+  const response = await authorizedFetch(path, { ...init, cache: "no-store" });
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    throw new WalletLinkError(response.status, isRecord(body) ? body.error : undefined);
+  }
+  return response.json();
+}
+
+export async function getWalletLinkRequest(userCode: string) {
+  const body = await send(`/api/wallets/link-requests/by-code/${encodeURIComponent(userCode)}`, { method: "GET" });
+  if (
+    !isRecord(body) || typeof body.requestId !== "string" || !body.requestId ||
+    !isRecord(body.consent) || body.consent.version !== "wallet-link-v1" ||
+    typeof body.consent.sha256 !== "string" || !/^[a-fA-F0-9]{64}$/.test(body.consent.sha256) ||
+    typeof body.consent.text !== "string" || !body.consent.text.trim()
+  ) {
+    throw new Error("Invalid wallet link response");
+  }
+  // Keep only the fields this screen needs; preserve the server's text and hash exactly.
+  return {
+    requestId: body.requestId,
+    consent: { text: body.consent.text, sha256: body.consent.sha256 },
+  };
+}
+
+export async function decideWalletLink(
+  requestId: string,
+  userCode: string,
+  decision: "approve" | "deny",
+  consentSha256: string,
+) {
+  const body = await send(`/api/wallets/link-requests/${encodeURIComponent(requestId)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userCode, decision, consentSha256 }),
+  });
+  if (isRecord(body)) {
+    if (body.status === "denied") return { status: "denied" } as const;
+    if (body.status === "approved" && typeof body.linkId === "string" && body.linkId) {
+      return { status: "approved", linkId: body.linkId } as const;
+    }
+  }
+  throw new Error("Invalid wallet link decision response");
+}
