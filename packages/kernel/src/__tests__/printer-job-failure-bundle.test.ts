@@ -202,7 +202,7 @@ afterEach(() => {
 });
 
 describe("ADK signed failure bundles and cancel input", () => {
-  it("T1: device_reported branch finalizes a signed failure and failed-step cleanup detaches it (printer-job.ts:639 emitter.finalizeBundle)", async () => {
+  it("T1: device_reported branch finalizes a signed failure and failed-step cleanup detaches it (printer-job.ts emitter.finalizeBundle)", async () => {
     const f = fixture();
     const pending = runPrintJob(f.options);
     await vi.advanceTimersByTimeAsync(0);
@@ -264,7 +264,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(observed[0]!.events.some((event) => event.type === "execution_failed")).toBe(true);
   });
 
-  it("T2: timeout sends exactly one cancelJob and signs its device failure (printer-job.ts:586 cancelJob.call)", async () => {
+  it("T2: timeout sends exactly one cancelJob and signs its device failure (printer-job.ts cancelJob.call)", async () => {
     const f = fixture({ cancel: reportCanceled });
     const result = await drive(runPrintJob(f.options));
     const bundle = signed(result, f.signer.publicKeyHex);
@@ -278,7 +278,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
   });
 
-  it("T3 defense in depth: a fixture breaching the quiesce contract produces one bound kernel failure after cancelWindowMs, preserving simulated source (printer-job.ts:599 admit(kernelFailure))", async () => {
+  it("T3 defense in depth: a fixture breaching the quiesce contract produces one bound kernel failure after cancelWindowMs, preserving simulated source (printer-job.ts admit(kernelFailure))", async () => {
     const source: EvidenceSource = { deviceId: "silent-sim", deviceType: "controller", kernelId: "original-kernel", simulated: true };
     const f = fixtureBreachingQuiesceContract({ source });
     const pending = runPrintJob({ ...f.options, ...UNIT });
@@ -350,7 +350,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("T4: no cancelJob fails closed without cancelRequested (printer-job.ts:571 typeof cancelJob)", async () => {
+  it("T4: no cancelJob fails closed without cancelRequested (printer-job.ts typeof cancelJob)", async () => {
     const f = fixture();
     delete f.printer.cancelJob;
     const result = await drive(runPrintJob(f.options));
@@ -360,7 +360,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.printer.commands.map((command) => command.type)).toEqual(["start"]);
   });
 
-  it("T5: abort after start cancels promptly and signs the device failure (printer-job.ts:521 signal.addEventListener)", async () => {
+  it("T5: abort after start cancels promptly and signs the device failure (printer-job.ts signal.addEventListener)", async () => {
     const f = fixture({ cancel: reportCanceled });
     const controller = new AbortController();
     const pending = runPrintJob({ ...f.options, timeoutMs: 10_000, signal: controller.signal });
@@ -376,7 +376,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.printer.commands.map((command) => command.type)).toEqual(["start"]);
   });
 
-  it("T6: an already-aborted signal refuses before start, registration or session (printer-job.ts:343 signal.aborted preflight)", async () => {
+  it("T6: an already-aborted signal refuses before start, registration or session (printer-job.ts signal.aborted preflight)", async () => {
     const f = fixture();
     const registered = vi.spyOn(f.emitter, "registerStep");
     const controller = new AbortController();
@@ -390,7 +390,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(result.cancelRequested).toBeUndefined();
   });
 
-  it("T7: reusing one signal for five prints leaves zero listeners and no late cancellation (printer-job.ts:704 removeEventListener)", async () => {
+  it("T7: reusing one signal for five prints leaves zero listeners and no late cancellation (printer-job.ts removeEventListener)", async () => {
     const f = fixture({ start: (printer) => {
       printer.emit("execution_started");
       printer.emit("execution_completed", { totalPages: 3 });
@@ -416,7 +416,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each(["execution_completed", "execution_failed"] as const)("T8: every device event commits the unit for %s (printer-job.ts:479 emitter.registerStep unit argument)", async (terminal) => {
+  it.each(["execution_completed", "execution_failed"] as const)("T8: every device event commits the unit for %s (printer-job.ts emitter.registerStep unit argument)", async (terminal) => {
     const f = fixture({ start: (printer) => {
       printer.emit("execution_started");
       printer.emit("execution_progress", { totalPages: 3, currentPage: 1 });
@@ -432,7 +432,7 @@ describe("ADK signed failure bundles and cancel input", () => {
   it.each([
     { settlementUnitId: UNIT.settlementUnitId },
     { challengeNonce: UNIT.challengeNonce },
-  ])("T8: a lone unit field %j refuses before anything is held (printer-job.ts:340 both-or-neither unit preflight)", async (unit) => {
+  ])("T8: a lone unit field %j refuses before anything is held (printer-job.ts both-or-neither unit preflight)", async (unit) => {
     const f = fixture();
     const registered = vi.spyOn(f.emitter, "registerStep");
     const result = await runPrintJob({ ...f.options, ...unit });
@@ -442,7 +442,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(registered).not.toHaveBeenCalled();
   });
 
-  it("T8: uppercase unit hex is refused through registerStep before start (printer-job.ts:479 emitter.registerStep unit argument)", async () => {
+  it("T8: uppercase unit hex is refused through registerStep before start (printer-job.ts emitter.registerStep unit argument)", async () => {
     const f = fixture();
     const result = await drive(runPrintJob({ ...f.options, ...UNIT, settlementUnitId: `0x${"A".repeat(64)}` }));
     eventless(result);
@@ -451,7 +451,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
   });
 
-  it("T9: top-level busy refusal is device busy and records nothing (printer-job.ts:537 startResult.busy)", async () => {
+  it("T9: top-level busy refusal is device busy and records nothing (printer-job.ts startResult.busy)", async () => {
     const f = fixture({ start: () => ({ success: false, busy: true, message: "occupied", data: { busy: false } }) });
     const recorded = vi.spyOn(f.emitter, "addEvent");
     const result = await drive(runPrintJob(f.options));
@@ -462,7 +462,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
   });
 
-  it("T9: data.busy alone never classifies a start failure as busy (printer-job.ts:537 startResult.busy)", async () => {
+  it("T9: data.busy alone never classifies a start failure as busy (printer-job.ts startResult.busy)", async () => {
     const f = fixture({ start: () => ({ success: false, message: "document rejected", data: { busy: true } }) });
     const recorded = vi.spyOn(f.emitter, "addEvent");
     const result = await drive(runPrintJob(f.options));
@@ -474,7 +474,7 @@ describe("ADK signed failure bundles and cancel input", () => {
   it.each([
     ["execution_completed", "execution_failed"],
     ["execution_failed", "execution_completed"],
-  ] as const)("T10: contradictory terminal order %s then %s signs a contradiction (printer-job.ts:643 completed !== null contradiction verdict)", async (first, second) => {
+  ] as const)("T10: contradictory terminal order %s then %s signs a contradiction (printer-job.ts completed !== null contradiction verdict)", async (first, second) => {
     const f = fixture({ start: (printer) => {
       printer.emit("execution_started");
       printer.emit(first);
@@ -491,7 +491,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(result.cancelRequested).toBeUndefined();
   });
 
-  it.each([NaN, -1, 2 ** 31, "1", Symbol("delay")])("T11: invalid cancelWindowMs %s is refused before any hold (printer-job.ts:338 isTimerDelay cancelWindowMs)", async (delay) => {
+  it.each([NaN, -1, 2 ** 31, "1", Symbol("delay")])("T11: invalid cancelWindowMs %s is refused before any hold (printer-job.ts isTimerDelay cancelWindowMs)", async (delay) => {
     const f = fixture();
     const registered = vi.spyOn(f.emitter, "registerStep");
     const result = await runPrintJob({ ...f.options, cancelWindowMs: delay as number });
@@ -503,7 +503,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("T12: mock cancelJob(activeId) emits exactly one failure before quiesce resolves (ipp-adapter.ts:295 mock cancel emit before cancelMockJob)", async () => {
+  it("T12: mock cancelJob(activeId) emits exactly one failure before quiesce resolves (ipp-adapter.ts mock cancel emit before cancelMockJob)", async () => {
     const adapter = new IppAdapter("adk-mock-active", { kernelId: KERNEL_ID, uri: "ipp://mock/print", mockMode: true });
     const events: Emitted[] = [];
     const order: string[] = [];
@@ -525,7 +525,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     await adapter.dispose();
   });
 
-  it("T12: mock cancelJob(otherId) emits nothing and leaves the active print running (ipp-adapter.ts:292 mock jobId equality)", async () => {
+  it("T12: mock cancelJob(otherId) emits nothing and leaves the active print running (ipp-adapter.ts mock jobId equality)", async () => {
     const adapter = new IppAdapter("adk-mock-other", { kernelId: KERNEL_ID, uri: "ipp://mock/print", mockMode: true });
     const events: Emitted[] = [];
     adapter.onEvidence((event) => events.push(event));
@@ -544,7 +544,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     await adapter.dispose();
   });
 
-  it("T13: turnkey 3-page mock timeout signs the mock's cancel failure (printer-job.ts:586 cancelJob; ipp-adapter.ts:295 mock cancellation evidence)", async () => {
+  it("T13: turnkey 3-page mock timeout signs the mock's cancel failure (printer-job.ts cancelJob; ipp-adapter.ts mock cancellation evidence)", async () => {
     const kernel = createIppPrintKernel({ kernelId: KERNEL_ID, deviceId: "adk-turnkey", mockMode: true, seed: SEED });
     const cancel = vi.spyOn(kernel.adapter, "cancelJob");
     const execute = vi.spyOn(kernel.adapter, "execute");
@@ -563,7 +563,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     await kernel.dispose();
   });
 
-  it("T14: completion winning after cancel is a signed success with cancelRequested (printer-job.ts:690 successful cancelRequested return)", async () => {
+  it("T14: completion winning after cancel is a signed success with cancelRequested (printer-job.ts successful cancelRequested return)", async () => {
     const f = fixture({ cancel: (printer) => {
       printer.later(5, () => printer.emit("execution_completed", { totalPages: 3 }));
     } });
@@ -579,7 +579,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("a rejected cancel keeps its error while accepting the device's terminal evidence (printer-job.ts:583 cancelJob catch continues)", async () => {
+  it("a rejected cancel keeps its error while accepting the device's terminal evidence (printer-job.ts cancelJob catch continues)", async () => {
     const f = fixture({ cancel: (printer) => {
       reportCanceled(printer);
       throw new Error("cancel transport rejected");
@@ -591,7 +591,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.printer.cancels).toEqual([f.printer.job]);
   });
 
-  it("defense in depth: a rejected silent cancel on a fixture breaching the quiesce contract signs a kernel failure (printer-job.ts:590 cancel window continues after rejection)", async () => {
+  it("defense in depth: a rejected silent cancel on a fixture breaching the quiesce contract signs a kernel failure (printer-job.ts cancel window continues after rejection)", async () => {
     const f = fixtureBreachingQuiesceContract({ cancel: () => { throw new Error("cancel offline"); } });
     const result = await drive(runPrintJob(f.options));
     signed(result, f.signer.publicKeyHex);
@@ -601,7 +601,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("a pending cancel cannot hold the terminal evidence window forever (printer-job.ts:590 Promise.race decided and cancelExpired)", async () => {
+  it("a pending cancel cannot hold the terminal evidence window forever (printer-job.ts Promise.race decided and cancelExpired)", async () => {
     const cancel = deferred<void>();
     const f = fixture({ cancel: () => cancel.promise, quiesce: () => cancel.promise });
     const result = await drive(runPrintJob(f.options));
@@ -616,7 +616,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("a failure during post-cancel completion quiesce makes a signed contradiction (printer-job.ts:643 verdict after session.quiesce)", async () => {
+  it("a failure during post-cancel completion quiesce makes a signed contradiction (printer-job.ts verdict after session.quiesce)", async () => {
     const quiet = deferred<void>();
     const f = fixture({
       cancel: (printer) => { printer.later(5, () => printer.emit("execution_completed", { totalPages: 3 })); },
@@ -761,7 +761,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("abort while start is in flight waits for its id then cancels immediately (printer-job.ts:554 abort latch checked after start)", async () => {
+  it("abort while start is in flight waits for its id then cancels immediately (printer-job.ts abort latch checked after start)", async () => {
     const start = deferred<MachineCommandResult>();
     const f = fixture({ start: () => start.promise, cancel: reportCanceled });
     const controller = new AbortController();
@@ -778,7 +778,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(result.durationMs).toBeLessThan(10_000);
   });
 
-  it("abort while a refused start is in flight preserves its plain start failure (printer-job.ts:535 startResult.success checked before cancel)", async () => {
+  it("abort while a refused start is in flight preserves its plain start failure (printer-job.ts startResult.success checked before cancel)", async () => {
     const start = deferred<MachineCommandResult>();
     const f = fixture({ start: () => start.promise });
     const controller = new AbortController();
@@ -795,7 +795,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(removed).toHaveBeenCalledWith("abort", expect.any(Function));
   });
 
-  it("defense in depth: silent abort on a fixture breaching the quiesce contract commits its kernel reason (printer-job.ts:596 kernel failure reason cancelRequested)", async () => {
+  it("defense in depth: silent abort on a fixture breaching the quiesce contract commits its kernel reason (printer-job.ts kernel failure reason cancelRequested)", async () => {
     const f = fixtureBreachingQuiesceContract();
     const controller = new AbortController();
     const pending = runPrintJob({ ...f.options, ...UNIT, signal: controller.signal });
@@ -809,7 +809,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     });
   });
 
-  it("foreign evidence during cancellation remains eventless and is never recorded (printer-job.ts:605 foreignJob fail-closed)", async () => {
+  it("foreign evidence during cancellation remains eventless and is never recorded (printer-job.ts foreignJob fail-closed)", async () => {
     const f = fixture({ cancel: (printer) => {
       printer.later(5, () => printer.emit("execution_failed", { ippJobId: printer.job + 1, state: "canceled" }));
     } });
@@ -823,7 +823,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("an unrecorded cancellation failure cannot be signed (printer-job.ts:628 unrecorded.first check before finalizeBundle)", async () => {
+  it("an unrecorded cancellation failure cannot be signed (printer-job.ts unrecorded.first check before finalizeBundle)", async () => {
     const f = fixture({ cancel: reportCanceled });
     const add = f.emitter.addEvent.bind(f.emitter);
     vi.spyOn(f.emitter, "addEvent").mockImplementation((jobId, stepId, event) => {
@@ -839,7 +839,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(f.emitter.getEvents(f.options.jobId, "print")).toEqual([]);
   });
 
-  it("quiesce timeout after a device cancellation failure stays eventless (printer-job.ts:613 session.quiesce before finalization)", async () => {
+  it("quiesce timeout after a device cancellation failure stays eventless (printer-job.ts session.quiesce before finalization)", async () => {
     const quiet = deferred<void>();
     const f = fixture({ cancel: reportCanceled, quiesce: () => quiet.promise });
     const finalized = vi.spyOn(f.emitter, "finalizeBundle");
@@ -854,7 +854,7 @@ describe("ADK signed failure bundles and cancel input", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("settle timeout after a device cancellation failure stays eventless (printer-job.ts:622 bounded settle before finalization)", async () => {
+  it("settle timeout after a device cancellation failure stays eventless (printer-job.ts bounded settle before finalization)", async () => {
     const pendingEvent = deferred<EvidenceEvent>();
     const f = fixture({ cancel: reportCanceled });
     const add = f.emitter.addEvent.bind(f.emitter);

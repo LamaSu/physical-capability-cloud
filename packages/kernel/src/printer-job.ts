@@ -220,7 +220,7 @@ export interface PrintCompletion {
 /**
  * Signed failure verdict; binding, recording or handshake failures have no verdict or bundle.
  * When multiple execution_failed events are signed, the first bound failure decides the
- * verdict and its origin; later failures remain in the bundle.
+ * verdict's origin; its kind comes from completion and cancellation, and later failures remain in the bundle.
  */
 export type PrintJobFailure =
   | { kind: "device_reported"; origin: "device" }
@@ -269,8 +269,9 @@ export interface PrintJobResult {
  * Event-driven: it waits for the device's own `execution_completed` (or
  * `execution_failed`) for this print's device job rather than fabricating a completion.
  * A success bundle requires completion without failure. Device failures and contradictions
- * also return signed bundles. Timeout or abort sends cancelJob once, keeps admitting evidence,
- * and records a kernel failure if no terminal evidence arrives within cancelWindowMs.
+ * also return signed bundles. Timeout or abort sends cancelJob once unless the job has already
+ * reported its end, keeps admitting evidence, and records a kernel failure if no terminal
+ * evidence arrives within cancelWindowMs.
  * That event is signed only after the adapter confirms quiescence.
  * Completion after cancel is success carrying cancelRequested; every cancel result carries it.
  * The evidence binding (session, step lease, device job, recording, quiesce) is described at
