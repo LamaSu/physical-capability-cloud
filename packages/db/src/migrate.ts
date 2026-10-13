@@ -2026,6 +2026,44 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS passkey_sessions_expires_at ON passkey_sessions(expires_at);
   `);
+
+  // Settlement package receipt and one-use gateway challenge ledger.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_receipts (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      kernel_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      escrow TEXT NOT NULL,
+      settlement_unit_id TEXT NOT NULL,
+      package_digest TEXT NOT NULL,
+      received_at INTEGER NOT NULL,
+      receipt_digest TEXT NOT NULL,
+      signature_hex TEXT NOT NULL,
+      kid TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_job_idx
+      ON gateway_receipts(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_unit_idx
+      ON gateway_receipts(chain_id, escrow, settlement_unit_id);
+
+    CREATE TABLE IF NOT EXISTS settlement_challenges (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      escrow TEXT NOT NULL,
+      settlement_unit_id TEXT NOT NULL,
+      nonce TEXT NOT NULL,
+      t_challenge_ref TEXT NOT NULL,
+      state TEXT NOT NULL CONSTRAINT settlement_challenges_state_check CHECK (state IN ('issued', 'consumed')),
+      issued_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS settlement_challenges_open_unit_idx
+      ON settlement_challenges(chain_id, escrow, settlement_unit_id) WHERE state = 'issued';
+  `);
 }
 
 /**

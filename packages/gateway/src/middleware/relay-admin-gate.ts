@@ -30,6 +30,11 @@ function countAdminKeyFields(req: FastifyRequest): number {
   return count;
 }
 
+/** Accept exactly one admin-secret header, using the shared constant-time comparison. */
+export function hasSingleValidAdminKey(req: FastifyRequest): boolean {
+  return countAdminKeyFields(req) === 1 && hasValidAdminKey(req.headers["x-admin-key"]);
+}
+
 /**
  * Root onRequest hook, registered second in createGateway, directly after the
  * request-target guard (rejectNonCanonicalTarget). Unless PCC_RELAY_GATE is
@@ -57,6 +62,6 @@ function countAdminKeyFields(req: FastifyRequest): number {
 export async function rejectRelayWithoutAdminKey(req: FastifyRequest, reply: FastifyReply) {
   if (isRelayGateOpen()) return;
   if (!isRelayRequest(req)) return;
-  if (countAdminKeyFields(req) === 1 && hasValidAdminKey(req.headers["x-admin-key"])) return;
+  if (hasSingleValidAdminKey(req)) return;
   return reply.code(403).send(RELAY_DISABLED_REFUSAL);
 }

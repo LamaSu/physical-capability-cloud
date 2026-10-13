@@ -38,7 +38,7 @@ function isNonEmptyId(value: unknown): value is string {
 }
 
 /** Shared authority check for poll/heartbeat targets and the kernel read from a job row. */
-function refuseKernelRequest(req: FastifyRequest, kernelId: unknown, action: KernelAction = "operate"): { status: number; body: Record<string, string> } | null {
+export function refuseKernelRequest(req: FastifyRequest, kernelId: unknown, action: KernelAction = "operate"): { status: number; body: Record<string, string> } | null {
   const authority = authorityOf(req);
   if (isAnonymous(authority)) return { status: 401, body: AUTHENTICATION_REQUIRED };
   if (kernelId === null || kernelId === undefined) {
