@@ -34,10 +34,12 @@ afterEach(() => {
 });
 
 const WALLET_LINK_URLS = [
-  "/api/wallets/link-requests/by-code/WDJBMJHT",
-  "https://gateway.example/api/wallets/link-requests/by-code/WDJBMJHT",
+  "/api/wallets/link-requests/lookup",
+  "https://gateway.example/api/wallets/link-requests/lookup",
   "/api/wallets/link-requests/req_private/approve",
   "https://gateway.example/api/wallets/link-requests/req_private/approve",
+  "/api/wallets/link-requests/req_private",
+  "https://gateway.example/api/wallets/link-requests/req_private",
 ];
 
 describe("wallet link codes and request IDs stay out of network telemetry", () => {

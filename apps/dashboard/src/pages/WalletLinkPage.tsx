@@ -1,12 +1,14 @@
 import { useRef, useState } from "react";
 import { decideWalletLink, getWalletLinkRequest, walletLinkErrorMessage } from "../lib/wallet-link-api.js";
+import { useAuthStore } from "../stores/auth-store.js";
 
 type PageState =
   | { step: "code"; input: string }
-  | { step: "consent"; userCode: string; request: Awaited<ReturnType<typeof getWalletLinkRequest>>; confirmed: boolean }
+  | { step: "consent"; userCode: string; request: Awaited<ReturnType<typeof getWalletLinkRequest>>; confirmed: boolean; keyEpoch: number }
   | { step: "result"; result: Awaited<ReturnType<typeof decideWalletLink>> };
 
 const BUTTON = "rounded-lg border border-white/20 px-5 py-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-40";
+const SIGN_IN_CHANGED = "Your sign-in changed; enter the code again.";
 
 export function WalletLinkPage() {
   const [state, setState] = useState<PageState>({ step: "code", input: "" });
@@ -22,9 +24,16 @@ export function WalletLinkPage() {
     inFlight.current = true;
     setBusy(true);
     setError(null);
+    const keyEpoch = useAuthStore.getState().keyEpoch;
     try {
       const request = await getWalletLinkRequest(normalizedCode);
-      setState({ step: "consent", userCode: normalizedCode, request, confirmed: false });
+      // Consent belongs to the sign-in that loaded it, including a pending lookup.
+      if (useAuthStore.getState().keyEpoch !== keyEpoch) {
+        setState({ step: "code", input: "" });
+        setError(SIGN_IN_CHANGED);
+        return;
+      }
+      setState({ step: "consent", userCode: normalizedCode, request, confirmed: false, keyEpoch });
     } catch (failure) {
       setError(walletLinkErrorMessage(failure));
     } finally {
@@ -35,6 +44,11 @@ export function WalletLinkPage() {
 
   async function decide(decision: "approve" | "deny") {
     if (state.step !== "consent" || inFlight.current || (decision === "approve" && !state.confirmed)) return;
+    if (useAuthStore.getState().keyEpoch !== state.keyEpoch) {
+      setState({ step: "code", input: "" });
+      setError(SIGN_IN_CHANGED);
+      return;
+    }
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -45,7 +59,7 @@ export function WalletLinkPage() {
     } catch (failure) {
       // A retry must reload the consent and require a new confirmation.
       setState({ step: "code", input: "" });
-      setError(walletLinkErrorMessage(failure));
+      setError(walletLinkErrorMessage(failure, decision));
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -98,7 +112,7 @@ export function WalletLinkPage() {
             </label>
             <div className="flex flex-wrap gap-3">
               <button type="button" disabled={!state.confirmed || busy} onClick={() => void decide("approve")} className={`${BUTTON} bg-emerald-500/20`}>Approve and link</button>
-              <button type="button" onClick={() => void decide("deny")} className={BUTTON}>Deny</button>
+              <button type="button" disabled={busy} onClick={() => void decide("deny")} className={BUTTON}>Deny</button>
             </div>
             {busy && <p role="status" className="text-sm text-white/70">Sending your decision…</p>}
           </>

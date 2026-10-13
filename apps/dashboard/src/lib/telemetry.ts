@@ -13,7 +13,7 @@ const GA_MEASUREMENT_ID = import.meta.env.VITE_GA_MEASUREMENT_ID || "";
 const SENTRY_DSN = import.meta.env.VITE_SENTRY_DSN || "";
 const IS_PROD = import.meta.env.PROD;
 
-/** Link codes and request IDs appear in API paths, so even network timing events must omit them. */
+/** Request IDs remain in wallet-link API paths, and public polling can expose accountId; omit this endpoint family from network telemetry. */
 function isWalletLinkUrl(value: unknown): boolean {
   if (typeof value !== "string") return false;
   try {

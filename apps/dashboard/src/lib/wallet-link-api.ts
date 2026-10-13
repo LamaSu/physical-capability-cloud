@@ -1,9 +1,11 @@
 import { authorizedFetch } from "./authorized-fetch.js";
 
 const UNREACHABLE = "Could not reach PCC. Nothing was linked.";
+const UNKNOWN_APPROVAL = "PCC did not confirm your decision. The link may have been made; check your terminal before trying again.";
+const UNKNOWN_DENIAL = "PCC did not confirm your denial. The request expires on its own.";
 
 class WalletLinkError extends Error {
-  constructor(status: number, code: unknown) {
+  constructor(readonly status: number, code: unknown) {
     let message = UNREACHABLE;
     if (status === 404) {
       message = "No pending request with this code. It may have expired, been used, or the terminal has not finished signing; check the code and try again.";
@@ -15,14 +17,22 @@ class WalletLinkError extends Error {
       message = "The terms changed; reload the request by entering the code again.";
     } else if (status === 409 && (code === "already_decided" || code === "already_linked")) {
       message = "This request was already handled.";
-    } else if (status === 403) {
+    } else if (status === 403 && code === "code_mismatch") {
       message = "The code does not match. Check the code and try again.";
+    } else if (status === 403) {
+      message = "PCC refused this with your current sign-in.";
+    } else if (status === 401) {
+      message = "Your sign-in is no longer valid; sign in again.";
     }
     super(message);
   }
 }
 
-export function walletLinkErrorMessage(error: unknown): string {
+export function walletLinkErrorMessage(error: unknown, decision?: "approve" | "deny"): string {
+  // Only a definite 4xx rejection confirms that the submitted decision failed.
+  if (decision && (!(error instanceof WalletLinkError) || error.status < 400 || error.status >= 500)) {
+    return decision === "approve" ? UNKNOWN_APPROVAL : UNKNOWN_DENIAL;
+  }
   return error instanceof WalletLinkError ? error.message : UNREACHABLE;
 }
 
@@ -41,7 +51,11 @@ async function send(path: string, init: RequestInit): Promise<unknown> {
 }
 
 export async function getWalletLinkRequest(userCode: string) {
-  const body = await send(`/api/wallets/link-requests/by-code/${encodeURIComponent(userCode)}`, { method: "GET" });
+  const body = await send("/api/wallets/link-requests/lookup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userCode }),
+  });
   if (
     !isRecord(body) || typeof body.requestId !== "string" || !body.requestId ||
     !isRecord(body.consent) || body.consent.version !== "wallet-link-v1" ||
@@ -69,8 +83,8 @@ export async function decideWalletLink(
     body: JSON.stringify({ userCode, decision, consentSha256 }),
   });
   if (isRecord(body)) {
-    if (body.status === "denied") return { status: "denied" } as const;
-    if (body.status === "approved" && typeof body.linkId === "string" && body.linkId) {
+    if (decision === "deny" && body.status === "denied") return { status: "denied" } as const;
+    if (decision === "approve" && body.status === "approved" && typeof body.linkId === "string" && body.linkId) {
       return { status: "approved", linkId: body.linkId } as const;
     }
   }

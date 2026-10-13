@@ -45,6 +45,26 @@ const CONSENT = "SENTINEL_W4: terms supplied only by the gateway.\nA line stays 
 const TITLE = "Link a wallet to your PCC account";
 const APPROVED = "Linked. Go back to your terminal; it continues on its own.";
 const DENIED = "Denied. Nothing was linked.";
+const UNKNOWN_APPROVAL = "PCC did not confirm your decision. The link may have been made; check your terminal before trying again.";
+const UNKNOWN_DENIAL = "PCC did not confirm your denial. The request expires on its own.";
+const SIGN_IN_CHANGED = "Your sign-in changed; enter the code again.";
+
+const privateFailure = "WDJBMJHT WDJB-MJHT req_w4_private";
+const failures = [
+  { name: "fetch rejection", reply: () => Promise.reject(new Error(privateFailure)) },
+  { name: "timeout", reply: () => Promise.reject(new DOMException(privateFailure, "TimeoutError")) },
+  ...[
+    [404, "not_found"], [429, "too_many_attempts"], [410, "expired"],
+    [409, "consent_changed"], [409, "already_decided"], [409, "already_linked"],
+    [403, "code_mismatch"], [403, "insufficient_scope"], [401, "unauthorized"],
+    [418, "unknown_error"], [500, "internal_error"], [502, "bad_gateway"],
+  ].map(([status, error]) => ({
+    name: `${status} ${error}`,
+    reply: () => Promise.resolve(json({ error, detail: privateFailure }, status as number)),
+  })),
+  { name: "malformed JSON", reply: () => Promise.resolve(new Response(privateFailure, { status: 200 })) },
+  { name: "invalid success body", reply: () => Promise.resolve(json({ detail: privateFailure })) },
+];
 
 function request(text = CONSENT, role: "agent" | "device" = "agent") {
   return {
@@ -72,6 +92,7 @@ let container: HTMLDivElement;
 let root: Root;
 let originalPath: string;
 let originalAuth: boolean;
+let originalEpoch: number;
 let originalMode: ReturnType<typeof useUIStore.getState>["interfaceMode"];
 
 beforeEach(() => {
@@ -80,6 +101,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("Unexpected unmocked request"))));
   originalPath = window.location.pathname + window.location.search + window.location.hash;
   originalAuth = useAuthStore.getState().isAuthenticated;
+  originalEpoch = useAuthStore.getState().keyEpoch;
   originalMode = useUIStore.getState().interfaceMode;
   window.history.replaceState({}, "", "/link");
   container = document.createElement("div");
@@ -90,7 +112,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
-  useAuthStore.setState({ isAuthenticated: originalAuth });
+  useAuthStore.setState({ isAuthenticated: originalAuth, keyEpoch: originalEpoch });
   useUIStore.setState({ interfaceMode: originalMode });
   window.history.replaceState({}, "", originalPath);
   vi.restoreAllMocks();
@@ -141,7 +163,7 @@ function lastDecision() {
 }
 
 describe("wallet link ceremony", () => {
-  it.each(["wdjb mjht", "WDJB-MJHT"])("normalizes %s for the lookup", async (code) => {
+  it.each(["wdjb mjht", "WDJB-MJHT"])("normalizes %s for POST lookup without a code in any request URL", async (code) => {
     await renderPage();
     expect(button("Continue").disabled).toBe(true);
     expect(container.querySelector("input")!.getAttribute("autocomplete")).toBe("off");
@@ -149,8 +171,19 @@ describe("wallet link ceremony", () => {
     expect(button("Continue").disabled).toBe(false);
     await click("Continue");
     expect(authorizedFetch).toHaveBeenCalledTimes(1);
-    expect(authorizedFetch.mock.calls[0]![0]).toMatch(/\/api\/wallets\/link-requests\/by-code\/WDJBMJHT$/);
+    const [url, init] = authorizedFetch.mock.calls[0]! as [string, RequestInit];
+    expect(url).toBe("/api/wallets/link-requests/lookup");
+    expect(init.method).toBe("POST");
+    expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
+    expect(JSON.parse(init.body as string)).toEqual({ userCode: "WDJBMJHT" });
     expect(container.textContent).toContain("Code WDJB-MJHT");
+    await confirmCode();
+    authorizedFetch.mockResolvedValueOnce(json({ status: "approved", linkId: "link_w4" }));
+    await click("Approve and link");
+    expect(authorizedFetch).toHaveBeenCalledTimes(2);
+    for (const [calledUrl] of authorizedFetch.mock.calls) {
+      expect(decodeURIComponent(String(calledUrl)).toUpperCase().replace(/[\s-]/g, "")).not.toContain("WDJBMJHT");
+    }
   });
 
   it("requires exactly eight letters from the code alphabet", async () => {
@@ -209,6 +242,60 @@ describe("wallet link ceremony", () => {
     expect(container.querySelector("input")).toBeNull();
   });
 
+  it("disables Deny during pending approval and sends no second decision", async () => {
+    await loadConsent();
+    await confirmCode();
+    let resolve!: (response: Response) => void;
+    authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
+    await click("Approve and link");
+    await click("Deny");
+    expect(authorizedFetch).toHaveBeenCalledTimes(2);
+    expect(lastDecision().decision).toBe("approve");
+    expect(button("Deny").disabled).toBe(true);
+    expect(button("Approve and link").disabled).toBe(true);
+    await act(async () => resolve(json({ status: "approved", linkId: "link_w4" })));
+    expect(container.textContent).toContain(APPROVED);
+  });
+
+  it("guards rapid decisions before the busy state renders", async () => {
+    await loadConsent();
+    await confirmCode();
+    let resolve!: (response: Response) => void;
+    authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
+    await act(async () => {
+      button("Approve and link").click();
+      button("Deny").click();
+    });
+    expect(authorizedFetch).toHaveBeenCalledTimes(2);
+    await act(async () => resolve(json({ status: "approved", linkId: "link_w4" })));
+  });
+
+  it.each(["approve", "deny"] as const)("drops consent if keyEpoch changes before %s and sends no decision", async (decision) => {
+    await loadConsent();
+    await confirmCode();
+    await act(async () => useAuthStore.setState((state) => ({ keyEpoch: state.keyEpoch + 1 })));
+    await click(decision === "approve" ? "Approve and link" : "Deny");
+    expect(authorizedFetch).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(SIGN_IN_CHANGED);
+    expect(container.querySelector<HTMLInputElement>('input[type="text"]')!.value).toBe("");
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(container.textContent).not.toContain("SENTINEL_W4");
+    expect(container.textContent).not.toContain("WDJB");
+  });
+
+  it("discards a lookup response if the sign-in changes while consent loads", async () => {
+    let resolve!: (response: Response) => void;
+    authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
+    await renderPage();
+    await typeCode("WDJB-MJHT");
+    await click("Continue");
+    await act(async () => useAuthStore.setState((state) => ({ keyEpoch: state.keyEpoch + 1 })));
+    await act(async () => resolve(json(request())));
+    expect(authorizedFetch).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(SIGN_IN_CHANGED);
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+  });
+
   it("cannot approve before consent loads", async () => {
     let resolve!: (response: Response) => void;
     authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
@@ -232,6 +319,8 @@ describe("wallet link ceremony", () => {
   it.each([
     [404, "not_found", "No pending request with this code", "check the code and try again"],
     [429, "too_many_attempts", "Too many attempts", "wait 10 minutes"],
+    [403, "insufficient_scope", "PCC refused this with your current sign-in.", ""],
+    [401, "unauthorized", "Your sign-in is no longer valid; sign in again.", ""],
   ])("explains lookup error %s without creating a link", async (status, error, message, guidance) => {
     authorizedFetch.mockResolvedValueOnce(json({ error }, status as number));
     await loadConsent();
@@ -248,8 +337,10 @@ describe("wallet link ceremony", () => {
     [409, "already_decided", "already handled", ""],
     [409, "already_linked", "already handled", ""],
     [403, "code_mismatch", "code does not match", ""],
+    [403, "insufficient_scope", "PCC refused this with your current sign-in.", ""],
+    [401, "unauthorized", "Your sign-in is no longer valid; sign in again.", ""],
     [429, "too_many_attempts", "Too many attempts", "wait 10 minutes"],
-    [500, "internal_private_details", "Could not reach PCC", "Nothing was linked"],
+    [500, "internal_private_details", "PCC did not confirm your decision", "The link may have been made"],
   ])("explains decision error %s %s without claiming success", async (status, error, message, guidance) => {
     await loadConsent();
     await confirmCode();
@@ -262,6 +353,36 @@ describe("wallet link ceremony", () => {
     if (String(error).includes("_")) expect(container.textContent).not.toContain(error);
     expect(authorizedFetch).toHaveBeenCalledTimes(2);
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+  });
+
+  const unknownDecisions = [
+    ...failures.filter(({ name }) => ["fetch rejection", "timeout", "500 internal_error", "502 bad_gateway", "malformed JSON", "invalid success body"].includes(name)),
+    { name: "200 approved missing linkId", reply: () => Promise.resolve(json({ status: "approved" })) },
+    { name: "200 linkId missing status", reply: () => Promise.resolve(json({ linkId: "link_w4" })) },
+    { name: "200 opposite decision status", reply: () => Promise.resolve(json({ status: "denied" })) },
+  ];
+
+  it.each(unknownDecisions)("shows an unknown approval outcome for $name", async ({ reply }) => {
+    await loadConsent();
+    await confirmCode();
+    authorizedFetch.mockImplementationOnce(reply);
+    await click("Approve and link");
+    expect(container.textContent).not.toContain("Nothing was linked");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(UNKNOWN_APPROVAL);
+    expect(container.textContent).not.toContain(APPROVED);
+    expect(container.querySelector<HTMLInputElement>('input[type="text"]')!.value).toBe("");
+    expect(authorizedFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(unknownDecisions)("shows an unconfirmed denial for $name", async ({ name, reply }) => {
+    await loadConsent();
+    authorizedFetch.mockImplementationOnce(name === "200 opposite decision status"
+      ? () => Promise.resolve(json({ status: "approved", linkId: "link_w4" })) : reply);
+    await click("Deny");
+    expect(container.textContent).not.toContain("Nothing was linked");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe(UNKNOWN_DENIAL);
+    expect(container.textContent).not.toContain(APPROVED);
+    expect(authorizedFetch).toHaveBeenCalledTimes(2);
   });
 
   it("reloads changed consent and requires a fresh confirmation", async () => {
@@ -277,16 +398,39 @@ describe("wallet link ceremony", () => {
   });
 
   it("explains a fetch rejection without logging private details", async () => {
-    const log = vi.spyOn(console, "log");
-    const warn = vi.spyOn(console, "warn");
-    const error = vi.spyOn(console, "error");
     authorizedFetch.mockRejectedValueOnce(new Error("WDJBMJHT req_w4_private"));
     await loadConsent();
     expect(container.querySelector('[role="alert"]')!.textContent).toBe("Could not reach PCC. Nothing was linked.");
     expect(container.textContent).not.toContain("req_w4_private");
-    expect(log).not.toHaveBeenCalled();
-    expect(warn).not.toHaveBeenCalled();
-    expect(error).not.toHaveBeenCalled();
+  });
+
+  const logScenarios = (["lookup", "approve", "deny"] as const).flatMap((stage) => [
+    { name: `${stage} success`, stage, reply: () => Promise.resolve(json(stage === "lookup" ? request() : stage === "approve" ? { status: "approved", linkId: "link_w4" } : { status: "denied" })) },
+    ...failures.map((failure) => ({ ...failure, name: `${stage} ${failure.name}`, stage })),
+    ...(stage === "lookup" ? [] : [
+      { name: `${stage} missing linkId`, stage, reply: () => Promise.resolve(json({ status: "approved", detail: privateFailure })) },
+      { name: `${stage} opposite decision status`, stage, reply: () => Promise.resolve(json(stage === "approve" ? { status: "denied" } : { status: "approved", linkId: "link_w4" })) },
+    ]),
+  ]);
+
+  it.each(logScenarios)("does not log the code during $name", async ({ stage, reply }) => {
+    const spies = (["log", "info", "debug", "warn", "error", "trace"] as const)
+      .map((method) => vi.spyOn(console, method).mockImplementation(() => {}));
+    if (stage === "lookup") {
+      authorizedFetch.mockImplementationOnce(reply);
+      await loadConsent();
+    } else {
+      await loadConsent();
+      if (stage === "approve") await confirmCode();
+      authorizedFetch.mockImplementationOnce(reply);
+      await click(stage === "approve" ? "Approve and link" : "Deny");
+    }
+    for (const spy of spies) {
+      for (const call of spy.mock.calls) {
+        const serialized = JSON.stringify(call, (_key, value: unknown) => value instanceof Error ? value.message : value);
+        expect(serialized.toUpperCase().replace(/[\s-]/g, "")).not.toContain("WDJBMJHT");
+      }
+    }
   });
 
   it("does not persist ceremony details or add them to the browser URL", async () => {
