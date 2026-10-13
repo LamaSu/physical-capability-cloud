@@ -8,6 +8,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { classifyProvisionError, provisionApiKey } from "../auth/api-key-auth.js";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import { getRepos } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -105,7 +106,7 @@ export async function provisionRoutes(app: FastifyInstance) {
         description: body.capability
           ? `Operator capability: ${body.capability}`
           : undefined,
-        scopes: ["*"],
+        scopes: [...SELF_SERVICE_KEY_SCOPES],
         metadata: {
           capability: body.capability,
           provisionedAt: new Date().toISOString(),

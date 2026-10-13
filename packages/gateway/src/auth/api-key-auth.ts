@@ -12,6 +12,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import { PCC_API_KEY_LIVE_PREFIX } from "@pcc/spec";
 import { getRepos } from "../db.js";
+import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
 import {
   generateEd25519Keypair,
   normalizePublicKeyHex,
@@ -202,7 +203,7 @@ export function provisionApiKey(opts: {
       operatorId: opts.operatorId,
       name: opts.name ?? null,
       description: opts.description ?? null,
-      scopes: JSON.stringify(opts.scopes ?? ["*"]),
+      scopes: JSON.stringify(opts.scopes ?? SELF_SERVICE_KEY_SCOPES),
       rateLimit: opts.rateLimit ?? "1000/hour",
       usageCount: "0",
       createdAt: now.toISOString(),
