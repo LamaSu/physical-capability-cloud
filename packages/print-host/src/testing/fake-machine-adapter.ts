@@ -11,6 +11,8 @@ type BusyResult = MachineCommandResult & { busy?: true };
 // A later poll must run even while a repro fakes the global timers.
 const realSetImmediate = setImmediate;
 const realClearImmediate = clearImmediate;
+const realSetTimeout = setTimeout;
+const realClearTimeout = clearTimeout;
 
 export type FakeStartOutcome =
   | { outcome: "success"; jobId: number }
@@ -23,7 +25,7 @@ type PrintEventType =
   | "execution_completed"
   | "execution_failed";
 
-/** A scripted printer: tests drive evidence, and cancellation models the state-7 poll. */
+/** A scripted printer: cancellation reports state 7 or reaches its own confirmation deadline. */
 export class FakeMachineAdapter implements MachineAdapter {
   readonly type = "ipp-2d";
   readonly source: EvidenceSource;
@@ -36,6 +38,7 @@ export class FakeMachineAdapter implements MachineAdapter {
   private activeJobId: number | undefined;
   private disposed = false;
   private cancelPoll: ReturnType<typeof setImmediate> | undefined;
+  private cancelDeadline: ReturnType<typeof setTimeout> | undefined;
   private eventNumber = 0;
   private readonly starts: FakeStartOutcome[] = [];
   private readonly unobservedStarts: MachineCommand[] = [];
@@ -51,7 +54,11 @@ export class FakeMachineAdapter implements MachineAdapter {
   constructor(
     readonly id: string,
     kernelId: string,
-    private readonly options: { cancelEventOrder?: "before-resolve" | "after-resolve" } = {},
+    private readonly options: {
+      cancelEventOrder?: "before-resolve" | "after-resolve";
+      cancelBehavior?: "report" | "silent";
+      cancelConfirmMs?: number;
+    } = {},
   ) {
     this.source = {
       deviceId: id,
@@ -130,6 +137,21 @@ export class FakeMachineAdapter implements MachineAdapter {
     }
     this.cancels.push(numericJobId);
     if (this.disposed || !this.active || this.activeJobId !== numericJobId) return;
+    if (this.options.cancelBehavior === "silent") {
+      this.cancelDeadline ??= realSetTimeout(() => {
+        this.cancelDeadline = undefined;
+        if (!this.disposed && this.active && this.activeJobId === numericJobId) {
+          this.emit("execution_failed", {
+            ippJobId: numericJobId,
+            state: "processing",
+            reason: "cancel-unconfirmed",
+            jobStateReasons: [],
+            origin: "device",
+          });
+        }
+      }, this.options.cancelConfirmMs ?? 50);
+      return;
+    }
     const reportCanceled = () => {
       if (!this.disposed && this.active && this.activeJobId === numericJobId) {
         this.emit("execution_failed", { ippJobId: numericJobId, state: "canceled", origin: "device" });
@@ -137,7 +159,10 @@ export class FakeMachineAdapter implements MachineAdapter {
     };
     // Cancellation leaves polling active, with either ordering of the state-7 event.
     if (this.options.cancelEventOrder === "after-resolve") {
-      this.cancelPoll ??= realSetImmediate(reportCanceled);
+      this.cancelPoll ??= realSetImmediate(() => {
+        this.cancelPoll = undefined;
+        reportCanceled();
+      });
     } else {
       await Promise.resolve().then(reportCanceled);
     }
@@ -179,6 +204,8 @@ export class FakeMachineAdapter implements MachineAdapter {
   private finishWork(): void {
     if (this.cancelPoll) realClearImmediate(this.cancelPoll);
     this.cancelPoll = undefined;
+    if (this.cancelDeadline) realClearTimeout(this.cancelDeadline);
+    this.cancelDeadline = undefined;
     this.active = false;
     this.activeJobId = undefined;
     this.status = "idle";

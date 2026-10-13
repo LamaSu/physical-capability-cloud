@@ -1,4 +1,4 @@
-import { createPrivateKey, createPublicKey, verify } from "node:crypto";
+import { createPrivateKey, createPublicKey, randomBytes, verify } from "node:crypto";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,13 +23,15 @@ import {
 } from "@pcc/spec";
 import { FakeMachineAdapter } from "../src/index.js";
 
-const gap = (name: string, fn: () => Promise<void>) =>
-  process.env.PRINT_HOST_SHOW_GAPS === "1" ? it(name, fn) : it.fails(name, fn);
+const gap = (name: string, fn: () => Promise<void>, timeout?: number) =>
+  process.env.PRINT_HOST_SHOW_GAPS === "1" ? it(name, fn, timeout) : it.fails(name, fn, timeout);
 
 const timeoutMs = 300;
+const gap7TimeoutMs = 60_000;
 const cleanups: Array<() => Promise<void>> = [];
 const realSetTimeout = setTimeout;
 const realClearTimeout = clearTimeout;
+const realNow = performance.now.bind(performance);
 const stillPending = Symbol("pending real async work");
 
 // Requested toolkit API; local types keep this repro compilable before it exists.
@@ -87,11 +89,13 @@ async function completingPrint(
   setup: ReturnType<typeof harness>,
   options: Omit<PrintJobOptions, "adapter" | "emitter">,
   ippJobId: number,
+  startMessage = "the scripted print must start",
 ) {
   setup.adapter.scriptStart({ outcome: "success", jobId: ippJobId });
   const started = setup.adapter.started();
   const pending = runPrintJob({ ...options, adapter: setup.adapter, emitter: setup.emitter });
-  await started;
+  const first = await Promise.race([started.then(() => "started" as const), pending]);
+  expect(first, startMessage).toBe("started");
   setup.adapter.emit("execution_started", { ippJobId, jobName: options.jobName });
   setup.adapter.emit("execution_progress", { ippJobId, totalPages: 1, progress: 100 });
   setup.adapter.emit("execution_completed", { ippJobId, totalPages: 1 });
@@ -153,7 +157,7 @@ async function expectPrivateJournalFiles(directory: string): Promise<number> {
   return paths.files.length;
 }
 
-async function publicKeysFromSeedsOnDisk(directory: string): Promise<Set<string>> {
+async function publicKeysFromSeedsOnDisk(directory: string, deviceSeed?: Uint8Array): Promise<Set<string>> {
   const candidates = new Set<string>();
   const addByteWindows = (bytes: Buffer) => {
     for (let offset = 0; offset + 32 <= bytes.length; offset++) {
@@ -161,8 +165,13 @@ async function publicKeysFromSeedsOnDisk(directory: string): Promise<Set<string>
     }
   };
   for (const path of (await journalPaths(directory)).files) {
-    // Scan encoded seeds in file text; binary files are not scanned as raw 32-byte windows.
-    const text = (await readFile(path)).toString("utf8");
+    const bytes = await readFile(path);
+    if (deviceSeed) {
+      expect(bytes.includes(Buffer.from(deviceSeed)), "journal files must not contain the raw device private seed").toBe(false);
+    }
+    // Raw seeds and secret keys may appear at any byte offset, including in binary journals.
+    addByteWindows(bytes);
+    const text = bytes.toString("utf8");
     for (const match of text.matchAll(/(?<![0-9a-fA-F])(?:0x)?[0-9a-fA-F]{64,}(?![0-9a-fA-F])/g)) {
       const hex = match[0].replace(/^0x/, "").toLowerCase();
       for (let offset = 0; offset + 64 <= hex.length; offset += 2) {
@@ -216,13 +225,69 @@ async function copyPrivateJournal(directory: string): Promise<string> {
   return copyDir;
 }
 
-afterEach(async () => {
-  for (const cleanup of cleanups.splice(0)) await cleanup();
-  vi.useRealTimers();
-  vi.restoreAllMocks();
-});
+async function runCleanups(): Promise<void> {
+  const errors: unknown[] = [];
+  try {
+    for (const cleanup of cleanups.splice(0)) {
+      try {
+        await cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+  } finally {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  }
+  if (errors.length) throw errors[0];
+}
+
+afterEach(runCleanups);
 
 describe("N144 print-host toolkit gap repros", () => {
+  it("throwing cleanups still dispose the adapter and remove its journal before rethrowing the first error", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "n144-cleanup-control-"));
+    const firstError = new Error("first cleanup failure");
+    const secondError = new Error("later cleanup failure");
+    const attempted: string[] = [];
+    const target = { read: () => "original" };
+    const originalRead = target.read;
+    vi.useFakeTimers();
+    vi.spyOn(target, "read").mockReturnValue("mocked");
+    cleanups.push(async () => {
+      attempted.push("first throw");
+      throw firstError;
+    });
+    const setup = harness("cleanup-control", { cancelBehavior: "silent", cancelConfirmMs: 10_000 });
+    setup.adapter.scriptStart({ outcome: "success", jobId: 124 });
+    await setup.adapter.execute({ type: "start" });
+    await setup.adapter.cancelJob(124);
+    const quiesced = setup.adapter.quiesceEvidence();
+    cleanups.push(async () => {
+      attempted.push("second throw");
+      throw secondError;
+    });
+    cleanups.push(async () => {
+      attempted.push("remove journal");
+      await rm(directory, { recursive: true, force: true });
+    });
+    try {
+      await expect(runCleanups()).rejects.toBe(firstError);
+      expect(attempted, "a throwing cleanup must not drop later cleanups")
+        .toEqual(["first throw", "second throw", "remove journal"]);
+      expect(await awaitRealWork(quiesced, 100), "adapter disposal must release pending work")
+        .not.toBe(stillPending);
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(setup.adapter.started()).rejects.toThrow("fake adapter disposed");
+      expect(vi.isFakeTimers(), "timers must be restored even when cleanups throw").toBe(false);
+      expect(target.read, "mocks must be restored even when cleanups throw").toBe(originalRead);
+    } finally {
+      // Keep this control's own resources bounded if a cleanup regression is detected.
+      await setup.adapter.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("the journal seed scan finds encoded private seeds and ignores seed-free files", async () => {
     const directory = await mkdtemp(join(tmpdir(), "n144-seed-scan-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -235,11 +300,12 @@ describe("N144 print-host toolkit gap repros", () => {
         await rm(path, { force: true });
       }
     };
-    expect(await scanFile("no-seed.txt", "journal metadata without a private seed\n"))
-      .toEqual(new Set());
-    // This byte makes base64url use its distinct '-' and '_' alphabet.
-    const seed = Buffer.alloc(32, 0xfb);
+    const seed = randomBytes(32);
+    // These runtime bytes force base64url to use its distinct '-' and '_' alphabet.
+    seed.fill(0xfb, 0, 3);
     const signer = makeKernelEd25519Signer(seed);
+    expect(await scanFile("no-seed.txt", "journal metadata without a private seed\n"))
+      .not.toContain(signer.publicKeyHex);
     const secretKey = Buffer.from(signer.secretKey);
     const forms = [
       ["seed.hex", "64-hex seed", seed.toString("hex")],
@@ -274,6 +340,51 @@ describe("N144 print-host toolkit gap repros", () => {
       expect(foundKeys, "event hashes and a real signature must not identify a held key").not.toContain(heldKey);
     }
   });
+
+  it("the journal seed scan finds raw seeds and secret keys at every byte offset without false positives", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "n144-raw-seed-scan-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const signer = makeKernelEd25519Signer();
+    const seed = Buffer.from(signer.secretKey.subarray(0, 32));
+    const forms = [
+      ["raw-seed", seed],
+      ["raw-secret-key", Buffer.from(signer.secretKey)],
+      ["raw-odd-offset", Buffer.concat([randomBytes(7), seed, randomBytes(13)])],
+    ] as const;
+    for (const [form, bytes] of forms) {
+      const path = join(directory, form);
+      try {
+        await writeFile(path, bytes);
+        expect(await publicKeysFromSeedsOnDisk(directory), `the scan must find the held key from ${form} alone`)
+          .toContain(signer.publicKeyHex);
+      } finally {
+        await rm(path, { force: true });
+      }
+    }
+    await writeFile(join(directory, "random-bytes"), randomBytes(137));
+    expect(await publicKeysFromSeedsOnDisk(directory), "random bytes must not identify a held key")
+      .not.toContain(signer.publicKeyHex);
+  });
+
+  it("GAP-7's six seed scans fit comfortably within its timeout for a journal over ten times today's size", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "n144-large-journal-scan-"));
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    // Rebuilt r8 reference: 1,495 bytes after finalize (its largest journal).
+    // 64 KiB exceeds 10x that size, with high-entropy, unique windows rather than padding.
+    const signer = makeKernelEd25519Signer();
+    const bytes = randomBytes(64 * 1024);
+    bytes.set(signer.secretKey.subarray(0, 32), 7);
+    await writeFile(join(directory, "journal.bin"), bytes);
+    const startedAt = realNow();
+    // Before resume: original + two copies; after resume: original + intact copy;
+    // after finalize: original. Exercise all six scans without a shared key cache.
+    for (let scan = 0; scan < 6; scan++) {
+      expect(await publicKeysFromSeedsOnDisk(directory), "the larger journal must still reveal a raw seed")
+        .toContain(signer.publicKeyHex);
+    }
+    expect(realNow() - startedAt, "all six scans must leave at least half GAP-7's timeout as headroom")
+      .toBeLessThan(gap7TimeoutMs / 2);
+  }, gap7TimeoutMs);
 
   it("the scripted adapter completes a print through runPrintJob", async () => {
     const setup = harness("harness-check");
@@ -354,6 +465,96 @@ describe("N144 print-host toolkit gap repros", () => {
     }
   });
 
+  it("the silent fake reports once only after its real cancel deadline, even with repeated cancels", async () => {
+    vi.useFakeTimers();
+    const cancelConfirmMs = 100;
+    const setup = harness("silent-cancel-control", { cancelBehavior: "silent", cancelConfirmMs });
+    setup.adapter.scriptStart({ outcome: "success", jobId: 121 });
+    await setup.adapter.execute({ type: "start" });
+    const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
+    let reportedAt = 0;
+    setup.adapter.onEvidence((event) => {
+      reportedAt = realNow();
+      events.push(event);
+    });
+    const canceledAt = realNow();
+    await setup.adapter.cancelJob(121);
+    await setup.adapter.cancelJob(121);
+    const idle = setup.adapter.quiesceEvidence();
+    // Advancing fake timers cannot trigger the adapter's real deadline.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(events, "a silent cancel must not report before its real deadline").toHaveLength(0);
+    expect(await awaitRealWork(idle, 20), "silent cancellation must keep work active before its deadline")
+      .toBe(stillPending);
+    expect(await awaitRealWork(idle, 250), "the silent cancel deadline must fire and quiesce work")
+      .not.toBe(stillPending);
+    // Native timers use a millisecond clock; allow its rounding against performance.now().
+    expect(reportedAt - canceledAt, "the silent report must wait for the cancel-confirm deadline within timer resolution")
+      .toBeGreaterThanOrEqual(cancelConfirmMs - 2);
+    await setup.adapter.cancelJob(121);
+    await new Promise<void>((resolve) => realSetTimeout(resolve, cancelConfirmMs + 20));
+    expect(events, "repeated silent cancels must emit exactly once").toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "execution_failed",
+      payload: { ippJobId: 121, state: "processing", reason: "cancel-unconfirmed", jobStateReasons: [], origin: "device" },
+    });
+    expect(setup.adapter.cancels).toEqual([121, 121, 121]);
+    expect(await setup.adapter.getStatus()).toBe("idle");
+  });
+
+  it("repeated silent cancels retain the first deadline", async () => {
+    // Capture a deterministic scheduler in this isolated module evaluation; the
+    // suite's statically imported adapter keeps its real-time deadline source.
+    vi.resetModules();
+    vi.useFakeTimers();
+    try {
+      const { FakeMachineAdapter: ScheduledFake } = await import("../src/testing/fake-machine-adapter.js");
+      const { kernelId, deviceId } = testIds("first-cancel-deadline");
+      const adapter = new ScheduledFake(deviceId, kernelId, { cancelBehavior: "silent", cancelConfirmMs: 100 });
+      cleanups.push(() => adapter.dispose());
+      adapter.scriptStart({ outcome: "success", jobId: 125 });
+      await adapter.execute({ type: "start" });
+      const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
+      adapter.onEvidence((event) => events.push(event));
+      await adapter.cancelJob(125);
+      await vi.advanceTimersByTimeAsync(60);
+      await adapter.cancelJob(125);
+      await vi.advanceTimersByTimeAsync(39);
+      expect(events, "the first cancel deadline has not yet elapsed").toHaveLength(0);
+      expect(await adapter.getStatus()).toBe("busy");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events, "a later cancel must not extend the first cancel deadline").toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: "execution_failed", payload: { ippJobId: 125, reason: "cancel-unconfirmed", origin: "device" },
+      });
+      expect(await adapter.getStatus()).toBe("idle");
+      await vi.advanceTimersByTimeAsync(60);
+      expect(events, "the later cancel must not schedule a second report").toHaveLength(1);
+      expect(adapter.cancels).toEqual([125, 125]);
+    } finally {
+      vi.resetModules();
+    }
+  });
+
+  it("a stale cancel poll cannot suppress cancellation of a replacement job", async () => {
+    const setup = harness("stale-cancel-poll", { cancelEventOrder: "after-resolve" });
+    const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
+    setup.adapter.onEvidence((event) => events.push(event));
+    setup.adapter.scriptStart({ outcome: "success", jobId: 122 });
+    await setup.adapter.execute({ type: "start" });
+    await setup.adapter.cancelJob(122);
+    // Replace the job before the scheduled poll, so its guard returns without finishWork.
+    setup.adapter.scriptStart({ outcome: "success", jobId: 123 });
+    await setup.adapter.execute({ type: "start" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events).toHaveLength(0);
+    await setup.adapter.cancelJob(123);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(events, "a completed stale cancel poll must permit the next job's cancel report").toHaveLength(1);
+    expect(events[0]!.payload).toMatchObject({ ippJobId: 123, state: "canceled", origin: "device" });
+    await setup.adapter.quiesceEvidence();
+  });
+
   gap("GAP-1 real mode never simulates", async () => {
     vi.useFakeTimers();
     let kernel: IppPrintKernel;
@@ -392,10 +593,13 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(resultA.success).toBe(true);
     const resultB = await completingPrint(setup, job("print-B"), 102);
     expect(resultB.success).toBe(true);
-    const foreignEvents = setup.emitter.getEvents(first.jobId, first.stepId!).filter(
+    const eventsA = setup.emitter.getEvents(first.jobId, first.stepId!);
+    const foreignEvents = eventsA.filter(
       (event) => event.payload.ippJobId === 102,
     );
     expect(foreignEvents, "print A must contain none of print B's events").toEqual([]);
+    expect(eventsA, "print A must retain exactly its three events").toHaveLength(3);
+    for (const event of eventsA) expect(event.payload.ippJobId).toBe(101);
   });
 
   gap("GAP-3 a reported failure returns a SIGNED execution_failed bundle", async () => {
@@ -415,42 +619,60 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
   });
 
-  gap("GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle", async () => {
-    vi.useFakeTimers();
-    const setup = harness("gap-4");
-    setup.adapter.scriptStart({ outcome: "success", jobId: 104 });
-    const started = setup.adapter.started();
-    const pending = runPrintJob({ ...job("timed-out"), ...setup });
-    await started;
-    setup.adapter.emit("execution_started", { ippJobId: 104 });
-    await vi.advanceTimersByTimeAsync(timeoutMs);
-    const result = await drainPrintJob(pending);
-    expect(result.success).toBe(false);
-    expect(
-      setup.adapter.cancels.length, "a timed-out device job must be canceled with cancelJob(104)",
-    ).toBeGreaterThanOrEqual(1);
-    expect(setup.adapter.cancels.every((id) => id === 104), "every cancel must target job 104").toBe(true);
-    expect(
-      setup.adapter.commands.some((command) => command.type === "stop"),
-      "never 'stop': it ends polling before the canceled state",
-    ).toBe(false);
-    expect(result.bundle, "a timeout must return a signed failure bundle").toBeDefined();
-    const bundle = result.bundle!;
-    expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
-    expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
-    expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
-    const failures = bundle.events.filter((event) => event.type === "execution_failed");
-    expect(failures, "a device-confirmed timeout must include exactly one execution_failed").toHaveLength(1);
-    expect(failures[0]!.payload).toMatchObject({ ippJobId: 104, origin: "device" });
-    expect(result).toMatchObject({ failure: { kind: "timeout" } });
-    expect((result as PrintJobResult & { cancelRequested?: unknown }).cancelRequested).toBeTruthy();
-  });
+  for (const cancelBehavior of ["report", "silent"] as const) {
+    gap(`GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle${cancelBehavior === "silent" ? " (silent printer)" : ""}`, async () => {
+      vi.useFakeTimers();
+      const setup = harness(`gap-4-${cancelBehavior}`, { cancelBehavior });
+      setup.adapter.scriptStart({ outcome: "success", jobId: 104 });
+      const started = setup.adapter.started();
+      const pending = runPrintJob({ ...job("timed-out"), ...setup });
+      await started;
+      setup.adapter.emit("execution_started", { ippJobId: 104 });
+      await vi.advanceTimersByTimeAsync(timeoutMs);
+      const result = await drainPrintJob(pending);
+      expect(result.success).toBe(false);
+      expect(
+        setup.adapter.cancels.length, "a timed-out device job must be canceled with cancelJob(104)",
+      ).toBeGreaterThanOrEqual(1);
+      expect(setup.adapter.cancels.every((id) => id === 104), "every cancel must target job 104").toBe(true);
+      expect(
+        setup.adapter.commands.some((command) => command.type === "stop"),
+        "never 'stop': it ends polling before the canceled state",
+      ).toBe(false);
+      expect(result.bundle, "a timeout must return a signed failure bundle").toBeDefined();
+      const bundle = result.bundle!;
+      expect(bundle.events.some((event) => event.type === "execution_failed")).toBe(true);
+      expect(bundle.events.some((event) => event.type === "execution_completed")).toBe(false);
+      expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
+      const failures = bundle.events.filter((event) => event.type === "execution_failed");
+      expect(failures, "a device-confirmed timeout must include exactly one execution_failed").toHaveLength(1);
+      // Assumes a contract-honouring adapter; real IppAdapter origin stamping and its
+      // cancel-confirm deadline are not tested here (adk was asked in bus #7752).
+      expect(failures[0]!.payload).toMatchObject({ ippJobId: 104, origin: "device" });
+      if (cancelBehavior === "silent") {
+        expect(failures[0]!.payload).toMatchObject({ reason: "cancel-unconfirmed" });
+      }
+      expect((result as PrintJobResult & { failure?: unknown }).failure)
+        .toMatchObject({ kind: "timeout", origin: "device" });
+      expect((result as PrintJobResult & { cancelRequested?: unknown }).cancelRequested).toBeTruthy();
+      if (cancelBehavior === "silent") {
+        const following = await completingPrint(setup, job("after-silent-timeout"), 124,
+          "a following print must start instead of a busy refusal with reason quiescing");
+        expect(following.success).toBe(true);
+      }
+    });
 
-  for (const cancelEventOrder of ["before-resolve", "after-resolve"] as const) {
+  }
+
+  for (const cancelEventOrder of ["before-resolve", "after-resolve", "silent printer"] as const) {
     gap(`GAP-5 an abort input cancels the device job and returns a SIGNED execution_failed bundle (${cancelEventOrder})`, async () => {
       vi.useFakeTimers();
-      const setup = harness(`gap-5-${cancelEventOrder}`, { cancelEventOrder });
-      const ippJobId = cancelEventOrder === "before-resolve" ? 105 : 115;
+      const silent = cancelEventOrder === "silent printer";
+      const setup = harness(`gap-5-${cancelEventOrder}`, {
+        cancelBehavior: silent ? "silent" : "report",
+        cancelEventOrder: silent ? "after-resolve" : cancelEventOrder,
+      });
+      const ippJobId = cancelEventOrder === "before-resolve" ? 105 : silent ? 125 : 115;
       const controller = new AbortController();
       // Requested host input: pcc-adk chooses the abort input's API shape.
       const options = {
@@ -480,9 +702,18 @@ describe("N144 print-host toolkit gap repros", () => {
       expect(verifyBundleSignature(bundle, bundleSigningKey(bundle, setup.signer.publicKeyHex))).toBe(true);
       const failures = bundle.events.filter((event) => event.type === "execution_failed");
       expect(failures, "a device-confirmed abort must include exactly one execution_failed").toHaveLength(1);
+      // Assumes a contract-honouring adapter; real IppAdapter origin stamping and its
+      // cancel-confirm deadline are not tested here (adk was asked in bus #7752).
       expect(failures[0]!.payload).toMatchObject({ ippJobId, origin: "device" });
-      expect(result).toMatchObject({ failure: { kind: "aborted" } });
+      if (silent) expect(failures[0]!.payload).toMatchObject({ reason: "cancel-unconfirmed" });
+      expect((result as PrintJobResult & { failure?: unknown }).failure)
+        .toMatchObject({ kind: "aborted", origin: "device" });
       expect((result as PrintJobResult & { cancelRequested?: unknown }).cancelRequested).toBeTruthy();
+      if (silent) {
+        const following = await completingPrint(setup, job("after-silent-abort"), 126,
+          "a following print must start instead of a busy refusal with reason quiescing");
+        expect(following.success).toBe(true);
+      }
     });
   }
 
@@ -497,7 +728,9 @@ describe("N144 print-host toolkit gap repros", () => {
     const result = await completingPrint(setup, options, 106);
     expect(result.success).toBe(true);
     expect(result.events).toHaveLength(3);
-    for (const event of setup.emitter.getEvents(options.jobId, options.stepId!)) {
+    expect(result.bundle, "unit-bound events must be in a signed bundle").toBeDefined();
+    expect(result.bundle!.events, "the signed bundle must contain all three print events").toHaveLength(3);
+    for (const event of result.bundle!.events) {
       expect(event.payload, `${event.type} must commit settlementUnitId and challengeNonce`)
         .toMatchObject(unit);
     }
@@ -559,11 +792,20 @@ describe("N144 print-host toolkit gap repros", () => {
     const pickup = await carrierEvent("courier_pickup_confirmed", "carrier-pickup");
     expectedEvents.push(structuredClone(pickup));
     await session.addEvent(pickup);
-    expect(await publicKeysFromSeedsOnDisk(journalDir), "the device private seed must not stay at rest before resume")
+    const deviceSeed = setup.signer.secretKey.subarray(0, 32);
+    const keysBeforeResume = await publicKeysFromSeedsOnDisk(journalDir, deviceSeed);
+    expect(keysBeforeResume, "the device private seed must not stay at rest before resume")
       .not.toContain(setup.signer.publicKeyHex);
     const resumeOptions = { journalDir, settlementUnitId: unit.settlementUnitId, deviceSigner: setup.signer };
     const tamperedDir = await copyPrivateJournal(journalDir);
     const copiedDir = await copyPrivateJournal(journalDir);
+    const copiesKeysBeforeResume = await Promise.all([tamperedDir, copiedDir].map(
+      (directory) => publicKeysFromSeedsOnDisk(directory, deviceSeed),
+    ));
+    for (const keys of copiesKeysBeforeResume) {
+      expect(keys, "journal copies must not contain the device private seed before resume")
+        .not.toContain(setup.signer.publicKeyHex);
+    }
     for (const path of (await journalPaths(tamperedDir)).files) {
       const contents = await readFile(path);
       if (contents.length === 0) continue;
@@ -582,15 +824,28 @@ describe("N144 print-host toolkit gap repros", () => {
     const delivery = await carrierEvent("courier_delivery_confirmed", "carrier-delivery");
     expectedEvents.push(structuredClone(delivery));
     await resumed.addEvent(delivery);
+    const keysBeforeFinalize = await publicKeysFromSeedsOnDisk(journalDir, deviceSeed);
+    const copiedKeysAfterResume = await publicKeysFromSeedsOnDisk(copiedDir, deviceSeed);
     const bundle = await resumed.finalize();
     expect(bundle.jobId, "the bundle jobId must equal the PCC job id").toBe(options.jobId);
     const authorization = bundle.sessionKeyAuthorization;
     expect(authorization, "the unit bundle must carry device-authorized sessionKeyAuthorization").toBeDefined();
-    const keysAtRest = await publicKeysFromSeedsOnDisk(journalDir);
+    const sessionPublicKeyHex = authorization!.publicKey.replace(/^0x/, "").toLowerCase();
+    expect(keysBeforeResume, "the session private seed must not stay at rest before resume")
+      .not.toContain(sessionPublicKeyHex);
+    for (const keys of copiesKeysBeforeResume) {
+      expect(keys, "journal copies must not contain the session private seed before resume")
+        .not.toContain(sessionPublicKeyHex);
+    }
+    expect(keysBeforeFinalize, "the session private seed must not stay at rest in the resumed journal before finalization")
+      .not.toContain(sessionPublicKeyHex);
+    expect(copiedKeysAfterResume, "the resumed journal copy must not contain the session private seed before finalization")
+      .not.toContain(sessionPublicKeyHex);
+    const keysAtRest = await publicKeysFromSeedsOnDisk(journalDir, deviceSeed);
     expect(keysAtRest, "the device private seed must not stay at rest after finalization")
       .not.toContain(setup.signer.publicKeyHex);
     expect(keysAtRest, "the session private seed must not stay at rest after finalization")
-      .not.toContain(authorization!.publicKey.replace(/^0x/, "").toLowerCase());
+      .not.toContain(sessionPublicKeyHex);
     const canonicalBundle = canonicalize(bundle);
     expect(bundle.events).toHaveLength(expectedEvents.length);
     for (const event of bundle.events) {
@@ -635,14 +890,16 @@ describe("N144 print-host toolkit gap repros", () => {
     const parentSignature = Buffer.from(authorization!.parentSignature.replace(/^0x/, ""), "hex");
     expect(verify(null, preimage, devicePublicKey, parentSignature)).toBe(true);
     expect(verifyBundleSignature(bundle, sessionPublicKey)).toBe(true);
-    expect(canonicalize(await resumed.finalize())).toBe(canonicalBundle);
+    vi.setSystemTime(new Date("2026-10-11T02:00:00.000Z"));
+    expect(canonicalize(await resumed.finalize()), "repeat finalization must return the identical journaled bundle at a later instant")
+      .toBe(canonicalBundle);
     const finalizedSession = await api.resumeUnitEvidenceSession(resumeOptions);
     expect(canonicalize(await finalizedSession.finalize())).toBe(canonicalBundle);
     await expect(Promise.resolve().then(() => api.resumeUnitEvidenceSession({
       ...resumeOptions, settlementUnitId: `0x${"e".repeat(64)}`,
     }))).rejects.toThrow();
     expect(await expectPrivateJournalFiles(journalDir), "the unit session must persist journal files").toBeGreaterThan(0);
-  });
+  }, gap7TimeoutMs);
 
   gap("GAP-8 a busy refusal is reported as busy and emits no failure (N127)", async () => {
     const setup = harness("gap-8");
