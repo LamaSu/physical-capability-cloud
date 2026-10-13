@@ -20,6 +20,14 @@ import {
   type JobPolicyFields,
   type UnitConfig,
 } from "@pcc/contracts/vnext";
+import {
+  computeAcceptedPolicyDigest,
+  computeBindingsRoot,
+  computePlanUnitKey,
+  computeSubjectBlockHash,
+  type SubjectBinding,
+  type SubjectBlockFields,
+} from "@pcc/spec";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getAddress,
@@ -27,6 +35,7 @@ import {
   recoverAddress,
   verifyTypedData,
   zeroAddress,
+  zeroHash,
   type Address,
   type Hex,
 } from "viem";
@@ -61,6 +70,8 @@ const payer = getAddress(`0x${"12".repeat(20)}`);
 const feeRecipient = getAddress(`0x${"ab34".repeat(10)}`);
 const otherRecipient = getAddress(`0x${"56".repeat(20)}`);
 const payoutRecipient = getAddress(`0x${"ab78".repeat(10)}`);
+const thursdayTermsHash: Hex = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+const s2ProgramHash: Hex = "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a";
 let directory: string;
 let path: string;
 let secret: Hex;
@@ -69,6 +80,8 @@ let key: OperatorKey;
 function terms(chainId: 84532 | 31337 = 84532) {
   return {
     chainId, factory, implementation,
+    termsHash: thursdayTermsHash,
+    subjectPins: { committedProgramHash: s2ProgramHash, targetSystemIdentity: word("target-system") },
     operatorPayoutRecipient: payoutRecipient,
     maxPassThrough: 20_000n,
     minG: 1_000n,
@@ -85,6 +98,24 @@ function terms(chainId: 84532 | 31337 = 84532) {
 function word(label: string): Hex {
   return `0x${createHash("sha256").update(label).digest("hex")}`;
 }
+function changedByte(value: Hex): Hex {
+  const byte = Number.parseInt(value.slice(-2), 16) ^ 1;
+  return `${value.slice(0, -2)}${byte.toString(16).padStart(2, "0")}` as Hex;
+}
+// These are synthetic shape fixtures, not an oracle subject-block golden.
+function subjectBlock(): SubjectBlockFields {
+  return {
+    payer: word("payer-principal"), operatorPrincipal: word("operator-principal"),
+    operatorSettlementAddress: payoutRecipient.toLowerCase() as Address,
+    authorizedTuplesRoot: word("authorized-tuples"), expertSetRoot: word("experts"),
+    executorSetRoot: word("executors"), expectedRecipient: word("expected-recipient"),
+    targetSystemIdentity: word("target-system"), committedProgramHash: s2ProgramHash,
+    recipeRef: word("recipe"), sampleManifestRef: word("sample-manifest"), childrenRoot: word("children"),
+    operatingEnvelopeHash: word("operating-envelope"), expectedRouteArea: word("route-area"),
+    expectedLocationHash: word("location"), captureNonceAnchor: word("capture-nonce"),
+    challengeAnchor: word("challenge"), integrityGrade: 2,
+  };
+}
 function unit(overrides: Partial<UnitConfig> = {}, index = 0): UnitConfig {
   const gross = overrides.g ?? 10_000n;
   const bps = overrides.feeBps ?? 50;
@@ -93,19 +124,28 @@ function unit(overrides: Partial<UnitConfig> = {}, index = 0): UnitConfig {
     ...buildUnitConfig({
       milestoneIndex: BigInt(index), stepId: word(`step-${index}`), requiredTier: 1,
       g: gross, feeBps: bps, feeRecipient: bps === 0 ? zeroAddress : feeRecipient,
-      reclaimAt: nowSeconds + 1_000_000n, compositionSchemaVersion: 1,
-      compositionRoot: word(`composition-${index}`),
+      reclaimAt: nowSeconds + 1_000_000n, compositionSchemaVersion: 0,
+      compositionRoot: zeroHash,
       payouts: [{ recipient: payoutRecipient, amount: n }],
     }),
     ...overrides,
   };
 }
 function input(configs: UnitConfig[] = [unit()], overrides: Partial<JobPolicyFields> = {}) {
+  const subject = subjectBlock();
+  const boundUnit = configs[0] ?? unit();
+  const bindings: SubjectBinding[] = [{
+    planUnitKey: computePlanUnitKey(0, boundUnit.milestoneIndex, boundUnit.stepId),
+    requirementIdHash: word("requirement"), sourceKind: 1, propositionKind: 2, valueRef: word("value-ref"),
+  }];
   const policy: JobPolicyFields = {
     chainId: 84532n, factory, implementation, escrow: unrelatedEscrow, payer, operator: key.address,
-    jobIdHash: word("job"), termsHash: word("terms"), policyNonce: 1n,
+    jobIdHash: word("job"), termsHash: thursdayTermsHash, policyNonce: 1n,
     prePolicyRoot: prePolicyRoot(configs), unitsRoot: word("temporary-root"),
-    expiry: nowSeconds + 300n, acceptedPolicyDigest: word("accepted-policy"),
+    expiry: nowSeconds + 300n, acceptedPolicyDigest: computeAcceptedPolicyDigest({
+      termsHash: overrides.termsHash ?? thursdayTermsHash,
+      subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot(bindings),
+    }),
     ...overrides,
   };
   if (overrides.escrow === undefined) {
@@ -115,7 +155,20 @@ function input(configs: UnitConfig[] = [unit()], overrides: Partial<JobPolicyFie
     chainId: policy.chainId, escrow: policy.escrow, jobIdHash: policy.jobIdHash,
     milestoneIndex: config.milestoneIndex, stepId: config.stepId,
   })));
-  return { policy, units: configs };
+  return { policy, units: configs, subjectBlock: subject, bindings };
+}
+function refreshPolicyIdentity(candidate: ReturnType<typeof input>): void {
+  candidate.policy.escrow = predictEscrow({ factory: candidate.policy.factory,
+    implementation: candidate.policy.implementation, salt: policySalt(candidate.policy) });
+  candidate.policy.unitsRoot = unitsRoot(candidate.units.map((config) => settlementUnitId({
+    chainId: candidate.policy.chainId, escrow: candidate.policy.escrow, jobIdHash: candidate.policy.jobIdHash,
+    milestoneIndex: config.milestoneIndex, stepId: config.stepId,
+  })));
+}
+function refreshAcceptedPolicy(candidate: ReturnType<typeof input>): void {
+  candidate.policy.acceptedPolicyDigest = computeAcceptedPolicyDigest({ termsHash: candidate.policy.termsHash,
+    subjectBlockHash: computeSubjectBlockHash(candidate.subjectBlock), bindingsRoot: computeBindingsRoot(candidate.bindings) });
+  refreshPolicyIdentity(candidate);
 }
 function noLeak(value: unknown): void {
   const renderings = [String(value), `${value}`, JSON.stringify(value) ?? "",
@@ -226,6 +279,122 @@ describe("JobPolicy acceptance uses the canonical compiler bytes", () => {
       { domain: { verifyingContract: factory } }, { types: {} }, { primaryType: "Other" }]) {
       await refusal(() => key.signJobPolicyAcceptance({ ...input(), ...extra } as never), "bad_input");
     }
+  });
+});
+
+describe("JobPolicy acceptance binds the pinned terms and program with the spec producer", () => {
+  it("signs a policy built with the spec subject, bindings and accepted-policy producers", async () => {
+    const candidate = input();
+    const subjectBlockHash = computeSubjectBlockHash(candidate.subjectBlock);
+    const bindingsRoot = computeBindingsRoot(candidate.bindings);
+    expect(candidate.subjectBlock.committedProgramHash).toBe(s2ProgramHash);
+    expect(candidate.policy.termsHash).toBe(thursdayTermsHash);
+    expect(candidate.bindings[0].planUnitKey).toBe(computePlanUnitKey(0,
+      candidate.units[0].milestoneIndex, candidate.units[0].stepId));
+    expect(subjectBlockHash).not.toBe(bindingsRoot);
+    expect(candidate.policy.acceptedPolicyDigest).toBe(computeAcceptedPolicyDigest({
+      termsHash: thursdayTermsHash, subjectBlockHash, bindingsRoot,
+    }));
+    await accepts(candidate);
+    expect(failure.signCalls).toBe(1);
+  });
+  it("refuses a termsHash one byte off even with its recomputed digest and predicted escrow", async () => {
+    const candidate = input([unit()], { termsHash: changedByte(thursdayTermsHash) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  for (const field of ["committedProgramHash", "targetSystemIdentity"] as const) {
+    it(`refuses a ${field} pin one byte off even with its recomputed acceptedPolicyDigest`, async () => {
+      const candidate = input();
+      candidate.subjectBlock[field] = changedByte(candidate.subjectBlock[field]);
+      refreshAcceptedPolicy(candidate);
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "subject_pin_mismatch");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  it("refuses an unpinned settlement address one byte off even with its recomputed digest", async () => {
+    const candidate = input();
+    candidate.subjectBlock.operatorSettlementAddress = changedByte(candidate.subjectBlock.operatorSettlementAddress);
+    refreshAcceptedPolicy(candidate);
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "settlement_address_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("compares the settlement-address pin by value against lowercase producer input", async () => {
+    const bound = await loadOperatorKey(path, 84532, { now, clock: () => now,
+      terms: { ...terms(), subjectPins: { ...terms().subjectPins, operatorSettlementAddress: payoutRecipient } } });
+    expect(input().subjectBlock.operatorSettlementAddress).not.toBe(payoutRecipient);
+    await accepts(input(), bound);
+  });
+  it("accepts every subject field as a pin and refuses a pinned integrityGrade one integer off", async () => {
+    const supplied = { ...terms(), subjectPins: subjectBlock() };
+    const bound = await loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied });
+    await accepts(input(), bound);
+    const candidate = input();
+    candidate.subjectBlock.integrityGrade = 3;
+    refreshAcceptedPolicy(candidate);
+    await refusal(() => bound.signJobPolicyAcceptance(candidate), "subject_pin_mismatch");
+    expect(failure.signCalls).toBe(1);
+  });
+  for (const integrityGrade of [2n, "2"] as const) {
+    it(`compares integrityGrade by integer value for producer input of type ${typeof integrityGrade}`, async () => {
+      const bound = await loadOperatorKey(path, 84532, { now, clock: () => now,
+        terms: { ...terms(), subjectPins: { ...terms().subjectPins, integrityGrade: 2 } } });
+      const candidate = input();
+      candidate.subjectBlock.integrityGrade = integrityGrade;
+      refreshAcceptedPolicy(candidate);
+      await accepts(candidate, bound);
+    });
+  }
+  it("refuses an acceptedPolicyDigest one byte off even with its matching predicted escrow", async () => {
+    const candidate = input();
+    candidate.policy.acceptedPolicyDigest = changedByte(candidate.policy.acceptedPolicyDigest);
+    refreshPolicyIdentity(candidate);
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "accepted_policy_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses a digest built with subjectBlockHash and bindingsRoot swapped", async () => {
+    const candidate = input();
+    const subjectBlockHash = computeSubjectBlockHash(candidate.subjectBlock);
+    const bindingsRoot = computeBindingsRoot(candidate.bindings);
+    expect(subjectBlockHash).not.toBe(bindingsRoot);
+    candidate.policy.acceptedPolicyDigest = computeAcceptedPolicyDigest({
+      termsHash: candidate.policy.termsHash, subjectBlockHash: bindingsRoot, bindingsRoot: subjectBlockHash,
+    });
+    refreshPolicyIdentity(candidate);
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "accepted_policy_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("accepts an exact bindingsRoot pin and refuses a binding value one byte off under a new digest", async () => {
+    const candidate = input();
+    const bound = await loadOperatorKey(path, 84532, { now, clock: () => now,
+      terms: { ...terms(), bindingsRoot: computeBindingsRoot(candidate.bindings) } });
+    await accepts(candidate, bound);
+    candidate.bindings[0].valueRef = changedByte(candidate.bindings[0].valueRef);
+    refreshAcceptedPolicy(candidate);
+    await refusal(() => bound.signJobPolicyAcceptance(candidate), "bindings_root_mismatch");
+    expect(failure.signCalls).toBe(1);
+  });
+  it("allows a different valid bindings set when no bindingsRoot pin was configured", async () => {
+    const candidate = input();
+    candidate.bindings[0].valueRef = changedByte(candidate.bindings[0].valueRef);
+    refreshAcceptedPolicy(candidate);
+    await accepts(candidate);
+  });
+  for (const [label, composition] of [
+    ["nonzero schema", { compositionSchemaVersion: 1, compositionRoot: zeroHash }],
+    ["nonzero root", { compositionSchemaVersion: 0, compositionRoot: changedByte(zeroHash) }],
+    ["composed unit", { compositionSchemaVersion: 1, compositionRoot: word("composition") }],
+  ] as const) {
+    it(`refuses ${label} before signing with composition_not_supported`, async () => {
+      await refusal(() => key.signJobPolicyAcceptance(input([unit(composition)])), "composition_not_supported");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  it("refuses composition in a later unit", async () => {
+    await refusal(() => key.signJobPolicyAcceptance(input([unit(), unit({
+      compositionSchemaVersion: 1, compositionRoot: word("later-composition"),
+    }, 1)])), "composition_not_supported");
+    expect(failure.signCalls).toBe(0);
   });
 });
 
@@ -600,6 +769,26 @@ describe("HostTerms bind authorization to the key's chain", () => {
 
 describe("HostTerms loading refuses malformed authorizations", () => {
   const malformed: Array<[string, Record<string, unknown>]> = [
+    ["zero termsHash", { termsHash: zeroHash }], ["invalid termsHash", { termsHash: "invalid" }],
+    ["short termsHash", { termsHash: `0x${"00".repeat(31)}` }],
+    ["missing committedProgramHash pin", { subjectPins: { targetSystemIdentity: word("target-system") } }],
+    ["empty subjectPins", { subjectPins: {} }], ["null subjectPins", { subjectPins: null }],
+    ["array subjectPins", { subjectPins: [] }],
+    ["invalid committedProgramHash pin", { subjectPins: { committedProgramHash: "invalid" } }],
+    ["non-bytes32 subject pin", { subjectPins: { committedProgramHash: s2ProgramHash, targetSystemIdentity: 1 } }],
+    ["unknown subject pin", { subjectPins: { committedProgramHash: s2ProgramHash, unapproved: word("unapproved") } }],
+    ["invalid settlement-address pin", { subjectPins: { committedProgramHash: s2ProgramHash,
+      operatorSettlementAddress: "invalid" } }],
+    ["settlement-address pin different from operatorPayoutRecipient", { subjectPins: {
+      committedProgramHash: s2ProgramHash, operatorSettlementAddress: otherRecipient,
+    } }],
+    ["negative integrityGrade pin", { subjectPins: { committedProgramHash: s2ProgramHash, integrityGrade: -1 } }],
+    ["fractional integrityGrade pin", { subjectPins: { committedProgramHash: s2ProgramHash, integrityGrade: 1.5 } }],
+    ["integrityGrade pin above uint8", { subjectPins: { committedProgramHash: s2ProgramHash, integrityGrade: 256 } }],
+    ["negative-zero integrityGrade pin", { subjectPins: { committedProgramHash: s2ProgramHash, integrityGrade: -0 } }],
+    ["noncanonical integrityGrade pin", { subjectPins: { committedProgramHash: s2ProgramHash, integrityGrade: "02" } }],
+    ["invalid bindingsRoot pin", { bindingsRoot: "invalid" }],
+    ["undefined bindingsRoot pin", { bindingsRoot: undefined }],
     ["negative minG", { minG: -1n }], ["number minG", { minG: 1_000 }],
     ["empty tier list", { allowedRequiredTiers: [] }], ["tier above three", { allowedRequiredTiers: [4] }],
     ["negative tier", { allowedRequiredTiers: [-1] }], ["fractional tier", { allowedRequiredTiers: [1.5] }],
@@ -637,7 +826,8 @@ describe("HostTerms loading refuses malformed authorizations", () => {
       await refusal(() => loadOperatorKey(path, 84532, { now, clock: () => now, terms: { ...terms(), ...change } as never }), "bad_terms");
     });
   }
-  for (const field of ["allowedPayoutRecipients", "operatorPayoutRecipient", "maxPassThrough", "factory", "implementation"] as const) {
+  for (const field of ["allowedPayoutRecipients", "operatorPayoutRecipient", "maxPassThrough", "factory", "implementation",
+    "termsHash", "subjectPins"] as const) {
     it(`requires the ${field} authorization field at load`, async () => {
       const supplied: Partial<ReturnType<typeof terms>> = terms();
       delete supplied[field];
@@ -656,6 +846,25 @@ describe("HostTerms loading refuses malformed authorizations", () => {
       if (variant === "accessor") Object.defineProperty(supplied, "minG", { enumerable: true, get: getter });
       await refusal(() => loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied }), "bad_terms");
       expect(getter).not.toHaveBeenCalled();
+    });
+  }
+  for (const variant of ["accessor", "inherited", "symbol", "non-enumerable", "proxy"] as const) {
+    it(`refuses ${variant} subjectPins at validation and load without executing input code`, async () => {
+      const supplied = terms();
+      const getter = vi.fn(() => { throw new Error(secret); });
+      if (variant === "accessor") Object.defineProperty(supplied.subjectPins, "committedProgramHash", {
+        enumerable: true, get: getter,
+      });
+      if (variant === "inherited") Object.setPrototypeOf(supplied.subjectPins, { unapproved: secret });
+      if (variant === "symbol") Object.defineProperty(supplied.subjectPins, Symbol("unapproved"), { value: secret });
+      if (variant === "non-enumerable") Object.defineProperty(supplied.subjectPins, "committedProgramHash", {
+        value: s2ProgramHash, enumerable: false,
+      });
+      if (variant === "proxy") supplied.subjectPins = new Proxy(supplied.subjectPins, { ownKeys: getter });
+      await refusal(async () => validateHostTerms(supplied), "bad_terms");
+      await refusal(() => loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied }), "bad_terms");
+      expect(getter).not.toHaveBeenCalled();
+      expect(failure.signCalls).toBe(0);
     });
   }
   for (const variant of ["extra", "accessor", "inherited", "sparse"] as const) {
@@ -685,6 +894,37 @@ describe("HostTerms loading refuses malformed authorizations", () => {
     supplied.allowedPayoutRecipients.splice(0, 1, otherRecipient);
     expect(validated.allowedPayoutRecipients).toEqual([payoutRecipient]);
     expect(() => (validated.allowedPayoutRecipients as Address[]).push(otherRecipient)).toThrow(TypeError);
+  });
+  it("copies and freezes subjectPins separately from the caller's terms", () => {
+    const supplied = terms();
+    const validated = validateHostTerms(supplied);
+    expect(validated.subjectPins).not.toBe(supplied.subjectPins);
+    expect(Object.isFrozen(validated.subjectPins)).toBe(true);
+    supplied.subjectPins.committedProgramHash = changedByte(s2ProgramHash);
+    expect(validated.subjectPins.committedProgramHash).toBe(s2ProgramHash);
+    expect(() => Object.assign(validated.subjectPins, { committedProgramHash: word("replacement-program") }))
+      .toThrow(TypeError);
+  });
+  it("snapshots termsHash, program pins and bindingsRoot at key load", async () => {
+    const candidate = input();
+    const supplied = { ...terms(), bindingsRoot: computeBindingsRoot(candidate.bindings) };
+    const bound = await loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied });
+    supplied.termsHash = changedByte(thursdayTermsHash);
+    supplied.subjectPins.committedProgramHash = changedByte(s2ProgramHash);
+    supplied.subjectPins.targetSystemIdentity = word("changed-system");
+    supplied.bindingsRoot = word("changed-bindings-root");
+    await accepts(candidate, bound);
+    await refusal(() => bound.signJobPolicyAcceptance(input([unit()], { termsHash: supplied.termsHash })),
+      "terms_hash_mismatch");
+    const programChanged = input();
+    programChanged.subjectBlock.committedProgramHash = supplied.subjectPins.committedProgramHash;
+    refreshAcceptedPolicy(programChanged);
+    await refusal(() => bound.signJobPolicyAcceptance(programChanged), "subject_pin_mismatch");
+    const bindingChanged = input();
+    bindingChanged.bindings[0].valueRef = changedByte(bindingChanged.bindings[0].valueRef);
+    refreshAcceptedPolicy(bindingChanged);
+    await refusal(() => bound.signJobPolicyAcceptance(bindingChanged), "bindings_root_mismatch");
+    expect(failure.signCalls).toBe(1);
   });
 });
 
@@ -737,7 +977,8 @@ describe("JobPolicy acceptance also enforces buildUnitConfig's context-free rule
 });
 
 describe("JobPolicy acceptance snapshots only strict data fields", () => {
-  for (const level of ["input", "policy", "unit", "payout", "units array", "payouts array"] as const) {
+  for (const level of ["input", "policy", "unit", "payout", "units array", "payouts array",
+    "subjectBlock", "binding", "bindings array"] as const) {
     for (const variant of ["extra", "accessor", "inherited"] as const) {
       it(`refuses ${variant} fields on the ${level} without executing a getter`, async () => {
         const candidate = input();
@@ -747,9 +988,13 @@ describe("JobPolicy acceptance snapshots only strict data fields", () => {
         else if (level === "unit") target = candidate.units[0];
         else if (level === "payout") target = candidate.units[0].payouts[0];
         else if (level === "units array") target = candidate.units;
-        else target = candidate.units[0].payouts;
+        else if (level === "payouts array") target = candidate.units[0].payouts;
+        else if (level === "subjectBlock") target = candidate.subjectBlock;
+        else if (level === "binding") target = candidate.bindings[0];
+        else target = candidate.bindings;
         const getter = vi.fn(() => { throw new Error(secret); });
-        const fields = { input: "policy", policy: "operator", unit: "g", payout: "amount", "units array": "0", "payouts array": "0" };
+        const fields = { input: "policy", policy: "operator", unit: "g", payout: "amount", "units array": "0",
+          "payouts array": "0", subjectBlock: "committedProgramHash", binding: "valueRef", "bindings array": "0" };
         if (variant === "extra") Object.defineProperty(target, "unapproved", { value: secret, enumerable: true });
         if (variant === "accessor") Object.defineProperty(target, fields[level], { enumerable: true, get: getter });
         if (variant === "inherited") {
@@ -773,6 +1018,105 @@ describe("JobPolicy acceptance snapshots only strict data fields", () => {
     const candidate = input();
     delete (candidate.policy as Partial<JobPolicyFields>).escrow;
     await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+  });
+  for (const field of ["subjectBlock", "bindings"] as const) {
+    it(`requires the ${field} acceptance input`, async () => {
+      const candidate: Partial<ReturnType<typeof input>> = input();
+      delete candidate[field];
+      await refusal(() => key.signJobPolicyAcceptance(candidate as never), "bad_input");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  for (const field of Object.keys(subjectBlock()) as (keyof SubjectBlockFields)[]) {
+    it(`maps the spec producer's missing subject ${field} refusal to bad_input`, async () => {
+      const candidate = input();
+      delete (candidate.subjectBlock as Partial<SubjectBlockFields>)[field];
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  it("maps duplicate binding requirementIdHash admission to bad_input even across plan units", async () => {
+    const candidate = input([unit(), unit({}, 1)]);
+    candidate.bindings.push({ ...candidate.bindings[0], planUnitKey: computePlanUnitKey(1,
+      candidate.units[1].milestoneIndex, candidate.units[1].stepId) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+    expect(failure.signCalls).toBe(0);
+  });
+  for (const [label, field, value] of [
+    ["invalid bytes32", "committedProgramHash", "invalid"],
+    ["non-lowercase bytes32", "committedProgramHash", s2ProgramHash.toUpperCase().replace("0X", "0x")],
+    ["invalid settlement address", "operatorSettlementAddress", "invalid"],
+    ["integrityGrade above uint8", "integrityGrade", 256],
+    ["fractional integrityGrade", "integrityGrade", 1.5],
+    ["noncanonical integrityGrade", "integrityGrade", "02"],
+    ["negative-zero integrityGrade", "integrityGrade", -0],
+  ] as const) {
+    it(`maps the spec producer's ${label} refusal to bad_input`, async () => {
+      const candidate = input();
+      Object.assign(candidate.subjectBlock, { [field]: value });
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  for (const field of ["planUnitKey", "requirementIdHash", "sourceKind", "propositionKind", "valueRef"] as const) {
+    it(`maps the spec producer's missing binding ${field} refusal to bad_input`, async () => {
+      const candidate = input();
+      delete (candidate.bindings[0] as Partial<SubjectBinding>)[field];
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  for (const sourceKind of [256, "01", -1, -0, 1.5]) {
+    it(`maps malformed binding sourceKind ${String(sourceKind)} to bad_input without exposing input`, async () => {
+      const candidate = input();
+      candidate.bindings[0].sourceKind = sourceKind;
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  for (const level of ["subjectBlock", "binding", "bindings array"] as const) {
+    it(`refuses a Proxy ${level} before inspecting its traps`, async () => {
+      const candidate = input();
+      const trap = vi.fn(() => { throw new Error(secret); });
+      const handler = { get: trap, ownKeys: trap, getOwnPropertyDescriptor: trap, getPrototypeOf: trap };
+      if (level === "subjectBlock") candidate.subjectBlock = new Proxy(candidate.subjectBlock, handler);
+      if (level === "binding") candidate.bindings[0] = new Proxy(candidate.bindings[0], handler);
+      if (level === "bindings array") candidate.bindings = new Proxy(candidate.bindings, handler);
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+      expect(trap).not.toHaveBeenCalled();
+      expect(failure.signCalls).toBe(0);
+    });
+  }
+  for (const level of ["subjectBlock", "bindings"] as const) {
+    it(`captures ${level} before the signing clock can mutate caller input`, async () => {
+      const candidate = input();
+      const clock = vi.fn(() => {
+        if (level === "subjectBlock") {
+          candidate.subjectBlock.committedProgramHash = changedByte(s2ProgramHash);
+          candidate.subjectBlock.operatorSettlementAddress = otherRecipient.toLowerCase() as Address;
+          candidate.subjectBlock.targetSystemIdentity = word("mutated-target");
+        } else {
+          candidate.bindings[0].valueRef = word("mutated-value");
+          candidate.bindings[0].requirementIdHash = word("mutated-requirement");
+          candidate.bindings.push({ ...candidate.bindings[0] });
+        }
+        return now;
+      });
+      const bound = await loadOperatorKey(path, 84532, { now, clock, terms: terms() });
+      await accepts(candidate, bound);
+      expect(clock).toHaveBeenCalledTimes(1);
+      expect(failure.signCalls).toBe(1);
+    });
+  }
+  it("maps producer refusals to bad_input without printing exceptions or secret input", async () => {
+    const candidate = input();
+    candidate.bindings[0].valueRef = secret;
+    candidate.subjectBlock.integrityGrade = secret;
+    const spies = (["log", "info", "warn", "error", "debug"] as const)
+      .map((method) => vi.spyOn(console, method).mockImplementation(() => {}));
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    expect(failure.signCalls).toBe(0);
   });
   it("refuses sparse arrays", async () => {
     const candidate = input();

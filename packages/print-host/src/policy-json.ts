@@ -4,7 +4,7 @@ import { isAbsolute } from "node:path";
 import { z } from "zod";
 import type { JobPolicyFields, UnitConfig } from "@pcc/contracts/vnext";
 import type { HostTerms, JobPolicyAcceptanceInput } from "./keys.js";
-import { OperatorSigningError, validateHostTerms } from "./operator-signing.js";
+import { computeJobPolicyCommitments, OperatorSigningError, validateHostTerms } from "./operator-signing.js";
 
 export type PolicyJsonErrorCode = "not_absolute" | "not_found" | "symlink" | "not_regular_file"
   | "bad_owner" | "bad_mode" | "too_large" | "changed_during_open" | "read_failed" | "bad_json";
@@ -39,7 +39,22 @@ const unitSchema = z.object({
   reclaimAt: decimal, compositionSchemaVersion: integer, compositionRoot: bytes32,
   payouts: z.array(z.object({ recipient: address, amount: decimal }).strict()),
 }).strict();
-const inputSchema = z.object({ policy: policySchema, units: z.array(unitSchema) }).strict();
+// The evidence producer admits these values, including its exact subject and
+// binding keys; a local schema must not strip unknown evidence fields.
+const inputSchema = z.object({
+  policy: policySchema, units: z.array(unitSchema), subjectBlock: z.unknown(), bindings: z.unknown(),
+}).strict();
+const subjectPinsSchema = z.object({
+  payer: bytes32.optional(), operatorPrincipal: bytes32.optional(),
+  operatorSettlementAddress: address.optional(), authorizedTuplesRoot: bytes32.optional(),
+  expertSetRoot: bytes32.optional(), executorSetRoot: bytes32.optional(),
+  expectedRecipient: bytes32.optional(), targetSystemIdentity: bytes32.optional(),
+  committedProgramHash: bytes32, recipeRef: bytes32.optional(), sampleManifestRef: bytes32.optional(),
+  childrenRoot: bytes32.optional(), operatingEnvelopeHash: bytes32.optional(),
+  expectedRouteArea: bytes32.optional(), expectedLocationHash: bytes32.optional(),
+  captureNonceAnchor: bytes32.optional(), challengeAnchor: bytes32.optional(),
+  integrityGrade: integer.max(255).optional(),
+}).strict();
 const termsSchema = z.object({
   chainId: z.union([z.literal(84532), z.literal(31337)]),
   factory: address, implementation: address,
@@ -48,6 +63,7 @@ const termsSchema = z.object({
   allowedFeeRecipients: z.array(address), allowedPayoutRecipients: z.array(address).nonempty(),
   operatorPayoutRecipient: address, maxPassThrough: decimal,
   maxUnits: integer, maxAcceptanceSeconds: integer,
+  termsHash: bytes32, subjectPins: subjectPinsSchema, bindingsRoot: bytes32.optional(),
 }).strict();
 
 async function readJson(path: string, maxBytes: number, expectedUid?: number): Promise<unknown> {
@@ -102,7 +118,11 @@ export async function loadJobPolicyInput(path: string): Promise<JobPolicyAccepta
   // These annotations bind the JSON schema to the compiler's exported types.
   const policy: JobPolicyFields = parsed.data.policy;
   const units: UnitConfig[] = parsed.data.units;
-  return { policy, units };
+  const input = {
+    policy, units, subjectBlock: parsed.data.subjectBlock, bindings: parsed.data.bindings,
+  } as JobPolicyAcceptanceInput;
+  computeJobPolicyCommitments(input);
+  return input;
 }
 
 export async function loadHostTerms(path: string, options: HostTermsLoadOptions = {}): Promise<HostTerms> {

@@ -70,6 +70,33 @@ must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
 its entire `n`; the cap applies across the policy, including all its units.
 Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
 864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
+The file also requires a non-zero bytes32 `termsHash` and a `subjectPins` object.
+Pins may contain only the 18 `SubjectBlockFields` keys from `@pcc/spec`, with exact
+bytes32 values, an address for `operatorSettlementAddress`, or an integer number
+for `integrityGrade` (0–255). `committedProgramHash` is required. An
+`operatorSettlementAddress` pin must equal `operatorPayoutRecipient`, compared
+case-insensitively. Optional bytes32 `bindingsRoot` pins the computed bindings root.
+Unknown fields, accessors, and non-plain terms or pin objects are refused with
+`bad_terms`.
+
+Thursday's PRINT unit uses these pinned values in the terms file:
+
+```json
+{
+  "termsHash": "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7",
+  "subjectPins": {
+    "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a"
+  },
+  "reclaimMaxSeconds": 1814400
+}
+```
+
+These fields extend the complete host terms described above. For Thursday,
+`reclaimMaxSeconds` must be at least 1814400 because `reclaimAt` is policy creation
+plus 21 days. The pinned `termsHash` is the hash of economics' terms document;
+the host's tier limits, payout allowlist, and other local terms are configuration
+and are not its preimage. The remaining subject fields arrive with the prepared
+policy; this example does not supply an oracle subject-block golden vector.
 Terms for one chain never load for a key bound to another chain; the loader
 refuses them before reading the key file. Loaders validate and freeze all terms
 at key load; a key loaded without terms
@@ -83,8 +110,16 @@ Readers open without following links or blocking on FIFOs, recheck the opened
 file's identity, type and size (plus terms ownership and permissions), read bounded
 bytes, and erase their buffers after parsing.
 
-The strict input JSON is `{ "policy": { ... }, "units": [ ... ] }`, using the
-exported `JobPolicyFields` and `UnitConfig` shapes from `@pcc/contracts/vnext`.
+The strict input JSON is
+`{ "policy": { ... }, "units": [ ... ], "subjectBlock": { ... }, "bindings": [ ... ] }`,
+using the exported `JobPolicyFields` and `UnitConfig` shapes from
+`@pcc/contracts/vnext` and `SubjectBlockFields` and `SubjectBinding` from `@pcc/spec`.
+The subject block must have exactly its 18 fields. Bindings must have exactly
+`planUnitKey`, `requirementIdHash`, `sourceKind`, `propositionKind`, and `valueRef`;
+duplicate `requirementIdHash` values are refused. The producer requires lowercase
+bytes32 values and settlement addresses. Build each binding's `planUnitKey` with
+`computePlanUnitKey(unitOrdinal, milestoneIndex, stepId)`. Producer admission
+errors are reported only as `bad_input`.
 Every compiler `bigint` field is an unsigned decimal string: policy `chainId`,
 `policyNonce`, and `expiry`; unit `milestoneIndex`, `g`, `f`, `n`, and `reclaimAt`;
 and each payout's `amount`. Tier, fee-basis-point, and composition-version fields
@@ -117,8 +152,22 @@ acceptance expiry must be in the future and no farther away than
 `maxAcceptanceSeconds`. The signature uses the compiler's `jobPolicyTypedData`
 unchanged; its verifying contract is `policy.escrow`.
 
+The host also requires `policy.termsHash` to match the loaded pin
+(`terms_hash_mismatch`), checks every subject pin (`subject_pin_mismatch`), and
+requires `subjectBlock.operatorSettlementAddress` to equal the configured payout
+recipient (`settlement_address_mismatch`). It computes `subjectBlockHash` with
+`computeSubjectBlockHash`, `bindingsRoot` with `computeBindingsRoot`, and
+`acceptedPolicyDigest` with
+`computeAcceptedPolicyDigest({ termsHash, subjectBlockHash, bindingsRoot })`, all
+from `@pcc/spec`. A configured root pin that differs gives
+`bindings_root_mismatch`; a policy digest that differs gives
+`accepted_policy_mismatch`. Every unit must have `compositionSchemaVersion: 0`
+and an all-zero `compositionRoot`, otherwise `composition_not_supported`.
+All these refusals happen before signing.
+
 Success creates a new mode-0644 JSON file containing exactly `operator`, `chainId`
-(a number), `escrow`, `acceptanceDigest`, and `signature`. Existing output files
+(a number), `escrow`, `acceptanceDigest`, `signature`, `subjectBlockHash`,
+`bindingsRoot`, and `acceptedPolicyDigest`. Existing output files
 are refused. If chmod, writing or closing fails after creation, the command removes
 the file it created so the operator can retry. This command prints no policy or private key data; on failure it
 prints only a closed error code.

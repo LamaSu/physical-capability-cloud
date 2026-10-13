@@ -10,6 +10,10 @@ import {
   acceptanceDigest, buildUnitConfig, domainSeparator, jobPolicyHash, policySalt, predictEscrow, prePolicyRoot,
   settlementUnitId, unitsRoot, type JobPolicyFields,
 } from "@pcc/contracts/vnext";
+import {
+  computeAcceptedPolicyDigest, computeBindingsRoot, computePlanUnitKey, computeSubjectBlockHash,
+  type SubjectBinding, type SubjectBlockFields,
+} from "@pcc/spec";
 import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "../src/policy-json.js";
@@ -31,11 +35,17 @@ afterEach(async () => {
 
 const address = (byte: string) => getAddress(`0x${byte.repeat(20)}`);
 const word = (label: string): Hex => `0x${createHash("sha256").update(label).digest("hex")}`;
+const thursdayTermsHash: Hex = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+const s2ProgramHash: Hex = "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a";
+const zeroWord = (): Hex => `0x${"00".repeat(32)}`;
+const oneByteOff = (value: Hex): Hex => `${value.slice(0, -2)}${value.endsWith("00") ? "01" : "00"}` as Hex;
 const json = (value: unknown): string => JSON.stringify(value, (_key, field: unknown) =>
   typeof field === "bigint" ? field.toString() : field);
 type EditableInput = Record<string, unknown> & {
   policy: Record<string, unknown>;
   units: Array<Record<string, unknown> & { payouts: Array<Record<string, unknown>> }>;
+  subjectBlock: Record<string, unknown>;
+  bindings: Array<Record<string, unknown>>;
 };
 const malformedTermsChainCases: Array<[string, (value: Record<string, unknown>) => void]> = [
   ["missing chainId", (value) => { delete value.chainId; }],
@@ -53,6 +63,15 @@ function bindEscrow(input: { policy: JobPolicyFields; units: ReturnType<typeof b
     chainId: input.policy.chainId, escrow: input.policy.escrow, jobIdHash: input.policy.jobIdHash,
     milestoneIndex: unit.milestoneIndex, stepId: unit.stepId,
   })));
+}
+
+function bindAccepted(input: { policy: JobPolicyFields; subjectBlock: SubjectBlockFields; bindings: SubjectBinding[] }) {
+  const subjectBlockHash = computeSubjectBlockHash(input.subjectBlock);
+  const bindingsRoot = computeBindingsRoot(input.bindings);
+  input.policy.acceptedPolicyDigest = computeAcceptedPolicyDigest({
+    termsHash: input.policy.termsHash, subjectBlockHash, bindingsRoot,
+  });
+  return { subjectBlockHash, bindingsRoot, acceptedPolicyDigest: input.policy.acceptedPolicyDigest };
 }
 
 function capture() {
@@ -87,20 +106,37 @@ async function fixture() {
   const now = BigInt(Math.floor(Date.now() / 1000));
   const unit = buildUnitConfig({
     milestoneIndex: 0n, stepId: word("cli-step"), requiredTier: 1,
-    g: 1000n, feeBps: 100, feeRecipient: address("cc"), reclaimAt: now + 864300n,
-    compositionSchemaVersion: 1, compositionRoot: word("cli-composition"),
+    g: 1000n, feeBps: 100, feeRecipient: address("cc"), reclaimAt: now + 1814400n,
+    compositionSchemaVersion: 0, compositionRoot: zeroWord(),
     payouts: [{ recipient: address("dd"), amount: 990n }],
   });
   const policy: JobPolicyFields = {
     chainId: 84532n, factory: address("aa"), implementation: address("bb"),
     escrow: address("ee"), payer: address("dd"), operator: generated.identity.operatorAddress as `0x${string}`,
-    jobIdHash: word("cli-job"), termsHash: word("cli-terms"), policyNonce: 0n,
+    jobIdHash: word("cli-job"), termsHash: thursdayTermsHash, policyNonce: 0n,
     prePolicyRoot: prePolicyRoot([unit]), unitsRoot: unitsRoot([settlementUnitId({
       chainId: 84532n, escrow: address("ee"), jobIdHash: word("cli-job"),
       milestoneIndex: unit.milestoneIndex, stepId: unit.stepId,
     })]), expiry: now + 300n, acceptedPolicyDigest: word("cli-accepted"),
   };
-  const input = { policy, units: [unit] };
+  // Synthetic fields exercise the producer; this is not an oracle golden vector.
+  const subjectBlock: SubjectBlockFields = {
+    payer: word("cli-payer"), operatorPrincipal: word("cli-operator-principal"),
+    operatorSettlementAddress: address("dd").toLowerCase() as `0x${string}`,
+    authorizedTuplesRoot: word("cli-tuples"), expertSetRoot: word("cli-experts"),
+    executorSetRoot: word("cli-executors"), expectedRecipient: word("cli-recipient"),
+    targetSystemIdentity: word("cli-system"), committedProgramHash: s2ProgramHash,
+    recipeRef: word("cli-recipe"), sampleManifestRef: word("cli-samples"),
+    childrenRoot: word("cli-children"), operatingEnvelopeHash: word("cli-envelope"),
+    expectedRouteArea: word("cli-route"), expectedLocationHash: word("cli-location"),
+    captureNonceAnchor: word("cli-capture"), challengeAnchor: word("cli-challenge"), integrityGrade: 1,
+  };
+  const bindings: SubjectBinding[] = [{
+    planUnitKey: computePlanUnitKey(0, unit.milestoneIndex, unit.stepId),
+    requirementIdHash: word("cli-requirement"), sourceKind: 1, propositionKind: 1, valueRef: word("cli-value"),
+  }];
+  const input = { policy, units: [unit], subjectBlock, bindings };
+  const commitments = bindAccepted(input);
   bindEscrow(input);
   const terms = {
     chainId: 84532,
@@ -110,16 +146,17 @@ async function fixture() {
     maxUnits: 2, maxAcceptanceSeconds: 600,
     factory: policy.factory, implementation: policy.implementation,
     operatorPayoutRecipient: address("dd"), maxPassThrough: 0n,
+    termsHash: thursdayTermsHash, subjectPins: { committedProgramHash: s2ProgramHash },
   };
   await writeFile(termsFile, json(terms), { mode: 0o600 });
   await writeFile(inputFile, json(input), { mode: 0o600 });
   const argv = ["sign-policy", "--config", configFile, "--terms", termsFile,
     "--input", inputFile, "--out", outputFile];
-  return { root, generated, configFile, termsFile, inputFile, outputFile, argv, input, terms };
+  return { root, generated, configFile, termsFile, inputFile, outputFile, argv, input, terms, commitments };
 }
 
 describe("print-host sign-policy CLI", () => {
-  it("writes only the five public acceptance fields at mode 0644 with compiler digest parity", async () => {
+  it("writes the public acceptance fields and three producer commitments at mode 0644 with compiler digest parity", async () => {
     const current = await fixture();
     // Vitest workers cannot change process.umask. Force the restrictive creation
     // mode that a 077 umask produces, so chmod(0644) is essential to this test.
@@ -135,11 +172,17 @@ describe("print-host sign-policy CLI", () => {
     expect(captured.output()).toEqual({ stdout: "", stderr: "" });
     const output = JSON.parse(await readFile(current.outputFile, "utf8")) as {
       operator: `0x${string}`; chainId: number; escrow: `0x${string}`; acceptanceDigest: Hex; signature: Hex;
+      subjectBlockHash: Hex; bindingsRoot: Hex; acceptedPolicyDigest: Hex;
     };
-    expect(Object.keys(output).sort()).toEqual(["acceptanceDigest", "chainId", "escrow", "operator", "signature"]);
+    expect(Object.keys(output).sort()).toEqual([
+      "acceptanceDigest", "acceptedPolicyDigest", "bindingsRoot", "chainId", "escrow", "operator", "signature", "subjectBlockHash",
+    ]);
     expect(output.operator).toBe(current.generated.identity.operatorAddress);
     expect(output.chainId).toBe(84532);
     expect(output.escrow).toBe(current.input.policy.escrow);
+    expect(output.subjectBlockHash).toBe(current.commitments.subjectBlockHash);
+    expect(output.bindingsRoot).toBe(current.commitments.bindingsRoot);
+    expect(output.acceptedPolicyDigest).toBe(current.commitments.acceptedPolicyDigest);
     expect(output.acceptanceDigest).toBe(acceptanceDigest(
       domainSeparator(current.input.policy.chainId, current.input.policy.escrow), jobPolicyHash(current.input.policy),
     ));
@@ -173,6 +216,59 @@ describe("print-host sign-policy CLI", () => {
     await expect(stat(current.outputFile)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  const commitmentRefusalCases: Array<[
+    string, (current: Awaited<ReturnType<typeof fixture>>) => void,
+  ]> = [
+    ["terms_hash_mismatch", (current) => {
+      current.input.policy.termsHash = oneByteOff(current.input.policy.termsHash);
+      bindAccepted(current.input);
+      bindEscrow(current.input);
+    }],
+    ["subject_pin_mismatch", (current) => {
+      current.input.subjectBlock.committedProgramHash = oneByteOff(s2ProgramHash);
+      bindAccepted(current.input);
+      bindEscrow(current.input);
+    }],
+    ["settlement_address_mismatch", (current) => {
+      current.input.subjectBlock.operatorSettlementAddress = address("de").toLowerCase() as `0x${string}`;
+      bindAccepted(current.input);
+      bindEscrow(current.input);
+    }],
+    ["bindings_root_mismatch", (current) => {
+      Object.assign(current.terms, { bindingsRoot: oneByteOff(current.commitments.bindingsRoot) });
+    }],
+    ["accepted_policy_mismatch", (current) => {
+      current.input.policy.acceptedPolicyDigest = oneByteOff(current.input.policy.acceptedPolicyDigest);
+      bindEscrow(current.input);
+    }],
+    ["composition_not_supported", (current) => {
+      current.input.units[0] = buildUnitConfig({
+        ...current.input.units[0], compositionSchemaVersion: 1, compositionRoot: word("cli-composition"),
+      });
+      bindEscrow(current.input);
+    }],
+  ];
+  it.each(commitmentRefusalCases)("prints only %s and creates no signature artifact", async (code, mutate) => {
+    const current = await fixture();
+    mutate(current);
+    await writeFile(current.inputFile, json(current.input));
+    await writeFile(current.termsFile, json(current.terms));
+    const captured = capture();
+    expect(await main(current.argv, captured.io)).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: `${code}\n` });
+    await expect(stat(current.outputFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("signs with an exact bindings root pin and a checksum settlement address pin", async () => {
+    const current = await fixture();
+    Object.assign(current.terms, { bindingsRoot: current.commitments.bindingsRoot });
+    Object.assign(current.terms.subjectPins, { operatorSettlementAddress: address("dd") });
+    await writeFile(current.termsFile, json(current.terms));
+    const captured = capture();
+    expect(await main(current.argv, captured.io)).toBe(0);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "" });
+  });
+
   it.each([[84532, 31337], [31337, 84532]] as const)(
     "refuses terms chain %s for config chain %s without creating output", async (termsChainId, configChainId) => {
       const current = await fixture();
@@ -200,6 +296,12 @@ describe("print-host sign-policy CLI", () => {
     ["a negative decimal string", (value) => { value.units[0].g = "-1000"; }],
     ["a fractional number field", (value) => { value.units[0].requiredTier = 1.5; }],
     ["a missing policy field", (value) => { delete value.policy.escrow; }],
+    ["an extra subject field", (value) => { value.subjectBlock.personal = "private-subject-value"; }],
+    ["a missing subject field", (value) => { delete value.subjectBlock.challengeAnchor; }],
+    ["a duplicate requirement hash", (value) => { value.bindings.push({ ...value.bindings[0] }); }],
+    ["an extra binding field", (value) => { value.bindings[0].personal = "private-binding-value"; }],
+    ["missing subjectBlock", (value) => { delete (value as Record<string, unknown>).subjectBlock; }],
+    ["missing bindings", (value) => { delete (value as Record<string, unknown>).bindings; }],
   ];
   it.each(malformedInputCases)("strictly refuses %s without printing values", async (_name, mutate) => {
     const current = await fixture();
@@ -232,6 +334,22 @@ describe("print-host sign-policy CLI", () => {
     ["missing allowedPayoutRecipients", (value) => { delete value.allowedPayoutRecipients; }],
     ["missing factory", (value) => { delete value.factory; }],
     ["missing implementation", (value) => { delete value.implementation; }],
+    ["missing termsHash", (value) => { delete value.termsHash; }],
+    ["zero termsHash", (value) => { value.termsHash = zeroWord(); }],
+    ["malformed termsHash", (value) => { value.termsHash = "private-terms-hash"; }],
+    ["missing subjectPins", (value) => { delete value.subjectPins; }],
+    ["subjectPins lacking committedProgramHash", (value) => { value.subjectPins = {}; }],
+    ["an unknown subject pin", (value) => {
+      value.subjectPins = { committedProgramHash: s2ProgramHash, personal: "private-pin-value" };
+    }],
+    ["a malformed program pin", (value) => { value.subjectPins = { committedProgramHash: "private-program" }; }],
+    ["a fractional integrity grade pin", (value) => {
+      value.subjectPins = { committedProgramHash: s2ProgramHash, integrityGrade: 1.5 };
+    }],
+    ["a settlement pin differing from the configured recipient", (value) => {
+      value.subjectPins = { committedProgramHash: s2ProgramHash, operatorSettlementAddress: address("de") };
+    }],
+    ["a malformed bindings root", (value) => { value.bindingsRoot = "private-bindings-root"; }],
     ["zero factory", (value) => { value.factory = address("00"); }],
     ["zero implementation", (value) => { value.implementation = address("00"); }],
     ["missing operatorPayoutRecipient", (value) => { delete value.operatorPayoutRecipient; }],
@@ -332,6 +450,26 @@ async function expectJsonFailure(operation: () => Promise<unknown>, code: string
 }
 
 describe("policy JSON file boundaries", () => {
+  it.each([
+    ["termsHash", (terms: Record<string, unknown>) => { delete terms.termsHash; }],
+    ["committedProgramHash pin", (terms: Record<string, unknown>) => { terms.subjectPins = {}; }],
+  ] as const)("refuses a missing %s at terms load", async (_field, mutate) => {
+    const current = await fixture();
+    const terms = JSON.parse(json(current.terms));
+    mutate(terms);
+    await writeFile(current.termsFile, json(terms));
+    await expect(loadHostTerms(current.termsFile)).rejects.toMatchObject({
+      name: "OperatorSigningError", code: "bad_terms", message: "bad_terms",
+    });
+  });
+
+  it("loads all 18 subject pins without dropping any field", async () => {
+    const current = await fixture();
+    const terms = { ...current.terms, subjectPins: current.input.subjectBlock };
+    await writeFile(current.termsFile, json(terms));
+    expect((await loadHostTerms(current.termsFile)).subjectPins).toEqual(current.input.subjectBlock);
+  });
+
   it.each(malformedTermsChainCases)("refuses %s in terms JSON with bad_terms", async (_name, mutate) => {
     const current = await fixture();
     const terms = JSON.parse(json(current.terms));

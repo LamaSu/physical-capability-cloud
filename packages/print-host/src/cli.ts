@@ -7,6 +7,7 @@ import { checkHostConfig, HostConfigError, loadHostConfig } from "./config.js";
 import { generateHostKeys, KeyGenerationError } from "./keygen.js";
 import { KeyFileError, loadOperatorKey, OperatorSigningError } from "./keys.js";
 import { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "./policy-json.js";
+import { computeJobPolicyCommitments } from "./operator-signing.js";
 import { SecretFileError } from "./secret-file.js";
 
 export interface CliIo {
@@ -40,10 +41,12 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
       loadJobPolicyInput(flags.get("--input")!),
     ]);
     const key = await loadOperatorKey(config.keys.operatorKeyFile, config.chain.chainId, { terms });
+    const commitments = computeJobPolicyCommitments(input);
     const signature = await key.signJobPolicyAcceptance(input);
     const output = {
       operator: key.address, chainId: config.chain.chainId, escrow: input.policy.escrow,
       acceptanceDigest: acceptanceDigest(domainSeparator(input.policy.chainId, input.policy.escrow), jobPolicyHash(input.policy)),
+      ...commitments,
       signature,
     };
     let file;

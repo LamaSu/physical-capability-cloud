@@ -1,4 +1,9 @@
 import { encodeFunctionData, getAddress, isAddress, zeroAddress, zeroHash, type Address, type Hex } from "viem";
+import { types as utilTypes } from "node:util";
+import {
+  computeAcceptedPolicyDigest, computeBindingsRoot, computeSubjectBlockHash,
+  type SubjectBinding, type SubjectBlockFields,
+} from "@pcc/spec";
 import {
   VNEXT, buildUnitConfig, computeFee, jobPolicyTypedData, policySalt, predictEscrow, prePolicyRoot, settlementUnitId, unitsRoot,
   type JobPolicyFields, type UnitConfig,
@@ -12,7 +17,9 @@ export type OperatorSigningErrorCode = "bad_input" | "bad_escrow" | "bad_bytes32
   "units_count" | "gross_below_min" | "tier_not_allowed" | "reclaim_too_soon" |
   "reclaim_too_late" | "fee_too_high" | "fee_recipient_not_allowed" |
   "payout_recipient_not_allowed" | "pass_through_too_high" | "fee_split_mismatch" | "payout_sum_mismatch" |
-  "acceptance_expired" | "acceptance_too_long";
+  "acceptance_expired" | "acceptance_too_long" | "terms_hash_mismatch" |
+  "subject_pin_mismatch" | "settlement_address_mismatch" | "bindings_root_mismatch" |
+  "accepted_policy_mismatch" | "composition_not_supported";
 
 /** Signing errors retain only a closed code, never inputs or library exceptions. */
 export class OperatorSigningError extends Error {
@@ -51,6 +58,9 @@ export interface HostTerms {
   readonly factory: Address;
   readonly implementation: Address;
   readonly operatorPayoutRecipient: Address;
+  readonly termsHash: Hex;
+  readonly subjectPins: Readonly<Partial<SubjectBlockFields> & Pick<SubjectBlockFields, "committedProgramHash">>;
+  readonly bindingsRoot?: Hex;
   readonly maxPassThrough: bigint;
   readonly minG: bigint;
   readonly allowedRequiredTiers: readonly number[];
@@ -66,7 +76,17 @@ export interface HostTerms {
 export interface JobPolicyAcceptanceInput {
   policy: JobPolicyFields;
   units: UnitConfig[];
+  subjectBlock: SubjectBlockFields;
+  bindings: SubjectBinding[];
 }
+
+// Admission keys only; the field types and digest encoding belong to @pcc/spec.
+const subjectKeys = ["payer", "operatorPrincipal", "operatorSettlementAddress", "authorizedTuplesRoot",
+  "expertSetRoot", "executorSetRoot", "expectedRecipient", "targetSystemIdentity", "committedProgramHash",
+  "recipeRef", "sampleManifestRef", "childrenRoot", "operatingEnvelopeHash", "expectedRouteArea",
+  "expectedLocationHash", "captureNonceAnchor", "challengeAnchor", "integrityGrade"] as const satisfies readonly (keyof SubjectBlockFields)[];
+type AssertSubjectKeys<T extends never> = T;
+type SubjectKeysComplete = AssertSubjectKeys<Exclude<keyof SubjectBlockFields, typeof subjectKeys[number]>>;
 
 // Frozen recursively: an importer cannot change what the signing closure encodes.
 export const submitEvidenceAbiItem = Object.freeze({
@@ -96,6 +116,7 @@ const d1Types = Object.freeze({
 } as const);
 
 const uint256Max = (1n << 256n) - 1n;
+const isProxy = utilTypes.isProxy;
 
 /** Snapshot data properties once. Reject extras, inherited fields and accessors. */
 function inputRecord(input: unknown, fields: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -137,6 +158,45 @@ function inputArray(input: unknown): unknown[] {
     }
     return snapshot;
   } catch { throw new OperatorSigningError("bad_input"); }
+}
+
+/** Copy data once without selecting fields: the producer admits the complete shape. */
+function snapshotProducerRecord(input: unknown): Record<string, unknown> {
+  try {
+    if (input === null || typeof input !== "object" || isProxy(input)) {
+      throw new OperatorSigningError("bad_input");
+    }
+    const prototype = Object.getPrototypeOf(input);
+    if (prototype !== null && prototype !== Object.prototype) throw new OperatorSigningError("bad_input");
+    const snapshot = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(input)) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, key);
+      if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw new OperatorSigningError("bad_input");
+      Object.defineProperty(snapshot, key, { value: descriptor.value, enumerable: true });
+    }
+    return snapshot;
+  } catch { throw new OperatorSigningError("bad_input"); }
+}
+
+function snapshotProducerBindings(input: unknown): SubjectBinding[] {
+  if (isProxy(input)) throw new OperatorSigningError("bad_input");
+  return inputArray(input).map((binding) => snapshotProducerRecord(binding) as unknown as SubjectBinding);
+}
+
+function policyCommitments(input: JobPolicyAcceptanceInput) {
+  try {
+    const subjectBlockHash = computeSubjectBlockHash(input.subjectBlock);
+    const bindingsRoot = computeBindingsRoot(input.bindings);
+    const acceptedPolicyDigest = computeAcceptedPolicyDigest({
+      termsHash: input.policy.termsHash.toLowerCase() as Hex, subjectBlockHash, bindingsRoot,
+    });
+    return { subjectBlockHash, bindingsRoot, acceptedPolicyDigest };
+  } catch { throw new OperatorSigningError("bad_input"); }
+}
+
+/** Hash the same strict snapshots the signer uses, for the CLI's public hand-off. */
+export function computeJobPolicyCommitments(input: JobPolicyAcceptanceInput) {
+  return policyCommitments(snapshotJobPolicyAcceptanceInput(input));
 }
 
 function escrowAddress(value: unknown): Address {
@@ -183,17 +243,41 @@ function numberField(value: unknown, max: number): number {
   return Number(unsignedInteger(value, BigInt(max)));
 }
 
+function pinGrade(value: unknown): SubjectBlockFields["integrityGrade"] {
+  if (typeof value === "string") {
+    if (!/^(0|[1-9][0-9]{0,2})$/.test(value) || BigInt(value) > 255n) throw new OperatorSigningError("bad_terms");
+    return value;
+  }
+  if (typeof value === "number" && Object.is(value, -0)) throw new OperatorSigningError("bad_terms");
+  unsignedInteger(value, 255n);
+  return value as number | bigint;
+}
+
 /** Strict validation also copies and freezes the lists, closing mutation after key load. */
 export function validateHostTerms(input: HostTerms): HostTerms {
   try {
-    const r = inputRecord(input, ["chainId", "factory", "implementation", "operatorPayoutRecipient", "maxPassThrough",
+    const r = inputRecord(input, ["chainId", "factory", "implementation", "operatorPayoutRecipient", "termsHash", "subjectPins", "maxPassThrough",
       "minG", "allowedRequiredTiers", "reclaimMinSeconds", "reclaimMaxSeconds",
-      "maxFeeBps", "allowedFeeRecipients", "allowedPayoutRecipients", "maxUnits", "maxAcceptanceSeconds"]);
+      "maxFeeBps", "allowedFeeRecipients", "allowedPayoutRecipients", "maxUnits", "maxAcceptanceSeconds"], ["bindingsRoot"]);
     const chainId = r.chainId;
     if (chainId !== 84532 && chainId !== 31337) throw new OperatorSigningError("bad_terms");
     const factory = policyAddress(r.factory);
     const implementation = policyAddress(r.implementation);
     const operatorPayoutRecipient = policyAddress(r.operatorPayoutRecipient);
+    const termsHash = policyBytes32(r.termsHash).toLowerCase() as Hex;
+    if (termsHash === zeroHash) throw new OperatorSigningError("bad_terms");
+    const pins = snapshotProducerRecord(r.subjectPins);
+    const pinRecord = inputRecord(pins, ["committedProgramHash"], subjectKeys.filter((key) => key !== "committedProgramHash"));
+    const subjectPins: Record<string, unknown> = Object.create(null);
+    for (const [field, value] of Object.entries(pinRecord)) {
+      subjectPins[field] = field === "integrityGrade" ? pinGrade(value)
+        : field === "operatorSettlementAddress" ? policyAddress(value) : policyBytes32(value).toLowerCase();
+    }
+    if (subjectPins.operatorSettlementAddress !== undefined
+      && (subjectPins.operatorSettlementAddress as Address).toLowerCase() !== operatorPayoutRecipient.toLowerCase()) {
+      throw new OperatorSigningError("bad_terms");
+    }
+    const bindingsRoot = Object.hasOwn(r, "bindingsRoot") ? policyBytes32(r.bindingsRoot).toLowerCase() as Hex : undefined;
     const maxPassThrough = bigintField(r.maxPassThrough);
     const minG = bigintField(r.minG);
     const allowedRequiredTiers = inputArray(r.allowedRequiredTiers).map((value) => numberField(value, VNEXT.MAX_TIER));
@@ -214,7 +298,9 @@ export function validateHostTerms(input: HostTerms): HostTerms {
       || reclaimMinSeconds > reclaimMaxSeconds || maxUnits === 0 || maxAcceptanceSeconds === 0) {
       throw new OperatorSigningError("bad_terms");
     }
-    return Object.freeze({ chainId, factory, implementation, operatorPayoutRecipient, maxPassThrough,
+    return Object.freeze({ chainId, factory, implementation, operatorPayoutRecipient, termsHash,
+      subjectPins: Object.freeze(subjectPins) as HostTerms["subjectPins"],
+      ...(bindingsRoot === undefined ? {} : { bindingsRoot }), maxPassThrough,
       minG, allowedRequiredTiers: Object.freeze(allowedRequiredTiers), reclaimMinSeconds,
       reclaimMaxSeconds, maxFeeBps, allowedFeeRecipients: Object.freeze(allowedFeeRecipients),
       allowedPayoutRecipients: Object.freeze(allowedPayoutRecipients), maxUnits, maxAcceptanceSeconds });
@@ -223,7 +309,7 @@ export function validateHostTerms(input: HostTerms): HostTerms {
 
 /** Runtime schema uses the compiler's types; no local JobPolicy or UnitConfig type is maintained. */
 export function snapshotJobPolicyAcceptanceInput(input: JobPolicyAcceptanceInput): JobPolicyAcceptanceInput {
-  const r = inputRecord(input, ["policy", "units"]);
+  const r = inputRecord(input, ["policy", "units", "subjectBlock", "bindings"]);
   const p = inputRecord(r.policy, ["chainId", "factory", "implementation", "escrow", "payer", "operator",
     "jobIdHash", "termsHash", "policyNonce", "prePolicyRoot", "unitsRoot", "expiry", "acceptedPolicyDigest"]);
   const policy: JobPolicyFields = {
@@ -248,12 +334,16 @@ export function snapshotJobPolicyAcceptanceInput(input: JobPolicyAcceptanceInput
       }),
     };
   });
-  return { policy, units };
+  const subjectBlock = snapshotProducerRecord(r.subjectBlock) as unknown as SubjectBlockFields;
+  const bindings = snapshotProducerBindings(r.bindings);
+  return { policy, units, subjectBlock, bindings };
 }
 
 export function prepareJobPolicyAcceptance(input: JobPolicyAcceptanceInput, chainId: OperatorChainId,
   operator: Address, terms: HostTerms | undefined, clock: () => Date) {
-  const { policy, units } = snapshotJobPolicyAcceptanceInput(input);
+  const snapshot = snapshotJobPolicyAcceptanceInput(input);
+  const { policy, units, subjectBlock } = snapshot;
+  const commitments = policyCommitments(snapshot);
   let nowMs: bigint;
   try {
     const time = Date.prototype.getTime.call(clock());
@@ -271,9 +361,29 @@ export function prepareJobPolicyAcceptance(input: JobPolicyAcceptanceInput, chai
     || policy.implementation.toLowerCase() !== terms.implementation.toLowerCase()) {
     throw new OperatorSigningError("deployment_mismatch");
   }
+  if (policy.termsHash.toLowerCase() !== terms.termsHash.toLowerCase()) throw new OperatorSigningError("terms_hash_mismatch");
+  for (const field of Object.keys(terms.subjectPins) as (keyof SubjectBlockFields)[]) {
+    const pin = terms.subjectPins[field];
+    const value = subjectBlock[field];
+    const matches = field === "integrityGrade" ? BigInt(value) === BigInt(pin!)
+      : (value as string).toLowerCase() === (pin as string).toLowerCase();
+    if (!matches) throw new OperatorSigningError("subject_pin_mismatch");
+  }
+  if (subjectBlock.operatorSettlementAddress.toLowerCase() !== terms.operatorPayoutRecipient.toLowerCase()) {
+    throw new OperatorSigningError("settlement_address_mismatch");
+  }
+  if (terms.bindingsRoot !== undefined && commitments.bindingsRoot !== terms.bindingsRoot.toLowerCase()) {
+    throw new OperatorSigningError("bindings_root_mismatch");
+  }
+  if (commitments.acceptedPolicyDigest !== policy.acceptedPolicyDigest.toLowerCase()) {
+    throw new OperatorSigningError("accepted_policy_mismatch");
+  }
   if (units.length < 1 || units.length > terms.maxUnits) throw new OperatorSigningError("units_count");
   let passThrough = 0n;
   for (const unit of units) {
+    if (unit.compositionSchemaVersion !== 0 || unit.compositionRoot.toLowerCase() !== zeroHash) {
+      throw new OperatorSigningError("composition_not_supported");
+    }
     if (unit.g < terms.minG) throw new OperatorSigningError("gross_below_min");
     if (!terms.allowedRequiredTiers.includes(unit.requiredTier)) throw new OperatorSigningError("tier_not_allowed");
     if (unit.reclaimAt < policy.expiry + BigInt(terms.reclaimMinSeconds)) throw new OperatorSigningError("reclaim_too_soon");
