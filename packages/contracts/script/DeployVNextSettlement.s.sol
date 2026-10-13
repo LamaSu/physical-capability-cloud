@@ -7,6 +7,7 @@ import {VNextDeploySpec} from "./vnext/VNextDeploySpec.sol";
 import {VNextSettlementEscrow} from "../src/VNextSettlementEscrow.sol";
 import {VNextSettlementEscrowFactory} from "../src/VNextSettlementEscrowFactory.sol";
 import {VNextSettlementLib, PolicyIdentity} from "../src/libraries/VNextSettlementLib.sol";
+import {SCHEDULE_ID, SCHEDULE_IS_TESTNET, SCHEDULE_WORK_MARGIN} from "vnext-schedule/VNextSchedule.sol";
 import {Fixed2of3O5Attester} from "../src/attesters/Fixed2of3O5Attester.sol";
 import {SingleSignerO5Attester} from "../src/attesters/SingleSignerO5Attester.sol";
 import {MockUSDC} from "../src/MockUSDC.sol";
@@ -259,6 +260,8 @@ contract DeployVNextSettlement is Script {
 
     /// @notice CANONICAL deploy. Idempotent, resumable, refuses to publish a rival deployment.
     function run() external {
+        _assertScheduleChain();
+        _printSchedule();
         Inputs memory i = _readInputs(VNextDeploySpec.MODE_CANONICAL, "");
         i.usdc = vm.envAddress("VNEXT_USDC");
         _deploy(i);
@@ -279,6 +282,8 @@ contract DeployVNextSettlement is Script {
     ///         The artifact adds `"canonical": false` and `"doNotPin": true` and lands under a
     ///         `PROVISIONAL-<label>.json` filename — belt and braces on top of the on-chain tag.
     function provisional() external {
+        _assertScheduleChain();
+        _printSchedule();
         string memory label = vm.envString("VNEXT_LABEL");
         require(bytes(label).length > 0, "VNEXT_LABEL is required for a provisional deployment");
         require(block.chainid != VNextDeploySpec.CHAIN_BASE, "provisional deployments are forbidden on Base mainnet");
@@ -320,6 +325,7 @@ contract DeployVNextSettlement is Script {
         console2.log("== V-next settlement stack : PREDICT ==");
         console2.log("mode:                ", i.mode);
         console2.log("chainId:             ", block.chainid);
+        _printSchedule();
         console2.log("library (linked):    ", address(VNextSettlementLib));
         console2.log("primary attester:    ", primary);
         console2.log("escalation attester: ", escalation);
@@ -591,9 +597,19 @@ contract DeployVNextSettlement is Script {
     //                                        ASSERTIONS
     // ════════════════════════════════════════════════════════════════════════════════════════════════
 
+    /// @dev Build-time testnet schedules may deploy only to Base Sepolia or a local anvil/fork.
+    ///      Called before input reads and any broadcast, including the provisional token deployment.
+    function _assertScheduleChain() internal view {
+        require(
+            !SCHEDULE_IS_TESTNET || block.chainid == 84532 || block.chainid == 31337,
+            "testnet schedule is restricted to Base Sepolia or anvil"
+        );
+    }
+
     /// @dev The guards that depend on nothing but the toolchain and the RPC. Run FIRST, and separately, so
     ///      a misconfigured invocation cannot spend gas before it is caught.
     function _assertToolchain() internal view {
+        _assertScheduleChain();
         // THE `--libraries` GUARD, and the most important assertion in this file.
         //
         // Forge links this script against a library it deploys itself at
@@ -1555,7 +1571,22 @@ contract DeployVNextSettlement is Script {
         c.cohortId = uint64(id);
     }
 
+    /// @dev Seconds, ready to copy into the deployment manifest and CANONICAL record.
+    function _printSchedule() internal pure {
+        console2.log("SCHEDULE_ID:");
+        console2.logBytes32(SCHEDULE_ID);
+        console2.log("SCHEDULE_IS_TESTNET:  ", SCHEDULE_IS_TESTNET);
+        console2.log("CHALLENGE_WINDOW:     ", VNextSettlementLib.CHALLENGE_WINDOW);
+        console2.log("APPEAL_WINDOW:        ", VNextSettlementLib.APPEAL_WINDOW);
+        console2.log("BACKUP_WINDOW:        ", VNextSettlementLib.BACKUP_WINDOW);
+        console2.log("EMERGENCY_REVIEW_WINDOW:", VNextSettlementLib.EMERGENCY_REVIEW_WINDOW);
+        console2.log("WORK_MARGIN:          ", SCHEDULE_WORK_MARGIN);
+        console2.log("MIN_RECLAIM_DELAY:    ", VNextSettlementLib.MIN_RECLAIM_DELAY);
+        console2.log("MAX_RECLAIM_DELAY:    ", VNextSettlementLib.MAX_RECLAIM_DELAY);
+    }
+
     function _printTuple(Tuple memory t) internal pure {
+        _printSchedule();
         console2.log("factory:             ", t.factory);
         console2.log("implementation:      ", t.implementation);
         console2.log("library:             ", t.settlementLib);
