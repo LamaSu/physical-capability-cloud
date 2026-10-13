@@ -16,6 +16,7 @@
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { CameraAdapter } from "./types.js";
+import { OutstandingWork } from "./outstanding-work.js";
 import type { PhotoCaptureService } from "../photo-capture-service.js";
 import type { GeminiComparisonService } from "../gemini-comparison-service.js";
 
@@ -31,6 +32,9 @@ export class PhotoCameraAdapter implements CameraAdapter {
   /** Last captured bytes — used as "captured image" in runInspection(). */
   private lastCapturedBytes: Uint8Array | null = null;
 
+  /** Captures and inspections in flight: the only things that emit. */
+  private readonly work = new OutstandingWork();
+
   constructor(
     id: string,
     kernelId: string,
@@ -38,11 +42,16 @@ export class PhotoCameraAdapter implements CameraAdapter {
     private readonly geminiService?: GeminiComparisonService,
   ) {
     this.id = id;
+    // Push-fed: the bytes come from the caller, so nothing proves this device
+    // acquired them (gpt-5.6-sol, pack 41 HIGH 1). Its events are simulated by
+    // design and never count toward assurance; a real camera is the
+    // PullCameraAdapter ("photo"), which acquires every frame itself.
     this.source = {
       deviceId: id,
       deviceType: "camera",
       kernelId,
       firmwareVersion: "PhotoCameraAdapter-1.0.0",
+      simulated: true,
     };
   }
 
@@ -59,7 +68,11 @@ export class PhotoCameraAdapter implements CameraAdapter {
   // CameraAdapter implementation
   // ---------------------------------------------------------------------------
 
-  async captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+  captureSnapshot(): Promise<{ imageHash: string; storageRef: string }> {
+    return this.work.track(this.capture());
+  }
+
+  private async capture(): Promise<{ imageHash: string; storageRef: string }> {
     const bytes = this.pendingBytes;
     if (!bytes || bytes.length === 0) {
       throw new Error(
@@ -85,6 +98,7 @@ export class PhotoCameraAdapter implements CameraAdapter {
       timestamp: new Date().toISOString(),
       source: this.source,
       payload: {
+        captureMode: "handed-in",
         imageHash,
         storageRef,
         rawSizeBytes: result.rawSizeBytes,
@@ -98,7 +112,16 @@ export class PhotoCameraAdapter implements CameraAdapter {
     return { imageHash, storageRef };
   }
 
-  async runInspection(referenceHash?: string): Promise<{
+  runInspection(referenceHash?: string): Promise<{
+    passed: boolean;
+    confidence: number;
+    findings: string[];
+    imageHash: string;
+  }> {
+    return this.work.track(this.inspect(referenceHash));
+  }
+
+  private async inspect(referenceHash?: string): Promise<{
     passed: boolean;
     confidence: number;
     findings: string[];
@@ -186,6 +209,7 @@ export class PhotoCameraAdapter implements CameraAdapter {
       timestamp: new Date().toISOString(),
       source: this.source,
       payload: {
+        captureMode: "handed-in",
         ...result,
         referenceHash: referenceHash ?? null,
         model: this.geminiService ? "gemini-2.0-flash" : "anti-spoof-heuristic",
@@ -210,6 +234,14 @@ export class PhotoCameraAdapter implements CameraAdapter {
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
     this.listeners.push(callback);
+  }
+
+  /**
+   * Resolves once no capture or inspection is in flight; at once when none is. Each awaits
+   * the capture service (and Gemini), then emits, before it returns.
+   */
+  quiesceEvidence(): Promise<void> {
+    return this.work.idle();
   }
 
   async dispose(): Promise<void> {

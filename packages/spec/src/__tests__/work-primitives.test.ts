@@ -327,6 +327,21 @@ describe("Registry snapshot hashes", () => {
     expect(setContains(snapshot, "lot-999")).toBe(false);
   });
 
+  it("setContains: a non-ASCII candidate is never a member, even one that lowercases to one (review E1)", () => {
+    const snapshot: RegistrySnapshot = {
+      registryId: "pcc.registry.test.v1",
+      version: 1,
+      snapshotHash: computeSetSnapshotHash(["kernel-1"]),
+      entriesLocator: { kind: "inline", entries: ["kernel-1"] },
+      publisherSignature: SIG,
+      publishedAt: 1714521600,
+    };
+    const kelvin = "\u212Aernel-1"; // U+212A KELVIN SIGN lowercases to ASCII "k"
+    expect(kelvin.toLowerCase()).toBe("kernel-1");
+    expect(setContains(snapshot, kelvin)).toBe(false);
+    expect(setContains(snapshot, "KERNEL-1")).toBe(true);
+  });
+
   it("mapGet: case-insensitive key lookup", () => {
     const entries = [
       { key: "permit-001", value: { number: "P-1" } },
@@ -343,6 +358,20 @@ describe("Registry snapshot hashes", () => {
     expect(mapGet(snapshot, "PERMIT-001")).toEqual({ number: "P-1" });
     expect(mapGet(snapshot, "permit-002")).toEqual({ number: "P-2" });
     expect(mapGet(snapshot, "permit-999")).toBeUndefined();
+  });
+
+  it("mapGet: a non-ASCII key is never found, even one that lowercases to a stored key (review E1)", () => {
+    const entries = [{ key: "kernel-1", value: { pub: "ed25519:ab" } }];
+    const snapshot: RegistrySnapshot = {
+      registryId: "pcc.registry.test.v1",
+      version: 1,
+      snapshotHash: computeMapSnapshotHash(entries),
+      entriesLocator: { kind: "inline", entries },
+      publisherSignature: SIG,
+      publishedAt: 1714521600,
+    };
+    expect(mapGet(snapshot, "\u212Aernel-1")).toBeUndefined(); // U+212A KELVIN SIGN lowercases to "k"
+    expect(mapGet(snapshot, "KERNEL-1")).toEqual({ pub: "ed25519:ab" });
   });
 });
 

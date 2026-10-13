@@ -83,10 +83,18 @@ const CAP = "liquid-handler";
 const ORIG = {
   mock: process.env.MOCK_SETTLEMENT,
   pk: process.env.PCC_GATEWAY_PRIVATE_KEY,
+  admin: process.env.PCC_ADMIN_KEY,
 };
+
+// N133 (the steward's DECISIONS 01:01): a session's buyer is the caller's proven wallet, or the
+// gateway admin acts for it, and only the buyer or the admin commits it. This suite has no caller
+// stand-in and its buyers are not wallets, so the admin creates and commits each session.
+const ADMIN = "commit-fail-loud-admin";
+const asAdmin = { "x-admin-key": ADMIN };
 
 async function buildApp(): Promise<FastifyInstance> {
   process.env.PCC_DB_PATH = ":memory:";
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
   const app = Fastify({ logger: false });
   await app.register(paidJobFlowRoutes);
@@ -99,6 +107,7 @@ async function createSession(app: FastifyInstance, userAgentId: string): Promise
   const res = await app.inject({
     method: "POST",
     url: "/api/negotiate/session",
+    headers: asAdmin,
     payload: { userAgentId, kernelId: KERNEL, capabilityType: CAP },
   });
   expect(res.statusCode).toBe(200);
@@ -111,7 +120,7 @@ function review(app: FastifyInstance, id: string) {
   return app.inject({ method: "POST", url: `/api/negotiate/session/${id}/review` });
 }
 function commit(app: FastifyInstance, id: string) {
-  return app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit` });
+  return app.inject({ method: "POST", url: `/api/negotiate/session/${id}/commit`, headers: asAdmin });
 }
 
 /** Drive a fresh session up to (but not through) /commit. */
@@ -142,6 +151,8 @@ describe("negotiation /commit — fail loud on real-settlement failure", () => {
     else process.env.MOCK_SETTLEMENT = ORIG.mock;
     if (ORIG.pk === undefined) delete process.env.PCC_GATEWAY_PRIVATE_KEY;
     else process.env.PCC_GATEWAY_PRIVATE_KEY = ORIG.pk;
+    if (ORIG.admin === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = ORIG.admin;
   });
 
   it("REAL mode + createJobFromSession throws → HTTP 502, not a false 200", async () => {
@@ -187,7 +198,7 @@ describe("negotiation /commit — fail loud on real-settlement failure", () => {
   it("MOCK mode commit is unchanged: 200 with a (synthetic) escrow", async () => {
     const id = await toReview(app, "mock-ok");
 
-    // Mock/dev mode — the default. Best-effort behavior is preserved.
+    // Mock/dev mode, set explicitly (N133: it is no longer the default). Best-effort behavior is preserved.
     process.env.MOCK_SETTLEMENT = "true";
 
     const res = await commit(app, id);

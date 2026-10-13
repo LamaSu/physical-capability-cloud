@@ -9,15 +9,48 @@
  *   POST /api/operator/evidence       — push evidence bundle from operator node
  *   POST /api/operator/heartbeat      — operator heartbeat + capability re-announcement
  *   POST /api/operator/job-status     — update job status from operator node
+ *
+ * Poll, heartbeat and status require kernel-authority "operate": the recorded
+ * operator identity, its proven wallet, or the gateway admin secret.
+ * Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c).
+ * Anonymous callers get 401
+ * before any job read; authority 403/404/503 refusals are sent unchanged.
+ * Non-string IDs get 400 before lookup.
+ * Evidence and status use the job row's kernel, never a body's kernelId.
+ * Authenticated unknown jobs retain their 200 job_not_found receipt; jobs without a kernel
+ * refuse non-admin callers with 403 job_has_no_kernel.
+ * Operator identity proof for operate is completed by WP-A (DECISIONS items 136 and 138).
  */
 
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
 import { extractNodeSignedBundle } from "../services/device-evidence-settlement.js";
+import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
+import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
+import { authorityOf, isAnonymous, refuseKernelAction, AUTHENTICATION_REQUIRED, type KernelAction } from "../auth/kernel-authority.js";
+
+function isNonEmptyId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Shared authority check for poll/heartbeat targets and the kernel read from a job row. */
+function refuseKernelRequest(req: FastifyRequest, kernelId: unknown, action: KernelAction = "operate"): { status: number; body: Record<string, string> } | null {
+  const authority = authorityOf(req);
+  if (isAnonymous(authority)) return { status: 401, body: AUTHENTICATION_REQUIRED };
+  if (kernelId === null || kernelId === undefined) {
+    return authority.admin ? null : {
+      status: 403,
+      body: { error: "forbidden", reason: "job_has_no_kernel", message: "This job has no kernel whose operator can authorize the action." },
+    };
+  }
+  // Reject malformed repository values too, even for admins, before a kernel lookup.
+  if (!isNonEmptyId(kernelId)) return { status: 400, body: { error: "kernelId must be a non-empty string" } };
+  return refuseKernelAction(req, authority, kernelId, action);
+}
 
 function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   if (result.success) return result.data;
@@ -75,9 +108,12 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   }>("/api/operator/jobs", async (req, reply) => {
     const { kernelId, status = "queued" } = req.query;
 
-    if (!kernelId) {
+    if (!isNonEmptyId(kernelId)) {
       return reply.code(400).send({ error: "kernelId query param required" });
     }
+
+    const refusal = refuseKernelRequest(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const result = await jobFacade.list({ kernelId, status });
     if (!result.success) return { jobs: [] };
@@ -95,12 +131,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   app.post<{ Body: EvidenceBody }>("/api/operator/evidence", async (req, reply) => {
     const { jobId, kernelId, evidence, timestamp } = req.body ?? {};
 
-    if (!jobId) {
+    if (!isNonEmptyId(jobId)) {
       return reply.code(400).send({ error: "jobId required" });
+    }
+    if (kernelId !== undefined && !isNonEmptyId(kernelId)) {
+      return reply.code(400).send({ error: "kernelId must be a non-empty string" });
     }
     if (!evidence) {
       return reply.code(400).send({ error: "evidence required" });
     }
+    if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
 
     try {
       const repos = getRepos();
@@ -118,6 +158,19 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         };
       }
 
+      // Evidence takes decide, per DECISIONS 2026-10-04 01:25 (N31c).
+      const refusal = refuseKernelRequest(req, job.kernelId, "decide");
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
+
+      // The stored bundle belongs to the job's kernel. A body naming another kernel is
+      // refused, never stored under it (N80: stored evidence tells the truth).
+      if (kernelId !== undefined && job.kernelId && kernelId !== job.kernelId) {
+        return reply.code(409).send({
+          error: "kernel_mismatch",
+          message: `evidence names kernel ${kernelId}, but job ${jobId} belongs to kernel ${job.kernelId}`,
+        });
+      }
+
       // Store evidence bundle
       const bundleId = `ev-${uuidv4()}`;
       const now = new Date().toISOString();
@@ -127,8 +180,17 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       // discarding the signature and writing a gateway placeholder. This only
       // PERSISTS the truth of what the device signed; it does NOT verify it or gate
       // settlement. The oracle #52 verifier (stubbed, fail-closed) still owns whether
-      // this evidence may settle. Old nodes / non-bundle evidence fall back to the
-      // placeholder, unchanged.
+      // this evidence may settle. Evidence without a device signature keeps the
+      // placeholder SIGNATURE (a gateway placeholder, never device-signed).
+      //
+      // The stored bundleHash is never made up (N80, rehearsal R0 G3). It used to be
+      // `sha256-<bundleId>` for any unsigned body, with no events stored, so it committed
+      // to nothing that was received. commitRelayEvidence recomputes LO-EV event hashes, or
+      // the hash of a device-signed document that names THIS job and its kernel (adk #4322),
+      // and refuses everything else: a supplied hash its content does not reproduce, a
+      // document signed for another job or kernel (409), a bare device digest that names no
+      // job, an ambiguous envelope, malformed events, and a document the gateway could not
+      // keep (cross-family review E4).
       //
       // assuranceTier stays 0 ON PURPOSE (fails closed): an UNVERIFIED bundle
       // "actually supports" only the tier-0 permissionless floor (eligibility.ts).
@@ -137,26 +199,50 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
       // release tier from unverified evidence. The tier is lifted only once the gated
       // #52 verifier confirms the evidence on deployed infra (SEAM-2 ready-but-gated).
       const captured = extractNodeSignedBundle(evidence);
-      const bundleHash = captured?.bundleHash ?? `sha256-${bundleId}`;
+      // The job context comes from the job row, never from the evidence.
+      const committed = await commitRelayEvidence(evidence, captured, { jobId: job.id, kernelId: job.kernelId ?? null });
+      if (!committed.ok) {
+        const conflict = committed.refusal.error === "job_mismatch" || committed.refusal.error === "kernel_mismatch";
+        return reply.code(conflict ? 409 : 422).send({ ...committed.refusal, stored: false, jobId });
+      }
+      const { bundleHash, hashModel, events } = committed.commitment;
       const kernelSignature = captured
         ? captured.kernelSignature
         : {
-            signer: kernelId ?? job.kernelId ?? "unknown",
+            signer: job.kernelId ?? "unknown",
             algorithm: "sha256",
             value: "operator-relay-auto",
           };
 
       try {
-        repos.evidence.insert({
-          id: bundleId,
-          jobId,
-          stepId: job.stepId ?? "operator-relay",
-          kernelId: kernelId ?? job.kernelId,
-          assuranceTier: 0,
-          bundleHash,
-          kernelSignature,
-          sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
-          createdAt: now,
+        // One transaction (cross-family review E4, finding 2): the bundle and its events
+        // commit together or not at all, so a failed event insert never leaves a stored
+        // bundle whose hash its missing events cannot reproduce.
+        getStore().db.transaction(() => {
+          repos.evidence.insert({
+            id: bundleId,
+            jobId,
+            stepId: job.stepId ?? "operator-relay",
+            kernelId: job.kernelId,
+            assuranceTier: 0,
+            bundleHash,
+            kernelSignature,
+            sessionKeyAuthorization: captured?.sessionKeyAuthorization ?? null,
+            createdAt: now,
+          });
+          if (events.length > 0) {
+            repos.evidence.insertEvents(
+              events.map((ev, i) => ({
+                id: `${bundleId}:${i}`,
+                bundleId,
+                type: ev.type,
+                timestamp: ev.timestamp,
+                source: ev.source as { deviceId: string; deviceType: string; kernelId: string },
+                payload: ev.payload,
+                hash: ev.hash,
+              })),
+            );
+          }
         });
       } catch (insertErr) {
         // Evidence insert failed — still acknowledge receipt
@@ -174,9 +260,17 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         stored: true,
         jobId,
         bundleId,
+        // What was committed: the stored hash, how it was made, and how many LO-EV
+        // events were stored with it (0 when the body carried none in that form).
+        contentHash: bundleHash,
+        hashModel,
+        eventsStored: events.length,
         // True when the node's real device-signed (#236) bundle was captured
         // (real Ed25519 signature persisted); false when the placeholder was used.
         deviceSigned: !!captured,
+        // Nothing here verifies a signature: capture persists it, and the gated #52
+        // verifier owns verification.
+        signatureVerified: false,
         timestamp: now,
       };
     } catch (err) {
@@ -198,9 +292,12 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
   app.post<{ Body: HeartbeatBody }>("/api/operator/heartbeat", async (req, reply) => {
     const { kernelId, status = "online", capabilities, timestamp } = req.body ?? {};
 
-    if (!kernelId) {
+    if (!isNonEmptyId(kernelId)) {
       return reply.code(400).send({ error: "kernelId required" });
     }
+
+    const refusal = refuseKernelRequest(req, kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
 
     const result = await kernelFacade.heartbeat(kernelId, { status, capabilities, timestamp });
     return sendResult(reply, result);
@@ -215,10 +312,13 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    * Body: { jobId, kernelId?, status, metadata?, timestamp? }
    */
   app.post<{ Body: JobStatusBody }>("/api/operator/job-status", async (req, reply) => {
-    const { jobId, status, metadata, timestamp } = req.body ?? {};
+    const { jobId, kernelId, status, metadata, timestamp } = req.body ?? {};
 
-    if (!jobId) {
+    if (!isNonEmptyId(jobId)) {
       return reply.code(400).send({ error: "jobId required" });
+    }
+    if (kernelId !== undefined && !isNonEmptyId(kernelId)) {
+      return reply.code(400).send({ error: "kernelId must be a non-empty string" });
     }
     if (!status) {
       return reply.code(400).send({ error: "status required" });
@@ -233,12 +333,38 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
         valid: [...JOB_STATUSES],
       });
     }
+    if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
 
     try {
-      const repos = getRepos();
-      const updated = repos.jobs.updateStatus(jobId, canonicalStatus);
+      const job = getRepos().jobs.findById(jobId);
+      if (!job) {
+        // Job not found — return 200 so the node doesn't fail hard.
+        return {
+          updated: false,
+          jobId,
+          status: canonicalStatus,
+          warning: "job_not_found",
+          timestamp: new Date().toISOString(),
+        };
+      }
+      const refusal = refuseKernelRequest(req, job.kernelId);
+      if (refusal) return reply.code(refusal.status).send(refusal.body);
 
-      if (!updated) {
+      // N85(a): a paid job's terminal status belongs to its settlement path.
+      // N85: bind that UPDATE to the same kernel the operate check authorized.
+      const outcome = writeJobStatusGuarded(jobId, canonicalStatus, undefined, job.kernelId ?? null);
+      if (outcome.kind === "refused") {
+        if (outcome.kernelChanged) {
+          return reply.code(409).send({ error: "job_kernel_changed", message: "The job's kernel changed after authorization. Poll again before reporting status." });
+        }
+        return reply.code(409).send({
+          error: "settlement_owned_status",
+          currentStatus: outcome.currentStatus,
+          message: SETTLEMENT_OWNED_MESSAGE,
+        });
+      }
+
+      if (outcome.kind === "not_found") {
         // Job not found — return 200 so the node doesn't fail hard
         return {
           updated: false,

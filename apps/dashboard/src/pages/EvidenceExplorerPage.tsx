@@ -10,11 +10,9 @@ import type {
 } from "@pcc/spec";
 import { useUIStore } from "../stores/ui-store.js";
 import { useEvidenceExplorerStore } from "../stores/evidence-explorer-store.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 import { PointMap3DViewer } from "../components/viewer/index.js";
 import { makeDemoPointMap3DTrace } from "../components/viewer/fixtures.js";
-
-const GATEWAY = "/api";
 
 export function EvidenceExplorerPage() {
   const { bundleId } = useParams<{ bundleId?: string }>();
@@ -125,9 +123,9 @@ export function EvidenceExplorerPage() {
   };
 
   const handleVerifyProof = async (bundle: EncryptedEvidenceBundle) => {
-    const resp = await fetch(`${GATEWAY}/zk/commit`, {
+    const resp = await authorizedFetch("/api/zk/commit", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ bundleHash: bundle.bundleHash }),
     });
     const { commitment } = await resp.json();

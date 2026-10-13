@@ -1,8 +1,6 @@
 import React, { useState } from "react";
 import { GlassPanel } from "@pcc/ui";
-import { getAuthHeaders } from "../../stores/auth-store.js";
-
-const API_ROOT = (import.meta.env.VITE_PCC_URL ?? "");
+import { authorizedFetch } from "../../lib/authorized-fetch.js";
 
 /**
  * T2.7 — buyer-side rate-submit form.
@@ -31,9 +29,9 @@ export function RateSubmitForm({
     }
     setBusy(true);
     try {
-      const res = await fetch(`${API_ROOT}/api/operators/${encodeURIComponent(operatorId)}/rate`, {
+      const res = await authorizedFetch(`/api/operators/${encodeURIComponent(operatorId)}/rate`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           rating,
           jobId: jobId.trim(),

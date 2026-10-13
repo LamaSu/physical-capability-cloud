@@ -547,19 +547,20 @@ export class SWFService {
   getSummary(): SWFSummary {
     let totalAccrued = 0;
     let totalDistributed = 0;
-    let lastDistributionAt = "";
 
     for (const epoch of this.epochs.values()) {
       totalAccrued += Number(epoch.totalAccrued);
       totalDistributed += Number(epoch.totalDistributed);
-      if (epoch.status === "completed" && epoch.endTime > lastDistributionAt) {
-        lastDistributionAt = epoch.endTime;
-      }
     }
 
     const activeEpoch = this.getActiveEpoch();
     const activeProposals = this.listProposals({ status: "active" }).length;
     const balance = totalAccrued - totalDistributed;
+    // Say what has no real source instead of filling it in (astra EC2 F2, F3). This ledger is an in-memory
+    // SIMULATION that nothing funds: its totals are simulation figures, not a fund's measured money, and a
+    // "completed" epoch is a simulated split whose endTime is its scheduled deadline, not a distribution. So
+    // no distribution time is reported, no chain holds a balance, and every money figure is marked unavailable.
+    const unavailable: NonNullable<SWFSummary["unavailable"]> = ["totalBalance", "totalAccruedAllTime", "totalDistributedAllTime", "lastDistributionAt", "chainBalances"];
 
     return {
       totalBalance: String(balance),
@@ -569,10 +570,10 @@ export class SWFService {
       currentAllocationStrategy: { ...this.currentStrategy },
       participantCount: this.listParticipants({ status: "active" }).length,
       activeProposals,
-      lastDistributionAt: lastDistributionAt || new Date().toISOString(),
-      chainBalances: [
-        { chain: "base", currency: "USDC", amount: String(balance) },
-      ],
+      lastDistributionAt: null,
+      chainBalances: [],
+      basis: "simulation",
+      unavailable,
     };
   }
 

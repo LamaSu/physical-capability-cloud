@@ -112,3 +112,59 @@ async def test_emit_event_outside_window_emits_with_null_job_id(captured):
     _, params = sent[0]
     assert params["jobId"] is None
     assert params["type"] == "camera_snapshot"
+
+
+# ── the evidence.stopRecording barrier (astra pack 186) ─────────────────────
+# Plain tests (asyncio.run), so they run without pytest-asyncio.
+
+
+def test_a_notification_for_a_window_closed_before_it_was_scheduled_is_dropped():
+    """A logging thread can read a window just before evidence.stopRecording closes it. Its
+    notification would then be written after the barrier, so it is dropped. The private
+    scheduler is called directly to make that interleaving deterministic."""
+
+    async def scenario() -> list[str]:
+        sent: list[str] = []
+
+        async def writer(method: str, params: dict) -> None:
+            sent.append(params["type"])
+
+        handler = EvidenceHandler(writer=writer, loop=asyncio.get_running_loop())
+        window = handler.start_recording("dev-1", "job-1")
+        handler.emit_atomic_op("dev-1", "aspirate", {})
+        handler.stop_recording("dev-1", "job-1")
+        handler._schedule_notify("evidence", {"type": "late"}, window)
+        await handler.drain_through(handler.watermark())
+        await asyncio.sleep(0.01)
+        return sent
+
+    assert asyncio.run(scenario()) == ["aspirate"]
+
+
+def test_drain_through_waits_for_notifications_up_to_the_watermark_only():
+    """The barrier waits for what was scheduled before it, not for what a busy logger
+    schedules afterwards."""
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        release_b = asyncio.Event()
+        sent: list[str] = []
+
+        async def writer(method: str, params: dict) -> None:
+            if params["type"] == "B":
+                await release_b.wait()
+            sent.append(params["type"])
+
+        handler = EvidenceHandler(writer=writer, loop=asyncio.get_running_loop())
+        handler.start_recording("dev-1", "job-1")
+        handler.emit_atomic_op("dev-1", "A", {})
+        mark = handler.watermark()
+        handler.emit_atomic_op("dev-1", "B", {})
+        await asyncio.wait_for(handler.drain_through(mark), timeout=1)
+        by_drain = list(sent)
+        release_b.set()
+        await asyncio.wait_for(handler.drain_through(handler.watermark()), timeout=1)
+        return by_drain, sent
+
+    by_drain, sent = asyncio.run(scenario())
+    assert by_drain == ["A"]
+    assert sent == ["A", "B"]

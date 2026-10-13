@@ -1,0 +1,1154 @@
+/**
+ * FinalMilestonePackageV2 — the typed body and `packageBodyHash` (G2, Step B).
+ *
+ * Wire contract owner: EVIDENCE `c25c8f97`, pinned at
+ * `~/.claude/shared/vnext-finalmilestonepackage-v2-body-schema.md` (2026-08-26,
+ * answering gateway #1148). Signer set RATIFIED D1/D2 by sol. Ingestion binds
+ * are the ORACLE's (#1359, 914/914).
+ *
+ * This module owns the BODY and the SIGNING pre-image. `package-digest-v2.ts`
+ * owns `packageDigestV2` — the digest over `{body, canonicalSignatures(sigs)}`.
+ * They are DIFFERENT hashes with different pre-images and it matters:
+ *
+ *   packageBodyHash  = SHA-256( raw32(SIG_DOMAIN_V2) ‖ u64be(len) ‖ JCS(body) )
+ *                      ^ what the OPERATOR and KERNEL sign
+ *   packageDigestV2  = SHA-256( JCS({body, signatures}) )
+ *                      ^ what `raw.packageHash` must equal, and what the
+ *                        gateway receipt binds as its anti-replay anchor
+ *
+ * Signing the wrong one of those produces signatures that verify against
+ * nothing, at mint time, with real money in the escrow.
+ *
+ * WHY EVERY SCALAR IS A STRING: evidence's schema specifies decimal strings for
+ * all numbers, language-independent under JCS. That is not cosmetic — `chainId`
+ * and `milestoneIndex` ride alongside uint256-derived values, and JS numbers
+ * silently lose precision above 2^53. Strings also sidestep the fact that the
+ * shared canonicalizer's number serialization is not RFC 8785. The validator
+ * below REFUSES a JS number in any scalar slot rather than coercing it.
+ */
+
+import { createHash } from "node:crypto";
+import { keccak256, toBytes } from "viem";
+import {
+  canonicalize,
+  devicePrincipalMatchesSigner,
+  isValidKernelId,
+  operatorPrincipalMatchesSigner,
+  principalFromRegistry,
+} from "@pcc/spec";
+import { verifyEd25519Signature } from "../auth/ed25519.js";
+
+export type Hex = `0x${string}`;
+
+/**
+ * keccak256("PCC:vnext:evidence-package-sig:v1") = 0x74101076…5685 — evidence
+ * schema §3.
+ *
+ * The suffix is `:v1` on purpose. The "V2" in the name is the raw32 FRAMING
+ * (raw32(domain) ‖ u64be(byteLen) ‖ JCS(body)), not the domain suffix. This
+ * constant previously hashed ":v2" (0x1e98b1f8…), copied from an evidence
+ * golden that had drifted; evidence #1202 / oracle #1414 corrected the wire
+ * contract to ":v1". The operator and the kernel sign packageBodyHash, so a
+ * producer on ":v2" yields signatures that verify against nothing. The golden
+ * test pins the value, not just its shape.
+ */
+export const SIG_DOMAIN_V2: Hex = keccak256(
+  toBytes("PCC:vnext:evidence-package-sig:v1"),
+);
+
+/** Fixed literals from the schema. Any drift here is a wire break. */
+export const PACKAGE_SCHEMA_VERSION = "FinalMilestonePackageV2" as const;
+export const PACKAGE_FORMAT = "2" as const;
+
+/** The 8 fields that bind a package to exactly one settlement unit. */
+export interface UnitBinding {
+  chainId: string;
+  escrow: Hex;
+  settlementUnitId: Hex;
+  jobIdHash: Hex;
+  milestoneIndex: string;
+  stepId: Hex;
+  compositionRoot: Hex;
+  /** == the FUNDED acceptedPolicyDigest (PolicyIdentity idx6). */
+  acceptedEnvelopeHash: Hex;
+}
+
+export interface FinalMilestonePackageV2Body {
+  packageSchemaVersion: typeof PACKAGE_SCHEMA_VERSION;
+  packageFormat: typeof PACKAGE_FORMAT;
+  /** MUST equal the outer commitment version — the oracle checks equality. */
+  compositionSchemaVersion: string;
+  unitBinding: UnitBinding;
+  producer: {
+    operatorPrincipalId: string;
+    kernelId: string;
+    devicePrincipalId: string;
+  };
+  challengeBinding: {
+    /** Gateway-ISSUED at runtime. See INTERIM note on `isInterimNonce`. */
+    nonce: Hex;
+    tChallengeRef: string;
+  };
+  evidence: {
+    /** EvidenceBlockV2 — one commitment to the 6 evaluator inputs. */
+    evidenceBlockHash: Hex;
+  };
+  /** CLAIMED-ONLY. May narrow [T_lo,T_hi], never widen. NEVER gates authz. */
+  evidenceTimeBounds: { start: string; end: string };
+}
+
+export class PackageBodyValidationError extends Error {
+  constructor(path: string, detail: string) {
+    super(`FinalMilestonePackageV2 body invalid at ${path}: ${detail}`);
+    this.name = "PackageBodyValidationError";
+  }
+}
+
+// Lowercase only, by REJECTION. Hex case carries no meaning, but it changes the
+// canonical bytes, so an EIP-55 checksummed escrow would otherwise produce a
+// different packageBodyHash and packageDigestV2 for the same unit. One accepted
+// spelling means one digest: a body in any other spelling is refused here with a
+// PackageBodyValidationError, never lowercased for the caller, and every hashing
+// function (computePackageBodyHash, packageBodyJcs, packageDigestV2) validates
+// first. A caller that holds an EIP-55 address lowercases it before it builds
+// the body.
+const HEX32 = /^0x[0-9a-f]{64}$/;
+const ADDR = /^0x[0-9a-f]{40}$/;
+const DECIMAL = /^(0|[1-9][0-9]*)$/;
+
+function str(v: unknown, path: string): string {
+  if (typeof v !== "string") {
+    throw new PackageBodyValidationError(
+      path,
+      `expected a string, got ${typeof v}. All scalars are strings in this ` +
+        `schema — a JS number here would be a precision and canonicalization bug.`,
+    );
+  }
+  return v;
+}
+function nonEmpty(v: unknown, path: string): string {
+  const s = str(v, path);
+  if (s.length === 0) throw new PackageBodyValidationError(path, "must not be empty");
+  return s;
+}
+/**
+ * Is `s` well-formed UTF-16 (no lone surrogate)? A lone surrogate survives
+ * `JSON.stringify` (the shared canonicalizer's string leaf, `util/canonical.ts`)
+ * as a `\uXXXX` escape, so the public producer can hash it — but the private
+ * Oracle's `jcs()` refuses it (F5, cross-family E9: evidence schema docs §3 vs
+ * oracle `oracle-verdict.ts:215-219`). A body that hashes on one side and is
+ * refused on the other is a producer bug, not an Oracle bug: refuse it here,
+ * before hashing, not after a mint fails downstream.
+ */
+function isWellFormedUnicode(s: string): boolean {
+  const withNativeCheck = s as unknown as { isWellFormed?: () => boolean };
+  if (typeof withNativeCheck.isWellFormed === "function") return withNativeCheck.isWellFormed();
+  // Fallback for a runtime without String.prototype.isWellFormed (Node < 20):
+  // a lone surrogate is a high surrogate not followed by a low one, or a low
+  // surrogate not preceded by a high one.
+  return !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+}
+/**
+ * A free-text field (`operatorPrincipalId`, `devicePrincipalId`,
+ * `tChallengeRef`): non-empty, like every other id, AND well-formed Unicode
+ * (F5). The two principal ids and the kernel id are ASCII-restricted
+ * elsewhere (`isValidKernelId` here; `parseOperatorPrincipalId` /
+ * `parseDevicePrincipalId` at mint time), but at THIS layer
+ * `operatorPrincipalId` / `devicePrincipalId` must still accept the golden's
+ * free-text sample values ("op-golden"), so this is the one check standing
+ * between a lone surrogate and a hash the Oracle cannot reproduce.
+ */
+function freeText(v: unknown, path: string): string {
+  const s = nonEmpty(v, path);
+  if (!isWellFormedUnicode(s)) {
+    throw new PackageBodyValidationError(
+      path,
+      "must not contain a lone UTF-16 surrogate (unhashable by the Oracle's canonicalizer)",
+    );
+  }
+  return s;
+}
+/**
+ * A kernel id, by #399's rule (`isValidKernelId`, pcc.evidence.principal-id.v1):
+ * 1-128 printable ASCII characters, no space, not starting `eip155:` or `ed25519:`
+ * in any ASCII case. It is the same rule `principalTupleWord("kernel", id)` hashes
+ * a funded `authorizedTuples` triple under, so every kernel id a package names is
+ * one the funded deal can name.
+ */
+function kernelIdField(v: unknown, path: string): string {
+  const s = nonEmpty(v, path);
+  if (!isValidKernelId(s)) {
+    throw new PackageBodyValidationError(
+      path,
+      "must be a kernel id: 1-128 printable ASCII characters, no space, not starting " +
+        "eip155: or ed25519: (pcc.evidence.principal-id.v1)",
+    );
+  }
+  return s;
+}
+/**
+ * An evidenceTimeBounds end: a decimal string of Unix seconds, kept exactly as
+ * given (the canonical settlement-vector golden: "1699999500" / "1700000000").
+ * The same grammar as spec `parseEvidenceTimeBound` (#438; bus #3567).
+ */
+function unixSeconds(v: unknown, path: string): string {
+  const s = nonEmpty(v, path);
+  if (!/^(0|[1-9][0-9]*)$/.test(s) || !Number.isSafeInteger(Number(s))) {
+    throw new PackageBodyValidationError(path, "must be a decimal string of Unix seconds (no sign, no leading zeros)");
+  }
+  return s;
+}
+function hex32(v: unknown, path: string): Hex {
+  const s = str(v, path);
+  if (!HEX32.test(s)) throw new PackageBodyValidationError(path, `expected 0x+64 lowercase hex, got "${s}"`);
+  return s as Hex;
+}
+function addr(v: unknown, path: string): Hex {
+  const s = str(v, path);
+  if (!ADDR.test(s)) {
+    throw new PackageBodyValidationError(path, `expected 0x+40 lowercase hex address, got "${s}"`);
+  }
+  return s as Hex;
+}
+function dec(v: unknown, path: string): string {
+  const s = str(v, path);
+  if (!DECIMAL.test(s)) {
+    throw new PackageBodyValidationError(
+      path,
+      `expected a decimal string (no sign, no leading zero, no exponent), got "${s}"`,
+    );
+  }
+  return s;
+}
+function obj(v: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new PackageBodyValidationError(path, "expected an object");
+  }
+  // An unknown key would be silently dropped from the typed body, so the
+  // digest would cover a different object than the one the caller holds.
+  const extra = Object.keys(v).filter((k) => !keys.includes(k));
+  if (extra.length > 0) {
+    throw new PackageBodyValidationError(path, `unknown key(s): ${extra.join(", ")}`);
+  }
+  return v as Record<string, unknown>;
+}
+
+/**
+ * Validate a body against evidence's pinned schema and return it typed.
+ *
+ * FAILS CLOSED on every deviation. A body that is wrong in a way we tolerate
+ * here becomes a digest the oracle cannot reproduce, discovered at mint. An
+ * unknown key is refused, not dropped (the digest would cover a different object
+ * than the caller holds), and the kernel id is pinned to #399's rule.
+ *
+ * NOT checked here, because the published golden forbids it: that
+ * `producer.operatorPrincipalId` and `producer.devicePrincipalId` are the pinned
+ * `eip155:<chainId>:0x<address>` and `ed25519:0x<key>` forms
+ * (`parseOperatorPrincipalId` / `parseDevicePrincipalId`). The golden's body is
+ * evidence's SAMPLE vector and carries the free-text ids "op-golden" and
+ * "dev-golden", and its hashes must stay byte-identical, so they are only
+ * required to be non-empty here. `assertMintablePackage` enforces the pinned forms
+ * and binds them to the D1 and D2 signatures and the kernel registry, so a package
+ * with free-text principals can be hashed but never minted.
+ */
+export function validatePackageBody(input: unknown): FinalMilestonePackageV2Body {
+  const b = obj(input, "$", [
+    "packageSchemaVersion",
+    "packageFormat",
+    "compositionSchemaVersion",
+    "unitBinding",
+    "producer",
+    "challengeBinding",
+    "evidence",
+    "evidenceTimeBounds",
+  ]);
+
+  if (b.packageSchemaVersion !== PACKAGE_SCHEMA_VERSION) {
+    throw new PackageBodyValidationError(
+      "$.packageSchemaVersion",
+      `must be the literal "${PACKAGE_SCHEMA_VERSION}"`,
+    );
+  }
+  if (b.packageFormat !== PACKAGE_FORMAT) {
+    throw new PackageBodyValidationError(
+      "$.packageFormat",
+      `must be the literal "${PACKAGE_FORMAT}" (V1 was "1"; the formats are not interchangeable)`,
+    );
+  }
+
+  const ub = obj(b.unitBinding, "$.unitBinding", [
+    "chainId",
+    "escrow",
+    "settlementUnitId",
+    "jobIdHash",
+    "milestoneIndex",
+    "stepId",
+    "compositionRoot",
+    "acceptedEnvelopeHash",
+  ]);
+  const pr = obj(b.producer, "$.producer", ["operatorPrincipalId", "kernelId", "devicePrincipalId"]);
+  const cb = obj(b.challengeBinding, "$.challengeBinding", ["nonce", "tChallengeRef"]);
+  const ev = obj(b.evidence, "$.evidence", ["evidenceBlockHash"]);
+  const tb = obj(b.evidenceTimeBounds, "$.evidenceTimeBounds", ["start", "end"]);
+  const boundStart = unixSeconds(tb.start, "$.evidenceTimeBounds.start");
+  const boundEnd = unixSeconds(tb.end, "$.evidenceTimeBounds.end");
+  if (Number(boundStart) > Number(boundEnd)) {
+    throw new PackageBodyValidationError("$.evidenceTimeBounds", "start is after end");
+  }
+
+  return {
+    packageSchemaVersion: PACKAGE_SCHEMA_VERSION,
+    packageFormat: PACKAGE_FORMAT,
+    compositionSchemaVersion: dec(b.compositionSchemaVersion, "$.compositionSchemaVersion"),
+    unitBinding: {
+      chainId: dec(ub.chainId, "$.unitBinding.chainId"),
+      escrow: addr(ub.escrow, "$.unitBinding.escrow"),
+      settlementUnitId: hex32(ub.settlementUnitId, "$.unitBinding.settlementUnitId"),
+      jobIdHash: hex32(ub.jobIdHash, "$.unitBinding.jobIdHash"),
+      milestoneIndex: dec(ub.milestoneIndex, "$.unitBinding.milestoneIndex"),
+      stepId: hex32(ub.stepId, "$.unitBinding.stepId"),
+      compositionRoot: hex32(ub.compositionRoot, "$.unitBinding.compositionRoot"),
+      acceptedEnvelopeHash: hex32(ub.acceptedEnvelopeHash, "$.unitBinding.acceptedEnvelopeHash"),
+    },
+    producer: {
+      operatorPrincipalId: freeText(pr.operatorPrincipalId, "$.producer.operatorPrincipalId"),
+      kernelId: kernelIdField(pr.kernelId, "$.producer.kernelId"),
+      devicePrincipalId: freeText(pr.devicePrincipalId, "$.producer.devicePrincipalId"),
+    },
+    challengeBinding: {
+      nonce: hex32(cb.nonce, "$.challengeBinding.nonce"),
+      tChallengeRef: freeText(cb.tChallengeRef, "$.challengeBinding.tChallengeRef"),
+    },
+    evidence: {
+      evidenceBlockHash: hex32(ev.evidenceBlockHash, "$.evidence.evidenceBlockHash"),
+    },
+    evidenceTimeBounds: { start: boundStart, end: boundEnd },
+  };
+}
+
+/** 8-byte big-endian length prefix. */
+function u64be(n: number): Buffer {
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64BE(BigInt(n));
+  return b;
+}
+
+/**
+ * packageBodyHash — the pre-image the OPERATOR (secp256k1-eip712) and the
+ * KERNEL (ed25519-raw32) sign. Evidence schema §3:
+ *
+ *   SHA-256( raw32(SIG_DOMAIN_V2) ‖ u64be(len(JCS(body))) ‖ JCS(body) )
+ *
+ * The length prefix is what makes the domain-separated concatenation
+ * unambiguous: without it, a crafted body could shift bytes across the
+ * boundary and collide with a different (domain, body) pair.
+ *
+ * `len` is the BYTE length of the UTF-8 JCS encoding, not the JS string length —
+ * these differ for any non-ASCII character, and a producer that used `.length`
+ * would agree with the oracle on ASCII-only bodies and diverge silently the
+ * first time a principalId carried an accent.
+ *
+ * The body is validated FIRST (`validatePackageBody`) and only the validated copy
+ * is hashed. Every hex field must be `0x` + lowercase hex of its exact width: a
+ * mixed-case or uppercase spelling (an EIP-55 escrow address, say) is refused with
+ * a PackageBodyValidationError, never lowercased and never hashed. Hex case carries
+ * no meaning but it changes the canonical bytes, so a body that was hashed in two
+ * spellings would have two hashes; with one accepted spelling it has one.
+ */
+export function computePackageBodyHash(body: unknown): Hex {
+  const jcs = canonicalize(validatePackageBody(body));
+  const jcsBytes = Buffer.from(jcs, "utf8");
+  const preImage = Buffer.concat([
+    Buffer.from(toBytes(SIG_DOMAIN_V2)), // raw 32 bytes, NOT the hex string
+    u64be(jcsBytes.length),
+    jcsBytes,
+  ]);
+  return `0x${createHash("sha256").update(preImage).digest("hex")}` as Hex;
+}
+
+/**
+ * The JCS pre-image, exposed so a cross-codebase mismatch is diffable. Validated
+ * exactly like `computePackageBodyHash`, so what it shows is what gets signed.
+ */
+export function packageBodyJcs(body: unknown): string {
+  return canonicalize(validatePackageBody(body));
+}
+
+/**
+ * Is this package's challenge nonce the known INTERIM placeholder?
+ *
+ * Evidence schema §4, open item: `challengeBinding.nonce` is gateway-issued and
+ * rides the durable T_lo challenge, which is the gateway's SECOND increment and
+ * IS NOT BUILT. Until it ships, `effectiveEvidenceTime` is T_hi-only (the
+ * gateway's `receivedAt`) and the nonce is a placeholder.
+ *
+ * This predicate exists so that fact is queryable in code rather than living
+ * only in a doc — a launch checklist that cannot be evaluated programmatically
+ * is a launch checklist that gets skipped. It is more than a flag:
+ * `assertMintablePackage` refuses a package whose challenge nonce is interim, so
+ * nothing is minted on the placeholder, and that fails closed until the durable
+ * challenge exists. (The interim value is the all-zero nonce; the check runs on
+ * the validated body, so no other spelling of it can get past.)
+ */
+export const INTERIM_NONCE: Hex = `0x${"00".repeat(32)}` as Hex;
+export function isInterimNonce(body: FinalMilestonePackageV2Body): boolean {
+  return body.challengeBinding.nonce.toLowerCase() === INTERIM_NONCE;
+}
+
+// ── Signature entries ───────────────────────────────────────────────────────
+// These live here, and package-digest-v2.ts re-exports them, so that
+// packageDigestV2 can call validatePackageBody without an import cycle.
+
+/**
+ * One signature over a FinalMilestonePackage body: EXACTLY the keys `signer`,
+ * `scheme` and `sig`, each a string. An entry with any other key is refused, not
+ * ignored: the digest hashes the whole entry, so an extra key would move it
+ * without changing a single fact.
+ *
+ * Shape is the ORACLE's (#1395, they own ingestion): `{signer, scheme, sig}`.
+ * The signer SET is {operator, kernel} per evidence's frozen profile —
+ * D1 = operator secp256k1-EIP712, D2 = kernel ed25519-raw32, one signature each.
+ *
+ * `signer` is the sort key, and it is `0x` + lowercase hex (SIGNER_FORM): any
+ * other spelling is REFUSED, never lowercased. Oracle #1395:
+ * "Do NOT depend on case; changing a signer id's case MUST be a no-op." Signer
+ * ids are EIP-55-checksummed addresses in some paths and lowercase in others, so
+ * binding a spelling would make identical evidence produce two package identities
+ * and fail the packageHash bind at first mint. The oracle gets its no-op by
+ * lowercasing on its own side. The producer gets the same result by accepting ONE
+ * spelling and emitting it exactly as given, so the digest it produces is the one
+ * the oracle computes.
+ *
+ * Evidence's mirror (`settlement-vector-golden-mirror.cjs`) dedups on the
+ * lowercased signer but keeps each entry's own case. On lowercase input, which is
+ * the only input the producer accepts, that is the same string, so producer,
+ * oracle and mirror agree on every input the producer accepts.
+ */
+export interface PackageSignature {
+  signer: string;
+  scheme: string;
+  sig: string;
+}
+
+/** Raised when a signature entry cannot participate in the canonical order. */
+export class InvalidSignatureEntryError extends Error {
+  constructor(reason: string) {
+    super(`Invalid FinalMilestonePackageV2 signature entry: ${reason}`);
+    this.name = "InvalidSignatureEntryError";
+  }
+}
+
+/**
+ * The two signer forms of the frozen profile, `0x` + LOWERCASE hex only: D1's
+ * address (40 digits) and D2's ed25519 public key (64 digits). A signer in any
+ * other spelling (uppercase or EIP-55 mixed case, a `0X` prefix, no prefix, any
+ * other width, not hex at all) is REFUSED, never normalized: one accepted
+ * spelling per signer is what gives one package one digest.
+ *
+ * The mint guard (`assertMintablePackage`) pins each form to its scheme: 40
+ * digits for D1, 64 for D2. This digest-path check cannot: the published golden
+ * (`g2-settlement-vector-golden.json`) is a sample set whose entry labelled
+ * "ed25519" has a 40-digit signer, and its digest must stay byte-identical.
+ */
+const SIGNER_FORM = /^0x(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** The keys of a signature entry, sorted and joined: an entry has EXACTLY these. */
+const SIGNATURE_ENTRY_KEYS = "scheme,sig,signer";
+
+/** One signature per role of the frozen signer set (D1 operator, D2 kernel). */
+const SIGNATURE_COUNT = 2;
+
+/** Builds the error a refusal raises: the digest path and the mint guard each raise their own type. */
+type Refuse = (path: string, detail: string) => Error;
+
+/**
+ * Read the caller's signature list ONCE into plain local copies, so that whatever
+ * is checked afterwards is exactly what is hashed afterwards. The list's length is
+ * read once, each index once, and for each entry its three fields once (the keys
+ * are enumerated once to prove there are exactly those three). Nothing downstream
+ * touches the caller's objects again, so a getter that answers differently the
+ * second time, or a caller that mutates an entry between a check and the hash,
+ * cannot make validation and hashing disagree.
+ *
+ * Enforces the shape only: an array of exactly `expected` entries, each an object
+ * with exactly the keys signer, scheme, sig. The values come back unchecked.
+ */
+function copySignatureEntries(
+  sigs: unknown,
+  expected: number,
+  refuse: Refuse,
+): Array<{ signer: unknown; scheme: unknown; sig: unknown }> {
+  if (!Array.isArray(sigs)) throw refuse("$signatures", "must be an array");
+  const count: number = sigs.length;
+  if (count !== expected) {
+    throw refuse(
+      "$signatures",
+      `expected exactly ${expected} signatures (one per role: D1 operator, D2 kernel), got ${count}`,
+    );
+  }
+  const copies: Array<{ signer: unknown; scheme: unknown; sig: unknown }> = [];
+  for (let i = 0; i < count; i++) {
+    const path = `$signatures[${i}]`;
+    const entry: unknown = sigs[i];
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      throw refuse(path, "is not an object");
+    }
+    if (Object.keys(entry).sort().join(",") !== SIGNATURE_ENTRY_KEYS) {
+      throw refuse(path, "must have exactly the keys signer, scheme, sig");
+    }
+    const { signer, scheme, sig } = entry as Record<string, unknown>;
+    copies.push({ signer, scheme, sig });
+  }
+  return copies;
+}
+
+/**
+ * The malleability closure, as REFUSALS. It does not repair what it is given: it
+ * accepts exactly one shape, and sorts.
+ *  - An array of exactly two entries: the signer set is one signature per role.
+ *  - Each entry has EXACTLY the keys signer, scheme, sig, all strings, with the
+ *    signer pinned to SIGNER_FORM. An unknown key would move the digest without
+ *    changing a fact.
+ *  - No two entries share a signer, and no two share a scheme (the role). A
+ *    duplicate is REFUSED, never deduplicated: under "first wins" a forged
+ *    duplicate placed ahead of the real entry would be the one that wins.
+ * The only normalization left is the sort by signer, so reordering is a no-op.
+ *
+ * NOT checked here: that the two schemes are exactly the D1 and D2 names, and the
+ * signer width per scheme. The published golden's sample set labels its entries
+ * "secp256k1" and "ed25519" (the latter with a 40-digit signer) and its digest
+ * must stay byte-identical. `assertMintablePackage` enforces both.
+ *
+ * Pure: never mutates the caller's array, returns a new one of new entries. Every
+ * input field is read once (`copySignatureEntries`), and only the copies are
+ * checked, sorted and returned.
+ */
+export function canonicalSignatures(sigs: unknown): PackageSignature[] {
+  const refuse: Refuse = (path, detail) => new InvalidSignatureEntryError(`${path} ${detail}`);
+  const entries: PackageSignature[] = [];
+  copySignatureEntries(sigs, SIGNATURE_COUNT, refuse).forEach(({ signer, scheme, sig }, i) => {
+    const path = `$signatures[${i}]`;
+    if (typeof signer !== "string" || !SIGNER_FORM.test(signer)) {
+      throw refuse(
+        `${path}.signer`,
+        "must be 0x + 40 or 64 lowercase hex digits (an address or an ed25519 key); " +
+          "any other spelling is refused, never normalized",
+      );
+    }
+    if (typeof scheme !== "string" || scheme.length === 0) {
+      throw refuse(`${path}.scheme`, "must be a non-empty string");
+    }
+    if (typeof sig !== "string" || sig.length === 0) {
+      throw refuse(`${path}.sig`, "must be a non-empty string");
+    }
+    entries.push({ signer, scheme, sig });
+  });
+
+  const signers = new Set<string>();
+  const roles = new Set<string>();
+  for (const e of entries) {
+    if (signers.has(e.signer)) {
+      throw new InvalidSignatureEntryError("a signer appears twice; duplicates are refused, never deduplicated");
+    }
+    signers.add(e.signer);
+    if (roles.has(e.scheme)) {
+      throw new InvalidSignatureEntryError("two signatures in the same role (same scheme); duplicates are refused, never deduplicated");
+    }
+    roles.add(e.scheme);
+  }
+
+  return entries.sort((a, b) => (a.signer < b.signer ? -1 : a.signer > b.signer ? 1 : 0));
+}
+
+// ── The mint-time guard ─────────────────────────────────────────────────────
+
+/** Raised when a body + signature set must not be minted into a package. */
+export class PackageNotMintableError extends Error {
+  constructor(path: string, detail: string) {
+    super(`FinalMilestonePackageV2 not mintable at ${path}: ${detail}`);
+    this.name = "PackageNotMintableError";
+  }
+}
+
+/**
+ * The frozen signer profile, under the self-describing scheme labels that the
+ * evidence schema §3 uses. The label is inside the hashed signature entries, so
+ * producer and verifiers need one string, and a bare "secp256k1" would not say
+ * raw, EIP-191 or EIP-712. (The published golden's SAMPLE signature set still
+ * carries the bare labels "secp256k1" and "ed25519", with a 40-digit "ed25519"
+ * signer: it is a digest vector, never a mintable set, which is why this profile
+ * is enforced here and not by `packageDigestV2`.)
+ *   D1 "secp256k1-eip712" = the operator's EIP-712 signature (signer = 0x +
+ *      40-hex address, 65-byte signature);
+ *   D2 "ed25519-raw32" = the kernel's ed25519 signature over raw32(packageBodyHash)
+ *      — the raw 32 bytes of packageBodyHash, never packageDigestV2 (which embeds
+ *      D2 itself) and never the hex string (signer = 0x + 64-hex public key, the
+ *      registry's form; 64-byte signature).
+ * Lowercase hex only.
+ *
+ * CROSS-FAMILY E9 (2026-10-03 / fixer-xray, round 2), D1 STATUS — READ BEFORE
+ * TOUCHING D1:
+ * D2 above IS cryptographically verified below (ed25519 over
+ * raw32(packageBodyHash), via `verifyEd25519Signature`). D1 is verified ONLY
+ * by the injected `OperatorSignatureVerifier` (defined below, called from
+ * `MintablePackage.assert` after every other check): this guard still checks
+ * D1's SHAPE itself (signer/sig regex, below) and that the CLAIMED
+ * `operatorPrincipalId` matches the CLAIMED D1 signer
+ * (`operatorPrincipalMatchesSigner`) — self-consistency, not authenticity —
+ * and then hands the validated unitBinding, packageBodyHash,
+ * operatorPrincipalId and the claimed D1 signer/signature to the verifier.
+ *
+ * D1 IS PINNED (2026-10-03): the struct and domain were RATIFIED by the oracle
+ * (bus #5773) and escrow (#5785) in evidence's
+ * `returns/pcc-evidence-work/d1-eip712-struct-proposal.md`:
+ *   FinalMilestonePackageV2(uint256 chainId,address escrow,bytes32 settlementUnitId,
+ *     bytes32 jobIdHash,uint256 milestoneIndex,bytes32 stepId,bytes32 compositionRoot,
+ *     bytes32 acceptedEnvelopeHash,bytes32 packageBodyHash)
+ *   in the domain {name "PCC FinalMilestonePackage", version "2", chainId, verifyingContract = escrow}.
+ * Its golden vectors (1 positive, 15 negatives) are #270 @59f6c45f. The
+ * production verifier is `createEip712OperatorVerifier`
+ * (operator-signature-verifier.ts): a 65-byte low-s ECDSA recovery checked
+ * against the D1 signer label, the AUTHORITATIVE unit operator and the pinned
+ * `operatorPrincipalId`. The authoritative operator is the bound escrow clone's
+ * `operator()`, read at one pinned block, and it comes from the caller's injected
+ * `operatorForUnit`. This guard still refuses every package whose caller
+ * injects no verifier, or any verifier that does not answer exactly `true`: it
+ * fails closed by construction, not merely by convention.
+ */
+const D1_SCHEME = "secp256k1-eip712";
+const D2_SCHEME = "ed25519-raw32";
+const MINT_SIGNER_PROFILE: Readonly<Record<string, { signer: RegExp; sig: RegExp; role: string }>> = {
+  [D1_SCHEME]: { signer: /^0x[0-9a-f]{40}$/, sig: /^0x[0-9a-f]{130}$/, role: "D1 operator" },
+  [D2_SCHEME]: { signer: /^0x[0-9a-f]{64}$/, sig: /^0x[0-9a-f]{128}$/, role: "D2 kernel" },
+};
+
+/**
+ * One read of the registry's signer into a plain copy: a string stays a string,
+ * an object becomes `{algorithm, publicKey, address}` read once each, anything
+ * else is passed through (the registry reader refuses it).
+ */
+function copyRegisteredSigner(v: unknown): unknown {
+  if (v === null || typeof v !== "object") return v;
+  const { algorithm, publicKey, address } = v as Record<string, unknown>;
+  return { algorithm, publicKey, address };
+}
+
+/**
+ * The shape `principalFromRegistry` / `normalizeRegisteredSigner` (`@pcc/spec`)
+ * accept. Not re-exported from the package root, so this mirrors it locally;
+ * `principalFromRegistry` is the actual authority on acceptable spellings, so an
+ * imprecise local type costs nothing at runtime — it only narrows what callers
+ * of `KernelRegistryReader` are nudged to return.
+ */
+export type KernelRegistrySigner =
+  | { algorithm: "ed25519"; publicKey: string }
+  | { algorithm: "secp256k1"; address: string };
+
+/**
+ * F2: the kernel registry, injected. `assertMintablePackage` calls
+ * `signerForKernel` with the VALIDATED `producer.kernelId` (never a caller
+ * claim) and requires the D2 key to equal what it returns. `null` means "the
+ * registry holds no signer for this kernel" and is refused, never treated as
+ * "no binding required" — a bare signer argument must never authorize itself.
+ * The reader's authority is the CALLER's: the gateway's own kernel registry, or
+ * a pinned snapshot verified with #416's `ident.registered_key`. This guard
+ * trusts whatever it is given here exactly once (read-once, below) and no more.
+ */
+export interface KernelRegistryReader {
+  signerForKernel(
+    kernelId: string,
+  ): KernelRegistrySigner | null | Promise<KernelRegistrySigner | null>;
+}
+
+/**
+ * F4: one durable challenge-issuance record, as the gateway's (not-yet-built)
+ * challenge issuer would return it. Only `state === "issued"` authorizes a
+ * mint: `"consumed"`, any other string, or no record at all are all refused.
+ * This is intentionally not a closed enum — a future issuer may add states
+ * (e.g. `"expired"`), and every one of them must fail closed by DEFAULT, not
+ * by an exhaustive switch this file would need to keep in sync.
+ */
+export interface ChallengeRecord {
+  nonce: Hex;
+  tChallengeRef: string;
+  state: "issued" | "consumed" | (string & {});
+}
+
+/**
+ * F4: the durable challenge issuer, injected. `assertMintablePackage` calls
+ * `recordFor` with the VALIDATED `unitBinding` and requires an ISSUED record
+ * whose `nonce` and `tChallengeRef` equal the package's. The durable issuer is
+ * NOT BUILT yet (evidence schema §4; `challengeBinding.nonce` is still
+ * interim), so today every real caller's `recordFor` returns `null` and every
+ * non-interim-nonce package is refused here — FAILS CLOSED: nothing is
+ * mintable until the issuer exists, which is the correct state for an unbuilt
+ * freshness gate, not a bug in this guard.
+ */
+export interface ChallengeReader {
+  recordFor(unitBinding: UnitBinding): ChallengeRecord | null | Promise<ChallengeRecord | null>;
+  /**
+   * ONE USE (cross-family E9b, HIGH). ATOMICALLY move the issued record for exactly
+   * this unit, nonce and tChallengeRef from "issued" to "consumed", and answer
+   * `true` only to the call that made that move. It MUST answer `true` at most once
+   * per issued challenge, across every concurrent and every later call: a
+   * compare-and-set in the authoritative challenge store, never a read followed by
+   * a write. `recordFor` alone cannot give this: two assertions that both read
+   * "issued" would both mint.
+   *
+   * The guard calls it LAST, after every other check has passed (so a package that
+   * is wrong in any other way never burns the challenge), and mints only on exactly
+   * `true`. `false`, any other value, a throw, a rejection, or a reader without this
+   * method all refuse. A minted package that later fails downstream cannot be
+   * re-minted with the same challenge: the issuer issues a fresh one.
+   */
+  consumeIssued(
+    unitBinding: UnitBinding,
+    expected: { nonce: Hex; tChallengeRef: string },
+  ): boolean | Promise<boolean>;
+}
+
+/**
+ * One read of a challenge record into a plain copy — same discipline as
+ * `copyRegisteredSigner`: a getter that answers differently on a second read
+ * cannot move what was checked away from what was compared.
+ */
+function copyChallengeRecord(
+  v: ChallengeRecord | null | undefined,
+): { nonce: unknown; tChallengeRef: unknown; state: unknown } | null {
+  if (v === null || v === undefined) return null;
+  const { nonce, tChallengeRef, state } = v as unknown as Record<string, unknown>;
+  return { nonce, tChallengeRef, state };
+}
+
+/**
+ * F1 (D1 half), cross-family E9: the VALIDATED inputs the (not yet built) D1
+ * EIP-712 verifier needs — the struct's own fields (the 8 unitBinding fields
+ * and packageBodyHash, evidence schema §2) plus operatorPrincipalId and the
+ * CLAIMED D1 signer/signature, so a real verifier can recover the operator
+ * address and bind it back to operatorPrincipalId exactly as this guard
+ * already does for self-consistency (`operatorPrincipalMatchesSigner`).
+ *
+ * Every field here is a VALIDATED copy: `unitBinding` and
+ * `operatorPrincipalId` come from `validatePackageBody`'s returned object,
+ * `packageBodyHash` is `computePackageBodyHash` over that SAME validated
+ * body (never a caller-supplied hash — there is no such field on the wire),
+ * and `signer`/`sig` are the D1 entry's already shape-checked fields from
+ * `copySignatureEntries`. No raw caller input reaches this interface.
+ */
+export interface OperatorSignatureVerifierInput {
+  unitBinding: UnitBinding;
+  packageBodyHash: Hex;
+  operatorPrincipalId: string;
+  signer: Hex;
+  sig: Hex;
+}
+
+/**
+ * F1 (D1 half), cross-family E9: the operator's EIP-712 signature verifier,
+ * injected. `assertMintablePackage` calls `verifyOperatorSignature` only
+ * after every other check (D1's shape, the self-consistency binds, D2's
+ * cryptographic verification, F2's registry binding and F4's challenge
+ * freshness) has already passed, and trusts it for EXACTLY ONE outcome:
+ *
+ *   - absent (the caller passes `undefined` or `null`): REFUSED. With no
+ *     verifier D1 is unverified, so the guard fails closed instead of
+ *     minting on shape-only self-consistency;
+ *   - the method returns anything other than exactly `true` (`false`, a
+ *     falsy or a TRUTHY non-boolean such as `1` or `"true"`, a promise that
+ *     resolves to any of those): REFUSED. Nothing here is coerced;
+ *   - the method throws, synchronously or via a rejected promise: REFUSED,
+ *     converted to `PackageNotMintableError` — the verifier's own error type
+ *     never escapes this guard as something else;
+ *   - only `=== true`, with every other check already passing, mints.
+ *
+ * The production implementation is `createEip712OperatorVerifier`
+ * (operator-signature-verifier.ts), over the RATIFIED D1 struct (see the D1
+ * STATUS note above `MINT_SIGNER_PROFILE`). Implementing it changed nothing in
+ * this guard: a caller injects it, with an `operatorForUnit` that reads the bound
+ * clone's `operator()` at one pinned block.
+ */
+export interface OperatorSignatureVerifier {
+  verifyOperatorSignature(
+    input: OperatorSignatureVerifierInput,
+  ): boolean | Promise<boolean>;
+}
+
+// Captured at MODULE LOAD, before any other code in the process has had a
+// chance to run and replace them (evidence-lane round 3, cross-family E9,
+// finding 2). `deepFreeze` below calls ONLY these, never the live
+// `Object.freeze` / `Object.isFrozen` / `Object.keys` globals, so a caller
+// that monkey-patches those into no-ops AFTER this module has loaded cannot
+// turn this module's own freeze into one.
+const captureObjectFreeze = Object.freeze;
+const captureObjectIsFrozen = Object.isFrozen;
+const captureObjectKeys = Object.keys;
+const captureWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has) as (set: WeakSet<object>, value: object) => boolean;
+const captureWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add) as (set: WeakSet<object>, value: object) => WeakSet<object>;
+
+/**
+ * E9b (cross-family r2, CRITICAL): every package `assertMintablePackage` has returned,
+ * and nothing else. Module-private: no other module can add to it, so membership is
+ * the runtime proof that a package passed every check. `#brand` alone was not: the
+ * emitted JavaScript constructor is callable (`Reflect.construct`), and it installs
+ * `#brand` on whatever it builds.
+ */
+const MINTED: WeakSet<object> = new WeakSet<object>();
+
+/**
+ * E9b (cross-family r2, CRITICAL): module-private, so only code in this module can
+ * pass it to the constructor. TypeScript's `private constructor` is compile-time
+ * only; this makes the runtime constructor refuse every outside call.
+ */
+const CONSTRUCTION_TOKEN: unique symbol = Symbol("pcc.mintable-package.construction");
+
+/**
+ * F2 (evidence-lane round 3, cross-family E9): deep-freeze `value` and every
+ * plain object/array reachable from it, using the captured intrinsics above.
+ * The constructor's freeze used to be `Object.freeze(body)` /
+ * `Object.freeze(signatures)` — TOP LEVEL ONLY. `body.unitBinding`,
+ * `body.producer`, every other nested body object, and each signature ENTRY
+ * stayed mutable: a caller holding the returned `MintablePackage` could
+ * mutate them after `assertMintablePackage` succeeded, and
+ * `mintablePackageDigest` would then hash a package that was never verified.
+ *
+ * Recurses via the captured `Object.keys` (which, for an array, returns its
+ * index keys, so an array of signature entries is walked element by element
+ * with no special-casing). Skips anything already frozen (via the captured
+ * `Object.isFrozen`), so re-freezing an already-deep-frozen value — exactly
+ * what the constructor does to `body`, which `assert` deep-freezes earlier —
+ * is a fast no-op, not a re-walk. Only ever called here on plain,
+ * non-circular, JSON-shaped data (a validated body, a canonicalized
+ * signature list), so it does not need cycle detection to be safe.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object" || captureObjectIsFrozen(value)) {
+    return value;
+  }
+  captureObjectFreeze(value);
+  for (const key of captureObjectKeys(value as object)) {
+    deepFreeze((value as Record<string, unknown>)[key]);
+  }
+  return value;
+}
+
+/**
+ * F3: the nominal brand that makes `assertMintablePackage` the ONLY mint-bound
+ * seam. The private field `#brand` makes TypeScript compare this class
+ * NOMINALLY rather than structurally: a hand-built `{body, signatures}` object
+ * is never assignable to `MintablePackage`, even though its public shape
+ * matches, because it has no `#brand`. (A private CONSTRUCTOR alone would not
+ * be enough for this — TypeScript's structural check for classes only treats
+ * them as nominal when they carry a private or protected MEMBER.)
+ *
+ * THE RUNTIME BOUNDARY IS THE MODULE-PRIVATE REGISTRY (cross-family E9b, CRITICAL).
+ * `private constructor` is compile-time only: the emitted constructor is callable,
+ * and `Reflect.construct(MintablePackage, [body, sigs])` installed a genuine
+ * `#brand` without running a single check. Now:
+ *   - the constructor refuses unless it is handed `CONSTRUCTION_TOKEN`, a
+ *     module-private symbol, so no outside call can build one;
+ *   - `assert` adds each package it returns to `MINTED`, a module-private WeakSet,
+ *     and `isMintablePackage` (what `mintablePackageDigest` calls) asks only that
+ *     set. Even an instance built some other way is not in it;
+ *   - the class and its prototype are frozen, so `isMintable` and `assert` cannot
+ *     be replaced (they could be, before).
+ *
+ * HISTORY of the runtime check (kept so the reasoning is not repeated):
+ *   - `instanceof` was forgeable (evidence-lane round 3): `Object.create(
+ *     MintablePackage.prototype)` passes it without running the constructor, and
+ *     a `Symbol.hasInstance` override redefines it for every check.
+ *   - `#brand in x` replaced it, but `#brand` is installed by the constructor,
+ *     and the emitted constructor was callable from outside (cross-family E9b,
+ *     CRITICAL): `Reflect.construct` built a branded instance with no checks.
+ *   - So the check is now membership in `MINTED` (above), which only `assert`
+ *     writes, with the constructor gated by `CONSTRUCTION_TOKEN`.
+ *
+ * `body` and `signatures` are DEEP-frozen (evidence-lane round 3, finding 2 —
+ * was shallow; see `deepFreeze` above) copies the caller cannot reach (both
+ * already came back from `validatePackageBody` / `canonicalSignatures`, which
+ * never alias the caller's objects). The freeze itself happens the moment
+ * `assert` validates the body — before any await and before any injected
+ * reader or verifier call reaches it (evidence-lane round 3, finding 3) — not
+ * here in the constructor at the end of `assert`, which is the stale timing
+ * this class used to have; see `assert`'s own doc for why that window
+ * mattered. The constructor's own freeze calls below are what close the
+ * window for `signatures` (built fresh by `canonicalSignatures`, frozen here
+ * for the first time) and are a defensive, idempotent no-op for `body`
+ * (already deep-frozen by `assert` by the time it reaches here).
+ */
+export class MintablePackage {
+  readonly body: FinalMilestonePackageV2Body;
+  readonly signatures: readonly PackageSignature[];
+  /** Makes the class nominal for TypeScript (see the class doc). Never read; the runtime check is `MINTED`. */
+  readonly #brand = true;
+
+  private constructor(token: typeof CONSTRUCTION_TOKEN, body: FinalMilestonePackageV2Body, signatures: PackageSignature[]) {
+    if (token !== CONSTRUCTION_TOKEN) {
+      throw new PackageNotMintableError("$", "a MintablePackage is made only by assertMintablePackage");
+    }
+    this.body = deepFreeze(body);
+    this.signatures = deepFreeze(signatures);
+    captureObjectFreeze(this);
+  }
+
+  /**
+   * Whether `x` is a package `assertMintablePackage` returned: `isMintablePackage`,
+   * membership in the module-private registry (cross-family E9b). Kept for callers
+   * of the old static; the class is frozen, so it cannot be replaced.
+   */
+  static isMintable(x: unknown): x is MintablePackage {
+    return isMintablePackage(x);
+  }
+
+  /**
+   * Refuse anything a real mint must never produce, before any digest exists,
+   * and return a branded `MintablePackage` — the only way to construct one.
+   * The digest path (`canonicalSignatures`) already refuses what the oracle's
+   * ingestion would repair (duplicates, case, extra keys); this is the
+   * stricter gate for a real mint:
+   *  - the body passes `validatePackageBody` (exact keys, lowercase hex, kernel id);
+   *  - the challenge nonce is not the interim placeholder AND matches an ISSUED,
+   *    unit-bound challenge record (F4: via `ChallengeReader`) — nonzero alone is
+   *    not proof of issuance, and no durable issuer yet means nothing is mintable
+   *    until it exists (fails closed);
+   *  - exactly one D1 and one D2 signature, each with exactly the keys
+   *    {signer, scheme, sig}, the profile's exact scheme name and its signer and
+   *    signature forms, so no duplicate, extra, relabelled or foreign-scheme entry
+   *    can reach the digest;
+   *  - the principal ids are the pinned forms (`pcc.evidence.principal-id.v1`)
+   *    and bound to those signatures: operatorPrincipalId is
+   *    eip155:<unit chainId>:<the D1 signer>, and devicePrincipalId is
+   *    ed25519:<the D2 signer>, which must be the key the kernel registry holds
+   *    for the VALIDATED producer.kernelId (F2: looked up through
+   *    `KernelRegistryReader`, never a bare caller-asserted signer) and never a
+   *    key whose secret is public;
+   *  - D2's ed25519 signature verifies over raw32(packageBodyHash) (F1 D2
+   *    half), AND the operator's D1 signature is verified by the injected
+   *    `OperatorSignatureVerifier`, which must answer exactly `true` (F1 D1
+   *    half) — a caller that injects none is refused; see the D1 STATUS
+   *    note above MINT_SIGNER_PROFILE and `OperatorSignatureVerifier`'s own doc.
+   *
+   * FROZEN IMMEDIATELY, BEFORE ANY AWAIT (evidence-lane round 3, cross-family
+   * E9, finding 3): `valid` is deep-frozen (see `deepFreeze` above) the
+   * instant it comes back from `validatePackageBody`, before the
+   * interim-nonce check and before any of the three injected calls below
+   * (the kernel registry, the challenge reader, the D1 verifier) ever see
+   * it. Each of those three can be arbitrary caller-supplied code, and two
+   * of them receive a reference INTO `valid` directly (`valid.unitBinding`
+   * to the challenge reader; the same `valid.unitBinding` inside the D1
+   * verifier's input object). Freezing here — not in the constructor at the
+   * very end of this method, which is where the freeze used to happen —
+   * means an injected reader that tries to mutate what it was handed throws
+   * in strict mode instead of silently changing what gets minted.
+   *
+   * READ ONCE. Every input is read exactly once into a local copy (the body through
+   * `validatePackageBody`'s returned copy, each signature entry's fields and the
+   * list's length and indices through `copySignatureEntries`, the registry signer's
+   * and the challenge record's fields through `copyRegisteredSigner` /
+   * `copyChallengeRecord`), and only the copies are checked and hashed. No
+   * getter's second answer, and no change the caller makes after a check, can
+   * make what was validated differ from what is returned.
+   *
+   * The registry and challenge lookups are async (real reads are I/O), so this
+   * method is too.
+   */
+  static async assert(
+    body: unknown,
+    sigs: unknown,
+    registry: KernelRegistryReader,
+    challenges: ChallengeReader,
+    operatorVerifier: OperatorSignatureVerifier | null | undefined,
+  ): Promise<MintablePackage> {
+    const valid = validatePackageBody(body);
+    deepFreeze(valid);
+    if (isInterimNonce(valid)) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding.nonce",
+        "is the interim placeholder; the durable challenge is not built",
+      );
+    }
+    const refuse: Refuse = (path, detail) => new PackageNotMintableError(path, detail);
+    const schemes = new Set<string>();
+    const entries: PackageSignature[] = copySignatureEntries(sigs, SIGNATURE_COUNT, refuse).map((c, i) => {
+      const path = `$signatures[${i}]`;
+      // Own keys only: a scheme named "constructor" or "__proto__" must be a typed refusal, not a crash.
+      const profile =
+        typeof c.scheme === "string" && Object.hasOwn(MINT_SIGNER_PROFILE, c.scheme)
+          ? MINT_SIGNER_PROFILE[c.scheme]
+          : undefined;
+      if (!profile || typeof c.scheme !== "string") {
+        throw refuse(`${path}.scheme`, `must be "${D1_SCHEME}" (D1) or "${D2_SCHEME}" (D2)`);
+      }
+      if (schemes.has(c.scheme)) {
+        throw refuse(`${path}.scheme`, `a second ${profile.role} signature`);
+      }
+      schemes.add(c.scheme);
+      if (typeof c.signer !== "string" || !profile.signer.test(c.signer)) {
+        throw refuse(`${path}.signer`, `not a ${profile.role} signer in its lowercase form`);
+      }
+      if (typeof c.sig !== "string" || !profile.sig.test(c.sig)) {
+        throw refuse(`${path}.sig`, `not a ${profile.role} signature`);
+      }
+      return { signer: c.signer, scheme: c.scheme, sig: c.sig };
+    });
+    const d1 = entries.find((e) => e.scheme === D1_SCHEME)!;
+    const d2 = entries.find((e) => e.scheme === D2_SCHEME)!;
+    const chainId = Number(valid.unitBinding.chainId);
+    if (!operatorPrincipalMatchesSigner(valid.producer.operatorPrincipalId, d1.signer, chainId)) {
+      throw new PackageNotMintableError(
+        "$.producer.operatorPrincipalId",
+        "must be eip155:<unitBinding.chainId>:<the D1 signer's address> (pcc.evidence.principal-id.v1)",
+      );
+    }
+    if (!devicePrincipalMatchesSigner(valid.producer.devicePrincipalId, d2.signer)) {
+      throw new PackageNotMintableError(
+        "$.producer.devicePrincipalId",
+        "must be ed25519:<the D2 signer's key>, never a key whose secret is public (pcc.evidence.principal-id.v1)",
+      );
+    }
+
+    // F1 (D2 half): the kernel's ed25519 signature must verify over the raw 32
+    // bytes of packageBodyHash — not the hex string, and not packageDigestV2
+    // (which would be circular: it embeds this very signature). D1 (below,
+    // after F2/F4) is verified by the injected OperatorSignatureVerifier, not
+    // here; see the D1 STATUS note above MINT_SIGNER_PROFILE.
+    const packageBodyHash = computePackageBodyHash(valid);
+    const bodyHashRaw32 = Buffer.from(toBytes(packageBodyHash));
+    if (!verifyEd25519Signature(d2.signer, bodyHashRaw32, d2.sig)) {
+      throw new PackageNotMintableError(
+        `$signatures[${entries.indexOf(d2)}].sig`,
+        "D2 ed25519 signature does not verify over raw32(packageBodyHash)",
+      );
+    }
+
+    // F2: the registry binding is authenticated, keyed by the VALIDATED kernel
+    // id — never a caller-asserted signer with no registry lookup at all.
+    const registeredSigner = await registry.signerForKernel(valid.producer.kernelId);
+    if (registeredSigner === null || registeredSigner === undefined) {
+      throw new PackageNotMintableError(
+        "$.producer.kernelId",
+        "the kernel registry holds no signer for this kernel id",
+      );
+    }
+    if (
+      principalFromRegistry(copyRegisteredSigner(registeredSigner), chainId) !==
+      valid.producer.devicePrincipalId
+    ) {
+      throw new PackageNotMintableError(
+        "$.producer.devicePrincipalId",
+        "is not the key the kernel registry holds for producer.kernelId",
+      );
+    }
+
+    // F4: freshness is authenticated against an issued, unit-bound challenge
+    // record — nonzero is not proof of issuance. No durable issuer yet means
+    // no record, ever, which fails closed by design (see ChallengeReader doc).
+    const record = copyChallengeRecord(await challenges.recordFor(valid.unitBinding));
+    if (record === null) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        "no issued challenge record exists for this unit; nothing is mintable until the durable challenge issuer exists",
+      );
+    }
+    if (record.state !== "issued") {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        `challenge record is not issued (state: ${JSON.stringify(record.state)})`,
+      );
+    }
+    if (
+      record.nonce !== valid.challengeBinding.nonce ||
+      record.tChallengeRef !== valid.challengeBinding.tChallengeRef
+    ) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        "does not match the issued challenge record's nonce/tChallengeRef",
+      );
+    }
+
+    // F1 (D1 half), cross-family E9 round 2: the operator's EIP-712 signature
+    // is verified ONLY by the injected OperatorSignatureVerifier — see its
+    // doc for the exact fail-closed rules. The production verifier is
+    // createEip712OperatorVerifier; a caller that injects none is refused.
+    // Runs last, after every other check, so a
+    // package that is wrong in any other way is refused for THAT reason first.
+    const d1Path = `$signatures[${entries.indexOf(d1)}].sig`;
+    if (operatorVerifier === null || operatorVerifier === undefined) {
+      throw new PackageNotMintableError(
+        d1Path,
+        "no operator signature verifier is injected, so D1 cannot be verified and the guard " +
+          "fails closed (the production verifier is createEip712OperatorVerifier)",
+      );
+    }
+    let d1Verified: boolean;
+    try {
+      d1Verified = await operatorVerifier.verifyOperatorSignature({
+        unitBinding: valid.unitBinding,
+        packageBodyHash,
+        operatorPrincipalId: valid.producer.operatorPrincipalId,
+        signer: d1.signer as Hex,
+        sig: d1.sig as Hex,
+      });
+    } catch (err) {
+      throw new PackageNotMintableError(
+        d1Path,
+        `the operator signature verifier threw instead of answering: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (d1Verified !== true) {
+      throw new PackageNotMintableError(d1Path, "the operator signature verifier did not return exactly true");
+    }
+
+    // E9b (cross-family r2, HIGH): ONE USE. The challenge is consumed atomically, LAST,
+    // after every other check passed, and only the call the store answers `true` mints.
+    // Two assertions that both read "issued" above cannot both get here with `true`.
+    let consumed: unknown;
+    try {
+      consumed = await challenges.consumeIssued(
+        valid.unitBinding,
+        captureObjectFreeze({ nonce: valid.challengeBinding.nonce, tChallengeRef: valid.challengeBinding.tChallengeRef }),
+      );
+    } catch (err) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        `the challenge could not be consumed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (consumed !== true) {
+      throw new PackageNotMintableError(
+        "$.challengeBinding",
+        "the challenge was not consumed by this call (already used, or the store refused); a challenge mints at most once",
+      );
+    }
+
+    const minted = new MintablePackage(CONSTRUCTION_TOKEN, valid, canonicalSignatures(entries));
+    captureWeakSetAdd(MINTED, minted);
+    return minted;
+  }
+}
+captureObjectFreeze(MintablePackage);
+captureObjectFreeze(MintablePackage.prototype);
+
+/**
+ * Whether `x` is a package `assertMintablePackage` returned (cross-family E9b,
+ * CRITICAL): membership in this module's private registry, never a property of `x`
+ * or of the class. `mintablePackageDigest` calls this. It is an ES module export,
+ * so importers cannot rebind it.
+ */
+export function isMintablePackage(x: unknown): x is MintablePackage {
+  return typeof x === "object" && x !== null && captureWeakSetHas(MINTED, x);
+}
+
+/**
+ * Thin, stable entry point: `MintablePackage.assert` under its established
+ * name. Kept as a function (not just the class) because it is the public API
+ * every caller and test already imports.
+ */
+export async function assertMintablePackage(
+  body: unknown,
+  sigs: unknown,
+  registry: KernelRegistryReader,
+  challenges: ChallengeReader,
+  operatorVerifier: OperatorSignatureVerifier | null | undefined,
+): Promise<MintablePackage> {
+  return MintablePackage.assert(body, sigs, registry, challenges, operatorVerifier);
+}

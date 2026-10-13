@@ -1,6 +1,12 @@
 // ---------------------------------------------------------------------------
 // Capability Bounty Service — In-memory mock implementation
+//
+// Nothing here is funded: no treasury exists and no escrow is called, so every
+// bounty carries fundingStatus "unfunded". Auto-creating "treasury" bounties
+// from demand signals is OFF unless a caller opts in explicitly (tests/demos).
 // ---------------------------------------------------------------------------
+
+import { randomUUID } from "node:crypto";
 
 import type {
   DemandSignal,
@@ -32,15 +38,14 @@ const MIN_VERIFICATION_SCORE = 0.7;
 // Helpers
 // ---------------------------------------------------------------------------
 
-let nextDemandId = 1;
-let nextBountyId = 1;
-
+// Random ids: a process-local counter restarts at 0001 and collides with ids
+// handed out before a restart.
 function generateDemandId(): string {
-  return `demand-${String(nextDemandId++).padStart(4, "0")}`;
+  return `demand-${randomUUID()}`;
 }
 
 function generateBountyId(): string {
-  return `bounty-${String(nextBountyId++).padStart(4, "0")}`;
+  return `bounty-${randomUUID()}`;
 }
 
 /** Map frequency to estimated annual multiplier */
@@ -63,32 +68,69 @@ function frequencyToAnnualMultiplier(
 // BountyService
 // ---------------------------------------------------------------------------
 
+export interface BountyServiceOptions {
+  /**
+   * Auto-create "treasury" bounties when demand crosses a threshold. Off by
+   * default: no treasury exists, so an auto-created bounty would advertise a
+   * reward nobody funded.
+   */
+  autoCreateTreasuryBounties?: boolean;
+}
+
+/**
+ * A detached, deeply frozen copy (astra pack 36b). Every public read returns
+ * one, so no caller can forge a stored record's status, funding, earnings or
+ * demand state by mutating what it was handed.
+ */
+function snapshot<T>(value: T): Readonly<T> {
+  const copy = structuredClone(value);
+  const freeze = (o: unknown): void => {
+    if (o !== null && typeof o === "object" && !Object.isFrozen(o)) {
+      Object.freeze(o);
+      for (const v of Object.values(o as Record<string, unknown>)) freeze(v);
+    }
+  };
+  freeze(copy);
+  return copy;
+}
+
+/**
+ * State is runtime-private (astra pack 36c): ES `#` fields, not TypeScript
+ * `private`, so a holder of an instance (the gateway's shared one included) can
+ * neither reach nor enumerate the stored maps. The instance is frozen, so no one
+ * can shadow its readers or flip the treasury switch after construction, and
+ * inputs are copied on the way in, so a caller keeps no alias into stored state.
+ */
 export class BountyService {
-  private demandSignals = new Map<string, DemandSignal>();
-  private bounties = new Map<string, CapabilityBounty>();
-  private hunters = new Map<string, BountyHunter>();
+  #demandSignals = new Map<string, DemandSignal>();
+  #bounties = new Map<string, CapabilityBounty>();
+  #hunters = new Map<string, BountyHunter>();
+  readonly #autoCreateTreasuryBounties: boolean;
+
+  constructor(options: BountyServiceOptions = {}) {
+    this.#autoCreateTreasuryBounties = options.autoCreateTreasuryBounties === true;
+    Object.freeze(this);
+  }
 
   // ── Demand Signals ──────────────────────────────────────────────
 
   submitDemand(
     input: Omit<DemandSignal, "id" | "createdAt" | "status">,
-  ): DemandSignal {
+  ): Readonly<DemandSignal> {
     const signal: DemandSignal = {
-      ...input,
+      ...structuredClone(input),
       id: generateDemandId(),
       createdAt: new Date().toISOString(),
       status: "active",
     };
-    this.demandSignals.set(signal.id, signal);
-    return signal;
+    this.#demandSignals.set(signal.id, signal);
+    return snapshot(signal);
   }
 
-  getDemandSignals(capabilityType?: string): DemandSignal[] {
-    const all = [...this.demandSignals.values()];
-    if (capabilityType) {
-      return all.filter((s) => s.capabilityType === capabilityType);
-    }
-    return all;
+  getDemandSignals(capabilityType?: string): Readonly<DemandSignal>[] {
+    const all = [...this.#demandSignals.values()];
+    const picked = capabilityType ? all.filter((s) => s.capabilityType === capabilityType) : all;
+    return picked.map(snapshot);
   }
 
   getTopDemand(
@@ -99,7 +141,7 @@ export class BountyService {
       { requesters: Set<string>; annualValue: number }
     >();
 
-    for (const signal of this.demandSignals.values()) {
+    for (const signal of this.#demandSignals.values()) {
       if (signal.status !== "active") continue;
       let entry = agg.get(signal.capabilityType);
       if (!entry) {
@@ -131,10 +173,11 @@ export class BountyService {
     currency: "USDC" | "CREDITS";
     requirements: BountyRequirements;
     expiresInDays: number;
-    fundedBy?: "treasury" | "requesters" | "mixed";
+    /** Who is PROPOSED to fund it. A proposal only: nothing funds a bounty (see fundingStatus). */
+    proposedFundingSource?: "treasury" | "requesters" | "mixed";
     demandCount?: number;
     estimatedAnnualValue?: number;
-  }): CapabilityBounty {
+  }): Readonly<CapabilityBounty> {
     const now = new Date();
     const expiresAt = new Date(
       now.getTime() + params.expiresInDays * 24 * 60 * 60 * 1000,
@@ -148,22 +191,23 @@ export class BountyService {
       estimatedAnnualValue: params.estimatedAnnualValue ?? 0,
       bountyReward: params.bountyReward,
       currency: params.currency,
-      fundedBy: params.fundedBy ?? "treasury",
-      requirements: params.requirements,
+      ...(params.proposedFundingSource ? { proposedFundingSource: params.proposedFundingSource } : {}),
+      fundingStatus: "unfunded",
+      requirements: structuredClone(params.requirements),
       status: "open",
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
     };
 
-    this.bounties.set(bounty.id, bounty);
-    return bounty;
+    this.#bounties.set(bounty.id, bounty);
+    return snapshot(bounty);
   }
 
   listBounties(filter?: {
     status?: CapabilityBounty["status"];
     capabilityType?: string;
-  }): CapabilityBounty[] {
-    let result = [...this.bounties.values()];
+  }): Readonly<CapabilityBounty>[] {
+    let result = [...this.#bounties.values()];
     if (filter?.status) {
       result = result.filter((b) => b.status === filter.status);
     }
@@ -172,11 +216,11 @@ export class BountyService {
         (b) => b.capabilityType === filter.capabilityType,
       );
     }
-    return result;
+    return result.map(snapshot);
   }
 
-  claimBounty(bountyId: string, operatorId: string): CapabilityBounty {
-    const bounty = this.bounties.get(bountyId);
+  claimBounty(bountyId: string, operatorId: string): Readonly<CapabilityBounty> {
+    const bounty = this.#bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
@@ -191,95 +235,65 @@ export class BountyService {
     bounty.claimedAt = new Date().toISOString();
 
     // Track the hunter
-    this.ensureHunter(operatorId);
-    const hunter = this.hunters.get(operatorId)!;
+    this.#ensureHunter(operatorId);
+    const hunter = this.#hunters.get(operatorId)!;
     hunter.bountiesClaimed += 1;
 
-    return bounty;
+    return snapshot(bounty);
   }
 
+  /**
+   * RETIRED (astra pack 36, HIGH 2). A caller-supplied job id and score are not
+   * verification authority: verification must be derived by the server from real
+   * job evidence (ledger R45). Always refuses and changes nothing; the signature
+   * stays for API compatibility.
+   */
   verifyBounty(
     bountyId: string,
-    jobId: string,
-    verificationScore: number,
-  ): CapabilityBounty {
-    const bounty = this.bounties.get(bountyId);
-    if (!bounty) {
+    _jobId: string,
+    _verificationScore: number,
+  ): never {
+    if (!this.#bounties.has(bountyId)) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
-    if (bounty.status !== "claimed") {
-      throw new Error(
-        `Bounty ${bountyId} cannot be verified (status: ${bounty.status})`,
-      );
-    }
-
-    bounty.verificationJobId = jobId;
-    bounty.verificationScore = verificationScore;
-
-    if (verificationScore >= MIN_VERIFICATION_SCORE) {
-      bounty.status = "verified";
-    }
-    // If score is too low, bounty stays "claimed" — operator can retry
-
-    return bounty;
+    throw new Error(
+      `Bounty verification is retired: a caller-supplied score is not authority (bounty ${bountyId}). ` +
+        "Verification is derived by the server from real job evidence (ledger R45).",
+    );
   }
 
-  payBounty(bountyId: string): CapabilityBounty {
-    const bounty = this.bounties.get(bountyId);
+  /**
+   * RETIRED (astra pack 36, HIGH 1). Nothing funds a bounty (fundingStatus is
+   * always "unfunded"), so no bounty can be paid and no earnings may be recorded.
+   * Payment happens only through the accepted-plan escrow path. Always refuses and
+   * changes nothing: no "paid" state, no paidAt, no totalEarned or
+   * bountiesCompleted, and no demand signal marked fulfilled.
+   */
+  payBounty(bountyId: string): never {
+    const bounty = this.#bounties.get(bountyId);
     if (!bounty) {
       throw new Error(`Bounty ${bountyId} not found`);
     }
-    if (bounty.status !== "verified") {
-      throw new Error(
-        `Bounty ${bountyId} cannot be paid (status: ${bounty.status})`,
-      );
-    }
-
-    bounty.status = "paid";
-    bounty.paidAt = new Date().toISOString();
-
-    // Update hunter stats
-    if (bounty.claimedBy) {
-      const hunter = this.hunters.get(bounty.claimedBy);
-      if (hunter) {
-        hunter.bountiesCompleted += 1;
-        hunter.totalEarned += bounty.bountyReward;
-        if (!hunter.capabilitiesOnboarded.includes(bounty.capabilityType)) {
-          hunter.capabilitiesOnboarded.push(bounty.capabilityType);
-        }
-        // Reputation = completed / claimed ratio * 100
-        hunter.reputation = Math.round(
-          (hunter.bountiesCompleted / hunter.bountiesClaimed) * 100,
-        );
-      }
-    }
-
-    // Mark matching demand signals as fulfilled
-    for (const signal of this.demandSignals.values()) {
-      if (
-        signal.capabilityType === bounty.capabilityType &&
-        signal.status === "active"
-      ) {
-        signal.status = "fulfilled";
-      }
-    }
-
-    return bounty;
+    throw new Error(
+      `Bounty payment is retired: nothing funds bounty ${bountyId} (fundingStatus ${bounty.fundingStatus}). ` +
+        "Payment happens only through the accepted-plan escrow path.",
+    );
   }
 
   // ── Auto-Bounty Creation ────────────────────────────────────────
 
-  checkAndCreateBounties(): CapabilityBounty[] {
+  checkAndCreateBounties(): Readonly<CapabilityBounty>[] {
+    if (!this.#autoCreateTreasuryBounties) return [];
+
     const topDemand = this.getTopDemand(100);
-    const created: CapabilityBounty[] = [];
+    const created: Readonly<CapabilityBounty>[] = [];
 
     // Collect capability types that already have an open or claimed bounty
     const existingBountyTypes = new Set<string>();
-    for (const bounty of this.bounties.values()) {
+    for (const bounty of this.#bounties.values()) {
       if (
         bounty.status === "open" ||
-        bounty.status === "claimed" ||
-        bounty.status === "verified"
+        bounty.status === "claimed"
       ) {
         existingBountyTypes.add(bounty.capabilityType);
       }
@@ -301,7 +315,7 @@ export class BountyService {
       const bountyReward = Math.min(rawReward, BOUNTY_REWARD_CAP);
 
       // Find a representative description from the demand signals
-      const representativeSignal = [...this.demandSignals.values()].find(
+      const representativeSignal = [...this.#demandSignals.values()].find(
         (s) =>
           s.capabilityType === demand.capabilityType &&
           s.status === "active",
@@ -320,7 +334,7 @@ export class BountyService {
           mustPassVerification: true,
         },
         expiresInDays: 90,
-        fundedBy: "treasury",
+        proposedFundingSource: "treasury",
         demandCount: demand.count,
         estimatedAnnualValue: demand.annualValue,
       });
@@ -333,17 +347,18 @@ export class BountyService {
 
   // ── Leaderboard ─────────────────────────────────────────────────
 
-  getLeaderboard(limit = 10): BountyHunter[] {
-    return [...this.hunters.values()]
+  getLeaderboard(limit = 10): Readonly<BountyHunter>[] {
+    return [...this.#hunters.values()]
       .sort((a, b) => b.totalEarned - a.totalEarned)
-      .slice(0, limit);
+      .slice(0, limit)
+      .map(snapshot);
   }
 
   // ── Internal ────────────────────────────────────────────────────
 
-  private ensureHunter(operatorId: string): void {
-    if (!this.hunters.has(operatorId)) {
-      this.hunters.set(operatorId, {
+  #ensureHunter(operatorId: string): void {
+    if (!this.#hunters.has(operatorId)) {
+      this.#hunters.set(operatorId, {
         operatorId,
         operatorDid: `did:pcc:operator:${operatorId}`,
         bountiesClaimed: 0,

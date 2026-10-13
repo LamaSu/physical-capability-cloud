@@ -1,9 +1,11 @@
 export * from "./types/index.js";
 export * from "./schemas/index.js";
-export { canonicalize, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEventHash } from "./util/canonical.js";
+export { canonicalize, canonicalSnapshot, sha256, hashBundle, hashEvent, verifyBundleHash, verifyEventHash } from "./util/canonical.js";
+export type { CanonicalSnapshot } from "./util/canonical.js";
 // RTP-absorption doc 03 — job lifecycle reducer + in-memory timeout registry (transport-independent)
 export * from "./util/job-lifecycle.js";
 export { ids, generateId } from "./util/ids.js";
+export { compareCodeUnits } from "./util/code-unit-order.js";
 // Identity types and browser-safe functions (no node:crypto)
 export * from "./identity/types.js";
 // ERC-8004 types (browser-safe)
@@ -14,6 +16,25 @@ export * from "./identity/ephemeral.js";
 export * from "./csd/index.js";
 // Evidence-primitive vocabulary v1 — bounded settlement primitives + eligibility lint
 export * from "./evidence/index.js";
+
+// ADK R8: safety envelope and typed I/O for onboarding
+export * from "./onboarding/index.js";
 // ROLE_TAGS — single-source-of-truth keccak256 hashes for ContributorRole
 // (off-chain TS side; on-chain Solidity side codegen'd into RoleTags.sol)
 export * from "./payouts.js";
+// Device intake (R2) — field registry, records, milestone validation, JSON Schema
+export * from "./onboarding/intake/index.js";
+// Research prompt library (R5) — ready-to-fire research prompts + coaching
+export * from "./onboarding/research/index.js";
+
+// Economic agreements v1 (docs/ECONOMIC_AGREEMENTS.md). Namespaced because its schema names
+// (Unit, AmountSchema, ...) are generic; also importable directly as `@pcc/spec/economics`.
+export * as economics from "./economics/index.js";
+// Canonical money-status display map (browser-safe) — the ONE exact escrow /
+// settlement state -> tone + honest label table every surface renders from.
+export * from "./money/money-status.js";
+// Product read models (browser-safe): typed DTOs product surfaces project without
+// inferring meaning. JobExecutionDTO first (PX-6).
+export * from "./readmodels/job-execution.js";
+export * from "./readmodels/operator-work.js";
+export * from "./readmodels/product-home.js";

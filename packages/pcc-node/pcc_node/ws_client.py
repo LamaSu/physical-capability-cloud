@@ -20,19 +20,11 @@ import logging
 import threading
 import time
 from typing import Callable, Dict, Any, List, Optional
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
-import ssl
+from .http_util import gateway_request
 
 log = logging.getLogger("pcc-node.ws")
 
 USER_AGENT = "PCC-Node/0.1.0 (https://capability.network)"
-
-# Relaxed SSL context for self-signed certs on local networks
-_relaxed_ctx = ssl.create_default_context()
-_relaxed_ctx.check_hostname = False
-_relaxed_ctx.verify_mode = ssl.CERT_NONE
-
 
 def _http(
     method: str,
@@ -41,30 +33,17 @@ def _http(
     api_key: str = "",
     timeout: int = 30,
 ) -> tuple:
-    """Minimal HTTP helper.  Returns (status_code, parsed_body)."""
+    """One gateway request. Returns (status_code, parsed_body).
+
+    Goes through http_util.gateway_request: https only (plain http only to this
+    machine), verified certificates, and no redirects, so the bearer key and
+    the jobs this node acts on can only come from the configured gateway
+    (verdicts 68b and 68c, finding 2).
+    """
     headers = {"User-Agent": USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = Request(url, data=data, headers=headers, method=method)
-    try:
-        with urlopen(req, timeout=timeout, context=_relaxed_ctx) as resp:
-            raw = resp.read().decode("utf-8")
-            try:
-                return resp.status, json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                return resp.status, raw
-    except HTTPError as e:
-        raw = e.read().decode("utf-8")
-        try:
-            return e.code, json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return e.code, raw
-    except (URLError, OSError, Exception) as e:
-        return 0, {"error": str(e)}
+    return gateway_request(method, url, body, headers, timeout=timeout)
 
 
 class PCCGatewayClient:
@@ -149,10 +128,14 @@ class PCCGatewayClient:
             "timestamp": time.time(),
         }
         status, resp = self._post("/api/operator/evidence", payload)
-        if status in (200, 201):
-            log.info(f"Evidence pushed for job {job_id}")
+        # The relay answers 200 with {"stored": false} when it did not store the
+        # bundle (unknown job, storage failure), so only a stored receipt for
+        # this job counts (verdict 102f, finding 1).
+        if (status in (200, 201) and isinstance(resp, dict)
+                and resp.get("stored") is True and resp.get("jobId") == job_id):
+            log.info(f"Evidence stored for job {job_id}")
             return True
-        log.warning(f"Evidence push failed HTTP {status}: {resp}")
+        log.warning(f"Evidence not stored for job {job_id} (HTTP {status})")
         return False
 
     def update_job_status(
@@ -218,19 +201,26 @@ class PCCGatewayClient:
         new_jobs = [j for j in jobs if j.get("id") not in self._seen_jobs]
         return new_jobs
 
-    def send_heartbeat(self, status_str: str = "online") -> bool:
-        """POST heartbeat to keep the kernel marked online."""
+    def send_heartbeat(self, status_str: str = "online", accepting_jobs: Optional[bool] = None) -> bool:
+        """POST heartbeat to keep the kernel marked online.
+
+        ``accepting_jobs=False`` tells the gateway this node takes no jobs, so
+        the heartbeat keeps the kernel alive without refreshing its capability
+        listings (verdict 68d, finding 3). A gateway without the field ignores it.
+        """
+        marker = {} if accepting_jobs is None else {"acceptingJobs": bool(accepting_jobs)}
         payload = {
             "kernelId": self.kernel_id,
             "status": status_str,
             "timestamp": time.time(),
+            **marker,
         }
         http_status, _ = self._post("/api/operator/heartbeat", payload)
         if http_status not in (200, 201):
             # Fall back to the standard kernel heartbeat endpoint
             http_status, _ = self._post(
                 f"/api/kernels/{self.kernel_id}/heartbeat",
-                {"status": status_str},
+                {"status": status_str, **marker},
             )
         return http_status in (200, 201)
 

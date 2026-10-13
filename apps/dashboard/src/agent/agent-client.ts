@@ -4,7 +4,7 @@
 
 import type { ToolCall } from "./agent-types.js";
 import { toolEndpoints } from "./agent-tools.js";
-import { getAuthHeaders } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 /** Execute a tool call by calling the gateway API. Returns the result. */
 export async function executeToolCall(
@@ -32,15 +32,14 @@ export async function executeToolCall(
   const path = typeof endpoint.path === "function" ? endpoint.path(toolCall.input) : endpoint.path;
   const options: RequestInit = { method: endpoint.method };
 
-  options.headers = { ...getAuthHeaders() };
-
   if (endpoint.method === "POST" && endpoint.body) {
-    options.headers = { ...options.headers, "Content-Type": "application/json" };
+    options.headers = { "Content-Type": "application/json" };
     options.body = JSON.stringify(endpoint.body(toolCall.input));
   }
 
   try {
-    const res = await fetch(`/api${path}`, options);
+    // The path can come from model tool input; authorizedFetch keeps it on the gateway.
+    const res = await authorizedFetch(`/api${path}`, options);
     if (!res.ok) {
       return { error: `API ${res.status}: ${res.statusText}` };
     }

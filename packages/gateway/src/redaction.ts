@@ -21,6 +21,9 @@ const REDACTED = "[redacted]";
 // blocks a letter/digit neighbor while still allowing `_`, `-`, whitespace, and start.
 const NLB = "(?<![A-Za-z0-9])"; // "not preceded by an identifier char"
 const PATTERNS: Array<[RegExp, string]> = [
+  // PEM private-key blocks, including a block cut off before its END line (#458
+  // round 1). Runs first so the body isn't half-matched by the rules below.
+  [/-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----|[\s\S]*$)/g, "[redacted-private-key]"],
   // Authorization: Bearer <token>
   [new RegExp(`${NLB}Bearer\\s+[A-Za-z0-9._~+/=-]{12,}`, "gi"), "Bearer " + REDACTED],
   // PCC API keys — pcc_live_… / pcc_test_… . The secret body may contain _ or - .
@@ -34,12 +37,24 @@ const PATTERNS: Array<[RegExp, string]> = [
   // Vendor key shapes: OpenAI sk- (incl. modern sk-proj-…), GitHub ghp_/gho_, Slack
   // xox*, AWS AKIA. Bounded both sides so a prefix inside a word (task-force) is safe.
   [new RegExp(`${NLB}(?:sk-[A-Za-z0-9_-]{16,}|gh[po]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})(?![A-Za-z0-9])`, "g"), "[redacted-key]"],
+  // More vendor shapes (#458 round 1): Google API keys (AIza…), Stripe secret and
+  // restricted keys (sk_/rk_ live/test), GitHub app and fine-grained tokens, and
+  // Hugging Face tokens.
+  [new RegExp(`${NLB}(?:AIza[0-9A-Za-z_-]{35}|[sr]k_(?:live|test)_[0-9A-Za-z]{10,}|gh[usr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{30,})(?![A-Za-z0-9_-])`, "g"), "[redacted-key]"],
 ];
+
+// `token=…`, `api_key: …`, `password=…` and similar: the value is redacted when it
+// looks like a credential (it holds a digit, or is 16+ characters), so prose such
+// as "token: expired" survives.
+const KEY_VALUE = /(?<![A-Za-z0-9])(api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd)(\s*[=:]\s*)(["']?)([^\s"'&,;]{8,})/gi;
 
 /** Replace secret-shaped substrings with a marker. Idempotent on already-clean text. */
 export function redactSecrets(s: string): string {
   let out = s;
   for (const [re, repl] of PATTERNS) out = out.replace(re, repl);
+  out = out.replace(KEY_VALUE, (m, key: string, sep: string, quote: string, value: string) =>
+    /\d/.test(value) || value.length >= 16 ? `${key}${sep}${quote}${REDACTED}` : m,
+  );
   return out;
 }
 
