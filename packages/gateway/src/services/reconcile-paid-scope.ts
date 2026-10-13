@@ -22,12 +22,13 @@
  *   a. re-read what allows the activation: the scope (not revoked, awaiting_funding, its
  *      pre-activation window still open: a lapsed window answers `expired` and the scope never
  *      activates), the kernel's emergency stop (clear, and its policy readable) and its operator
- *      policy (a list naming the buyer is buyer_blocked first, as the mint refuses it; otherwise
+ *      policy (an array naming the buyer is buyer_blocked first, as the mint refuses it; otherwise
  *      the shared blockListUnreadable predicate makes an unreadable list policy_unavailable,
  *      as the mint answers awaiting_operator, since it cannot show the buyer unblocked). The
- *      block-list read's catch and non-object check (blockRefusal) are defence in depth and unreachable today:
- *      emergencyStopState reads the same policy row first, on the same connection, and answers
- *      unavailable (policy_unavailable here) when that read throws or the policy is not an object;
+ *      block-list read's catch and non-object check (blockRefusal) are defence in depth and
+ *      unreachable today: emergencyStopState reads the same policy row first, on the same
+ *      connection, and answers unavailable (policy_unavailable here) when that read throws or the
+ *      policy is not an object;
  *   b. insert the verification record through the funding-record port, unless the store already
  *      keeps this scope's record of this escrow (the Stage-1 verifier may have stored it first);
  *   c. compare-and-set the scope from awaiting_funding to active, with expiresAt = now +
@@ -95,7 +96,10 @@ const { executionScopes, operatorPolicies } = schema;
  */
 export const MAX_POST_ACTIVATION_TTL_MS = (365 - 9) * 24 * 60 * 60_000;
 
-/** Every reason reconcilePaidScope refuses, in the order it checks them. */
+/**
+ * Every reason reconcilePaidScope refuses, in the order it checks them (policy_unavailable is
+ * answered at two points: the stop read, and the block list after buyer_blocked).
+ */
 export const RECONCILE_REFUSALS = [
   /** No record store is configured (production until Q9): nothing can be recorded. */
   "funding_record_store_unavailable",
@@ -180,9 +184,10 @@ const isActivationTtl = (v: unknown): v is number =>
   typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= MAX_POST_ACTIVATION_TTL_MS;
 
 /**
- * The kernel's block list, read in the transaction: a list naming the buyer is buyer_blocked first,
- * as the mint refuses it. Then their shared blockListUnreadable predicate answers policy_unavailable
- * (awaiting_operator at the mint), also for a non-object policy as defence in depth; otherwise null.
+ * The kernel's block list, read in the transaction: an array naming the buyer is buyer_blocked
+ * first, as the mint refuses it. Then the mint's and reconcile's shared blockListUnreadable
+ * predicate answers policy_unavailable (awaiting_operator at the mint), also for a non-object
+ * policy as defence in depth; otherwise null.
  */
 function blockRefusal(tx: FundingTx, kernelId: string, buyer: string): "buyer_blocked" | "policy_unavailable" | null {
   let policy: unknown;

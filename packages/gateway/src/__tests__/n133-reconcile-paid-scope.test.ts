@@ -356,6 +356,22 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect((await writeAs(f, scopeId)).statusCode).toBe(403);
   });
 
+  it("(neg-blocked-case) reconcile reads a block-list entry as the mint does: a mixed-case entry blocks a lower-case buyer", async () => {
+    const LETTERED = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const ENTRY = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
+    const { scopeId } = await paidScope(f, { buyer: LETTERED });
+    expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", createdBy: LETTERED });
+    const blocked = { ...basePolicy(), blockedAgents: [ENTRY] };
+    setPolicy(KERNEL, blocked);
+    expect(acceptanceFor(blocked, LETTERED)).toBe("refused");
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: LETTERED }), TERMS)).toEqual(refused("buyer_blocked"));
+    expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+    expect(store.count()).toBe(0);
+    // Control: the same buyer with the entry removed activates.
+    setPolicy(KERNEL, { ...basePolicy(), blockedAgents: [] });
+    expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: LETTERED }), TERMS).kind).toBe("activated");
+  });
+
   it("(neg-blocklist-buyer-first) a malformed list naming the buyer is buyer_blocked, as the mint refuses it first", async () => {
     const { scopeId } = await paidScope(f);
     const policy = basePolicy();

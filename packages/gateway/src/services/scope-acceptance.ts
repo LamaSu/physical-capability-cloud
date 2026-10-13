@@ -57,9 +57,9 @@ export type Acceptance = "accepted" | "awaiting_operator" | "refused";
  *   - A policy that is not an object (missing, unreadable, an array, a string): awaiting_operator.
  *   - A block list that is an array with an element naming the buyer: refused.
  *   - A block list that is present (any value but undefined) and is not an array whose every
- *     index holds a string (a string, null, a number, an object, an array holding a non-string or a hole):
- *     awaiting_operator, whatever the approval mode (N133 follow-up, fund-s2-review LOW-2). The
- *     gateway can't read such a list, so it can't show the buyer is off it (the kernel's policy
+ *     index holds a string (a string, null, a number, an object, an array holding a non-string or
+ *     a hole): awaiting_operator, whatever the approval mode (N133 follow-up, fund-s2-review LOW-2).
+ *     The gateway can't read such a list, so it can't show the buyer is off it (the kernel's policy
  *     engine reads a string by substring, as blocked), and refusing would claim the buyer is on
  *     it. The mint and reconcile share blockListUnreadable: a list naming the buyer is refused
  *     (buyer_blocked at reconcile) before an unreadable list waits (policy_unavailable there).

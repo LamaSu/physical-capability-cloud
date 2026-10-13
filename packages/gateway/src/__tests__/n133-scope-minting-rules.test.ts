@@ -362,6 +362,25 @@ describe("N133 rule 2: a paid write scope goes live only on the kernel operator'
     expect((await writeAs(asKey(BUYER), res.json().scopeId)).statusCode).toBe(403);
   });
 
+  it("the mint rejects a blocked lettered buyer in another case; removing the entry activates the control", async () => {
+    const blocked = {
+      ...basePolicy(),
+      approvalMode: "auto",
+      blockedAgents: ["0xaBcDeF0123456789aBcDeF0123456789aBcDeF01"],
+    };
+    setPolicy(KERNEL, blocked);
+    const res = await submit(asKey(LETTERED), LETTERED);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().scopeStatus).toBe("rejected");
+    expect(scopeRow(res.json().scopeId)).toMatchObject({ createdBy: LETTERED, status: "rejected" });
+
+    setPolicy(KERNEL, { ...blocked, blockedAgents: [] });
+    const control = await submit(asKey(LETTERED), LETTERED);
+    expect(control.statusCode).toBe(201);
+    expect(control.json().scopeStatus).toBe("active");
+    expect(scopeRow(control.json().scopeId)).toMatchObject({ createdBy: LETTERED, status: "active" });
+  });
+
   it("a default (manual) policy waits; the scope's kernel operator, proven, accepts it once; then the write is admitted", async () => {
     const res = await submit(asKey(BUYER), BUYER);
     expect(res.statusCode).toBe(201);
