@@ -26,7 +26,8 @@ and a silent printer's once-only cancel-confirm deadline. An Ed25519 seed scan c
 isolated leak forms, seed-free text, random bytes, and real event hashes/signature
 as false-positive controls.
 GAP-7 also checks that an intact copied journal resumes alongside the requirement to
-refuse a tampered copy.
+refuse a tampered copy. The original journal and intact copy are scanned again after
+resume and delivery, before finalization can erase a leaked session seed.
 
 The at-rest scan covers eight text forms: 64-hex seed, `0x`-prefixed 64-hex seed,
 128-hex secret key, base64 seed, base64url seed, base64 secret key, JSON numeric
@@ -36,6 +37,11 @@ raw seed at an odd byte offset, and directly searches raw bytes for the device
 seed. It does NOT cover decimal Uint8Array text, `util.inspect` Buffer text,
 odd-nibble hex, colon-separated hex, prefixed or wrapped base64, base64/base64url
 tokens over 8192 characters, or decimal-string arrays.
+
+The scan de-duplicates candidate seeds but derives an Ed25519 public key for every
+unique 32-byte window, so its cost grows with journal bytes. GAP-7 has an explicit
+60-second timeout, including its six scans; a timing control exercises all six on
+a synthetic journal at least ten times the r8 reference's size.
 
 When a toolkit change makes a GAP test pass, the same PR changes that test's `gap(` to `it(`; the repro is then that fix's acceptance test.
 
@@ -92,7 +98,11 @@ cancellation once. With `cancelBehavior:"silent"`, the printer never reports sta
 if that job is still active, then ends work so quiesce resolves. Repeated cancels
 retain the first deadline, and fake timers cannot stall it. Dispose clears the
 deadline. Other ids change nothing, and `"stop"` ends
-work without a terminal event. Real-time waits let hashing finish; fake-time draining
+work without a terminal event. A successful replacement start retains the old cancel
+handles. In silent mode, cancelling the replacement before the old deadline fires
+arms no new deadline; when the old callback runs it skips the replacement, which
+remains silent indefinitely. This replacement sequence is a declared gap in the fake.
+Real-time waits let hashing finish; fake-time draining
 is only a fallback. Each test uses its own
 kernel and device ids. IPP repros use fake timers and dispose the adapter; the only
 real-mode URI is the loopback discard endpoint above. All signing keys are generated
