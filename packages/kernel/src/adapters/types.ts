@@ -70,7 +70,10 @@ export interface MachineAdapter {
   /** Get current progress (0-100) */
   getProgress(): Promise<number>;
 
-  /** Subscribe to evidence events from this machine */
+  /**
+   * Subscribe to evidence events from this machine.
+   * execution_completed and execution_failed must report terminal states, because the kernel sends no cancel after either one.
+   */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
 
   /**
