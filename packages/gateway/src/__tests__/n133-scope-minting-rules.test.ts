@@ -151,6 +151,7 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
   it("sameIdentity: equal strings, or the same 0x address in another case; nothing else", () => {
     expect(sameIdentity(BUYER, BUYER)).toBe(true);
     expect(sameIdentity(LETTERED_MIXED, LETTERED)).toBe(true);
+    expect(sameIdentity(LETTERED, LETTERED_MIXED)).toBe(true);
     expect(sameIdentity("agent-1", "AGENT-1")).toBe(false);
     expect(sameIdentity(BUYER, OTHER)).toBe(false);
     expect(sameIdentity("", "")).toBe(false);
@@ -379,6 +380,21 @@ describe("N133 rule 2: a paid write scope goes live only on the kernel operator'
     expect(control.statusCode).toBe(201);
     expect(control.json().scopeStatus).toBe("active");
     expect(scopeRow(control.json().scopeId)).toMatchObject({ createdBy: LETTERED, status: "active" });
+  });
+
+  it("the admin mint rejects a mixed-case buyer blocked by a lower-case entry; removing the entry activates the control", async () => {
+    const blocked = { ...basePolicy(), approvalMode: "auto", blockedAgents: [LETTERED] };
+    setPolicy(KERNEL, blocked);
+    const res = await submit(asAdmin(), LETTERED_MIXED);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().scopeStatus).toBe("rejected");
+    expect(scopeRow(res.json().scopeId)).toMatchObject({ createdBy: LETTERED_MIXED, status: "rejected" });
+
+    setPolicy(KERNEL, { ...blocked, blockedAgents: [] });
+    const control = await submit(asAdmin(), LETTERED_MIXED);
+    expect(control.statusCode).toBe(201);
+    expect(control.json().scopeStatus).toBe("active");
+    expect(scopeRow(control.json().scopeId)).toMatchObject({ createdBy: LETTERED_MIXED, status: "active" });
   });
 
   it("a default (manual) policy waits; the scope's kernel operator, proven, accepts it once; then the write is admitted", async () => {

@@ -372,6 +372,30 @@ describe("S2.2 negatives (the plan's Stage 2 list)", () => {
     expect(reconcilePaidScope(scopeId, verification(scopeId, { buyer: LETTERED }), TERMS).kind).toBe("activated");
   });
 
+  it("(neg-blocked-case-reverse) a lower-case entry blocks a mixed-case buyer; removing the entry activates the same scope", async () => {
+    const LETTERED = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const ENTRY = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
+    const { scopeId, jobId, escrowId } = await paidScope(f, { buyer: LETTERED });
+    // The proven-wallet gate folds buyers; preserve the case an admin can name instead.
+    db().update(schema.executionScopes).set({ createdBy: ENTRY }).where(eq(schema.executionScopes.id, scopeId)).run();
+    setEscrow(escrowId, { payer: ENTRY });
+    expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", createdBy: ENTRY });
+    expect(escrowForJob(jobId)?.payer).toBe(ENTRY);
+    const record = verification(scopeId, { buyer: ENTRY });
+    const blocked = { ...basePolicy(), blockedAgents: [LETTERED] };
+    setPolicy(KERNEL, blocked);
+    expect(acceptanceFor(blocked, ENTRY)).toBe("refused");
+    expect(reconcilePaidScope(scopeId, record, TERMS)).toEqual(refused("buyer_blocked"));
+    expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_funding", createdBy: ENTRY });
+    expect(store.count()).toBe(0);
+
+    // Control: only remove the block entry; the same scope and funding must activate.
+    setPolicy(KERNEL, { ...blocked, blockedAgents: [] });
+    expect(reconcilePaidScope(scopeId, record, TERMS).kind).toBe("activated");
+    expect(scopeRow(scopeId)).toMatchObject({ status: "active", createdBy: ENTRY });
+    expect(store.count()).toBe(1);
+  });
+
   it("(neg-blocklist-buyer-first) a malformed list naming the buyer is buyer_blocked, as the mint refuses it first", async () => {
     const { scopeId } = await paidScope(f);
     const policy = basePolicy();
