@@ -588,4 +588,107 @@ describe("print-host per-unit evidence session", () => {
     expect(secrets).toHaveLength(1);
     expect(secrets[0]!.some((byte) => byte !== 0), "a rejected delegation still erases the session secret").toBe(false);
   });
+
+  it("finalize at exactly expiresAt is refused before any key is minted or delegated", async () => {
+    const setup = await fixture("expired-before-mint");
+    let t = setup.options.fundedAt + 60;
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, signDelegation,
+    }) as DeviceKey;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey, now: () => t });
+    await session.addEvent(await eventFor(setup));
+    const recordsBefore = (await journalPaths(setup.options.journalDir)).files.length;
+    for (const expiredAt of [setup.options.expiresAt, setup.options.expiresAt + 1]) {
+      t = expiredAt;
+      const refused = session.finalize();
+      await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+      await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+      expect(mint).not.toHaveBeenCalled();
+      expect(signDelegation).not.toHaveBeenCalled();
+      expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+    }
+  });
+
+  it("finalize at expiresAt minus one succeeds with a verified bundle created at that second", async () => {
+    const setup = await fixture("before-expiry-boundary");
+    let t = setup.options.fundedAt + 60;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, now: () => t });
+    await session.addEvent(await eventFor(setup));
+    t = setup.options.expiresAt - 1;
+    const bundle = await session.finalize();
+    expect(verifyBundleSignature(bundle,
+      Buffer.from(bundle.sessionKeyAuthorization!.publicKey.replace(/^0x/, ""), "hex"))).toBe(true);
+    expect(bundle.createdAt).toBe(new Date((setup.options.expiresAt - 1) * 1_000).toISOString());
+  });
+
+  it("the clock crossing expiresAt during device delegation refuses before the session key signs", async () => {
+    const setup = await fixture("expired-during-delegation");
+    let t = setup.options.fundedAt + 60;
+    const original = sessionSigners.makeKernelEd25519Signer;
+    const secrets: Uint8Array[] = [];
+    const sessionSigns: Array<ReturnType<typeof original>["signFn"]> = [];
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer").mockImplementation((seed) => {
+      const signer = original(seed);
+      const signFn = vi.fn(signer.signFn);
+      secrets.push(signer.secretKey);
+      sessionSigns.push(signFn);
+      return { ...signer, signFn };
+    });
+    const signDelegation = vi.fn(async (input: Parameters<DeviceKey["signDelegation"]>[0]) => {
+      const signature = await setup.deviceKey.signDelegation(input);
+      t = setup.options.expiresAt;
+      return signature;
+    });
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, signDelegation,
+    }) as DeviceKey;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey, now: () => t });
+    await session.addEvent(await eventFor(setup));
+    const recordsBefore = (await journalPaths(setup.options.journalDir)).files.length;
+    const refused = session.finalize();
+    await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(sessionSigns).toHaveLength(1);
+    expect(sessionSigns[0]!).not.toHaveBeenCalled();
+    expect(secrets).toHaveLength(1);
+    expect(secrets[0]!.every((byte) => byte === 0), "expiry after delegation erases the session secret").toBe(true);
+    expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+    const later = session.finalize();
+    await expect(later).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(later).rejects.toMatchObject({ code: "expired", message: "expired" });
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(sessionSigns[0]!).not.toHaveBeenCalled();
+    expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+  });
+
+  it("a resumed unfinalized journal refuses finalize at expiresAt without minting a key", async () => {
+    const setup = await fixture("expired-unfinalized-resume");
+    const session = await api.openUnitEvidenceSession(setup.options);
+    await session.addEvent(await eventFor(setup));
+    const recordsBefore = (await journalPaths(setup.options.journalDir)).files.length;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(setup.options.expiresAt * 1_000));
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    const resumed = await api.resumeUnitEvidenceSession({
+      journalDir: setup.options.journalDir, settlementUnitId: setup.unit.settlementUnitId, deviceKey: setup.deviceKey,
+    });
+    const refused = resumed.finalize();
+    await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+    expect(mint).not.toHaveBeenCalled();
+    expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+  });
+
+  it("open at exactly expiresAt is refused and creates no journal directory", async () => {
+    const setup = await fixture("expired-open");
+    const refused = api.openUnitEvidenceSession({ ...setup.options, now: () => setup.options.expiresAt });
+    await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+    await expect(stat(setup.options.journalDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });
