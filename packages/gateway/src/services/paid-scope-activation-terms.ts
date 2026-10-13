@@ -4,11 +4,12 @@
  * reviewer-hotel proposed, fund-s2-r2-review.md section 6, adopted by the lane).
  *
  *   expectedChainId      The chain a buyer-funded V-next escrow lives on: the `chainId` of the ONE
- *                        pinned V-next deployment record that S0.1 commits,
- *                        packages/contracts/deployments/vnext/<network>/PROVISIONAL-<label>.json,
+ *                        operator-approved canonical V-next deployment record the economics lane commits,
+ *                        packages/contracts/deployments/vnext/<network>/CANONICAL.json,
  *                        read from the @pcc/contracts package, so the image carries it. <network>
- *                        and <label> come from explicit config with no default
- *                        (PCC_VNEXT_RECORD_NETWORK, PCC_VNEXT_RECORD_LABEL). Never paid-job-flow's
+ *                        comes from explicit config with no default (PCC_VNEXT_RECORD_NETWORK).
+ *                        Any PCC_VNEXT_RECORD_LABEL config is refused, including an empty value.
+ *                        Never paid-job-flow's
  *                        resolveChainId, @pcc/contracts getDeployment or IDENTITY_REGISTRY_CHAIN_ID
  *                        (ruling 4). The verifier (S1.2) reads the same record.
  *   postActivationTtlMs  How long a scope stays live once activated: S1.1's prepared funding terms
@@ -49,8 +50,6 @@ export type PaidScopeActivationTermsSource = (scope: ActivationScope) => PaidSco
 
 /** VNextDeploySpec.networkSlug's outputs: base, base-sepolia, anvil, chain-<id>. */
 const NETWORK_RE = /^(base|base-sepolia|anvil|chain-[1-9][0-9]{0,19})$/;
-/** DeployVNextSettlement.s.sol's _requireValidLabel: [A-Za-z0-9_-]{1,64}. */
-const LABEL_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** VNextDeploySpec.networkSlug: the directory under deployments/vnext a chain's records live in. */
 export function vnextNetworkSlug(chainId: number): string {
@@ -93,25 +92,25 @@ function readRegularFile(path: string): string | null {
 }
 
 /**
- * The chain id of the pinned record `<packageRoot>/deployments/vnext/<network>/PROVISIONAL-<label>.json`,
+ * The chain id of the canonical record `<packageRoot>/deployments/vnext/<network>/CANONICAL.json`,
  * or null when anything is missing, unreadable or inconsistent (fail closed):
- *   - `network` or `label` is not a slug the deploy script writes, so no path is formed from it;
+ *   - `network` is not a slug the deploy script writes, so no path is formed from it;
  *   - deployments, deployments/vnext or the network directory is a symlink or not a directory, or
  *     the record is a symlink or not a regular file (the directory README's rule), checked before
  *     the record is opened, so a FIFO there is refused, not waited on;
- *   - the record is not a JSON object written by a broadcast PROVISIONAL run with this label:
- *     `broadcast` true (a dry run's tuple says false, and lives under a DRYRUN- name this never
- *     forms), `mode` "PROVISIONAL", `label` this label;
+ *   - the record is not a JSON object with DeployVNextSettlement.s.sol's broadcast run() fields:
+ *     `mode` "CANONICAL", `label` "", `canonical` true, `doNotPin` false, `broadcast` true.
+ *     Provisional and DRYRUN- files are never selected, and no fallback is read;
  *   - its `chainId` is not a positive safe integer, or not the chain whose directory it sits in.
  * Not covered (as in the README): a link or a FIFO swapped in between the checks and the open.
  */
-export function vnextRecordChainId(packageRoot: string, network: string, label: string): number | null {
-  if (!NETWORK_RE.test(network) || !LABEL_RE.test(label)) return null;
+export function vnextRecordChainId(packageRoot: string, network: string): number | null {
+  if (!NETWORK_RE.test(network)) return null;
   const deployments = join(packageRoot, "deployments");
   const vnext = join(deployments, "vnext");
   const networkDir = join(vnext, network);
   if (![deployments, vnext, networkDir].every(realDirectory)) return null;
-  const text = readRegularFile(join(networkDir, `PROVISIONAL-${label}.json`));
+  const text = readRegularFile(join(networkDir, "CANONICAL.json"));
   if (text === null) return null;
   let record: unknown;
   try {
@@ -121,7 +120,7 @@ export function vnextRecordChainId(packageRoot: string, network: string, label: 
   }
   if (typeof record !== "object" || record === null || Array.isArray(record)) return null;
   const r = record as Record<string, unknown>;
-  if (r.broadcast !== true || r.mode !== "PROVISIONAL" || r.label !== label) return null;
+  if (r.mode !== "CANONICAL" || r.label !== "" || r.canonical !== true || r.doNotPin !== false || r.broadcast !== true) return null;
   const chainId = r.chainId;
   if (typeof chainId !== "number" || !Number.isSafeInteger(chainId) || chainId <= 0) return null;
   return vnextNetworkSlug(chainId) === network ? chainId : null;
@@ -138,16 +137,16 @@ export function contractsPackageRoot(): string | null {
 }
 
 /**
- * The expected chain from the configured record (PCC_VNEXT_RECORD_NETWORK, PCC_VNEXT_RECORD_LABEL; no
- * default), or null. The record is looked for under `packageRoot`, by default the @pcc/contracts
- * package; a test gives its own, so the no-default rule is checked against a record that exists.
+ * The expected chain from CANONICAL.json in the explicitly configured PCC_VNEXT_RECORD_NETWORK
+ * directory (no default), or null. Legacy PCC_VNEXT_RECORD_LABEL config is refused even when empty.
+ * The record is looked for under `packageRoot`, by default the @pcc/contracts package; a test gives
+ * its own, so the no-default rule is checked against a record that exists.
  */
 export function configuredVNextChainId(packageRoot?: string | null): number | null {
   const network = process.env.PCC_VNEXT_RECORD_NETWORK;
-  const label = process.env.PCC_VNEXT_RECORD_LABEL;
-  if (typeof network !== "string" || typeof label !== "string") return null;
+  if (typeof network !== "string" || process.env.PCC_VNEXT_RECORD_LABEL !== undefined) return null;
   const root = packageRoot === undefined ? contractsPackageRoot() : packageRoot;
-  return root === null ? null : vnextRecordChainId(root, network, label);
+  return root === null ? null : vnextRecordChainId(root, network);
 }
 
 /**

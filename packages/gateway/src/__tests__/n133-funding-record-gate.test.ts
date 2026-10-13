@@ -362,18 +362,33 @@ describe("the accept route and reconcilePaidScope", () => {
     const res = await submit(f);
     const { scopeId, escrowId } = res.json() as { scopeId: string; escrowId: string };
     setEscrow(escrowId, { contractAddress: ESCROW_A, status: "funded" });
-    db().transaction((tx) => store.insert(tx, verification(scopeId)));
+    const record = verification(scopeId);
+    db().transaction((tx) => store.insert(tx, record));
     installActivationTerms();
+    const original = scopeRow(scopeId);
+    expect(original).toMatchObject({ status: "awaiting_acceptance", expiresAt: iso(T0 + TTL) });
+    const readFailure = new Error("store read failed");
+    const findByScope = vi.fn<Parameters<FundingRecordStore["findByScope"]>, ReturnType<FundingRecordStore["findByScope"]>>((handle, lookedUpScopeId) => {
+      // The funding gate reads before acceptance; let it see the real finalized record.
+      if (findByScope.mock.calls.length === 1) return store.findByScope(handle, lookedUpScopeId);
+      // The second read is in reconcile, after acceptance has changed the scope in the transaction.
+      expect(scopeRow(scopeId).status).toBe("awaiting_funding");
+      throw readFailure;
+    });
     const failing: TestFundingRecordStore = {
       ...store,
-      findByScope: () => {
-        throw new Error("store read failed");
-      },
+      findByScope,
     };
     __setFundingRecordStoreForTest(failing);
     const accepted = await acceptScope(f, scopeId);
+    expect(findByScope).toHaveBeenCalledTimes(2);
+    expect(findByScope.mock.results[0]).toEqual({ type: "return", value: record });
+    // An assertion failure in the second read is caught by the route too; require our own throw.
+    expect(findByScope.mock.results[1]).toEqual({ type: "throw", value: readFailure });
     expect(accepted.statusCode).toBe(500);
-    expect(scopeRow(scopeId)).toMatchObject({ status: "awaiting_acceptance", expiresAt: iso(T0 + TTL) });
+    expect(scopeRow(scopeId)).toEqual(original);
+    expect(store.count()).toBe(1);
+    expect(store.findByScope(db(), scopeId)).toEqual(record);
   });
 
   it("a record for another of the buyer's scopes does not activate this one at the accept", async () => {
