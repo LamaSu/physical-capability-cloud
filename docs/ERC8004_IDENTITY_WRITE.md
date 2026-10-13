@@ -38,9 +38,8 @@ A failed on-chain write **never** fails the HTTP request. The API key
 is always issued. The retry sweeper picks up `pending` rows on the
 next pass.
 
-`onchain_error`, `agent_wallet_onchain_error`, and the response's
-`operator_wallet.onchain_error` hold only closed codes, never provider error
-text. Failure logs and audit metadata also carry codes only. The codes are
+`onchain_error` holds only closed codes, never provider error text.
+Failure logs and audit metadata also carry codes only. The codes are
 `identity_write_disabled`, `config_invalid`, `rpc_unavailable`,
 `insufficient_funds`, `rpc_rejected`, `tx_reverted`, `tx_missing_event`,
 `signing_failed`, `wallet_generation_failed`, and `unknown`.

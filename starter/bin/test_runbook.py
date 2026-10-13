@@ -119,7 +119,7 @@ class TestTruths(unittest.TestCase):
                 self.assertRegex(window, r"> \.pcc/", f"{path.name}: provision output must be written under .pcc/")
 
     def test_every_provisioning_call_sends_its_own_public_key(self):
-        # Rehearsal R0's P9: without publicKey, the response carries a server-made private key.
+        # Without publicKey, the API key has no signing key on file.
         # A body is either inline JSON, or a private file built just before the call (115c F5).
         calls = 0
         for path, text in text_files():

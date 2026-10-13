@@ -84,21 +84,22 @@ describe("provision error codes at every sink (T1, T2, T5)", () => {
     method: "POST", url: "/api/auth/provision", payload: { email: "codes@example.com" },
   });
 
-  it.each([0, 1, 2])("T1: wallet assignment failure at wrapper depth %i is code-only", async (depth) => {
+  it.each([0, 1, 2])("T1: wallet assignment failure at wrapper depth %i is never reached", async (depth) => {
     chain.setAgentWalletOnChain.mockRejectedValueOnce(rpcError(depth));
     const res = await provision();
     expect(res.statusCode).toBe(201);
     const body = res.json();
     expect.soft(res.body).not.toContain(CANARY);
-    expect.soft(body.operator_wallet.onchain_status).toBe("failed");
-    expect.soft(EXPECTED_CODES).toContain(body.operator_wallet.onchain_error);
-    expect.soft(body.operator_wallet.onchain_error).toBe("rpc_unavailable");
+    expect.soft(body.operator_wallet).toEqual({ source: "none" });
+    expect.soft(body.onchain.status).toBe("written");
+    expect.soft(chain.generateOperatorWallet).not.toHaveBeenCalled();
+    expect.soft(chain.setAgentWalletOnChain).not.toHaveBeenCalled();
     const stored = getRepos().apiKeys.findById(body.key_id);
-    expect.soft(stored?.agentWalletOnchainError).toBe("rpc_unavailable");
+    expect.soft(stored?.onchainStatus).toBe("written");
+    expect.soft(stored?.operatorWalletAddress).toBeNull();
+    expect.soft(stored?.agentWalletOnchainError).toBeNull();
     expect.soft(JSON.stringify(logs)).not.toContain(CANARY);
-    expect.soft(logs.map((line) => JSON.parse(line))).toEqual([
-      expect.objectContaining({ keyId: body.key_id, code: "rpc_unavailable" }),
-    ]);
+    expect.soft(logs.map((line) => JSON.parse(line))).toEqual([]);
   });
 
   it.each([0, 1, 2])("T2: registration failure at wrapper depth %i is code-only, including the caller's audit view", async (depth) => {
@@ -109,6 +110,7 @@ describe("provision error codes at every sink (T1, T2, T5)", () => {
     expect.soft(res.body).not.toContain(CANARY);
     expect.soft(body.onchain.status).toBe("pending");
     const stored = getRepos().apiKeys.findById(body.key_id);
+    expect.soft(EXPECTED_CODES).toContain(stored?.onchainError);
     expect.soft(stored?.onchainError).toBe("rpc_unavailable");
     expect.soft(JSON.stringify(logs)).not.toContain(CANARY);
     expect.soft(logs.map((line) => JSON.parse(line))).toEqual([
@@ -127,16 +129,17 @@ describe("provision error codes at every sink (T1, T2, T5)", () => {
     expect.soft(audit.json()).toMatchObject({ scoped: true, count: 1, entries: [{ metadata: { code: "rpc_unavailable" } }] });
   });
 
-  it.each([0, 1, 2])("wallet generation failure at wrapper depth %i logs a fixed code", async (depth) => {
+  it.each([0, 1, 2])("wallet generation failure at wrapper depth %i is never reached", async (depth) => {
     chain.generateOperatorWallet.mockRejectedValueOnce(rpcError(depth));
     const res = await provision();
     expect(res.statusCode).toBe(201);
     expect.soft(res.body).not.toContain(CANARY);
     expect.soft(res.json().onchain.status).toBe("written");
+    expect.soft(res.json().operator_wallet).toEqual({ source: "none" });
+    expect.soft(chain.generateOperatorWallet).not.toHaveBeenCalled();
+    expect.soft(chain.setAgentWalletOnChain).not.toHaveBeenCalled();
     expect.soft(JSON.stringify(logs)).not.toContain(CANARY);
-    expect.soft(logs.map((line) => JSON.parse(line))).toEqual([
-      expect.objectContaining({ keyId: res.json().key_id, code: "wallet_generation_failed" }),
-    ]);
+    expect.soft(logs.map((line) => JSON.parse(line))).toEqual([]);
   });
 
   it.each([URL, `Maximum 5 ${URL}`])("T5: an untyped provisioning error is a fixed 500 (%s)", async (message) => {
