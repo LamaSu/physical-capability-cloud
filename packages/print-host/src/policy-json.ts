@@ -1,10 +1,15 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import type { JobPolicyFields, UnitConfig } from "@pcc/contracts/vnext";
 import type { HostTerms, JobPolicyAcceptanceInput } from "./keys.js";
 import { OperatorSigningError, validateHostTerms } from "./operator-signing.js";
 
-export type PolicyJsonErrorCode = "read_failed" | "too_large" | "bad_json";
+export type PolicyJsonErrorCode = "not_absolute" | "not_found" | "symlink" | "not_regular_file"
+  | "bad_owner" | "bad_mode" | "too_large" | "changed_during_open" | "read_failed" | "bad_json";
+
+export interface HostTermsLoadOptions { expectedUid?: number }
 
 /** Carries no file name, JSON value, parser details, or underlying exception. */
 export class PolicyJsonError extends Error {
@@ -36,25 +41,62 @@ const unitSchema = z.object({
 }).strict();
 const inputSchema = z.object({ policy: policySchema, units: z.array(unitSchema) }).strict();
 const termsSchema = z.object({
+  factory: address, implementation: address,
   minG: decimal, allowedRequiredTiers: z.array(integer),
   reclaimMinSeconds: integer, reclaimMaxSeconds: integer, maxFeeBps: integer,
   allowedFeeRecipients: z.array(address), allowedPayoutRecipients: z.array(address).nonempty(),
+  operatorPayoutRecipient: address, maxPassThrough: decimal,
   maxUnits: integer, maxAcceptanceSeconds: integer,
 }).strict();
 
-async function readJson(path: string): Promise<unknown> {
-  let bytes: Buffer;
-  try { bytes = await readFile(path); }
+async function readJson(path: string, maxBytes: number, expectedUid?: number): Promise<unknown> {
+  if (typeof path !== "string" || !isAbsolute(path)) throw new PolicyJsonError("not_absolute");
+  let before;
+  try { before = await lstat(path); }
+  catch (error) {
+    const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+    throw new PolicyJsonError(missing ? "not_found" : "read_failed");
+  }
+  if (before.isSymbolicLink()) throw new PolicyJsonError("symlink");
+  if (!before.isFile()) throw new PolicyJsonError("not_regular_file");
+  if (expectedUid !== undefined) {
+    if (before.uid !== expectedUid) throw new PolicyJsonError("bad_owner");
+    if ((before.mode & 0o022) !== 0) throw new PolicyJsonError("bad_mode");
+  }
+  if (before.size > maxBytes) throw new PolicyJsonError("too_large");
+  let file;
+  try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NOCTTY | constants.O_NONBLOCK); }
   catch { throw new PolicyJsonError("read_failed"); }
+  const bytes = Buffer.alloc(maxBytes + 1);
   try {
-    if (bytes.length > 1024 * 1024) throw new PolicyJsonError("too_large");
-    try { return JSON.parse(bytes.toString("utf8")) as unknown; }
+    const opened = await file.stat();
+    if (opened.dev !== before.dev || opened.ino !== before.ino) throw new PolicyJsonError("changed_during_open");
+    if (!opened.isFile()) throw new PolicyJsonError("not_regular_file");
+    if (expectedUid !== undefined) {
+      if (opened.uid !== expectedUid) throw new PolicyJsonError("bad_owner");
+      if ((opened.mode & 0o022) !== 0) throw new PolicyJsonError("bad_mode");
+    }
+    if (opened.size > maxBytes) throw new PolicyJsonError("too_large");
+    let length = 0;
+    while (length < bytes.length) {
+      const { bytesRead } = await file.read(bytes, length, bytes.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) throw new PolicyJsonError("too_large");
+    try { return JSON.parse(bytes.subarray(0, length).toString("utf8")) as unknown; }
     catch { throw new PolicyJsonError("bad_json"); }
-  } finally { bytes.fill(0); }
+  } catch (error) {
+    if (error instanceof PolicyJsonError) throw error;
+    throw new PolicyJsonError("read_failed");
+  } finally {
+    bytes.fill(0);
+    await file.close().catch(() => undefined);
+  }
 }
 
 export async function loadJobPolicyInput(path: string): Promise<JobPolicyAcceptanceInput> {
-  const parsed = inputSchema.safeParse(await readJson(path));
+  const parsed = inputSchema.safeParse(await readJson(path, 1024 * 1024));
   if (!parsed.success) throw new OperatorSigningError("bad_input");
   // These annotations bind the JSON schema to the compiler's exported types.
   const policy: JobPolicyFields = parsed.data.policy;
@@ -62,8 +104,13 @@ export async function loadJobPolicyInput(path: string): Promise<JobPolicyAccepta
   return { policy, units };
 }
 
-export async function loadHostTerms(path: string): Promise<HostTerms> {
-  const parsed = termsSchema.safeParse(await readJson(path));
+export async function loadHostTerms(path: string, options: HostTermsLoadOptions = {}): Promise<HostTerms> {
+  if (typeof path !== "string" || !isAbsolute(path)) throw new PolicyJsonError("not_absolute");
+  const expectedUid = options.expectedUid ?? process.getuid?.();
+  if (expectedUid === undefined || !Number.isSafeInteger(expectedUid) || expectedUid < 0) {
+    throw new PolicyJsonError("bad_owner");
+  }
+  const parsed = termsSchema.safeParse(await readJson(path, 64 * 1024, expectedUid));
   if (!parsed.success) throw new OperatorSigningError("bad_terms");
   return validateHostTerms(parsed.data);
 }

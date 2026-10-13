@@ -40,9 +40,10 @@ the operator never sends the funding transaction
 remains open. Loading the key binds all three signing methods to the configured
 chain. D1 uses the fixed domain name
 `PCC FinalMilestonePackage`, version `2`, and the supplied escrow address for both
-the message and verifying contract. The escrow address is supplied per signing
-call until canonical deployment binding is added; no escrow configuration field
-is needed yet.
+the message and verifying contract. For D1 and `submitEvidence`, the escrow address
+is supplied per signing call until canonical deployment binding is added; no
+escrow configuration field is needed yet. Policy acceptance binds the deployment
+through the loaded terms and derives the escrow as described below.
 
 October ships no `invokeBackup` path. A recursive source guard test enforces the
 absence of its name and selector and checks the host's `submitEvidence` selector
@@ -54,14 +55,30 @@ For the Thursday acceptance hand-off, run:
 node packages/print-host/dist/cli.js sign-policy --config /absolute/host.json --terms /absolute/terms.json --input /absolute/policy.json --out /absolute/signature.json
 ```
 
-The terms file strictly contains `minG` (an unsigned decimal string),
+The terms file strictly contains `factory` and `implementation` (required,
+valid non-zero deployment addresses), `minG` (an unsigned decimal string),
 `allowedRequiredTiers` (an array of numbers), `reclaimMinSeconds`,
 `reclaimMaxSeconds`, `maxFeeBps`, `allowedFeeRecipients` (an array of addresses),
 `allowedPayoutRecipients` (a required, non-empty array of addresses with no
-case-insensitive duplicates), `maxUnits`, and `maxAcceptanceSeconds`. The payout
-allowlist binds acceptance to who receives each unit's net payment. All remaining scalar terms are integer
-numbers. Loaders validate and freeze the terms; a key loaded without terms refuses
-policy acceptance signing.
+case-insensitive duplicates), `operatorPayoutRecipient` (a required address in
+that allowlist), `maxPassThrough` (an unsigned decimal string in USDC base units),
+`maxUnits`, and `maxAcceptanceSeconds`. For each unit, the host sums every payout
+to `operatorPayoutRecipient`, comparing addresses case-insensitively. The policy's
+total pass-through is the sum of each unit's `n` minus that operator amount, and
+must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
+its entire `n`; the cap applies across the policy, including all its units.
+Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
+864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
+Loaders validate and freeze all terms at key load; a key loaded without terms
+refuses policy acceptance signing. The explicit deployment terms will be replaced
+by economics' N150 canonical deployment record when it lands.
+
+Both terms and input paths must be absolute, regular files and cannot be symlinks.
+The terms file must belong to the current uid and deny group/other writes, with a
+64 KiB limit. The input has a 1 MiB limit and no ownership or mode requirement.
+Readers open without following links or blocking on FIFOs, recheck the opened
+file's identity, type and size (plus terms ownership and permissions), read bounded
+bytes, and erase their buffers after parsing.
 
 The strict input JSON is `{ "policy": { ... }, "units": [ ... ] }`, using the
 exported `JobPolicyFields` and `UnitConfig` shapes from `@pcc/contracts/vnext`.
@@ -69,13 +86,24 @@ Every compiler `bigint` field is an unsigned decimal string: policy `chainId`,
 `policyNonce`, and `expiry`; unit `milestoneIndex`, `g`, `f`, `n`, and `reclaimAt`;
 and each payout's `amount`. Tier, fee-basis-point, and composition-version fields
 remain integer numbers. Unknown fields and a caller-supplied clock are refused.
+Library callers can set `OperatorKeyLoadOptions.clock` when loading the key;
+the closure captures that function and reads it exactly once per signing call,
+after snapshotting the input. The default returns the current time. The existing
+load option `now` only controls key-file expiry validation.
 
-Before signing, the host checks the operator address and bound chain, recomputes
+Before signing, the host checks the operator address and bound chain, requires
+the policy's factory and implementation to match the loaded deployment terms
+case-insensitively, and refuses zero factory, implementation or escrow addresses.
+It derives the escrow with the compiler's `predictEscrow` and `policySalt` from
+the full policy identity and refuses any other escrow. It recomputes
 the ordered units root with the compiler's helpers, and checks every unit against
 the terms. It also checks the compiler's pre-policy root, which commits the checked
 economic configuration. Gross payment must meet `minG`, the required tier and fee recipient must
 be allowed, fees must be at most `maxFeeBps`, and reclaim time must lie within the
-inclusive configured window from the current time. The zero fee recipient is
+inclusive window from `policy.expiry + reclaimMinSeconds` through
+`now + reclaimMaxSeconds`. Measuring the lower bound from expiry guarantees the
+minimum reclaim delay even if funding occurs at the latest allowed time.
+The zero fee recipient is
 allowed only with zero fees. Every payout recipient must be allowed, compared
 case-insensitively. The compiler's `computeFee` must match both `f` and `n`, and
 non-empty, positive payouts must sum exactly to `n`. The host also calls the
@@ -88,7 +116,8 @@ unchanged; its verifying contract is `policy.escrow`.
 
 Success creates a new mode-0644 JSON file containing exactly `operator`, `chainId`
 (a number), `escrow`, `acceptanceDigest`, and `signature`. Existing output files
-are refused. This command prints no policy or private key data; on failure it
+are refused. If chmod, writing or closing fails after creation, the command removes
+the file it created so the operator can retry. This command prints no policy or private key data; on failure it
 prints only a closed error code.
 
 The strict JSON configuration has `kernelId`, `deviceId`, `printer.uri`,

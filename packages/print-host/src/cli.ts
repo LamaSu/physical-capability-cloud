@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { acceptanceDigest, domainSeparator, jobPolicyHash } from "@pcc/contracts/vnext";
 import { checkHostConfig, HostConfigError, loadHostConfig } from "./config.js";
@@ -58,8 +58,12 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
       // Explicit chmod makes the hand-off mode independent of the operator's umask.
       await file.chmod(0o644);
       await file.writeFile(`${JSON.stringify(output)}\n`, "utf8");
-    } catch { throw new PolicyCliError("write_failed"); }
-    finally { await file.close().catch(() => undefined); }
+      await file.close();
+    } catch {
+      await file.close().catch(() => undefined);
+      await unlink(flags.get("--out")!).catch(() => undefined);
+      throw new PolicyCliError("write_failed");
+    }
     return 0;
   } catch (error) {
     if (error instanceof OperatorSigningError || error instanceof PolicyJsonError
