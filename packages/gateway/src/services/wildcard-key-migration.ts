@@ -8,6 +8,7 @@ export interface WildcardKeyMigrationCounts {
   revoked: number;
   alreadyRevoked: number;
   kept: number;
+  keptInactive: number;
 }
 
 /** Narrowing, explicit revocations and verification commit together or all roll back. */
@@ -28,10 +29,19 @@ export function runWildcardKeyMigration(
     const ids = [...new Set(revokeIds)];
     const kept = new Set(keepIds);
     const conflicting = ids.filter((id) => kept.has(id)).length;
-    const verifiedKept = wildcardRows.filter((row) => kept.has(row.id)).length;
-    if (conflicting !== 0 || verifiedKept !== kept.size) {
+    // A revoked, narrowed or re-sourced kept row must never break a later boot.
+    // Missing rows are configuration errors; check both lists before any write.
+    const liveKept = new Set(wildcardRows.filter((row) => kept.has(row.id)).map((row) => row.id));
+    const missingKept = [...kept].filter((id) =>
+      !tx.get(sql`SELECT id FROM api_keys WHERE id = ${id}`),
+    ).length;
+    const missingListed = ids.filter((id) =>
+      !tx.get(sql`SELECT id FROM api_keys WHERE id = ${id}`),
+    ).length;
+    const keptInactive = kept.size - liveKept.size - missingKept;
+    if (conflicting !== 0 || missingKept !== 0 || missingListed !== 0) {
       throw Object.assign(new Error("wildcard key migration verification failed"), {
-        counts: { listed: ids.length, kept: kept.size, conflicting, verifiedKept },
+        counts: { listed: ids.length, kept: liveKept.size, keptInactive, conflicting, missingKept, missingListed },
       });
     }
     const candidates = wildcardRows.filter((row) => !kept.has(row.id));
@@ -64,12 +74,12 @@ export function runWildcardKeyMigration(
       const row = tx.get<{ revoked_at: string | null }>(sql`SELECT revoked_at FROM api_keys WHERE id = ${id}`);
       return row !== undefined && row.revoked_at !== null;
     }).length;
-    if (remaining.length !== kept.size || remaining.some((row) => !kept.has(row.id)) || narrowed !== candidates.length || verifiedNarrowed !== candidates.length || verifiedRevoked !== ids.length) {
+    if (remaining.length !== liveKept.size || remaining.some((row) => !liveKept.has(row.id)) || narrowed !== candidates.length || verifiedNarrowed !== candidates.length || verifiedRevoked !== ids.length) {
       throw Object.assign(new Error("wildcard key migration verification failed"), {
-        counts: { candidates: candidates.length, narrowed, remaining: remaining.length, verifiedNarrowed, listed: ids.length, verifiedRevoked, revoked, alreadyRevoked, kept: kept.size, verifiedKept },
+        counts: { candidates: candidates.length, narrowed, remaining: remaining.length, verifiedNarrowed, listed: ids.length, verifiedRevoked, revoked, alreadyRevoked, kept: liveKept.size, keptInactive },
       });
     }
-    return { narrowed, revoked, alreadyRevoked, kept: kept.size };
+    return { narrowed, revoked, alreadyRevoked, kept: liveKept.size, keptInactive };
   });
 }
 
@@ -79,6 +89,6 @@ export function applyWildcardKeyMigrationFromEnv(store: Store): WildcardKeyMigra
   const ids = [...new Set((process.env.PCC_REVOKE_API_KEY_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean))];
   const keepIds = [...new Set((process.env.PCC_WILDCARD_KEY_KEEP_IDS ?? "").split(",").map((id) => id.trim()).filter(Boolean))];
   const counts = runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, ids, () => new Date().toISOString(), keepIds);
-  console.log(`[wildcard-key-migration] narrowed ${counts.narrowed}, revoked ${counts.revoked}, already revoked ${counts.alreadyRevoked}, kept ${counts.kept}`);
+  console.log(`[wildcard-key-migration] narrowed ${counts.narrowed}, revoked ${counts.revoked}, already revoked ${counts.alreadyRevoked}, kept ${counts.kept}, kept inactive ${counts.keptInactive}`);
   return counts;
 }
