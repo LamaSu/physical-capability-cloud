@@ -22,7 +22,7 @@ async function withServer(
     });
   } catch (error) {
     const code = (error as { code?: string }).code;
-    // These four checks are written, not test-run in a socket-restricted sandbox.
+    // These checks are written, not test-run in a socket-restricted sandbox.
     // The lane runs them normally; no application failure is converted to a skip.
     if (code === "EPERM" || code === "EACCES") { skip(); return; }
     throw error;
@@ -38,6 +38,13 @@ async function withServer(
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+}
+
+async function expectSocketClosed(closed: Promise<void>): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const deadline = setTimeout(() => reject(new Error("Production agent:false left the printer socket open")), 1000);
+    closed.then(() => { clearTimeout(deadline); resolve(); }, error => { clearTimeout(deadline); reject(error); });
+  });
 }
 
 describe("HTTP IPP transport, real loopback sockets (T11)", () => {
@@ -77,6 +84,36 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
     // Revert the transport's total deadline timer to fail.
     await withServer(() => {}, async (transport, request) => {
       expect(await transport({ ...request, deadlineMs: 100 })).toMatchObject({ ok: false, kind: "deadline", sent: true });
+    }, skip);
+  });
+
+  it("T13: agent:false closes the real socket after too_large before server teardown", async ({ skip }) => {
+    let onClose!: () => void;
+    const closed = new Promise<void>(resolve => { onClose = resolve; });
+    await withServer((req, res) => {
+      req.socket.once("close", onClose);
+      res.writeHead(200, { "Content-Length": "100" });
+      res.write("1234"); // Keep the response open; only the client can close it.
+    }, async (transport, request) => {
+      expect(await transport({ ...request, maxResponseBytes: 3 })).toMatchObject({ ok: false, kind: "too_large", sent: true });
+      await expectSocketClosed(closed);
+    }, skip);
+  });
+
+  it("T13: agent:false closes the real socket after its deadline before server teardown", async ({ skip }) => {
+    let onClose!: () => void;
+    const closed = new Promise<void>(resolve => { onClose = resolve; });
+    await withServer(req => { req.socket.once("close", onClose); }, async (transport, request) => {
+      expect(await transport({ ...request, deadlineMs: 75 })).toMatchObject({ ok: false, kind: "deadline", sent: true });
+      await expectSocketClosed(closed);
+    }, skip);
+  });
+
+  it("T08: the production parser refuses bare-LF framing", async ({ skip }) => {
+    await withServer((_req, res) => {
+      res.socket?.end("HTTP/1.1 200 OK\nContent-Length: 3\n\nIPP");
+    }, async (transport, request) => {
+      expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
     }, skip);
   });
 });

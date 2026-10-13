@@ -169,6 +169,15 @@ describe("HTTP IPP transport, socket-free", () => {
     expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", message: expect.stringContaining("close-delimited") });
   });
 
+  it.each([
+    ["status line", "HTTP/1.1 200 OK\nContent-Length: 3\r\n\r\nIPP"],
+    ["header line", "HTTP/1.1 200 OK\r\nContent-Length: 3\n\r\nIPP"],
+    ["chunk-size line", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\nIPP\r\n0\r\n\r\n"],
+  ])("T08: strict HTTP parsing refuses a bare-LF %s", async (_name, raw) => {
+    const { transport } = scripted(raw);
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
   it("T9: a socket creation failure has sent:false and exposes no endpoint or raw error", async () => {
     // Revert pre-connection sent:false tracking or sanitized catch to fail.
     const transport = createHttpIppTransport({ createConnection: () => { throw new Error("secret-user:password@printer.invalid"); } });
