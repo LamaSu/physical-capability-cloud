@@ -264,6 +264,22 @@ describe("PR2 round 2 regressions", () => {
     expect(vi.getTimerCount()).toBe(0);
     await adapter.quiesceEvidence();
   });
+  it.each([0x0406, 0x0407])("R4 F-8/PD2: gone code %s expires as job-unobservable without cancel", async statusCode => {
+    // Kills F8-not-found-only (drop 0x0407) and F8-gone-only (drop 0x0406).
+    const { adapter, printer, events } = make(new FakeIppPrinter().setHandler(OP.GET_JOB_ATTRIBUTES,
+      request => ippResponse(request, { statusCode })), { cancelConfirmMs: 200 });
+    expect((await start(adapter)).success).toBe(true);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(events.map(event => event.type)).toEqual(["execution_started"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(events.map(event => event.type)).toEqual(["execution_started", "execution_failed"]);
+    expect(events.at(-1)?.payload).toEqual({ ippJobId: 77, state: "unobservable", reason: "job-unobservable", jobStateReasons: [], origin: "device" });
+    await adapter.quiesceEvidence();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(events.filter(event => event.type === "execution_failed")).toHaveLength(1);
+    expect(printer.operationRequests(OP.CANCEL_JOB)).toEqual([]);
+    expect((await start(adapter)).success).toBe(true);
+  });
   it("F2: the default cancel deadline is 20 seconds and does not wait for a poll tick", async () => {
     const { adapter, events } = make(undefined, { pollIntervalMs: 600000 });
     await start(adapter); await adapter.cancelJob(77);

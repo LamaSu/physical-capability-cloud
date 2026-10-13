@@ -701,7 +701,7 @@ export class IppAdapter implements MachineAdapter {
     finally { if (this.pollAbort === abort) this.pollAbort = null; }
     if (this.disposed || generation !== this.pollGeneration || this.activeRealJobId !== jobId) return;
     if (!attrs.ok) {
-      if (attrs.kind === "ipp_status" && attrs.statusCode === 0x0406) this.armTerminalDeadline(jobId, "job-unobservable");
+      if (attrs.kind === "ipp_status" && (attrs.statusCode === 0x0406 || attrs.statusCode === 0x0407)) this.armTerminalDeadline(jobId, "job-unobservable");
       this.pollProblem(jobId, "poll_failed", attrs.message, attrs);
       return;
     }
