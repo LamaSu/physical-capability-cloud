@@ -182,10 +182,10 @@ describe("wildcard migration requires explicit operator activation and verifies 
     const store = open();
     const fixtures = seedCases(store);
     gate("apply");
-    expect(applyWildcardKeyMigrationFromEnv(store)).toEqual({ narrowed: 4, revoked: 0, alreadyRevoked: 0, kept: 0 });
+    expect(applyWildcardKeyMigrationFromEnv(store)).toEqual({ narrowed: 4, revoked: 0, alreadyRevoked: 0, kept: 0, keptInactive: 0 });
     expectNarrowed(store, fixtures);
     expect(console.log).toHaveBeenCalledTimes(1);
-    expect(console.log).toHaveBeenCalledWith("[wildcard-key-migration] narrowed 4, revoked 0, already revoked 0, kept 0");
+    expect(console.log).toHaveBeenCalledWith("[wildcard-key-migration] narrowed 4, revoked 0, already revoked 0, kept 0, kept inactive 0");
   });
 
   it.each(["env", "boot"])("%s preserves kept rows byte-identically and narrows all other candidates", (entryPoint) => {
@@ -203,13 +203,13 @@ describe("wildcard migration requires explicit operator activation and verifies 
       store = initStore({ seed: false });
     } else {
       store = original;
-      expect(applyWildcardKeyMigrationFromEnv(store)).toEqual({ narrowed: 2, revoked: 0, alreadyRevoked: 0, kept: 2 });
+      expect(applyWildcardKeyMigrationFromEnv(store)).toEqual({ narrowed: 2, revoked: 0, alreadyRevoked: 0, kept: 2, keptInactive: 0 });
     }
     expectNarrowed(store, fixtures, keptIds);
     expect(vi.mocked(console.log).mock.calls.filter(([message]) =>
       typeof message === "string" && message.startsWith("[wildcard-key-migration]"),
     )).toHaveLength(1);
-    expect(console.log).toHaveBeenCalledWith("[wildcard-key-migration] narrowed 2, revoked 0, already revoked 0, kept 2");
+    expect(console.log).toHaveBeenCalledWith("[wildcard-key-migration] narrowed 2, revoked 0, already revoked 0, kept 2, kept inactive 0");
   });
 
   it("the pure function preserves accepted wildcard scope formats and de-duplicates kept ids", () => {
@@ -221,14 +221,24 @@ describe("wildcard migration requires explicit operator activation and verifies 
     const live = insert(store, { metadata: null }).record;
     const keptIds = kept.flatMap((record) => [record.id, record.id]);
     expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id], () => now, keptIds))
-      .toEqual({ narrowed: 4, revoked: 1, alreadyRevoked: 0, kept: 5 });
+      .toEqual({ narrowed: 4, revoked: 1, alreadyRevoked: 0, kept: 5, keptInactive: 0 });
     expectNarrowed(store, fixtures);
     for (const record of kept) expect(store.repos.apiKeys.findById(record.id)).toEqual(record);
     expect(store.repos.apiKeys.findById(live.id)).toEqual({ ...live, revokedAt: now });
   });
 
+  it("a missing kept id fails before any narrowing or revocation write", () => {
+    const store = open();
+    seedCases(store);
+    const live = insert(store, { metadata: null }).record;
+    const before = snapshot(store);
+    store.db.run(sql.raw("CREATE TRIGGER forbid_migration_write BEFORE UPDATE ON api_keys BEGIN SELECT RAISE(ABORT, 'unexpected migration write'); END;"));
+    expect(() => runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id], () => now, [randomUUID()]))
+      .toThrowError("wildcard key migration verification failed");
+    expect(snapshot(store)).toBe(before);
+  });
+
   it.each([
-    { label: "missing", overrides: undefined },
     { label: "revoked", overrides: { revokedAt: earlier } },
     { label: "another source", overrides: { metadata: JSON.stringify({ source: "other" }) } },
     { label: "contributor source", overrides: { metadata: JSON.stringify({ source: "contributor-quickstart", flow: "quickstart" }) } },
@@ -243,16 +253,17 @@ describe("wildcard migration requires explicit operator activation and verifies 
     { label: "null scopes value", overrides: { scopes: "null" } },
     { label: "boolean scopes value", overrides: { scopes: "true" } },
     { label: "empty scope list", overrides: { scopes: "[]" } },
-  ] satisfies { label: string; overrides?: Partial<Insert> }[])("a $label kept id fails before any narrowing or revocation write", ({ overrides }) => {
+  ] satisfies { label: string; overrides: Partial<Insert> }[])("an existing $label kept id is skipped without changing its row", ({ overrides }) => {
     const store = open();
-    seedCases(store);
+    const fixtures = seedCases(store);
     const live = insert(store, { metadata: null }).record;
-    const keptId = overrides === undefined ? randomUUID() : insert(store, overrides).record.id;
-    const before = snapshot(store);
-    store.db.run(sql.raw("CREATE TRIGGER forbid_migration_write BEFORE UPDATE ON api_keys BEGIN SELECT RAISE(ABORT, 'unexpected migration write'); END;"));
-    expect(() => runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id], () => now, [keptId]))
-      .toThrowError("wildcard key migration verification failed");
-    expect(snapshot(store)).toBe(before);
+    const kept = insert(store, overrides).record;
+    store.db.run(sql.raw(`CREATE TRIGGER forbid_kept_write BEFORE UPDATE ON api_keys WHEN OLD.id = '${kept.id}' BEGIN SELECT RAISE(ABORT, 'unexpected kept row write'); END;`));
+    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id], () => now, [kept.id]))
+      .toEqual({ narrowed: 4, revoked: 1, alreadyRevoked: 0, kept: 0, keptInactive: 1 });
+    expect(store.repos.apiKeys.findById(kept.id)).toEqual(kept);
+    expectNarrowed(store, fixtures);
+    expect(store.repos.apiKeys.findById(live.id)).toEqual({ ...live, revokedAt: now });
   });
 
   it("an id in both keep and revoke lists fails before any row write", () => {
@@ -290,10 +301,10 @@ describe("wildcard migration requires explicit operator activation and verifies 
     const live = insert(store, { metadata: null }).record;
     const keptIds = [fixtures.candidates[0].id];
     expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id], () => now, keptIds))
-      .toEqual({ narrowed: 3, revoked: 1, alreadyRevoked: 0, kept: 1 });
+      .toEqual({ narrowed: 3, revoked: 1, alreadyRevoked: 0, kept: 1, keptInactive: 0 });
     const before = snapshot(store);
     expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id], () => "2031-01-01T00:00:00.000Z", keptIds))
-      .toEqual({ narrowed: 0, revoked: 0, alreadyRevoked: 1, kept: 1 });
+      .toEqual({ narrowed: 0, revoked: 0, alreadyRevoked: 1, kept: 1, keptInactive: 0 });
     expect(snapshot(store)).toBe(before);
   });
 
@@ -301,7 +312,7 @@ describe("wildcard migration requires explicit operator activation and verifies 
     const store = open();
     const { record } = insert(store);
     const target = ["read", ...SELF_SERVICE_KEY_SCOPES];
-    expect(runWildcardKeyMigration(store, target, [], () => now)).toEqual({ narrowed: 1, revoked: 0, alreadyRevoked: 0, kept: 0 });
+    expect(runWildcardKeyMigration(store, target, [], () => now)).toEqual({ narrowed: 1, revoked: 0, alreadyRevoked: 0, kept: 0, keptInactive: 0 });
     expect(store.repos.apiKeys.findById(record.id)).toEqual({ ...record, scopes: JSON.stringify(target) });
   });
 
@@ -313,7 +324,7 @@ describe("wildcard migration requires explicit operator activation and verifies 
       insert(store, { scopes: JSON.stringify(SELF_SERVICE_KEY_SCOPES) }).record,
       insert(store, { metadata: null }).record,
     ];
-    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id, revoked.id], () => now)).toEqual({ narrowed: 0, revoked: 1, alreadyRevoked: 1, kept: 0 });
+    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, [live.id, revoked.id], () => now)).toEqual({ narrowed: 0, revoked: 1, alreadyRevoked: 1, kept: 0, keptInactive: 0 });
     expect(store.repos.apiKeys.findById(live.id)).toEqual({ ...live, revokedAt: now });
     expect(store.repos.apiKeys.findById(revoked.id)).toEqual(revoked);
     for (const record of unlisted) expect(store.repos.apiKeys.findById(record.id)).toEqual(record);
@@ -326,7 +337,7 @@ describe("wildcard migration requires explicit operator activation and verifies 
     gate("apply");
     vi.stubEnv("PCC_REVOKE_API_KEY_IDS", ` , ${live.id} , , ${revoked.id}, `);
     const started = Date.now();
-    expect(applyWildcardKeyMigrationFromEnv(store)).toEqual({ narrowed: 0, revoked: 1, alreadyRevoked: 1, kept: 0 });
+    expect(applyWildcardKeyMigrationFromEnv(store)).toEqual({ narrowed: 0, revoked: 1, alreadyRevoked: 1, kept: 0, keptInactive: 0 });
     const after = store.repos.apiKeys.findById(live.id)!;
     expect(after).toEqual({ ...live, revokedAt: after.revokedAt });
     expect(after.revokedAt).not.toBeNull();
@@ -334,7 +345,7 @@ describe("wildcard migration requires explicit operator activation and verifies 
     expect(Date.parse(after.revokedAt!)).toBeLessThanOrEqual(Date.now());
     expect(store.repos.apiKeys.findById(revoked.id)).toEqual(revoked);
     expect(console.log).toHaveBeenCalledTimes(1);
-    expect(console.log).toHaveBeenCalledWith("[wildcard-key-migration] narrowed 0, revoked 1, already revoked 1, kept 0");
+    expect(console.log).toHaveBeenCalledWith("[wildcard-key-migration] narrowed 0, revoked 1, already revoked 1, kept 0, kept inactive 0");
   });
 
   it("a missing listed row rolls back both narrowing and revocation", () => {
@@ -384,9 +395,9 @@ describe("wildcard migration requires explicit operator activation and verifies 
     const live = insert(store, { metadata: null }).record;
     const revoked = insert(store, { revokedAt: earlier }).record;
     const ids = [live.id, revoked.id];
-    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, ids, () => now)).toEqual({ narrowed: 4, revoked: 1, alreadyRevoked: 1, kept: 0 });
+    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, ids, () => now)).toEqual({ narrowed: 4, revoked: 1, alreadyRevoked: 1, kept: 0, keptInactive: 0 });
     const before = snapshot(store);
-    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, ids, () => "2031-01-01T00:00:00.000Z")).toEqual({ narrowed: 0, revoked: 0, alreadyRevoked: 2, kept: 0 });
+    expect(runWildcardKeyMigration(store, SELF_SERVICE_KEY_SCOPES, ids, () => "2031-01-01T00:00:00.000Z")).toEqual({ narrowed: 0, revoked: 0, alreadyRevoked: 2, kept: 0, keptInactive: 0 });
     expect(snapshot(store)).toBe(before);
   });
 
