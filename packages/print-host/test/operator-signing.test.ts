@@ -10,6 +10,7 @@ import {
   parseTransaction,
   recoverTransactionAddress,
   recoverTypedDataAddress,
+  zeroAddress,
   type Address,
   type Hex,
   type TransactionSerializedEIP1559,
@@ -236,7 +237,11 @@ async function assertTx(operator: OperatorKey, chainId: number,
 describe("operator key only exposes the two authorized signatures", () => {
   it("walks every own and inherited string and symbol property and admits only the narrow surface", () => {
     assertNarrowSurface(key);
+    expect(Reflect.ownKeys(key)).toEqual(["address", "signD1", "signSubmitEvidenceTx"]);
     expect(Object.isFrozen(key)).toBe(true);
+    const prototype = Object.getPrototypeOf(key) as object;
+    expect(Object.isFrozen(prototype)).toBe(true);
+    expect(Object.getPrototypeOf(prototype)).toBe(null);
   });
   it("walks every reachable property value without finding a general signer", () => {
     assertNoGeneralSigner(key);
@@ -333,6 +338,9 @@ describe("operator signing rejects caller control of fixed signing fields", () =
 describe("operator signing validates every authorized field with closed errors", () => {
   for (const method of ["signD1", "signSubmitEvidenceTx"] as const) {
     const input = method === "signD1" ? d1Input : txInput;
+    it(`${method} refuses the zero escrow address before signing`, async () => {
+      await closedRefusal(() => key[method]({ ...input(), escrow: zeroAddress } as never), "bad_escrow");
+    });
     it(`${method} requires the escrow's checksum and exact address shape`, async () => {
       const checksum = input().escrow;
       expect(checksum).not.toBe(checksum.toLowerCase());

@@ -1,11 +1,27 @@
 import { randomBytes } from "node:crypto";
+import * as fs from "node:fs/promises";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { checkHostConfig, HostConfigError, loadHostConfig, type HostConfig } from "../src/config.js";
 import { generateHostKeys } from "../src/keygen.js";
+import type * as secretFile from "../src/secret-file.js";
+
+const mocks = vi.hoisted(() => ({ fileBuffers: [] as { path: string; bytes: Buffer }[] }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
+vi.mock("../src/secret-file.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof secretFile>();
+  return { ...actual, readSecretFile: vi.fn(async (...args: Parameters<typeof actual.readSecretFile>) => {
+    const bytes = await actual.readSecretFile(...args);
+    mocks.fileBuffers.push({ path: args[0], bytes });
+    return bytes;
+  }) };
+});
 
 const dirs: string[] = [];
 
@@ -70,7 +86,13 @@ async function expectConfigFailure(operation: () => Promise<unknown>, code: stri
   return caught as HostConfigError;
 }
 
+beforeEach(async () => {
+  mocks.fileBuffers = [];
+  const actual = await vi.importActual<typeof fs>("node:fs/promises");
+  vi.mocked(fs.open).mockReset().mockImplementation(actual.open);
+});
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
@@ -156,6 +178,56 @@ describe("host configuration", () => {
     await expectConfigFailure(() => loadHostConfig(link), "symlink");
   });
 
+  it("detects a config file swapped between lstat and open", async () => {
+    const setup = await fixture();
+    const originalOpen = (await vi.importActual<typeof fs>("node:fs/promises")).open;
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+      await fs.rename(setup.path, join(setup.dir, "original"));
+      await setup.save();
+      return originalOpen(...args);
+    });
+    await expectConfigFailure(() => loadHostConfig(setup.path), "changed_during_open");
+  });
+
+  it("refuses a config symlink swapped between lstat and open", async () => {
+    const setup = await fixture();
+    const originalOpen = (await vi.importActual<typeof fs>("node:fs/promises")).open;
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+      const target = join(setup.dir, "original");
+      await fs.rename(setup.path, target);
+      await fs.symlink(target, setup.path);
+      return originalOpen(...args);
+    });
+    await expectConfigFailure(() => loadHostConfig(setup.path), "read_failed");
+  });
+
+  it("rechecks config mode after open", async () => {
+    const setup = await fixture();
+    const originalOpen = (await vi.importActual<typeof fs>("node:fs/promises")).open;
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+      const handle = await originalOpen(...args);
+      await handle.chmod(0o666);
+      return handle;
+    });
+    await expectConfigFailure(() => loadHostConfig(setup.path), "bad_mode");
+  });
+
+  it("rechecks config owner on the opened file", async () => {
+    const setup = await fixture();
+    const originalOpen = (await vi.importActual<typeof fs>("node:fs/promises")).open;
+    vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalStat = handle.stat.bind(handle);
+      vi.spyOn(handle, "stat").mockImplementationOnce(async (...statArgs) => {
+        const stat = await originalStat(...statArgs);
+        stat.uid = typeof stat.uid === "number" ? stat.uid + 1 : stat.uid + 1n;
+        return stat;
+      });
+      return handle;
+    });
+    await expectConfigFailure(() => loadHostConfig(setup.path), "bad_owner");
+  });
+
   it("does not retain JSON parser excerpts or schema values", async () => {
     const setup = await fixture();
     const secret = "abcdef"[randomBytes(1)[0]! % 6]! + randomBytes(32).toString("hex");
@@ -179,6 +251,31 @@ describe("host configuration", () => {
     const operatorFile = JSON.parse(await readFile(setup.pair.paths.operatorKeyFile, "utf8")) as { privateKey: string };
     expectNoSecret(result, [setup.rpcSecret, setup.apiSecret, deviceFile.seed, operatorFile.privateKey.slice(2)]);
     expect(JSON.stringify(result) === JSON.stringify(expected)).toBe(true);
+  });
+
+  it("zeroes the RPC URL and API-key buffers after successful validation", async () => {
+    const setup = await completeFixture();
+    await checkHostConfig(setup.config);
+    for (const path of [setup.config.chain.rpcUrlFile, setup.config.gateway.apiKeyFile]) {
+      const buffers = mocks.fileBuffers.filter((entry) => entry.path === path);
+      expect(buffers).toHaveLength(1);
+      expect(buffers[0].bytes.length > 0).toBe(true);
+      expect(buffers[0].bytes.every((byte) => byte === 0), "validated credential bytes were retained").toBe(true);
+    }
+  });
+
+  it.each(["RPC URL", "API key"] as const)("zeroes the %s buffer after failed validation", async (credential) => {
+    const setup = await completeFixture();
+    const isRpc = credential === "RPC URL";
+    const path = isRpc ? setup.config.chain.rpcUrlFile : setup.config.gateway.apiKeyFile;
+    const invalid = isRpc ? `http://rpc.example.test/${setup.rpcSecret}` : `${setup.apiSecret} whitespace`;
+    await writeFile(path, invalid, { mode: 0o600 });
+    await expectConfigFailure(() => checkHostConfig(setup.config), isRpc ? "bad_rpc_url" : "bad_api_key",
+      [setup.rpcSecret, setup.apiSecret]);
+    const buffers = mocks.fileBuffers.filter((entry) => entry.path === path);
+    expect(buffers).toHaveLength(1);
+    expect(buffers[0].bytes.length > 0).toBe(true);
+    expect(buffers[0].bytes.every((byte) => byte === 0), "rejected credential bytes were retained").toBe(true);
   });
 
   it.each(["http://127.0.0.1:8545", "http://[::1]:8545", "http://localhost:8545"])("allows anvil RPC at %s", async (url) => {
