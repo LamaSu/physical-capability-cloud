@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { acceptanceDigest, domainSeparator, jobPolicyHash } from "@pcc/contracts/vnext";
 import { getAddress } from "viem";
 import { createEvidenceBroadcaster, EvidenceChainConfigError } from "./chain.js";
-import { checkHostConfig, HostConfigError, loadHostConfig } from "./config.js";
+import { checkHostConfig, HostConfigError, loadHostConfig, requireSubmissionCaps } from "./config.js";
 import type { HostConfig } from "./config.js";
 import { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
 import type { GatewayClient, GatewayClientConfig } from "./gateway-client.js";
@@ -28,7 +28,7 @@ export interface CliIo {
 
 const usage = "Usage: print-host keygen --out <dir> [--not-after <ISO>]\n"
   + "       print-host check-config <path>\n"
-  + "       print-host run --config <path> [--once] [--poll-only] [--inputs-dir <dir>]\n"
+  + "       print-host run --config <path> [--once] [--poll-only] [--no-submit] [--inputs-dir <dir>]\n"
   + "       print-host sign-policy --config <cfg> --terms <terms.json> --input <policy.json> --out <sig.json>\n";
 
 export interface CliPrintComponents {
@@ -47,6 +47,7 @@ interface RunOptions {
   configPath: string;
   once: boolean;
   pollOnly: boolean;
+  noSubmit: boolean;
   inputsDir?: string;
 }
 
@@ -55,10 +56,12 @@ function parseRunOptions(argv: string[]): RunOptions | undefined {
   let inputsDir: string | undefined;
   let once = false;
   let pollOnly = false;
+  let noSubmit = false;
   for (let index = 1; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === "--once" && !once) once = true;
     else if (flag === "--poll-only" && !pollOnly) pollOnly = true;
+    else if (flag === "--no-submit" && !noSubmit) noSubmit = true;
     else if ((flag === "--config" && configPath === undefined)
       || (flag === "--inputs-dir" && inputsDir === undefined)) {
       const value = argv[++index];
@@ -67,7 +70,7 @@ function parseRunOptions(argv: string[]): RunOptions | undefined {
       else inputsDir = value;
     } else return undefined;
   }
-  return configPath ? { configPath, once, pollOnly, inputsDir } : undefined;
+  return configPath ? { configPath, once, pollOnly, noSubmit, inputsDir } : undefined;
 }
 
 function createPrinter(config: HostConfig): CliPrintComponents {
@@ -83,8 +86,10 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   let printer: CliPrintComponents | undefined;
+  let journal: ReturnType<typeof createJobJournal> | undefined;
   try {
     const config = await loadHostConfig(options.configPath);
+    if (!options.pollOnly && !options.noSubmit) requireSubmissionCaps(config.chain);
     // Poll-only is usable before key provisioning and never opens the printer.
     const identity = options.pollOnly ? undefined : await checkHostConfig(config);
     const operator = identity ? await loadOperatorKey(config.keys.operatorKeyFile, config.chain.chainId) : undefined;
@@ -94,7 +99,7 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
     // Each consumer receives only its own scoped closure; no policy acceptance
     // authority or general transaction signer enters the host run loop.
     const operatorKey = operator ? Object.freeze({ address: operator.address, signD1: operator.signD1 }) : undefined;
-    const broadcaster = operator ? (runtime.createBroadcaster ?? createEvidenceBroadcaster)({ chain: config.chain },
+    const broadcaster = operator && !options.noSubmit ? (runtime.createBroadcaster ?? createEvidenceBroadcaster)({ chain: config.chain },
       Object.freeze({ address: operator.address, signSubmitEvidenceTx: operator.signSubmitEvidenceTx })) : undefined;
     const apiBytes = await readSecretFile(config.gateway.apiKeyFile);
     let gateway: GatewayClient;
@@ -109,11 +114,12 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
       });
     } finally { apiBytes.fill(0); }
     if (!options.pollOnly) printer = (runtime.createPrinter ?? createPrinter)(config);
+    journal = createJobJournal(config.dataDir);
     const host = createHost({
       config, gateway, adapter: printer?.adapter, deviceKey, operatorAddress: operator?.address,
       operatorKey, broadcaster,
       inputSource: options.inputsDir ? fileJobInputSource(options.inputsDir) : defaultJobInputSource,
-      journal: createJobJournal(config.dataDir), pollOnly: options.pollOnly,
+      journal, pollOnly: options.pollOnly, noSubmit: options.noSubmit,
       stopSignal: shutdown.signal,
       logger: (code) => {
         // Preserve the runtime's closed logging contract at the CLI boundary.
@@ -122,13 +128,14 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
     });
     if (options.once) {
       const tick = await host.runOnce();
-      if (tick.kind === "halted") throw new JournalError("journal_write_failed");
+      if (tick.kind === "halted") throw new JournalError(tick.code === "data_dir_locked" ? "data_dir_locked" : "journal_write_failed");
     }
     else await host.run(shutdown.signal);
   } finally {
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
-    await printer?.dispose();
+    try { await printer?.dispose(); }
+    finally { await journal?.close(); }
   }
 }
 

@@ -39,14 +39,25 @@ describe("fileJobInputSource", () => {
   });
 
   it("accepts complete settlement and canonical program contexts", async () => {
+    const completeUnit = { ...unit, ...packageFields, challengeNonce: hash("challenge") };
+    await fixture({ unit: completeUnit, program });
+    const result = await fileJobInputSource(dir)(jobId);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.unit).toEqual(completeUnit);
+      expect(result.value.program).toEqual(program);
+      expect(hasPackageInputs(result.value)).toBe(true);
+      expect(isUnitBinding(result.value.unit)).toBe(true);
+    }
+  });
+
+  it("keeps zero challenge nonce printable but refuses it as complete package inputs", async () => {
     await fixture({ unit: { ...unit, ...packageFields }, program });
     const result = await fileJobInputSource(dir)(jobId);
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.value.unit).toEqual({ ...unit, ...packageFields });
-      expect(result.value.program).toEqual(program);
-      expect(hasPackageInputs(result.value)).toBe(true);
       expect(isUnitBinding(result.value.unit)).toBe(true);
+      expect(hasPackageInputs(result.value)).toBe(false);
     }
   });
 

@@ -7,9 +7,9 @@ import type { EvidenceBundle } from "@pcc/spec";
 import { getAddress, type Hex } from "viem";
 import type { EvidenceBroadcaster, EvidenceBroadcastOutcome, EvidenceSubmission } from "./chain.js";
 import type { HostConfig } from "./config.js";
-import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue } from "./gateway-client.js";
+import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue, ReceiptEnvelope } from "./gateway-client.js";
 import { hasPackageInputs, isUnitBinding, JOB_INPUT_CODES, type JobInputSource, type JobInputs } from "./job-inputs.js";
-import { SUBMIT_CODES, type JobJournal, type JournalCode, type JournalState, type PackageHashes } from "./journal.js";
+import { JournalError, SUBMIT_CODES, type JobJournal, type JournalCode, type JournalState, type PackageHashes } from "./journal.js";
 import type { DeviceKey, OperatorKey } from "./keys.js";
 import { buildMilestonePackage, computePackageBodyHash, computePackageDigest, signMilestonePackage } from "./package-builder.js";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
@@ -31,7 +31,7 @@ export const HOST_LOG_CODES = [
   "evidence_stored", "evidence_indeterminate", "evidence_refused", "abandoned",
   "interrupted", "simulated_refused", "no_bundle", "journal_failed", "host_shutdown",
   "reader_unavailable", "stopped", "absent", "malformed", "poll_failed", "session_failed",
-  "package_built", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
+  "package_built", "receipt_stored", "data_dir_locked", "receipt_exists", "receipt_signer_unavailable", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
   ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
 ] as const;
 export type HostLogCode = typeof HOST_LOG_CODES[number];
@@ -59,6 +59,7 @@ export interface HostDeps {
   /** The CLI always uses real mode; explicit false is for simulation rehearsals. */
   realMode?: boolean;
   pollOnly?: boolean;
+  noSubmit?: boolean;
   stopSignal?: AbortSignal;
   timeoutMs?: number;
   cancelWindowMs?: number;
@@ -68,6 +69,7 @@ export interface HostTickResult {
   waitMs: number;
   jobId?: string;
   state?: JournalState;
+  code?: "data_dir_locked" | "journal_failed";
 }
 
 const terminalReportCodes = new Set<GwCode>([
@@ -98,10 +100,12 @@ export function createHost(deps: HostDeps): {
   const interval = config.eStopPollIntervalMs ?? 5_000;
   if (!Number.isSafeInteger(interval) || interval < 1 || interval > 60_000) throw new Error("bad_host_interval");
   const print = deps.print ?? runPrintJob;
-  const sendEnabled = deps.realMode !== false && [config.chain.maxFeePerGasCap,
+  const sendEnabled = !deps.noSubmit && deps.realMode !== false && [config.chain.maxFeePerGasCap,
     config.chain.maxPriorityFeePerGasCap, config.chain.gasCap].every((cap) => cap !== undefined && BigInt(cap) > 0n);
   let initialized = false;
   let halted = false;
+  let haltCode: "data_dir_locked" | "journal_failed" = "journal_failed";
+  const retries = new Map<string, { failures: number; until: number }>();
   let stopped = deps.stopSignal?.aborted === true;
   let lastHeartbeat = -Infinity;
   let pollFailures = 0;
@@ -139,7 +143,7 @@ export function createHost(deps: HostDeps): {
     const why = ["reader_unavailable", "stopped", "unavailable", "absent", "malformed", "poll_failed"] as const;
     log(why.includes(stop.why) ? stop.why : "malformed");
   }
-  async function record(jobId: string, state: JournalState, code?: JournalCode, hashes?: PackageHashes): Promise<void> {
+  async function record(jobId: string, state: JournalState, code?: JournalCode, hashes?: PackageHashes | { transactionHash: string }): Promise<void> {
     await journal.append(jobId, state, code, hashes);
     log(state);
     if (code && (HOST_LOG_CODES as readonly string[]).includes(code)) log(code as HostLogCode);
@@ -148,17 +152,28 @@ export function createHost(deps: HostDeps): {
     await record(pending!.jobId, state, code);
   }
   function skipSubmission(inputs: JobInputs): "package_inputs_missing" | "submit_disabled" | undefined {
+    if (deps.noSubmit) return "submit_disabled";
     if (!hasPackageInputs(inputs)) return "package_inputs_missing";
     if (!sendEnabled || !deps.operatorKey || !deps.broadcaster || !deps.deviceKey) return "submit_disabled";
     return undefined;
   }
+  function retry(jobId: string, code: HostLogCode, retryAfterS = 0): void {
+    log(code);
+    const failures = (retries.get(jobId)?.failures ?? 0) + 1;
+    const waitMs = Math.min(60_000, Math.max(5_000 * 2 ** Math.min(failures - 1, 4), Number.isFinite(retryAfterS) ? Math.max(0, retryAfterS) * 1_000 : 0));
+    retries.set(jobId, { failures, until: now() + waitMs });
+  }
+  function jobWait(jobId: string): number {
+    return Math.max(5_000, (retries.get(jobId)?.until ?? now()) - now());
+  }
   async function outcome(jobId: string, result: EvidenceBroadcastOutcome, readOnly: boolean): Promise<JournalState> {
     if (result.code === "already_committed" || result.code === "conflict" || (!readOnly && result.code === "submitted")) {
+      retries.delete(jobId);
       await record(jobId, result.code);
       return result.code;
     }
-    // An attempt's absence does not authorize another send: a node can have
-    // accepted the transaction without mining it or returning its result yet.
+    // After a durable attempt, absence cannot authorize another send. A node
+    // may have accepted the transaction without mining it or returning a result.
     const state = readOnly || result.code === "indeterminate" || result.code === "rpc_unavailable"
       ? "submit_indeterminate" : "refused";
     const code = result.code === "rpc_unavailable" ? "submit_rpc_unavailable"
@@ -175,24 +190,35 @@ export function createHost(deps: HostDeps): {
     await record(jobId, state, code);
     return state;
   }
+  function receiptBinds(value: ReceiptEnvelope, signed: NonNullable<Awaited<ReturnType<JobJournal["readPackage"]>>>): boolean {
+    const unit = signed.body.unitBinding;
+    return String(value.receipt.chainId) === unit.chainId
+      && value.receipt.escrow.toLowerCase() === unit.escrow.toLowerCase()
+      && value.receipt.settlementUnitId === unit.settlementUnitId
+      && value.receipt.packageDigest === signed.packageDigest;
+  }
   async function submitStored(jobId: string, inputs?: JobInputs, bundle?: EvidenceBundle): Promise<JournalState> {
     const entries = await journal.read(jobId);
     const last = entries.at(-1)!;
-    // The receipt is an independent, durable prerequisite, including on restart.
-    if (!entries.some((entry) => entry.state === "evidence_stored")) throw new Error("journal_invalid");
+    // Relay evidence storage is a durable prerequisite, including on restart.
+    if (!entries.some((entry) => entry.state === "evidence_stored")) throw new JournalError("journal_invalid");
     const readOnly = last.state === "submit_attempted" || last.state === "submit_indeterminate";
     let signed = await journal.readPackage(jobId);
     const builtRecord = entries.find((entry) => entry.state === "package_built");
-    if ((builtRecord || readOnly) && !signed) throw new Error("journal_invalid");
+    if ((builtRecord || readOnly) && !signed) throw new JournalError("journal_invalid");
     if (!signed) {
       if (!inputs) {
         let result;
-        try { result = await deps.inputSource(jobId); } catch { result = undefined; }
-        if (result?.ok) inputs = result.value;
-      }
-      if (!inputs) {
-        await record(jobId, "evidence_stored", "package_inputs_missing");
-        return "evidence_stored";
+        try { result = await deps.inputSource(jobId); }
+        catch {
+          retry(jobId, "job_inputs_unavailable");
+          return last.state;
+        }
+        if (!result.ok) {
+          retry(jobId, JOB_INPUT_CODES.includes(result.code) ? result.code : "job_inputs_unavailable");
+          return last.state;
+        }
+        inputs = result.value;
       }
       const skip = skipSubmission(inputs);
       if (skip) {
@@ -223,11 +249,11 @@ export function createHost(deps: HostDeps): {
         || computePackageDigest(signed.body, signed.signatures) !== signed.packageDigest
         || signed.body.evidence.evidenceBlockHash !== signed.evidenceBlockHash
         || (builtRecord && (builtRecord.packageDigest !== signed.packageDigest || builtRecord.evidenceBlockHash !== signed.evidenceBlockHash))) {
-        throw new Error("journal_invalid");
+        throw new JournalError("journal_invalid");
       }
       submission = { escrow: getAddress(u.escrow), unitId: u.settlementUnitId,
         packageDigest: signed.packageDigest, compositionSchemaVersion: Number(signed.body.compositionSchemaVersion) };
-    } catch { throw new Error("journal_invalid"); }
+    } catch { throw new JournalError("journal_invalid"); }
     if (!builtRecord) await record(jobId, "package_built", undefined, {
       packageDigest: signed.packageDigest, evidenceBlockHash: signed.evidenceBlockHash,
     });
@@ -241,16 +267,63 @@ export function createHost(deps: HostDeps): {
       await record(jobId, "refused", "submit_disabled");
       return "refused";
     }
-    // append resolves only after the file AND directory have been fsynced.
-    // Everything after this boundary is read-back-only after any crash.
-    await record(jobId, "submit_attempted");
+    const storedRecord = entries.some((entry) => entry.state === "receipt_stored");
+    if (storedRecord) {
+      const receipt = await journal.readReceipt(jobId);
+      if (!receipt || !receiptBinds(receipt, signed)) throw new JournalError("journal_invalid");
+    } else {
+      let result;
+      try { result = await gateway.postReceipt(jobId, { body: signed.body, signatures: signed.signatures }); }
+      catch { result = { ok: false as const, code: "network" as const, status: null }; }
+      if (!result.ok) {
+        if (result.status === 409 || result.code === "receipt_exists") {
+          await record(jobId, "refused", "receipt_conflict");
+          return "refused";
+        }
+        retry(jobId, result.code === "receipt_signer_unavailable" ? result.code : safeGwCode(result.code), result.retryAfterS);
+        return "package_built";
+      }
+      if (!receiptBinds(result.value, signed)) {
+        await record(jobId, "refused", "receipt_mismatch");
+        return "refused";
+      }
+      // A successful POST may have survived a crash before its journal record.
+      // Re-POST first; the gateway returns the same receipt for the same digest.
+      const existing = await journal.readReceipt(jobId);
+      if (existing) {
+        if (!receiptBinds(existing, signed)) throw new JournalError("journal_invalid");
+      } else await journal.saveReceipt(jobId, result.value);
+      await record(jobId, "receipt_stored");
+    }
+    const durableReceipt = await journal.readReceipt(jobId);
+    if (!durableReceipt || !receiptBinds(durableReceipt, signed)) throw new JournalError("journal_invalid");
+    // The broadcaster signs first, then awaits this fsynced record immediately
+    // before sendRawTransaction. Only crossing this boundary makes recovery
+    // read-back-only; no preflight failure writes an attempt.
+    let hookRan = false;
+    let hookFailed = false;
     let result: EvidenceBroadcastOutcome;
-    try { result = await deps.broadcaster.submit(submission); }
-    catch { result = { code: "indeterminate" }; }
+    try {
+      result = await deps.broadcaster.submit(submission, { beforeSend: async ({ transactionHash }) => {
+        try { await record(jobId, "submit_attempted", undefined, { transactionHash }); }
+        catch (error) { hookFailed = true; throw error; }
+        hookRan = true;
+      } });
+    } catch (error) {
+      if (hookFailed) throw error;
+      result = hookRan ? { code: "indeterminate" } : { code: "rpc_unavailable" };
+    }
+    if (!hookRan && (result.code === "rpc_unavailable" || result.code === "caps_exceeded"
+      || (result.code === "refused" && result.reason === "unreconciled_transaction"))) {
+      retry(jobId, result.code === "rpc_unavailable" ? "submit_rpc_unavailable"
+        : result.code === "caps_exceeded" ? "submit_caps_exceeded" : "submit_unreconciled");
+      return "receipt_stored";
+    }
+    retries.delete(jobId);
     return outcome(jobId, result, false);
   }
   async function tick(): Promise<HostTickResult> {
-    if (halted) return { kind: "halted", waitMs: 5_000 };
+    if (halted) return { kind: "halted", waitMs: 5_000, code: haltCode };
     if (!initialized) {
       await journal.initialize();
       initialized = true;
@@ -264,10 +337,12 @@ export function createHost(deps: HostDeps): {
       const records = await journal.list();
       // A possibly pending transaction owns the operator's nonce stream.
       const recoverable = records.find((entry) => entry.state === "submit_attempted" || entry.state === "submit_indeterminate")
-        ?? records.find((entry) => entry.state === "package_built" || (entry.state === "evidence_stored" && entry.code === undefined));
+        ?? records.find((entry) => entry.state === "package_built" || entry.state === "receipt_stored" || (entry.state === "evidence_stored" && entry.code === undefined));
       if (recoverable) {
+        const until = retries.get(recoverable.jobId)?.until;
+        if (until !== undefined && now() < until) return { kind: "backoff", jobId: recoverable.jobId, waitMs: until - now() };
         const state = await submitStored(recoverable.jobId);
-        return { kind: "job", jobId: recoverable.jobId, state, waitMs: 5_000 };
+        return { kind: "job", jobId: recoverable.jobId, state, waitMs: jobWait(recoverable.jobId) };
       }
     }
     if (now() < nextPollAt) return { kind: "backoff", waitMs: nextPollAt - now() };
@@ -311,7 +386,7 @@ export function createHost(deps: HostDeps): {
     const jobId = pending.jobId;
     const done = (state: JournalState): HostTickResult => {
       pending = undefined;
-      return { kind: "job", jobId, state, waitMs: 5_000 };
+      return { kind: "job", jobId, state, waitMs: jobWait(jobId) };
     };
     if (!pending.reported) {
       pending.reports++;
@@ -474,11 +549,12 @@ export function createHost(deps: HostDeps): {
     if (activeTick) return activeTick;
     if (deps.stopSignal?.aborted) requestStop();
     deps.stopSignal?.addEventListener("abort", requestStop, { once: true });
-    activeTick = tick().catch((): HostTickResult => {
+    activeTick = tick().catch((error): HostTickResult => {
       // A partial local write must stop this process before another side effect.
       halted = true;
-      log("journal_failed");
-      return { kind: "halted", waitMs: 5_000 };
+      haltCode = error instanceof JournalError && error.code === "data_dir_locked" ? "data_dir_locked" : "journal_failed";
+      log(haltCode as HostLogCode);
+      return { kind: "halted", waitMs: 5_000, code: haltCode };
     }).finally(() => {
       deps.stopSignal?.removeEventListener("abort", requestStop);
       activeTick = undefined;
@@ -509,7 +585,10 @@ export function createHost(deps: HostDeps): {
       try {
         while (!stopped) {
           const result = await runOnce();
-          if (result.kind === "halted") throw new Error("journal_failed");
+          if (result.kind === "halted") {
+            if (haltCode === "data_dir_locked") throw new JournalError("data_dir_locked");
+            throw new Error(haltCode);
+          }
           // Backoff delays job polling, while heartbeat attempts retain their
           // thirty-second cadence even when the relay asks us to wait a minute.
           const waitMs = Math.min(Math.max(5_000, result.waitMs), Math.max(1, 30_000 - (now() - lastHeartbeat)));
@@ -519,6 +598,7 @@ export function createHost(deps: HostDeps): {
         await activeTick;
       } finally {
         stopSignal.removeEventListener("abort", requestStop);
+        await journal.close();
         log("host_shutdown");
       }
     },

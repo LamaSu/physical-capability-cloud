@@ -119,7 +119,9 @@ testnet-only sentence for `testnet_only`. Keygen and check-config print that
 message once; sign-policy prints only the code.
 
 The host must produce ONE signed bundle per settlement unit: print events plus pulled carrier
-events on success, or `execution_failed` evidence on failure. The reference is
+events on success, or `execution_failed` evidence on failure. A committed print-only
+package can never be extended with later carrier events: `submitEvidence` is one shot.
+The reference is
 pcc-oracle's B5 print-host bundle contract, **including the 10/10 amendment**
 (pcc-oracle `16aa336b`; on the Spark:
 `/mnt/sparkbulk/pcc-reconciliation/returns/pcc-oracle-work/print-host-bundle-contract-20261009.md`),
@@ -138,7 +140,7 @@ remain parked.
 ## Run loop
 
 ```bash
-print-host run --config /absolute/host.json [--once] [--poll-only] [--inputs-dir /absolute/inputs]
+print-host run --config /absolute/host.json [--once] [--poll-only] [--no-submit] [--inputs-dir /absolute/inputs]
 ```
 
 The equivalent direct invocation is
@@ -147,6 +149,9 @@ The equivalent direct invocation is
 `--poll-only` polls and heartbeats without opening the printer or loading signing
 keys. `--inputs-dir` selects the local manifest/document source. Without it,
 the default source returns `job_inputs_unavailable` and no job is claimed.
+Real mode requires positive `maxFeePerGasCap`, `maxPriorityFeePerGasCap`, and
+`gasCap` before startup. Use `--no-submit` explicitly to print and relay without
+package submission; those jobs end with `evidence_stored` / `submit_disabled`.
 All run logs contain closed codes only.
 
 The CLI uses the **STRICT e-stop reader by default**. Execution requires a parsed
@@ -154,6 +159,9 @@ poll with an own `emergencyStop: "clear"` field and an own `jobs` array.
 `"stopped"`, `"unavailable"`, missing or malformed stop data, and poll errors
 prevent execution. The host polls again immediately before printing, watches
 the stop while printing, and cancels on shutdown or a stopped poll.
+Stopping the host mid-print forfeits that unit: its signed failure bundle follows
+the receipt and commit path and spends the unit's one shot. A failed mid-print
+poll has the same effect.
 
 The local source reads `<encodeURIComponent(jobId)>.json` and the named PDF in
 the same directory. A manifest contains these fields:
@@ -179,18 +187,41 @@ for compatibility with existing manifests; missing fields still allow printing
 and relay storage, then journal `package_inputs_missing` and skip settlement
 submission. Supplied fields are strictly validated, including partial package
 inputs, and unknown fields are refused. Operator, kernel and funded device
-identities come from the configured runtime. The gateway settlement block and
-economics' canonical funded record are the future source of the unit context;
-the evidence lane owns the three program roots. The file source is the seam
-for those inputs and invents no package defaults.
+identities come from the configured runtime. The operator's inputs manifest is
+Thursday's only unit source (#7866). Evidence's committed S2 program supplies
+`program`; copy those fields byte for byte into every manifest before printing.
+Set `unit.evidenceTimeBounds.end` to the decimal `reclaimAt`, and choose `start`
+at or before the first print event so the bounds cover every event. An end before
+the final event produces terminal `package_invalid` after the print.
+The gateway settlement block and economics' canonical funded record are future
+unit-context sources. The file source invents no package defaults.
 
 The private `dataDir/journal/` contains per-job mode-0600 JSONL records and the
 saved signed bundle. Appends sync their file and directory before returning.
+The bundle, package, and receipt artifacts share an atomic save: a unique
+exclusive temporary file is written and fsynced, linked to its final name,
+then unlinked and the directory fsynced. A leftover temporary file is ignored
+and cannot block a later save.
 The mode-0700 `dataDir/sessions/` holds each unit session's public journal;
 device and session seeds are never written there. The session opens after
 `in_progress_reported`, adds every result event in order, then mints and
 delegates its session key at finalization. Finalization is repeatable from its
 public records and retains one signed bundle.
+
+Initialization exclusively creates `dataDir/journal/.lock`, containing the pid,
+the process's `/proc/self/stat` start time (field 22), and the kernel boot id as
+`{pid, startTime, bootId}`.
+Another process with the same identity causes `data_dir_locked`. A different
+boot id, absent pid, or changed process start time permits stale-lock takeover;
+unreadable `/proc` refuses startup. Clean exit releases the lock. To clear a stale
+lock manually, stop all hosts using this data directory, compare the saved
+identity with `/proc/sys/kernel/random/boot_id` and `/proc/<pid>/stat`, and only
+after confirming the original process is gone remove `journal/.lock`. The
+launcher uses its own PID namespace, so a matching pid alone proves nothing;
+check the host's namespace or stop its launcher before manual removal.
+Avoid simultaneous stale-lock replacements: takeover checks the existing inode
+before unlinking, but the check and unlink are separate operations and leave a
+narrow race between two concurrent replacements.
 
 Normal job order is `claimed`, `in_progress_reported`, `printing`, `printed`
 or `print_failed`, `bundle_saved`, then `evidence_stored`. A failed-print
@@ -207,23 +238,51 @@ Only after durable `evidence_stored` does the host build and sign D1 and D2.
 It saves and fsyncs the full signed public package as a mode-0600
 `<encodeURIComponent(jobId)>.package.json` artifact in the job journal directory,
 then journals `package_built` with only the public `packageDigest` and
-`evidenceBlockHash`. It journals and fsyncs `submit_attempted` **before**
-`sendRawTransaction`. Chain outcomes are `submitted`, `already_committed`,
+`evidenceBlockHash`. Next it POSTs the persisted `{body, signatures}` envelope
+to the gateway receipt route, checks the receipt's chain, escrow, settlement unit
+and digest against that package, atomically saves `<encodeURIComponent(jobId)>.receipt.json`,
+and journals `receipt_stored`. The receipt file contains
+`{receipt, signatureHex, receiptDigest, kid}`; hand its `{receipt, signatureHex}`
+to the `/settle` caller. PASS and FAIL bundles use this same call order:
+**build, receipt, submitEvidence**. No broadcaster submission is allowed without
+a stored, binding receipt.
+
+The broadcaster signs after successful preflight, then awaits the host's hook
+that journals and fsyncs `submit_attempted` with the public transaction hash.
+That durable attempt is the last step before `sendRawTransaction`, after signing
+and immediately before the send. If the hook fails, no transaction is sent and
+the host halts. Chain outcomes are `submitted`, `already_committed`,
 `conflict`, `refused`, or `submit_indeterminate`. A matching existing commitment
-requires no send; a conflict halts that job. All three positive transaction
-caps must be configured; omitted caps attach `submit_disabled` to
-`evidence_stored` and invoke neither package signers nor transaction signer.
+requires no send; a conflict halts that job. In real CLI mode all three positive
+transaction caps must be configured unless `--no-submit` is explicit; disabled
+submission invokes neither package signers nor transaction signer.
 `package_inputs_missing` is likewise an `evidence_stored` code.
+
+A pre-send RPC failure, `unreconciled_transaction`, or `caps_exceeded` leaves the
+job at its previous state and writes no attempt. Receipt 503, 429, 5xx, network,
+timeout, and other refusals also retry without a new journal record. Failures
+back off per job from 5 seconds, doubling to 60 seconds; a low cap keeps logging
+`submit_caps_exceeded` until the operator raises it. Receipt 409 is terminal
+`receipt_conflict`; a receipt for a different package is terminal `receipt_mismatch`.
+A source failure on restart logs its closed input code and retries from
+`evidence_stored`; only a returned incomplete manifest writes `package_inputs_missing`.
 
 On restart, `submit_attempted` and `submit_indeterminate` reconcile by read-back
 only, using the persisted package's chain, escrow, unit, schema and digest rather
 than a reloaded manifest. The exact digest commitment becomes `already_committed`;
 a different commitment becomes `conflict`. Confirmed absence after a journaled attempt
-stays `submit_indeterminate` for operator reconciliation. The host never
+stays `submit_indeterminate`. Check the transaction hash from `submit_attempted`
+on the chain's explorer. If it is mined, the next read-back resolves the unit.
+If it is not mined, the host keeps reading back. This round adds no resend tool.
+The host never
 automatically resends and exposes no resubmit flag. Interrupted printing or
 partial session work is journaled `interrupted` and never reprinted or reposted.
-`evidence_stored` without a skip code and `package_built` can resume safe local
-work before the first submit attempt.
+`evidence_stored` without a skip code can resume package construction.
+`package_built` without `receipt_stored` re-POSTs the persisted package; the route
+is idempotent per digest. `receipt_stored` reloads and validates its artifact and
+package binding before the first attempt. Missing, malformed, or mismatched
+stored receipt artifacts halt as `journal_invalid`. Read-back-only states never
+POST a receipt. Missing or altered package artifacts likewise halt.
 Unresolved attempts take priority over every new send on the operator's nonce
 stream. Repeated unchanged read-back outcomes log their code without growing
 the durable journal.
@@ -233,7 +292,7 @@ sending prevents restart from consuming that slot twice.
 ## Operator relay gateway client
 
 `createGatewayClient({baseUrl, apiKey, kernelId})` uses the Node 20+ global fetch
-and keeps the API key in a closure. The frozen client exposes four calls:
+and keeps the API key in a closure. The frozen client exposes five calls:
 
 - `pollJobs()` requests `GET /api/operator/jobs?kernelId=...&status=queued`,
   validates the job list, drops foreign-kernel jobs, and marks lists of 50 or
@@ -250,6 +309,13 @@ and keeps the API key in a closure. The frozen client exposes four calls:
   own kernel. The other three calls need `operate`. Acknowledgment is accepted
   only for `stored: true` with the sent job id, `event_bundle_hash` model, and
   matching `sha256:` content hash. A `stored: false` receipt is an error.
+- `postReceipt(jobId, {body, signatures})` sends `{packageEnvelope:{body,signatures}}`
+  to `POST /api/operator/jobs/:jobId/receipt` with the same operator auth and
+  `decide` authority. A strict 200 contains only `{receipt, signatureHex,
+  receiptDigest, kid}`; the receipt contains only `{chainId, escrow,
+  settlementUnitId, packageDigest, receivedAt}`. The same package digest returns
+  the original receipt. A different digest returns `409 receipt_exists`; a
+  missing gateway signer returns `503 receipt_signer_unavailable`.
 
 The library client's fallback e-stop reader returns
 `{proceed: false, why: "reader_unavailable"}`. The CLI explicitly selects the
@@ -331,7 +397,9 @@ The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803)
    deduplication and sorting as the oracle contract specifies.
    Before signing, it checks the block's unit-context digest against the body's
    unit binding and challenge nonce, rejecting a mismatch as `bad_body`.
-5. The operator broadcasts `submitEvidence(unitId, packageDigest)` once while
+5. POST the signed envelope to the N149 gateway receipt route, verify its package
+   binding, and save its public receipt for the `/settle` caller.
+6. The operator broadcasts `submitEvidence(unitId, packageDigest)` once while
    FUNDED_ACTIVE and before reclaimAt. The escrow's commitment uses layout
    format 1 even though the body's package format is `"2"`. A successful receipt
    must be followed by comparing `evidenceBundleHashOf(unitId)` with the
@@ -339,9 +407,10 @@ The host EOA is the PRINT unit's V-next operator under steward ruling R1 (#7803)
    its settlement unit id), escrow, unit, stored schema version and package digest.
 
 Inputs still owed by other lanes: evidence supplies the committed program hash
-and the attestation/work-product roots (Q-E3 and S2 goldens); gateway N149 supplies
-the receipt, challenge and unit block; economics N150 supplies the canonical
-escrow record. This package does not create a receipt, choose a profile or tier,
+and the attestation/work-product roots (Q-E3 and S2 goldens); gateway supplies
+the challenge and unit block; economics N150 supplies the canonical
+escrow record. The host obtains the N149 receipt from the gateway. This package
+does not choose a profile or tier,
 or attest a settlement verdict. A locally valid package is only one input to the
 gateway and oracle checks.
 
@@ -358,8 +427,9 @@ those hashes. No oracle implementation is imported.
 The `chain` configuration accepts `maxFeePerGasCap` and
 `maxPriorityFeePerGasCap` in wei, plus `gasCap` in gas units. Each is a canonical
 unsigned decimal string fitting uint256. The priority cap must not exceed the
-total fee cap. Omitted caps mean zero and disable broadcasting; supply all three
-before sending. The broadcaster snapshots and validates these caps even for
+total fee cap. Omitted caps mean zero to the library broadcaster; real CLI runs
+refuse startup unless all three are positive or `--no-submit` is explicit.
+The broadcaster snapshots and validates these caps even for
 manually constructed config and refuses excessive estimated fees or gas before
 calling the operator signer.
 These caps bound only the L2 execution fee (gas × maxFeePerGas); on an OP-stack
@@ -373,7 +443,7 @@ Optional controls are `confirmations` (1–64, default 1), `rpcTimeoutMs`
 `chain.rpcUrlFile` through the secret-file reader. RPC URLs, raw transactions
 and server text are excluded from results and logs. Sends have no retries.
 
-`createEvidenceBroadcaster(config, operatorKey)` returns `submit(input)` and
+`createEvidenceBroadcaster(config, operatorKey)` returns `submit(input, hooks?)` and
 `readBack(input)`. The input is `{escrow, unitId, packageDigest,
 compositionSchemaVersion}`. Both calls use the unit's frozen chain id, proven
 through its settlement unit id, and its stored schema version for the expected
@@ -381,6 +451,10 @@ commitment; a version mismatch is refused as `unit_mismatch` before any send.
 `readBack` never signs or sends. An uncommitted getter
 returns `refused` with `EvidenceNotCommitted`. Factory configuration errors carry
 only `bad_config`.
+The optional hook is `{beforeSend: async ({transactionHash, nonce}) => ...}`.
+The broadcaster awaits it after signing and immediately before `sendRawTransaction`.
+Hook rejection sends nothing, releases that attempt's latch and nonce hold, and
+propagates the error. Callers without a hook retain the ordinary broadcaster behavior.
 
 The closed outcomes are `submitted`, `already_committed`, `conflict`,
 `indeterminate`, `refused`, `caps_exceeded` and `rpc_unavailable`. Matching
@@ -396,7 +470,10 @@ restarts.
 Within an instance, `submit` refuses another unit as `unreconciled_transaction`
 until each earlier transaction it sent has a receipt or the operator's latest
 nonce has passed its nonce, and also refuses when the RPC's pending nonce does
-not exceed every nonce it signed. Across instances, including a new broadcaster
+not exceed every signed nonce still held by the broadcaster. A decoded send rejection followed by an
+uncommitted read-back releases its cross-unit nonce hold while retaining its
+same-unit no-resend latch. An ambiguous rejection retains the hold.
+Across instances, including a new broadcaster
 or a restart, the caller must reconcile an indeterminate operator transaction
 first, so an unseen pending transaction cannot compete for the same nonce.
 

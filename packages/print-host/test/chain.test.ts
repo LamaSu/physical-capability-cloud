@@ -232,6 +232,57 @@ describe("submitEvidence broadcaster", () => {
     setup.expectRedacted(result);
   });
 
+  it("awaits the durable beforeSend hook after signing and immediately before the raw send", async () => {
+    const setup = await fixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const beforeSend = vi.fn(async (sent: { transactionHash: Hex; nonce: number }) => {
+      setup.calls.push({ method: "beforeSend", params: sent });
+      await gate;
+      setup.calls.push({ method: "beforeSendResolved", params: sent });
+    });
+    const pending = setup.broadcaster.submit(setup.input, { beforeSend });
+    await vi.waitFor(() => expect(beforeSend).toHaveBeenCalledTimes(1));
+    expect(beforeSend).toHaveBeenCalledWith({ transactionHash: setup.hash, nonce: 7 });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+    release();
+    expect(await pending).toEqual({ code: "submitted", transactionHash: setup.hash });
+    const order = setup.calls.map(({ method }) => method);
+    expect(order.indexOf("beforeSend")).toBe(order.indexOf("signTransaction") + 1);
+    expect(order.indexOf("eth_sendRawTransaction")).toBe(order.indexOf("beforeSendResolved") + 1);
+    expect(order.filter((method) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it("a rejected beforeSend hook propagates, sends nothing and leaves no same-unit latch or nonce hold", async () => {
+    const setup = await fixture();
+    const failure = new Error("journal_invalid");
+    await expect(setup.broadcaster.submit(setup.input, {
+      beforeSend: async () => { throw failure; },
+    })).rejects.toBe(failure);
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+    // The same instance can retry this provably unsent unit at the same nonce.
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 7]);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it("a failed beforeSend hook leaves no cross-unit hold", async () => {
+    const setup = await fixture();
+    await expect(setup.broadcaster.submit(setup.input, {
+      beforeSend: async () => { throw new Error("journal_invalid"); },
+    })).rejects.toThrow("journal_invalid");
+    setup.fake.latestFailure = true;
+    setup.fake.pendingNonce = 7;
+    expect(await setup.broadcaster.submit(setup.addUnit(4n)))
+      .toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 7]);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    expect(setup.calls.filter(({ method, params }) => method === "eth_getTransactionCount"
+      && (params as [Hex, string])[1] === "latest")).toHaveLength(0);
+  });
+
   it.each([
     ["maxFeePerGasCap", { maxFeePerGasCap: "21" }, { baseFee: 20n }],
     ["maxPriorityFeePerGasCap", { maxPriorityFeePerGasCap: "1" }, {}],
@@ -479,6 +530,42 @@ describe("submitEvidence broadcaster", () => {
       setup.expectPostSendRead("eth_sendRawTransaction");
       setup.expectRedacted(result);
     });
+
+  it.each(["NotActive", "EvidenceAlreadyCommitted", "unknown_revert"] as const)(
+    "a send rejected with %s and uncommitted read-back releases both cross-unit nonce checks", async (reason) => {
+      const setup = await fixture({}, { sendRevert: reason });
+      const first = await setup.broadcaster.submit(setup.input);
+      expect(first).toEqual({ code: "refused", reason });
+      const boundary = setup.calls.length;
+      // An unconsumed nonce remains 7. Any latest read would fail and expose a hold.
+      setup.fake.latestFailure = true;
+      setup.fake.pendingNonce = 7;
+      setup.fake.sendRevert = undefined;
+      expect(await setup.broadcaster.submit(setup.addUnit(4n)))
+        .toEqual({ code: "submitted", transactionHash: setup.hash });
+      expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 7]);
+      expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
+      expect(setup.calls.slice(boundary).filter(({ method, params }) => method === "eth_getTransactionCount")
+        .map(({ params }) => (params as [Hex, string])[1])).toEqual(["pending"]);
+      // Its own latch survives the released hold, even when its escrow is absent.
+      setup.fake.afterSendCommitment = null;
+      expect(await setup.broadcaster.submit(setup.input))
+        .toEqual({ code: "indeterminate", transactionHash: setup.hash });
+      expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(2);
+      expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
+      setup.expectRedacted(first);
+    });
+
+  it("an ambiguous send failure keeps its cross-unit nonce hold", async () => {
+    const setup = await fixture({}, { failureMethod: "eth_sendRawTransaction" });
+    expect(await setup.broadcaster.submit(setup.input))
+      .toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    setup.fake.failureMethod = undefined;
+    expect(await setup.broadcaster.submit(setup.addUnit(4n)))
+      .toEqual({ code: "refused", reason: "unreconciled_transaction" });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
 
   it("a successful receipt with unavailable read-back remains indeterminate", async () => {
     const setup = await fixture({}, { postSendReadFailure: true });

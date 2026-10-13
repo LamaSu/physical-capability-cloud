@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { checkHostConfig, HostConfigError, loadHostConfig, type HostConfig } from "../src/config.js";
+import { checkHostConfig, HostConfigError, loadHostConfig, requireSubmissionCaps, type HostConfig } from "../src/config.js";
 import { generateHostKeys } from "../src/keygen.js";
 import type * as secretFile from "../src/secret-file.js";
 
@@ -97,6 +97,19 @@ afterEach(async () => {
 });
 
 describe("host configuration", () => {
+  it("requires every transaction cap to be positive for a submitting real run", async () => {
+    const setup = await fixture();
+    const complete = { ...setup.config.chain, maxFeePerGasCap: "100", maxPriorityFeePerGasCap: "10", gasCap: "250000" };
+    expect(() => requireSubmissionCaps(complete)).not.toThrow();
+    expect(() => requireSubmissionCaps(setup.config.chain)).toThrowError("submit_caps_required");
+    for (const field of ["maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"] as const) {
+      expect(() => requireSubmissionCaps({ ...complete, [field]: undefined })).toThrowError("submit_caps_required");
+      const zero = { ...complete, [field]: "0" };
+      if (field === "maxFeePerGasCap") zero.maxPriorityFeePerGasCap = "0";
+      expect(() => requireSubmissionCaps(zero)).toThrowError("submit_caps_required");
+    }
+  });
+
   it("loads explicit broadcaster caps and receipt controls", async () => {
     const setup = await fixture();
     const chain = { ...setup.config.chain, maxFeePerGasCap: "100000000000", maxPriorityFeePerGasCap: "2000000000",

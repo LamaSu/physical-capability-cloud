@@ -3,8 +3,9 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createJobJournal, JournalError, type JournalCode, type JournalState } from "../src/journal.js";
-import type { RelayEvidenceBundle } from "../src/gateway-client.js";
+import { constants } from "node:fs";
+import { createJobJournal, JournalError, type JournalCode, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
+import type { ReceiptEnvelope, RelayEvidenceBundle } from "../src/gateway-client.js";
 
 let dir: string;
 const jobId = "job-journal-1";
@@ -14,12 +15,20 @@ const bundle: RelayEvidenceBundle = {
   events: [], bundleHash: `sha256:${"a".repeat(64)}`,
   kernelSignature: { signer: `0x${"b".repeat(40)}`, algorithm: "ed25519", value: "c".repeat(128) },
 };
+const publicWord = () => `0x${randomBytes(32).toString("hex")}` as const;
+const receipt = (): ReceiptEnvelope => ({
+  receipt: {
+    chainId: 84532, escrow: `0x${randomBytes(20).toString("hex")}`,
+    settlementUnitId: publicWord(), packageDigest: publicWord(), receivedAt: Math.floor(time() / 1_000),
+  },
+  signatureHex: `0x${randomBytes(64).toString("hex")}`, receiptDigest: publicWord(), kid: "test-public-receipt-key",
+});
 
 beforeEach(async () => { dir = await fs.mkdtemp(join(tmpdir(), "print-host-journal-")); await fs.chmod(dir, 0o700); });
 afterEach(async () => { vi.restoreAllMocks(); await fs.rm(dir, { recursive: true, force: true }); });
 
 describe("job journal", () => {
-  it.each(["package_built", "submit_attempted", "submit_indeterminate", "submitted", "already_committed", "conflict", "refused"] as const)(
+  it.each(["package_built", "receipt_stored", "submit_attempted", "submit_indeterminate", "submitted", "already_committed", "conflict", "refused"] as const)(
     "a stored receipt preserves %s and its public package hashes across restart", async (state) => {
       const original = createJobJournal(dir, time);
       const hashes = { packageDigest: `0x${randomBytes(32).toString("hex")}`, evidenceBlockHash: `0x${randomBytes(32).toString("hex")}` };
@@ -27,6 +36,7 @@ describe("job journal", () => {
       await original.append(jobId, "package_built", undefined, hashes);
       if (state !== "package_built") await original.append(jobId, state);
       await fs.mkdir(original.sessionDirectory(jobId), { mode: 0o700 });
+      await original.close();
       const restarted = createJobJournal(dir, time);
       const records = await restarted.read(jobId);
       expect(records.at(-1)?.state).toBe(state);
@@ -90,6 +100,7 @@ describe("job journal", () => {
   it.each(["claimed", "in_progress_reported", "printing"] as const)("a restart makes %s interrupted exactly once", async (state) => {
     const original = createJobJournal(dir, time);
     await original.append(jobId, state);
+    await original.close();
     const restarted = createJobJournal(dir, time);
     await restarted.initialize();
     await restarted.initialize();
@@ -101,6 +112,7 @@ describe("job journal", () => {
     "a restart retains %s and the existing journal exclusion", async (state) => {
       const original = createJobJournal(dir, time);
       await original.append(jobId, state);
+      await original.close();
       const restarted = createJobJournal(dir, time);
       expect((await restarted.read(jobId)).map((record) => record.state)).toEqual([state]);
       expect(await restarted.has(jobId)).toBe(true);
@@ -113,11 +125,13 @@ describe("job journal", () => {
       await original.append(jobId, state);
       await fs.mkdir(original.sessionDirectory(jobId), { mode: 0o700 });
       await fs.writeFile(join(original.sessionDirectory(jobId), "00000000.json"), "{}", { mode: 0o600 });
+      await original.close();
       const restarted = createJobJournal(dir, time);
       await restarted.initialize();
       await restarted.initialize();
       expect((await restarted.read(jobId)).map((record) => record.state)).toEqual([state, "interrupted"]);
       expect(await restarted.has(jobId)).toBe(true);
+      await restarted.close();
       const nextRestart = createJobJournal(dir, time);
       expect((await nextRestart.read(jobId)).map((record) => record.state)).toEqual([state, "interrupted"]);
     },
@@ -128,16 +142,18 @@ describe("job journal", () => {
     await original.initialize();
     await fs.mkdir(original.sessionDirectory(jobId), { mode: 0o700 });
     await fs.writeFile(join(original.sessionDirectory(jobId), "00000000.json"), "{}", { mode: 0o600 });
+    await original.close();
     const restarted = createJobJournal(dir, time);
     expect(await restarted.has(jobId)).toBe(true);
     expect(await restarted.list()).toEqual([{ at, jobId, state: "interrupted" }]);
-    expect(await fs.readdir(restarted.directory)).toEqual([`${jobId}.jsonl`]);
+    expect(await fs.readdir(restarted.directory)).toEqual([".lock", `${jobId}.jsonl`]);
   });
 
   it("retains a session with a durable evidence-stored receipt", async () => {
     const original = createJobJournal(dir, time);
     await original.append(jobId, "evidence_stored");
     await fs.mkdir(original.sessionDirectory(jobId), { mode: 0o700 });
+    await original.close();
     const restarted = createJobJournal(dir, time);
     expect((await restarted.read(jobId)).map((record) => record.state)).toEqual(["evidence_stored"]);
     expect(await restarted.has(jobId)).toBe(true);
@@ -156,6 +172,7 @@ describe("job journal", () => {
     const original = createJobJournal(dir, time);
     await original.initialize();
     await fs.mkdir(original.sessionDirectory(jobId), { mode: 0o755 });
+    await original.close();
     await expect(createJobJournal(dir, time).initialize()).rejects.toMatchObject({ code: "journal_bad_directory" });
     await fs.chmod(original.sessionDirectory(jobId), 0o700);
     await fs.rename(original.sessionDirectory(jobId), join(dir, "actual-session"));
@@ -209,7 +226,7 @@ describe("job journal", () => {
       const handle = await open(...args);
       const sync = handle.sync.bind(handle);
       vi.spyOn(handle, "sync").mockImplementation(async () => {
-        calls.push(args[0] === journal.bundlePath(jobId) ? "bundle" : "directory");
+        calls.push(String(args[0]).startsWith(`${journal.bundlePath(jobId)}.tmp-`) ? "bundle" : "directory");
         await sync();
       });
       return handle;
@@ -222,6 +239,7 @@ describe("job journal", () => {
     const journal = createJobJournal(dir, time);
     await journal.append(jobId, "printing");
     await fs.appendFile(journal.journalPath(jobId), '{"at":');
+    await journal.close();
     await expect(createJobJournal(dir, time).initialize()).rejects.toMatchObject({ code: "journal_invalid" });
   });
 
@@ -231,7 +249,7 @@ describe("job journal", () => {
     await expect(journal.append(jobId, secret as JournalState)).rejects.toMatchObject({ code: "journal_invalid" });
     await expect(journal.append(jobId, "abandoned", secret as JournalCode)).rejects.toMatchObject({ code: "journal_invalid" });
     expect(await journal.has(jobId)).toBe(false);
-    expect(await fs.readdir(journal.directory)).toEqual([]);
+    expect(await fs.readdir(journal.directory)).toEqual([".lock"]);
   });
 
   it("encodes job IDs into basenames and never follows a job-file symlink", async () => {
@@ -264,5 +282,156 @@ describe("job journal", () => {
     expect(String(caught)).toBe("JournalError: journal_write_failed");
     expect(JSON.stringify(caught)).not.toContain("PRIVATE_DOCUMENT_OR_SERVER_TEXT");
     expect(Object.hasOwn(caught as object, "cause")).toBe(false);
+  });
+
+  it("persists a lowercase public transaction hash only on submit_attempted", async () => {
+    const journal = createJobJournal(dir, time);
+    const transactionHash = publicWord();
+    await journal.append(jobId, "submit_attempted", undefined, { transactionHash });
+    expect(await journal.read(jobId)).toEqual([{ at, jobId, state: "submit_attempted", transactionHash }]);
+    for (const state of ["receipt_stored", "submitted", "package_built"] as const) {
+      await expect(journal.append(jobId, state, undefined, { transactionHash })).rejects.toMatchObject({ code: "journal_invalid" });
+    }
+    for (const invalid of [`0x${"A".repeat(64)}`, "0x", "PRIVATE_CANARY", `${transactionHash}00`]) {
+      await expect(journal.append(jobId, "submit_attempted", undefined, { transactionHash: invalid }))
+        .rejects.toMatchObject({ code: "journal_invalid" });
+    }
+    await journal.close();
+    expect((await createJobJournal(dir, time).read(jobId)).at(-1)?.transactionHash).toBe(transactionHash);
+  });
+
+  it.each([
+    { state: "submitted", transactionHash: publicWord() },
+    { state: "submit_attempted", transactionHash: `0x${"A".repeat(64)}` },
+    { state: "submit_attempted", transactionHash: "PRIVATE_CANARY" },
+  ])("validates transaction metadata on read: $state / $transactionHash", async (metadata) => {
+    const journal = createJobJournal(dir, time);
+    await journal.initialize();
+    await fs.writeFile(journal.journalPath(jobId), `${JSON.stringify({ at, jobId, ...metadata })}\n`, { mode: 0o600 });
+    await expect(journal.read(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
+  });
+
+  it("stores a strict receipt artifact and rejects malformed recovery receipts", async () => {
+    const journal = createJobJournal(dir, time);
+    expect(await journal.readReceipt(jobId)).toBeUndefined();
+    const value = receipt();
+    await journal.saveReceipt(jobId, value);
+    await journal.append(jobId, "receipt_stored");
+    expect(await journal.readReceipt(jobId)).toEqual(value);
+    expect((await fs.stat(journal.receiptPath(jobId))).mode & 0o777).toBe(0o600);
+    await expect(journal.saveReceipt(jobId, value)).rejects.toMatchObject({ code: "journal_bundle_exists" });
+    await fs.writeFile(journal.receiptPath(jobId), JSON.stringify({ ...value, serverText: "PRIVATE_CANARY" }));
+    await expect(journal.readReceipt(jobId)).rejects.toMatchObject({ code: "journal_invalid" });
+  });
+
+  it.each(["bundle", "package", "receipt"] as const)("publishes the %s only by linking a synced unique temp file", async (kind) => {
+    const journal = createJobJournal(dir, time);
+    await journal.initialize();
+    const final = kind === "bundle" ? journal.bundlePath(jobId)
+      : kind === "package" ? journal.packagePath(jobId) : journal.receiptPath(jobId);
+    const open = fs.open.bind(fs);
+    const link = fs.link.bind(fs);
+    const calls: string[] = [];
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      if (typeof args[1] === "number" && (args[1] & constants.O_WRONLY)) {
+        expect(String(args[0])).toMatch(new RegExp(`\\.${kind}\\.json\\.tmp-[0-9a-f]{32}$`));
+        expect((args[1] & constants.O_EXCL) !== 0).toBe(true);
+        const sync = handle.sync.bind(handle);
+        vi.spyOn(handle, "sync").mockImplementation(async () => { calls.push("file_synced"); await sync(); });
+      } else if (args[0] === journal.directory) {
+        const sync = handle.sync.bind(handle);
+        vi.spyOn(handle, "sync").mockImplementation(async () => { calls.push("directory_synced"); await sync(); });
+      }
+      return handle;
+    });
+    vi.spyOn(fs, "link").mockImplementation(async (...args) => {
+      expect(calls).toEqual(["file_synced"]);
+      expect(args[1]).toBe(final);
+      await expect(fs.stat(final)).rejects.toMatchObject({ code: "ENOENT" });
+      calls.push("linked");
+      await link(...args);
+    });
+    if (kind === "bundle") await journal.saveBundle(jobId, bundle);
+    else if (kind === "package") await journal.savePackage(jobId, { body: { public: true } } as unknown as SignedMilestonePackage);
+    else await journal.saveReceipt(jobId, receipt());
+    expect(calls).toEqual(["file_synced", "linked", "directory_synced"]);
+    expect((await fs.readdir(journal.directory)).some((file) => file.includes(".tmp-"))).toBe(false);
+  });
+
+  it("a partial leftover temp artifact is ignored after restart and cannot block another save", async () => {
+    const original = createJobJournal(dir, time);
+    await original.initialize();
+    const leftover = `${original.bundlePath(jobId)}.tmp-crash`;
+    await fs.writeFile(leftover, '{"events":', { mode: 0o600 });
+    await original.close();
+    const journal = createJobJournal(dir, time);
+    await journal.saveBundle(jobId, bundle);
+    expect(await journal.readBundle(jobId)).toEqual(bundle);
+    expect(await fs.readFile(leftover, "utf8")).toBe('{"events":');
+  });
+
+  it("takes an exclusive data-directory lock and releases it on clean close", async () => {
+    const first = createJobJournal(dir, time);
+    await first.initialize();
+    const lockPath = join(first.directory, ".lock");
+    const identity = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    const selfStat = await fs.readFile("/proc/self/stat", "utf8");
+    expect(identity).toEqual({
+      pid: process.pid, startTime: selfStat.slice(selfStat.lastIndexOf(")") + 1).trim().split(/\s+/)[19],
+      bootId: (await fs.readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim(),
+    });
+    await expect(createJobJournal(dir, time).initialize()).rejects.toMatchObject({ code: "data_dir_locked" });
+    expect(JSON.parse(await fs.readFile(lockPath, "utf8"))).toEqual(identity);
+    await first.close();
+    await expect(fs.stat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(first.append(jobId, "claimed")).rejects.toMatchObject({ code: "data_dir_locked" });
+    await expect(createJobJournal(dir, time).initialize()).resolves.toBeUndefined();
+  });
+
+  it("two simultaneous starts on an unlocked directory have exactly one owner", async () => {
+    const journals = [createJobJournal(dir, time), createJobJournal(dir, time)];
+    const outcomes = await Promise.allSettled(journals.map((journal) => journal.initialize()));
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const refused = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(refused).toMatchObject({ reason: { code: "data_dir_locked" } });
+    await Promise.all(journals.map((journal) => journal.close()));
+  });
+
+  it.each(["bootId", "pid", "startTime"] as const)("takes over a stale lock identified by its %s", async (field) => {
+    const first = createJobJournal(dir, time);
+    await first.initialize();
+    const lockPath = join(first.directory, ".lock");
+    const identity = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    await first.close();
+    if (field === "bootId") identity.bootId = `${identity.bootId[0] === "0" ? "1" : "0"}${identity.bootId.slice(1)}`;
+    else if (field === "pid") identity.pid = 2_147_483_647;
+    else identity.startTime = String(BigInt(identity.startTime) + 1n);
+    await fs.writeFile(lockPath, JSON.stringify(identity), { mode: 0o600 });
+    const next = createJobJournal(dir, time);
+    await next.initialize();
+    const current = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    expect(current.pid).toBe(process.pid);
+    expect(current[field]).not.toBe(identity[field]);
+  });
+
+  it.each(["/proc/self/stat", "/proc/sys/kernel/random/boot_id"])("refuses to start if %s is unreadable", async (blocked) => {
+    const readFile = fs.readFile.bind(fs);
+    vi.spyOn(fs, "readFile").mockImplementation((...args) => {
+      if (args[0] === blocked) return Promise.reject(Object.assign(new Error("PRIVATE_CANARY"), { code: "EACCES" }));
+      return readFile(...args);
+    });
+    await expect(createJobJournal(dir, time).initialize()).rejects.toMatchObject({ code: "data_dir_locked" });
+  });
+
+  it("an unreadable existing pid identity is not treated as stale", async () => {
+    const first = createJobJournal(dir, time);
+    await first.initialize();
+    const readFile = fs.readFile.bind(fs);
+    vi.spyOn(fs, "readFile").mockImplementation((...args) => {
+      if (args[0] === `/proc/${process.pid}/stat`) return Promise.reject(Object.assign(new Error("PRIVATE_CANARY"), { code: "EACCES" }));
+      return readFile(...args);
+    });
+    await expect(createJobJournal(dir, time).initialize()).rejects.toMatchObject({ code: "data_dir_locked" });
   });
 });

@@ -1,5 +1,5 @@
 import { createPublicKey, randomBytes, verify } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -11,7 +11,7 @@ import {
 import { settlementUnitId } from "@pcc/contracts/vnext";
 import { createEvidenceBroadcaster, type EvidenceBroadcaster, type EvidenceSubmission } from "../src/chain.js";
 import type { HostConfig } from "../src/config.js";
-import type { GwResult, PollJobsValue, RelayEvidenceBundle } from "../src/gateway-client.js";
+import type { GwResult, PollJobsValue, RelayEvidenceBundle, ReceiptEnvelope } from "../src/gateway-client.js";
 import { createHost, HOST_LOG_CODES, type HostDeps, type HostLogCode } from "../src/host.js";
 import type { JobInputs } from "../src/job-inputs.js";
 import { createJobJournal, type JournalRecord, type JournalState, type SignedMilestonePackage } from "../src/journal.js";
@@ -24,12 +24,14 @@ const jobId = "job:host-submit";
 const cleanups: Array<() => Promise<void>> = [];
 const word = (): Hex => toHex(randomBytes(32));
 const functions = parseAbi([
+  "function unitTerms(bytes32 unitId) view returns (uint256 milestoneIndex_, bytes32 stepId_, uint8 requestedTier_, uint256 reclaimAt_, bytes32 payoutConfigHash_, uint16 compositionSchemaVersion_, bool evidenceCommitted_)",
+  "function jobIdHash() view returns (bytes32)",
   "function evidenceBundleHashOf(bytes32 unitId) view returns (bytes32)",
   "function submitEvidence(bytes32 unitId, bytes32 packageDigest)",
 ]);
-const errors = parseAbi(["error EvidenceNotCommitted()"]);
+const errors = parseAbi(["error EvidenceNotCommitted()", "error NotActive()"]);
 const completedStates = ["claimed", "in_progress_reported", "printing", "printed", "bundle_saved",
-  "evidence_stored", "package_built", "submit_attempted", "submitted"];
+  "evidence_stored", "package_built", "receipt_stored", "submit_attempted", "submitted"];
 
 // Independently spell the escrow commitment ABI, including its format version.
 function commitment(input: EvidenceSubmission): Hex {
@@ -72,7 +74,11 @@ async function fixture(options: {
   };
   const journal = createJobJournal(directory, () => now.getTime());
   async function diskRecords(): Promise<JournalRecord[]> {
-    const text = await readFile(journal.journalPath(jobId), "utf8");
+    const text = await readFile(journal.journalPath(jobId), "utf8").catch((error: unknown) => {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return "";
+      throw error;
+    });
+    if (!text) return [];
     return text.trimEnd().split("\n").map((line) => JSON.parse(line) as JournalRecord);
   }
   async function diskPackage(): Promise<SignedMilestonePackage> {
@@ -104,6 +110,10 @@ async function fixture(options: {
   const adapter = new FakeMachineAdapter(config.deviceId, config.kernelId);
   adapter.source.simulated = options.simulated ?? false;
   cleanups.push(() => adapter.dispose());
+  const receiptValue = (): ReceiptEnvelope => ({ receipt: { chainId: 31337, escrow: packageUnit.escrow.toLowerCase() as Hex,
+    settlementUnitId: unitId, packageDigest: word(), receivedAt: Math.floor(now.getTime() / 1000) },
+    signatureHex: toHex(randomBytes(64)), receiptDigest: word(), kid: "gateway-test" });
+  const receipts = new Map<Hex, ReceiptEnvelope>();
   const gateway = {
     heartbeat: vi.fn(async () => ({ ok: true as const, value: null })),
     pollJobs: vi.fn(async (): Promise<GwResult<PollJobsValue>> => ({ ok: true,
@@ -112,12 +122,23 @@ async function fixture(options: {
     postRelayEvidence: vi.fn(async (id: string, bundle: RelayEvidenceBundle): Promise<GwResult<{ jobId: string;
       contentHash: string; hashModel: "event_bundle_hash" }>> => ({ ok: true,
       value: { jobId: id, contentHash: bundle.bundleHash, hashModel: "event_bundle_hash" } })),
+    postReceipt: vi.fn(async (_id: string, envelope: { body: SignedMilestonePackage["body"]; signatures: SignedMilestonePackage["signatures"] }): Promise<GwResult<ReceiptEnvelope>> => {
+      const digest = computePackageDigest(envelope.body, envelope.signatures);
+      let value = receipts.get(digest);
+      if (!value) {
+        const fresh = receiptValue();
+        value = { ...fresh, receipt: { ...fresh.receipt, packageDigest: digest } };
+        receipts.set(digest, value);
+      }
+      return { ok: true, value };
+    }),
     toJSON: () => ({ baseUrl: "https://gateway.example.test", kernelId: config.kernelId }),
     toString: () => "gateway",
     [inspect.custom]: () => ({ baseUrl: "https://gateway.example.test", kernelId: config.kernelId }),
   };
-  const fake: { initial: "absent" | "matching" | "conflict"; send: "ok" | "throw_after_commit" | "throw_absent";
-    readFailure: boolean; stored?: Hex } = { initial: "absent", send: "ok", readFailure: false };
+  const fake: { initial: "absent" | "matching" | "conflict"; send: "ok" | "throw_after_commit" | "throw_absent" | "reject_absent";
+    readFailure: boolean; stored?: Hex; storedVersion?: number; failOnce?: string; latestNonce?: number; pendingNonce?: number } = { initial: "absent", send: "ok", readFailure: false };
+  const terms = new Map<Hex, { milestoneIndex: bigint; stepId: Hex; version: number }>([[unitId, { milestoneIndex: 7n, stepId: packageUnit.stepId, version: 1 }]]);
   const calls: Array<{ method: string; params: unknown }> = [];
   const sendStates: JournalState[][] = [];
   const sentData: Hex[] = [];
@@ -125,19 +146,30 @@ async function fixture(options: {
   const serverText = `${rpcUrl} private-server-${randomBytes(24).toString("base64url")}`;
   const transport = custom({ request: async ({ method, params }) => {
     calls.push({ method, params });
+    const callName = method === "eth_call" ? decodeFunctionData({ abi: functions, data: (params as [{ data: Hex }])[0].data }).functionName : undefined;
+    const point = callName ? `eth_call:${callName}` : method === "eth_getTransactionCount" ? `${method}:${(params as unknown[])[1]}` : method;
+    if (fake.failOnce === point) { fake.failOnce = undefined; throw { code: -32603, message: serverText }; }
     switch (method) {
       case "eth_chainId": return "0x7a69";
       case "eth_call": {
         if (fake.readFailure) throw { code: -32603, message: serverText };
         const decoded = decodeFunctionData({ abi: functions, data: (params as [{ data: Hex }])[0].data });
+        if (decoded.functionName === "jobIdHash") return packageUnit.jobIdHash;
+        if (decoded.functionName === "unitTerms") {
+          const t = terms.get(decoded.args[0]);
+          if (!t) throw new Error("unknown unit");
+          return encodeAbiParameters([{ type: "uint256" }, { type: "bytes32" }, { type: "uint8" }, { type: "uint256" },
+            { type: "bytes32" }, { type: "uint16" }, { type: "bool" }],
+            [t.milestoneIndex, t.stepId, 1, BigInt(reclaimAt), word(), fake.storedVersion ?? t.version, false]);
+        }
         // Record wrong targets as a conflict, instead of allowing a read to pass accidentally.
-        if (decoded.functionName !== "evidenceBundleHashOf" || decoded.args[0] !== unitId) return word();
+        if (decoded.functionName !== "evidenceBundleHashOf" || !terms.has(decoded.args[0])) return word();
         if (fake.stored !== undefined) return fake.stored;
         if (fake.initial === "matching") return commitment(submission(await diskPackage()));
         if (fake.initial === "conflict") return word();
         throw { code: 3, message: serverText, data: encodeErrorResult({ abi: errors, errorName: "EvidenceNotCommitted" }) };
       }
-      case "eth_getTransactionCount": return "0x7";
+      case "eth_getTransactionCount": return numberToHex((params as unknown[])[1] === "latest" ? fake.latestNonce ?? 7 : fake.pendingNonce ?? 7);
       case "eth_getBlockByNumber": return { number: "0x1", hash: word(), parentHash: word(), timestamp: "0x1",
         baseFeePerGas: "0xa", gasLimit: "0xffffff", gasUsed: "0x0", transactions: [] };
       case "eth_maxPriorityFeePerGas": return "0x2";
@@ -150,9 +182,10 @@ async function fixture(options: {
         txHash = keccak256(raw);
         const decoded = decodeFunctionData({ abi: functions, data: tx.data! });
         if (decoded.functionName !== "submitEvidence") throw new Error("wrong function");
-        if (fake.send !== "throw_absent") fake.stored = commitment({ escrow: getAddress(tx.to!),
+        if (fake.send !== "throw_absent" && fake.send !== "reject_absent") fake.stored = commitment({ escrow: getAddress(tx.to!),
           unitId: decoded.args[0], packageDigest: decoded.args[1],
-          compositionSchemaVersion: inputs.unit.compositionSchemaVersion ?? 0 });
+          compositionSchemaVersion: fake.storedVersion ?? 1 });
+        if (fake.send === "reject_absent") throw { code: 3, message: serverText, data: encodeErrorResult({ abi: errors, errorName: "NotActive" }) };
         if (fake.send !== "ok") throw { code: -32603, message: serverText };
         return txHash;
       }
@@ -175,7 +208,7 @@ async function fixture(options: {
     ...(options.print ? { print: options.print } : {}), ...(options.realMode === undefined ? {} : { realMode: options.realMode }) };
   const host = createHost(deps);
   return { directory, config, journal, diskRecords, diskPackage, inputs, inputSource, adapter, gateway, fake, calls,
-    sendStates, sentData, d1States, operatorKey, deviceKey, broadcaster, newBroadcaster, logs, deps, host, rpcUrl, serverText };
+    sendStates, sentData, d1States, operatorKey, deviceKey, broadcaster, newBroadcaster, logs, deps, host, rpcUrl, serverText, terms, receiptValue, advance: (ms = 60_000) => now.setTime(now.getTime() + ms) };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -189,7 +222,8 @@ async function finish(setup: Fixture, failed = false) {
   else setup.adapter.emit("execution_completed", { ippJobId: 101, totalPages: 2 });
   return tick;
 }
-function restart(setup: Fixture, overrides: Partial<HostDeps> = {}) {
+async function restart(setup: Fixture, overrides: Partial<HostDeps> = {}) {
+  await setup.journal.close();
   const broadcaster = setup.newBroadcaster();
   const journal = createJobJournal(setup.directory, setup.deps.clock);
   return { broadcaster, journal, host: createHost({ ...setup.deps, journal, broadcaster, ...overrides }) };
@@ -222,6 +256,10 @@ describe("host package and crash-safe submitEvidence", () => {
     expect(setup.sentData).toHaveLength(1);
     expect(decodeFunctionData({ abi: functions, data: setup.sentData[0] })).toEqual({
       functionName: "submitEvidence", args: [setup.inputs.unit.settlementUnitId, pkg.packageDigest] });
+    const attempt = (await setup.journal.read(jobId)).find((record) => record.state === "submit_attempted")!;
+    expect(attempt.transactionHash).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(await setup.journal.readReceipt(jobId)).toMatchObject({ receipt: { packageDigest: pkg.packageDigest } });
     expect(setup.fake.stored).toBe(commitment(submission(pkg)));
     expect(await setup.broadcaster.readBack(submission(pkg))).toEqual({ code: "already_committed" });
     expect(setup.operatorKey.signD1).toHaveBeenCalledTimes(1);
@@ -259,7 +297,7 @@ describe("host package and crash-safe submitEvidence", () => {
     setup.fake.send = "throw_after_commit";
     expect(await finish(setup)).toMatchObject({ state: "submit_indeterminate" });
     expect(setup.sendStates).toEqual([completedStates.slice(0, -1)]);
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     expect(await recovered.host.runOnce()).toMatchObject({ state: "already_committed" });
     expect(recovered.broadcaster.readBack).toHaveBeenCalledTimes(1);
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
@@ -280,13 +318,13 @@ describe("host package and crash-safe submitEvidence", () => {
     expect(await finish(setup)).toMatchObject({ kind: "halted" });
     expect(await states(setup)).toEqual(completedStates.slice(0, -1));
     expect(setup.sentData).toHaveLength(0);
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     expect(await recovered.host.runOnce()).toMatchObject({ state: "submit_indeterminate" });
     expect(await recovered.host.runOnce()).toMatchObject({ state: "submit_indeterminate" });
     expect(recovered.broadcaster.readBack).toHaveBeenCalledTimes(2);
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
     expect(setup.sentData).toHaveLength(0);
-    expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+    expect(setup.operatorKey.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
     expect((await recovered.journal.read(jobId)).at(-1)).toMatchObject({ state: "submit_indeterminate", code: "submit_absent" });
   });
 
@@ -299,7 +337,7 @@ describe("host package and crash-safe submitEvidence", () => {
     setup.inputs.unit.escrow = getAddress(toHex(randomBytes(20)));
     setup.inputSource.mockClear();
     setup.fake.stored = commitment(submission(pkg));
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     expect(await recovered.host.runOnce()).toMatchObject({ state: "already_committed" });
     expect(recovered.broadcaster.readBack).toHaveBeenCalledWith(submission(pkg));
     expect(setup.inputSource).not.toHaveBeenCalled();
@@ -317,7 +355,7 @@ describe("host package and crash-safe submitEvidence", () => {
     expect(await finish(setup)).toMatchObject({ kind: "halted" });
     expect((await states(setup)).at(-1)).toBe("package_built");
     expect(setup.sentData).toHaveLength(0);
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
     expect(await states(setup)).toEqual(completedStates);
     expect(setup.operatorKey.signD1).toHaveBeenCalledTimes(1);
@@ -329,10 +367,10 @@ describe("host package and crash-safe submitEvidence", () => {
     const setup = await fixture();
     setup.fake.initial = "matching";
     expect(await finish(setup)).toMatchObject({ state: "already_committed" });
-    expect((await states(setup)).slice(-2)).toEqual(["submit_attempted", "already_committed"]);
+    expect((await states(setup)).slice(-2)).toEqual(["receipt_stored", "already_committed"]);
     expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
     expect(setup.sentData).toHaveLength(0);
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     await recovered.host.runOnce();
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
     expect(recovered.broadcaster.readBack).not.toHaveBeenCalled();
@@ -346,7 +384,7 @@ describe("host package and crash-safe submitEvidence", () => {
     const firstRecords = await setup.journal.read(jobId);
     setup.fake.initial = "absent";
     await setup.host.runOnce();
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     await recovered.host.runOnce();
     await recovered.host.runOnce();
     expect(await setup.journal.read(jobId)).toEqual(firstRecords);
@@ -364,6 +402,8 @@ describe("host package and crash-safe submitEvidence", () => {
     const posted = setup.gateway.postRelayEvidence.mock.calls[0][1];
     expect(posted.events.map((event) => event.type)).toEqual(["execution_started", "execution_failed"]);
     const pkg = await setup.diskPackage();
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect((await setup.journal.readReceipt(jobId))?.receipt.packageDigest).toBe(pkg.packageDigest);
     expect(pkg.evidenceBlock.kernelSignedEventsRoot).toBe(`0x${posted.bundleHash.slice(7)}`);
     expect(pkg.signatures).toHaveLength(2);
     expect(decodeFunctionData({ abi: functions, data: setup.sentData[0] }).args).toEqual([
@@ -387,7 +427,7 @@ describe("host package and crash-safe submitEvidence", () => {
     expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
     expect(await setup.journal.readPackage(jobId)).toBeUndefined();
     noSubmitSignatures(setup);
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     await recovered.host.runOnce();
     noSubmitSignatures(setup);
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
@@ -433,7 +473,7 @@ describe("host package and crash-safe submitEvidence", () => {
     expect(await states(setup)).not.toContain("evidence_stored");
     expect(await setup.journal.readPackage(jobId)).toBeUndefined();
     noSubmitSignatures(setup);
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     await recovered.host.runOnce();
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
     expect(recovered.broadcaster.readBack).not.toHaveBeenCalled();
@@ -444,7 +484,7 @@ describe("host package and crash-safe submitEvidence", () => {
     setup.fake.send = "throw_absent";
     expect(await finish(setup)).toMatchObject({ state: "submit_indeterminate" });
     setup.fake.readFailure = true;
-    const recovered = restart(setup);
+    const recovered = await restart(setup);
     expect(await recovered.host.runOnce()).toMatchObject({ state: "submit_indeterminate" });
     expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "submit_indeterminate", code: "submit_rpc_unavailable" });
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
@@ -452,5 +492,309 @@ describe("host package and crash-safe submitEvidence", () => {
     expect(JSON.stringify(setup.logs)).not.toContain(setup.rpcUrl);
     expect(JSON.stringify(setup.logs)).not.toContain(setup.serverText);
     expect(setup.logs.every((code) => HOST_LOG_CODES.includes(code))).toBe(true);
+  });
+});
+
+describe("pre-send retries and gateway receipts", () => {
+  it.each([
+    "eth_chainId", "eth_call:unitTerms", "eth_call:jobIdHash", "eth_call:evidenceBundleHashOf",
+    "eth_getTransactionCount:pending", "eth_getBlockByNumber", "eth_maxPriorityFeePerGas", "eth_estimateGas", "rpc_file",
+  ])("a one-shot %s failure writes no attempt and the next healthy tick sends exactly once", async (point) => {
+    const setup = await fixture();
+    if (point === "rpc_file") await unlink(setup.config.chain.rpcUrlFile);
+    else setup.fake.failOnce = point;
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored", waitMs: 5_000 });
+    expect(await states(setup)).not.toContain("submit_attempted");
+    expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+    expect(setup.logs).toContain("submit_rpc_unavailable");
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff", waitMs: 5_000 });
+    if (point === "rpc_file") await writeFile(setup.config.chain.rpcUrlFile, `${setup.rpcUrl}\n`, { mode: 0o600 });
+    setup.advance(5_000);
+    expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+    expect(setup.operatorKey.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(await states(setup)).toEqual(completedStates);
+  });
+
+  it("a latest-nonce RPC failure with an unsettled attempt retries without signing the new unit", async () => {
+    const setup = await fixture();
+    const stepId = word();
+    const otherId = settlementUnitId({ chainId: 31337n, escrow: setup.inputs.unit.escrow!,
+      jobIdHash: setup.inputs.unit.jobIdHash!, milestoneIndex: 8n, stepId });
+    setup.terms.set(otherId, { milestoneIndex: 8n, stepId, version: 1 });
+    setup.fake.send = "throw_absent";
+    expect(await setup.broadcaster.submit({ escrow: setup.inputs.unit.escrow!, unitId: otherId,
+      packageDigest: word(), compositionSchemaVersion: 1 })).toMatchObject({ code: "indeterminate" });
+    setup.sentData.length = 0;
+    setup.sendStates.length = 0;
+    setup.operatorKey.signSubmitEvidenceTx.mockClear();
+    setup.fake.send = "ok";
+    setup.fake.failOnce = "eth_getTransactionCount:latest";
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored" });
+    expect(await states(setup)).not.toContain("submit_attempted");
+    expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+    setup.fake.latestNonce = 8;
+    setup.fake.pendingNonce = 8;
+    setup.advance();
+    expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+    expect(setup.operatorKey.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+  });
+
+  it("a clean beforeSend journal failure sends nothing, halts, and a restart sends exactly once", async () => {
+    const setup = await fixture();
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      if (args[1] === "submit_attempted") throw new Error("injected journal failure");
+      await original(...args);
+    });
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    expect(await states(setup)).not.toContain("submit_attempted");
+    expect(setup.sentData).toHaveLength(0);
+    expect(setup.operatorKey.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+  });
+
+  it("unreconciled_transaction remains retryable, then sends once", async () => {
+    const setup = await fixture();
+    setup.broadcaster.submit.mockResolvedValueOnce({ code: "refused", reason: "unreconciled_transaction" });
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "receipt_stored" });
+    expect(await states(setup)).not.toContain("submit_attempted");
+    expect(setup.logs).toContain("submit_unreconciled");
+    setup.advance();
+    expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it("fee caps and unexpected pre-hook exceptions back off repeatedly without an attempt", async () => {
+    const setup = await fixture();
+    setup.broadcaster.submit.mockResolvedValueOnce({ code: "caps_exceeded", cap: "gasCap" })
+      .mockRejectedValueOnce(new Error(setup.serverText));
+    expect(await finish(setup)).toMatchObject({ state: "receipt_stored", waitMs: 5_000 });
+    setup.advance(5_000);
+    expect(await setup.host.runOnce()).toMatchObject({ state: "receipt_stored", waitMs: 10_000 });
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff", waitMs: 10_000 });
+    expect(await states(setup)).not.toContain("submit_attempted");
+    expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+    expect(JSON.stringify(setup.logs)).not.toContain(setup.serverText);
+    setup.advance(10_000);
+    expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it("a manifest version different from the stored unit version is terminal before transaction signing", async () => {
+    const setup = await fixture();
+    setup.fake.storedVersion = 2;
+    expect(await finish(setup)).toMatchObject({ state: "refused" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "refused", code: "submit_refused" });
+    expect(await states(setup)).not.toContain("submit_attempted");
+    expect(setup.operatorKey.signSubmitEvidenceTx).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+  });
+
+  it("a decoded rejected send with uncommitted read-back journals terminal refusal after its attempt", async () => {
+    const setup = await fixture();
+    setup.fake.send = "reject_absent";
+    expect(await finish(setup)).toMatchObject({ state: "refused" });
+    expect((await states(setup)).slice(-2)).toEqual(["submit_attempted", "refused"]);
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ code: "submit_refused" });
+    const recovered = await restart(setup);
+    await recovered.host.runOnce();
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it.each(["receipt_exists", "route_unavailable"] as const)("a 409 %s receipt conflict is terminal and never submits across ticks or restart", async (code) => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code, status: 409 });
+    expect(await finish(setup)).toMatchObject({ state: "refused" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ code: "receipt_conflict" });
+    setup.advance();
+    await setup.host.runOnce();
+    const recovered = await restart(setup);
+    await recovered.host.runOnce();
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+  });
+
+  it.each(["chainId", "escrow", "settlementUnitId", "packageDigest"] as const)("a receipt with mismatched %s is terminal and never submits", async (field) => {
+    const setup = await fixture();
+    const receipt = setup.receiptValue();
+    const original = setup.gateway.postReceipt.getMockImplementation()!;
+    setup.gateway.postReceipt.mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      if (!result.ok) throw new Error("fixture");
+      return { ok: true, value: { ...result.value, receipt: { ...result.value.receipt,
+        [field]: field === "chainId" ? 31338 : field === "escrow" ? getAddress(toHex(randomBytes(20))).toLowerCase() : receipt.receiptDigest } } };
+    });
+    expect(await finish(setup)).toMatchObject({ state: "refused" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ code: "receipt_mismatch" });
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+    expect(await states(setup)).not.toContain("receipt_stored");
+  });
+
+  it("a 503 receipt signer outage retries a 200, then sends exactly once", async () => {
+    const setup = await fixture();
+    setup.gateway.postReceipt.mockResolvedValueOnce({ ok: false, code: "receipt_signer_unavailable", status: 503 });
+    expect(await finish(setup)).toMatchObject({ state: "package_built" });
+    expect((await setup.journal.read(jobId)).at(-1)).toMatchObject({ state: "package_built" });
+    expect(setup.broadcaster.submit).not.toHaveBeenCalled();
+    expect(await setup.host.runOnce()).toMatchObject({ kind: "backoff" });
+    setup.advance();
+    expect(await setup.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(2);
+    expect(setup.sentData).toHaveLength(1);
+    expect(await states(setup)).toEqual(completedStates);
+  });
+
+  it.each(["save", "record"] as const)("a crash after successful receipt POST before durable %s re-POSTs and sends exactly once", async (point) => {
+    const setup = await fixture();
+    if (point === "save") vi.spyOn(setup.journal, "saveReceipt").mockRejectedValueOnce(new Error("crash"));
+    else {
+      const original = setup.journal.append.bind(setup.journal);
+      vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+        if (args[1] === "receipt_stored") throw new Error("crash");
+        await original(...args);
+      });
+    }
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    expect((await states(setup)).at(-1)).toBe("package_built");
+    expect(setup.sentData).toHaveLength(0);
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(2);
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it("a crash after receipt_stored restarts without POST and sends exactly once", async () => {
+    const setup = await fixture();
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      await original(...args);
+      if (args[1] === "receipt_stored") throw new Error("crash");
+    });
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it.each(["missing", "malformed", "mismatch"] as const)("a %s stored receipt halts without submitting", async (damage) => {
+    const setup = await fixture();
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      await original(...args);
+      if (args[1] === "receipt_stored") throw new Error("crash");
+    });
+    await finish(setup);
+    if (damage === "missing") await unlink(setup.journal.receiptPath(jobId));
+    else {
+      const value = await setup.journal.readReceipt(jobId);
+      await writeFile(setup.journal.receiptPath(jobId), damage === "malformed" ? '{"receipt":' : JSON.stringify({ ...value,
+        receipt: { ...value!.receipt, packageDigest: word() } }));
+    }
+    const recovered = await restart(setup);
+    const records = await setup.diskRecords();
+    expect(await recovered.host.runOnce()).toMatchObject({ kind: "halted" });
+    expect(await setup.diskRecords()).toEqual(records);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(setup.sentData).toHaveLength(0);
+  });
+});
+
+describe("restart artifact and recovery guards", () => {
+  it("an unavailable input source after evidence storage retries without package_inputs_missing (P3)", async () => {
+    const setup = await fixture();
+    vi.spyOn(setup.journal, "savePackage").mockRejectedValueOnce(new Error("crash"));
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    expect((await states(setup)).at(-1)).toBe("evidence_stored");
+    const recovered = await restart(setup, { inputSource: async () => ({ ok: false, code: "job_inputs_not_found" }) });
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "evidence_stored" });
+    expect((await setup.diskRecords()).at(-1)).toMatchObject({ state: "evidence_stored" });
+    expect((await setup.diskRecords()).at(-1)?.code).toBeUndefined();
+    expect(setup.logs).toContain("job_inputs_not_found");
+    await recovered.journal.close();
+    const healthy = await restart(setup);
+    expect(await healthy.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it("a partial leftover temporary package never blocks restart, which saves and sends once (P5)", async () => {
+    const setup = await fixture();
+    vi.spyOn(setup.journal, "savePackage").mockRejectedValueOnce(new Error("crash"));
+    expect(await finish(setup)).toMatchObject({ kind: "halted" });
+    await writeFile(`${setup.journal.packagePath(jobId)}.tmp-orphan`, '{"body":', { mode: 0o600 });
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ state: "submitted" });
+    expect(setup.sentData).toHaveLength(1);
+    expect(await recovered.journal.readPackage(jobId)).toBeDefined();
+  });
+
+  it("read-back for indeterminate A precedes package-built B and never submits B (RV1)", async () => {
+    const setup = await fixture();
+    setup.fake.send = "throw_absent";
+    await finish(setup);
+    const otherJob = "a:package-built";
+    const pkg = await setup.diskPackage();
+    await setup.journal.append(otherJob, "evidence_stored");
+    await setup.journal.savePackage(otherJob, pkg);
+    await setup.journal.append(otherJob, "package_built", undefined, {
+      packageDigest: pkg.packageDigest, evidenceBlockHash: pkg.evidenceBlockHash });
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ jobId, state: "submit_indeterminate" });
+    expect(recovered.broadcaster.readBack).toHaveBeenCalledTimes(1);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.gateway.postReceipt).toHaveBeenCalledTimes(1);
+    expect(setup.sentData).toHaveLength(1);
+  });
+
+  it.each(["package_built", "submit_attempted"] as const)("a missing package after %s halts without a new journal line (RV2)", async (boundary) => {
+    const setup = await fixture();
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      await original(...args);
+      if (args[1] === boundary) throw new Error("crash");
+    });
+    await finish(setup);
+    await unlink(setup.journal.packagePath(jobId));
+    const before = await setup.diskRecords();
+    const recovered = await restart(setup, { inputSource: async () => ({ ok: true, value: { ...setup.inputs, program: undefined } }) });
+    expect(await recovered.host.runOnce()).toMatchObject({ kind: "halted" });
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.readBack).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+  });
+
+  it("a valid persisted package differing from package_built hashes halts (RV3)", async () => {
+    const setup = await fixture();
+    const original = setup.journal.append.bind(setup.journal);
+    vi.spyOn(setup.journal, "append").mockImplementation(async (...args) => {
+      await original(...args);
+      if (args[1] === "package_built") throw new Error("crash");
+    });
+    await finish(setup);
+    const pkg = await setup.diskPackage();
+    pkg.signatures[0]!.sig = toHex(randomBytes(65));
+    pkg.packageDigest = computePackageDigest(pkg.body, pkg.signatures);
+    await writeFile(setup.journal.packagePath(jobId), JSON.stringify(pkg));
+    const before = await setup.diskRecords();
+    const recovered = await restart(setup);
+    expect(await recovered.host.runOnce()).toMatchObject({ kind: "halted" });
+    expect(await setup.diskRecords()).toEqual(before);
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
   });
 });

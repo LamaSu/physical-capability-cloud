@@ -68,13 +68,13 @@ async function withInherited(property: string, value: unknown, operation: () => 
 }
 
 describe("gateway client construction and public surface", () => {
-  it("freezes exactly the four relay methods and public display methods", () => {
+  it("freezes exactly the five operator methods and public display methods", () => {
     const { client } = fixture();
     expect(Object.isFrozen(client)).toBe(true);
     expect(Reflect.ownKeys(client)).toEqual(expect.arrayContaining([
-      "pollJobs", "heartbeat", "reportInProgress", "postRelayEvidence", "toJSON", "toString", inspect.custom,
+      "pollJobs", "heartbeat", "reportInProgress", "postRelayEvidence", "postReceipt", "toJSON", "toString", inspect.custom,
     ]));
-    expect(Reflect.ownKeys(client)).toHaveLength(7);
+    expect(Reflect.ownKeys(client)).toHaveLength(8);
     expect(client.toJSON()).toEqual({ baseUrl, kernelId });
     expect(String(client)).toContain(baseUrl);
     expect(String(client)).toContain(kernelId);
@@ -830,4 +830,93 @@ describe("server and key canary isolation", () => {
       }
     },
   );
+});
+
+describe("N149 receipt posting", () => {
+  const word = () => `0x${randomBytes(32).toString("hex")}`;
+  const receiptResponse = () => ({
+    receipt: {
+      chainId: 84532, escrow: `0x${randomBytes(20).toString("hex")}`,
+      settlementUnitId: word(), packageDigest: word(), receivedAt: 1_792_087_200,
+    },
+    signatureHex: `0x${randomBytes(64).toString("hex")}`, receiptDigest: word(), kid: "receipt-key-id",
+  });
+  const envelope = { body: { public: true }, signatures: [] };
+
+  it("posts only the package envelope with operator auth and parses the closed receipt", async () => {
+    const response = receiptResponse();
+    const { client, fetchImpl } = fixture(json(response));
+    expect(await client.postReceipt(jobId, envelope)).toEqual({ ok: true, value: response });
+    const sent = request(fetchImpl);
+    expect(sent.url).toBe(`${baseUrl}/api/operator/jobs/${encodeURIComponent(jobId)}/receipt`);
+    expect(sent.method).toBe("POST");
+    expect(sent.headers.authorization === `Bearer ${apiKey}`).toBe(true);
+    expect(sent.redirect).toBe("error");
+    expect(JSON.parse(String(sent.body))).toEqual({ packageEnvelope: envelope });
+    expectNoCanaries(client);
+  });
+
+  it.each([
+    [409, "receipt_exists", "receipt_exists"],
+    [503, "receipt_signer_unavailable", "receipt_signer_unavailable"],
+    [429, "unknown", "rate_limited"], [500, "unknown", "server_error"],
+    [503, "unknown", "unavailable"], [401, "unknown", "unauthenticated"],
+    [403, "unknown", "forbidden"], [409, "unknown", "route_unavailable"],
+    [422, "unknown", "route_unavailable"],
+  ])("returns only a closed receipt refusal for %s %s", async (status, error, code) => {
+    const { client } = fixture(json({ error, message: noiseString, reason: noiseString }, Number(status)));
+    const result = await client.postReceipt(jobId, envelope);
+    expect(result).toEqual({ ok: false, status, code });
+    expectNoCanaries(result);
+  });
+
+  it.each([
+    { chainId: "84532" }, { chainId: 0 }, { chainId: -1 }, { chainId: 1.5 },
+    { escrow: "0x1234" }, { escrow: `0x${"A".repeat(40)}` },
+    { settlementUnitId: "0x1234" }, { settlementUnitId: `0x${"A".repeat(64)}` },
+    { packageDigest: "0x1234" }, { packageDigest: `0x${"A".repeat(64)}` },
+    { receivedAt: "1792087200" }, { receivedAt: -1 }, { receivedAt: 1.5 },
+    { receivedAt: Number.MAX_SAFE_INTEGER + 1 }, { receivedAt: 2 ** 64 },
+    { extra: "untrusted server text" },
+  ])("rejects malformed or extra receipt fields %#", async (change) => {
+    const response = receiptResponse();
+    const { client } = fixture(json({ ...response, receipt: { ...response.receipt, ...change } }));
+    expect(await client.postReceipt(jobId, envelope)).toEqual({ ok: false, code: "malformed_response", status: 200 });
+  });
+
+  it.each([
+    { receipt: null }, { signatureHex: "0x1234" }, { signatureHex: `0x${"g".repeat(128)}` },
+    { receiptDigest: "0x1234" }, { receiptDigest: `0x${"A".repeat(64)}` },
+    { kid: "" }, { kid: 5 }, { extra: noiseString },
+  ])("rejects malformed or extra outer fields %#", async (change) => {
+    const { client } = fixture(json({ ...receiptResponse(), ...change }));
+    const result = await client.postReceipt(jobId, envelope);
+    expect(result).toEqual({ ok: false, code: "malformed_response", status: 200 });
+    expectNoCanaries(result);
+  });
+
+  it("requires every outer and receipt key to be present", async () => {
+    for (const level of ["outer", "receipt"] as const) {
+      const response = receiptResponse();
+      for (const key of Object.keys(level === "outer" ? response : response.receipt)) {
+        const changed = structuredClone(response);
+        Reflect.deleteProperty(level === "outer" ? changed : changed.receipt, key);
+        const { client } = fixture(json(changed));
+        expect(await client.postReceipt(jobId, envelope)).toEqual({ ok: false, code: "malformed_response", status: 200 });
+      }
+    }
+  });
+
+  it("returns closed network and timeout codes without retrying within the call", async () => {
+    const fetchImpl = vi.fn(async () => { throw new Error(noiseString); });
+    const client = createGatewayClient({ baseUrl, apiKey, kernelId, fetchImpl });
+    const result = await client.postReceipt(jobId, envelope);
+    expect(result).toEqual({ ok: false, code: "network", status: null });
+    expectNoCanaries(result);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const hung = vi.fn(() => new Promise<Response>(() => undefined));
+    const timed = createGatewayClient({ baseUrl, apiKey, kernelId, fetchImpl: hung, timeoutMs: 5 });
+    expect(await timed.postReceipt(jobId, envelope)).toEqual({ ok: false, code: "timeout", status: null });
+    expect(hung).toHaveBeenCalledOnce();
+  });
 });

@@ -9,7 +9,7 @@ export type HostConfigErrorCode =
   | "not_absolute" | "not_found" | "not_regular_file" | "symlink"
   | "bad_mode" | "bad_owner" | "too_large" | "changed_during_open"
   | "read_failed" | "bad_json" | "bad_schema" | "testnet_only"
-  | "bad_rpc_url" | "bad_api_key" | "bad_data_dir";
+  | "bad_rpc_url" | "bad_api_key" | "bad_data_dir" | "submit_caps_required";
 
 /** Deliberately excludes input values and underlying exception messages. */
 export class HostConfigError extends Error {
@@ -148,6 +148,15 @@ export function validateHostChainConfig(input: unknown): HostConfig["chain"] {
     if (!parsed.success) throw new HostConfigError("bad_schema", "config", "chain");
     return Object.freeze(parsed.data);
   } catch { throw new HostConfigError("bad_schema", "config", "chain"); }
+}
+
+/** Real run mode must opt in to three positive transaction limits. */
+export function requireSubmissionCaps(chain: HostConfig["chain"]): void {
+  const checked = validateHostChainConfig(chain);
+  if ([checked.maxFeePerGasCap, checked.maxPriorityFeePerGasCap, checked.gasCap]
+    .some(value => value === undefined || BigInt(value) <= 0n)) {
+    throw new HostConfigError("submit_caps_required", "config");
+  }
 }
 
 function validateConfig(value: unknown, path: string): HostConfig {

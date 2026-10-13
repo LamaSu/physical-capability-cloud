@@ -60,6 +60,7 @@ function gateway() {
     pollJobs: vi.fn(async (): Promise<GwResult<PollJobsValue>> => poll()),
     heartbeat: vi.fn(async () => ({ ok: true as const, value: null })),
     reportInProgress: vi.fn(async (_id: string) => ({ ok: true as const, value: { updated: true as const } })),
+    postReceipt: vi.fn(async () => ({ ok: false as const, code: "network" as const, status: null })),
     postRelayEvidence: vi.fn(async (id: string, bundle: RelayEvidenceBundle) => ({
       ok: true as const, value: { jobId: id, contentHash: bundle.bundleHash, hashModel: "event_bundle_hash" as const },
     })),
@@ -697,6 +698,7 @@ describe("print-host run loop", () => {
     await complete(setup);
     expect(await states(setup)).toContain("evidence_indeterminate");
     for (let tick = 0; tick < 2; tick++) { await setup.timers.advance(5_000); await setup.host.runOnce(); }
+    await setup.journal.close();
     const restarted = createHost({ ...setup.deps, journal: createJobJournal(setup.dir, () => setup.timers.now) });
     await restarted.runOnce();
     expect(setup.gw.postRelayEvidence).toHaveBeenCalledTimes(1);
@@ -719,6 +721,7 @@ describe("print-host run loop", () => {
     const setup = await fixture({ print });
     await setup.journal.initialize();
     await setup.journal.append(jobId, state);
+    await setup.journal.close();
     const restarted = createHost({ ...setup.deps, journal: createJobJournal(setup.dir, () => setup.timers.now) });
     await restarted.runOnce();
     await restarted.runOnce();
@@ -785,7 +788,7 @@ describe("print-host run loop", () => {
     await complete(setup);
     expect(await states(setup)).toEqual(["claimed", "in_progress_reported", "printing", "simulated_refused"]);
     expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
-    expect(await readdir(setup.journal.directory)).toEqual(["job%3Abuyer.jsonl"]);
+    expect(await readdir(setup.journal.directory)).toEqual([".lock", "job%3Abuyer.jsonl"]);
     expect(setup.logs).toContain("simulated_refused");
     expect(finalize).not.toHaveBeenCalled();
     const records = await Promise.all((await readdir(setup.journal.sessionDirectory(jobId)))
@@ -860,6 +863,7 @@ describe("print-host run loop", () => {
       parentAgentId: `eip155:31337:${setup.operatorAddress.toLowerCase()}`,
       expiresAt: setup.unit.reclaimAt, deviceKey: setup.deviceKey,
       journalDir: setup.journal.sessionDirectory(jobId) });
+    await setup.journal.close();
     const host = createHost({ ...setup.deps, journal: createJobJournal(setup.dir, () => setup.timers.now) });
     await host.runOnce();
     await host.runOnce();
@@ -884,6 +888,7 @@ describe("print-host run loop", () => {
     expectSigned(saved, setup.deviceKey);
     expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
     expect(setup.logs).toContain("journal_failed");
+    await setup.journal.close();
     const restarted = createHost({ ...setup.deps, journal: createJobJournal(setup.dir, () => setup.timers.now) });
     await restarted.runOnce();
     await restarted.runOnce();
@@ -957,7 +962,7 @@ describe("print-host run loop", () => {
     const records = await Promise.all((await readdir(setup.journal.sessionDirectory(jobId)))
       .map(async (name) => JSON.parse(await readFile(join(setup.journal.sessionDirectory(jobId), name), "utf8"))));
     expect(records.map((record) => record.record.kind)).toEqual(["open"]);
-    expect(await readdir(setup.journal.directory)).toEqual(["job%3Abuyer.jsonl"]);
+    expect(await readdir(setup.journal.directory)).toEqual([".lock", "job%3Abuyer.jsonl"]);
     expect(JSON.stringify(setup.logs)).not.toContain(serverCanary);
     expect(setup.timers.count).toBe(0);
   });

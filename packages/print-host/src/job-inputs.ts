@@ -44,8 +44,9 @@ export type JobInputResult = { ok: true; value: JobInputs } | { ok: false; code:
 export type JobInputSource = (jobId: string) => Promise<JobInputResult>;
 
 /**
- * Future source seam: gateway settlement supplies unit package fields, and the
- * economics canonical record supplies program. Absence never authorises a print.
+ * The operator's inputs manifest is Thursday's only unit source (#7866).
+ * Evidence's committed S2 program supplies `program`; the operator copies it
+ * byte for byte into each manifest. Absence never authorises a print.
  */
 export const defaultJobInputSource: JobInputSource = async () => ({ ok: false, code: "job_inputs_unavailable" });
 
@@ -97,7 +98,7 @@ const unitSchema = z.object({
 }).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
 const programSchema = z.object({ programHash: word, attestationSetRoot: word, workProductRoot: word }).strict();
 const completeUnitSchema = z.object({
-  settlementUnitId: word, challengeNonce: word, fundedAt: safeUint, reclaimAt: safeUint,
+  settlementUnitId: word, challengeNonce: word.refine(value => value !== `0x${"0".repeat(64)}`), fundedAt: safeUint, reclaimAt: safeUint,
   ...packageUnitFields,
 }).strict().refine((unit) => unit.reclaimAt > unit.fundedAt);
 

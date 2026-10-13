@@ -1,5 +1,6 @@
 import { inspect } from "node:util";
 import type { EvidenceBundle } from "@pcc/spec";
+import type { Hex } from "viem";
 import { isGatewayBaseUrl } from "./config.js";
 import { createGatewayRequest, isRequestFailure } from "./gateway-request.js";
 
@@ -11,6 +12,7 @@ export type GwCode =
   | "job_not_found" | "settlement_owned_status" | "job_kernel_changed" | "invalid_status"
   | "payload_too_large" | "bad_bundle" | "stored_mismatch" | "not_stored"
   | "evidence_refused" | "indeterminate"
+  | "receipt_exists" | "receipt_signer_unavailable"
   | "spend_not_approved" | "idempotency_conflict" | "reconciliation_required"
   | "kernel_unowned" | "kernel_mismatch" | "job_not_active"
   | "carrier_record_ownership_mismatch" | "carrier_not_configured"
@@ -82,11 +84,51 @@ export interface RelayEvidenceReceipt {
   hashModel: "event_bundle_hash";
 }
 
+/** Public N149 attestation; numeric seconds are limited to lossless JSON integers. */
+export interface GatewayReceipt {
+  chainId: number;
+  escrow: Hex;
+  settlementUnitId: Hex;
+  packageDigest: Hex;
+  receivedAt: number;
+}
+
+export interface ReceiptEnvelope {
+  receipt: GatewayReceipt;
+  signatureHex: Hex;
+  receiptDigest: Hex;
+  kid: string;
+}
+
+/** Shared by the HTTP response and the persisted journal artifact reader. */
+export function parseReceipt(value: unknown): ReceiptEnvelope | undefined {
+  try {
+    if (!object(value) || !exactKeys(value, ["receipt", "signatureHex", "receiptDigest", "kid"])) return undefined;
+    const receipt = own(value, "receipt");
+    if (!object(receipt) || !exactKeys(receipt, ["chainId", "escrow", "settlementUnitId", "packageDigest", "receivedAt"])) return undefined;
+    const { chainId, escrow, settlementUnitId, packageDigest, receivedAt } = receipt;
+    const { signatureHex, receiptDigest, kid } = value;
+    const word = (field: unknown): field is Hex => typeof field === "string" && /^0x[0-9a-f]{64}$/.test(field);
+    if (typeof chainId !== "number" || !Number.isSafeInteger(chainId) || chainId <= 0
+      || typeof escrow !== "string" || !/^0x[0-9a-f]{40}$/.test(escrow)
+      || !word(settlementUnitId) || !word(packageDigest)
+      || typeof receivedAt !== "number" || !Number.isSafeInteger(receivedAt) || receivedAt < 0
+      || BigInt(receivedAt) > (1n << 64n) - 1n
+      || typeof signatureHex !== "string" || !/^0x[0-9a-fA-F]{128}$/.test(signatureHex)
+      || !word(receiptDigest) || typeof kid !== "string" || kid.length === 0) return undefined;
+    return {
+      receipt: { chainId, escrow: escrow as Hex, settlementUnitId, packageDigest, receivedAt },
+      signatureHex: signatureHex as Hex, receiptDigest, kid,
+    };
+  } catch { return undefined; }
+}
+
 export interface GatewayClient {
   pollJobs(): Promise<GwResult<PollJobsValue>>;
   heartbeat(): Promise<GwResult<HeartbeatValue>>;
   reportInProgress(jobId: string): Promise<GwResult<InProgressValue>>;
   postRelayEvidence(jobId: string, bundle: RelayEvidenceBundle): Promise<GwResult<RelayEvidenceReceipt>>;
+  postReceipt(jobId: string, packageEnvelope: { body: unknown; signatures: unknown }): Promise<GwResult<ReceiptEnvelope>>;
   toJSON(): { baseUrl: string; kernelId: string };
   toString(): string;
   [inspect.custom](): { baseUrl: string; kernelId: string };
@@ -95,7 +137,7 @@ export interface GatewayClient {
 type Failure = Extract<GwResult<never>, { ok: false }>;
 type ObjectBody = Record<string, unknown>;
 type Reply = { body: ObjectBody; status: 200 };
-type CallKind = "poll" | "heartbeat" | "status" | "evidence";
+type CallKind = "poll" | "heartbeat" | "status" | "evidence" | "receipt";
 
 function isFailure(reply: Reply | Failure): reply is Failure {
   return Object.hasOwn(reply, "ok");
@@ -111,6 +153,10 @@ function object(value: unknown): value is ObjectBody {
 
 function own(value: ObjectBody, key: string): unknown {
   return Object.hasOwn(value, key) ? value[key] : undefined;
+}
+
+function exactKeys(value: ObjectBody, keys: string[]): boolean {
+  return Reflect.ownKeys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 }
 
 function validId(value: unknown): value is string {
@@ -163,6 +209,10 @@ const evidenceInvalid = [
 /** Only our allowlist constants can become error codes or subcodes. */
 function classify(status: number, body: ObjectBody, headers: Headers, kind: CallKind): Failure {
   const error = own(body, "error");
+  if (kind === "receipt") {
+    if (status === 409 && error === "receipt_exists") return failure("receipt_exists", status);
+    if (status === 503 && error === "receipt_signer_unavailable") return failure("receipt_signer_unavailable", status);
+  }
   if (status === 401) return failure("unauthenticated", status);
   if (status === 403) {
     const reason = own(body, "reason");
@@ -309,6 +359,20 @@ export function createGatewayClient(cfg: GatewayClientConfig): Readonly<GatewayC
       if (own(reply.body, "jobId") !== jobId || own(reply.body, "hashModel") !== "event_bundle_hash"
         || own(reply.body, "contentHash") !== contentHash) return failure("stored_mismatch", 200);
       return { ok: true, value: { jobId, contentHash, hashModel: "event_bundle_hash" } };
+    },
+    async postReceipt(jobId: string, packageEnvelope: { body: unknown; signatures: unknown }): Promise<GwResult<ReceiptEnvelope>> {
+      if (!validId(jobId)) return failure("bad_request", null);
+      let body: string;
+      try {
+        if (!object(packageEnvelope) || !Object.hasOwn(packageEnvelope, "body")
+          || !Object.hasOwn(packageEnvelope, "signatures")) return failure("bad_request", null);
+        body = JSON.stringify({ packageEnvelope: { body: packageEnvelope.body, signatures: packageEnvelope.signatures } });
+      } catch { return failure("bad_request", null); }
+      if (Buffer.byteLength(body, "utf8") > 1_000_000) return failure("payload_too_large", null);
+      const reply = await request("receipt", `${endpoint("jobs")}/${encodeURIComponent(jobId)}/receipt`, body);
+      if (isFailure(reply)) return reply;
+      const receipt = parseReceipt(reply.body);
+      return receipt ? { ok: true, value: receipt } : failure("malformed_response", 200);
     },
     toJSON: publicIdentity,
     toString: () => JSON.stringify(publicIdentity()),

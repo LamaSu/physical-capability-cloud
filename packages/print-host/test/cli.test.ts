@@ -8,6 +8,7 @@ import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { createGatewayClient } from "../src/gateway-client.js";
 import { HOST_LOG_CODES } from "../src/host.js";
+import { createJobJournal } from "../src/journal.js";
 import { FakeMachineAdapter } from "../src/testing/fake-machine-adapter.js";
 import type { createEvidenceBroadcaster, EvidenceBroadcaster } from "../src/chain.js";
 
@@ -56,7 +57,7 @@ async function runFixture(stopFields: Record<string, unknown> = { emergencyStop:
   await writeFile(configFile, JSON.stringify({
     kernelId: "n144-cli-run", deviceId: "printer-cli-run",
     printer: { uri: "ipp://localhost:631/printers/test" },
-    chain: { chainId: 84532, rpcUrlFile },
+    chain: { chainId: 84532, rpcUrlFile, maxFeePerGasCap: "100", maxPriorityFeePerGasCap: "10", gasCap: "250000" },
     gateway: { baseUrl: "https://gateway.example.test", apiKeyFile },
     keys: { deviceKeyFile: generated.paths.deviceKeyFile, operatorKeyFile: generated.paths.operatorKeyFile },
     dataDir,
@@ -172,6 +173,7 @@ describe("print-host CLI", () => {
     ["check-config"], ["check-config", "relative-unused", "extra"],
     ["run"], ["run", "--config"], ["run", "--config", "unused", "--once", "--once"],
     ["run", "--config", "unused", "--poll-only", "--poll-only"],
+    ["run", "--config", "unused", "--no-submit", "--no-submit"],
     ["run", "--config", "unused", "--inputs-dir"], ["run", "--config", "unused", "--unknown"],
     ["run", "--config", "unused", "--config", "unused"],
   ])("bad arguments exit 2 (%#)", async (...argv: string[]) => {
@@ -292,6 +294,68 @@ describe("print-host CLI", () => {
     expect(captured.output()).toEqual({ stdout: "", stderr: "not_found\n" });
   });
 
+  it.each(["all", "maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"] as const)(
+    "real run refuses missing transaction caps (%s) before opening credentials or devices", async (field) => {
+      const fixture = await runFixture();
+      const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+      if (field === "all") {
+        for (const cap of ["maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"]) delete config.chain[cap];
+      } else delete config.chain[field];
+      await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
+      await rm(config.keys.operatorKeyFile);
+      const createGateway = vi.fn(() => { throw new Error("missing caps cannot open gateway"); });
+      const createBroadcaster = vi.fn(() => { throw new Error("missing caps cannot open broadcaster"); });
+      const captured = capture();
+      expect(await main(["run", "--config", fixture.configFile, "--once"], captured.io, {
+        createGateway, createPrinter: fixture.createPrinter, createBroadcaster,
+      })).toBe(1);
+      expect(captured.output()).toEqual({ stdout: "", stderr: "submit_caps_required\n" });
+      expect(createGateway).not.toHaveBeenCalled();
+      expect(createBroadcaster).not.toHaveBeenCalled();
+      expect(fixture.createPrinter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"] as const)(
+    "real run refuses a zero %s", async (field) => {
+      const fixture = await runFixture();
+      const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+      config.chain[field] = "0";
+      if (field === "maxFeePerGasCap") config.chain.maxPriorityFeePerGasCap = "0";
+      await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
+      const captured = capture();
+      expect(await main(["run", "--config", fixture.configFile, "--once"], captured.io)).toBe(1);
+      expect(captured.output()).toEqual({ stdout: "", stderr: "submit_caps_required\n" });
+    },
+  );
+
+  it("--no-submit explicitly permits missing caps and records submit_disabled even with positive caps", async () => {
+    for (const withCaps of [false, true]) {
+      const fixture = await runFixture();
+      if (!withCaps) {
+        const config = JSON.parse(await readFile(fixture.configFile, "utf8"));
+        for (const cap of ["maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"]) delete config.chain[cap];
+        await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
+      }
+      fixture.adapter.scriptStart({ outcome: "success", jobId: 902 });
+      const createBroadcaster = vi.fn(() => { throw new Error("no-submit cannot construct a broadcaster"); });
+      const captured = capture();
+      const running = main(["run", "--config", fixture.configFile, "--once", "--no-submit", "--inputs-dir", fixture.inputsDir], captured.io, {
+        createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+        createPrinter: fixture.createPrinter, createBroadcaster,
+      });
+      await fixture.adapter.started();
+      process.emit("SIGTERM");
+      expect(await running).toBe(0);
+      const records = (await readFile(join(fixture.dataDir, "journal", "cli-job.jsonl"), "utf8"))
+        .trim().split("\n").map(line => JSON.parse(line));
+      expect(records.at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
+      expect(records.some(record => record.state === "submit_attempted")).toBe(false);
+      expect(createBroadcaster).not.toHaveBeenCalled();
+      assertRunOutput(captured, fixture.secrets);
+    }
+  });
+
   it("run --poll-only never claims even with clear e-stop and available inputs", async () => {
     const fixture = await runFixture();
     // If --poll-only is removed, the real host can reach start and finish this
@@ -318,6 +382,8 @@ describe("print-host CLI", () => {
     await Promise.all([
       rm(config.keys.deviceKeyFile), rm(config.keys.operatorKeyFile), rm(config.chain.rpcUrlFile),
     ]);
+    for (const cap of ["maxFeePerGasCap", "maxPriorityFeePerGasCap", "gasCap"]) delete config.chain[cap];
+    await writeFile(fixture.configFile, JSON.stringify(config), { mode: 0o600 });
     const captured = capture();
     const createBroadcaster = vi.fn(() => { throw new Error("poll-only cannot construct a broadcaster"); });
     expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
@@ -345,6 +411,27 @@ describe("print-host CLI", () => {
     expect(fixture.adapter.commands).toEqual([]);
     expect(fixture.createPrinter).not.toHaveBeenCalled();
     expect(fixture.dispose).not.toHaveBeenCalled();
+  });
+
+  it("run refuses a live data-directory owner with the closed lock code and releases its own lock on exit", async () => {
+    const fixture = await runFixture();
+    const owner = createJobJournal(fixture.dataDir);
+    await owner.initialize();
+    try {
+      for (const once of [true, false]) {
+        const captured = capture();
+        expect(await main(["run", "--config", fixture.configFile, "--poll-only", ...(once ? ["--once"] : [])], captured.io, {
+          createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+        })).toBe(1);
+        expect(captured.output()).toEqual({ stdout: once ? "data_dir_locked\n" : "data_dir_locked\nhost_shutdown\n", stderr: "data_dir_locked\n" });
+        expect(fixture.calls).toEqual([]);
+      }
+    } finally { await owner.close(); }
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--poll-only"], captured.io, {
+      createGateway: settings => createGatewayClient({ ...settings, fetchImpl: fixture.fetchImpl }),
+    })).toBe(0);
+    expect(await readdir(join(fixture.dataDir, "journal"))).not.toContain(".lock");
   });
 
   it.each(["SIGINT", "SIGTERM"] as const)("run --once handles %s by cancelling and posting signed failure evidence", async (signal) => {
