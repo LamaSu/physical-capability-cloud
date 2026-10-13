@@ -12,6 +12,7 @@ import { jobRoutes } from "../routes/jobs.js";
 import { operatorRoutes } from "../routes/operator.js";
 import { operatorRelayRoutes } from "../routes/operator-relay.js";
 import { walletsRoutes } from "../routes/wallets.js";
+import { topicSSE } from "../sse/topic-sse.js";
 import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
 import { GATEWAY_LOGGER_OPTIONS } from "../services/telemetry-privacy.js";
 import { writeAuditHook } from "../services/write-audit-hook.js";
@@ -31,6 +32,7 @@ type Headers = NonNullable<InjectOptions["headers"]>;
 let app: FastifyInstance;
 let clockNow: number;
 let logs: string[];
+let sseProofs: unknown[];
 let wallet: ReturnType<typeof privateKeyToAccount>;
 let key: ReturnType<typeof provisionApiKey>;
 let sameOperatorKey: ReturnType<typeof provisionApiKey>;
@@ -52,6 +54,7 @@ beforeEach(async () => {
   clockNow = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => clockNow);
   logs = [];
+  sseProofs = [];
   closeStore();
   const { repos } = initStore({ seed: true });
   wallet = privateKeyToAccount(generatePrivateKey());
@@ -73,6 +76,9 @@ beforeEach(async () => {
     }
   });
   app.addHook("onResponse", writeAuditHook);
+  app.addHook("onSend", async req => {
+    if (req.url.startsWith("/sse/")) sseProofs.push((req as ProofRequest).provenWallet ?? null);
+  });
   app.addHook("onSend", async (req, reply, payload) => typeof payload === "string"
     ? decorateWithReportHint(payload, { statusCode: reply.statusCode,
       contentType: String(reply.getHeader("content-type") ?? ""), url: req.url, method: req.method })
@@ -83,6 +89,7 @@ beforeEach(async () => {
   await app.register(jobRoutes);
   await app.register(walletsRoutes);
   await app.register(operatorRelayRoutes);
+  await app.register(topicSSE);
   await app.register(async sibling => {
     sibling.get("/api/w1b/proof", async req => ({ provenWallet: (req as ProofRequest).provenWallet ?? null }));
     sibling.post("/api/w1b/intent", async req => {
@@ -275,6 +282,34 @@ describe("API key self-linked proven wallet", () => {
     expect(without.statusCode).toBe(200);
     expect(withHeader.statusCode).toBe(without.statusCode);
     expect(withHeader.json()).toMatchObject({ stored: true, jobId: JOB });
+  });
+  it("ignores a self-linked wallet header when a valid admin key is present", async () => {
+    await link();
+    const headers = { ...header(), "x-admin-key": ADMIN };
+    const proof = await app.inject({ url: "/api/w1b/proof", headers });
+    expect(proof.statusCode).toBe(200);
+    expect(proof.json()).toEqual({ provenWallet: null });
+    expect((await evidence(headers)).statusCode).toBe(200);
+  });
+  it("ignores a self-linked wallet header when an invalid admin key is present", async () => {
+    await link();
+    const headers = { ...header(), "x-admin-key": "invalid-admin-key" };
+    const proof = await app.inject({ url: "/api/w1b/proof", headers });
+    expect(proof.statusCode).toBe(200);
+    expect(proof.json()).toEqual({ provenWallet: null });
+    await refused(headers);
+  });
+  it("ignores a self-linked wallet header on a real SSE route", async () => {
+    await link();
+    // A missing job keeps even a regressed grant finite: a proven reader gets 404.
+    const url = "/sse/stream/job/job-w1b-missing";
+    const without = await app.inject({ url, headers: bearer() });
+    const withHeader = await app.inject({ url, headers: header() });
+    expect(without.statusCode).toBe(403);
+    expect(without.json()).toMatchObject({ error: "identity_unverified" });
+    expect(withHeader.statusCode).toBe(without.statusCode);
+    expect(withHeader.json()).toEqual(without.json());
+    expect(sseProofs).toEqual([null, null]);
   });
   it("13 returns 503 wallet_link_unavailable on a lookup failure", async () => {
     await link();

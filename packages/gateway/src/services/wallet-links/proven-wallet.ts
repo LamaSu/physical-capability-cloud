@@ -27,7 +27,7 @@ async function bindProof(req: FastifyRequest, reply: FastifyReply): Promise<void
 }
 
 export function proveSelfLinkedWallet(req: FastifyRequest, reply: FastifyReply, done: HookHandlerDoneFunction): void {
-  if (req.headers["x-pcc-wallet"] === undefined) {
+  if (req.headers["x-admin-key"] !== undefined || req.headers["x-pcc-wallet"] === undefined) {
     done();
     return;
   }
