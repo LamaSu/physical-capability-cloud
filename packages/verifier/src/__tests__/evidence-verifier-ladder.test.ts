@@ -215,6 +215,8 @@ describe("EvidenceVerifier — tier requirements from the funded CSD's ladder (N
     await expectRefused(value);
   });
 
+  // These malformed tier-1 cases can also be refused by monotone or contiguity rules.
+  // The isolated cases below pin each empty-group, vocabulary, tier and minimum rule.
   it.each([
     ["a null entry", () => null],
     ["an invalid tier", (tier: TierEvidenceRequirements) => ({ ...tier, tier: "1" })],
@@ -228,6 +230,48 @@ describe("EvidenceVerifier — tier requirements from the funded CSD's ladder (N
     const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
     tiers[1] = malformed(tiers[1]!) as never;
     await expectRefused(tiers);
+  });
+
+  it.each([
+    ["an empty OR group at the highest tier", (tiers: TierEvidenceRequirements[]) => { tiers[3]!.requiredEventTypes.push([]); }],
+    ["an unknown event at the highest tier", (tiers: TierEvidenceRequirements[]) => { tiers[3]!.requiredEventTypes.push(["not_an_event" as never]); }],
+    ["an extra numeric tier outside 0..3", (tiers: TierEvidenceRequirements[]) => { tiers.push({ ...tiers[3]!, tier: 4 as never }); }],
+    ["a negative minimum at tier 0", (tiers: TierEvidenceRequirements[]) => { tiers[0]!.minimumEvents = -1; }],
+  ])("F1 refuses %s independently of monotone and contiguity rules", async (_name, mutate) => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    mutate(tiers);
+    await expectRefused(tiers);
+  });
+
+  it.each(["ladder", "entry"] as const)("F2 refuses a transparent Proxy %s before running traps", async (part) => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    const proxied = (handler: ProxyHandler<object>) => {
+      if (part === "ladder") return new Proxy(tiers, handler);
+      const entries = [...tiers];
+      entries[1] = new Proxy(entries[1]!, handler);
+      return entries;
+    };
+    // Empty handlers preserve the original data, so only Proxy detection refuses them.
+    await expectRefused(proxied({}));
+    let traps = 0;
+    await expectRefused(proxied({
+      getPrototypeOf(target) { traps++; return Reflect.getPrototypeOf(target); },
+      ownKeys(target) { traps++; return Reflect.ownKeys(target); },
+      getOwnPropertyDescriptor(target, key) { traps++; return Reflect.getOwnPropertyDescriptor(target, key); },
+      get(target, key, receiver) { traps++; return Reflect.get(target, key, receiver); },
+    }));
+    expect(traps).toBe(0);
+  });
+
+  it("F2 refuses an accessor on an unread entry field without running its getter", async () => {
+    const tiers = structuredClone(await ladder()) as TierEvidenceRequirements[];
+    let getterCalls = 0;
+    Object.defineProperty(tiers[1]!, "nonEventRequirements", {
+      enumerable: true,
+      get() { getterCalls++; return []; },
+    });
+    await expectRefused(tiers);
+    expect(getterCalls).toBe(0);
   });
 
   it.each(["tiers", "groups", "events"])("E15 Q3 refuses a sparse %s array", async (part) => {
