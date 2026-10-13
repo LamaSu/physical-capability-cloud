@@ -41,6 +41,7 @@ import {
   IdentityRegistryClient,
   REGISTRY_ADDRESSES,
 } from "@pcc/identity-8004";
+import { ChainWriteError } from "./chain-error-code.js";
 
 // ---------------------------------------------------------------------------
 // Env resolution
@@ -71,13 +72,17 @@ function resolveRegistryAddress(chainId: number): `0x${string}` {
   const override = process.env.IDENTITY_REGISTRY_ADDRESS as `0x${string}` | undefined;
   if (override) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(override)) {
-      throw new Error(`IDENTITY_REGISTRY_ADDRESS is not a valid EVM address: ${override}`);
+      throw new ChainWriteError(
+        "config_invalid",
+        `IDENTITY_REGISTRY_ADDRESS is not a valid EVM address: ${override}`,
+      );
     }
     return override;
   }
   const known = REGISTRY_ADDRESSES[chainId];
   if (known) return known.identityRegistry;
-  throw new Error(
+  throw new ChainWriteError(
+    "config_invalid",
     `No ERC-8004 IdentityRegistry address known for chain ${chainId}. ` +
     `Set IDENTITY_REGISTRY_ADDRESS or use a supported chain.`,
   );
@@ -97,7 +102,8 @@ function resolvePrivateKey(): `0x${string}` | undefined {
     (process.env.DEPLOYER_PRIVATE_KEY as `0x${string}` | undefined);
   if (!key) return undefined;
   if (!/^0x[0-9a-fA-F]{64}$/.test(key)) {
-    throw new Error(
+    throw new ChainWriteError(
+      "config_invalid",
       "Identity write private key is not a valid 0x-prefixed 32-byte hex string",
     );
   }
@@ -136,7 +142,8 @@ function getWalletClient(): WalletClient {
   if (!_walletClient) {
     const key = resolvePrivateKey();
     if (!key) {
-      throw new Error(
+      throw new ChainWriteError(
+        "identity_write_disabled",
         "Identity registry write requires PCC_GATEWAY_PRIVATE_KEY or DEPLOYER_PRIVATE_KEY",
       );
     }
@@ -256,8 +263,9 @@ export interface RegisterAgentOnChainResult {
 export async function registerAgentOnChain(
   input: RegisterAgentOnChainInput,
 ): Promise<RegisterAgentOnChainResult> {
-  if (!isIdentityWriteEnabled()) {
-    throw new Error(
+  if (!resolvePrivateKey()) {
+    throw new ChainWriteError(
+      "identity_write_disabled",
       "ERC-8004 identity write is disabled — set PCC_GATEWAY_PRIVATE_KEY",
     );
   }
@@ -276,7 +284,8 @@ export async function registerAgentOnChain(
   ];
   if (input.capabilityHash) {
     if (!/^0x[0-9a-fA-F]{64}$/.test(input.capabilityHash)) {
-      throw new Error(
+      throw new ChainWriteError(
+        "config_invalid",
         `capabilityHash must be 0x-prefixed 32-byte hex (got ${input.capabilityHash})`,
       );
     }
@@ -317,7 +326,8 @@ export async function registerAgentOnChain(
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== "success") {
-    throw new Error(
+    throw new ChainWriteError(
+      "tx_reverted",
       `IdentityRegistry.register reverted (tx ${txHash}, status ${receipt.status})`,
     );
   }
@@ -329,7 +339,8 @@ export async function registerAgentOnChain(
     logs: receipt.logs,
   });
   if (events.length === 0) {
-    throw new Error(
+    throw new ChainWriteError(
+      "tx_missing_event",
       `IdentityRegistry.register succeeded but emitted no Registered event (tx ${txHash})`,
     );
   }
@@ -418,8 +429,9 @@ export interface SetAgentWalletResult {
 export async function setAgentWalletOnChain(
   input: SetAgentWalletInput,
 ): Promise<SetAgentWalletResult> {
-  if (!isIdentityWriteEnabled()) {
-    throw new Error(
+  if (!resolvePrivateKey()) {
+    throw new ChainWriteError(
+      "identity_write_disabled",
       "ERC-8004 identity write is disabled — set PCC_GATEWAY_PRIVATE_KEY",
     );
   }
@@ -468,7 +480,8 @@ export async function setAgentWalletOnChain(
 
   const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
   if (receipt.status !== "success") {
-    throw new Error(
+    throw new ChainWriteError(
+      "tx_reverted",
       `setAgentWallet reverted (tx ${txHash}, status ${receipt.status})`,
     );
   }

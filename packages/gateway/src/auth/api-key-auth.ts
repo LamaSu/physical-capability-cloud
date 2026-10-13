@@ -96,6 +96,22 @@ export function resolveApiKey(req: FastifyRequest) {
 // Per-operator provisioning lock to prevent TOCTOU race on concurrent requests
 const provisioningLocks = new Set<string>();
 
+export type ProvisionErrorCode =
+  | "too_many_keys"
+  | "provision_in_progress"
+  | "invalid_public_key";
+
+/** Only closed codes may cross the provisioning error boundary. */
+export function classifyProvisionError(err: unknown): ProvisionErrorCode | "unknown" {
+  if (!(err instanceof Error) || !("code" in err)) return "unknown";
+  switch (err.code) {
+    case "too_many_keys": return "too_many_keys";
+    case "provision_in_progress": return "provision_in_progress";
+    case "invalid_public_key": return "invalid_public_key";
+    default: return "unknown";
+  }
+}
+
 /**
  * Result of provisioning an API key.
  *
@@ -140,7 +156,10 @@ export function provisionApiKey(opts: {
 }): ProvisionResult {
   // Serialize provisioning per operator to prevent race condition (VULN-05 fix)
   if (provisioningLocks.has(opts.operatorId)) {
-    throw new Error("Key provisioning in progress — try again in a moment");
+    throw Object.assign(
+      new Error("Key provisioning in progress — try again in a moment"),
+      { code: "provision_in_progress" as const },
+    );
   }
   provisioningLocks.add(opts.operatorId);
 
@@ -150,7 +169,10 @@ export function provisionApiKey(opts: {
     // Limit keys per operator (max 5 active)
     const activeCount = repo.countByOperator(opts.operatorId);
     if (activeCount >= 5) {
-      throw new Error("Maximum 5 active API keys per operator");
+      throw Object.assign(
+        new Error("Maximum 5 active API keys per operator"),
+        { code: "too_many_keys" as const },
+      );
     }
 
     // Ed25519: BYOK or mint
@@ -161,7 +183,7 @@ export function provisionApiKey(opts: {
       if (cleaned === null) {
         throw Object.assign(
           new Error("publicKey must be a 32-byte Ed25519 public key (64 hex chars, optional 0x prefix)"),
-          { code: "invalid_public_key" },
+          { code: "invalid_public_key" as const },
         );
       }
       storedPublicKeyHex = cleaned;
