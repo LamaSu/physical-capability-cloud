@@ -19,14 +19,26 @@ identity JSON only; keygen also prints the generated file paths. Keygen refuses
 existing files and writes the device and operator keys at 0600 inside a private
 directory. An optional `--not-after` must be later than the current time and the
 keys' `createdAt`. Keep the funded Ed25519 device principal separate from the secp256k1
-operator EOA. This package delegates bundle signing to the kernel's existing
-`signFn`; D2 and delegation signing belong to the toolkit. The operator key has
+operator EOA. The per-unit SESSION key signs the bundle (H1(b)). The device key
+signs ONLY LO-EV-1 delegations and D2, through `signDelegation` and `signD2`.
+Load it with `delegationBinding: { chainId, operator }` from the host's configured
+chain and operator identity; loading without that binding permits public identity
+checks and D2, but refuses delegation signing. Delegations name one bounded job id
+(1–256 ASCII letters, digits, `_`, `.`, `:`, or `-`, starting with a letter or digit),
+the spec's exact MVP action set, and a distinct 32-byte session public key. Their
+whole-second issuance lies between funding and the first event, expiry equals
+reclaimAt, and maxSignatures equals the finalized event count (1–1000).
+`signD2` accepts exactly 32 raw bytes or their `0x`-prefixed lowercase hex encoding.
+The toolkit still needs the unit session and bundle builders recorded by GAP-7.
+
+The operator key has
 three scoped uses: D1 `FinalMilestonePackageV2` signatures, zero-value EIP-1559
 `submitEvidence(unitId, packageDigest)` transactions, and EIP-712 `JobPolicy`
 acceptance signatures. V-next `fund()` always requires the operator acceptance:
 the operator never sends the funding transaction
-(`packages/contracts/src/VNextSettlementEscrow.sol:346`). Loading the key binds
-all three signing methods to the configured chain. D1 uses the fixed domain name
+(`packages/contracts/src/VNextSettlementEscrow.sol:346`). The WP-A wallet proof
+remains open. Loading the key binds all three signing methods to the configured
+chain. D1 uses the fixed domain name
 `PCC FinalMilestonePackage`, version `2`, and the supplied escrow address for both
 the message and verifying contract. The escrow address is supplied per signing
 call until canonical deployment binding is added; no escrow configuration field
