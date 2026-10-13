@@ -5,6 +5,10 @@ import { auditService } from "../services/audit-service.js";
 import * as privacy from "../services/telemetry-privacy.js";
 import { writeAuditHook } from "../services/write-audit-hook.js";
 import { securityMonitorPlugin } from "../middleware/security-monitor.js";
+import { apiGate } from "../middleware/api-gate.js";
+import { tenantContext } from "../middleware/tenant-context.js";
+import { hashApiKey } from "../auth/api-key-auth.js";
+import { walletsRoutes } from "../routes/wallets.js";
 import * as posthog from "../services/posthog-service.js";
 import * as sentry from "../sentry.js";
 
@@ -30,6 +34,14 @@ afterEach(async () => {
 });
 
 describe("wallet ceremony global privacy", () => {
+  it.each(["/api/walletsX", "/api/walletsX/link-requests", "https://capability.network/api/walletsX", "POST /api/walletsX"])("wallet prefix excludes unrelated path: %s", (url) => {
+    expect(privacy.isWalletRequest(url)).toBe(false);
+  });
+
+  it.each(["/api/wallets", "/api/wallets?anything=1", "/api/wallets/link-requests", "https://capability.network/api/wallets", "POST /api/wallets/link-requests/:id/approve"])("wallet prefix includes its root and children: %s", (url) => {
+    expect(privacy.isWalletRequest(url)).toBe(true);
+  });
+
   it.each([
     `/api/wallets/link-requests/by-code/${CODE}?address=${ADDRESS}`,
     `/api/wallets//${LABEL}`,
@@ -72,20 +84,48 @@ describe("wallet ceremony global privacy", () => {
     }
   });
 
-  it("security monitor emits no wallet request fingerprints or values", async () => {
-    const analytics = vi.spyOn(posthog, "trackServerEvent").mockImplementation(() => undefined);
-    const logs: string[] = [];
-    app = Fastify({ logger: { level: "warn", stream: { write: (line: string) => logs.push(line) } }, trustProxy: true });
-    await securityMonitorPlugin(app);
-    app.post("/api/wallets/link-requests", async () => ({ ok: true }));
+  it("non-wallet sibling route accepts ordinary job prose with the monitor encapsulated", async () => {
+    vi.spyOn(posthog, "trackServerEvent").mockImplementation(() => undefined);
+    delete process.env.DATABASE_URL;
+    process.env.PCC_DB_PATH = ":memory:";
+    closeStore();
+    const store = initStore({ seed: false });
+    const token = "pcc_test_w1_monitor_regression";
+    store.repos.apiKeys.insert({
+      id: "w1-monitor-regression", keyHash: hashApiKey(token), keyPrefix: token.slice(0, 12), operatorId: OWNER,
+      name: null, description: null, scopes: '["*"]', rateLimit: "1000/hour", usageCount: "0",
+      createdAt: new Date().toISOString(), expiresAt: null, metadata: null, publicKey: null,
+    });
+    app = Fastify({ logger: false });
+    // Match server.ts: monitor, API gate, job routes, then wallet routes, all siblings.
+    await app.register(securityMonitorPlugin);
+    await app.register(apiGate);
+    await app.register(async jobApp => {
+      jobApp.post("/api/jobs/w1-monitor-control", async req => req.body);
+    });
+    await app.register(walletsRoutes);
+    const payload = { instructions: "Please select the black filament from the shelf and update the label where it says PLA." };
     const response = await app.inject({
-      method: "POST", url: "/api/wallets/link-requests",
-      headers: { "x-forwarded-for": IP, "user-agent": "python-requests/2.0" },
-      payload: { label: LABEL, signature: `<script>${SIGNATURE}</script>` },
+      method: "POST", url: "/api/jobs/w1-monitor-control",
+      headers: { authorization: `Bearer ${token}` }, payload,
     });
     expect(response.statusCode).toBe(200);
-    expect(analytics).not.toHaveBeenCalled();
-    for (const value of [IP, SIGNATURE, LABEL]) expect(logs.join("")).not.toContain(value);
+    expect(response.json()).toEqual(payload);
+  });
+
+  it("tenant context is available to later onRequest hooks on wallet owner routes", async () => {
+    app = Fastify({ logger: false });
+    app.addHook("onRequest", async (req) => {
+      req.apiKeyId = "key-privacy-owner";
+      req.operatorId = OWNER;
+    });
+    await app.register(tenantContext);
+    let earlyTenant: string | null | undefined;
+    app.addHook("onRequest", async (req) => { earlyTenant = req.tenantId; });
+    app.post("/api/wallets/link-requests/lookup", async () => ({ ok: true }));
+    const response = await app.inject({ method: "POST", url: "/api/wallets/link-requests/lookup", payload: { userCode: CODE } });
+    expect(response.statusCode).toBe(200);
+    expect(earlyTenant).toBe(OWNER);
   });
 
   it("wallet lookalikes have a fixed 404 without raw request values", async () => {

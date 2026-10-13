@@ -14,7 +14,9 @@ export type LinkRequestRow = WalletLinkMessageRequest & {
   proof_signature: string | null;
   proof_consumed_at: string | null;
   account_id: string | null;
+  created_by_key_id: string | null;
   approved_by: string | null;
+  approved_by_key_id: string | null;
   decided_at: string | null;
   link_id: string | null;
   requester_ip_class: string;
@@ -58,7 +60,7 @@ export function getLinkRequest(id: string): LinkRequestRow | undefined {
 export function createLinkRequest(input: {
   keyType: "secp256k1" | "ed25519"; identity: string; role: "agent" | "device"; label: string;
   chainId: number; clientInfo?: { name: string; version: string }; kernelId?: string;
-}, requesterIpClass: string, config: WalletLinkConfig, now: number): LinkRequestRow {
+}, requesterIpClass: string, config: WalletLinkConfig, now: number, createdByKeyId: string | null = null): LinkRequestRow {
   const db = getStore().db;
   return db.transaction(tx => {
     const timestamp = new Date(now).toISOString();
@@ -78,16 +80,17 @@ export function createLinkRequest(input: {
       kernel_id: input.kernelId ?? null, chain_id: input.chainId, env: config.env, domain: config.domain,
       nonce: randomBytes(16).toString("hex"), user_code: code, status: "pending_proof", message: "",
       consent_version: CONSENT_VERSION, consent_sha256: CONSENT_SHA256, proof_signature: null,
-      proof_consumed_at: null, account_id: null, approved_by: null, decided_at: null, link_id: null,
+      proof_consumed_at: null, account_id: null, created_by_key_id: createdByKeyId,
+      approved_by: null, approved_by_key_id: null, decided_at: null, link_id: null,
       requester_ip_class: requesterIpClass, created_at: timestamp, expires_at: new Date(now + 600000).toISOString(),
     };
     row.message = composeProofMessage(row, config);
     tx.run(sql`INSERT INTO wallet_link_requests
       (id, key_type, address_or_pubkey, role, label, client_info, kernel_id, chain_id, env, domain, nonce,
-       user_code, status, message, consent_version, consent_sha256, requester_ip_class, created_at, expires_at)
+       user_code, status, message, consent_version, consent_sha256, requester_ip_class, created_at, expires_at, created_by_key_id)
       VALUES (${row.id}, ${row.key_type}, ${row.address_or_pubkey}, ${row.role}, ${row.label}, ${row.client_info},
        ${row.kernel_id}, ${row.chain_id}, ${row.env}, ${row.domain}, ${row.nonce}, ${row.user_code}, ${row.status},
-       ${row.message}, ${row.consent_version}, ${row.consent_sha256}, ${row.requester_ip_class}, ${row.created_at}, ${row.expires_at})`);
+       ${row.message}, ${row.consent_version}, ${row.consent_sha256}, ${row.requester_ip_class}, ${row.created_at}, ${row.expires_at}, ${row.created_by_key_id})`);
     return row;
   }, { behavior: "immediate" });
 }
@@ -116,13 +119,13 @@ export function lookupLinkRequestByCode(code: string, now: number): LinkRequestR
       AND expires_at > ${new Date(now).toISOString()}`);
 }
 
-export function decideLinkRequest(id: string, accountId: string, decision: "approve" | "deny", now: number) {
+export function decideLinkRequest(id: string, accountId: string, decision: "approve" | "deny", now: number, approvedByKeyId: string | null = null) {
   const db = getStore().db;
   return db.transaction(tx => {
     const timestamp = new Date(now).toISOString();
     const row = tx.get<LinkRequestRow>(sql`UPDATE wallet_link_requests
       SET status = ${decision === "approve" ? "approved" : "denied"}, account_id = ${accountId},
-        approved_by = ${accountId}, decided_at = ${timestamp}
+        approved_by = ${accountId}, approved_by_key_id = ${approvedByKeyId}, decided_at = ${timestamp}
       WHERE id = ${id} AND status = 'awaiting_approval' AND expires_at > ${timestamp} RETURNING *`);
     if (!row) {
       const existing = tx.get<LinkRequestRow>(sql`SELECT * FROM wallet_link_requests WHERE id = ${id}`);
@@ -142,17 +145,19 @@ export function decideLinkRequest(id: string, accountId: string, decision: "appr
     tx.run(sql`INSERT INTO wallet_links
       (id, account_id, role, subject_type, subject_id, key_type, address_or_pubkey, chain_id, label,
        consent_version, consent_sha256, proof_message, proof_signature, approval_signature,
-       request_id, approved_by, created_at, expires_at)
+       request_id, approved_by, created_at, expires_at, created_by_key_id, approved_by_key_id)
       VALUES (${linkId}, ${accountId}, ${row.role}, ${row.role}, ${row.kernel_id}, ${row.key_type},
        ${row.address_or_pubkey}, ${row.chain_id}, ${row.label}, ${row.consent_version}, ${row.consent_sha256},
-       ${row.message}, ${row.proof_signature}, NULL, ${row.id}, ${accountId}, ${timestamp}, ${expiresAt})`);
+       ${row.message}, ${row.proof_signature}, NULL, ${row.id}, ${accountId}, ${timestamp}, ${expiresAt}, ${row.created_by_key_id}, ${approvedByKeyId})`);
     tx.run(sql`UPDATE wallet_link_requests SET link_id = ${linkId} WHERE id = ${row.id}`);
     return { status: "approved" as const, linkId, accountId };
   }, { behavior: "immediate" });
 }
 
-export function listWalletLinks(accountId: string, now: number) {
-  return getStore().db.all<LinkRow>(sql`SELECT * FROM wallet_links WHERE account_id = ${accountId} ORDER BY created_at, id`).map(row => ({
+export function listWalletLinks(accountId: string, now: number, approvedByKeyId: string | null = null) {
+  return getStore().db.all<LinkRow>(sql`SELECT * FROM wallet_links WHERE account_id = ${accountId}
+    AND ${approvedByKeyId === null ? sql`approved_by_key_id IS NULL` : sql`approved_by_key_id = ${approvedByKeyId}`}
+    ORDER BY created_at, id`).map(row => ({
     linkId: row.id, role: row.role, keyType: row.key_type,
     ...(row.key_type === "secp256k1" ? { address: row.address_or_pubkey } : { publicKey: row.address_or_pubkey }),
     label: row.label, chainId: row.chain_id,
@@ -161,13 +166,15 @@ export function listWalletLinks(accountId: string, now: number) {
   }));
 }
 
-export function revokeWalletLink(id: string, accountId: string, reason: string | undefined, now: number) {
+export function revokeWalletLink(id: string, accountId: string, reason: string | undefined, now: number, approvedByKeyId: string | null = null) {
   const timestamp = new Date(now).toISOString();
   const row = getStore().db.get<{ revoked_at: string }>(sql`UPDATE wallet_links
     SET revoked_at = COALESCE(revoked_at, ${timestamp}),
       revoked_by = CASE WHEN revoked_at IS NULL THEN ${accountId} ELSE revoked_by END,
       revoke_reason = CASE WHEN revoked_at IS NULL THEN ${reason ?? null} ELSE revoke_reason END
-    WHERE id = ${id} AND account_id = ${accountId} RETURNING revoked_at`);
+    WHERE id = ${id} AND account_id = ${accountId}
+      AND ${approvedByKeyId === null ? sql`approved_by_key_id IS NULL` : sql`approved_by_key_id = ${approvedByKeyId}`}
+      RETURNING revoked_at`);
   if (!row) throw new WalletLinkError(404, "not_found");
   return { status: "revoked", revokedAt: row.revoked_at };
 }

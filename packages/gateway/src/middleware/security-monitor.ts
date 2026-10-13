@@ -10,7 +10,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { createHmac, randomBytes } from "node:crypto";
 import { isIP } from "node:net";
-import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 // ---------------------------------------------------------------------------
 // Attack Signatures
@@ -408,7 +407,6 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
 
   // ── Request Scanning Hook (onRequest — URL + headers only, body not yet parsed) ──
   app.addHook("onRequest", async (req, reply) => {
-    if (isWalletRequest(req.url)) return;
     const fp = buildFingerprint(req);
 
     // 1. Attack pattern detection (URL + query + headers only — body is not available yet)
@@ -483,7 +481,6 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
   // body between onRequest and preHandler. Scanning in onRequest misses all
   // body-based attacks (the most common attack vector).
   app.addHook("preHandler", async (req, reply) => {
-    if (isWalletRequest(req.url)) return;
     if (!req.body || req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return;
 
     const bodyStr = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
@@ -505,7 +502,6 @@ export async function securityMonitorPlugin(app: FastifyInstance) {
 
   // ── Full Request Fingerprinting (onResponse — captures status code + duration)
   app.addHook("onResponse", async (req, reply) => {
-    if (isWalletRequest(req.url)) return;
     // Skip SSE streams, health checks, and static assets
     if (req.url.startsWith("/sse/") || req.url === "/health" || req.url === "/api/health") return;
     if (req.url.startsWith("/assets/") || req.url.endsWith(".js") || req.url.endsWith(".css")) return;

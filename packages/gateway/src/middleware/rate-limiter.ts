@@ -10,8 +10,6 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { createHash } from "node:crypto";
-import { containsKeyMaterial } from "../services/wallet-links/guards.js";
 import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 const WINDOW_MS = 60_000; // 1 minute
@@ -43,7 +41,7 @@ async function rateLimiterImpl(app: FastifyInstance) {
       return;
     }
 
-    const ip = createHash("sha256").update(req.ip).digest("hex");
+    const ip = req.ip;
     let entry = ipCounts.get(ip);
 
     if (!entry || now - entry.windowStart > WINDOW_MS) {
@@ -72,14 +70,7 @@ async function rateLimiterImpl(app: FastifyInstance) {
       });
     }
   };
-  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!isWalletRequest(req.url)) return limit(req, reply);
-  });
-  app.addHook("preValidation", async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!isWalletRequest(req.url)) return;
-    if (containsKeyMaterial(req.body)) return reply.status(400).send({ error: "key_material_refused" });
-    return limit(req, reply);
-  });
+  app.addHook("onRequest", limit);
 }
 
 // This hook is intentionally global. Fastify encapsulates ordinary registered

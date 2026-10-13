@@ -1,3 +1,5 @@
+import { deploymentEnvName } from "../../mcp/mcp-api-base.js";
+
 /** Current server settings are read at proof/approval time, never from a request. */
 export interface WalletLinkConfig {
   publicOrigin: string;
@@ -18,7 +20,7 @@ export function walletLinkConfig(): WalletLinkConfig {
   if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password) {
     throw new Error("invalid_wallet_public_origin");
   }
-  const env = process.env.NODE_ENV || "development";
+  const env = deploymentEnvName() || process.env.NODE_ENV || "development";
   return {
     publicOrigin: origin.origin,
     domain: origin.host,

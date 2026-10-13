@@ -26,7 +26,6 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
-import { isWalletRequest } from "../services/telemetry-privacy.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 
@@ -70,7 +69,6 @@ export function getTenantContext(req: FastifyRequest): TenantContext {
  */
 async function tenantContextImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, _reply: FastifyReply) => {
-    if (isWalletRequest(req.url)) return;
     // Default to null. apiGate sets req.apiKeyId / req.userId BEFORE this hook
     // when registered ahead of tenantContext in the plugin chain; if not, we
     // re-resolve here so the field is always populated for downstream code.
@@ -96,9 +94,6 @@ async function tenantContextImpl(app: FastifyInstance) {
     }
 
     req.tenantId = null;
-  });
-  app.addHook("preValidation", async (req: FastifyRequest) => {
-    if (isWalletRequest(req.url)) req.tenantId = req.operatorId ?? req.userId ?? null;
   });
 }
 

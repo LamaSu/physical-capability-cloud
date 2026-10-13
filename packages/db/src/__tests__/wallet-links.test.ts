@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDatabase, migrateDatabase } from "../index.js";
 
@@ -61,6 +62,66 @@ describe("wallet link migration", () => {
     insertRequest("lr-first", "BCDFGHJK", "shared-nonce", "failed");
     expect(() => insertRequest("lr-second", "LMNPQRST", "shared-nonce"))
       .toThrow(/UNIQUE constraint failed/);
+  });
+
+  it("stores distinct creating and approving API key ids on a link request", () => {
+    insertRequest("lr-keys", "BCDFGHJK");
+    sqlite.prepare(`
+      UPDATE wallet_link_requests
+      SET created_by_key_id = ?, approved_by_key_id = ?, approved_by = ?
+      WHERE id = ?
+    `).run("key-creating", "key-approving", "account-owner", "lr-keys");
+    expect(sqlite.prepare(`
+      SELECT created_by_key_id, approved_by_key_id, approved_by
+      FROM wallet_link_requests WHERE id = ?
+    `).get("lr-keys")).toEqual({
+      created_by_key_id: "key-creating",
+      approved_by_key_id: "key-approving",
+      approved_by: "account-owner",
+    });
+  });
+
+  it("defaults anonymous creating and cookie approving key ids to null on requests", () => {
+    insertRequest("lr-anonymous", "BCDFGHJK");
+    expect(sqlite.prepare(`
+      SELECT created_by_key_id, approved_by_key_id
+      FROM wallet_link_requests WHERE id = ?
+    `).get("lr-anonymous")).toEqual({ created_by_key_id: null, approved_by_key_id: null });
+  });
+
+  it("stores the copied creating key and approving key separately from the link account", () => {
+    insertLink("wl-keys", "account-owner");
+    sqlite.prepare(`
+      UPDATE wallet_links SET created_by_key_id = ?, approved_by_key_id = ? WHERE id = ?
+    `).run("key-creating", "key-approving", "wl-keys");
+    expect(sqlite.prepare(`
+      SELECT created_by_key_id, approved_by_key_id, approved_by, account_id
+      FROM wallet_links WHERE id = ?
+    `).get("wl-keys")).toEqual({
+      created_by_key_id: "key-creating",
+      approved_by_key_id: "key-approving",
+      approved_by: "account-owner",
+      account_id: "account-owner",
+    });
+  });
+
+  it("defaults anonymous creating and cookie approving key ids to null on links", () => {
+    insertLink("wl-cookie", "account-owner");
+    expect(sqlite.prepare(`
+      SELECT created_by_key_id, approved_by_key_id FROM wallet_links WHERE id = ?
+    `).get("wl-cookie")).toEqual({ created_by_key_id: null, approved_by_key_id: null });
+  });
+
+  it("matches migration 0004 and runtime wallet DDL statement for statement", () => {
+    const migration = readFileSync(new URL("../migrations/0004_wallet_links.sql", import.meta.url), "utf8");
+    const runtime = readFileSync(new URL("../migrate.ts", import.meta.url), "utf8");
+    const blocks = [...runtime.matchAll(/sqlite\.exec\(`([\s\S]*?)`\);/g)]
+      .map((match) => match[1])
+      .filter((sql) => /CREATE TABLE IF NOT EXISTS wallet_link_requests\s*\(/.test(sql));
+    expect(blocks).toHaveLength(1);
+    const statements = (sql: string) => sql.replace(/--[^\n]*/g, "")
+      .split(";").map((statement) => statement.replace(/\s+/g, " ").trim()).filter(Boolean);
+    expect(statements(blocks[0]!)).toEqual(statements(migration));
   });
 
   it("can rerun migrations without losing link requests or receipts", () => {

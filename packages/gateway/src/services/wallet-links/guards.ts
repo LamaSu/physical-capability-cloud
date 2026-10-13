@@ -56,15 +56,15 @@ export function walletRequestLimits() {
       creates.set(key, item);
       if (++item.count > 10) throw new WalletLinkError(429, "rate_limited");
     },
-    checkCodes(accountId: string, now: number) {
+    checkCodes(credential: string, now: number) {
       prune(wrongCodes, now);
-      if ((wrongCodes.get(accountId)?.count ?? 0) >= 5) throw new WalletLinkError(429, "too_many_attempts");
+      if ((wrongCodes.get(credential)?.count ?? 0) >= 5) throw new WalletLinkError(429, "too_many_attempts");
     },
-    wrongCode(accountId: string, now: number) {
+    wrongCode(credential: string, now: number) {
       prune(wrongCodes, now);
-      const item = wrongCodes.get(accountId) ?? { count: 0, until: now + 600000 };
+      const item = wrongCodes.get(credential) ?? { count: 0, until: now + 600000 };
       item.count++;
-      wrongCodes.set(accountId, item);
+      wrongCodes.set(credential, item);
     },
     poll(id: string, expiresAt: string, now: number) {
       prune(polls, now);

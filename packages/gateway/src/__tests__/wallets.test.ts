@@ -7,29 +7,38 @@ import { readFileSync, readdirSync } from "node:fs";
 import { sql } from "@pcc/store";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 import { apiGate } from "../middleware/api-gate.js";
-import { scopeChecker } from "../middleware/scope-checker.js";
+import { scopeChecker, __resetScopeCacheForTests } from "../middleware/scope-checker.js";
 import { tenantContext } from "../middleware/tenant-context.js";
 import { rateLimiter, __resetRateLimitState } from "../middleware/rate-limiter.js";
 import { hashApiKey } from "../auth/api-key-auth.js";
 import { walletsRoutes } from "../routes/wallets.js";
-import { resolveActiveWalletLink } from "../services/wallet-links/repository.js";
+import { decideLinkRequest, getLinkRequest, resolveActiveWalletLink } from "../services/wallet-links/repository.js";
 import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
 import * as config from "../services/wallet-links/config.js";
+import { telemetryLookalikeHook } from "../services/telemetry-privacy.js";
 
 const path = "/api/wallets/link-requests";
 const owner = { authorization: "Bearer pcc_test_wallet_owner" };
 const other = { authorization: "Bearer pcc_test_wallet_other" };
+const sameAccount = { authorization: "Bearer pcc_test_wallet_same_account" };
 let app: FastifyInstance;
 let logLines: string[];
 let clockNow: number;
+let bodyStreamIterations: number;
 
 async function buildApp() {
   const instance = Fastify({ logger: { level: "info", stream: { write: (s: string) => { logLines.push(s); } } }, disableRequestLogging: true });
+  instance.addHook("onRequest", telemetryLookalikeHook);
   await instance.register(cookie);
   await instance.register(rateLimiter);
   await instance.register(apiGate);
   await instance.register(tenantContext);
   await instance.register(scopeChecker);
+  instance.addHook("onRequest", async req => {
+    if (req.method !== "GET" && req.method !== "HEAD") return;
+    const iterator = req.raw[Symbol.asyncIterator];
+    req.raw[Symbol.asyncIterator] = function () { bodyStreamIterations++; return iterator.call(this); };
+  });
   instance.get("/api/dht/w1-rate-control", async () => ({ ok: true }));
   await instance.register(walletsRoutes);
   await instance.ready();
@@ -41,14 +50,19 @@ beforeEach(async () => {
   vi.stubEnv("DATABASE_URL", ":memory:");
   vi.stubEnv("PCC_PUBLIC_URL", "https://capability.network");
   vi.stubEnv("NODE_ENV", "staging");
+  vi.stubEnv("PCC_DEPLOYMENT_ENV", "");
+  vi.stubEnv("RAILWAY_ENVIRONMENT_NAME", "");
   clockNow = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => clockNow);
   logLines = [];
+  bodyStreamIterations = 0;
   __resetRateLimitState();
+  __resetScopeCacheForTests();
   const store = initStore({ seed: false });
   for (const [id, token, operatorId, scopes] of [
     ["owner", "pcc_test_wallet_owner", "account-a", "[]"],
     ["other", "pcc_test_wallet_other", "account-b", '["*"]'],
+    ["same-account-key", "pcc_test_wallet_same_account", "account-a", '["*"]'],
   ]) {
     store.repos.apiKeys.insert({ id, keyHash: hashApiKey(token), keyPrefix: token.slice(0, 12), operatorId,
       name: null, description: null, scopes, rateLimit: "1000/hour", usageCount: "0",
@@ -59,15 +73,15 @@ beforeEach(async () => {
 
 afterEach(async () => { await app?.close(); closeStore(); vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function create(overrides: Record<string, unknown> = {}, ip = "203.0.113.27") {
+async function create(overrides: Record<string, unknown> = {}, ip = "203.0.113.27", headers: Record<string, string> = {}) {
   const account = privateKeyToAccount(generatePrivateKey());
-  const response = await app.inject({ method: "POST", url: path, remoteAddress: ip,
+  const response = await app.inject({ method: "POST", url: path, remoteAddress: ip, headers,
     payload: { keyType: "secp256k1", address: account.address.toLowerCase(), role: "agent", label: "cli@laptop", chainId: 84532, ...overrides } });
   expect(response.statusCode).toBe(201);
   return { account, request: response.json() as {requestId: string;userCode: string;message: string;expiresAt: string;verificationUri: string;interval: number} };
 }
-async function proved(overrides: Record<string, unknown> = {}) {
-  const result = await create(overrides);
+async function proved(overrides: Record<string, unknown> = {}, headers: Record<string, string> = {}) {
+  const result = await create(overrides, "203.0.113.27", headers);
   const signature = await result.account.signMessage({ message: result.request.message });
   const response = await app.inject({ method: "POST", url: `${path}/${result.request.requestId}/proof`, payload: { signature } });
   expect(response.statusCode).toBe(200);
@@ -77,6 +91,15 @@ async function proved(overrides: Record<string, unknown> = {}) {
 async function approve(request: { requestId: string; userCode: string }, headers: Record<string, string> = owner, payload = {}) {
   return app.inject({ method: "POST", url: `${path}/${request.requestId}/approve`, headers,
     payload: { userCode: request.userCode, decision: "approve", consentSha256: CONSENT_SHA256, ...payload } });
+}
+async function lookup(userCode: string, headers: Record<string, string> = owner, extra: Record<string, unknown> = {}) {
+  return app.inject({ method: "POST", url: `${path}/lookup`, headers, payload: { userCode, ...extra } });
+}
+function sessionHeaders(token: string, accountId = privateKeyToAccount(generatePrivateKey()).address) {
+  getRepos().sessions.insert({ id: token, token, walletAddress: accountId,
+    createdAt: new Date(clockNow).toISOString(), lastActiveAt: new Date(clockNow).toISOString(),
+    expiresAt: new Date(clockNow + 86400000).toISOString() });
+  return { cookie: `pcc_session=${token}`, origin: "https://capability.network" };
 }
 function updateRequest(id: string, set: ReturnType<typeof sql>) {
   getStore().db.run(sql`UPDATE wallet_link_requests SET ${set} WHERE id = ${id}`);
@@ -94,7 +117,7 @@ describe("W1 wallet ceremony", () => {
     expect(request.message).toContain(`urn:pcc:consent:wallet-link-v1:sha256:${CONSENT_SHA256}`);
     const poll = await app.inject(`${path}/${request.requestId}`);
     expect(poll.json()).toEqual({ status: "authorization_pending" });
-    const consent = await app.inject({ url: `${path}/by-code/${request.userCode.toLowerCase().replace("-", "%20")}`, headers: owner });
+    const consent = await lookup(request.userCode.toLowerCase().replace("-", " "));
     expect(consent.statusCode).toBe(200);
     expect(consent.json()).toMatchObject({ requestId: request.requestId, address: account.address, role: "agent", chainId: 84532,
       network: "Base Sepolia (test network, chain 84532)", requesterIpClass: "203.0.113.x", clientInfo: { name: "pcc-cli", version: "0.3.0" },
@@ -129,13 +152,114 @@ describe("W1 wallet ceremony", () => {
     expect(JSON.parse(request.message.slice(12))).toMatchObject({ publicKey, kernelId: "kernel_lab-1" });
     const signature = sign(null, Buffer.from(request.message), pair.privateKey).toString("hex");
     expect((await app.inject({ method: "POST", url: `${path}/${request.requestId}/proof`, payload: { signature } })).statusCode).toBe(200);
-    const consent = (await app.inject({ url: `${path}/by-code/${request.userCode}`, headers: owner })).json();
+    const consent = (await lookup(request.userCode)).json();
     expect(consent).toMatchObject({ publicKey, kernelId: "kernel_lab-1", requesterIpClass: "2001:0db8:1234::/48" });
     expect(consent.consent.text).toContain("It cannot spend.");
     const decision = await approve(request);
     expect(decision.statusCode).toBe(200);
     const row = (await app.inject({ url: "/api/wallets", headers: owner })).json().links[0];
     expect(row).toMatchObject({ keyType: "ed25519", publicKey, expiresAt: null });
+  });
+
+  it("POST lookup accepts the code only in its body and the removed GET path always gives 404", async () => {
+    const { request } = await proved();
+    for (const code of [request.userCode, "BBBB-BBBB", request.userCode.toLowerCase()]) {
+      for (const headers of [owner, other, {}]) {
+        const response = await app.inject({ method: "GET", url: `${path}/by-code/${code}`, headers });
+        expect(response.statusCode).toBe(404);
+      }
+    }
+    const response = await lookup(request.userCode);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().requestId).toBe(request.requestId);
+    expect(logLines.join("")).not.toContain(request.userCode);
+    expect(logLines.join("")).not.toContain(request.userCode.replace("-", ""));
+  });
+
+  it("POST lookup has an exact body schema and refuses I1 before unknown-field validation", async () => {
+    const { request } = await proved();
+    for (const payload of [{}, { userCode: 1 }, { userCode: request.userCode, unknown: true }, { userCode: request.userCode, clientInfo: {} }]) {
+      const response = await app.inject({ method: "POST", url: `${path}/lookup`, headers: owner, payload });
+      expect(response.statusCode).toBe(400); expect(response.json()).toEqual({ error: "invalid_request" });
+    }
+    const response = await lookup(request.userCode, owner, { unknown: [{ nested: { private_key: "never-logged-lookup" } }] });
+    expect(response.statusCode).toBe(400); expect(response.json()).toEqual({ error: "key_material_refused" });
+    expect(response.body).not.toContain("never-logged-lookup");
+    expect(logLines.join("")).not.toContain("never-logged-lookup");
+  });
+
+  it("records creating and approving API key ids separately from account ids without returning them", async () => {
+    const { request } = await proved({}, owner);
+    const pending = getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`);
+    expect(pending).toMatchObject({ created_by_key_id: "owner", approved_by_key_id: null });
+    const response = await approve(request, sameAccount);
+    expect(response.statusCode).toBe(200);
+    const { linkId } = response.json();
+    const decided = getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`);
+    expect(decided).toMatchObject({ created_by_key_id: "owner", approved_by_key_id: "same-account-key", approved_by: "account-a" });
+    const link = getStore().db.get<any>(sql`SELECT * FROM wallet_links WHERE id = ${linkId}`);
+    expect(link).toMatchObject({ created_by_key_id: "owner", approved_by_key_id: "same-account-key", approved_by: "account-a" });
+    for (const result of [request, response.json(), (await lookup(request.userCode)).json(),
+      (await app.inject(`${path}/${request.requestId}`)).json(), (await app.inject({ url: "/api/wallets", headers: sameAccount })).json()]) {
+      expect(JSON.stringify(result)).not.toMatch(/created_by_key_id|approved_by_key_id|createdByKeyId|approvedByKeyId/);
+    }
+  });
+
+  it("anonymous create and cookie approval store null key ids on the request and link", async () => {
+    const { request } = await proved();
+    expect(getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`).created_by_key_id).toBeNull();
+    const headers = sessionHeaders("cookie-approval");
+    const response = await approve(request, headers);
+    expect(response.statusCode).toBe(200);
+    expect(getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`))
+      .toMatchObject({ created_by_key_id: null, approved_by_key_id: null });
+    expect(getStore().db.get<any>(sql`SELECT * FROM wallet_links WHERE id = ${response.json().linkId}`))
+      .toMatchObject({ created_by_key_id: null, approved_by_key_id: null });
+  });
+
+  it("create with a presented invalid API key returns the gateway 401 and stores no anonymous request", async () => {
+    const validSession = sessionHeaders("valid-cookie-with-invalid-key");
+    for (const cookieHeaders of [{}, validSession]) {
+      const response = await app.inject({ method: "POST", url: path,
+        headers: { ...cookieHeaders, authorization: "Bearer pcc_test_invalid_wallet_key" },
+        payload: { keyType: "secp256k1", address: privateKeyToAccount(generatePrivateKey()).address, role: "agent", label: "cli", chainId: 84532 } });
+      expect(response.statusCode).toBe(401); expect(response.json().error).toBe("api_key_required");
+      expect(getStore().db.get<any>(sql`SELECT count(*) AS n FROM wallet_link_requests`).n).toBe(0);
+    }
+  });
+
+  it("scopeChecker enforces POST /api/wallets/** endpoint scopes for an owner key without wildcard", async () => {
+    const { request } = await proved();
+    getRepos().governance.insertEndpointScope({ id: "wallet-scope-rule", method: "POST", routePattern: "/api/wallets/**",
+      requiredScopes: ["wallet:manage"], description: "wallet test" });
+    __resetScopeCacheForTests();
+    for (const [endpoint, payload] of [
+      [`${path}/lookup`, { userCode: request.userCode }],
+      [`${path}/${request.requestId}/approve`, { userCode: request.userCode, decision: "approve", consentSha256: CONSENT_SHA256 }],
+      [`/api/wallets/wl_${"A".repeat(26)}/revoke`, {}],
+    ] as const) {
+      const response = await app.inject({ method: "POST", url: endpoint, headers: owner, payload });
+      expect(response.statusCode).toBe(403); expect(response.json().error).toBe("insufficient_scope");
+      expect(response.json().required_scopes).toEqual(["wallet:manage"]);
+    }
+    expect(getLinkRequest(request.requestId)?.status).toBe("awaiting_approval");
+    expect((await approve(request, other)).statusCode).toBe(200);
+  });
+
+  it("proof messages use the gateway deployment environment ahead of NODE_ENV and bind it at proof", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("RAILWAY_ENVIRONMENT_NAME", "railway-stage");
+    const railway = await create();
+    expect(railway.request.message).toContain("urn:pcc:env:railway-stage");
+    vi.stubEnv("PCC_DEPLOYMENT_ENV", " PreVIEW ");
+    const preview = await create();
+    expect(preview.request.message).toContain("urn:pcc:env:preview");
+    expect(preview.request.message).not.toContain("urn:pcc:env:prod\n");
+    const signature = await preview.account.signMessage({ message: preview.request.message });
+    vi.stubEnv("PCC_DEPLOYMENT_ENV", "production");
+    const response = await app.inject({ method: "POST", url: `${path}/${preview.request.requestId}/proof`, payload: { signature } });
+    expect(response.statusCode).toBe(401); expect(response.json()).toEqual({ error: "invalid_proof" });
+    expect(getLinkRequest(preview.request.requestId)?.status).toBe("failed");
   });
 
   it("replay consumes once, including two concurrent valid proofs", async () => {
@@ -199,15 +323,38 @@ describe("W1 wallet ceremony", () => {
     }
     expect((await approve(request)).json()).toEqual({ error: "too_many_attempts" });
     clockNow += 600001;
-    expect((await app.inject({ url: `${path}/by-code/BBBB-BBBB`, headers: owner })).statusCode).toBe(404);
+    expect((await lookup("BBBB-BBBB")).statusCode).toBe(404);
   });
 
-  it("by-code shares wrong-code counter per principal", async () => {
+  it("POST lookup shares the wrong-code counter per authenticated credential", async () => {
     const { request } = await proved();
-    for (let i = 0; i < 5; i++) expect((await app.inject({ url: `${path}/by-code/BBBB-BBBB`, headers: owner })).statusCode).toBe(404);
-    const response = await app.inject({ url: `${path}/by-code/${request.userCode}`, headers: owner });
+    for (let i = 0; i < 5; i++) expect((await lookup("BBBB-BBBB")).statusCode).toBe(404);
+    const response = await lookup(request.userCode);
     expect(response.statusCode).toBe(429);
-    expect((await app.inject({ url: `${path}/by-code/${request.userCode}`, headers: other })).statusCode).toBe(200);
+    expect((await lookup(request.userCode, other)).statusCode).toBe(200);
+  });
+
+  it("a second API key claiming the same account does not lock out the first key after five wrong codes", async () => {
+    const { request } = await proved();
+    const wrong = request.userCode === "BBBB-BBBB" ? "CCCC-CCCC" : "BBBB-BBBB";
+    for (let i = 0; i < 5; i++) {
+      const response = await lookup(wrong, sameAccount);
+      expect(response.statusCode).toBe(404); expect(response.json()).toEqual({ error: "not_found" });
+    }
+    expect((await lookup(request.userCode, sameAccount)).statusCode).toBe(429);
+    expect((await lookup(request.userCode, owner)).statusCode).toBe(200);
+    expect((await approve(request, owner)).statusCode).toBe(200);
+  });
+
+  it("wrong codes are counted per session token rather than a shared cookie account", async () => {
+    const accountId = privateKeyToAccount(generatePrivateKey()).address;
+    const first = sessionHeaders("cookie-first", accountId);
+    const second = sessionHeaders("cookie-second", accountId);
+    const { request } = await proved();
+    const wrong = request.userCode === "BBBB-BBBB" ? "CCCC-CCCC" : "BBBB-BBBB";
+    for (let i = 0; i < 5; i++) expect((await lookup(wrong, second)).statusCode).toBe(404);
+    expect((await lookup(request.userCode, second)).statusCode).toBe(429);
+    expect((await lookup(request.userCode, first)).statusCode).toBe(200);
   });
 
   it("a second approve by either account is already_decided", async () => {
@@ -217,6 +364,24 @@ describe("W1 wallet ceremony", () => {
       const response = await approve(request, headers);
       expect(response.statusCode).toBe(409); expect(response.json()).toEqual({ error: "already_decided" });
     }
+  });
+
+  it("repository approve then deny refuses already_decided and leaves the link active", async () => {
+    const { account, request } = await proved();
+    const approved = decideLinkRequest(request.requestId, "account-a", "approve", clockNow);
+    expect(approved.status).toBe("approved");
+    expect(() => decideLinkRequest(request.requestId, "account-a", "deny", clockNow + 1))
+      .toThrow(expect.objectContaining({ status: 409, code: "already_decided" }));
+    expect(getLinkRequest(request.requestId)?.status).toBe("approved");
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 }))
+      .toMatchObject({ linkId: "linkId" in approved ? approved.linkId : undefined, accountId: "account-a" });
+    expect(getStore().db.get<any>(sql`SELECT revoked_at FROM wallet_links`).revoked_at).toBeNull();
+  });
+
+  it("approve compares accepted consent SHA256 hex case-insensitively", async () => {
+    const { request } = await proved();
+    const response = await approve(request, owner, { consentSha256: CONSENT_SHA256.toUpperCase() });
+    expect(response.statusCode).toBe(200); expect(response.json().status).toBe("approved");
   });
 
   it("concurrent approvals create exactly one receipt", async () => {
@@ -230,7 +395,7 @@ describe("W1 wallet ceremony", () => {
     const { request } = await proved();
     expect((await approve(request, owner, { decision: "deny" })).json()).toEqual({ status: "denied" });
     expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "denied" });
-    expect((await app.inject({ url: `${path}/by-code/${request.userCode}`, headers: owner })).statusCode).toBe(404);
+    expect((await lookup(request.userCode)).statusCode).toBe(404);
     expect((await app.inject({ url: "/api/wallets", headers: owner })).json()).toEqual({ links: [] });
   });
 
@@ -287,6 +452,53 @@ describe("W1 wallet ceremony", () => {
     expect((await revoke(owner, { reason: "BAD" })).json()).toEqual({ error: "invalid_request" });
   });
 
+  it("the approving API key alone lists and revokes a link when another key claims the same account", async () => {
+    const { request } = await proved({}, sameAccount);
+    const { linkId } = (await approve(request, owner)).json();
+    expect((await app.inject({ url: "/api/wallets", headers: owner })).json().links).toHaveLength(1);
+    expect((await app.inject({ url: "/api/wallets", headers: sameAccount })).json()).toEqual({ links: [] });
+    const stranger = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: sameAccount, payload: {} });
+    expect(stranger.statusCode).toBe(404); expect(stranger.json()).toEqual({ error: "not_found" });
+    expect(getStore().db.get<any>(sql`SELECT revoked_at FROM wallet_links WHERE id = ${linkId}`).revoked_at).toBeNull();
+    const revoke = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: owner });
+    expect(revoke.statusCode).toBe(200); expect(revoke.json().status).toBe("revoked");
+  });
+
+  it("cookie-approved links are manageable by same-account cookie sessions and hidden from its API keys", async () => {
+    const accountId = privateKeyToAccount(generatePrivateKey()).address;
+    const approvingSession = sessionHeaders("cookie-manages-first", accountId);
+    const anotherSession = sessionHeaders("cookie-manages-second", accountId);
+    getStore().db.run(sql`UPDATE api_keys SET operator_id = ${accountId} WHERE id = 'same-account-key'`);
+    const { request } = await proved();
+    const { linkId } = (await approve(request, approvingSession)).json();
+    expect((await app.inject({ url: "/api/wallets", headers: anotherSession })).json().links).toHaveLength(1);
+    expect((await app.inject({ url: "/api/wallets", headers: sameAccount })).json()).toEqual({ links: [] });
+    const keyRevoke = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: sameAccount, payload: {} });
+    expect(keyRevoke.statusCode).toBe(404); expect(keyRevoke.json()).toEqual({ error: "not_found" });
+    expect((await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: anotherSession, payload: {} })).statusCode).toBe(200);
+  });
+
+  it("API-key-approved links are hidden from and not revocable by a cookie session of the same account", async () => {
+    const accountId = privateKeyToAccount(generatePrivateKey()).address;
+    const cookieHeaders = sessionHeaders("cookie-with-key-approved-link", accountId);
+    getStore().db.run(sql`UPDATE api_keys SET operator_id = ${accountId} WHERE id = 'owner'`);
+    const { request } = await proved();
+    const { linkId } = (await approve(request)).json();
+    expect((await app.inject({ url: "/api/wallets", headers: cookieHeaders })).json()).toEqual({ links: [] });
+    const response = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: cookieHeaders, payload: {} });
+    expect(response.statusCode).toBe(404); expect(response.json()).toEqual({ error: "not_found" });
+    expect((await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: owner, payload: {} })).statusCode).toBe(200);
+  });
+
+  it("revoke without a body is treated as an empty object and remains idempotent", async () => {
+    const { request } = await proved();
+    const { linkId } = (await approve(request)).json();
+    const first = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: owner });
+    expect(first.statusCode).toBe(200); expect(first.json().status).toBe("revoked");
+    clockNow += 1000;
+    expect((await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: owner })).json()).toEqual(first.json());
+  });
+
   it("expired links are excluded and revoked in the replacement approval transaction", async () => {
     const { account, request } = await proved();
     const { linkId } = (await approve(request)).json();
@@ -322,9 +534,9 @@ describe("W1 wallet ceremony", () => {
     expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "authorization_pending" });
   });
 
-  it("public by-code is hidden until proof and unknown ids have 404", async () => {
+  it("POST lookup is hidden until proof and unknown ids have 404", async () => {
     const { request } = await create();
-    expect((await app.inject({ url: `${path}/by-code/${request.userCode}`, headers: owner })).statusCode).toBe(404);
+    expect((await lookup(request.userCode)).statusCode).toBe(404);
     expect((await app.inject(`${path}/lr_${"A".repeat(26)}`)).json()).toEqual({ error: "not_found" });
     expect((await app.inject({ method: "POST", url: `${path}/lr_${"A".repeat(26)}/proof`, payload: { signature: "abc" } })).statusCode).toBe(404);
     expect((await app.inject(`${path}/does-not-exist`)).statusCode).toBe(404);
@@ -332,30 +544,40 @@ describe("W1 wallet ceremony", () => {
   });
 
   it("four owner routes refuse anonymous callers with normal gateway 401", async () => {
-    for (const [method, url, payload] of [["GET", `${path}/by-code/BBBB-BBBB`, undefined], ["POST", `${path}/lr_${"A".repeat(26)}/approve`, {}], ["GET", "/api/wallets", undefined], ["POST", `/api/wallets/wl_${"A".repeat(26)}/revoke`, {}]] as const) {
+    for (const [method, url, payload] of [["POST", `${path}/lookup`, { userCode: "BBBB-BBBB" }], ["POST", `${path}/lr_${"A".repeat(26)}/approve`, {}], ["GET", "/api/wallets", undefined], ["POST", `/api/wallets/wl_${"A".repeat(26)}/revoke`, {}]] as const) {
       const response = await app.inject({ method, url, payload });
       expect(response.statusCode).toBe(401); expect(response.json().error).toBe("api_key_required");
     }
   });
 
-  it("I1 takes priority over owner auth and GET body validation", async () => {
+  it("owner authentication onRequest precedes I1; authenticated I1 precedes body validation", async () => {
     const { request } = await create();
-    for (const [method, url] of [["POST", `${path}/${request.requestId}/approve`], ["POST", `/api/wallets/wl_${"A".repeat(26)}/revoke`], ["GET", "/api/wallets"], ["GET", `${path}/by-code/BBBB-BBBB`]] as const) {
-      const response = await app.inject({ method, url, payload: { nested: [{ seed_phrase: "refused-sentinel" }] } });
+    for (const url of [`${path}/lookup`, `${path}/${request.requestId}/approve`, `/api/wallets/wl_${"A".repeat(26)}/revoke`]) {
+      const payload = { nested: [{ seed_phrase: "refused-sentinel" }] };
+      const anonymous = await app.inject({ method: "POST", url, payload });
+      expect(anonymous.statusCode).toBe(401); expect(anonymous.json().error).toBe("api_key_required");
+      const response = await app.inject({ method: "POST", url, headers: owner, payload });
       expect(response.statusCode).toBe(400); expect(response.json()).toEqual({ error: "key_material_refused" });
       expect(response.body).not.toContain("refused-sentinel");
     }
-    const unexpected = await app.inject({ method: "GET", url: `/api/wallets`, headers: owner, payload: { unknown: true } });
-    expect(unexpected.statusCode).toBe(400); expect(unexpected.json()).toEqual({ error: "invalid_request" });
   });
 
-  it("I1 takes priority over the coarse global rate limit without auth usage", async () => {
+  it("global onRequest rate limit precedes I1 without authenticating an exhausted IP", async () => {
     const { request } = await create();
     for (let i = 0; i < 201; i++) await app.inject(`${path}/${request.requestId}`);
     const before = getRepos().apiKeys.findById("owner")?.usageCount;
     const response = await app.inject({ method: "POST", url: `${path}/${request.requestId}/approve`, headers: owner, payload: { secret: "refused-sentinel" } });
-    expect(response.statusCode).toBe(400); expect(response.json()).toEqual({ error: "key_material_refused" });
+    expect(response.statusCode).toBe(429); expect(response.json()).toEqual({ error: "rate_limited" });
     expect(getRepos().apiKeys.findById("owner")?.usageCount).toBe(before);
+  });
+
+  it.each(["GET", "HEAD"] as const)("%s with a body is invalid_request without reading the stream", async method => {
+    for (const headers of [{ "content-length": "24" }, { "transfer-encoding": "chunked" }]) {
+      const response = await app.inject({ method, url: "/api/wallets", headers: { ...owner, ...headers }, payload: '{"secret":"unread-body"}' });
+      expect(response.statusCode).toBe(400);
+      if (method === "GET") expect(response.json()).toEqual({ error: "invalid_request" });
+      expect(bodyStreamIterations).toBe(0);
+    }
   });
 
   it("coarse rate accounting remains shared with other gateway routes", async () => {

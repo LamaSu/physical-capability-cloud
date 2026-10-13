@@ -52,7 +52,8 @@ export function isWalletRequest(rawUrl: string): boolean {
   if (/^https?:\/\//i.test(path)) {
     try { path = new URL(path).pathname; } catch { return false; }
   }
-  return canonicalRequestPath(path).startsWith("/api/wallets");
+  const canonical = canonicalRequestPath(path);
+  return canonical === "/api/wallets" || canonical.startsWith("/api/wallets/");
 }
 
 /** Sensitive sinks record a route template; other URLs retain the existing logging policy. */

@@ -167,8 +167,9 @@ async function apiGateImpl(app: FastifyInstance) {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
 
-    // Skip public routes
-    if (isPublicRoute(req.url, req.method)) return;
+    const optionalCreate = req.method === "POST" && req.url.split("?")[0] === "/api/wallets/link-requests";
+    // A presented credential on create must be validated even though create is public.
+    if (isPublicRoute(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
@@ -180,7 +181,9 @@ async function apiGateImpl(app: FastifyInstance) {
     }
 
     // Try SIWE session (dashboard users)
-    const session = resolveSession(req);
+    // A cookie must not turn an invalid presented key into anonymous creation.
+    const sessionRequest = optionalCreate ? Object.assign(Object.create(req), { cookies: {} }) as FastifyRequest : req;
+    const session = resolveSession(sessionRequest);
     if (session) {
       req.userId = session.address;
       return;
@@ -197,14 +200,16 @@ async function apiGateImpl(app: FastifyInstance) {
   app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
     // A target the router would route differently is never judged (N105).
     if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
-    if (isWalletRequest(req.url)) return;
+    if (isWalletRequest(req.url) && (req.method === "GET" || req.method === "HEAD") &&
+      (req.headers["transfer-encoding"] !== undefined || Number(req.headers["content-length"] ?? 0) > 0)) {
+      return reply.status(400).send({ error: "invalid_request" });
+    }
     return authenticate(req, reply);
   });
   app.addHook("preValidation", async (req: FastifyRequest, reply: FastifyReply) => {
     if (!isWalletRequest(req.url)) return;
-    // I1 precedes principal resolution and strict schema validation.
+    // Root preValidation: I1 precedes route validation and handler persistence.
     if (containsKeyMaterial(req.body)) return reply.status(400).send({ error: "key_material_refused" });
-    return authenticate(req, reply);
   });
 }
 

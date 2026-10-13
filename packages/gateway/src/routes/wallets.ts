@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { getAddress, isAddress } from "viem";
 import { isValidKernelId } from "@pcc/spec";
@@ -11,7 +12,7 @@ import {
   WalletLinkError, claimLinkProof, createLinkRequest, decideLinkRequest, displayUserCode, finishLinkProof,
   getLinkRequest, listWalletLinks, lookupLinkRequestByCode, revokeWalletLink,
 } from "../services/wallet-links/repository.js";
-import { containsKeyMaterial, requesterIpClass, userCodesEqual, walletRequestLimits } from "../services/wallet-links/guards.js";
+import { requesterIpClass, userCodesEqual, walletRequestLimits } from "../services/wallet-links/guards.js";
 
 const label = z.string().regex(/^[A-Za-z0-9._@-]{1,64}$/).refine(value => value.trim() === value);
 const clientName = z.string().regex(/^[A-Za-z0-9._-]{1,32}$/).refine(value => value.trim() === value);
@@ -23,6 +24,7 @@ const createSchema = z.object({
   kernelId: z.string().refine(isValidKernelId).optional(),
 }).strict();
 const proofSchema = z.object({ signature: z.string().min(1).max(256) }).strict();
+const lookupSchema = z.object({ userCode: z.string().min(1).max(64) }).strict();
 const approveSchema = z.object({ userCode: z.string().min(1).max(64), decision: z.enum(["approve", "deny"]),
   consentSha256: z.string().regex(/^[a-fA-F0-9]{64}$/).refine(value => value.trim() === value) }).strict();
 const revokeSchema = z.object({ reason: z.string().regex(/^[a-z_]{1,32}$/).refine(value => value.trim() === value).optional() }).strict();
@@ -45,6 +47,13 @@ function accountPrincipal(req: FastifyRequest): string {
   return accountId;
 }
 
+function credentialPrincipal(req: FastifyRequest): string {
+  if (req.apiKeyId) return `key:${req.apiKeyId}`;
+  const session = resolveSession(req);
+  if (!session) throw new WalletLinkError(401, "api_key_required");
+  return `session:${createHash("sha256").update(session.token).digest("hex")}`;
+}
+
 function checkApprovalOrigin(req: FastifyRequest, origin: string) {
   if (req.apiKeyId || !req.cookies?.pcc_session) return;
   const cookieRequest = Object.create(req) as FastifyRequest;
@@ -57,29 +66,6 @@ function checkApprovalOrigin(req: FastifyRequest, origin: string) {
 
 export async function walletsRoutes(app: FastifyInstance) {
   const limits = walletRequestLimits();
-  // Fastify skips body parsing for GET/HEAD. Parse their optional JSON here so
-  // I1 also precedes the empty-body validation and authentication on those routes.
-  app.addHook("onRequest", async (req, reply) => {
-    if (req.method !== "GET" && req.method !== "HEAD") return;
-    if (!req.headers["transfer-encoding"] && Number(req.headers["content-length"] ?? 0) === 0) return;
-    const chunks: Buffer[] = [];
-    let size = 0;
-    for await (const part of req.raw) {
-      const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
-      size += chunk.length;
-      if (size > (req.routeOptions.bodyLimit ?? 1048576)) return reply.code(400).send({ error: "invalid_request" });
-      chunks.push(chunk);
-    }
-    try { req.body = JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-    catch { return reply.code(400).send({ error: "invalid_request" }); }
-  });
-  app.addHook("preValidation", async (req, reply) => {
-    if (containsKeyMaterial(req.body)) return reply.code(400).send({ error: "key_material_refused" });
-    // Fastify does not support JSON body schemas on GET; GET accepts no members.
-    if ((req.method === "GET" || req.method === "HEAD") && req.body !== undefined && !z.object({}).strict().safeParse(req.body).success) {
-      return reply.code(400).send({ error: "invalid_request" });
-    }
-  });
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof WalletLinkError) return reply.code(error.status).send({ error: error.code });
     if (error.validation || (error.statusCode && error.statusCode < 500)) return reply.code(400).send({ error: "invalid_request" });
@@ -109,7 +95,7 @@ export async function walletsRoutes(app: FastifyInstance) {
     }
     const now = Date.now();
     limits.create(req.ip, now);
-    const row = createLinkRequest({ ...input, identity, role: input.role }, requesterIpClass(req.ip), config, now);
+    const row = createLinkRequest({ ...input, identity, role: input.role }, requesterIpClass(req.ip), config, now, req.apiKeyId ?? null);
     return reply.code(201).send({ requestId: row.id, userCode: displayUserCode(row.user_code),
       verificationUri: config.uri, message: row.message, expiresAt: row.expires_at, interval: 5 });
   });
@@ -138,12 +124,15 @@ export async function walletsRoutes(app: FastifyInstance) {
     return { status: "authorization_pending" };
   });
 
-  app.get<{ Params: { code: string } }>("/api/wallets/link-requests/by-code/:code", { preHandler: requireAuth }, async req => {
+  app.post("/api/wallets/link-requests/lookup", {
+    ...bodyOptions(lookupSchema, { userCode: { type: "string" } }, ["userCode"]), onRequest: requireAuth,
+  }, async req => {
     const accountId = accountPrincipal(req);
+    const credential = credentialPrincipal(req);
     const now = Date.now();
-    limits.checkCodes(accountId, now);
-    const row = lookupLinkRequestByCode(req.params.code, now);
-    if (!row) { limits.wrongCode(accountId, now); throw new WalletLinkError(404, "not_found"); }
+    limits.checkCodes(credential, now);
+    const row = lookupLinkRequestByCode(lookupSchema.parse(req.body).userCode, now);
+    if (!row) { limits.wrongCode(credential, now); throw new WalletLinkError(404, "not_found"); }
     return { requestId: row.id, role: row.role, keyType: row.key_type,
       ...(row.key_type === "secp256k1" ? { address: row.address_or_pubkey } : { publicKey: row.address_or_pubkey }),
       label: row.label, clientInfo: row.client_info ? JSON.parse(row.client_info) : null, chainId: row.chain_id,
@@ -155,30 +144,34 @@ export async function walletsRoutes(app: FastifyInstance) {
 
   app.post<{ Params: { id: string } }>("/api/wallets/link-requests/:id/approve", {
     ...bodyOptions(approveSchema, { userCode: { type: "string" }, decision: { enum: ["approve", "deny"] }, consentSha256: { type: "string" } }, ["userCode", "decision", "consentSha256"]),
-    preHandler: requireAuth,
+    onRequest: requireAuth,
   }, async req => {
     const accountId = accountPrincipal(req);
+    const credential = credentialPrincipal(req);
     const config = walletLinkConfig();
     checkApprovalOrigin(req, config.publicOrigin);
     const input = approveSchema.parse(req.body);
     const now = Date.now();
-    limits.checkCodes(accountId, now);
+    limits.checkCodes(credential, now);
     const row = getLinkRequest(req.params.id);
     if (!row) throw new WalletLinkError(404, "not_found");
     if (!userCodesEqual(input.userCode, row.user_code)) {
-      limits.wrongCode(accountId, now); throw new WalletLinkError(403, "code_mismatch");
+      limits.wrongCode(credential, now); throw new WalletLinkError(403, "code_mismatch");
     }
-    if (input.consentSha256 !== CONSENT_SHA256 || row.consent_sha256 !== CONSENT_SHA256 || row.consent_version !== CONSENT_VERSION) {
+    if (input.consentSha256.toLowerCase() !== CONSENT_SHA256 || row.consent_sha256.toLowerCase() !== CONSENT_SHA256 || row.consent_version !== CONSENT_VERSION) {
       throw new WalletLinkError(409, "consent_changed");
     }
     if (Date.parse(row.expires_at) <= now) throw new WalletLinkError(410, "expired");
     if (row.status !== "awaiting_approval") throw new WalletLinkError(409, "already_decided");
-    return decideLinkRequest(row.id, accountId, input.decision, now);
+    return decideLinkRequest(row.id, accountId, input.decision, now, req.apiKeyId ?? null);
   });
 
-  app.get("/api/wallets", { preHandler: requireAuth }, async req => ({ links: listWalletLinks(accountPrincipal(req), Date.now()) }));
+  app.get("/api/wallets", { onRequest: requireAuth }, async req => ({ links: listWalletLinks(accountPrincipal(req), Date.now(), req.apiKeyId ?? null) }));
 
   app.post<{ Params: { linkId: string } }>("/api/wallets/:linkId/revoke", {
-    ...bodyOptions(revokeSchema, { reason: { type: "string", pattern: "^[a-z_]{1,32}$" } }), preHandler: requireAuth,
-  }, async req => revokeWalletLink(req.params.linkId, accountPrincipal(req), revokeSchema.parse(req.body).reason, Date.now()));
+    ...bodyOptions(revokeSchema, { reason: { type: "string", pattern: "^[a-z_]{1,32}$" } }), onRequest: requireAuth,
+    preValidation: async req => {
+      if (req.body == null && req.headers["transfer-encoding"] === undefined && Number(req.headers["content-length"] ?? 0) === 0) req.body = {};
+    },
+  }, async req => revokeWalletLink(req.params.linkId, accountPrincipal(req), revokeSchema.parse(req.body).reason, Date.now(), req.apiKeyId ?? null));
 }
