@@ -11,6 +11,17 @@
  */
 
 import * as Sentry from "@sentry/node";
+import { isWalletRequest } from "./services/telemetry-privacy.js";
+
+/** Drop ceremony events before Sentry's transport receives request context. */
+export function walletSafeSentryEvent<T extends {
+  request?: { url?: string };
+  extra?: Record<string, unknown>;
+  transaction?: string;
+}>(event: T): T | null {
+  const urls = [event.request?.url, event.extra?.url, event.transaction];
+  return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : event;
+}
 
 const SENTRY_DSN =
   process.env.SENTRY_DSN ||
@@ -37,6 +48,18 @@ export function initSentry(): void {
     // 100 % sample rate for the hackathon demo; reduce in production
     tracesSampleRate: 1.0,
     profilesSampleRate: 0.1,
+    beforeSend: walletSafeSentryEvent,
+    beforeSendTransaction: walletSafeSentryEvent,
+    beforeBreadcrumb(breadcrumb) {
+      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];
+      return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : breadcrumb;
+    },
+    beforeSendSpan(span) {
+      const urls = [span.description, span.data["url.full"], span.data["http.url"], span.data["http.route"]];
+      return urls.some((url) => typeof url === "string" && isWalletRequest(url))
+        ? { ...span, description: "/api/wallets", data: {} }
+        : span;
+    },
     // Tag every event with the service name so Sentry dashboards can filter
     initialScope: {
       tags: { service: "pcc-gateway" },

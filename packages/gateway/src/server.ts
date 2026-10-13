@@ -5,7 +5,8 @@ initSentry();
 
 import { initPostHog, shutdownPostHog } from "./services/posthog-service.js";
 import { writeAuditHook } from "./services/write-audit-hook.js";
-import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook } from "./services/telemetry-privacy.js";
+import { GATEWAY_LOGGER_OPTIONS, telemetryLookalikeHook, isWalletRequest } from "./services/telemetry-privacy.js";
+import { walletsRoutes } from "./routes/wallets.js";
 initPostHog();
 import { randomBytes } from "node:crypto";
 
@@ -210,6 +211,10 @@ export async function createGateway(port = 3200) {
   // and returns a clean 400 instead of letting them bubble as 500s to Sentry.
   // Registered after Sentry so Sentry's onError hook still fires for 500s.
   app.setErrorHandler((error, request, reply) => {
+    if (isWalletRequest(request.url)) {
+      const status = (error.statusCode ?? 500) >= 500 ? 500 : 400;
+      return reply.status(status).send({ error: status === 500 ? "internal_error" : "invalid_request" });
+    }
     // FST_ERR_CTP_BODY_TOO_LARGE or body size mismatch
     if (
       error.code === "FST_ERR_CTP_BODY_TOO_LARGE" ||
@@ -265,6 +270,7 @@ export async function createGateway(port = 3200) {
   // status gate is cheap (only 5xx pay the parse cost) and it skips /api/feedback
   // itself. See ai/research/agent-feedback-auto-design.md.
   app.addHook("onSend", async (request, reply, payload) => {
+    if (isWalletRequest(request.url)) return payload;
     if (typeof payload !== "string" || reply.statusCode < 500 || reply.statusCode >= 600) return payload;
     return decorateWithReportHint(payload, {
       statusCode: reply.statusCode,
@@ -678,6 +684,7 @@ export async function createGateway(port = 3200) {
   await app.register(registrySnapshotRoutes);
   await app.register(spaceRoutes);
   await app.register(operatorRoutes);
+  await app.register(walletsRoutes);
   await app.register(operatorWorkRoutes);
   await app.register(productHomeRoutes);
   await app.register(operatorsPublicRoutes);
@@ -1121,4 +1128,3 @@ process.on("uncaughtException", (err) => {
   console.error("[gateway] Uncaught exception:", err);
   process.exit(1);
 });
-

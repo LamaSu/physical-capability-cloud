@@ -9,6 +9,8 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
+import { containsKeyMaterial } from "../services/wallet-links/guards.js";
+import { isWalletRequest } from "../services/telemetry-privacy.js";
 
 /** Routes that don't require any auth */
 const PUBLIC_PREFIXES = [
@@ -133,6 +135,10 @@ const PUBLIC_LOB_WEBHOOK_PATH = "/api/lob/webhook";
 
 function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
+  // Only the device-authorization capability endpoints are public.
+  if (method === "POST" && path === "/api/wallets/link-requests") return true;
+  if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/proof$/.test(path)) return true;
+  if ((method === "GET" || method === "HEAD") && /^\/api\/wallets\/link-requests\/[^/]+$/.test(path)) return true;
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
   if (PUBLIC_EXACT.includes(path)) return true;
   if (method === "POST" && path === PUBLIC_CARRIER_WEBHOOK_PATH) return true;
@@ -157,10 +163,7 @@ function isPublicRoute(url: string, method?: string): boolean {
 }
 
 async function apiGateImpl(app: FastifyInstance) {
-  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
-    // A target the router would route differently is never judged (N105; the server-level guard
-    // refuses it first, and this keeps apiGate closed even without that guard).
-    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+  const authenticate = async (req: FastifyRequest, reply: FastifyReply) => {
     // Only gate /api/* routes
     if (!req.url.startsWith("/api/")) return;
 
@@ -190,6 +193,18 @@ async function apiGateImpl(app: FastifyInstance) {
       provision_url: "/api/auth/provision",
       docs: "https://capability.network/whitepaper.md",
     });
+  };
+  app.addHook("onRequest", async (req: FastifyRequest, reply: FastifyReply) => {
+    // A target the router would route differently is never judged (N105).
+    if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
+    if (isWalletRequest(req.url)) return;
+    return authenticate(req, reply);
+  });
+  app.addHook("preValidation", async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!isWalletRequest(req.url)) return;
+    // I1 precedes principal resolution and strict schema validation.
+    if (containsKeyMaterial(req.body)) return reply.status(400).send({ error: "key_material_refused" });
+    return authenticate(req, reply);
   });
 }
 
