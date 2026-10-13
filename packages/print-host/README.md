@@ -26,8 +26,9 @@ and a silent printer's once-only cancel-confirm deadline. An Ed25519 seed scan c
 isolated leak forms, seed-free text, random bytes, and real event hashes/signature
 as false-positive controls.
 GAP-7 also checks that an intact copied journal resumes alongside the requirement to
-refuse a tampered copy. The original journal and intact copy are scanned again after
-resume and delivery, before finalization can erase a leaked session seed.
+refuse a tampered copy. The original journal is scanned again after resume and delivery,
+before finalization can erase a leaked session seed. The intact copy's scan detects
+only the original bundle's session key.
 
 The at-rest scan covers eight text forms: 64-hex seed, `0x`-prefixed 64-hex seed,
 128-hex secret key, base64 seed, base64url seed, base64 secret key, JSON numeric
@@ -101,7 +102,9 @@ deadline. Other ids change nothing, and `"stop"` ends
 work without a terminal event. A successful replacement start retains the old cancel
 handles. In silent mode, cancelling the replacement before the old deadline fires
 arms no new deadline; when the old callback runs it skips the replacement, which
-remains silent indefinitely. This replacement sequence is a declared gap in the fake.
+remains silent indefinitely unless a later cancel arms a fresh deadline. This replacement
+sequence is a declared gap in the fake. The after-resolve poll retains its handle in the
+same way: a replacement cancelled before the stale poll fires gets no report.
 Real-time waits let hashing finish; fake-time draining
 is only a fallback. Each test uses its own
 kernel and device ids. IPP repros use fake timers and dispose the adapter; the only
