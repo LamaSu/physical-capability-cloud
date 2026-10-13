@@ -8,7 +8,8 @@
   "types": "dist/cli.d.ts",
   "bin": {
     "onboard": "dist/cli.js",
-    "pcc-onboard-chat": "dist/cli.js"
+    "pcc-onboard-chat": "dist/cli.js",
+    "pcc-wallet": "dist/wallet/cli.js"
   },
   "files": [
     "dist",

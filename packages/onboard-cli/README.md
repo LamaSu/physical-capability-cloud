@@ -101,6 +101,19 @@ and the dashboard behave identically.
   written it with `--persist`.
 - `--print-snippet` makes zero network calls.
 
+## pcc-wallet
+
+Run `pcc-wallet init --role agent --label my-agent` (or `onboard wallet init`)
+to create a key on this computer, hand the printed code and URL to your PCC
+account owner for browser approval, and request Base Sepolia test funds.
+Devices default to Ed25519; agents default to secp256k1. Keys stay in
+`~/.pcc/wallets/<label>.json` (0600, directory 0700), or `PCC_WALLET_DIR`.
+Gateway resolution is the same as onboard. `--yes` skips typed consent only
+on non-TTY stdin; browser approval still requires the human owner.
+Use `link`, `fund`, `status`, `export-address`, or owner-only `revoke`
+(`--api-key` / `PCC_API_KEY`, or Wallets → Unlink in the dashboard).
+There is no key export; encryption and Windows storage are not in v1.
+
 ## License
 
 Apache-2.0
