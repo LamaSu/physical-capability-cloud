@@ -6,6 +6,7 @@ import { schema, eq, and } from "@pcc/store";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 import { SCOPE_AWAITING_ACCEPTANCE, SCOPE_AWAITING_FUNDING, scopeFundingRefusal } from "../services/scope-acceptance.js";
 import { emergencyStopState, stopRefusal } from "./device-relay.js";
+import { scopeExpiryMs } from "../services/scope-expiry.js";
 
 const { operatorPolicies, pendingApprovals, toolCallRelay, executionScopes } = schema;
 
@@ -519,7 +520,8 @@ export async function operatorRoutes(app: FastifyInstance) {
       const refusal = refuseKernelAction(req, authority, scope.kernelId, "decide");
       if (refusal) return reply.code(refusal.status).send(refusal.body);
       if (scope.status !== SCOPE_AWAITING_ACCEPTANCE) return reply.status(409).send(scopeAlreadyDecided(scope.status));
-      if (new Date(scope.expiresAt) <= new Date()) {
+      // An expiry that can't be read is an expired one (N133 follow-up: fail closed).
+      if (scopeExpiryMs(scope.expiresAt) <= Date.now()) {
         return reply.status(409).send({ error: "scope_expired", message: "This scope expired before it was accepted; this request changed nothing." });
       }
       // Nothing below awaits, so the stop read, the funding read and the update are one
