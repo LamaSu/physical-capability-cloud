@@ -954,7 +954,7 @@ export async function setupRoutes(app: FastifyInstance) {
         if (statusResult.evidenceBundleId) {
           evidenceBundleId = statusResult.evidenceBundleId;
         }
-        if (finalStatus === "completed" || finalStatus === "failed") {
+        if (finalStatus === "completed" || finalStatus === "failed" || finalStatus === "rejected_busy") {
           break;
         }
         // "unknown" means the job ran without DB tracking (no capability found).

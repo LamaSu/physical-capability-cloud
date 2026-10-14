@@ -11,7 +11,7 @@ import { EvidenceEmitter } from "@pcc/kernel";
 import { createAdaptersFromConfig, loadKernelConfig } from "@pcc/kernel";
 import { initSafetyGateway, getSafetyGateway } from "@pcc/kernel";
 import type { KernelConfig } from "@pcc/kernel";
-import type { MachineAdapter } from "@pcc/kernel";
+import type { JobResult, MachineAdapter } from "@pcc/kernel";
 import { OctoPrintAdapter, OPCUAAdapter, OpentronsMachineAdapter, SiLAAdapter } from "@pcc/kernel";
 import type { EvidenceBundle } from "@pcc/spec";
 import { getRepos } from "../db.js";
@@ -107,12 +107,38 @@ export function adapterIsSimulated(machine: MachineAdapter | undefined): boolean
 /** How many finished jobs keep the adapter that ran them; an evicted one reads as simulated. */
 const JOB_ADAPTER_MEMORY = 1000;
 
+/**
+ * A job refused because ANOTHER job holds its device ("adapter": the holder is
+ * recording; "quiescing": the holder's adapter has not yet confirmed its
+ * evidence is complete) is retried once, after the holder's run settles, waiting
+ * at most this long (N127). PCC_KERNEL_BUSY_RETRY_WAIT_MS overrides it.
+ */
+const DEFAULT_BUSY_RETRY_WAIT_MS = 30_000;
+function busyRetryWaitMs(): number {
+  const ms = Number(process.env.PCC_KERNEL_BUSY_RETRY_WAIT_MS);
+  return Number.isFinite(ms) && ms >= 0 ? ms : DEFAULT_BUSY_RETRY_WAIT_MS;
+}
+
+/**
+ * The terminal status of a job still refused busy after its one retry (N127).
+ * It is not "failed": nothing ran, the device is not at fault, and no failure is
+ * counted against it (the breaker, already, and every reader of "failed").
+ */
+export const BUSY_REFUSED_STATUS = "rejected_busy";
+
+/** The status a run that did not succeed leaves its job in: refused busy is not failed (N127). */
+function terminalStatusOf(result: JobResult): string {
+  return result.busy === undefined ? "failed" : BUSY_REFUSED_STATUS;
+}
+
 export class KernelService {
   private runners: Map<string, JobRunner> = new Map();
   private machines: Map<string, MachineAdapter> = new Map();
   private emitter: EvidenceEmitter;
   private config: KernelConfig;
   private runningJobs: Map<string, RunningJob> = new Map();
+  /** Each running job's settlement: a job refused because its device is busy waits on the holder's (N127). */
+  private jobSettled: Map<string, Promise<void>> = new Map();
   /** The adapter each dispatched job ran on, for jobRanSimulated (the newest JOB_ADAPTER_MEMORY jobs). */
   private jobAdapters: Map<string, MachineAdapter | undefined> = new Map();
   /** Cache of finalized evidence bundles, keyed by jobId */
@@ -308,6 +334,13 @@ export class KernelService {
   async submitJob(params: SubmitJobParams): Promise<{ jobId: string; deviceId: string; status: "accepted" }> {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
 
+    // A job that is still running is not submitted again (N127). Its run would be
+    // refused "step" busy, and the refusal would then rewrite the running job's row
+    // and drop its in-memory entry. Nothing below has run yet, so nothing is touched.
+    if (this.runningJobs.has(jobId)) {
+      throw new Error(`job_already_running: ${jobId}`);
+    }
+
     const deviceId = this.selectDevice(params.deviceId);
     if (!deviceId) {
       throw new Error("no_devices_available");
@@ -353,6 +386,13 @@ export class KernelService {
 
     // Track in-memory
     this.runningJobs.set(jobId, { jobId, deviceId, startedAt: Date.now() });
+    let settle: () => void = () => {};
+    this.jobSettled.set(jobId, new Promise<void>((resolve) => (settle = resolve)));
+    const settled = () => {
+      this.runningJobs.delete(jobId);
+      this.jobSettled.delete(jobId);
+      settle();
+    };
     this.jobAdapters.set(jobId, machine);
     if (this.jobAdapters.size > JOB_ADAPTER_MEMORY) {
       this.jobAdapters.delete(this.jobAdapters.keys().next().value as string);
@@ -397,8 +437,8 @@ export class KernelService {
         (lifecycleSpan) => {
           // Telemetry: job execution starting
           pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
-          runner
-            .run({
+          this
+            .runWithBusyRetry(runner, {
               jobId,
               stepId,
               gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
@@ -409,7 +449,7 @@ export class KernelService {
               },
             })
             .then(async (result) => {
-              this.runningJobs.delete(jobId);
+              settled();
               // Feed the REAL execution outcome into the safety breaker. Admission
               // used validateOnly (which records nothing), so this is the only
               // place a genuine device success/failure reaches the breaker. A busy
@@ -430,7 +470,7 @@ export class KernelService {
                     evidenceBundleId: result.bundleId,
                   });
                 } else {
-                  repos.jobs.updateStatus(jobId, "failed");
+                  repos.jobs.updateStatus(jobId, terminalStatusOf(result));
                 }
               } catch {
                 // DB update failure is non-fatal
@@ -467,7 +507,7 @@ export class KernelService {
               endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
             })
             .catch((err: unknown) => {
-              this.runningJobs.delete(jobId);
+              settled();
               // A rejected runner.run() is a real device failure — record it.
               gateway.recordDeviceFailure(deviceId);
               try {
@@ -487,8 +527,8 @@ export class KernelService {
       // Sentry not initialised — fall back to plain fire-and-forget
       // Telemetry: job execution starting (fallback path)
       pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
-      runner
-        .run({
+      this
+        .runWithBusyRetry(runner, {
           jobId,
           stepId,
           gcodeHash: (gcodeHash ?? `sha256:${jobId}`) as `sha256:${string}`,
@@ -499,7 +539,7 @@ export class KernelService {
           },
         })
         .then(async (result) => {
-          this.runningJobs.delete(jobId);
+          settled();
           // Feed the REAL execution outcome into the safety breaker (fallback path).
           // A busy refusal never commanded the device, so it records nothing (#5205).
           if (result.success) {
@@ -517,7 +557,7 @@ export class KernelService {
                 evidenceBundleId: result.bundleId,
               });
             } else {
-              repos.jobs.updateStatus(jobId, "failed");
+              repos.jobs.updateStatus(jobId, terminalStatusOf(result));
             }
           } catch {
             // DB update failure is non-fatal
@@ -548,7 +588,7 @@ export class KernelService {
           endTrace(traceId, lifecycleLocalSpanId, result.success ? "ok" : "error");
         })
         .catch(() => {
-          this.runningJobs.delete(jobId);
+          settled();
           // A rejected runner.run() is a real device failure — record it (fallback path).
           gateway.recordDeviceFailure(deviceId);
           try {
@@ -563,6 +603,25 @@ export class KernelService {
     }
 
     return { jobId, deviceId, status: "accepted" };
+  }
+
+  /**
+   * runner.run, retried ONCE when it is refused because another job holds the
+   * device (N127): "adapter" (the holder is recording its evidence) or
+   * "quiescing" (the holder's adapter has not yet confirmed that work is done).
+   * The retry waits for the holder's run to settle, at most busyRetryWaitMs().
+   * A refusal that survives the retry is returned as it is, and submitJob gives
+   * it BUSY_REFUSED_STATUS. A "step" refusal (this job's step is already
+   * running) is a duplicate, never retried.
+   */
+  private async runWithBusyRetry(runner: JobRunner, params: Parameters<JobRunner["run"]>[0]): Promise<JobResult> {
+    const first = await runner.run(params);
+    if (first.busy === undefined || first.busy.reason === "step") return first;
+    const holder = this.jobSettled.get(first.busy.jobId) ?? Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([holder, new Promise<void>((resolve) => (timer = setTimeout(resolve, busyRetryWaitMs())))]);
+    clearTimeout(timer);
+    return runner.run(params);
   }
 
   /**

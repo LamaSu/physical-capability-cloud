@@ -102,6 +102,8 @@ export const JOB_EXECUTION_PHASE_MAP: Readonly<Record<string, KnownPhase>> = Obj
   collecting_evidence: "running",
   awaiting_pickup: "awaiting_handoff",
   timed_out: "timed_out",
+  // Refused because the device was busy with another job (N127): nothing ran, and it is no failure.
+  rejected_busy: "cancelled",
 
   // CWM step vocabulary (StepStatus, types/common.ts). A step that awaits verification,
   // was verified or is disputed has already been reported complete by its executor. The
@@ -485,6 +487,7 @@ const KERNEL_JOB_STATUS_COVERAGE: { readonly [K in KernelJobStatus]: KnownPhase 
   failed: "failed",
   cancelled: "cancelled",
   timed_out: "timed_out",
+  rejected_busy: "cancelled",
 };
 const STEP_STATUS_COVERAGE: { readonly [K in StepStatus]: KnownPhase } = {
   pending: "pending",

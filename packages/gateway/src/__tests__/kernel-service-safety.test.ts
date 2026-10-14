@@ -78,9 +78,9 @@ vi.mock("../contracts/batch-settlement.js", () => ({
 }));
 
 // ── Imports (after mocks) ─────────────────────────────────────────────────────
-import { initStore, closeStore } from "../db.js";
+import { initStore, closeStore, getRepos } from "../db.js";
 import { Sentry } from "../sentry.js";
-import { KernelService } from "../services/kernel-service.js";
+import { BUSY_REFUSED_STATUS, KernelService } from "../services/kernel-service.js";
 import {
   getSafetyGateway,
   initSafetyGateway,
@@ -260,70 +260,124 @@ describe("KernelService.submitJob — real device failures trip the breaker", ()
   });
 });
 
-describe("KernelService.submitJob — a busy refusal is not a device failure (#5205)", () => {
-  it.each([
-    ["with the Sentry lifecycle span", false],
-    ["on the fallback path, when Sentry cannot start a span", true],
-  ])("jobs refused because another job holds the device never open its breaker, and the next job is still admitted (%s)", async (_path, withoutSentry) => {
-    const startSpanManual = vi.mocked(Sentry.startSpanManual);
-    if (withoutSentry) {
-      startSpanManual.mockImplementation(() => {
-        throw new Error("Sentry not initialised");
-      });
-    }
-    try {
-      await busyRefusalsAreNotFailures(withoutSentry ? "kernel-ks-safety-busy-fallback" : "kernel-ks-safety-busy");
-      expect(startSpanManual, "submissions that tried Sentry's span").toHaveBeenCalledTimes(4);
-    } finally {
-      startSpanManual.mockImplementation((_o: unknown, cb: (span: object) => void) => {
-        cb({ end: vi.fn(), setStatus: vi.fn() });
-      });
-    }
-  });
-});
+const PATHS = [
+  ["with the Sentry lifecycle span", false],
+  ["on the fallback path, when Sentry cannot start a span", true],
+] as const;
 
-/** Job 1 holds the device; jobs 2 to 4 are refused busy, and none of it reaches the breaker. */
-async function busyRefusalsAreNotFailures(kernelId: string): Promise<void> {
+/** Runs `body` with Sentry's span failing to start when `withoutSentry`, as the fallback path needs. */
+async function onPath(withoutSentry: boolean, body: () => Promise<void>): Promise<void> {
+  const startSpanManual = vi.mocked(Sentry.startSpanManual);
+  if (withoutSentry) {
+    startSpanManual.mockImplementation(() => {
+      throw new Error("Sentry not initialised");
+    });
+  }
+  try {
+    await body();
+  } finally {
+    startSpanManual.mockImplementation((_o: unknown, cb: (span: object) => void) => {
+      cb({ end: vi.fn(), setStatus: vi.fn() });
+    });
+  }
+}
+
+/** A service with one HELD device, whose first job holds it until releaseHeld(). */
+function heldService(kernelId: string): KernelService {
   initSafetyGateway({ circuitBreaker: { failureThreshold: 2, cooldownMs: 60_000 } });
-  const gw = getSafetyGateway();
   held = new Promise<void>((resolve) => {
     releaseHeld = resolve;
   });
-  const svc = new KernelService({
-    kernelId,
-    mockMode: false,
-    devices: [{ id: "dev-held", type: "machine", adapterType: HELD_TYPE, config: {} }],
-  });
-  const done = async (jobId: string) => (await svc.getJobStatus(jobId)).status !== "executing";
-  const waitDone = async (jobId: string) => {
-    const start = Date.now();
-    while (!(await done(jobId))) {
-      if (Date.now() - start > 2_000) throw new Error(`job ${jobId} is still executing`);
-      await new Promise((r) => setTimeout(r, 10));
-    }
-  };
-
-  // Job 1 runs, and holds the device until its adapter answers.
-  await svc.submitJob({ jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
-  // Jobs 2 and 3 are refused busy: twice the breaker's threshold, were refusals failures.
-  for (const jobId of ["ks-busy-2", "ks-busy-3"]) {
-    await svc.submitJob({ jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
-    await waitDone(jobId);
-  }
-  expect(heldAdapter?.commands, "commands the device received: job 1's only").toEqual(["load_gcode", "start"]);
-  expect(await done("ks-busy-1"), "job 1, still holding the device").toBe(false);
-  expect.soft(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures recorded").toBe(0);
-  expect.soft(gw.getStatus().circuits.get("dev-held")?.state ?? "closed", "the breaker").toBe("closed");
-  await expect.soft(
-    svc.submitJob({ jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
-    "job 4's admission",
-  ).resolves.toMatchObject({ status: "accepted" });
-  await waitDone("ks-busy-4").catch(() => {});
-
-  releaseHeld();
-  await waitDone("ks-busy-1");
-  expect(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures, after job 1 completed").toBe(0);
+  return new KernelService({ kernelId, mockMode: false, devices: [{ id: "dev-held", type: "machine", adapterType: HELD_TYPE, config: {} }] });
 }
+
+/** Waits until `jobId` has left "executing" (its run settled). */
+async function waitDone(svc: KernelService, jobId: string): Promise<void> {
+  const start = Date.now();
+  while ((await svc.getJobStatus(jobId)).status === "executing") {
+    if (Date.now() - start > 2_000) throw new Error(`job ${jobId} is still executing`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+describe("KernelService.submitJob — a busy refusal is retried once, then refused, never failed (#5205, N127)", () => {
+  it.each(PATHS)("a job refused because another job holds the device waits for that job, then runs (%s)", async (_path, withoutSentry) => {
+    await onPath(withoutSentry, async () => {
+      const svc = heldService(withoutSentry ? "kernel-ks-wait-fallback" : "kernel-ks-wait");
+      const gw = getSafetyGateway();
+      const statuses = vi.spyOn(getRepos().jobs, "updateStatus");
+      const updates = vi.spyOn(getRepos().jobs, "update");
+      await svc.submitJob({ jobId: "ks-wait-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+      await svc.submitJob({ jobId: "ks-wait-2", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+      // Job 2's first run is refused, since job 1 holds the device; it waits for job 1 rather than ending.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(heldAdapter?.commands, "commands the device received: job 1's only").toEqual(["load_gcode", "start"]);
+      expect((await svc.getJobStatus("ks-wait-2")).status, "job 2, waiting for job 1").toBe("executing");
+      releaseHeld();
+      await waitDone(svc, "ks-wait-1");
+      await waitDone(svc, "ks-wait-2");
+      // Its one retry ran it on the freed device, and it completed.
+      expect(heldAdapter?.commands, "job 1's commands, then job 2's").toEqual(["load_gcode", "start", "load_gcode", "start"]);
+      expect(updates).toHaveBeenCalledWith("ks-wait-2", expect.objectContaining({ status: "completed" }));
+      expect(statuses).not.toHaveBeenCalledWith("ks-wait-2", "failed");
+      expect(statuses).not.toHaveBeenCalledWith("ks-wait-2", BUSY_REFUSED_STATUS);
+      expect(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures").toBe(0);
+    });
+  });
+
+  it.each(PATHS)("jobs still refused after their one retry end rejected_busy, never failed; the breaker counts none, and the next job is admitted (%s)", async (_path, withoutSentry) => {
+    process.env.PCC_KERNEL_BUSY_RETRY_WAIT_MS = "20";
+    try {
+      await onPath(withoutSentry, async () => {
+        const svc = heldService(withoutSentry ? "kernel-ks-safety-busy-fallback" : "kernel-ks-safety-busy");
+        const gw = getSafetyGateway();
+        const statuses = vi.spyOn(getRepos().jobs, "updateStatus");
+        // Job 1 runs, and holds the device until its adapter answers.
+        await svc.submitJob({ jobId: "ks-busy-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+        // Jobs 2 and 3 are refused, wait 20 ms (job 1 still holds), and are refused again: twice the breaker's
+        // threshold, were refusals failures.
+        for (const jobId of ["ks-busy-2", "ks-busy-3"]) {
+          await svc.submitJob({ jobId, stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+          await waitDone(svc, jobId);
+          expect(statuses, `${jobId}'s terminal status`).toHaveBeenCalledWith(jobId, BUSY_REFUSED_STATUS);
+          expect(statuses).not.toHaveBeenCalledWith(jobId, "failed");
+        }
+        expect(BUSY_REFUSED_STATUS).toBe("rejected_busy");
+        expect(heldAdapter?.commands, "commands the device received: job 1's only").toEqual(["load_gcode", "start"]);
+        expect((await svc.getJobStatus("ks-busy-1")).status, "job 1, still holding the device").toBe("executing");
+        expect.soft(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures recorded").toBe(0);
+        expect.soft(gw.getStatus().circuits.get("dev-held")?.state ?? "closed", "the breaker").toBe("closed");
+        await expect.soft(
+          svc.submitJob({ jobId: "ks-busy-4", stepId: "s", assuranceTier: 0, deviceId: "dev-held" }),
+          "job 4's admission",
+        ).resolves.toMatchObject({ status: "accepted" });
+        await waitDone(svc, "ks-busy-4").catch(() => {});
+        releaseHeld();
+        await waitDone(svc, "ks-busy-1");
+        expect(gw.getStatus().circuits.get("dev-held")?.failures ?? 0, "device failures, after job 1 completed").toBe(0);
+        expect(vi.mocked(Sentry.startSpanManual), "submissions that tried Sentry's span").toHaveBeenCalledTimes(4);
+      });
+    } finally {
+      delete process.env.PCC_KERNEL_BUSY_RETRY_WAIT_MS;
+    }
+  });
+
+  it("a job that is still running is not submitted again: the duplicate is refused at admission, and the running job is untouched", async () => {
+    const svc = heldService("kernel-ks-duplicate");
+    const statuses = vi.spyOn(getRepos().jobs, "updateStatus");
+    await svc.submitJob({ jobId: "ks-dup-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" });
+    statuses.mockClear();
+    await expect(svc.submitJob({ jobId: "ks-dup-1", stepId: "s", assuranceTier: 0, deviceId: "dev-held" })).rejects.toThrow(
+      /job_already_running: ks-dup-1/,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    expect(statuses, "no status written for the running job by its duplicate").not.toHaveBeenCalled();
+    expect((await svc.getJobStatus("ks-dup-1")).status, "the running job").toBe("executing");
+    expect(heldAdapter?.commands, "commands: the running job's only").toEqual(["load_gcode", "start"]);
+    releaseHeld();
+    await waitDone(svc, "ks-dup-1");
+  });
+});
 
 // ── listDevices reports real health ───────────────────────────────────────────
 

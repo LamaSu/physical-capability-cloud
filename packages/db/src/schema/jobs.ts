@@ -9,7 +9,7 @@ export const jobs = sqliteTable("jobs", {
   cwmId: text("cwm_id").notNull(),
   capabilityId: text("capability_id").notNull().references(() => capabilities.id),
   kernelId: text("kernel_id").notNull().references(() => shopKernels.id),
-  status: text("status").notNull(), // "queued" | "preparing" | "executing" | "collecting_evidence" | "awaiting_pickup" | "completed" | "failed" | "cancelled"
+  status: text("status").notNull(), // "queued" | "preparing" | "executing" | "collecting_evidence" | "awaiting_pickup" | "completed" | "failed" | "cancelled" | "rejected_busy"
   assignedDevices: text("assigned_devices", { mode: "json" }).notNull().$type<string[]>(),
   startedAt: text("started_at"),
   completedAt: text("completed_at"),

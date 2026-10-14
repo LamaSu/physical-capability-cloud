@@ -40,15 +40,17 @@ export function isTerminalJobStatus(status: KernelJobStatus): boolean {
 const ALLOWED: Record<KernelJobStatus, readonly KernelJobStatus[]> = {
   queued: ["dispatched", "accepted", "preparing", "executing", "failed", "cancelled"],
   dispatched: ["accepted", "preparing", "executing", "failed", "cancelled"],
-  accepted: ["preparing", "executing", "collecting_evidence", "failed", "cancelled"],
-  preparing: ["executing", "collecting_evidence", "failed", "cancelled"],
-  executing: ["collecting_evidence", "failed", "cancelled"],
+  // A run is refused busy before it commands the device, so only before evidence is collected (N127).
+  accepted: ["preparing", "executing", "collecting_evidence", "failed", "cancelled", "rejected_busy"],
+  preparing: ["executing", "collecting_evidence", "failed", "cancelled", "rejected_busy"],
+  executing: ["collecting_evidence", "failed", "cancelled", "rejected_busy"],
   collecting_evidence: ["awaiting_pickup", "completed", "failed", "cancelled"],
   awaiting_pickup: ["completed", "failed", "cancelled"],
   completed: [],
   failed: [],
   cancelled: [],
   timed_out: [],
+  rejected_busy: [],
 };
 
 /** Create a fresh lifecycle state in `queued` at `now`. */
