@@ -35,21 +35,32 @@ vi.mock("../components/AgentLandingHero.js", () => ({ AgentLandingHero: () => nu
 
 import { App } from "../App.js";
 import { WalletLinkPage } from "../pages/WalletLinkPage.js";
-import { useAuthStore } from "../stores/auth-store.js";
+import { hasStoredApiKey } from "../lib/authorized-fetch.js";
+import { adoptApiKey, useAuthStore } from "../stores/auth-store.js";
 import { useUIStore } from "../stores/ui-store.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const HASH = "Ab".repeat(32);
-const CONSENT = "SENTINEL_W4: terms supplied only by the gateway.\nA line stays inside this paragraph.\n\nSENTINEL_W4: the second paragraph, with its own terms.";
+const USER_CODE = "WDJBMJHT";
+const DISPLAY_CODE = "WDJB-MJHT";
+const REQUEST_ID = "req_w4_private";
+const ADDRESS = "0x0123456789012345678901234567890123456789";
+const PUBLIC_KEY = "device-public-key";
+const ACCOUNT_NAME = "SENTINEL_W4_ACCOUNT_OWNER";
+const CONSENT = `SENTINEL_W4: Code ${DISPLAY_CODE}; link agent wallet ${ADDRESS} to account ${ACCOUNT_NAME}.\nA line stays inside this paragraph.\n\nSENTINEL_W4: the second paragraph, with its own terms.`;
+const DEVICE_CONSENT = `SENTINEL_W4: Code ${DISPLAY_CODE}; link device public key ${PUBLIC_KEY} to account ${ACCOUNT_NAME}.\nA line stays inside this paragraph.\n\nSENTINEL_W4: the second paragraph, with device terms.`;
+const SENSITIVE_VALUES = [USER_CODE, DISPLAY_CODE, REQUEST_ID, ADDRESS, PUBLIC_KEY, ACCOUNT_NAME, CONSENT, DEVICE_CONSENT];
 const TITLE = "Link a wallet to your PCC account";
 const APPROVED = "Linked. Go back to your terminal; it continues on its own.";
 const DENIED = "Denied. Nothing was linked.";
 const UNKNOWN_APPROVAL = "PCC did not confirm your decision. The link may have been made; check your terminal before trying again.";
 const UNKNOWN_DENIAL = "PCC did not confirm your denial. The request expires on its own.";
 const SIGN_IN_CHANGED = "Your sign-in changed; enter the code again.";
+const REFUSED = "PCC refused this request, so nothing was linked. Reload the page and try again.";
+const ALREADY_LINKED = "This wallet is already linked to a PCC account, so nothing was linked. Stop the command in your terminal, or start again there with a new key.";
 
-const privateFailure = "WDJBMJHT WDJB-MJHT req_w4_private";
+const privateFailure = SENSITIVE_VALUES.join(" ");
 const failures = [
   { name: "fetch rejection", reply: () => Promise.reject(new Error(privateFailure)) },
   { name: "timeout", reply: () => Promise.reject(new DOMException(privateFailure, "TimeoutError")) },
@@ -66,13 +77,13 @@ const failures = [
   { name: "invalid success body", reply: () => Promise.resolve(json({ detail: privateFailure })) },
 ];
 
-function request(text = CONSENT, role: "agent" | "device" = "agent") {
+function request(text: string | undefined = undefined, role: "agent" | "device" = "agent") {
   return {
-    requestId: "req_w4_private",
+    requestId: REQUEST_ID,
     role,
     keyType: role === "agent" ? "secp256k1" : "ed25519",
-    address: role === "agent" ? "0x0123456789012345678901234567890123456789" : undefined,
-    publicKey: role === "device" ? "device-public-key" : undefined,
+    address: role === "agent" ? ADDRESS : undefined,
+    publicKey: role === "device" ? PUBLIC_KEY : undefined,
     label: "terminal-wallet",
     clientInfo: { name: "pcc-cli", version: "test" },
     chainId: 84532,
@@ -80,7 +91,7 @@ function request(text = CONSENT, role: "agent" | "device" = "agent") {
     requestedAt: "2026-10-13T00:00:00Z",
     requesterIpClass: "203.0.113.x",
     kernelId: role === "device" ? "kernel_test" : undefined,
-    consent: { version: "wallet-link-v1", sha256: HASH, text },
+    consent: { version: "wallet-link-v1", sha256: HASH, text: text ?? (role === "agent" ? CONSENT : DEVICE_CONSENT) },
   };
 }
 
@@ -91,18 +102,39 @@ function json(body: unknown, status = 200): Response {
 let container: HTMLDivElement;
 let root: Root;
 let originalPath: string;
-let originalAuth: boolean;
-let originalEpoch: number;
+let originalAuth: ReturnType<typeof useAuthStore.getState>;
 let originalMode: ReturnType<typeof useUIStore.getState>["interfaceMode"];
+let originalStorage: [Storage, [string, string][]][];
+
+function storageContents(storage: Storage): [string, string][] {
+  return Array.from({ length: storage.length }, (_, index) => {
+    const key = storage.key(index)!;
+    return [key, storage.getItem(key)!];
+  });
+}
+
+function expectNoSensitive(value: unknown, context: string) {
+  const serialized = typeof value === "string" ? value : JSON.stringify(value, (_key, entry: unknown) => entry instanceof Error ? entry.message : entry) ?? "";
+  const forms = [serialized];
+  try { forms.push(decodeURIComponent(decodeURIComponent(serialized))); } catch { /* Keep checking malformed URLs verbatim. */ }
+  for (const form of forms) {
+    for (const sensitive of SENSITIVE_VALUES) {
+      expect(form, context).not.toContain(sensitive);
+      // Console argument serialization escapes the consent's paragraph breaks.
+      expect(form, context).not.toContain(JSON.stringify(sensitive).slice(1, -1));
+    }
+    expect(form.toUpperCase().replace(/[\s-]/g, ""), context).not.toContain(USER_CODE);
+  }
+}
 
 beforeEach(() => {
   authorizedFetch.mockReset();
   authorizedFetch.mockResolvedValue(json(request()));
   vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("Unexpected unmocked request"))));
   originalPath = window.location.pathname + window.location.search + window.location.hash;
-  originalAuth = useAuthStore.getState().isAuthenticated;
-  originalEpoch = useAuthStore.getState().keyEpoch;
+  originalAuth = useAuthStore.getState();
   originalMode = useUIStore.getState().interfaceMode;
+  originalStorage = [localStorage, sessionStorage].map((storage) => [storage, storageContents(storage)]);
   window.history.replaceState({}, "", "/link");
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -112,10 +144,15 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
-  useAuthStore.setState({ isAuthenticated: originalAuth, keyEpoch: originalEpoch });
-  useUIStore.setState({ interfaceMode: originalMode });
-  window.history.replaceState({}, "", originalPath);
   vi.restoreAllMocks();
+  adoptApiKey(null);
+  useAuthStore.setState(originalAuth);
+  useUIStore.setState({ interfaceMode: originalMode });
+  for (const [storage, contents] of originalStorage) {
+    storage.clear();
+    for (const [key, value] of contents) storage.setItem(key, value);
+  }
+  window.history.replaceState({}, "", originalPath);
   vi.unstubAllGlobals();
 });
 
@@ -158,6 +195,7 @@ function lastDecision() {
   const [url, init] = authorizedFetch.mock.calls.at(-1)! as [string, RequestInit];
   expect(url).toMatch(/\/api\/wallets\/link-requests\/req_w4_private\/approve$/);
   expect(init.method).toBe("POST");
+  expect(init.credentials).toBe("omit");
   expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   return JSON.parse(init.body as string);
 }
@@ -174,6 +212,7 @@ describe("wallet link ceremony", () => {
     const [url, init] = authorizedFetch.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe("/api/wallets/link-requests/lookup");
     expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("omit");
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
     expect(JSON.parse(init.body as string)).toEqual({ userCode: "WDJBMJHT" });
     expect(container.textContent).toContain("Code WDJB-MJHT");
@@ -204,11 +243,11 @@ describe("wallet link ceremony", () => {
   });
 
   it.each(["agent", "device"] as const)("renders the %s variant only from server text", async (role) => {
-    const text = `SERVER_${role}: variant terms.\n\nSERVER_${role}: its own permission line.`;
-    authorizedFetch.mockResolvedValueOnce(json(request(text, role)));
+    const text = role === "agent" ? CONSENT : DEVICE_CONSENT;
+    authorizedFetch.mockResolvedValueOnce(json(request(undefined, role)));
     await loadConsent();
     expect([...container.querySelectorAll('[aria-label="Wallet link consent"] p')].map((p) => p.textContent)).toEqual(text.split("\n\n"));
-    expect(container.textContent).not.toContain(`SERVER_${role === "agent" ? "device" : "agent"}`);
+    expect(container.textContent).not.toContain(role === "agent" ? PUBLIC_KEY : ADDRESS);
   });
 
   it("gates approval on the checkbox and posts exactly the typed code and server hash", async () => {
@@ -270,6 +309,20 @@ describe("wallet link ceremony", () => {
     await act(async () => resolve(json({ status: "approved", linkId: "link_w4" })));
   });
 
+  it("guards rapid lookup submits before the busy state renders", async () => {
+    let resolve!: (response: Response) => void;
+    authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
+    await renderPage();
+    await typeCode(DISPLAY_CODE);
+    await act(async () => {
+      const form = container.querySelector("form")!;
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(authorizedFetch).toHaveBeenCalledTimes(1);
+    await act(async () => resolve(json(request())));
+  });
+
   it.each(["approve", "deny"] as const)("drops consent if keyEpoch changes before %s and sends no decision", async (decision) => {
     await loadConsent();
     await confirmCode();
@@ -321,6 +374,7 @@ describe("wallet link ceremony", () => {
     [429, "too_many_attempts", "Too many attempts", "wait 10 minutes"],
     [403, "insufficient_scope", "PCC refused this with your current sign-in.", ""],
     [401, "unauthorized", "Your sign-in is no longer valid; sign in again.", ""],
+    [400, "invalid_request", REFUSED, ""],
   ])("explains lookup error %s without creating a link", async (status, error, message, guidance) => {
     authorizedFetch.mockResolvedValueOnce(json({ error }, status as number));
     await loadConsent();
@@ -331,28 +385,78 @@ describe("wallet link ceremony", () => {
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
   });
 
-  it.each([
-    [410, "expired", "expired", "start again in the terminal"],
-    [409, "consent_changed", "terms changed", "reload the request"],
-    [409, "already_decided", "already handled", ""],
-    [409, "already_linked", "already handled", ""],
-    [403, "code_mismatch", "code does not match", ""],
-    [403, "insufficient_scope", "PCC refused this with your current sign-in.", ""],
-    [401, "unauthorized", "Your sign-in is no longer valid; sign in again.", ""],
-    [429, "too_many_attempts", "Too many attempts", "wait 10 minutes"],
-    [500, "internal_private_details", "PCC did not confirm your decision", "The link may have been made"],
-  ])("explains decision error %s %s without claiming success", async (status, error, message, guidance) => {
+  const decisionErrors = (["approve", "deny"] as const).flatMap((decision) => [
+    { status: 404, error: "not_found", message: "No pending request with this code", guidance: "check the code and try again" },
+    { status: 410, error: "expired", message: "expired", guidance: "start again in the terminal" },
+    { status: 409, error: "consent_changed", message: "terms changed", guidance: "reload the request" },
+    { status: 409, error: "already_decided", message: "already handled", guidance: "" },
+    { status: 409, error: "already_linked", message: ALREADY_LINKED, guidance: "" },
+    { status: 403, error: "code_mismatch", message: "code does not match", guidance: "" },
+    { status: 403, error: "insufficient_scope", message: "PCC refused this with your current sign-in.", guidance: "" },
+    { status: 401, error: "unauthorized", message: "Your sign-in is no longer valid; sign in again.", guidance: "" },
+    { status: 429, error: "too_many_attempts", message: "Too many attempts", guidance: "wait 10 minutes" },
+    { status: 500, error: "internal_private_details", message: decision === "approve" ? UNKNOWN_APPROVAL : UNKNOWN_DENIAL, guidance: "" },
+    ...[
+      [400, "invalid_request"], [400, "key_material_refused"], [405, "method_not_allowed"],
+      [422, "unprocessable_content"], [409, "unknown_code"],
+    ].map(([status, error]) => ({ status: status as number, error: error as string, message: REFUSED, guidance: "" })),
+  ].map((row) => ({ ...row, decision })));
+
+  it.each(decisionErrors)("explains $decision error $status $error without claiming success", async ({ status, error, message, guidance, decision }) => {
     await loadConsent();
-    await confirmCode();
-    authorizedFetch.mockResolvedValueOnce(json({ error }, status as number));
-    await click("Approve and link");
+    if (decision === "approve") await confirmCode();
+    authorizedFetch.mockResolvedValueOnce(json({ error }, status));
+    await click(decision === "approve" ? "Approve and link" : "Deny");
     expect(container.querySelector('[role="alert"]')!.textContent).toContain(message);
     expect(container.querySelector('[role="alert"]')!.textContent).toContain(guidance);
     expect(container.textContent).not.toContain(APPROVED);
     expect(container.querySelector('[role="alert"]')!.textContent).not.toBe(error);
+    if (message === REFUSED || message === ALREADY_LINKED) {
+      expect(container.querySelector('[role="alert"]')!.textContent).toBe(message);
+      expect(container.textContent).not.toContain("Could not reach");
+    }
+    if (error === "already_linked") expect(container.textContent).not.toContain("already handled");
     if (String(error).includes("_")) expect(container.textContent).not.toContain(error);
     expect(authorizedFetch).toHaveBeenCalledTimes(2);
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+  });
+
+  it.each((["lookup", "approve", "deny"] as const).flatMap((stage) => [401, 403].map((status) => ({ stage, status }))))(
+    "offers Sign out after $stage $status and clears the held key",
+    async ({ stage, status }) => {
+      adoptApiKey(["pcc", "test", "walletlinkowner0123456789"].join("_"));
+      expect(hasStoredApiKey()).toBe(true);
+      const failure = json({ error: status === 401 ? "unauthorized" : "insufficient_scope" }, status);
+      if (stage === "lookup") {
+        authorizedFetch.mockResolvedValueOnce(failure);
+        await loadConsent();
+      } else {
+        await loadConsent();
+        if (stage === "approve") await confirmCode();
+        authorizedFetch.mockResolvedValueOnce(failure);
+        await click(stage === "approve" ? "Approve and link" : "Deny");
+      }
+      expect(button("Sign out").disabled).toBe(false);
+      await click("Sign out");
+      expect(hasStoredApiKey()).toBe(false);
+      expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    },
+  );
+
+  it.each((["lookup", "approve", "deny"] as const).flatMap((stage) => [
+    ...failures.filter(({ name }) => !["401 unauthorized", "403 insufficient_scope"].includes(name)),
+    { name: "400 invalid_request", reply: () => Promise.resolve(json({ error: "invalid_request" }, 400)) },
+  ].map((failure) => ({ ...failure, stage }))))("has no Sign out for $stage $name", async ({ stage, reply }) => {
+    if (stage === "lookup") {
+      authorizedFetch.mockImplementationOnce(reply);
+      await loadConsent();
+    } else {
+      await loadConsent();
+      if (stage === "approve") await confirmCode();
+      authorizedFetch.mockImplementationOnce(reply);
+      await click(stage === "approve" ? "Approve and link" : "Deny");
+    }
+    expect([...container.querySelectorAll("button")].some((element) => element.textContent === "Sign out")).toBe(false);
   });
 
   const unknownDecisions = [
@@ -404,18 +508,24 @@ describe("wallet link ceremony", () => {
     expect(container.textContent).not.toContain("req_w4_private");
   });
 
-  const logScenarios = (["lookup", "approve", "deny"] as const).flatMap((stage) => [
-    { name: `${stage} success`, stage, reply: () => Promise.resolve(json(stage === "lookup" ? request() : stage === "approve" ? { status: "approved", linkId: "link_w4" } : { status: "denied" })) },
+  const hygieneScenarios = (["agent", "device"] as const).flatMap((role) => (["lookup", "approve", "deny"] as const).flatMap((stage) => [
+    { name: `${stage} success`, stage, reply: () => Promise.resolve(json(stage === "lookup" ? request(undefined, role) : stage === "approve" ? { status: "approved", linkId: "link_w4" } : { status: "denied" })) },
     ...failures.map((failure) => ({ ...failure, name: `${stage} ${failure.name}`, stage })),
     ...(stage === "lookup" ? [] : [
       { name: `${stage} missing linkId`, stage, reply: () => Promise.resolve(json({ status: "approved", detail: privateFailure })) },
       { name: `${stage} opposite decision status`, stage, reply: () => Promise.resolve(json(stage === "approve" ? { status: "denied" } : { status: "approved", linkId: "link_w4" })) },
     ]),
-  ]);
+  ].map((scenario) => ({ ...scenario, role, name: `${role} ${scenario.name}` }))));
 
-  it.each(logScenarios)("does not log the code during $name", async ({ stage, reply }) => {
+  it.each(hygieneScenarios)("keeps sensitive values out of console, storage and browser URLs during $name", async ({ stage, reply, role }) => {
     const spies = (["log", "info", "debug", "warn", "error", "trace"] as const)
       .map((method) => vi.spyOn(console, method).mockImplementation(() => {}));
+    // jsdom Storage instances share this method; instance spies do not intercept it.
+    // mock.instances lets us inspect localStorage and sessionStorage writes separately.
+    const storageWrites = vi.spyOn(Storage.prototype, "setItem");
+    const pushState = vi.spyOn(window.history, "pushState");
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    authorizedFetch.mockResolvedValue(json(request(undefined, role)));
     if (stage === "lookup") {
       authorizedFetch.mockImplementationOnce(reply);
       await loadConsent();
@@ -427,23 +537,48 @@ describe("wallet link ceremony", () => {
     }
     for (const spy of spies) {
       for (const call of spy.mock.calls) {
-        const serialized = JSON.stringify(call, (_key, value: unknown) => value instanceof Error ? value.message : value);
-        expect(serialized.toUpperCase().replace(/[\s-]/g, "")).not.toContain("WDJBMJHT");
+        expectNoSensitive(call, "console arguments");
       }
     }
-  });
-
-  it("does not persist ceremony details or add them to the browser URL", async () => {
-    const write = vi.spyOn(Storage.prototype, "setItem");
-    await loadConsent();
-    expect(window.location.pathname + window.location.search + window.location.hash).toBe("/link");
-    expect(write).not.toHaveBeenCalled();
+    for (const [name, storage] of [["localStorage", localStorage], ["sessionStorage", sessionStorage]] as const) {
+      const calls = storageWrites.mock.calls.filter((_call, index) => (storageWrites.mock.instances[index] as unknown) === storage);
+      for (const [key, value] of calls) {
+        expectNoSensitive(key, `${name} write key`);
+        expectNoSensitive(value, `${name} write value`);
+      }
+      for (const [key, value] of storageContents(storage)) {
+        expectNoSensitive(key, `${name} stored key`);
+        expectNoSensitive(value, `${name} stored value`);
+      }
+    }
+    for (const spy of [pushState, replaceState]) {
+      for (const call of spy.mock.calls) expectNoSensitive(String(call[2] ?? ""), "history URL");
+    }
+    expectNoSensitive(window.location.href, "current browser URL");
+    expect(authorizedFetch).toHaveBeenCalledTimes(stage === "lookup" ? 1 : 2);
     expect(container.querySelector("main")!.classList.contains("ph-no-capture")).toBe(true);
     expect(container.querySelector("main")!.classList.contains("sentry-block")).toBe(true);
   });
 });
 
 describe("App /link auth and routing (actual private Shell through App)", () => {
+  it("returns to the sign-in gate at /link after signing out from a 401", async () => {
+    adoptApiKey(["pcc", "test", "walletlinkowner0123456789"].join("_"));
+    authorizedFetch.mockResolvedValueOnce(json({ error: "unauthorized" }, 401));
+    await act(async () => root.render(<App />));
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(container.textContent).toContain(TITLE);
+    });
+    await typeCode(DISPLAY_CODE);
+    await click("Continue");
+    await click("Sign out");
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState().isAuthenticated).toBe(false);
+    expect(container.querySelector("[data-login-page]")).not.toBeNull();
+    expect(window.location.pathname).toBe("/link");
+  });
+
   it("shows the existing login gate at /link until signed in, then the wallet page", async () => {
     useAuthStore.setState({ isAuthenticated: false });
     await act(async () => root.render(<App />));

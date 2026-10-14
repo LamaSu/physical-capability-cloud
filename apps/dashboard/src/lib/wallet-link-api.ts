@@ -6,7 +6,9 @@ const UNKNOWN_DENIAL = "PCC did not confirm your denial. The request expires on 
 
 class WalletLinkError extends Error {
   constructor(readonly status: number, code: unknown) {
-    let message = UNREACHABLE;
+    let message = status >= 400 && status < 500
+      ? "PCC refused this request, so nothing was linked. Reload the page and try again."
+      : UNREACHABLE;
     if (status === 404) {
       message = "No pending request with this code. It may have expired, been used, or the terminal has not finished signing; check the code and try again.";
     } else if (status === 429) {
@@ -15,8 +17,10 @@ class WalletLinkError extends Error {
       message = "This request expired; start again in the terminal.";
     } else if (status === 409 && code === "consent_changed") {
       message = "The terms changed; reload the request by entering the code again.";
-    } else if (status === 409 && (code === "already_decided" || code === "already_linked")) {
+    } else if (status === 409 && code === "already_decided") {
       message = "This request was already handled.";
+    } else if (status === 409 && code === "already_linked") {
+      message = "This wallet is already linked to a PCC account, so nothing was linked. Stop the command in your terminal, or start again there with a new key.";
     } else if (status === 403 && code === "code_mismatch") {
       message = "The code does not match. Check the code and try again.";
     } else if (status === 403) {
@@ -42,7 +46,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function send(path: string, init: RequestInit): Promise<unknown> {
   // Relative API paths resolve against the configured gateway inside authorizedFetch.
-  const response = await authorizedFetch(path, { ...init, cache: "no-store" });
+  const response = await authorizedFetch(path, { ...init, cache: "no-store", credentials: "omit" });
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
     throw new WalletLinkError(response.status, isRecord(body) ? body.error : undefined);

@@ -18,6 +18,8 @@ export function WalletLinkPage() {
   const normalizedCode = state.step === "code" ? state.input.toUpperCase().replace(/[\s-]/g, "") : "";
   const validCode = /^[BCDFGHJKLMNPQRSTVWXZ]{8}$/.test(normalizedCode);
   const displayCode = state.step === "consent" ? `${state.userCode.slice(0, 4)}-${state.userCode.slice(4)}` : "";
+  const needsSignOut = error === "Your sign-in is no longer valid; sign in again." ||
+    error === "PCC refused this with your current sign-in.";
 
   async function loadRequest() {
     if (state.step !== "code" || !validCode || inFlight.current) return;
@@ -71,7 +73,12 @@ export function WalletLinkPage() {
     <main className="ph-no-capture sentry-block min-h-screen bg-[#0B0D12] px-6 py-12 text-white">
       <div className="mx-auto max-w-2xl space-y-6" aria-busy={busy}>
         <h1 className="text-2xl font-semibold">Link a wallet to your PCC account</h1>
-        {error && <p role="alert" className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-amber-100">{error}</p>}
+        {error && (
+          <div className="flex flex-wrap items-center gap-3">
+            <p role="alert" className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-amber-100">{error}</p>
+            {needsSignOut && <button type="button" onClick={() => useAuthStore.getState().logout()} className={BUTTON}>Sign out</button>}
+          </div>
+        )}
 
         {state.step === "code" && (
           <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void loadRequest(); }}>
