@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {
+    SCHEDULE_CHALLENGE_WINDOW,
+    SCHEDULE_APPEAL_WINDOW,
+    SCHEDULE_BACKUP_WINDOW,
+    SCHEDULE_EMERGENCY_REVIEW_WINDOW,
+    SCHEDULE_WORK_MARGIN
+} from "vnext-schedule/VNextSchedule.sol";
+
 /**
  * @title VNextSettlementLib
  * @notice Byte-exact primitives + pure invariant checks for the V-next unified
@@ -227,8 +235,9 @@ library VNextSettlementLib {
     // (VNextSettlementEscrow._hashJobPolicy), and these values live in that implementation's bytecode, so
     // signing the implementation address IS signing this schedule. Making them per-job config would add a
     // negotiation surface (a 1-second appeal window is a payer-side veto restored by the back door), more
-    // funding validation, and more calldata — for a freedom neither party has asked for. v2's modular
-    // policies are where a second schedule belongs: a different schedule is a different implementation.
+    // funding validation, and more calldata — for a freedom neither party has asked for. Instead, the
+    // schedule is chosen at build time through the vnext-schedule/ remapping: a different schedule is a
+    // different implementation, with different bytecode and addresses, never a runtime switch.
     //
     // The whole machine is anchored BACKWARDS from `reclaimAt`, so a funded unit provably terminates by
     // its own deadline and the payer's capital is never locked past it by the escalation machinery:
@@ -236,14 +245,14 @@ library VNextSettlementLib {
     //     primaryVerdictDue  = assertionCutoff - BACKUP_WINDOW
     // and `MIN_RECLAIM_DELAY > CHALLENGE + APPEAL + BACKUP` makes `primaryVerdictDue > fundedAt`, so both
     // subtractions are underflow-free BY CONSTRUCTION (checked once at funding, never re-derived unsafely).
-    uint256 internal constant CHALLENGE_WINDOW = 2 days;
-    uint256 internal constant APPEAL_WINDOW = 5 days;
-    uint256 internal constant BACKUP_WINDOW = 2 days;
+    uint256 internal constant CHALLENGE_WINDOW = SCHEDULE_CHALLENGE_WINDOW;
+    uint256 internal constant APPEAL_WINDOW = SCHEDULE_APPEAL_WINDOW;
+    uint256 internal constant BACKUP_WINDOW = SCHEDULE_BACKUP_WINDOW;
     /// @notice §8.3 C-5 Model B: how long the emergency cohort has to review an accepted assertion after
     ///         the asserting cohort is disabled. Silence past it REFUNDS — the one explicit exception to
     ///         "timeout preserves the last authenticated state", justified only for a declared systemic
     ///         compromise. Bounded so a disable cannot lock the payer's capital indefinitely.
-    uint256 internal constant EMERGENCY_REVIEW_WINDOW = 5 days;
+    uint256 internal constant EMERGENCY_REVIEW_WINDOW = SCHEDULE_EMERGENCY_REVIEW_WINDOW;
 
     // ── H-01 §8.2 H-2 challenger-only bond schedule (the "deterministic pre-agreed schedule") ────────
     // Prices {appeal cost + bounded operator delay-harm + anti-spam}. It is NOT job collateralization:
@@ -272,9 +281,11 @@ library VNextSettlementLib {
     // ── H-01 §13.1/H-2 funding-parameter bounds (sized from PHYSICAL REALITY, not from the attack) ───
     // LOWER: the operator's floor. A funded job may never carry a deadline so near that the physical work
     // + evidence + the challenge/appeal/backup windows cannot fit before the payer may reclaim. This is
-    // now a DERIVED floor, not a taste: at exactly MIN_RECLAIM_DELAY the operator still has 1 day of
-    // working time before `primaryVerdictDue`, and the full §8.1 machine fits before `reclaimAt`.
-    uint256 internal constant MIN_RECLAIM_DELAY = CHALLENGE_WINDOW + APPEAL_WINDOW + BACKUP_WINDOW + 1 days;
+    // now a DERIVED floor, not a taste: at exactly MIN_RECLAIM_DELAY the operator still has the build-time
+    // SCHEDULE_WORK_MARGIN before `primaryVerdictDue`, and the full §8.1 machine fits before `reclaimAt`.
+    // Margin first preserves solc 0.8.24's mainnet bytecode when replacing the old `+ 1 days` literal.
+    uint256 internal constant MIN_RECLAIM_DELAY =
+        SCHEDULE_WORK_MARGIN + (CHALLENGE_WINDOW + APPEAL_WINDOW + BACKUP_WINDOW);
     // UPPER: long-lead tooling, castings and regulated QC legitimately run months, so ~1 year is the
     // honest ceiling; it also keeps `primaryAssertionCutoff = reclaimAt - challengeWindow - appealWindow`
     // (§8.2 C-3) inside a bounded horizon and makes every timestamp provably fit its packed uint64.
