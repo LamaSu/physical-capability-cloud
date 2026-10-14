@@ -25,6 +25,7 @@ spec = importlib.util.spec_from_file_location("pcc_node_crypto", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 os.environ.pop("PCC_NODE_KEY_PATH", None)
+os.environ.pop("PCC_NODE_KEYS_FILE", None)
 home = os.path.expanduser("~")
 # A synthetic checkout in the temp directory: this test never points the key
 # code at this repository, so a regression cannot leave a secret in the tree.

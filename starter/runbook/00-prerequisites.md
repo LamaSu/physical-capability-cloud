@@ -2,7 +2,7 @@
 
 **Goal:** a working gateway address, pcc-node with signing support, and an API key that never appears in a log.
 
-Run every command from the folder you are onboarding in. State lives in `./.pcc/`, which stays out of git (see `.gitignore`), so it survives shells that forget variables.
+Run every command from the folder you are onboarding in. Onboarding state lives in `./.pcc/` so it survives shells that forget variables. The node's private signing key lives separately at the default `~/.pcc-node/keys.json`, or at `PCC_NODE_KEY_PATH` when set, outside every source checkout; ignoring a key in git does not make its location safe.
 
 ## 1. The gateway: PCC_BASE
 Use the PCC gateway you were given. There is no default. At an event, a rehearsal or a staging gateway, **never call production** (`https://capability.network`) unless you were told to.
@@ -42,17 +42,18 @@ python3 -c "import nacl.signing" && echo "signing OK"
 
 ## 3. The node's signing key, made here and never sent
 The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half. That way no private key ever travels: a provisioning request without a public key gets a server-made private key back in the response.
+
+Key persistence is supported on **Linux only**, where pcc-node can check the filesystem and its aliases. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` to a path outside every source checkout. Use the same location in this phase and phase 5; keep the override set for both if you need one. Your home and the key directory must be outside every source checkout. pcc-node checks the location, creates an owner-only directory and a `0600` key file, and refuses unsafe ownership, permissions or ancestry. Do not work around a refusal with `.gitignore` or by changing the key's permissions.
 ```bash
 umask 077
 python3 - <<'EOF' > .pcc/node-public-key
 import nacl.signing                                 # refuses here if the crypto extra is missing
 from pcc_node.crypto import load_or_create_keys
-public_hex, _ = load_or_create_keys(".pcc/node-keys.json")
+public_hex, _ = load_or_create_keys()
 print(public_hex, end="")
 EOF
-chmod 600 .pcc/node-keys.json
 ```
-**Check:** `.pcc/node-public-key` holds 64 hex characters. `.pcc/node-keys.json` holds the private half; never print it or copy it anywhere.
+**Check:** `.pcc/node-public-key` holds 64 hex characters. The selected key file holds the private half; never print it or copy it anywhere.
 
 ## 4. An operator API key, captured without logging it
 **Ask the human** (class C): "Which email should this operator account be registered under?"

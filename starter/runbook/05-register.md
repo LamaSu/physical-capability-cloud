@@ -19,7 +19,7 @@ python3 -c "import json; print(json.load(open('.pcc/kernel.json'))['kernel']['id
 **Check:** HTTP 201, and `.pcc/kernel-id` holds an id such as `kernel_…`. The location comes from intake, as coarse as the human chose. The gateway reads only `lat` and `lng` from `location`, so a text address goes in `physicalAddress`.
 
 ## 2. The kernel's signing key
-Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves `.pcc/node-keys.json`.
+Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` to a path outside every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux and pcc-node's filesystem checks.
 
 **First, GET `$BASE/api/kernels/<id>`** and check it is the kernel you just created, with no signing key yet. A mistyped id would sign, and create, a different kernel.
 ```bash
@@ -28,17 +28,16 @@ python3 - <<'EOF'
 from pcc_node.crypto import load_or_create_keys
 from pcc_node.register import register_signing_key
 read = lambda name: open(".pcc/" + name).read().strip()
-pub, sec = load_or_create_keys(".pcc/node-keys.json")
+pub, sec = load_or_create_keys()
 status, _ = register_signing_key(read("base"), read("api-key"), read("kernel-id"), pub, sec)
 print("signing key:", status)
 EOF
-chmod 600 .pcc/node-keys.json
 ```
 **Check:** status 200 or 201. `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows a non-null `signingKey`.
 
 If it refuses with "pynacl" or `LogSigningRefused`:
 1. Install the crypto extra (phase 0 step 2).
-2. Delete `.pcc/node-keys.json` and `.pcc/node-public-key`. Made without pynacl, the key file holds a placeholder that can never sign, and it was never registered.
+2. If an older pcc-node made an unregistered placeholder without pynacl, retire the selected key file and delete `.pcc/node-public-key`. The placeholder can never sign. Current pcc-node refuses to create a key without pynacl.
 3. Run phase 0 step 3 again for a real key, then this step.
 
 ## 3. The capability (what buyers can order)

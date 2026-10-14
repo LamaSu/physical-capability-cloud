@@ -399,11 +399,14 @@ class TestKeyFilePermissionsAndPlace:
     def test_a_directory_or_key_file_owned_by_another_user_is_refused(self, monkeypatch, tmp_path):
         path = tmp_path / "own" / "keys.json"
         load_or_create_keys(str(path))
-        real_uid = os.getuid()
-        monkeypatch.setattr(crypto_module.os, "getuid", lambda: real_uid + 1)
+        real_uid = os.geteuid()
+        monkeypatch.setattr(crypto_module.os, "geteuid", lambda: real_uid + 1)
         with pytest.raises(crypto_module.KeyFileError, match="not owned by this user"):
             load_or_create_keys(str(path))
         monkeypatch.setattr(crypto_module, "_check_directory", lambda *args: None)
+        # Isolate the file's effective-uid guard after the whole directory chain
+        # has already been refused above.
+        monkeypatch.setattr(crypto_module, "_check_ancestor", lambda *args: None)
         with pytest.raises(crypto_module.KeyFileError, match="not owned by this user"):
             load_or_create_keys(str(path))
 
@@ -1419,3 +1422,728 @@ class TestAtomicKeyPublication:
         assert verify_signature(announcement, sign_announcement(announcement, secret), public)
         reloads_created_pair = load_or_create_keys(str(path)) == (public, secret)
         assert reloads_created_pair
+
+
+# ---------------------------------------------------------------------------
+# E17b finding 1: the descriptor walk checks every ancestor's ownership/mode,
+# including the selected real directory's chain when selection uses symlinks.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def _e17b_checked_test_namespace(monkeypatch, tmp_path):
+    """One ordinary filesystem with a controlled, secure host ancestor chain.
+
+    The sandbox maps system-directory owners to nobody and bind-mounts the WT.
+    Normalize only preexisting ancestors ABOVE this test's tmp_path to root
+    ownership where needed, keeping their modes/inodes and actual descriptor
+    walk. Suppress only the host WT and its preexisting tmp/.git entries,
+    never a fixture-created one.
+    This makes the fixture a deterministic filesystem namespace: the checkout,
+    ownership, alias and mount guards still run, and fixture metadata is not
+    changed. Existing tests use the real host namespace without this fixture.
+    """
+    real_fstat = os.fstat
+    real_stat = os.stat
+    euid = os.geteuid()
+    mapped_host_ids = set()
+    for parent in tmp_path.parents:
+        st = real_stat(parent)
+        if st.st_uid not in (0, euid):
+            mapped_host_ids.add((st.st_dev, st.st_ino))
+    checkout = Path(crypto_module.__file__).resolve().parents[3]
+    host_checkout_ids = set()
+    for host_directory in (checkout, checkout / "tmp"):
+        if host_directory in tmp_path.parents:
+            st = real_stat(host_directory)
+            host_checkout_ids.add((st.st_dev, st.st_ino))
+
+    def fstat_in_test_namespace(fd):
+        st = real_fstat(fd)
+        if stat.S_ISDIR(st.st_mode) and (st.st_dev, st.st_ino) in mapped_host_ids:
+            values = list(st)
+            values[4] = 0  # st_uid: root in the simulated host namespace
+            return os.stat_result(values)
+        return st
+
+    def stat_in_test_namespace(path, *, dir_fd=None, follow_symlinks=True):
+        if path == ".git" and dir_fd is not None:
+            held = real_fstat(dir_fd)
+            if (held.st_dev, held.st_ino) in host_checkout_ids:
+                raise FileNotFoundError(errno.ENOENT, "host checkout is outside test namespace", path)
+        return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    mount = {
+        "id": "e17b-ordinary-filesystem", "devno": "0:374", "root": "/", "mountpoint": "/",
+        "fstype": "ext4", "source": "/dev/e17b-test", "super": "rw",
+    }
+    monkeypatch.setattr(crypto_module.os, "fstat", fstat_in_test_namespace)
+    monkeypatch.setattr(crypto_module.os, "stat", stat_in_test_namespace)
+    monkeypatch.setattr(crypto_module, "_mount_of", lambda fd: mount)
+    monkeypatch.setattr(crypto_module, "_mountinfo", lambda: [mount])
+
+
+def _e17b_directory_metadata(monkeypatch, directory, *, owner, mode):
+    """Change only one real directory inode's metadata on held descriptors."""
+    st = os.stat(directory)
+    directory_id = (st.st_dev, st.st_ino)
+    real_fstat = os.fstat
+    inspected = []
+
+    def fstat_with_directory_metadata(fd):
+        st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) == directory_id:
+            inspected.append(fd)
+            values = list(st)
+            values[0] = stat.S_IFDIR | mode
+            values[4] = owner
+            return os.stat_result(values)
+        return st
+
+    monkeypatch.setattr(crypto_module.os, "fstat", fstat_with_directory_metadata)
+    return inspected
+
+
+@needs_nacl
+class TestE17bSecureAncestorChain:
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_a_foreign_owned_0755_ancestor_is_refused(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        ancestor = _private_dir(tmp_path / "foreign-ancestor")
+        target = _private_dir(ancestor / "private") / "keys.json"
+        if existing:
+            _new_key_pair_file(target)
+        inspected = _e17b_directory_metadata(
+            monkeypatch, ancestor, owner=os.geteuid() + 1, mode=0o755
+        )
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(target))
+        assert str(ancestor) in str(refused.value)
+        assert re.search(r"owner|owned", str(refused.value))
+        assert inspected, "the ancestor's held descriptor was not inspected"
+        assert target.exists() == existing
+
+
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_a_group_writable_ancestor_is_refused(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        ancestor = _private_dir(tmp_path / "group-writable-ancestor")
+        target = _private_dir(ancestor / "private") / "keys.json"
+        if existing:
+            _new_key_pair_file(target)
+        inspected = _e17b_directory_metadata(
+            monkeypatch, ancestor, owner=os.geteuid(), mode=0o770
+        )
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(target))
+        assert str(ancestor) in str(refused.value)
+        assert "writable by other users" in str(refused.value)
+        assert inspected, "the ancestor's held descriptor was not inspected"
+        assert target.exists() == existing
+
+    def test_a_root_owned_sticky_1777_ancestor_is_allowed(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        ancestor = _private_dir(tmp_path / "root-sticky")
+        directory = _private_dir(ancestor / "private")
+        inspected = _e17b_directory_metadata(monkeypatch, ancestor, owner=0, mode=0o1777)
+        fd = os.open(directory, crypto_module._directory_flags())
+        try:
+            crypto_module._refuse_checkout(fd, str(directory / "keys.json"))
+        finally:
+            os.close(fd)
+        assert inspected, "the root-owned sticky ancestor was not inspected"
+        assert list(directory.iterdir()) == []
+
+    def test_sticky_does_not_exempt_a_non_root_writable_ancestor(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        ancestor = _private_dir(tmp_path / "non-root-sticky")
+        directory = _private_dir(ancestor / "private")
+        _e17b_directory_metadata(monkeypatch, ancestor, owner=os.geteuid(), mode=0o1777)
+        fd = os.open(directory, crypto_module._directory_flags())
+        try:
+            with pytest.raises(crypto_module.KeyFileError, match="writable by other users"):
+                crypto_module._refuse_checkout(fd, str(directory / "keys.json"))
+        finally:
+            os.close(fd)
+
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_a_foreign_ancestor_cannot_relocate_the_key_directory_during_the_walk(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        ancestor = _private_dir(tmp_path / "foreign-ancestor")
+        directory = _private_dir(ancestor / "private")
+        target = directory / "keys.json"
+        if existing:
+            _new_key_pair_file(target)
+        checkout = _private_dir(tmp_path / "attacker-checkout")
+        (checkout / ".git").mkdir()
+        moved = checkout / "private"
+        directory_st = os.stat(directory)
+        directory_id = (directory_st.st_dev, directory_st.st_ino)
+        ancestor_st = os.stat(ancestor)
+        ancestor_id = (ancestor_st.st_dev, ancestor_st.st_ino)
+        real_open = os.open
+        real_fstat = os.fstat
+        renamed = []
+        walked_past_foreign_ancestor = []
+
+        def open_then_relocate(path, flags, mode=0o777, *, dir_fd=None):
+            current_id = None
+            if path == ".." and dir_fd is not None:
+                current = real_fstat(dir_fd)
+                current_id = (current.st_dev, current.st_ino)
+                if current_id == ancestor_id:
+                    walked_past_foreign_ancestor.append(True)
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if current_id == directory_id and not renamed:
+                # The old parent descriptor is already open. The attacker's
+                # rename makes the pathname's current chain enter a checkout.
+                directory.rename(moved)
+                renamed.append(True)
+            return fd
+
+        _e17b_directory_metadata(monkeypatch, ancestor, owner=os.geteuid() + 1, mode=0o755)
+        monkeypatch.setattr(crypto_module.os, "open", open_then_relocate)
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(target))
+        assert renamed, "the deterministic foreign-owner relocation did not happen"
+        assert str(ancestor) in str(refused.value)
+        assert re.search(r"owner|owned", str(refused.value))
+        assert not walked_past_foreign_ancestor, "the walk continued above an unsafe ancestor"
+        assert not directory.exists()
+        assert (moved / "keys.json").exists() == existing
+
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_a_symlink_below_a_foreign_lexical_ancestor_selects_the_safe_real_directory(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        lexical = _private_dir(tmp_path / "foreign-lexical")
+        safe = _private_dir(tmp_path / "safe-real")
+        alias = lexical / "selected"
+        alias.symlink_to(safe, target_is_directory=True)
+        target = safe / "keys.json"
+        original = _new_key_pair_file(target) if existing else None
+        inspected = _e17b_directory_metadata(
+            monkeypatch, lexical, owner=os.geteuid() + 1, mode=0o755
+        )
+        selected_pair = load_or_create_keys(str(alias / "keys.json"))
+        same_identity = original is None or selected_pair == original
+        assert same_identity, "loading through the symlink selected a different identity"
+        assert target.exists()
+        assert not inspected, "the walk followed lexical ancestry instead of the held directory"
+
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_a_symlink_under_safe_lexical_ancestry_cannot_hide_a_foreign_real_ancestor(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        foreign = _private_dir(tmp_path / "foreign-real")
+        directory = _private_dir(foreign / "private")
+        target = directory / "keys.json"
+        if existing:
+            _new_key_pair_file(target)
+        lexical = _private_dir(tmp_path / "safe-lexical")
+        alias = lexical / "selected"
+        alias.symlink_to(directory, target_is_directory=True)
+        inspected = _e17b_directory_metadata(
+            monkeypatch, foreign, owner=os.geteuid() + 1, mode=0o755
+        )
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(alias / "keys.json"))
+        assert str(foreign) in str(refused.value)
+        assert re.search(r"owner|owned", str(refused.value))
+        assert inspected, "the selected real ancestor was not inspected"
+        assert target.exists() == existing
+
+
+@needs_nacl
+class TestE17bPersistentExposure:
+    @pytest.mark.parametrize("route", ["argument", "PCC_NODE_KEY_PATH", "PCC_NODE_KEYS_FILE"])
+    @pytest.mark.parametrize("mode", [0o604, 0o620, 0o644, 0o666])
+    def test_exposure_is_refused_on_three_consecutive_starts(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, mode, route
+    ):
+        target = tmp_path / "keys.json"
+        public, secret = load_or_create_keys(str(target))
+        if route == "argument":
+            load = lambda: load_or_create_keys(str(target))
+        else:
+            monkeypatch.setenv(route, str(target))
+            load = load_or_create_keys
+        os.chmod(target, mode)
+        marker = target.with_name(target.name + ".exposed")
+        for attempt in range(3):
+            with pytest.raises(KeyFileError, match="identity is compromised") as refused:
+                load()
+            assert str(target) in str(refused.value)
+            assert str(marker) in str(refused.value)
+            assert "re-registration" in str(refused.value)
+            assert stat.S_IMODE(target.stat().st_mode) == 0o600
+            assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+            record = json.loads(marker.read_text())
+            assert set(record) == {"utc", "reason"}
+            assert record["utc"].endswith("+00:00")
+            assert "mode" in record["reason"]
+            leaked_key = public in marker.read_text() or secret in marker.read_text()
+            assert not leaked_key, "an exposure record contained key material"
+            if attempt == 0:
+                first_record = marker.read_bytes()
+            assert marker.read_bytes() == first_record, "a retained marker was replaced"
+
+    def test_the_marker_is_durable_in_the_verified_directory_before_chmod(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+        marker = target.with_name(target.name + ".exposed")
+        directory_st, key_st = tmp_path.stat(), target.stat()
+        real_open, real_dump = os.open, json.dump
+        real_fsync, real_fchmod, real_fstat = os.fsync, os.fchmod, os.fstat
+        events = []
+        marker_ids = []
+
+        def identity(st):
+            return st.st_dev, st.st_ino
+
+        def observe_open(path, flags, mode=0o777, *, dir_fd=None):
+            if str(path).endswith(".exposed"):
+                assert path == marker.name
+                assert identity(real_fstat(dir_fd)) == identity(directory_st)
+                assert flags & os.O_EXCL and flags & os.O_CREAT and flags & os.O_NOFOLLOW
+                assert mode == 0o600
+                assert stat.S_IMODE(target.stat().st_mode) == 0o644
+                events.append("marker-open")
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                marker_ids.append(identity(real_fstat(fd)))
+                return fd
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        def observe_dump(record, f, **kwargs):
+            assert identity(real_fstat(f.fileno())) == marker_ids[0]
+            assert set(record) == {"utc", "reason"}
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+            real_dump(record, f, **kwargs)
+            events.append("record-write")
+
+        def observe_sync(fd):
+            held = identity(real_fstat(fd))
+            if held == marker_ids[0]:
+                assert set(json.loads(marker.read_text())) == {"utc", "reason"}
+                events.append("file-fsync")
+            else:
+                assert held == identity(directory_st)
+                events.append("dir-fsync")
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+            real_fsync(fd)
+
+        def observe_chmod(fd, mode):
+            assert identity(real_fstat(fd)) == identity(key_st)
+            assert events == ["marker-open", "record-write", "file-fsync", "dir-fsync"]
+            assert mode == 0o600
+            events.append("key-chmod")
+            real_fchmod(fd, mode)
+
+        monkeypatch.setattr(crypto_module.os, "open", observe_open)
+        monkeypatch.setattr(crypto_module.json, "dump", observe_dump)
+        monkeypatch.setattr(crypto_module.os, "fsync", observe_sync)
+        monkeypatch.setattr(crypto_module.os, "fchmod", observe_chmod)
+        with pytest.raises(KeyFileError, match="identity is compromised"):
+            load_or_create_keys(str(target))
+        assert events == ["marker-open", "record-write", "file-fsync", "dir-fsync", "key-chmod"]
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_an_operator_chmod_cannot_clear_the_marker_refusal(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+        with pytest.raises(KeyFileError, match="identity is compromised"):
+            load_or_create_keys(str(target))
+        os.chmod(target, 0o600)
+
+        def no_key_open_or_create(*args, **kwargs):
+            pytest.fail("a marker must refuse before opening or creating a key")
+
+        real_open = os.open
+
+        def open_without_key(path, flags, mode=0o777, *, dir_fd=None):
+            if path == target.name:
+                no_key_open_or_create()
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(crypto_module.os, "open", open_without_key)
+        monkeypatch.setattr(crypto_module, "_create_key_file", no_key_open_or_create)
+        for _ in range(2):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+
+    def test_a_retained_writer_cannot_make_an_exposed_identity_acceptable(
+        self, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o666)
+        writer = os.open(target, os.O_WRONLY)
+        try:
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+            assert stat.S_IMODE(target.stat().st_mode) == 0o600
+            replacement = generate_node_keys()
+            data = json.dumps({"public": replacement[0], "secret": replacement[1]}).encode()
+            assert os.pwrite(writer, data, 0) == len(data)
+            os.ftruncate(writer, len(data))
+            os.fsync(writer)
+            for _ in range(2):
+                with pytest.raises(KeyFileError, match="identity is compromised"):
+                    load_or_create_keys(str(target))
+        finally:
+            os.close(writer)
+
+    def test_both_files_must_be_retired_before_a_new_identity_is_created(
+        self, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        public, _ = load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+        with pytest.raises(KeyFileError, match="identity is compromised"):
+            load_or_create_keys(str(target))
+        marker = target.with_name(target.name + ".exposed")
+        retired = _private_dir(tmp_path / "retired")
+        target.rename(retired / target.name)
+        with pytest.raises(KeyFileError, match="identity is compromised"):
+            load_or_create_keys(str(target))
+        assert not target.exists(), "a marker alone must prevent automatic rotation"
+        marker.rename(retired / marker.name)
+        new_public, _ = load_or_create_keys(str(target))
+        assert new_public != public
+        assert not marker.exists()
+
+    def test_a_foreign_owned_key_is_restricted_and_persistently_refused(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        key_st = target.stat()
+        real_fstat = os.fstat
+        foreign = [True]
+
+        def fstat(fd):
+            st = real_fstat(fd)
+            if foreign[0] and (st.st_dev, st.st_ino) == (key_st.st_dev, key_st.st_ino):
+                values = list(st)
+                values[4] = os.geteuid() + 1
+                return os.stat_result(values)
+            return st
+
+        monkeypatch.setattr(crypto_module.os, "fstat", fstat)
+        with pytest.raises(KeyFileError, match="owned by another account"):
+            load_or_create_keys(str(target))
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        foreign[0] = False
+        for _ in range(2):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+
+    def test_a_marker_blocks_exclusive_creation_without_writing(
+        self, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        marker = target.with_name(target.name + ".exposed")
+        marker.write_text("retired exposure\n")
+        os.chmod(marker, 0o600)
+        with pytest.raises(KeyFileError, match="identity is compromised"):
+            crypto_module._create_exclusive(str(target), *generate_node_keys())
+        assert set(tmp_path.iterdir()) == {marker}
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["wide-mode", "foreign-owner"])
+    def test_a_failed_marker_open_preserves_exposure_and_every_retry_refuses(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, foreign
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+        if foreign:
+            key_st = target.stat()
+            real_fstat = os.fstat
+
+            def foreign_fstat(fd):
+                st = real_fstat(fd)
+                if (st.st_dev, st.st_ino) == (key_st.st_dev, key_st.st_ino):
+                    values = list(st)
+                    values[4] = os.geteuid() + 1
+                    return os.stat_result(values)
+                return st
+
+            monkeypatch.setattr(crypto_module.os, "fstat", foreign_fstat)
+        real_open = os.open
+
+        def open_without_marker(path, flags, mode=0o777, *, dir_fd=None):
+            if str(path).endswith(".exposed"):
+                raise OSError(errno.EIO, "injected marker creation failure")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(crypto_module.os, "open", open_without_marker)
+        def no_chmod(*args):
+            pytest.fail("marker creation failure must never change the key's mode")
+
+        monkeypatch.setattr(crypto_module.os, "fchmod", no_chmod)
+        for _ in range(3):
+            with pytest.raises(KeyFileError, match="mode was left unchanged") as refused:
+                load_or_create_keys(str(target))
+            reason = "owned by another account" if foreign else "mode 644"
+            assert reason in str(refused.value), "the unchanged exposure was not detected again"
+            assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        assert not target.with_name(target.name + ".exposed").exists()
+
+    @pytest.mark.parametrize("failure", ["write", "file-sync", "directory-sync", "unsupported-directory-sync"])
+    def test_failed_marker_persistence_preserves_mode_and_refuses_every_retry(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, failure
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+
+        real_sync = os.fsync
+
+        def fail_sync(fd):
+            directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+            should_fail = directory if "directory" in failure else not directory
+            if should_fail:
+                code = errno.EINVAL if failure == "unsupported-directory-sync" else errno.EIO
+                raise OSError(code, "injected marker sync failure")
+            real_sync(fd)
+
+        def fail_write(record, f, **kwargs):
+            f.write('{"utc":')
+            raise OSError(errno.EIO, "injected marker write failure")
+
+        def no_chmod(*args):
+            pytest.fail("marker persistence failure must never change the key's mode")
+
+        monkeypatch.setattr(crypto_module.os, "fchmod", no_chmod)
+        if failure == "write":
+            monkeypatch.setattr(crypto_module.json, "dump", fail_write)
+        else:
+            monkeypatch.setattr(crypto_module.os, "fsync", fail_sync)
+        with pytest.raises(KeyFileError, match="Exposure marker could not be persisted"):
+            load_or_create_keys(str(target))
+        marker = target.with_name(target.name + ".exposed")
+        assert marker.exists()
+        assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        for _ in range(2):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+        # Model a non-durable marker lost across a crash: the unchanged key
+        # exposure must still refuse, rather than accepting the old identity.
+        marker.unlink()
+        with pytest.raises(KeyFileError, match="Exposure marker could not be persisted"):
+            load_or_create_keys(str(target))
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    def test_a_durable_marker_keeps_refusing_when_chmod_fails(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+        marker = target.with_name(target.name + ".exposed")
+        real_sync = os.fsync
+        syncs = []
+
+        def observe_sync(fd):
+            real_sync(fd)
+            syncs.append("directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+
+        def fail_chmod(fd, mode):
+            assert syncs == ["file", "directory"]
+            assert mode == 0o600
+            raise OSError(errno.EIO, "injected chmod failure")
+
+        monkeypatch.setattr(crypto_module.os, "fsync", observe_sync)
+        monkeypatch.setattr(crypto_module.os, "fchmod", fail_chmod)
+        with pytest.raises(KeyFileError, match="marker is durable.*cannot be restricted to 0600"):
+            load_or_create_keys(str(target))
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+        assert set(json.loads(marker.read_text())) == {"utc", "reason"}
+        for _ in range(2):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+        assert syncs == ["file", "directory"]
+
+    def test_a_competing_marker_never_allows_chmod_before_its_durability_is_known(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        os.chmod(target, 0o644)
+        marker = target.with_name(target.name + ".exposed")
+        real_open = os.open
+        competed = []
+
+        def create_competing_marker(path, flags, mode=0o777, *, dir_fd=None):
+            if path == marker.name and not competed:
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                os.close(fd)
+                competed.append(True)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        def no_chmod(*args):
+            pytest.fail("an existing marker's durability is unknown; its key mode must stay unchanged")
+
+        monkeypatch.setattr(crypto_module.os, "open", create_competing_marker)
+        monkeypatch.setattr(crypto_module.os, "fchmod", no_chmod)
+        for _ in range(3):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+        assert competed == [True]
+        assert marker.exists()
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    def test_an_exposed_legacy_file_refuses_until_both_files_are_retired(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        work = _private_dir(tmp_path / "work")
+        monkeypatch.chdir(work)
+        selected = tmp_path / "new-home" / "keys.json"
+        monkeypatch.setenv("PCC_NODE_KEYS_FILE", str(selected))
+        legacy = work / LEGACY_KEYS_PATH
+        public, secret = generate_node_keys()
+        _write_pair(legacy, public, secret, mode=0o644)
+        marker = legacy.with_name(legacy.name + ".exposed")
+        for _ in range(3):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys()
+            assert stat.S_IMODE(legacy.stat().st_mode) == 0o600
+            assert marker.exists()
+            assert not selected.exists()
+        retired = _private_dir(tmp_path / "retired")
+        legacy.rename(retired / legacy.name)
+        with pytest.raises(KeyFileError, match="identity is compromised"):
+            load_or_create_keys()
+        assert not selected.exists(), "a retained legacy marker must prevent creation"
+        marker.rename(retired / marker.name)
+        new_public, _ = load_or_create_keys()
+        assert new_public != public
+
+    def test_a_competitors_exposed_key_is_refused_on_reuse_and_subsequent_starts(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        directory = _private_dir(tmp_path / "keys")
+        target = directory / "keys.json"
+        winner = generate_node_keys()
+        real_link, real_open = os.link, os.open
+        published = []
+
+        def publish_first(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
+            if not published:
+                fd = real_open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                               0o600, dir_fd=dst_dir_fd)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({"public": winner[0], "secret": winner[1]}, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    os.fchmod(f.fileno(), 0o644)
+                published.append(True)
+            return real_link(src, dst, src_dir_fd=src_dir_fd,
+                             dst_dir_fd=dst_dir_fd, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(crypto_module.os, "link", publish_first)
+        for _ in range(3):
+            with pytest.raises(KeyFileError, match="identity is compromised"):
+                load_or_create_keys(str(target))
+            assert stat.S_IMODE(target.stat().st_mode) == 0o600
+            assert set(p.name for p in directory.iterdir()) == {"keys.json", "keys.json.exposed"}
+        assert published == [True], "the competing creator reuse path was not exercised"
+        retained = json.loads(target.read_text())
+        assert (retained["public"], retained["secret"]) == winner, "the competitor's key was changed"
+
+
+@needs_nacl
+class TestE17bUnavailableMountDiscovery:
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_unknown_mount_refuses_without_reading_or_writing(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        directory = _private_dir(tmp_path / "keys")
+        target = directory / "keys.json"
+        if existing:
+            _new_key_pair_file(target)
+        before = target.read_bytes() if existing else None
+        monkeypatch.setattr(crypto_module, "_mount_of", lambda fd: None)
+
+        def unexpected(*args, **kwargs):
+            pytest.fail("a key read or write was attempted without mount discovery")
+
+        monkeypatch.setattr(crypto_module, "_read_key_file", unexpected)
+        monkeypatch.setattr(crypto_module, "_create_key_file", unexpected)
+        with pytest.raises(KeyFileError, match="without usable Linux mount discovery"):
+            load_or_create_keys(str(target))
+        assert target.exists() == existing
+        assert set(directory.iterdir()) == ({target} if existing else set())
+        if existing:
+            assert target.read_bytes() == before
+
+    def test_unknown_mount_refuses_before_creating_missing_directories(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        monkeypatch.setattr(crypto_module, "_mount_of", lambda fd: None)
+        with pytest.raises(KeyFileError, match="Linux mount discovery"):
+            load_or_create_keys(str(tmp_path / "missing" / "keys.json"))
+        assert not (tmp_path / "missing").exists()
+
+    def test_unknown_mount_is_never_a_whole_filesystem(self):
+        assert crypto_module._whole_filesystem(None) is False
+
+    @pytest.mark.parametrize("alias_check", ["_refuse_aliases", "_refuse_file_aliases"])
+    def test_alias_checks_never_skip_unknown_mounts(self, monkeypatch, tmp_path, alias_check):
+        target = tmp_path / "synthetic-file"
+        target.write_text("not a key")
+        fd = os.open(target if alias_check == "_refuse_file_aliases" else tmp_path, os.O_RDONLY)
+        try:
+            monkeypatch.setattr(crypto_module, "_LINUX", False)
+            with pytest.raises(KeyFileError, match="Linux mount discovery"):
+                getattr(crypto_module, alias_check)(fd, str(target))
+        finally:
+            os.close(fd)
+
+
+class TestE17bCleanupWarning:
+    def test_unknown_link_count_does_not_hide_a_failed_scrub_warning(self, monkeypatch, tmp_path):
+        directory = _private_dir(tmp_path / "cleanup")
+        target = directory / "synthetic-file"
+        target.write_bytes(b"synthetic data, no key material")
+        dir_fd = os.open(directory, crypto_module._directory_flags())
+        fd = os.open(target, os.O_RDWR)
+        real_unlink = os.unlink
+        real_fstat = os.fstat
+        unlinked = []
+
+        def fail(*args, **kwargs):
+            raise OSError(errno.EIO, "injected scrub failure")
+
+        def unlink(name, *, dir_fd=None):
+            real_unlink(name, dir_fd=dir_fd)
+            unlinked.append(True)
+
+        def fstat(held):
+            if held == fd and unlinked:
+                raise OSError(errno.EIO, "injected warning metadata failure")
+            return real_fstat(held)
+
+        monkeypatch.setattr(crypto_module.os, "ftruncate", fail)
+        monkeypatch.setattr(crypto_module.os, "pwrite", fail)
+        monkeypatch.setattr(crypto_module.os, "unlink", unlink)
+        monkeypatch.setattr(crypto_module.os, "fstat", fstat)
+        try:
+            with pytest.raises(KeyFileError, match="THE SECRET MAY REMAIN.*unknown"):
+                crypto_module._scrub_and_remove(dir_fd, target.name, fd, str(target), None)
+            assert unlinked
+            assert not target.exists()
+        finally:
+            os.close(fd)
+            os.close(dir_fd)

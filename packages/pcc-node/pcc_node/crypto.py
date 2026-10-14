@@ -16,6 +16,7 @@ import logging
 import re
 import stat
 import sys
+from datetime import datetime, timezone
 
 log = logging.getLogger("pcc-node.crypto")
 
@@ -191,13 +192,23 @@ def verify_signature(announcement, signature_hex, public_key_hex):
 # ---------------------------------------------------------------------------
 
 KEY_PATH_ENV = "PCC_NODE_KEY_PATH"
+_KEY_LOCATION_ADVICE = (
+    "Use the default ~/.pcc-node/keys.json, or set PCC_NODE_KEY_PATH to a path outside every "
+    "source checkout. If you passed a path explicitly, change that argument or omit it to use "
+    "the default or environment setting."
+)
 DEFAULT_KEYS_PATH = os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 LEGACY_KEYS_PATH = "pcc-keys.json"
 _POSIX = os.name != "nt"
 _FSYNC_UNSUPPORTED = {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
 _WINDOWS_REFUSAL = (
     "pcc-node does not keep a node key on Windows: owner-only ACLs and checked no-follow "
-    "directory opens are unavailable. Run the node on Linux or macOS (WSL works)."
+    "directory opens are unavailable. Run the node on Linux (WSL works)."
+)
+_MOUNT_REFUSAL = (
+    "pcc-node cannot load or create a node key without usable Linux mount discovery: "
+    "the filesystem and its aliases cannot be checked. Key persistence is Linux only; "
+    "native macOS checks are not available."
 )
 
 
@@ -314,6 +325,13 @@ def _mount_of(fd):
     raise _unreadable_mounts()
 
 
+def _checked_mount_of(fd):
+    mount = _mount_of(fd)
+    if mount is None:
+        raise KeyFileError(_MOUNT_REFUSAL)
+    return mount
+
+
 # Filesystems whose files live in backing directories elsewhere (an overlay's upper
 # directory receives every new file): the backing paths are not evaluated, so a key
 # on one is refused (review A02e).
@@ -332,24 +350,27 @@ def _whole_filesystem(mount):
     subvolume mounted as such)? A bind mount of a subtree does not. Other names of
     a whole filesystem (the same filesystem mounted again, or a btrfs top level
     showing the subvolume) are checked separately, by :func:`_refuse_aliases`."""
-    if mount is None or mount["root"] == "/":
+    if mount is None:
+        return False
+    if mount["root"] == "/":
         return True
     return mount["fstype"] == "btrfs" and ("subvol=" + mount["root"]) in mount["super"].split(",")
 
 
 def _refuse_bind_mounted(fd, key_path, what):
-    mount = _mount_of(fd)
-    if mount is not None and _is_union_or_fuse(mount["fstype"]):
+    mount = _checked_mount_of(fd)
+    if _is_union_or_fuse(mount["fstype"]):
         raise KeyFileError(
             "refusing to use a key file on a union or FUSE filesystem (%s %s is on a %s mount): its files are "
             "stored where this check cannot follow, and may be visible inside a source checkout. Keep the key on "
-            "an ordinary filesystem." % (key_path, what, mount["fstype"])
+            "an ordinary filesystem. %s" % (key_path, what, mount["fstype"], _KEY_LOCATION_ADVICE)
         )
     if not _whole_filesystem(mount):
         raise KeyFileError(
             "refusing to use a key file reached through a bind mount of a subtree (%s %s is on a mount of "
             "%r): the same file has other names this process cannot check, and one may be inside a source "
-            "checkout. Keep the key on a filesystem mounted whole." % (key_path, what, mount["root"])
+            "checkout. Keep the key on a filesystem mounted whole. %s"
+            % (key_path, what, mount["root"], _KEY_LOCATION_ADVICE)
         )
     return mount
 
@@ -390,9 +411,7 @@ def _refuse_file_aliases(key_fd, key_path):
     checkout (review A02f): a bind mount of the file (its mount root is the file's
     own path) adds a name without adding a hard link. Each such name that still
     shows this file is judged by walking the directory that holds it. Linux only."""
-    if not _LINUX:
-        return
-    mine = _mount_of(key_fd)
+    mine = _checked_mount_of(key_fd)
     fs_path = _fs_path_of(key_fd, mine)
     st = os.fstat(key_fd)
     for alias in _alias_paths(fs_path, mine, _mountinfo()):
@@ -423,9 +442,7 @@ def _refuse_aliases(dir_fd, key_path):
     mounted inside a checkout and bound elsewhere, a btrfs top level showing the
     subvolume. A name that resolves to another directory, or to nothing, is shadowed
     in this view and is not a name of this directory here. Linux only."""
-    if not _LINUX:
-        return
-    mine = _mount_of(dir_fd)
+    mine = _checked_mount_of(dir_fd)
     fs_path = _fs_path_of(dir_fd, mine)
     st = os.fstat(dir_fd)
     for alias in _alias_paths(fs_path, mine, _mountinfo()):
@@ -485,9 +502,12 @@ def _refuse_checkout(dir_fd, key_path, aliases=True):
     is one ``git add`` from being published. A walk that cannot finish (an
     unreadable ancestor) refuses too: a location that is not proven is not used.
 
-    On Linux every other mount-visible name of the directory is walked the same
-    way (:func:`_refuse_aliases`), and no level may be on a union filesystem or a
-    bind mount of a subtree.
+    Every level's ownership and write permissions are judged on that same
+    descriptor: only root or the effective uid may own it; writable ancestors
+    are refused except for root-owned sticky directories. Every other Linux
+    mount-visible name is walked too (:func:`_refuse_aliases`), and no level may
+    be on a union filesystem or a bind mount of a subtree. Without usable Linux
+    mount discovery the walk refuses.
 
     Descriptors opened here are closed here; *dir_fd* stays the caller's.
     """
@@ -502,13 +522,15 @@ def _refuse_checkout(dir_fd, key_path, aliases=True):
         root_fd = os.open("/", flags)
         try:
             root = os.fstat(root_fd)
-            root_mount = _mount_of(root_fd)
+            root_mount = _checked_mount_of(root_fd)
         finally:
             os.close(root_fd)
         # The root is this process's "/" AND its mount: "/" bind-mounted somewhere below a
         # checkout has the same device and inode, on another mount (review A02d).
         root_id = (root.st_dev, root.st_ino, root_mount["id"] if root_mount else None)
         for level in range(_MAX_ANCESTORS):
+            here = os.fstat(current)
+            _check_ancestor(here, current, key_path)
             try:
                 os.stat(".git", dir_fd=current, follow_symlinks=False)
             except FileNotFoundError:
@@ -518,10 +540,9 @@ def _refuse_checkout(dir_fd, key_path, aliases=True):
                     level, "" if level == 1 else "s")
                 raise KeyFileError(
                     "refusing to use a key file inside a source checkout (%s: a .git entry was found %s): "
-                    "a key there is one `git add` away from being published. Set %s to a path outside "
-                    "every repository." % (key_path, where, KEY_PATH_ENV)
+                    "a key there is one `git add` away from being published. %s"
+                    % (key_path, where, _KEY_LOCATION_ADVICE)
                 )
-            here = os.fstat(current)
             mount = _refuse_bind_mounted(current, key_path, "has a directory that")
             if (here.st_dev, here.st_ino, mount["id"] if mount else None) == root_id:
                 return  # this level IS the process's root directory: every level has been looked at
@@ -531,16 +552,39 @@ def _refuse_checkout(dir_fd, key_path, aliases=True):
             current = above
         raise KeyFileError(
             "%s lies more than %d directories deep, so it cannot be proven to be outside a source "
-            "checkout" % (key_path, _MAX_ANCESTORS)
+            "checkout. %s" % (key_path, _MAX_ANCESTORS, _KEY_LOCATION_ADVICE)
         )
     except OSError as err:
         raise KeyFileError(
             "cannot tell whether %s is inside a source checkout (%s); a location that is not proven "
-            "is not used" % (key_path, err)
+            "is not used. %s" % (key_path, err, _KEY_LOCATION_ADVICE)
         ) from None
     finally:
         if current != dir_fd:
             os.close(current)
+
+
+def _check_ancestor(st, dir_fd, key_path):
+    """Judge the SAME directory descriptor used by the checkout walk.
+
+    Root-owned sticky directories protect this user's entries from other users
+    even when writable, as /tmp does. A foreign owner can rename entries despite
+    a non-writable mode, so no other owner is safe.
+    """
+    reason = None
+    if st.st_uid not in (0, os.geteuid()):
+        reason = "is not owned by this user or root (owned by another account)"
+    elif st.st_mode & 0o022 and not (st.st_uid == 0 and st.st_mode & stat.S_ISVTX):
+        reason = "is writable by other users (mode %o)" % stat.S_IMODE(st.st_mode)
+    if reason is not None:
+        try:
+            ancestor = os.readlink("/proc/self/fd/%d" % dir_fd)
+        except OSError:
+            ancestor = "the ancestor open as descriptor %d for %s" % (dir_fd, key_path)
+        raise KeyFileError(
+            "%s %s; keep the key below a secure ancestor chain. %s"
+            % (ancestor, reason, _KEY_LOCATION_ADVICE)
+        )
 
 
 def _check_directory(dir_fd, directory):
@@ -549,11 +593,15 @@ def _check_directory(dir_fd, directory):
     file. (POSIX owners and modes: a platform without them never gets here, see
     :func:`_require_descriptor_support`.)"""
     st = os.fstat(dir_fd)
-    if st.st_uid != os.getuid():
-        raise KeyFileError("%s is not owned by this user; keep the key in a directory you own" % directory)
+    if st.st_uid != os.geteuid():
+        raise KeyFileError(
+            "%s is not owned by this user; keep the key in a directory you own. %s"
+            % (directory, _KEY_LOCATION_ADVICE)
+        )
     if st.st_mode & 0o022:
         raise KeyFileError(
-            "%s is writable by other users (mode %o); run chmod 700 on it" % (directory, st.st_mode & 0o777)
+            "%s is writable by other users (mode %o); run chmod 700 on it, or choose a secure location. %s"
+            % (directory, st.st_mode & 0o777, _KEY_LOCATION_ADVICE)
         )
 
 
@@ -603,44 +651,115 @@ def _open_key_directory(parent, key_path):
         raise
 
 
+class _ExposedKeyError(KeyFileError):
+    """Exposure detected on a descriptor; the caller must persist its refusal."""
+
+
+def _exposure_refusal(key_path):
+    return (
+        "%s: the identity is compromised. Move both %s and %s.exposed out of this directory "
+        "to retire it; the next start creates a NEW key pair and a new identity, which needs re-registration."
+        % (key_path, key_path, key_path)
+    )
+
+
+def _refuse_exposed_marker(dir_fd, name, key_path):
+    try:
+        os.stat(name + ".exposed", dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    raise KeyFileError(_exposure_refusal(key_path))
+
+
+def _record_exposure(dir_fd, name, key_path, reason):
+    """Atomically create a 0600 exposure record through the checked directory.
+
+    This record contains only a UTC timestamp and the metadata refusal reason,
+    never any part of the key pair. Existing markers are never replaced. Once
+    created, the marker remains even if its write or sync fails: presence alone
+    is sufficient to refuse the identity.
+    """
+    marker = name + ".exposed"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(marker, flags, 0o600, dir_fd=dir_fd)
+    except FileExistsError:
+        # A competing detector may still be writing/syncing this marker.
+        # Refuse without changing the key's mode or assuming durability.
+        raise KeyFileError(_exposure_refusal(key_path)) from None
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as f:
+            json.dump({"utc": datetime.now(timezone.utc).isoformat(), "reason": reason}, f)
+            f.flush()
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+    # Unlike ordinary key publication, unsupported directory fsync is a
+    # refusal here: changing the key's mode requires a durable marker first.
+    os.fsync(dir_fd)
+
+
+def _judge_persisted_key_file(dir_fd, name, fd, key_path, legacy=False):
+    _refuse_exposed_marker(dir_fd, name, key_path)
+    try:
+        if legacy:
+            _judge_key_file(fd, key_path, legacy=True)
+        else:
+            _judge_key_file(fd, key_path)
+    except _ExposedKeyError as err:
+        try:
+            _record_exposure(dir_fd, name, key_path, str(err))
+        except OSError as record_error:
+            # Preserve the exposure itself as the retry signal. Even an
+            # incomplete marker refuses, but its durability is unproven.
+            raise KeyFileError(
+                "%s %s Exposure marker could not be persisted: %s; the key's mode was left unchanged."
+                % (err, _exposure_refusal(key_path), record_error)
+            ) from None
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError as chmod_error:
+            raise KeyFileError(
+                "%s %s The exposure marker is durable, but the key cannot be restricted to 0600: %s"
+                % (err, _exposure_refusal(key_path), chmod_error)
+            ) from None
+        log.warning("%s; exposure marker is durable; restricted to 0600", err)
+        raise KeyFileError(
+            "%s It is now 0600 (chmod 600). %s" % (err, _exposure_refusal(key_path))
+        ) from None
+
+
 def _judge_key_file(fd, key_path, legacy=False):
     """Judge the open file itself, never a name that may lead elsewhere: a
     regular file owned by this user, with exactly one name (a second hard link
     may sit inside a source checkout, where this file is published with it),
-    readable by the owner only. A wider mode is corrected on this descriptor
-    and refused: another account may already have copied the secret."""
+    readable by the owner only. Exposure is reported without changing its mode;
+    the caller persists the marker before restricting it on this descriptor.
+    Another account may already have
+    copied the secret, or retained an open writer."""
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode):
         raise KeyFileError(key_path + " is not a regular file")
     # st_nlink counts hard links only: a bind mount of the file, or of a directory
     # above it, adds a name without adding a link (review A02d).
     _refuse_bind_mounted(fd, key_path, "itself")
-    if st.st_uid != os.getuid():
-        raise KeyFileError(key_path + " is not owned by this user (owned by another account)")
+    mode = stat.S_IMODE(st.st_mode)
+    foreign = st.st_uid != os.geteuid()
+    # Executable-only bits are also conservatively treated as exposure, as before.
+    if foreign or mode & 0o077:
+        reason = (
+            "is not owned by this user (owned by another account)" if foreign
+            else "was readable or writable by other users (mode %o)" % mode
+        )
+        legacy_note = ", pcc-node 0.1.x's key file," if legacy else ""
+        raise _ExposedKeyError(
+            "%s%s %s; its secret may already have been copied."
+            % (key_path, legacy_note, reason)
+        )
     if st.st_nlink != 1:
         raise KeyFileError(
             "%s has %d hard links; a key file must have exactly one name, because another may sit "
             "inside a source checkout" % (key_path, st.st_nlink)
-        )
-    mode = st.st_mode & 0o777
-    if mode & 0o077:
-        try:
-            os.fchmod(fd, 0o600)
-        except OSError as err:
-            raise KeyFileError(
-                "%s is readable by other users (mode %o) and cannot be corrected: %s" % (key_path, mode, err)
-            ) from None
-        log.warning("%s was mode %o; corrected to 0600", key_path, mode)
-        if legacy:
-            raise KeyFileError(
-                "%s, pcc-node 0.1.x's key file, was readable by other users (mode %o). It is now "
-                "0600 and will not be adopted: move it aside to create a new identity, then register "
-                "the node again." % (key_path, mode)
-            )
-        raise KeyFileError(
-            "%s was readable or writable by other users (mode %o). It is now 0600 (chmod 600), "
-            "but its secret may already have been copied. Move it aside to create a new identity, "
-            "then register the node again." % (key_path, mode)
         )
 
 
@@ -653,6 +772,7 @@ def _read_key_file(dir_fd, name, key_path):
     ``(fd, data)``: the descriptor stays OPEN, so the caller judges the same
     file again as its last step (review A02c). FileNotFoundError when there is
     no such file."""
+    _refuse_exposed_marker(dir_fd, name, key_path)
     flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(name, flags, dir_fd=dir_fd)
@@ -661,7 +781,7 @@ def _read_key_file(dir_fd, name, key_path):
             raise KeyFileError(key_path + " is a symbolic link; a key file must be a regular file") from None
         raise
     try:
-        _judge_key_file(fd, key_path)
+        _judge_persisted_key_file(dir_fd, name, fd, key_path)
         chunks = []
         size = 0
         while True:
@@ -691,13 +811,14 @@ def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
     terminal checks. A failed hard link has no rename fallback. Any failed
     creation scrubs through that descriptor and removes its new names.
     """
+    _refuse_exposed_marker(dir_fd, name, key_path)
     tmp = ".%s.%d.%s.tmp" % (name, os.getpid(), os.urandom(4).hex())
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
     installed = False
     temp_exists = True
     try:
-        _judge_key_file(fd, key_path)
+        _judge_persisted_key_file(dir_fd, name, fd, key_path)
         with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as f:
             json.dump({"public": public_hex, "secret": secret_hex}, f, indent=2)
             f.flush()
@@ -712,8 +833,8 @@ def _create_key_file(dir_fd, name, key_path, public_hex, secret_hex):
         except OSError as err:
             raise KeyFileError(
                 "cannot install %s atomically: the filesystem refused a hard link (%s). Keep "
-                "the key on a local filesystem, for example with %s or PCC_NODE_KEYS_FILE."
-                % (key_path, errno.errorcode.get(err.errno, err.errno), KEY_PATH_ENV)
+                "the key on a local filesystem. %s"
+                % (key_path, errno.errorcode.get(err.errno, err.errno), _KEY_LOCATION_ADVICE)
             ) from None
         installed = True
         os.unlink(tmp, dir_fd=dir_fd)
@@ -769,10 +890,14 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
             return
         # The name is gone, but the bytes were never scrubbed: another hard link, or an
         # open descriptor elsewhere, can still reach them (review A02f).
+        try:
+            other_links = os.fstat(fd).st_nlink
+        except OSError:
+            other_links = "unknown"
         raise KeyFileError(
             "%s was refused; its name was removed, but the new key file could not be emptied first: THE SECRET "
-            "MAY REMAIN through another name of the same file (%d other link(s) right now). Find and delete it "
-            "by hand." % (key_path, os.fstat(fd).st_nlink)
+            "MAY REMAIN through another name of the same file (%s other link(s) right now). Find and delete it "
+            "by hand." % (key_path, other_links)
         ) from cause
     if emptied:
         raise KeyFileError(
@@ -788,8 +913,8 @@ def _scrub_and_remove(dir_fd, name, fd, key_path, cause):
 def _refuse_legacy(legacy, path):
     """Check and refuse a legacy file, without reading or adopting its secret.
 
-    A legacy file others could read is locked down on its descriptor first,
-    then refused. Ownership, unsafe directories and symlinks get their
+    A legacy file others could read is marked durably before its descriptor's
+    mode is restricted, then refused. Ownership, unsafe directories and symlinks get their
     specific refusals. Moving a node's own file into the selected location is
     the operator's explicit act; mere presence in the working directory never
     supplies an identity.
@@ -800,13 +925,14 @@ def _refuse_legacy(legacy, path):
     key_fd = None
     try:
         _check_directory(dir_fd, parent)
+        _refuse_exposed_marker(dir_fd, name, old)
         try:
             key_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
         except OSError as err:
             if err.errno in (errno.ELOOP, errno.EMLINK):
                 raise KeyFileError(old + " is a symbolic link: a legacy key will not be adopted") from None
             raise
-        _judge_key_file(key_fd, old, legacy=True)
+        _judge_persisted_key_file(dir_fd, name, key_fd, old, legacy=True)
         directory = os.path.dirname(os.path.abspath(path))
         raise KeyFileError(
             "%s is a pcc-node 0.1.x key file. pcc-node no longer adopts a key from the working "
@@ -825,7 +951,7 @@ def _check_key_location(dir_fd, key_fd, key_path):
     """Terminal checks on the same open directory and file used for the key."""
     _refuse_checkout(dir_fd, key_path)
     _check_directory(dir_fd, os.path.dirname(key_path))
-    _judge_key_file(key_fd, key_path)
+    _judge_persisted_key_file(dir_fd, os.path.basename(key_path), key_fd, key_path)
     _refuse_file_aliases(key_fd, key_path)
 
 
@@ -892,14 +1018,25 @@ def load_or_create_keys(path=None):
     opened once and judged as that open directory, never by pathname. It, and
     every directory above it up to the filesystem root (the user's home
     included), must hold no ``.git`` entry, so the key lies outside every source
-    checkout; and it must be owned by this user and writable by no one else.
+    checkout. Every ancestor must be owned by root or the effective uid and
+    writable by no one else, except root-owned sticky directories such as /tmp.
+    The immediate key directory must be owned by the effective uid and writable
+    by no one else.
     The key file is then opened or created relative to that same directory,
     never through a symbolic link. An existing file must be a regular file
     owned by this user with exactly one name (a second hard link could sit in a
     checkout); a new file is created 0600 from the first byte, never over an
     existing name. Directories that do not exist yet are created 0700. Where
     the platform cannot do this (no ``dir_fd`` calls, no ``O_DIRECTORY`` or
-    ``O_NOFOLLOW``: native Windows), the key is refused.
+    ``O_NOFOLLOW``: native Windows), or lacks usable Linux mount discovery
+    (including native macOS), the key is refused.
+
+    An exposed file is marked compromised in a sibling ``<keyfile>.exposed``
+    record, fsynced along with its directory BEFORE restricting the key to
+    0600. If marker persistence fails, the key's mode stays unchanged so its
+    exposure still causes a refusal on retry. Every later start refuses while that marker
+    exists. The operator must retire both files; only then is a new identity
+    created, and it must be registered again. No automatic rotation occurs.
 
     Loading checks the pair, not just its label: both keys are exactly 64 hex
     characters, the public key derived from the secret must match the stored
@@ -930,7 +1067,9 @@ def load_or_create_keys(path=None):
     _require_descriptor_support()
     if path is None:
         selected = default_key_path()
-        if not os.path.lexists(selected) and os.path.lexists(LEGACY_KEYS_PATH):
+        if not os.path.lexists(selected) and (
+            os.path.lexists(LEGACY_KEYS_PATH) or os.path.lexists(LEGACY_KEYS_PATH + ".exposed")
+        ):
             _refuse_legacy(LEGACY_KEYS_PATH, selected)
         path = selected
     abs_path = os.path.abspath(path)
