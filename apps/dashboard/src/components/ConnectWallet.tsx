@@ -2,6 +2,7 @@ import React from "react";
 import { useAccount, useConnect, useDisconnect, useSignMessage } from "wagmi";
 import { GlassPanel } from "@pcc/ui";
 import { useAuthStore } from "../stores/auth-store.js";
+import { authorizedFetch } from "../lib/authorized-fetch.js";
 
 /**
  * Build an EIP-4361 SIWE message string.
@@ -65,7 +66,8 @@ export function ConnectWallet() {
 
   // Check for existing session on mount
   React.useEffect(() => {
-    fetch("/api/auth/me", { credentials: "include" })
+    // With the API key: the gateway honors a session cookie only beside the key it was verified under (N103).
+    authorizedFetch("/api/auth/me", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.address) {
@@ -105,7 +107,8 @@ export function ConnectWallet() {
       const signature = await signMessageAsync({ message });
 
       // 4. Verify with gateway
-      const verifyRes = await fetch("/api/auth/verify", {
+      // With the API key, so the gateway binds the session to this account (N103).
+      const verifyRes = await authorizedFetch("/api/auth/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
