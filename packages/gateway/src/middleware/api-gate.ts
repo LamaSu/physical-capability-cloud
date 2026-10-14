@@ -6,6 +6,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
+import { hasSingleValidAdminKey } from "./relay-admin-gate.js";
 import { nonCanonicalTargetReason, NON_CANONICAL_REFUSAL } from "./canonical-request-target.js";
 import { resolveApiKey } from "../auth/api-key-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
@@ -166,6 +167,13 @@ async function apiGateImpl(app: FastifyInstance) {
 
     // Skip public routes
     if (isPublicRoute(req.url, req.method)) return;
+
+    // These private settlement routes also accept the gateway admin secret itself.
+    const path = req.url.split("?")[0];
+    const receiptRoute = /^(?:\/api\/operator\/jobs\/[^/]+\/receipt)$/.test(path)
+      && (req.method === "POST" || req.method === "GET" || req.method === "HEAD");
+    const issueRoute = path === "/api/admin/settlement-challenges" && req.method === "POST";
+    if ((receiptRoute || issueRoute) && hasSingleValidAdminKey(req)) return;
 
     // Try API key first (most common for agents)
     const apiKey = resolveApiKey(req);
