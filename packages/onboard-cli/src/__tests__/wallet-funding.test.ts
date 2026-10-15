@@ -561,6 +561,7 @@ describe("bounded receipt polling and RPC retries", () => {
     });
     expect(await fund("agent", [], runtime({ waitForReceipt: waiter, receiptTimeoutMs: 60_000 }))).toBe(1);
     expect(waiter).toHaveBeenCalledTimes(4);
+    expect(waiter.mock.calls.map(call => call[2])).toEqual([60_000, 45_000, 30_000, 15_000]);
     expect(errors.join("")).toContain("funding_receipt_timeout");
     expect(output.join("")).not.toContain("funded");
   });
