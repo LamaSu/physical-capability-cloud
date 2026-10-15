@@ -45,7 +45,6 @@ Options:
   --chain-id 84532                     Base Sepolia only
   --gateway <origin>                   Same gateway resolution as onboard
   --rpc-url <url>                      Base Sepolia receipts (env: PCC_RPC_URL)
-  --usdc 1|2|3                        Optional agent funding amount
   --kernel-id <id>                     Optional device binding on init/link
   --yes                               Skip typed create only on non-TTY stdin
   --api-key <owner-key>                Revoke only (env: PCC_API_KEY)
@@ -70,7 +69,6 @@ interface Args {
   reason?: string;
   kernelId?: string;
   rpcUrl?: string;
-  usdc?: 1 | 2 | 3;
 }
 
 function parseArgs(argv: string[]): Args | null {
@@ -85,7 +83,7 @@ function parseArgs(argv: string[]): Args | null {
   for (let i = 0; i < flags.length; i++) {
     const flag = flags[i];
     if (flag === "--yes") { yes = true; continue; }
-    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason", "--kernel-id", "--rpc-url", "--usdc"].includes(flag)) {
+    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason", "--kernel-id", "--rpc-url"].includes(flag)) {
       throw new WalletError("invalid_wallet_option");
     }
     const value = flags[++i];
@@ -113,16 +111,10 @@ function parseArgs(argv: string[]): Args | null {
     if (!/^[\x21-\x7E]{1,128}$/.test(kernelId) || /^(?:eip155|ed25519):/i.test(kernelId)) throw new WalletError("invalid_kernel_id");
     if (command !== "init" && command !== "link") throw new WalletError("invalid_wallet_option");
   }
-  const usdc = values["--usdc"];
-  if (usdc !== undefined) {
-    if (role !== "agent") throw new WalletError("usdc_agent_only");
-    if (!/^[123]$/.test(usdc)) throw new WalletError("invalid_usdc_amount");
-    if (command !== "init" && command !== "fund") throw new WalletError("invalid_wallet_option");
-  }
   return {
     command: command as Command, role, label, keyType, chainId: 84532,
     gateway: values["--gateway"], yes, apiKey: values["--api-key"], reason, kernelId,
-    rpcUrl: values["--rpc-url"], usdc: usdc === undefined ? undefined : Number(usdc) as 1 | 2 | 3,
+    rpcUrl: values["--rpc-url"],
   };
 }
 
@@ -225,11 +217,11 @@ function printClaims(result: FundingResult, io: WalletRuntime): void {
   for (const claim of result.claims) io.stdout(`${claim.token} ${claim.amount} ${claim.status}${claim.txHash ? ` ${claim.txHash}` : ""}\n`);
 }
 
-async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: string, usdc?: 1 | 2 | 3): Promise<boolean> {
+async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: string): Promise<boolean> {
   if (!wallet.link.linkId || !wallet.link.requestId || wallet.link.status !== "approved") throw new WalletError("approved_link_required");
   const deadline = io.now() + 60_000;
   for (let attempt = 0; attempt < 8; attempt++) {
-    const result = await requestFunding(wallet.gatewayOrigin, wallet.link.requestId, wallet.role, usdc);
+    const result = await requestFunding(wallet.gatewayOrigin, wallet.link.requestId, wallet.role);
     if (result.status === "unavailable") {
       io.stdout("funding is not available on this gateway; ask the operator for test funds\nlinked (unfunded)\n");
       return false;
@@ -281,7 +273,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       chainId: args.chainId, gatewayOrigin: origin, createdAt: new Date(io.now()).toISOString(),
     });
     wallet = await linkWallet(wallet, io, args.kernelId);
-    if (await fundWallet(wallet, io, rpcUrl, args.usdc)) io.stdout("ready\n");
+    if (await fundWallet(wallet, io, rpcUrl)) io.stdout("ready\n");
     return 0;
   }
   let wallet = readWallet(args.label);
@@ -299,7 +291,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       await linkWallet(wallet, io, args.kernelId);
       return 0;
     case "fund":
-      await fundWallet(wallet, io, rpcUrl, args.usdc);
+      await fundWallet(wallet, io, rpcUrl);
       return 0;
     case "status": {
       io.stdout(`label: ${wallet.label}\nrole: ${wallet.role}\nkey type: ${wallet.keyType}\n${wallet.address ? "address" : "public key"}: ${wallet.address ?? wallet.publicKey}\nchain: ${wallet.chainId}\ngateway: ${wallet.gatewayOrigin}\nfile: ${walletPath(wallet.label)} (mode 0600)\ncreated: ${wallet.createdAt}\nlocal status: ${wallet.link.status ?? "unlinked"}\n`);

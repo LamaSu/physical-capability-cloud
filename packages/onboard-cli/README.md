@@ -121,7 +121,8 @@ can remain in shell history. Create requests include the installed CLI version.
 Device links accept `--kernel-id <id>` on `init` or `link`.
 An already approved wallet refuses `link`; revoke it before linking again.
 Funding uses the approved request's anonymous capability for up to 60 minutes.
-Agents may pass `--usdc 1|2|3`; devices receive ETH only. The CLI waits for every
+Agents receive five ETH claims and one USDC claim; secp256k1 devices receive
+five ETH claims. Funding takes no amount input. The CLI waits for every
 transaction receipt on Base Sepolia through `--rpc-url` / `PCC_RPC_URL`
 (default `https://sepolia.base.org`). Gateway and RPC URLs require HTTPS,
 except loopback HTTP for local use. Partial funding prints each claim and exits

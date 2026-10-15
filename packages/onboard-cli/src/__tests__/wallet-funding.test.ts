@@ -102,15 +102,13 @@ describe("W2 funding response contract", () => {
     expect(new Headers(init?.headers).get("authorization")).toBeNull();
     expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
   });
-  it.each([1, 2, 3] as const)("agent can request usdc=%s", async usdc => {
-    const fetchSpy = gateway(FUNDED);
-    await requestFunding(ORIGIN, REQUEST_ID, "agent", usdc);
-    expect(JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body))).toEqual({ usdc });
-  });
-  it("refuses a device USDC request before contacting the gateway", async () => {
-    const fetchSpy = gateway(FUNDED);
-    await expect(requestFunding(ORIGIN, REQUEST_ID, "device", 1)).rejects.toThrow("usdc_agent_only");
-    expect(fetchSpy).not.toHaveBeenCalled();
+  it("fund POST has no amount input for either role", async () => {
+    for (const role of ["agent", "device"] as const) {
+      const fetchSpy = gateway({ status: "funded", claims: realFundingClaims(role) });
+      await requestFunding(ORIGIN, REQUEST_ID, role);
+      expect(JSON.parse(String(fetchSpy.mock.calls.at(-1)?.[1]?.body))).toEqual({});
+      fetchSpy.mockRestore();
+    }
   });
   it("accepts device ETH claims", async () => {
     const device = { status: "funded", claims: realFundingClaims("device") };
@@ -382,17 +380,17 @@ describe("W2 funding option boundaries", () => {
     expect(errors.join("")).toContain("insecure_rpc_origin");
     expect(await (await import("node:fs/promises")).readdir(directory)).toEqual([]);
   });
-  it("device USDC flag is refused before requests", async () => {
+  it("removed --usdc option is refused for devices before requests", async () => {
     const fetchSpy = gateway(FUNDED);
     expect(await main(["init", "--role", "device", "--label", "device", "--gateway", ORIGIN, "--usdc", "1", "--yes"], runtime())).toBe(1);
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(errors.join("")).toContain("usdc_agent_only");
+    expect(errors.join("")).toContain("invalid_wallet_option");
   });
-  it.each(["0", "4", "1.5"])("refuses invalid USDC option %s", async (usdc) => {
+  it.each(["0", "1", "2", "3", "4", "1.5"])("removed --usdc option %s is refused for agents before requests", async (usdc) => {
     store(); const fetchSpy = gateway(FUNDED);
     expect(await fund("agent", ["--usdc", usdc])).toBe(1);
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(errors.join("")).toContain("invalid_usdc_amount");
+    expect(errors.join("")).toContain("invalid_wallet_option");
   });
   it("bounds pending even with a frozen clock", async () => {
     store();
@@ -419,4 +417,9 @@ describe("W2 funding option boundaries", () => {
     expect(waiter).toHaveBeenCalledTimes(5);
     expect(errors.join("")).toContain("funding_partial");
   });
+});
+
+it("wallet help exposes no --usdc input", async () => {
+  expect(await main(["--help"], runtime())).toBe(0);
+  expect(output.join("")).not.toContain("--usdc");
 });

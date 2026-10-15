@@ -170,14 +170,8 @@ export async function requestFunding(
   origin: string,
   requestId: string,
   role: Role = "agent",
-  usdc?: 1 | 2 | 3,
 ): Promise<FundingResult> {
-  if (usdc !== undefined) {
-    if (role !== "agent") throw new WalletError("usdc_agent_only");
-    if (![1, 2, 3].includes(usdc)) throw new WalletError("invalid_usdc_amount");
-  }
-  const response = await send(origin, `/api/wallets/link-requests/${encodeURIComponent(requestId)}/fund`, "POST",
-    usdc === undefined ? {} : { usdc });
+  const response = await send(origin, `/api/wallets/link-requests/${encodeURIComponent(requestId)}/fund`, "POST", {});
   let data: unknown;
   try { data = await json(response); }
   catch (error) {
