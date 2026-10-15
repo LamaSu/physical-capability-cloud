@@ -298,8 +298,8 @@ describe("PR2 round 2 regressions", () => {
     expect(defaults.cancelConfirmMs + defaults.pollIntervalMs).toBeLessThan(DEFAULT_CANCEL_WINDOW_MS);
   });
   it("R4 #7962(b): a silent printer with real defaults records one device cancel-unconfirmed", async () => {
-    // PR1's cancellation-aware runPrintJob is absent here; the lane must test
-    // this silent printer through runPrintJob on the PR1+PR2 merge for the race.
+    // printer-job-ipp-silent-race.test.ts covers this cancellation path through
+    // runPrintJob, including the signed failure bundle and kernel cancel window.
     // Kills cancel-no-arm and cancel-default-28000 before waiting on quiesce.
     const printer = new FakeIppPrinter();
     const adapter = new IppAdapter("silent-defaults", { uri: "ipp://printer.test/ipp/print", kernelId: "k", transport: printer.transport });
