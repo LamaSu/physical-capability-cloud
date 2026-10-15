@@ -60,14 +60,16 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
 
 /**
  * Buyer intent fixed in the caller's own records before requesting the prepare payload; never copy it from that
- * payload. PCC MVP units bind termsHash, acceptedPolicyDigest and compositionRoots exactly (or bind jobPolicyHash,
- * which commits to everything), and must not waive them. Trusted values come from the caller's own trusted record
- * (N150's canonical funded policy or the CANONICAL record), held like the pins, never copied from the payload or
- * any gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true and leave
+ * payload. PCC MVP units bind their commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots,
+ * or jobPolicyHash, which commits to everything), and must not waive them. Values come from the caller's own pins;
+ * Thursday PRINT buyers use PRINT_UNIT_THURSDAY_V1 from economics' decisions and exact terms-file bytes. Never
+ * copy values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require
+ * allowUnchecked: true and leave
  * the terms, evidence policy or composition to the payload's author; prepared.unchecked lists them.
- * Unless jobPolicyHash is bound, the payload's author still chooses the unit count, each unit's g, milestoneIndex
- * and stepId, the split among payees, each unit's tier within the allowed set, reclaimAt below latestReclaimAt,
- * expiry, policyNonce and compositionSchemaVersion. A mixed tier set hands the choice of release authority to the
+ * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
+ * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
+ * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within
+ * the permitted window. A mixed tier set hands the choice of release authority to the
  * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
  * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
  */
@@ -125,9 +127,10 @@ export interface PrepareFundingArgs {
 
 /**
  * A payload that passed every check, with every value the SDK recomputed. Deep-frozen.
- * Unless jobPolicyHash is bound, the payload's author still chooses the unit count, each unit's g, milestoneIndex
- * and stepId, the split among payees, each unit's tier within the allowed set, reclaimAt below latestReclaimAt,
- * expiry, policyNonce and compositionSchemaVersion. A mixed tier set hands the choice of release authority to the
+ * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
+ * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
+ * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within
+ * the permitted window. A mixed tier set hands the choice of release authority to the
  * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
  * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
  * These choices are not waivers and do not appear in unchecked.
@@ -395,7 +398,7 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   const expect = copyExpectations(args.expect);
   const waived = (["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const).filter((field) => expect[field] === "unchecked");
   if (waived.length !== 0 && args.allowUnchecked !== true) {
-    refuse("BAD_EXPECTATION", `${waived.join(", ")} waived without allowUnchecked: true; the PCC MVP binds all three exactly and must not waive them`);
+    refuse("BAD_EXPECTATION", `${waived.join(", ")} waived without allowUnchecked: true; the PCC MVP binds its commitments exactly and must not waive them`);
   }
   // Everything judged below comes from this parse, taken before the first await.
   const p = parsePreparePayload(args.payload);

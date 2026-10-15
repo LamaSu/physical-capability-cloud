@@ -249,7 +249,7 @@ describe("buyer intent from the caller's own records", () => {
     await expect(result).rejects.toMatchObject({ code: "BAD_EXPECTATION" });
     const error = await result.catch((e: FundingRefusal) => e) as FundingRefusal;
     for (const field of ["termsHash", "acceptedPolicyDigest", "compositionRoots"]) expect(error.message).toContain(field);
-    expect(error.message).toContain("MVP binds all three exactly");
+    expect(error.message).toContain("MVP binds its commitments exactly");
     expect(chain.state.log).toEqual([]);
   });
 

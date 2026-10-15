@@ -1,6 +1,6 @@
 /**
  * `@pcc/spec/funding`: the buyer-funding SDK for V-next escrows (buyer-funding plan S3.1), for a viem EOA. Author:
- * implementer-bravo (pcc-adk). Self-contained (viem is its only dependency) so it can move into `@pcc/adk`.
+ * implementer-bravo (pcc-adk). Uses viem and @pcc/spec's public evidence producers.
  * viem is an optional peer of `@pcc/spec`: install viem ^2 alongside it, or importing this subpath fails with
  * ERR_MODULE_NOT_FOUND.
  *
@@ -17,14 +17,15 @@
  * and only after verifying the payload against caller intent and trusted pins. There is no x402 path: x402 cannot
  * fund a V-next escrow (plan G10).
  * Fix expect in your own submit record, operator choice and payee list before requesting the prepare payload.
- * PCC MVP units bind termsHash, acceptedPolicyDigest and compositionRoots exactly (or bind jobPolicyHash, which
- * commits to everything), and must not waive them. Trusted values come from the caller's own trusted record
- * (N150's canonical funded policy or the CANONICAL record), held like the pins, never copied from the payload or
- * any gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
+ * PCC MVP units bind their commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots, or
+ * jobPolicyHash, which commits to everything), and must not waive them. Values come from the caller's own pins;
+ * Thursday PRINT uses PRINT_UNIT_THURSDAY_V1 from economics' decisions and exact terms-file bytes. Never copy
+ * values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
  * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.
- * Unless jobPolicyHash is bound, the payload's author still chooses the unit count, each unit's g, milestoneIndex
- * and stepId, the split among payees, each unit's tier within the allowed set, reclaimAt below latestReclaimAt,
- * expiry, policyNonce and compositionSchemaVersion. A mixed tier set hands the choice of release authority to the
+ * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
+ * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
+ * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within
+ * the permitted window. A mixed tier set hands the choice of release authority to the
  * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
  * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
  * These choices are not waivers and do not appear in prepared.unchecked.
