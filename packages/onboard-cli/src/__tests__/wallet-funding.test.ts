@@ -520,6 +520,17 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([false, 0, ""])("LOW-F2 refuses an own non-null error %j beside a matching receipt", async error => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: rpcReceipt(), error })));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([-32602, -32005])("PROBE-E1 JSON-RPC error %s takes precedence over a matching receipt in HTTP 200", async code => {
     vi.useFakeTimers();
     const started = Date.now();
