@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 // Regression from the Claude identity probe: real auth, authorizedFetch and app singleton.
 // Only the gateway response is stubbed.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
@@ -57,6 +57,7 @@ async function load() {
   const panel = await import("../components/inbox/InboxPanel.js");
   return { ...auth, ...inbox, ...toasts, ...panel };
 }
+beforeAll(async () => { await load(); }, 30_000);
 async function mountPanel(InboxPanel: React.ComponentType) {
   const host = document.createElement("div");
   document.body.appendChild(host);

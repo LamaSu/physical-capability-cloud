@@ -7,7 +7,17 @@ import { TaskCard } from "./TaskCard.js";
 
 const OUTCOME_COPY: Record<ActOutcome | AckOutcome, string> = {
   done: "Done.",
+  accepted_awaiting_funding: "Accepted. It starts once the buyer's funding is confirmed.",
+  accepted_unknown: "Accepted. Check again for its current status.",
   already_decided: "Already decided.",
+  already_active: "This scope is already active.",
+  already_awaiting_funding: "This scope was already accepted. It starts once the buyer's funding is confirmed.",
+  already_awaiting_acceptance: "This scope is awaiting acceptance.",
+  already_approved: "Already approved.",
+  already_rejected: "Already rejected.",
+  already_expired: "This scope has expired.",
+  already_revoked: "This scope was revoked.",
+  already_completed: "This scope is already completed.",
   expired: "This expired before it was decided.",
   stopped: "The kernel's emergency stop is on; nothing was decided.",
   sign_in: "Sign in to see your inbox.",
@@ -33,7 +43,10 @@ export function InboxItemCard({ item, store, now }: { item: InboxItem; store: In
         <h3 className="text-sm font-medium text-white/80 break-words min-w-0">{item.title}</h3>
         <GlowBadge color={isPinned(item) ? "gold" : "gray"}>{URGENCY_COPY[item.urgency]}</GlowBadge>
       </div>
-      {item.detail !== null && <p className="text-xs text-white/50 break-words">{item.detail}</p>}
+      {item.detail !== null && <div role="group" aria-label="Requested capability (as submitted; not checked by PCC):" className="space-y-1 text-xs text-white/50 break-words">
+        <p>Requested capability (as submitted; not checked by PCC):</p>
+        <blockquote className="border-l border-white/20 pl-3 font-mono">{item.detail}</blockquote>
+      </div>}
       <div className="flex flex-wrap gap-3 text-xs text-white/40">
         <span>{formatWhen(item.createdAt, now)}</span>
         {item.decideBy !== null && <span>Decide by {formatWhen(item.decideBy, now)}</span>}

@@ -110,6 +110,11 @@ describe("pinning and display order", () => {
 });
 
 describe("plain text and fixed time copy", () => {
+  it("strips format characters and line separators before clamping", () => {
+    const formatCharacters = "\u00ad\u200b\u200c\u200d\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2060\u2066\u2067\u2068\u2069\ufeff";
+    expect(Array.from(clampText("a" + formatCharacters + "\u2028\u2029b", 80)!, (c) => c.codePointAt(0))).toEqual([97, 98]);
+    expect(clampText("abc\u202edefghi\u202c", 8)).toBe("abcde...");
+  });
   it("clamps strings after stripping controls and trimming", () => {
     expect(clampText(7, 80)).toBeNull();
     expect(clampText(null, 80)).toBeNull();

@@ -34,7 +34,10 @@ export interface InboxNotice {
   source?: string;
 }
 export type InboxLoadError = "sign_in" | "sign_in_wallet" | "unavailable" | "failed";
-export type ActOutcome = "done" | "already_decided" | "expired" | "stopped" | "sign_in" | "sign_in_wallet" | "not_allowed" | "gone" | "unavailable" | "failed";
+export type ActOutcome = "done" | "accepted_awaiting_funding" | "accepted_unknown" |
+  "already_decided" | "already_active" | "already_awaiting_funding" | "already_awaiting_acceptance" |
+  "already_approved" | "already_rejected" | "already_expired" | "already_revoked" | "already_completed" |
+  "expired" | "stopped" | "sign_in" | "sign_in_wallet" | "not_allowed" | "gone" | "unavailable" | "failed";
 export type AckOutcome = "acked" | "already_acked" | "sign_in" | "sign_in_wallet" | "not_allowed" | "gone" | "unavailable" | "failed";
 export interface InboxSource {
   id: string;
@@ -93,7 +96,7 @@ export function orderForDisplay(items: InboxItem[], _now: number): { actNow: Inb
 
 export function clampText(s: unknown, max: number): string | null {
   if (typeof s !== "string") return null;
-  const text = s.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  const text = s.replace(/[\x00-\x1f\x7f\p{Cf}\u2028\u2029]/gu, "").trim();
   return text.length > max ? text.slice(0, Math.max(0, max - 3)) + "..." : text;
 }
 

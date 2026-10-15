@@ -135,7 +135,7 @@ export function createInboxStore(sources: InboxSource[], deps: {
           catch { outcome = "unavailable"; }
           if (epoch !== startedEpoch) return;
           set((s) => ({ outcomes: { ...s.outcomes, [itemId]: outcome } }));
-          if (epoch === startedEpoch && (outcome === "done" || outcome === "already_decided" || outcome === "expired")) await reconcile(startedEpoch);
+          if (epoch === startedEpoch && (outcome === "done" || outcome === "expired" || outcome.startsWith("accepted_") || outcome.startsWith("already_"))) await reconcile(startedEpoch);
         } finally { clearPending([itemId], startedEpoch); }
       },
       async ackTask(itemId, kind) {

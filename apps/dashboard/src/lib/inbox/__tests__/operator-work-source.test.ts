@@ -169,7 +169,28 @@ describe("operator work inbox read", () => {
     const body = { ...dto(), items: [work(), { ...work(), id: 9 }, { ...work(), actions: null }, null] };
     const result = await createOperatorWorkSource({ fetch: async () => response(200, body) }).load();
     expect(result.ok && result.items).toHaveLength(1);
-    expect(result.ok && result.notices).toContainEqual({ code: "unshown_items", count: 2 });
+    expect(result.ok && result.notices).toContainEqual({ code: "unshown_items", count: 3 });
+  });
+  it("requires approval source state when sources are missing", async () => {
+    const { sources: _sources, ...body } = dto({ items: [] });
+    const result = await createOperatorWorkSource({ fetch: async () => response(200, body) }).load();
+    expect(result.ok && result.notices).toContainEqual({ code: "source_unavailable", source: "approvals" });
+  });
+  it("requires approval source state when sources omit approval", async () => {
+    const { approval: _approval, ...sources } = dto().sources;
+    const result = await createOperatorWorkSource({ fetch: async () => response(200, { ...dto({ items: [] }), sources }) }).load();
+    expect(result.ok && result.notices).toContainEqual({ code: "source_unavailable", source: "approvals" });
+  });
+  it("requires a read approval source state when the state is partial", async () => {
+    const body = { ...dto({ items: [] }), sources: { ...dto().sources, approval: { ...dto().sources.approval, state: "partial" } } };
+    const result = await createOperatorWorkSource({ fetch: async () => response(200, body) }).load();
+    expect(result.ok && result.notices).toContainEqual({ code: "source_unavailable", source: "approvals" });
+  });
+  it("counts every non-object item as unshown", async () => {
+    const body = { ...dto(), items: [null, "approval:x", 7] };
+    const result = await createOperatorWorkSource({ fetch: async () => response(200, body) }).load();
+    expect(result.ok && result.items).toEqual([]);
+    expect(result.ok && result.notices).toContainEqual({ code: "unshown_items", count: 3 });
   });
   it("keeps only decision ops, clamps reasons and disallows unsafe or mismatched routes", async () => {
     const body = dto({ items: [work({ actions: [
@@ -188,6 +209,39 @@ describe("operator work inbox read", () => {
 });
 
 describe("operator work explicit decisions", () => {
+  const accept: InboxAction = { ...approve, route: { method: "POST", path: "/api/operator/scopes/s:1/accept" } };
+  it("reads accepted awaiting-funding status without reporting completion", async () => {
+    const json = vi.fn(async () => ({ status: "awaiting_funding" }));
+    const source = createOperatorWorkSource({ fetch: async () => ({ status: 200, json }) });
+    expect(await source.act!(actItem, accept)).toBe("accepted_awaiting_funding");
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+  it("reads active acceptance status before reporting completion", async () => {
+    const json = vi.fn(async () => ({ status: "active" }));
+    const source = createOperatorWorkSource({ fetch: async () => ({ status: 200, json }) });
+    expect(await source.act!(actItem, accept)).toBe("done");
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    ["expired", "already_expired"], ["revoked", "already_revoked"], ["active", "already_active"],
+    ["awaiting_funding", "already_awaiting_funding"], ["awaiting_acceptance", "already_awaiting_acceptance"],
+    ["approved", "already_approved"], ["rejected", "already_rejected"], ["completed", "already_completed"],
+  ])("maps already-decided status %s to fixed outcome %s", async (status, outcome) => {
+    const source = createOperatorWorkSource({ fetch: async () => response(409, { error: "already_decided", status }) });
+    expect(await source.act!(actItem, accept)).toBe(outcome);
+  });
+  it("keeps unspecified acceptance outcomes distinct from completion", async () => {
+    for (const body of [{ status: "future_status" }, {}, null]) {
+      const accepted = createOperatorWorkSource({ fetch: async () => response(200, body) });
+      expect(await accepted.act!(actItem, accept)).toBe("accepted_unknown");
+    }
+  });
+  it("keeps unknown or missing prior decision statuses generic", async () => {
+    for (const body of [{ error: "already_decided", status: "future_status" }, { error: "already_decided" }]) {
+      const decided = createOperatorWorkSource({ fetch: async () => response(409, body) });
+      expect(await decided.act!(actItem, accept)).toBe("already_decided");
+    }
+  });
   it.each<[number, unknown, ActOutcome]>([
     [200, {}, "done"], [201, {}, "done"], [204, {}, "done"], [299, {}, "done"],
     [409, { error: "already_decided" }, "already_decided"], [409, { error: "scope_expired" }, "expired"],
@@ -215,13 +269,24 @@ describe("operator work explicit decisions", () => {
     expect(await createOperatorWorkSource({ fetch }).act!(actItem, action as InboxAction)).toBe("not_allowed");
     expect(fetch).not.toHaveBeenCalled();
   });
-  it("POSTs scope acceptance exactly as supplied, with no body or success JSON read", async () => {
-    const json = vi.fn(async () => { throw new Error("204 has no body"); });
-    const fetch = vi.fn(async () => ({ status: 204, json }));
+  it("POSTs scope acceptance exactly as supplied, with no request body, and reads the success status", async () => {
+    const json = vi.fn(async () => ({ status: "active" }));
+    const fetch = vi.fn(async () => ({ status: 200, json }));
     const action: InboxAction = { ...approve, route: { method: "POST", path: "/api/operator/scopes/s:1/accept" } };
     expect(await createOperatorWorkSource({ fetch }).act!(actItem, action)).toBe("done");
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith(action.route.path, { method: "POST" });
-    expect(json).not.toHaveBeenCalled();
+    expect(json).toHaveBeenCalledTimes(1);
+  });
+  it("keeps scope acceptance without a response body unavailable", async () => {
+    const json = vi.fn(async () => { throw new Error("204 has no body"); });
+    const fetch = vi.fn(async () => ({ status: 204, json }));
+    const action: InboxAction = { ...approve, route: { method: "POST", path: "/api/operator/scopes/s:1/accept" } };
+    const outcome = await createOperatorWorkSource({ fetch }).act!(actItem, action);
+    expect(outcome).toBe("unavailable");
+    expect(outcome).not.toBe("done");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(action.route.path, { method: "POST" });
+    expect(json).toHaveBeenCalledTimes(1);
   });
 });

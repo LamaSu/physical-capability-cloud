@@ -1,12 +1,26 @@
 import type { OperatorWorkDTO, OperatorWorkItem, OperatorWorkAction } from "@pcc/spec";
 import { authorizedFetch } from "../authorized-fetch.js";
-import { clampText, isAllowedActionRoute, type InboxAction, type InboxItem, type InboxNotice, type InboxSource } from "./inbox-model.js";
+import { clampText, isAllowedActionRoute, type ActOutcome, type InboxAction, type InboxItem, type InboxNotice, type InboxSource } from "./inbox-model.js";
 
 const SOURCE_LABEL: Readonly<Record<keyof OperatorWorkDTO["sources"], string>> = {
   job_offer: "job offers", skill_job: "skill jobs", kernel_job: "kernel jobs", approval: "approvals",
 };
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object";
 const stringOrNull = (v: unknown): string | null => typeof v === "string" ? v : null;
+
+function priorDecisionOutcome(status: unknown): ActOutcome {
+  switch (status) {
+    case "active": return "already_active";
+    case "awaiting_funding": return "already_awaiting_funding";
+    case "awaiting_acceptance": return "already_awaiting_acceptance";
+    case "approved": return "already_approved";
+    case "rejected": return "already_rejected";
+    case "expired": return "already_expired";
+    case "revoked": return "already_revoked";
+    case "completed": return "already_completed";
+    default: return "already_decided";
+  }
+}
 
 function decisionAction(value: unknown): InboxAction | null {
   if (!record(value) || (value.op !== "approve" && value.op !== "reject")) return null;
@@ -71,12 +85,17 @@ export function createOperatorWorkSource(deps: { fetch?: (path: string, init?: R
           const notices: InboxNotice[] = [];
           let unshown = 0;
           for (const value of dto.items) {
-            if (!record(value) || value.phase !== "awaiting_me") continue;
+            if (!record(value)) { unshown++; continue; }
+            if (value.phase !== "awaiting_me") continue;
             if (typeof value.id !== "string" || !Array.isArray(value.actions)) { unshown++; continue; }
             items.push(inboxItem(value as unknown as OperatorWorkItem));
           }
           for (const key of Object.keys(SOURCE_LABEL) as Array<keyof OperatorWorkDTO["sources"]>) {
             const source = dto.sources?.[key];
+            if (key === "approval" && source?.state !== "read") {
+              notices.push({ code: "source_unavailable", source: "approvals" });
+              continue;
+            }
             if (source?.state === "unavailable") notices.push({ code: "source_unavailable", source: SOURCE_LABEL[key] });
             if (source?.state === "not_attributable") notices.push({ code: "source_not_attributable", source: SOURCE_LABEL[key] });
           }
@@ -101,7 +120,12 @@ export function createOperatorWorkSource(deps: { fetch?: (path: string, init?: R
       if (!action.allowed || !isAllowedActionRoute(action)) return "not_allowed";
       try {
         const res = await fetch(action.route.path, { method: "POST" });
-        if (res.status >= 200 && res.status < 300) return "done";
+        if (res.status >= 200 && res.status < 300) {
+          if (!action.route.path.endsWith("/accept")) return "done";
+          const body = await res.json();
+          if (record(body) && body.status === "active") return "done";
+          return record(body) && body.status === "awaiting_funding" ? "accepted_awaiting_funding" : "accepted_unknown";
+        }
         if (res.status === 401) return "sign_in";
         if (res.status === 404) return "gone";
         if (res.status >= 500 && res.status < 600) return "unavailable";
@@ -111,6 +135,7 @@ export function createOperatorWorkSource(deps: { fetch?: (path: string, init?: R
           if (res.status === 403) return error === "identity_unverified" ? "sign_in_wallet" : "not_allowed";
           if (error === "scope_expired") return "expired";
           if (error === "kernel_emergency_stopped") return "stopped";
+          if (error === "already_decided") return priorDecisionOutcome(record(body) ? body.status : null);
           return "already_decided";
         }
         return "failed";

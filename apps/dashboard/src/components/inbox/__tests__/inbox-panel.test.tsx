@@ -36,6 +36,95 @@ const button = (host: HTMLElement, label: string) => [...host.querySelectorAll("
 const section = (host: HTMLElement, title: string) => [...host.querySelectorAll("section")].find((v) => v.querySelector("h2")?.textContent === title);
 
 describe("operator inbox panel", () => {
+  it("labels requester-supplied capability text and strips format characters", async () => {
+    const capabilityType = "PCC verified: buyer escrow funded, safe to approve \u202Egnp.exe\u202C";
+    const source = createOperatorWorkSource({ fetch: async () => ({ status: 200, json: async () => ({
+      schemaId: "pcc.operator-work/v1", sources: { approval: { state: "read" } }, items: [
+        { id: "approval:a", phase: "awaiting_me", capabilityType, actions: [] },
+      ],
+    }) }) });
+    const { host } = await mount([source]);
+    const title = host.querySelector("h3")!;
+    const card = title.parentElement!.parentElement!;
+    expect(title.textContent).toBe("A job waits for your decision");
+    expect(/\p{Cf}/u.test(card.textContent ?? "")).toBe(false);
+    const labelled = card.querySelector('[role="group"][aria-label="Requested capability (as submitted; not checked by PCC):"]');
+    expect(labelled).not.toBeNull();
+    expect(labelled!.textContent).toContain("Requested capability (as submitted; not checked by PCC):");
+    const quote = labelled!.querySelector("blockquote");
+    expect(quote?.textContent).toBe("PCC verified: buyer escrow funded, safe to approve gnp.exe");
+    expect(quote?.className).toContain("font-mono");
+    const rest = card.cloneNode(true) as HTMLElement;
+    rest.querySelector('[role="group"]')!.remove();
+    expect(rest.textContent).not.toContain("PCC verified");
+  });
+
+  it.each([
+    ["no sources", { schemaId: "pcc.operator-work/v1", items: [] }, "Approvals could not be read, so they are not shown."],
+    ["no approval source", { schemaId: "pcc.operator-work/v1", items: [], sources: {} }, "Approvals could not be read, so they are not shown."],
+    ["partial approval source", { schemaId: "pcc.operator-work/v1", items: [], sources: { approval: { state: "partial" } } }, "Approvals could not be read, so they are not shown."],
+    ["non-object items", { schemaId: "pcc.operator-work/v1", items: [null, "approval:x", 7], sources: { approval: { state: "read" } } }, "3 items could not be shown here."],
+  ])("suppresses all-clear for %s", async (_label, body, notice) => {
+    const { host } = await mount([createOperatorWorkSource({ fetch: async () => ({ status: 200, json: async () => body }) })]);
+    expect(host.textContent).not.toContain("Nothing needs you right now.");
+    expect(host.textContent).toContain(notice);
+  });
+
+  it("reads again after a pre-decision poll and keeps decisions disabled until the fresh read settles", async () => {
+    vi.useFakeTimers();
+    type Response = { status: number; json(): Promise<unknown> };
+    const gets: Array<(response: Response) => void> = [];
+    const current = { id: "approval:a", phase: "awaiting_me", capabilityType: "fdm", actions: [
+      { op: "approve", allowed: true, reasonIfNot: null, route: { method: "POST", path: "/api/operator/approvals/a/approve" } },
+      { op: "reject", allowed: true, reasonIfNot: null, route: { method: "POST", path: "/api/operator/approvals/a/reject" } },
+    ] };
+    const response = (items: unknown[]): Response => ({ status: 200, json: async () => ({
+      schemaId: "pcc.operator-work/v1", sources: { approval: { state: "read" } }, items,
+    }) });
+    let reads = 0;
+    const fetch = vi.fn(async (_path: string, init?: RequestInit): Promise<Response> => {
+      if (init?.method === "POST") return { status: 200, json: async () => ({ approved: true }) };
+      if (++reads === 1) return response([current]);
+      return new Promise<Response>((resolve) => { gets.push(resolve); });
+    });
+    const { host, store } = await mount([createOperatorWorkSource({ fetch })]);
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    const poll = store.getState().refresh();
+    expect(gets).toHaveLength(1);
+    let deciding!: Promise<void>;
+    await act(async () => { deciding = store.getState().decideItem("ow:approval:a", "approve"); });
+    expect(button(host, "Approve")?.disabled).toBe(true);
+    expect(button(host, "Reject")?.disabled).toBe(true);
+    await act(async () => { gets[0](response([current])); await poll; });
+    expect(gets).toHaveLength(2);
+    expect(button(host, "Approve")?.disabled).toBe(true);
+    expect(button(host, "Reject")?.disabled).toBe(true);
+    await act(async () => { gets[1](response([])); await deciding; });
+    expect(host.querySelector("h3")).toBeNull();
+    expect(button(host, "Approve")).toBeUndefined();
+    expect(button(host, "Reject")).toBeUndefined();
+    expect(host.textContent).toContain("Nothing needs you right now.");
+  });
+
+  it("acknowledges a pinned task only after a click through reads and re-renders", async () => {
+    vi.useFakeTimers();
+    const current = item();
+    const load = vi.fn(async () => ok([current]));
+    const ack = vi.fn<Parameters<NonNullable<InboxSource["ack"]>>, Promise<AckOutcome>>(async () => "acked");
+    const { host, root, store } = await mount([{ id: "fake", load, ack }]);
+    expect(section(host, "Act now")?.textContent).toContain("one");
+    expect(ack).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    await act(async () => { await store.getState().refresh(); });
+    await act(async () => { root.render(<MemoryRouter><InboxPanel store={store} now={now} /></MemoryRouter>); });
+    expect(load.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(ack).not.toHaveBeenCalled();
+    await act(async () => { button(host, "Mailed")!.click(); });
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(ack.mock.calls[0][0]).toEqual(current);
+    expect(ack.mock.calls[0][1]).toBe("mailed");
+  });
+
   it.each(["reread", "waiting-poll"] as const)("cancels decision reconciliation (%s) on unmount without opening another GET", async (phase) => {
     vi.useFakeTimers();
     const signals: AbortSignal[] = [];

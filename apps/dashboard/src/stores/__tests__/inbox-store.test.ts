@@ -329,6 +329,22 @@ function identityChanges() {
 }
 
 describe("identity-scoped inbox state", () => {
+  it("synchronously aborts an in-flight source read when the identity changes", async () => {
+    const identity = identityChanges();
+    const pending = deferred<Awaited<ReturnType<InboxSource["load"]>>>();
+    const load = vi.fn<Parameters<InboxSource["load"]>, ReturnType<InboxSource["load"]>>(() => pending.promise);
+    const store = createInboxStore([{ id: "fake", load }], identity);
+    const reading = store.getState().refresh();
+    const signal = load.mock.calls[0][0];
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(false);
+    identity.change();
+    expect(signal?.aborted).toBe(true);
+    pending.resolve(ok([]));
+    await reading;
+    expect(store.getState()).toMatchObject({ items: [], loaded: false, errors: {} });
+  });
+
   it("drops all state, ack keys, read marks and toast history immediately on a change", async () => {
     const identity = identityChanges();
     const notify = vi.fn();
