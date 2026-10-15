@@ -11,7 +11,7 @@ import {
 } from "./keystore.js";
 import { signWalletMessage } from "./keys.js";
 import { validateProofMessage } from "./proof.js";
-import { requestFunding, walletRequest } from "./http.js";
+import { requestFunding, validateTransportUrl, walletRequest } from "./http.js";
 
 export interface WalletRuntime {
   stdout: (text: string) => void;
@@ -104,12 +104,7 @@ function parseArgs(argv: string[]): Args | null {
 }
 
 function gatewayOrigin(gateway?: string): string {
-  try {
-    const url = new URL(resolveConfig({ gateway }).gatewayUrl);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
-      || url.search || url.hash || url.pathname !== "/") throw new Error();
-    return url.origin;
-  } catch { throw new WalletError("invalid_gateway_origin"); }
+  return validateTransportUrl(resolveConfig({ gateway }).gatewayUrl).origin;
 }
 
 async function promptCreate(): Promise<string> {

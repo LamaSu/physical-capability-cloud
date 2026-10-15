@@ -603,3 +603,14 @@ describe("pcc-wallet phishing defence", () => {
     expect(gateway.proofs()).toHaveLength(0);
   });
 });
+
+describe("gateway transport policy", () => {
+  it.each(["http://pcc.example.com", "http://192.168.1.10", "http://localhost.example"])("refuses insecure gateway %s before prompts, keys or requests", async (gateway) => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected_http_request"));
+    expect(await main(["init", "--gateway", gateway, "--role", "agent", "--label", "wallet-test", "--yes"], runtime())).toBe(1);
+    expect(stderr.join("")).toBe("insecure_gateway_origin\n");
+    expect(prompt).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await readdir(walletDir)).toEqual([]);
+  });
+});

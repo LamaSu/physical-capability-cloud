@@ -2,6 +2,19 @@ import { WalletError } from "./errors.js";
 
 type JsonObject = Record<string, unknown>;
 
+export function validateTransportUrl(value: string, kind: "gateway" | "rpc" = "gateway"): URL {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new WalletError(`invalid_${kind}_origin`); }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password
+    || url.search || url.hash || (kind === "gateway" && url.pathname !== "/")) {
+    throw new WalletError(`invalid_${kind}_origin`);
+  }
+  const loopback = url.hostname === "localhost" || url.hostname === "[::1]"
+    || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+  if (url.protocol === "http:" && !loopback) throw new WalletError(`insecure_${kind}_origin`);
+  return url;
+}
+
 function object(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -28,6 +41,7 @@ async function send(
   body?: JsonObject,
   apiKey?: string,
 ): Promise<Response> {
+  validateTransportUrl(origin);
   if (body) checkBody(body);
   try {
     return await fetch(`${origin}${path}`, {

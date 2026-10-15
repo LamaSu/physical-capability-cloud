@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, parse, resolve } from "node:path";
 import { WalletError } from "./errors.js";
+import { validateTransportUrl } from "./http.js";
 import { generateWalletKeys, validateWalletKeys } from "./keys.js";
 
 export type Role = "agent" | "device";
@@ -187,9 +188,8 @@ function validateRecord(record: unknown, label: string): asserts record is Walle
     || !Number.isFinite(Date.parse(data.createdAt))
     || new Date(data.createdAt).toISOString() !== data.createdAt) throw new WalletError("invalid_keystore");
   try {
-    const gateway = new URL(data.gatewayOrigin);
-    if (!["http:", "https:"].includes(gateway.protocol) || gateway.origin !== data.gatewayOrigin
-      || gateway.username || gateway.password) throw new WalletError("invalid_keystore");
+    const gateway = validateTransportUrl(data.gatewayOrigin);
+    if (gateway.origin !== data.gatewayOrigin) throw new WalletError("invalid_keystore");
   } catch { throw new WalletError("invalid_keystore"); }
   validateLink(data.link);
   validateWalletKeys(data);
