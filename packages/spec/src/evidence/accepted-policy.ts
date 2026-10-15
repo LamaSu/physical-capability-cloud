@@ -26,8 +26,10 @@
  * the sealed deal bytes, or a units manifest. That is what lets a units manifest sit
  * inside the sealed v3 preimage without circularity (oracle N37).
  *
- * `termsHash` is an INPUT here, never derived: the oracle has not confirmed a public
- * derivation for it (composition #4720 item 2), so this module does not compute it.
+ * `termsHash` is a plain INPUT to computeAcceptedPolicyDigest. Its ratified v2.1
+ * derivation is available separately as computeTermsHash: per policy, over the funded
+ * UnitConfig[] in funded order (bus #8158/#8165). A terms-file byte digest is only a
+ * file-version digest, never this termsHash.
  *
  * ── Layer 1 (this file, shipped): the pure encodings, byte-exact with the #270 mirror ──
  *   computeSubjectBlockHash  — the 18 already-committed subject fields -> subjectBlockHash.
@@ -476,9 +478,106 @@ function keccakUtf8(label: string): Bytes32Hex {
 export const SUBJECT_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:accepted-policy-subjects:v1");
 export const POLICY_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:accepted-job-policy:v1");
 export const PLANUNIT_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:plan-unit-key:v1");
+/** Ratified termsHash v2.1 keeps the v1 domain label; deadlines are per milestone. */
+export const TERMS_DOMAIN: Bytes32Hex = keccakUtf8("PCC:vnext:job-terms:v1");
 export const POLICY_VERSION = 1;
 
 // ── Layer 1: the pure encodings ──────────────────────────────────────────────────────
+
+/** One funded UnitConfig, in the position it occupies in the funded array. */
+export interface CanonicalMilestoneTermsV1 {
+  milestoneIndex: UintInput;
+  stepId: Bytes32Hex;
+  /** UnitConfig.g, already expressed in settlement-token base units (uint256). */
+  amount: UintInput;
+  /** UnitConfig.reclaimAt, UTC Unix seconds (uint64), independently per milestone. */
+  deadline: UintInput;
+}
+
+/** Ratified termsHash v2.1 inputs; milestones preserve the funded UnitConfig[] order. */
+export interface CanonicalJobTermsV1 {
+  token: AddressHex;
+  assuranceTier: UintInput;
+  milestones: readonly CanonicalMilestoneTermsV1[];
+}
+
+const MILESTONE_TERMS_KEYS = ["milestoneIndex", "stepId", "amount", "deadline"] as const satisfies readonly (keyof CanonicalMilestoneTermsV1)[];
+const JOB_TERMS_KEYS = ["token", "assuranceTier", "milestones"] as const satisfies readonly (keyof CanonicalJobTermsV1)[];
+type MilestoneTermsMissingFromKeyList = AssertNever<Exclude<keyof CanonicalMilestoneTermsV1, (typeof MILESTONE_TERMS_KEYS)[number]>>;
+type JobTermsMissingFromKeyList = AssertNever<Exclude<keyof CanonicalJobTermsV1, (typeof JOB_TERMS_KEYS)[number]>>;
+
+/**
+ * milestonesRoot = keccak256(abi.encode(
+ *   (uint256 milestoneIndex, bytes32 stepId, uint256 amount, uint64 deadline)[])):
+ * uint256(0x20) || uint256(length) || each milestone's four left-padded ABI words.
+ *
+ * POSITION-PINNED: the order IS the funded UnitConfig[] order. NEVER sort, deduplicate,
+ * or rematch milestones. Distinct legal funding orders must produce distinct roots.
+ * Require at least one milestone and unique (milestoneIndex, stepId) pairs; reject
+ * duplicates rather than deduplicating. amount is UnitConfig.g in token base units;
+ * deadline is that unit's own UnitConfig.reclaimAt in UTC Unix seconds.
+ *
+ * The dense, non-Proxy array and every plain milestone object are read once into
+ * snapshots. Validation and hashing read only those snapshots, never caller data again.
+ */
+export function computeMilestonesRoot(milestones: readonly CanonicalMilestoneTermsV1[]): Bytes32Hex {
+  const list = admitPlainArray(milestones, "milestones");
+  if (list.length === 0) {
+    throw new AcceptedPolicyDigestInputError("milestones", "expected at least one funded milestone");
+  }
+  const words: Uint8Array[] = [encodeUint(32n), encodeUint(toBigInt(list.length))];
+  const seen = new Set<string>();
+  for (let i = 0; i < list.length; i++) {
+    const field = `milestones[${i}]`;
+    const admitted = admitPlainObject(list[i], field);
+    const snapshot = checkExactKeys(admitted, field, MILESTONE_TERMS_KEYS);
+    const f = (key: (typeof MILESTONE_TERMS_KEYS)[number]) => requiredField(snapshot, field, key);
+    const indexWord = uintWord(`${field}.milestoneIndex`, f("milestoneIndex"), 256);
+    const stepWord = bytes32Word(`${field}.stepId`, f("stepId"));
+    const amountWord = uintWord(`${field}.amount`, f("amount"), 256);
+    const deadlineWord = uintWord(`${field}.deadline`, f("deadline"), 64);
+    // Fixed-width words make the pair unambiguous and normalize all admitted uint forms.
+    const pair = bytesToHex(indexWord) + bytesToHex(stepWord);
+    if (seen.has(pair)) {
+      throw new AcceptedPolicyDigestInputError(field, "duplicate (milestoneIndex, stepId) pair");
+    }
+    seen.add(pair);
+    words.push(indexWord, stepWord, amountWord, deadlineWord);
+  }
+  return keccakWords(words);
+}
+
+/**
+ * Ratified termsHash v2.1 = keccak256(abi.encode(
+ *   bytes32 TERMS_DOMAIN, address token, uint8 assuranceTier, bytes32 milestonesRoot)).
+ * Pure and chain/factory/escrow-independent; assuranceTier is restricted to 0..3.
+ * The top-level terms, milestone list, and every milestone are admitted as snapshots;
+ * hashing never re-reads the caller's objects or invokes their accessors or Proxy traps.
+ *
+ * The oracle's pre-sign gate refuses any policy whose termsHash differs from this
+ * derivation over its funded UnitConfig[] (bus #8158/#8165). Per position, milestoneIndex,
+ * stepId, amount, and deadline must equal the funded unit's milestoneIndex, stepId, g,
+ * and reclaimAt; token must be the settlement token and assuranceTier the funded tier.
+ * A terms-file byte digest is a file-version digest and must never be used as termsHash.
+ * Pass the result as a plain input to computeAcceptedPolicyDigest.
+ */
+export function computeTermsHash(terms: CanonicalJobTermsV1): Bytes32Hex {
+  const admitted = admitPlainObject(terms, "terms");
+  const snapshot = checkExactKeys(admitted, "terms", JOB_TERMS_KEYS);
+  const f = (key: (typeof JOB_TERMS_KEYS)[number]) => requiredField(snapshot, "terms", key);
+  const tokenWord = addressWord("terms.token", f("token"));
+  const tierWord = uintWord("terms.assuranceTier", f("assuranceTier"), 8);
+  if (tierWord[31]! > 3) {
+    throw new AcceptedPolicyDigestInputError("terms.assuranceTier", "expected an assurance tier in 0..3");
+  }
+  const root = computeMilestonesRoot(f("milestones") as readonly CanonicalMilestoneTermsV1[]);
+  return keccakWords([
+    bytes32Word("TERMS_DOMAIN", TERMS_DOMAIN),
+    tokenWord,
+    tierWord,
+    bytes32Word("milestonesRoot", root),
+  ]);
+}
 
 /** The 18 already-committed fields `computeSubjectBlockHash` hashes, in ABI order (bus #1174, #4569). */
 export interface SubjectBlockFields {
@@ -777,7 +876,7 @@ function concatWords(words: readonly Uint8Array[]): Uint8Array {
 
 /** The three already-computed roots `computeAcceptedPolicyDigest` combines. */
 export interface AcceptedPolicyDigestInputs {
-  /** An INPUT, never derived here: the oracle has not confirmed a public termsHash derivation (bus #4720 item 2). */
+  /** Ratified v2.1 derivation: computeTermsHash (bus #8158/#8165); still a plain INPUT to computeAcceptedPolicyDigest. */
   termsHash: Bytes32Hex;
   subjectBlockHash: Bytes32Hex;
   bindingsRoot: Bytes32Hex;
