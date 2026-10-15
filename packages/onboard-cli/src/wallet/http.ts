@@ -139,18 +139,18 @@ function exactKeys(value: JsonObject, required: readonly string[], optional: rea
 function parseFunding(data: unknown, role: Role): FundingResult {
   if (!object(data) || !exactKeys(data, ["status", "claims"])
     || (data.status !== "funded" && data.status !== "partial" && data.status !== "pending")
-    || !Array.isArray(data.claims) || data.claims.length < 1 || data.claims.length > 2) invalidFundingResponse();
-  const tokens = new Set<string>();
-  const claims = data.claims.map((value: unknown): FundingClaim => {
+    || !Array.isArray(data.claims) || data.claims.length !== (role === "agent" ? 6 : 5)) invalidFundingResponse();
+  const hashes = new Set<string>();
+  const claims = data.claims.map((value: unknown, index: number): FundingClaim => {
     if (!object(value) || !exactKeys(value, ["token", "amount", "status"], ["txHash"])
-      || (value.token !== "eth" && value.token !== "usdc")
-      || (role === "device" && value.token !== "eth")
+      || value.token !== (index < 5 ? "eth" : "usdc")
       || value.amount !== (value.token === "eth" ? "0.0001" : "1")
       || (value.status !== "succeeded" && value.status !== "failed" && value.status !== "pending")
       || (Object.hasOwn(value, "txHash") && (typeof value.txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value.txHash)))
       || (value.status === "succeeded" && typeof value.txHash !== "string")
-      || tokens.has(value.token)) invalidFundingResponse();
-    tokens.add(value.token);
+      || (value.status !== "succeeded" && Object.hasOwn(value, "txHash"))
+      || (typeof value.txHash === "string" && hashes.has(value.txHash.toLowerCase()))) invalidFundingResponse();
+    if (typeof value.txHash === "string") hashes.add(value.txHash.toLowerCase());
     return {
       token: value.token,
       amount: value.amount as FundingClaim["amount"],
@@ -158,9 +158,10 @@ function parseFunding(data: unknown, role: Role): FundingResult {
       ...(typeof value.txHash === "string" ? { txHash: value.txHash as Hex } : {}),
     };
   });
-  if ((data.status === "funded" && !claims.every(claim => claim.status === "succeeded" && claim.txHash))
-    || (data.status === "partial" && !claims.some(claim => claim.status === "failed"))
-    || (data.status === "pending" && !claims.some(claim => claim.status === "pending"))) invalidFundingResponse();
+  const expectedStatus = claims.every(claim => claim.status === "succeeded" && claim.txHash) ? "funded"
+    : claims.some(claim => claim.status === "pending") ? "pending"
+    : claims.some(claim => claim.status === "succeeded") ? "partial" : undefined;
+  if (data.status !== expectedStatus) invalidFundingResponse();
   return { status: data.status as FundingResult["status"], claims };
 }
 

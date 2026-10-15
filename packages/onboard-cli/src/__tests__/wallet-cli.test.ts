@@ -9,6 +9,8 @@ import { createSiweMessage, type SiweMessage } from "viem/siwe";
 import { main } from "../wallet/cli.js";
 import { main as onboardMain } from "../cli.js";
 
+import { realFundingClaims } from "./wallet-funding-fixtures.js";
+
 const home = vi.hoisted(() => ({ path: "" }));
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
@@ -51,7 +53,7 @@ type StubOptions = {
 const REQUEST_ID = "lr_0123456789ABCDEFGHJKMNPQRST";
 const LINK_ID = "wl_0123456789ABCDEFGHJKMNPQRST";
 const ACCOUNT_ID = "account_wallet_test";
-const TX_HASH = `0x${"ab".repeat(32)}`;
+const TX_HASH = realFundingClaims()[0]!.txHash!;
 const CONSENT_HASH = "a".repeat(64);
 const PREFIX = "PCC-LINK-V1\n";
 const BASE_TIME = Date.parse("2026-10-13T12:00:00.000Z");
@@ -188,7 +190,7 @@ class Gateway {
       const status = this.options.fundStatus ?? 200;
       const sequence = this.options.fundSequence;
       reply(status, sequence ? sequence[Math.min(this.fundIndex++, sequence.length - 1)] : this.options.fundBody ?? (status < 300
-        ? { status: "funded", claims: [{ token: "eth", amount: "0.0001", status: "succeeded", txHash: TX_HASH }] }
+        ? { status: "funded", claims: realFundingClaims(this.created.role === "device" ? "device" : "agent") }
         : { error: status === 503 ? "faucet_unavailable" : "faucet_error" }));
       return;
     }
@@ -780,7 +782,7 @@ describe("wallet create metadata and options", () => {
 
 describe("W2 init funding outcome", () => {
   it("init partial prints each failed claim and never ready", async () => {
-    const gateway = await new Gateway({ statuses: ["approved"], fundBody: { status: "partial", claims: [{ token: "eth", amount: "0.0001", status: "failed" }] } }).start();
+    const gateway = await new Gateway({ statuses: ["approved"], fundBody: { status: "partial", claims: [{ token: "eth", amount: "0.0001", status: "failed" }, ...realFundingClaims().slice(1)] } }).start();
     expect(await run(gateway, "init", ["--yes"])).toBe(1);
     expect(stdout.join("")).toContain("eth 0.0001 failed");
     expect(stdout.join("")).not.toContain("ready");
@@ -788,8 +790,8 @@ describe("W2 init funding outcome", () => {
   });
   it("init pending waits for final claims and receipts before ready", async () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundSequence: [
-      { status: "pending", claims: [{ token: "eth", amount: "0.0001", status: "pending" }] },
-      { status: "funded", claims: [{ token: "eth", amount: "0.0001", status: "succeeded", txHash: TX_HASH }] },
+      { status: "pending", claims: realFundingClaims().map(({ txHash: _hash, ...claim }) => ({ ...claim, status: "pending" })) },
+      { status: "funded", claims: realFundingClaims() },
     ] }).start();
     expect(await run(gateway, "init", ["--yes"])).toBe(0);
     expect(gateway.requests.filter((request) => request.path.endsWith("/fund"))).toHaveLength(2);

@@ -21,16 +21,18 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+import { realFundingClaims } from "./wallet-funding-fixtures.js";
+
 const ORIGIN = "https://wallets.invalid";
 const REQUEST_ID = "lr_0123456789ABCDEFGHJKLMNPQR";
 const LINK_ID = "wl_0123456789ABCDEFGHJKLMNPQR";
-const TX_ETH = `0x${"ab".repeat(32)}` as `0x${string}`;
-const TX_USDC = `0x${"cd".repeat(32)}` as `0x${string}`;
-const ETH = { token: "eth", amount: "0.0001", status: "succeeded", txHash: TX_ETH };
-const USDC = { token: "usdc", amount: "1", status: "succeeded", txHash: TX_USDC };
-const FUNDED = { status: "funded", claims: [ETH, USDC] };
-const PARTIAL = { status: "partial", claims: [ETH, { token: "usdc", amount: "1", status: "failed" }] };
-const PENDING = { status: "pending", claims: [{ token: "eth", amount: "0.0001", status: "pending" }] };
+const ETH = realFundingClaims()[0]!;
+const USDC = realFundingClaims()[5]!;
+const TX_ETH = ETH!.txHash!;
+const TX_USDC = USDC.txHash!;
+const FUNDED = { status: "funded", claims: realFundingClaims() };
+const PARTIAL = { status: "partial", claims: [...realFundingClaims("device"), { token: "usdc", amount: "1", status: "failed" }] };
+const PENDING = { status: "pending", claims: realFundingClaims().map(({ txHash: _hash, ...claim }) => ({ ...claim, status: "pending" })) };
 let directory: string;
 let output: string[];
 let errors: string[];
@@ -83,7 +85,9 @@ function gateway(data: unknown, status = 200) {
   }));
 }
 function claimResponse(claim: Record<string, unknown>, status = "funded") {
-  return { status, claims: [claim] };
+  const claims: unknown[] = realFundingClaims();
+  claims[claim.token === "usdc" ? 5 : 0] = claim;
+  return { status, claims };
 }
 
 describe("W2 funding response contract", () => {
@@ -109,8 +113,9 @@ describe("W2 funding response contract", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
   it("accepts device ETH claims", async () => {
-    gateway(claimResponse(ETH));
-    expect(await requestFunding(ORIGIN, REQUEST_ID, "device")).toEqual(claimResponse(ETH));
+    const device = { status: "funded", claims: realFundingClaims("device") };
+    gateway(device);
+    expect(await requestFunding(ORIGIN, REQUEST_ID, "device")).toEqual(device);
   });
   it("refuses any USDC claim for a device", async () => {
     gateway(FUNDED);
@@ -135,7 +140,13 @@ describe("W2 funding response contract", () => {
     ["funded with pending claim", claimResponse({ token: "eth", amount: "0.0001", status: "pending" })],
     ["partial without failed claim", claimResponse(ETH, "partial")],
     ["pending without pending claim", claimResponse(ETH, "pending")],
-    ["duplicate token", { status: "funded", claims: [ETH, ETH] }],
+    ["duplicate txHash", { status: "funded", claims: realFundingClaims().map(claim => ({ ...claim, txHash: TX_ETH })) }],
+    ["four ETH claims", { status: "funded", claims: realFundingClaims().slice(1) }],
+    ["claims out of order", { status: "funded", claims: realFundingClaims().reverse() }],
+    ["hash on failed claim", claimResponse({ ...USDC, status: "failed" }, "partial")],
+    ["hash on pending claim", claimResponse({ ...USDC, status: "pending" }, "pending")],
+    ["partial with pending claim", { ...PARTIAL, claims: [...PARTIAL.claims.slice(0, 4), { token: "eth", amount: "0.0001", status: "pending" }, PARTIAL.claims[5]] }],
+    ["partial with no success", { status: "partial", claims: realFundingClaims().map(({ txHash: _hash, ...claim }) => ({ ...claim, status: "failed" })) }],
     ["hash in unrelated nested object", { status: "funded", claims: [{ token: "eth", amount: "0.0001", status: "succeeded" }], extra: { txHash: TX_ETH } }],
   ])("refuses %s instead of collecting arbitrary hashes", async (_name, data) => {
     gateway(data);
@@ -159,7 +170,7 @@ describe("W2 CLI funding", () => {
       return { status: "success" as const };
     });
     expect(await fund("agent", ["--rpc-url", "http://127.0.0.1:8545"], runtime({ waitForReceipt: waiter }))).toBe(0);
-    expect(waiter.mock.calls.map(call => call[0])).toEqual([TX_ETH, TX_USDC]);
+    expect(waiter.mock.calls.map(call => call[0])).toEqual(realFundingClaims().map(claim => claim.txHash));
     expect(waiter.mock.calls.every(call => call[1] === "http://127.0.0.1:8545")).toBe(true);
     expect(output.join("")).toContain("funded");
   });
@@ -402,10 +413,10 @@ describe("W2 funding option boundaries", () => {
     expect(errors.join("")).toContain("invalid_rpc_origin");
   });
   it("partial waits for every supplied claim hash and still exits nonzero", async () => {
-    store(); gateway({ status: "partial", claims: [ETH, { ...USDC, status: "failed" }] });
+    store(); gateway(PARTIAL);
     const waiter = vi.fn(async () => ({ status: "success" as const }));
     expect(await fund("agent", [], runtime({ waitForReceipt: waiter }))).toBe(1);
-    expect(waiter).toHaveBeenCalledTimes(2);
+    expect(waiter).toHaveBeenCalledTimes(5);
     expect(errors.join("")).toContain("funding_partial");
   });
 });
