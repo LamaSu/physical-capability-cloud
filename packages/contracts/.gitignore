@@ -1,6 +1,8 @@
 # Foundry build artifacts
 out/
 cache/
+out-testnet/
+cache-testnet/
 
 # Foundry deployment artifacts (contain private key hashes, nonces, etc.)
 broadcast/

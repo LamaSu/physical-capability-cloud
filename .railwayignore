@@ -8,6 +8,8 @@ ai/supervisor
 ai/reports
 packages/contracts/out
 packages/contracts/cache
+packages/contracts/out-testnet
+packages/contracts/cache-testnet
 packages/contracts/lib
 packages/pcc-node/__pycache__
 packages/pcc-node/tests/__pycache__

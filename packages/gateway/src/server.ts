@@ -135,6 +135,7 @@ import { ot2LegacyGoneRoutes } from "./routes/ot2-legacy-gone.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
+import { settlementReceiptRoutes } from "./routes/settlement-receipts.js";
 import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
@@ -696,6 +697,7 @@ export async function createGateway(port = 3200) {
   await app.register(captureSimRoutes);
   await app.register(pizzaDemoRoutes);
   await app.register(operatorRelayRoutes);
+  await app.register(settlementReceiptRoutes);
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
@@ -1044,8 +1046,8 @@ export async function createGateway(port = 3200) {
       // Start ERC-8004 identity write retry sweeper (no-op if write disabled)
       import("./services/erc8004-identity-sweeper.js")
         .then(({ startIdentitySweeper }) => startIdentitySweeper())
-        .catch((err) =>
-          console.warn("[gateway] ERC-8004 sweeper init failed:", err),
+        .catch(() =>
+          console.warn("[gateway] ERC-8004 sweeper init failed:", { code: "unknown" }),
         );
 
       // Start mock streaming producers
