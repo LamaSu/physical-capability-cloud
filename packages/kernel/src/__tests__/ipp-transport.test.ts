@@ -125,6 +125,31 @@ describe("HTTP IPP transport, socket-free", () => {
   });
 
   it.each([
+    ["leading CRLFCRLF with a raw body", "\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+    ["leading CRLFCRLF with chunk bytes", "\r\n\r\n", "3\r\nIPP\r\n0\r\n\r\n"],
+    ["leading LFCRLFCRLF", "\n\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+    ["leading CRLF before 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+    ["CRLFCRLF after 100", "HTTP/1.1 100 Continue\r\n\r\n\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+  ])("R5 LOW-1: refuses trailing HTAB after %s", async (_name, prefix, body) => {
+    const { transport, connection } = scripted(`${prefix}HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\n${body}`);
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+    expect(connection.destroyed).toBe(true);
+  });
+
+  it.each([
+    ["leading CRLFs", "\r\n\r\n"],
+    ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
+  ])("R5 LOW-1: accepts valid Content-Length and chunked framing with %s", async (_name, prefix) => {
+    for (const [header, body] of [
+      ["Content-Length: 3", "IPP"],
+      ["Transfer-Encoding: chunked", "3\r\nIPP\r\n0\r\n\r\n"],
+    ]) {
+      const { transport } = scripted(`${prefix}HTTP/1.1 200 OK\r\n${header}\r\n\r\n${body}`);
+      expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+    }
+  });
+
+  it.each([
     ["identical duplicate Content-Length", "Content-Length: 3\r\nContent-Length: 3"],
     ["different duplicate Content-Length", "Content-Length: 3\r\nContent-Length: 4"],
     ["comma Content-Length", "Content-Length: 3, 3"],

@@ -74,6 +74,8 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
     const inspectRawHeaders = (chunk: Buffer): void => {
       if (settled || headersChecked) return;
       for (const byte of chunk) {
+        // Match llhttp's start state, also after each informational block.
+        if (headerSize === 0 && (byte === 13 || byte === 10)) continue;
         if (headerSize === headerPrefix.length) {
           fail("framing", "IPP response headers exceeded the framing scan limit");
           return;

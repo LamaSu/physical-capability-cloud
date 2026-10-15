@@ -101,6 +101,40 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
     }, skip);
   });
 
+  for (const [name, prefix, body] of [
+    ["leading CRLFCRLF with a raw body", "\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+    ["leading CRLFCRLF with chunk bytes", "\r\n\r\n", "3\r\nIPP\r\n0\r\n\r\n"],
+    ["leading LFCRLFCRLF", "\n\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+    ["leading CRLF before 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+    ["CRLFCRLF after 100", "HTTP/1.1 100 Continue\r\n\r\n\r\n\r\n", "RAW-BODY-NOT-CHUNKED"],
+  ]) {
+    it(`R5 LOW-1: production transport refuses trailing HTAB after ${name}`, async ({ skip }) => {
+      await withServer((_req, res) => {
+        res.socket?.end(`${prefix}HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\n${body}`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
+      }, skip);
+    });
+  }
+
+  for (const [name, prefix] of [
+    ["leading CRLFs", "\r\n\r\n"],
+    ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
+  ]) {
+    for (const [header, body] of [
+      ["Content-Length: 3", "IPP"],
+      ["Transfer-Encoding: chunked", "3\r\nIPP\r\n0\r\n\r\n"],
+    ]) {
+      it(`R5 LOW-1: production transport accepts ${header} with ${name}`, async ({ skip }) => {
+        await withServer((_req, res) => {
+          res.socket?.end(`${prefix}HTTP/1.1 200 OK\r\n${header}\r\n\r\n${body}`);
+        }, async (transport, request) => {
+          expect(await transport(request)).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+        }, skip);
+      });
+    }
+  }
+
   it("T13: agent:false closes the real socket after too_large before server teardown", async ({ skip }) => {
     let onClose!: () => void;
     const closed = new Promise<void>(resolve => { onClose = resolve; });
