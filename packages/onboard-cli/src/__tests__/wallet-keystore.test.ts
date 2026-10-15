@@ -468,3 +468,39 @@ describe("opaque stored account ids", () => {
     expect(walletPath(wallet.label)).toBe(join(directory, "participant.json"));
   });
 });
+
+describe("keystore surviving-mutant rules", () => {
+  it("K8 refuses a writable non-sticky GRANDPARENT (not only the nearest ancestor)", () => {
+    const hostile = join(root, "hostile"); mkdirSync(hostile); chmodSync(hostile, 0o777);
+    const middle = join(hostile, "middle"); mkdirSync(middle); chmodSync(middle, 0o755);
+    process.env.PCC_WALLET_DIR = join(middle, "wallets");
+    expect(() => create()).toThrow(/permissions_refused/);
+  });
+  it("K5 refuses a group-writable setgid (2770) parent: setgid is not sticky", () => {
+    const shared = join(root, "shared"); mkdirSync(shared); chmodSync(shared, 0o2770);
+    process.env.PCC_WALLET_DIR = join(shared, "wallets");
+    expect(() => create()).toThrow(/permissions_refused/);
+  });
+  it("K9 refuses a symlinked ancestor whose TARGET is world-writable", () => {
+    const target = join(root, "open-target"); mkdirSync(target); chmodSync(target, 0o777);
+    const alias = join(root, "alias"); symlinkSync(target, alias, "dir");
+    process.env.PCC_WALLET_DIR = join(alias, "wallets");
+    expect(() => create()).toThrow(/permissions_refused/);
+  });
+  it("K10 a read refuses once an ancestor becomes writable by others", () => {
+    const parent = join(root, "parent"); mkdirSync(parent); chmodSync(parent, 0o755);
+    process.env.PCC_WALLET_DIR = join(parent, "wallets");
+    create();
+    chmodSync(parent, 0o777);
+    expect(() => readWallet("participant")).toThrow(/permissions_refused/);
+  });
+  it("F2f a stored plain-http public gateway origin is an invalid keystore", () => {
+    const parent = join(root, "parent"); mkdirSync(parent); chmodSync(parent, 0o755);
+    process.env.PCC_WALLET_DIR = join(parent, "wallets");
+    create();
+    const path = walletPath("participant");
+    const data = JSON.parse(readFileSync(path, "utf8"));
+    writeFileSync(path, JSON.stringify({ ...data, gatewayOrigin: "http://pcc.example" }), { mode: 0o600 });
+    expect(() => readWallet("participant")).toThrow(/invalid_keystore/);
+  });
+});

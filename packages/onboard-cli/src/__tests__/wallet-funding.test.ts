@@ -84,7 +84,7 @@ function gateway(data: unknown, status = 200) {
     status, headers: { "content-type": "application/json" },
   }));
 }
-function claimResponse(claim: Record<string, unknown>, status = "funded") {
+function claimResponse<T extends { token: unknown }>(claim: T, status = "funded") {
   const claims: unknown[] = realFundingClaims();
   claims[claim.token === "usdc" ? 5 : 0] = claim;
   return { status, claims };
@@ -125,7 +125,7 @@ describe("W2 funding response contract", () => {
     ["unknown root field", { ...FUNDED, hashes: [TX_ETH] }],
     ["missing claims", { status: "funded" }], ["claims object", { status: "funded", claims: {} }],
     ["empty claims", { status: "funded", claims: [] }],
-    ["null claim", { status: "funded", claims: [null] }],
+    ["null claim", { status: "funded", claims: [null, ...realFundingClaims().slice(1)] }],
     ["unknown token", claimResponse({ ...ETH, token: "btc" })],
     ["wrong ETH amount", claimResponse({ ...ETH, amount: "1" })],
     ["wrong USDC amount", claimResponse({ ...USDC, amount: "0.0001" })],
@@ -597,4 +597,34 @@ describe("faucet errorClass safety", () => {
     expect(errors.join("")).toContain("faucet_error, unknown");
     expect(errors.join("")).not.toContain("untrusted diagnostic text");
   });
+});
+
+describe("receipt redirect rule", () => {
+  it("H1rpc every receipt RPC request refuses redirects", async () => {
+    const hash = `0x${"ab".repeat(32)}` as `0x${string}`;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body)) as { method: string; id: number };
+      const result = payload.method === "eth_blockNumber" ? "0x1" : {
+        transactionHash: hash, transactionIndex: "0x0", blockHash: `0x${"cd".repeat(32)}`, blockNumber: "0x1",
+        from: "0x0000000000000000000000000000000000000001", to: "0x0000000000000000000000000000000000000002",
+        cumulativeGasUsed: "0x5208", gasUsed: "0x5208", effectiveGasPrice: "0x1", contractAddress: null,
+        logs: [], logsBloom: `0x${"00".repeat(256)}`, type: "0x2", status: "0x1",
+      };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: payload.id, result }));
+    });
+    await expect(waitForFundingReceipt(hash, "http://127.0.0.1:8545", 50)).resolves.toEqual({ status: "success" });
+    expect(fetchSpy.mock.calls.length).toBeGreaterThan(0);
+    expect(fetchSpy.mock.calls.every((call) => (call[1] as RequestInit | undefined)?.redirect === "error")).toBe(true);
+  });
+});
+
+it("W2f partial refuses a succeeded claim without txHash", async () => {
+  const claims = PARTIAL.claims.map((claim, index) => index === 0
+    ? { token: "eth", amount: "0.0001", status: "succeeded" } : claim);
+  gateway({ status: "partial", claims });
+  await expect(requestFunding(ORIGIN, REQUEST_ID, "agent")).rejects.toThrow("invalid_gateway_response");
+});
+it("refuses four ETH claims for a device", async () => {
+  gateway({ status: "funded", claims: realFundingClaims("device").slice(0, 4) });
+  await expect(requestFunding(ORIGIN, REQUEST_ID, "device")).rejects.toThrow("invalid_gateway_response");
 });

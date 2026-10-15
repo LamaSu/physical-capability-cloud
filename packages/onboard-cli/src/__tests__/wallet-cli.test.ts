@@ -37,6 +37,7 @@ type StubOptions = {
   statuses?: string[];
   publicOrigin?: string;
   accountId?: unknown;
+  omitAccountId?: boolean;
   interval?: number;
   lifetimeMs?: number;
   fundStatus?: number;
@@ -184,7 +185,7 @@ class Gateway {
     if (path === `/api/wallets/link-requests/${REQUEST_ID}` && req.method === "GET") {
       const statuses = this.options.statuses ?? ["authorization_pending", "slow_down", "approved"];
       const status = statuses[Math.min(this.pollIndex++, statuses.length - 1)];
-      reply(200, status === "approved" ? { status, linkId: LINK_ID, accountId: this.options.accountId ?? ACCOUNT_ID } : { status });
+      reply(200, status === "approved" ? { status, linkId: LINK_ID, ...(this.options.omitAccountId ? {} : { accountId: this.options.accountId ?? ACCOUNT_ID }) } : { status });
       return;
     }
     if (path === `/api/wallets/link-requests/${REQUEST_ID}/fund` && req.method === "POST") {
@@ -932,4 +933,25 @@ describe("public origin for browser approval and signed proof", () => {
     expect(gateway.proofs()).toHaveLength(0);
     expect(stdout.join("")).not.toContain("Open:");
   });
+});
+
+it("approved poll accepts exactly status and linkId without inventing accountId", async () => {
+  const gateway = await new Gateway({ statuses: ["approved"], omitAccountId: true }).start();
+  expect(await run(gateway, "init", ["--yes"])).toBe(0);
+  expect((await stored()).link).toEqual({ status: "approved", requestId: REQUEST_ID, linkId: LINK_ID });
+  expect(gateway.pollIndex).toBe(1);
+  expect(stdout.join("")).toContain("ready");
+});
+
+it.each([
+  ["agent", "domain"], ["agent", "uri"], ["device", "domain"], ["device", "uri"],
+])("--public-origin validates the signed %s %s even when the browser URL matches", async (role, field) => {
+  const gateway = await new Gateway({
+    statuses: ["approved"], publicOrigin: "https://approve.example",
+    mutateSiwe: message => { if (field === "domain") message.domain = "attacker.example"; else message.uri = "https://attacker.example/link"; },
+    mutateEd: message => { message[field] = field === "domain" ? "attacker.example" : "https://attacker.example/link"; },
+  }).start();
+  expect(await run(gateway, "init", ["--yes", "--public-origin", "https://approve.example"], role)).toBe(1);
+  expect(stderr.join("")).toContain(`refusing to sign: ${field} mismatch`);
+  expect(gateway.proofs()).toHaveLength(0);
 });
