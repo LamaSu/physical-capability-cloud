@@ -57,6 +57,8 @@ const DEFAULT_SCOPE_REQUIREMENTS: Array<{
   scopes: string[];
 }> = [
   // Operator endpoints — manage kernels, submit evidence
+  { method: "POST",   pattern: "/api/operator/jobs/*/receipt",       scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
+  { method: "GET",    pattern: "/api/operator/jobs/*/receipt",       scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   { method: "POST",   pattern: "/api/kernels/*",                    scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   { method: "PUT",    pattern: "/api/kernels/*",                    scopes: ["operator", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
   { method: "POST",   pattern: "/api/evidence/*",                   scopes: ["operator", "verifier", "admin", SELF_SERVICE_OPERATOR_SCOPE] },
