@@ -129,7 +129,8 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
   const epoch = state.keyEpoch;
   const session = state.sessionToken;
   const sessionEpoch = state.sessionEpoch;
-  const current = () => !signingOut && useAuthStore.getState().keyEpoch === epoch && useAuthStore.getState().sessionEpoch === sessionEpoch && useAuthStore.getState().sessionToken === session;
+  const address = state.address;
+  const current = () => !signingOut && useAuthStore.getState().keyEpoch === epoch && useAuthStore.getState().sessionEpoch === sessionEpoch && useAuthStore.getState().sessionToken === session && useAuthStore.getState().address === address;
   mintKeyEpoch = epoch;
   mintSessionEpoch = sessionEpoch;
   const flight = (async () => {
@@ -156,7 +157,7 @@ function mintSessionKey(checkSession: boolean): Promise<boolean> {
         });
         const data = await response.json().catch(() => ({}));
         if (!current()) return false;
-        if (response.status === 201 && typeof data.api_key === "string" && typeof data.key_id === "string" && typeof data.expires_at === "string" && Number.isFinite(Date.parse(data.expires_at))) {
+        if (response.status === 201 && typeof data.operator_id === "string" && address && data.operator_id.toLowerCase() === address.toLowerCase() && typeof data.api_key === "string" && typeof data.key_id === "string" && typeof data.expires_at === "string" && Number.isFinite(Date.parse(data.expires_at))) {
           adoptApiKey(data.api_key, false);
           useAuthStore.setState({ sessionKeyId: data.key_id, sessionKeyExpiresAt: data.expires_at, authNotice: null });
           scheduleRenewal(data.expires_at);

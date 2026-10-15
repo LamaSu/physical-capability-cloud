@@ -67,7 +67,7 @@ export function setStoredApiKey(key: string | null, persist = true): void {
   }
   storedApiKey = key || null;
   keyVersion += 1;
-  writeStorage(persist ? storedApiKey : null);
+  if (persist) writeStorage(storedApiKey);
   undelivered += 1;
   if (round >= 0) return; // a delivery is under way: the next round tells everyone
   let failed = false;
@@ -113,12 +113,13 @@ export async function authorizedFetch(target: string, init: RequestInit = {}): P
   const version = keyVersion;
   const sessionKey = isSessionKeyActive();
   const identity = sessionIdentity();
-  const response = await fetchWithKey(target, storedApiKey, init);
+  const requestInit: RequestInit = sessionKey && init.credentials === undefined ? { ...init, credentials: "omit" } : init;
+  const response = await fetchWithKey(target, storedApiKey, requestInit);
   if (response.status !== 401 || !sessionKey || !isSessionKeyActive() || identity !== sessionIdentity()) return response;
   // A late response may belong to the key another request already renewed.
   if (version === keyVersion && !await renewSessionKey()) return response;
   if (!isSessionKeyActive() || identity !== sessionIdentity()) return response;
-  return fetchWithKey(target, storedApiKey, init);
+  return fetchWithKey(target, storedApiKey, requestInit);
 }
 
 /** Install the defence-in-depth egress guard over the stored key (main.tsx, at startup). */

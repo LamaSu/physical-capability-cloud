@@ -7,7 +7,7 @@
  */
 
 import { useState, useCallback, useEffect } from "react";
-import { useAccount, useSignMessage } from "wagmi";
+import { useAccount, useConnectionEffect, useSignMessage } from "wagmi";
 import { useAuthStore } from "../stores/auth-store.js";
 import { gatewayUrl } from "../lib/gateway-base.js";
 
@@ -57,17 +57,22 @@ export function useAuth() {
 
   const [isChecking, setIsChecking] = useState(true);
 
+  useConnectionEffect({
+    onDisconnect() {
+      if (useAuthStore.getState().sessionKeyId) void signOutWallet();
+      else {
+        setAddress(null);
+        setSession(null);
+      }
+    },
+  });
+
   // Sync wallet connection to auth store
   useEffect(() => {
     if (isConnected && address) {
       setAddress(address);
-    } else if (useAuthStore.getState().sessionKeyId) {
-      void signOutWallet();
-    } else {
-      setAddress(null);
-      setSession(null);
     }
-  }, [isConnected, address, setAddress, setSession, signOutWallet]);
+  }, [isConnected, address, setAddress]);
 
   // Check existing session on mount
   useEffect(() => {
@@ -91,6 +96,7 @@ export function useAuth() {
 
   const login = useCallback(async () => {
     if (!address || !chainId) return;
+    setAddress(address);
     setVerifying(true);
     setError(null);
 
@@ -137,7 +143,7 @@ export function useAuth() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
     }
-  }, [address, chainId, signMessageAsync, setVerifying, setError, setSession, mintSessionKey]);
+  }, [address, chainId, signMessageAsync, setAddress, setVerifying, setError, setSession, mintSessionKey]);
 
   const logout = useCallback(async () => {
     await signOutWallet();

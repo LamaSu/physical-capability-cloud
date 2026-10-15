@@ -12,12 +12,14 @@ const wallet = vi.hoisted(() => ({
   isConnected: true,
   signMessageAsync: vi.fn(async () => "signed"),
   disconnect: vi.fn(),
+  onDisconnect: undefined as (() => void) | undefined,
 }));
 vi.mock("wagmi", () => ({
   useAccount: () => ({ address: wallet.address, isConnected: wallet.isConnected, chainId: 1 }),
   useSignMessage: () => ({ signMessageAsync: wallet.signMessageAsync }),
   useConnect: () => ({ connectors: [], connect: vi.fn() }),
   useDisconnect: () => ({ disconnect: wallet.disconnect }),
+  useConnectionEffect: ({ onDisconnect }: { onDisconnect: () => void }) => { wallet.onDisconnect = onDisconnect; },
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,12 +39,14 @@ let requestReply: (call: Call) => Response | Promise<Response>;
 let deleteStatus: number;
 
 function Harness() { auth = useAuth(); return <p>{auth.authNotice}</p>; }
+function SecondUser() { useAuth(); return null; }
 const pathOf = (input: RequestInfo | URL) => new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, window.location.origin).pathname;
 const count = (path: string) => calls.filter((call) => call.path === path).length;
-const minted = (key = KEY, id = "session-key-1") => reply(201, { api_key: key, key_id: id, expires_at: expiry() });
+const minted = (key = KEY, id = "session-key-1") => reply(201, { api_key: key, key_id: id, operator_id: wallet.address, expires_at: expiry() });
 
 beforeEach(async () => {
   wallet.isConnected = true;
+  wallet.onDisconnect = undefined;
   adoptApiKey(null);
   localStorage.clear();
   sessionStorage.clear();
@@ -126,7 +130,7 @@ describe("wallet session credentials", () => {
 
   it("renews before expiry while the app is open", async () => {
     vi.useFakeTimers();
-    mintReply = () => reply(201, { api_key: KEY, key_id: "session-key-1", expires_at: new Date(Date.now() + 6 * 60 * 1000).toISOString() });
+    mintReply = () => reply(201, { api_key: KEY, key_id: "session-key-1", operator_id: wallet.address, expires_at: new Date(Date.now() + 6 * 60 * 1000).toISOString() });
     await signIn();
     mintReply = () => minted(NEXT, "session-key-2");
     await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
@@ -190,9 +194,113 @@ describe("wallet session credentials", () => {
     expect(count("/api/auth/session-key")).toBe(1);
     expect(hasStoredApiKey()).toBe(true);
   });
+
+  it("keeps a restored cookie session when another wallet control mounts disconnected", async () => {
+    await act(async () => { root.unmount(); });
+    wallet.isConnected = false;
+    meValid = true;
+    calls = [];
+    root = createRoot(container);
+    await act(async () => { root.render(<Harness />); });
+    expect(count("/api/auth/session-key")).toBe(1);
+    expect(hasStoredApiKey()).toBe(true);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const second = createRoot(host);
+    try {
+      await act(async () => { second.render(<SecondUser />); });
+      expect(calls.map((call) => call.path)).not.toContain("/api/auth/logout");
+      expect(count("/api/auth/session-key")).toBe(1);
+      expect(useAuthStore.getState()).toMatchObject({ address: wallet.address, sessionToken: "cookie", sessionKeyId: "session-key-1" });
+      expect(hasStoredApiKey()).toBe(true);
+      await request();
+      expect(new Headers(calls.at(-1)!.init.headers).get("Authorization")).toBe(`Bearer ${KEY}`);
+    } finally {
+      await act(async () => { second.unmount(); });
+      host.remove();
+    }
+  });
+
+  it("keeps a key persisted by another tab while renewing its wallet credential", async () => {
+    vi.useFakeTimers();
+    mintReply = () => reply(201, { api_key: KEY, key_id: "session-key-1", operator_id: wallet.address, expires_at: new Date(Date.now() + 6 * 60 * 1000).toISOString() });
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    mintReply = () => minted(NEXT, "session-key-2");
+    await act(async () => { await vi.advanceTimersByTimeAsync(60 * 1000); });
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-2");
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
+    await request();
+    expect(new Headers(calls.at(-1)!.init.headers).get("Authorization")).toBe(`Bearer ${NEXT}`);
+    await act(async () => { await auth.logout(); });
+    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+  });
+
+  it("adopts a credential only for the signed-in wallet, with matching letter case", async () => {
+    for (const operator of [undefined, "0x9999999999999999999999999999999999999999"]) {
+      mintReply = () => reply(201, { api_key: KEY, key_id: "session-key-1", operator_id: operator, expires_at: expiry() });
+      await signIn();
+      expect(hasStoredApiKey()).toBe(false);
+      expect(useAuthStore.getState()).toMatchObject({ address: wallet.address, sessionKeyId: null, sessionToken: "session-token" });
+    }
+    mintReply = () => reply(201, { api_key: KEY, key_id: "session-key-1", operator_id: wallet.address.toUpperCase(), expires_at: expiry() });
+    await signIn();
+    expect(hasStoredApiKey()).toBe(true);
+    expect(useAuthStore.getState().sessionKeyId).toBe("session-key-1");
+  });
+
+  it("keeps pending credentials within the wallet session and address that requested them", async () => {
+    let finish!: (response: Response) => void;
+    mintReply = () => new Promise((resolve) => { finish = resolve; });
+    let login!: Promise<void>;
+    await act(async () => { login = auth.login(); });
+    await vi.waitFor(() => expect(count("/api/auth/session-key")).toBe(1));
+    await act(async () => { useAuthStore.getState().setSession(null); });
+    await act(async () => { finish(minted()); await login; });
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({ sessionToken: null, sessionKeyId: null });
+
+    let pending!: Promise<boolean>;
+    await act(async () => {
+      useAuthStore.getState().setSession("next-session");
+      pending = useAuthStore.getState().mintSessionKey();
+    });
+    expect(count("/api/auth/session-key")).toBe(2);
+    await act(async () => {
+      useAuthStore.getState().setAddress("0x9999999999999999999999999999999999999999");
+      finish(minted());
+      expect(await pending).toBe(false);
+    });
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState().sessionKeyId).toBeNull();
+  });
 });
 
 describe("session request renewal", () => {
+  it("renews a replaced session credential and respects explicit request credentials", async () => {
+    await signIn();
+    calls = [];
+    mintReply = () => minted(NEXT, "session-key-2");
+    requestReply = (call) => new Headers(call.init.headers).get("Authorization") === `Bearer ${NEXT}`
+      ? reply(200, { ok: true })
+      : call.init.credentials === "omit" ? reply(401, { error: "api_key_required" }) : reply(403, { error: "insufficient_scope" });
+    let responses!: Response[];
+    await act(async () => {
+      responses = await Promise.all([1, 2, 3].map(() => authorizedFetch("/api/jobs/submit", { method: "POST", body: "payload" })));
+    });
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+    expect(count("/api/auth/me")).toBe(1);
+    expect(count("/api/auth/session-key")).toBe(1);
+    const requests = calls.filter((call) => call.path === "/api/jobs/submit");
+    expect(requests).toHaveLength(6);
+    for (const call of requests) expect(call.init).toMatchObject({ credentials: "omit", method: "POST", body: "payload" });
+    for (const credentials of ["include", "same-origin", "omit"] as const) {
+      await act(async () => { expect((await authorizedFetch("/api/jobs/submit", { credentials })).status).toBe(200); });
+      expect(calls.at(-1)!.init.credentials).toBe(credentials);
+    }
+    expect(count("/api/auth/session-key")).toBe(1);
+  });
+
   it("checks the cookie, mints once, and retries the original request once", async () => {
     await signIn();
     calls = [];
@@ -325,7 +433,7 @@ describe("wallet sign-out", () => {
     expect(useAuthStore.getState().sessionKeyId).toBe("session-key-1");
     calls = [];
     wallet.isConnected = false;
-    await act(async () => { root.render(<Harness />); });
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
     expect(calls.map((call) => call.path)).toEqual(["/api/auth/keys/session-key-1", "/api/auth/logout"]);
     expect(hasStoredApiKey()).toBe(false);
     expect(useAuthStore.getState()).toMatchObject({ sessionToken: null, sessionKeyId: null, sessionKeyExpiresAt: null });
@@ -346,6 +454,7 @@ describe("wallet sign-out", () => {
     stop();
     expect(events).toEqual(["DELETE", "/api/auth/logout", "clear"]);
     expect(new Headers(calls[0].init.headers).get("Authorization")).toBe(`Bearer ${KEY}`);
+    expect(calls[0].init.credentials ?? "same-origin").toBe("same-origin");
     expect(useAuthStore.getState()).toMatchObject({ sessionToken: null, sessionKeyId: null, sessionKeyExpiresAt: null });
     expect(hasStoredApiKey()).toBe(false);
   });
