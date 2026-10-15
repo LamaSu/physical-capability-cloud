@@ -73,7 +73,7 @@ async function setup() {
     } }, parties);
     const fake = makeChain(changed);
     const pending = prepareFunding({ payload: changed.wire(), wallet: fake.wallet(), publicClient: fake.publicClient,
-      quote: { maxTotalGross: 750_000n }, expect: own, pins: testPins(changed) });
+      quote: { maxTotalGross: 3_000_000n }, expect: own, pins: testPins(changed) });
     return { pending, fake };
   };
   return { subject, input, own, fx, chain, prepare, substituted };
@@ -168,6 +168,14 @@ describe("Thursday PRINT buyer expectation", () => {
     expect(apiModule.printUnitThursdayExpectation({ ...input, host: input.host.toLowerCase() as Address }).operator)
       .toBe(input.host.toLowerCase());
   });
+  it.each(["checksum", "uppercase"])("accepts an equal subject settlement address in %s casing", async (casing) => {
+    const { input, own } = await setup();
+    const address = casing === "checksum" ? input.host : `0x${input.host.slice(2).toUpperCase()}` as Address;
+    const subject = Object.freeze({ ...input.subject, operatorSettlementAddress: address });
+    const changed = (await api()).printUnitThursdayExpectation({ ...input, subject });
+    expect(changed.acceptedPolicyDigest).toBe(own.acceptedPolicyDigest);
+    expect(subject.operatorSettlementAddress).toBe(address);
+  });
   it("INTENT_MISMATCH before any RPC: bindings must be empty", async () => {
     const { input, chain } = await setup();
     const binding: SubjectBinding = { planUnitKey: computePlanUnitKey(0, 0n, ONE), requirementIdHash: ONE,
@@ -190,7 +198,7 @@ describe("Thursday PRINT buyer expectation", () => {
     ["compositionRoot", "INTENT_MISMATCH", (cs) => { cs[0]!.compositionRoot = ONE; }],
     ["compositionSchemaVersion", "INTENT_MISMATCH", (cs) => { cs[0]!.compositionSchemaVersion = 1; }],
     ["third payee", "INTENT_MISMATCH", (cs) => {
-      cs[0]!.payouts[0]!.amount -= 1n; cs[0]!.payouts.push({ recipient: OTHER, amount: 1n });
+      cs[0]!.payouts[0]!.amount -= 1n; cs[0]!.payouts.push({ recipient: POSTAGE, amount: 1n });
     }],
     ["split 400000/350000", "INTENT_MISMATCH", (cs) => {
       cs[0]!.payouts[0]!.amount = 400_000n; cs[0]!.payouts[1]!.amount = 350_000n;
@@ -266,6 +274,24 @@ describe("optional exact funding expectations", () => {
     const own = { ...testExpect(fx), [field]: value };
     expect((await prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
       quote: { maxTotalGross: fx.totalGross }, expect: own, pins: testPins(fx) })).unchecked).toEqual([]);
+  });
+  it.each([
+    ["compositionSchemaVersion", 1], ["unitCount", 1], ["unitGross", 1n],
+    ["earliestReclaimAt", NOW + 31n * 86_400n], ["chainId", 84532n],
+  ] as const)("INTENT_MISMATCH before any RPC: isolated optional %s", async (field, value) => {
+    const fx = await buildFixture(); const chain = makeChain(fx);
+    await expect(prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, expect: { ...testExpect(fx), [field]: value },
+      pins: testPins(fx) })).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining(field) });
+    expect(chain.state.log).toEqual([]);
+  });
+  it("INTENT_MISMATCH before any RPC: payout recipients swapped without changing amounts", async () => {
+    const { own, prepare, chain, input } = await setup();
+    const payouts = [{ recipient: POSTAGE, amount: 500_000n }, { recipient: input.host, amount: 250_000n }];
+    await expect(prepare({ ...own, unitPayouts: payouts })).rejects.toMatchObject({
+      code: "INTENT_MISMATCH", message: expect.stringContaining("unitPayouts"),
+    });
+    expect(chain.state.log).toEqual([]);
   });
   const malformed = [
     ["compositionSchemaVersion", "unchecked"], ["compositionSchemaVersion", -1], ["compositionSchemaVersion", 65536],

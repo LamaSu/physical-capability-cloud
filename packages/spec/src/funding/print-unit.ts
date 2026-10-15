@@ -99,7 +99,7 @@ export interface PrintUnitThursdayExpectationInput {
   jobId: string;
   host: Address;
   fundingWallet: Address;
-  /** Full canonical subject block, including the buyer-opaque authorizedTuplesRoot. */
+  /** Full subject block; hashes are canonical lowercase, settlement address accepts any hex casing. */
   subject: SubjectBlockFields;
   bindings: readonly SubjectBinding[];
   /** Independently obtained latest chain-block timestamp; never a quote's reclaimAt. */
@@ -123,7 +123,17 @@ export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectation
   }
   try {
     // The public producer first validates the full subject's shape and canonical field spellings.
-    const subjectBlockHash = computeSubjectBlockHash(subject);
+    let subjectBlockHash: Hex;
+    try {
+      subjectBlockHash = computeSubjectBlockHash(subject);
+    } catch (error) {
+      // The producer validates the original plain data object before reading address words.
+      // Only its address-casing refusal is retried; no accessor or Proxy is copied or read.
+      if (!(error instanceof AcceptedPolicyDigestInputError) || error.field !== "subject.operatorSettlementAddress" ||
+          typeof subject.operatorSettlementAddress !== "string" || !isAddress(subject.operatorSettlementAddress, { strict: false })) throw error;
+      subjectBlockHash = computeSubjectBlockHash({ ...subject,
+        operatorSettlementAddress: subject.operatorSettlementAddress.toLowerCase() as Address });
+    }
     const mismatch = (field: string, got: unknown, want: unknown): never =>
       refuse("INTENT_MISMATCH", `PRINT subject.${field} is ${String(got)}; the buyer expects ${String(want)}`);
     if (subject.committedProgramHash !== p.committedProgramHash) mismatch("committedProgramHash", subject.committedProgramHash, p.committedProgramHash);
@@ -142,9 +152,9 @@ export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectation
       jobId, operator: host, payees: [host, p.passThroughRecipient], maxFeeBps: p.feeBps,
       feeRecipients: [p.feeRecipient], tiers: [p.requestedTier], termsHash: p.termsHash,
       acceptedPolicyDigest, compositionRoots: [p.compositionRoot],
-      ...{ compositionSchemaVersion: p.compositionSchemaVersion, unitCount: p.unitCount, unitGross: p.g,
+      compositionSchemaVersion: p.compositionSchemaVersion, unitCount: p.unitCount, unitGross: p.g,
         unitPayouts: [{ recipient: host, amount: p.hostPayoutAmount }, { recipient: p.passThroughRecipient, amount: p.passThrough }],
-        chainId: BigInt(p.chainId), earliestReclaimAt: latestBlockTimestamp + MIN_RECLAIM_DELAY },
+        chainId: BigInt(p.chainId), earliestReclaimAt: latestBlockTimestamp + MIN_RECLAIM_DELAY,
       latestReclaimAt: latestBlockTimestamp + maxDelay,
     };
   } catch (error) {

@@ -34,6 +34,8 @@ import {
   FACTORY_ABI,
   JOB_POLICY_FIELDS,
   MAX_RECLAIM_DELAY,
+  MAX_PAYOUT_LEGS,
+  MAX_UNITS,
   MIN_RECLAIM_DELAY,
   POLICY_VERSION,
   acceptanceDigest,
@@ -49,6 +51,7 @@ import {
   unitsRoot,
   type JobPolicyMessage,
   type JobPolicyTypedData,
+  type PayoutEntry,
   type UnitConfig,
 } from "./vnext.js";
 
@@ -83,6 +86,16 @@ export interface FundingExpectations {
   compositionRoots: readonly Hex[] | "unchecked";
   /** Exact UnitConfig composition schema version, uint16; never waivable. */
   compositionSchemaVersion?: number;
+  /** Exact chain id; never waivable. */
+  chainId?: bigint;
+  /** Exact number of settlement units. */
+  unitCount?: number;
+  /** Exact gross USDC base units for every settlement unit. */
+  unitGross?: bigint;
+  /** Exact ordered recipient/amount payout legs for every settlement unit. */
+  unitPayouts?: readonly PayoutEntry[];
+  /** Earliest permitted reclaim time, in chain seconds. */
+  earliestReclaimAt?: bigint;
   jobPolicyHash?: Hex;
 }
 
@@ -170,7 +183,7 @@ function copyExpectations(raw: unknown): FundingExpectations {
   }
   const e = raw as Record<string, unknown>;
   const required = ["jobId", "operator", "payees", "maxFeeBps", "feeRecipients", "tiers", "latestReclaimAt", "termsHash", "acceptedPolicyDigest", "compositionRoots"];
-  const optional = ["jobPolicyHash", "compositionSchemaVersion"];
+  const optional = ["jobPolicyHash", "compositionSchemaVersion", "chainId", "unitCount", "unitGross", "unitPayouts", "earliestReclaimAt"];
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(e, key)) ||
       Object.keys(e).some((key) => !required.includes(key) && !optional.includes(key))) {
     refuse("BAD_EXPECTATION", `expect must contain ${required.join(", ")}, with only ${optional.join(", ")} optional`);
@@ -187,6 +200,12 @@ function copyExpectations(raw: unknown): FundingExpectations {
   const hash = (v: unknown, field: string): Hex => {
     if (typeof v !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(v)) refuse("BAD_EXPECTATION", `expect.${field} is not a bytes32`);
     return v as Hex;
+  };
+  const uint256 = (v: unknown, field: string): bigint => {
+    if (typeof v !== "bigint" || v < 0n || v >= 1n << 256n) {
+      refuse("BAD_EXPECTATION", `expect.${field} must be a non-negative uint256 bigint`);
+    }
+    return v;
   };
   if (typeof e.jobId !== "string") refuse("BAD_EXPECTATION", "expect.jobId must be a string");
   const operator = address(e.operator, "operator");
@@ -217,9 +236,44 @@ function copyExpectations(raw: unknown): FundingExpectations {
        compositionSchemaVersion < 0 || compositionSchemaVersion > 65_535)) {
     refuse("BAD_EXPECTATION", "expect.compositionSchemaVersion must be an integer in [0, 65535]");
   }
+  const chainId = e.chainId === undefined ? undefined : uint256(e.chainId, "chainId");
+  if (chainId === 0n) refuse("BAD_EXPECTATION", "expect.chainId must be a positive uint256 bigint");
+  const unitCount = e.unitCount;
+  if (unitCount !== undefined && (typeof unitCount !== "number" || !Number.isInteger(unitCount) || unitCount < 1 || unitCount > MAX_UNITS)) {
+    refuse("BAD_EXPECTATION", `expect.unitCount must be an integer in [1, ${MAX_UNITS}]`);
+  }
+  const unitGross = e.unitGross === undefined ? undefined : uint256(e.unitGross, "unitGross");
+  const earliestReclaimAt = e.earliestReclaimAt === undefined ? undefined : uint256(e.earliestReclaimAt, "earliestReclaimAt");
+  if (earliestReclaimAt !== undefined && earliestReclaimAt > e.latestReclaimAt) {
+    refuse("BAD_EXPECTATION", "expect.earliestReclaimAt must not exceed expect.latestReclaimAt");
+  }
+  let unitPayouts: PayoutEntry[] | undefined;
+  if (e.unitPayouts !== undefined) {
+    if (!Array.isArray(e.unitPayouts) || e.unitPayouts.length < 1 || e.unitPayouts.length > MAX_PAYOUT_LEGS) {
+      refuse("BAD_EXPECTATION", `expect.unitPayouts must contain 1..${MAX_PAYOUT_LEGS} payout entries`);
+    }
+    unitPayouts = Array.from(e.unitPayouts, (entry: unknown, i) => {
+      const field = `unitPayouts[${i}]`;
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry) ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) {
+        refuse("BAD_EXPECTATION", `expect.${field} must be a plain recipient/amount object`);
+      }
+      const leg = entry as Record<string, unknown>;
+      if (!Object.prototype.hasOwnProperty.call(leg, "recipient") || !Object.prototype.hasOwnProperty.call(leg, "amount") ||
+          Object.keys(leg).some((key) => key !== "recipient" && key !== "amount")) {
+        refuse("BAD_EXPECTATION", `expect.${field} must contain only recipient and amount`);
+      }
+      return { recipient: address(leg.recipient, `${field}.recipient`), amount: uint256(leg.amount, `${field}.amount`) };
+    });
+  }
   return { jobId: e.jobId, operator, payees, maxFeeBps: e.maxFeeBps, feeRecipients, tiers,
     latestReclaimAt: e.latestReclaimAt, termsHash, acceptedPolicyDigest, compositionRoots,
     ...(compositionSchemaVersion === undefined ? {} : { compositionSchemaVersion }),
+    ...(chainId === undefined ? {} : { chainId }),
+    ...(unitCount === undefined ? {} : { unitCount }),
+    ...(unitGross === undefined ? {} : { unitGross }),
+    ...(unitPayouts === undefined ? {} : { unitPayouts }),
+    ...(earliestReclaimAt === undefined ? {} : { earliestReclaimAt }),
     ...(e.jobPolicyHash === undefined ? {} : { jobPolicyHash: hash(e.jobPolicyHash, "jobPolicyHash") }) };
 }
 
@@ -229,11 +283,22 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
   const mismatch = (field: string, got: unknown, want: unknown): never =>
     refuse("INTENT_MISMATCH", `${field} is ${display(got)}; the buyer expects ${display(want)}`);
   const expectedJob = jobIdHashOf(e.jobId);
+  if (e.chainId !== undefined && p.chainId !== e.chainId) mismatch("chainId", p.chainId, e.chainId);
   if (!same(m.jobIdHash, expectedJob)) mismatch("jobId (message.jobIdHash)", m.jobIdHash, expectedJob);
   if (!same(m.operator, e.operator)) mismatch("operator", m.operator, e.operator);
   if (e.termsHash !== "unchecked" && !same(m.termsHash, e.termsHash)) mismatch("termsHash", m.termsHash, e.termsHash);
   if (e.acceptedPolicyDigest !== "unchecked" && !same(m.acceptedPolicyDigest, e.acceptedPolicyDigest)) mismatch("acceptedPolicyDigest", m.acceptedPolicyDigest, e.acceptedPolicyDigest);
+  if (e.unitCount !== undefined && p.fund.configs.length !== e.unitCount) mismatch("unitCount (fund.configs.length)", p.fund.configs.length, e.unitCount);
   p.fund.configs.forEach((c, i) => {
+    if (e.unitGross !== undefined && c.g !== e.unitGross) mismatch(`unitGross (fund.configs[${i}].g)`, c.g, e.unitGross);
+    if (e.unitPayouts !== undefined) {
+      if (c.payouts.length !== e.unitPayouts.length) mismatch(`unitPayouts (fund.configs[${i}].payouts.length)`, c.payouts.length, e.unitPayouts.length);
+      c.payouts.forEach((leg, j) => {
+        const expected = e.unitPayouts![j]!;
+        if (!same(leg.recipient, expected.recipient)) mismatch(`unitPayouts (fund.configs[${i}].payouts[${j}].recipient)`, leg.recipient, expected.recipient);
+        if (leg.amount !== expected.amount) mismatch(`unitPayouts (fund.configs[${i}].payouts[${j}].amount)`, leg.amount, expected.amount);
+      });
+    }
     c.payouts.forEach((leg, j) => {
       if (!e.payees.some((payee) => same(leg.recipient, payee))) mismatch(`payees (fund.configs[${i}].payouts[${j}].recipient)`, leg.recipient, e.payees);
     });
@@ -244,6 +309,7 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
       if (!e.tiers.includes(c[field])) mismatch(`tiers (fund.configs[${i}].${field})`, c[field], e.tiers);
     }
     if (c.reclaimAt > e.latestReclaimAt) mismatch(`latestReclaimAt (fund.configs[${i}].reclaimAt)`, c.reclaimAt, e.latestReclaimAt);
+    if (e.earliestReclaimAt !== undefined && c.reclaimAt < e.earliestReclaimAt) mismatch(`earliestReclaimAt (fund.configs[${i}].reclaimAt)`, c.reclaimAt, e.earliestReclaimAt);
     if (e.compositionRoots !== "unchecked" && !e.compositionRoots.some((root) => same(c.compositionRoot, root))) mismatch(`compositionRoots (fund.configs[${i}].compositionRoot)`, c.compositionRoot, e.compositionRoots);
     if (e.compositionSchemaVersion !== undefined && c.compositionSchemaVersion !== e.compositionSchemaVersion) mismatch(`compositionSchemaVersion (fund.configs[${i}].compositionSchemaVersion)`, c.compositionSchemaVersion, e.compositionSchemaVersion);
   });
@@ -410,6 +476,16 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   //    the payer sends (ESC:718; FAC:253), so its signature bytes are empty and are never checked.
   if (p.fund.acceptance.expiry !== p.expiry) refuse("FUND_ARGS_MISMATCH", `fund.acceptance.expiry ${p.fund.acceptance.expiry} is not the policy's ${p.expiry}`);
   if (p.fund.acceptance.payerSignature !== "0x") refuse("FUND_ARGS_MISMATCH", "fund.acceptance.payerSignature must be empty: the payer sends fund() itself");
+  // E3: VNextSettlementLib.sol:583-589 requires N+F=G, F=0 and the zero fee recipient when feeBps is zero.
+  // Refuse the reverting fund() args locally, before the buyer can broadcast an approval.
+  p.fund.configs.forEach((c, i) => {
+    if (c.feeBps !== 0) return;
+    if (c.f !== 0n) refuse("FUND_ARGS_MISMATCH", `fund.configs[${i}].f must be 0 when feeBps is 0`);
+    if (c.n !== c.g) refuse("FUND_ARGS_MISMATCH", `fund.configs[${i}].n must equal g when feeBps is 0`);
+    if (!same(c.feeRecipient, "0x0000000000000000000000000000000000000000")) {
+      refuse("FUND_ARGS_MISMATCH", `fund.configs[${i}].feeRecipient must be the zero address when feeBps is 0`);
+    }
+  });
 
   // 9. The operator's acceptance: an EOA signature over the RECOMPUTED digest (FAC:256, 375-387).
   const structHash = jobPolicyHash(message);
