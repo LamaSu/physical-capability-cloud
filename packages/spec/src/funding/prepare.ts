@@ -81,6 +81,8 @@ export interface FundingExpectations {
   termsHash: Hex | "unchecked";
   acceptedPolicyDigest: Hex | "unchecked";
   compositionRoots: readonly Hex[] | "unchecked";
+  /** Exact UnitConfig composition schema version, uint16; never waivable. */
+  compositionSchemaVersion?: number;
   jobPolicyHash?: Hex;
 }
 
@@ -168,9 +170,10 @@ function copyExpectations(raw: unknown): FundingExpectations {
   }
   const e = raw as Record<string, unknown>;
   const required = ["jobId", "operator", "payees", "maxFeeBps", "feeRecipients", "tiers", "latestReclaimAt", "termsHash", "acceptedPolicyDigest", "compositionRoots"];
+  const optional = ["jobPolicyHash", "compositionSchemaVersion"];
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(e, key)) ||
-      Object.keys(e).some((key) => !required.includes(key) && key !== "jobPolicyHash")) {
-    refuse("BAD_EXPECTATION", `expect must contain ${required.join(", ")}, with only jobPolicyHash optional`);
+      Object.keys(e).some((key) => !required.includes(key) && !optional.includes(key))) {
+    refuse("BAD_EXPECTATION", `expect must contain ${required.join(", ")}, with only ${optional.join(", ")} optional`);
   }
   const address = (v: unknown, field: string): Address => {
     if (typeof v !== "string" || !isAddress(v)) refuse("BAD_EXPECTATION", `expect.${field} is not an address`);
@@ -208,8 +211,15 @@ function copyExpectations(raw: unknown): FundingExpectations {
     if (!Array.isArray(e.compositionRoots) || e.compositionRoots.length === 0) refuse("BAD_EXPECTATION", "expect.compositionRoots must be a non-empty bytes32 array or the literal unchecked");
     compositionRoots = Array.from(e.compositionRoots, (root, i) => hash(root, `compositionRoots[${i}]`));
   }
+  const compositionSchemaVersion = e.compositionSchemaVersion;
+  if (compositionSchemaVersion !== undefined &&
+      (typeof compositionSchemaVersion !== "number" || !Number.isInteger(compositionSchemaVersion) ||
+       compositionSchemaVersion < 0 || compositionSchemaVersion > 65_535)) {
+    refuse("BAD_EXPECTATION", "expect.compositionSchemaVersion must be an integer in [0, 65535]");
+  }
   return { jobId: e.jobId, operator, payees, maxFeeBps: e.maxFeeBps, feeRecipients, tiers,
     latestReclaimAt: e.latestReclaimAt, termsHash, acceptedPolicyDigest, compositionRoots,
+    ...(compositionSchemaVersion === undefined ? {} : { compositionSchemaVersion }),
     ...(e.jobPolicyHash === undefined ? {} : { jobPolicyHash: hash(e.jobPolicyHash, "jobPolicyHash") }) };
 }
 
@@ -235,6 +245,7 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
     }
     if (c.reclaimAt > e.latestReclaimAt) mismatch(`latestReclaimAt (fund.configs[${i}].reclaimAt)`, c.reclaimAt, e.latestReclaimAt);
     if (e.compositionRoots !== "unchecked" && !e.compositionRoots.some((root) => same(c.compositionRoot, root))) mismatch(`compositionRoots (fund.configs[${i}].compositionRoot)`, c.compositionRoot, e.compositionRoots);
+    if (e.compositionSchemaVersion !== undefined && c.compositionSchemaVersion !== e.compositionSchemaVersion) mismatch(`compositionSchemaVersion (fund.configs[${i}].compositionSchemaVersion)`, c.compositionSchemaVersion, e.compositionSchemaVersion);
   });
   if (e.jobPolicyHash !== undefined && !same(structHash, e.jobPolicyHash)) mismatch("jobPolicyHash", structHash, e.jobPolicyHash);
 }
@@ -331,9 +342,6 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   if (!account) refuse("PAYER_NOT_SIGNER", "the wallet has no account to sign or send with");
   const m = p.typedData.message;
 
-  // 1. The chain, for both clients (plan S3 negative: "the chainId differs").
-  await assertChain(args.wallet, args.publicClient, p.chainId);
-
   // 2. The deployment. The token is the pinned Circle USDC (plan S3 negative; DEP-01), and the factory is the pinned
   //    one (plan §3 step 6, S1 negative 5). Without a factory pin, every check below could be met by a look-alike
   //    deployment whose fund() pays someone else.
@@ -416,6 +424,10 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
 
   // Internal coherence and the operator's signature do not establish the buyer's authorization.
   checkIntent(p, expect, structHash);
+
+  // The first RPC follows all local checks, including the caller's independent intent.
+  // Both clients must be on the policy's chain (plan S3 negative: "the chainId differs").
+  await assertChain(args.wallet, args.publicClient, p.chainId);
 
   // 10. Live, at one pinned block: the pinned factory's implementation (an immutable, FAC:34), the factory's own
   //     prediction of the escrow address (ABI doc §5.2), that implementation's token (an immutable, ESC:75), and the
