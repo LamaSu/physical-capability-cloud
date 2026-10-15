@@ -1,6 +1,6 @@
 import { isAddress, type Address, type Hex } from "viem";
 import {
-  AcceptedPolicyDigestInputError, computeAcceptedPolicyDigest, computeBindingsRoot, computeSubjectBlockHash,
+  AcceptedPolicyDigestInputError, computeBindingsRoot, computeSubjectBlockHash,
   type SubjectBinding, type SubjectBlockFields,
 } from "../evidence/accepted-policy.js";
 import { formatOperatorPrincipalId, principalTupleWord } from "../evidence/principal-id.js";
@@ -20,10 +20,11 @@ export const RECLAIM_SKEW_SECONDS = 600n;
  * enforces requiredTier == requestedTier in fund() (also documented by its getter at :1089).
  * authorizedTuplesRoot remains buyer-opaque and unchecked on Thursday: no public root
  * producer exists (economics #8095). It is still included in the accepted-policy digest.
+ * termsHash is derived per policy from the funded configs using ratified v2.1 (#8165).
+ * The old terms-file keccak 0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7
+ * is only a file-version digest (#8165), never a policy commitment.
  */
 export const PRINT_UNIT_THURSDAY_V1 = Object.freeze({
-  /** Keccak of the exact economics terms file bytes (#8032). */
-  termsHash: "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7",
   /** Subject-block field 10, S2 programHash @ba992167 (#8021). */
   committedProgramHash: "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
   /** This unit is non-composed (#8021). */
@@ -108,8 +109,9 @@ export interface PrintUnitThursdayExpectationInput {
 
 /**
  * Fix independent Thursday PRINT buyer intent before prepareFunding. Every refusal is local;
- * the public evidence producers own all hashing. A PRINT buyer never passes allowUnchecked.
- * prepareFunding checks reclaimAt from the actual fund.configs, then rechecks live chain timing.
+ * public evidence producers own the subject and bindings roots. A PRINT buyer never passes allowUnchecked.
+ * prepareFunding derives ratified v2.1 termsHash from the actual funded configs (#8165), then
+ * computes acceptedPolicyDigest with these public roots and rechecks live chain timing.
  */
 export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectationInput): FundingExpectations {
   const p = PRINT_UNIT_THURSDAY_V1;
@@ -149,11 +151,11 @@ export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectation
     // Validate bindings via the public producer even though the only admitted array is empty.
     const bindingsRoot = computeBindingsRoot(bindings);
     if (bindings.length !== 0) refuse("INTENT_MISMATCH", "PRINT bindings must be exactly []; this unit admits no subject bindings");
-    const acceptedPolicyDigest = computeAcceptedPolicyDigest({ termsHash: p.termsHash, subjectBlockHash, bindingsRoot });
     return {
       jobId, operator: host, payees: [host, p.passThroughRecipient], maxFeeBps: p.feeBps,
-      feeRecipients: [p.feeRecipient], tiers: [p.requestedTier], termsHash: p.termsHash,
-      acceptedPolicyDigest, compositionRoots: [p.compositionRoot],
+      feeRecipients: [p.feeRecipient], tiers: [p.requestedTier],
+      termsHash: { derive: "v2.1", token: p.usdc, assuranceTier: p.requiredTier },
+      acceptedPolicyDigest: { subjectBlockHash, bindingsRoot }, compositionRoots: [p.compositionRoot],
       compositionSchemaVersion: p.compositionSchemaVersion, unitCount: p.unitCount, unitGross: p.g,
       unitPayouts: [{ recipient: host, amount: p.hostPayoutAmount }, { recipient: p.passThroughRecipient, amount: p.passThrough }],
       chainId: BigInt(p.chainId), earliestReclaimAt: latestBlockTimestamp + MIN_RECLAIM_DELAY,

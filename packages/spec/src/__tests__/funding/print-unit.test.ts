@@ -8,11 +8,12 @@ import { formatOperatorPrincipalId, principalTupleWord } from "../../evidence/pr
 import { prepareFunding, type FundingExpectations } from "../../funding/prepare.js";
 import type { FundingRefusalCode } from "../../funding/errors.js";
 import { MIN_RECLAIM_DELAY, type UnitConfig } from "../../funding/vnext.js";
+import { computeTermsHashV21 } from "../../funding/terms-hash-v21.js";
 import { NOW, OTHER, buildFixture, makeChain, newAccount, testExpect, testPins, type FixtureOptions } from "./fixture.js";
 
 // Dynamic import makes each first-run test record its own red result before the API exists.
 const api = () => import("../../funding/print-unit.js");
-const TERMS = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+const FILE_VERSION_DIGEST = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
 const PROGRAM = "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a";
 const POSTAGE: Address = "0x6463ACd05141c1EF6583E4Fd978FC61Fff4045DC";
 const WORD = "0x5c7d94f41618b47baed85a60abea9904c04ffafe43edf75dad2739b3a760ac35";
@@ -40,9 +41,17 @@ function subjectFor(host: Address, payer: Address): SubjectBlockFields {
   };
 }
 
-const digestFor = (subject: SubjectBlockFields) => computeAcceptedPolicyDigest({
-  termsHash: TERMS, subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot([]),
+const termsFor = (configs: readonly UnitConfig[]): Hex => computeTermsHashV21({
+  token: TOKEN, assuranceTier: 1,
+  milestones: configs.map((c) => ({ milestoneIndex: c.milestoneIndex, stepId: c.stepId, amount: c.g, deadline: c.reclaimAt })),
 });
+const digestFor = (subject: SubjectBlockFields, termsHash: Hex) => computeAcceptedPolicyDigest({
+  termsHash, subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot([]),
+});
+const digestFromExpectation = (e: FundingExpectations, termsHash: Hex): Hex => {
+  if (typeof e.acceptedPolicyDigest !== "object") throw new TypeError("PRINT expectation must carry public digest roots");
+  return computeAcceptedPolicyDigest({ termsHash, ...e.acceptedPolicyDigest });
+};
 
 async function setup() {
   const { printUnitThursdayExpectation } = await api();
@@ -52,8 +61,7 @@ async function setup() {
     fundingWallet: parties.payer.address, subject, bindings: [] as readonly SubjectBinding[], latestBlockTimestamp: NOW };
   const own = printUnitThursdayExpectation(input);
   const options: FixtureOptions = {
-    chainId: 84532, usdc: TOKEN, jobId: input.jobId, termsHash: TERMS,
-    acceptedPolicyDigest: digestFor(subject), reclaimAt: [NOW + 1_814_400n],
+    chainId: 84532, usdc: TOKEN, jobId: input.jobId, reclaimAt: [NOW + 1_814_400n],
     configure: (cs) => {
       const c = cs[0]!;
       Object.assign(c, { requiredTier: 1, requestedTier: 1, g: 750_000n, f: 0n, n: 750_000n,
@@ -61,29 +69,36 @@ async function setup() {
         payouts: [{ recipient: parties.operator.address, amount: 500_000n }, { recipient: POSTAGE, amount: 250_000n }] });
     },
   };
-  const fx = await buildFixture(options, parties);
+  const buildConfigured = async (change: FixtureOptions = {}) => {
+    const merged = { ...options, ...change, configure: (cs: UnitConfig[]) => {
+      options.configure!(cs); change.configure?.(cs);
+    } };
+    const configured = await buildFixture(merged, parties);
+    const termsHash = change.termsHash ?? termsFor(configured.configs);
+    const acceptedPolicyDigest = change.acceptedPolicyDigest ?? digestFor(subject, termsHash);
+    return buildFixture({ ...merged, termsHash, acceptedPolicyDigest }, parties);
+  };
+  const fx = await buildConfigured();
   const chain = makeChain(fx);
   const prepare = (expectations: FundingExpectations = own) => prepareFunding({
     payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
     quote: { maxTotalGross: 750_000n }, expect: expectations, pins: testPins(fx),
   });
   const substituted = async (change: FixtureOptions) => {
-    const changed = await buildFixture({ ...options, ...change, configure: (cs) => {
-      options.configure!(cs); change.configure?.(cs);
-    } }, parties);
+    const changed = await buildConfigured(change);
     const fake = makeChain(changed);
     const pending = prepareFunding({ payload: changed.wire(), wallet: fake.wallet(), publicClient: fake.publicClient,
       quote: { maxTotalGross: 3_000_000n }, expect: own, pins: testPins(changed) });
     return { pending, fake };
   };
-  return { subject, input, own, fx, chain, prepare, substituted };
+  return { subject, input, own, fx, chain, prepare, substituted, buildConfigured };
 }
 
 describe("Thursday PRINT pins and public producers", () => {
   it("pins every decided value literally and freezes nested pins", async () => {
     const { PRINT_UNIT_THURSDAY_V1: pins, RECLAIM_SKEW_SECONDS } = await api();
     expect(pins).toEqual({
-      termsHash: TERMS, committedProgramHash: PROGRAM, compositionSchemaVersion: 0, compositionRoot: zeroHash,
+      committedProgramHash: PROGRAM, compositionSchemaVersion: 0, compositionRoot: zeroHash,
       requiredTier: 1, requestedTier: 1, feeBps: 0, feeRecipient: zeroAddress,
       g: 750_000n, f: 0n, n: 750_000n, passThrough: 250_000n, hostPayoutAmount: 500_000n,
       passThroughRecipient: POSTAGE, unitCount: 1, chainId: 84532, usdc: TOKEN, usdcDecimals: 6,
@@ -128,8 +143,10 @@ describe("Thursday PRINT buyer expectation", () => {
   it("prepares one exact PRINT unit with no unchecked commitments", async () => {
     const { prepare, own, input, fx } = await setup();
     expect(own).toMatchObject({ jobId: input.jobId, operator: input.host, payees: [input.host, POSTAGE],
-      maxFeeBps: 0, feeRecipients: [zeroAddress], tiers: [1], termsHash: TERMS,
-      acceptedPolicyDigest: digestFor(input.subject), compositionRoots: [zeroHash], compositionSchemaVersion: 0,
+      maxFeeBps: 0, feeRecipients: [zeroAddress], tiers: [1],
+      termsHash: { derive: "v2.1", token: TOKEN, assuranceTier: 1 },
+      acceptedPolicyDigest: { subjectBlockHash: computeSubjectBlockHash(input.subject), bindingsRoot: computeBindingsRoot([]) },
+      compositionRoots: [zeroHash], compositionSchemaVersion: 0,
       unitCount: 1, unitGross: 750_000n, unitPayouts: fx.configs[0]!.payouts, chainId: 84532n,
       earliestReclaimAt: NOW + MIN_RECLAIM_DELAY, latestReclaimAt: NOW + 1_814_400n + 600n });
     const prepared = await prepare();
@@ -138,12 +155,12 @@ describe("Thursday PRINT buyer expectation", () => {
     expect(prepared.totalGross).toBe(750_000n);
   });
   it("digest changes with the opaque field and equals accepted-policy.ts's producer", async () => {
-    const { input, own } = await setup();
+    const { input, own, fx } = await setup();
     const subject = { ...input.subject, authorizedTuplesRoot: flipBit(input.subject.authorizedTuplesRoot) };
     const changed = (await api()).printUnitThursdayExpectation({ ...input, subject });
-    expect(changed.acceptedPolicyDigest).not.toBe(own.acceptedPolicyDigest);
-    expect(changed.acceptedPolicyDigest).toBe(computeAcceptedPolicyDigest({
-      termsHash: TERMS, subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot([]),
+    expect(digestFromExpectation(changed, fx.message.termsHash)).not.toBe(digestFromExpectation(own, fx.message.termsHash));
+    expect(digestFromExpectation(changed, fx.message.termsHash)).toBe(computeAcceptedPolicyDigest({
+      termsHash: fx.message.termsHash, subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot([]),
     }));
   });
   const subjectChanges: Array<[string, (s: SubjectBlockFields, input: Awaited<ReturnType<typeof setup>>["input"]) => void]> = [
@@ -171,11 +188,11 @@ describe("Thursday PRINT buyer expectation", () => {
       .toBe(input.host.toLowerCase());
   });
   it.each(["checksum", "uppercase"])("accepts an equal subject settlement address in %s casing", async (casing) => {
-    const { input, own } = await setup();
+    const { input, own, fx } = await setup();
     const address = casing === "checksum" ? input.host : `0x${input.host.slice(2).toUpperCase()}` as Address;
     const subject = Object.freeze({ ...input.subject, operatorSettlementAddress: address });
     const changed = (await api()).printUnitThursdayExpectation({ ...input, subject });
-    expect(changed.acceptedPolicyDigest).toBe(own.acceptedPolicyDigest);
+    expect(digestFromExpectation(changed, fx.message.termsHash)).toBe(digestFromExpectation(own, fx.message.termsHash));
     expect(subject.operatorSettlementAddress).toBe(address);
   });
   it("BAD_EXPECTATION before any RPC: never reads a settlement-address getter", async () => {
@@ -238,14 +255,43 @@ describe("Thursday PRINT buyer expectation", () => {
     expect(fake.state.log).toEqual([]);
   });
   it("INTENT_MISMATCH before any RPC: termsHash differs by one bit", async () => {
-    const { substituted } = await setup();
-    const { pending, fake } = await substituted({ termsHash: flipBit(TERMS) });
+    const { substituted, fx } = await setup();
+    const { pending, fake } = await substituted({ termsHash: flipBit(fx.message.termsHash) });
     await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("termsHash") });
     expect(fake.state.log).toEqual([]);
   });
   it("INTENT_MISMATCH before any RPC: accepted digest uses a changed subject", async () => {
+    const { substituted, subject, fx } = await setup();
+    const { pending, fake } = await substituted({ acceptedPolicyDigest: digestFor({ ...subject, authorizedTuplesRoot: zeroHash }, fx.message.termsHash) });
+    await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("acceptedPolicyDigest") });
+    expect(fake.state.log).toEqual([]);
+  });
+  it("INTENT_MISMATCH before any RPC: old terms file digest is not derived PRINT terms", async () => {
+    const { substituted } = await setup();
+    const { pending, fake } = await substituted({ termsHash: FILE_VERSION_DIGEST });
+    await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("termsHash") });
+    expect(fake.state.log).toEqual([]);
+  });
+  it.each(["reclaimAt", "stepId", "milestoneIndex"] as const)(
+    "INTENT_MISMATCH before any RPC: PRINT terms derived from a different %s", async (field) => {
+      const { substituted, fx } = await setup();
+      const stale = fx.configs.map((c) => ({ ...c }));
+      if (field === "stepId") stale[0]!.stepId = flipBit(stale[0]!.stepId);
+      else stale[0]![field] += 1n;
+      const { pending, fake } = await substituted({ termsHash: termsFor(stale) });
+      await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("termsHash") });
+      expect(fake.state.log).toEqual([]);
+    },
+  );
+  it("INTENT_MISMATCH before any RPC: forged PRINT terms and digest pair", async () => {
     const { substituted, subject } = await setup();
-    const { pending, fake } = await substituted({ acceptedPolicyDigest: digestFor({ ...subject, authorizedTuplesRoot: zeroHash }) });
+    const { pending, fake } = await substituted({ termsHash: ONE, acceptedPolicyDigest: digestFor(subject, ONE) });
+    await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("termsHash") });
+    expect(fake.state.log).toEqual([]);
+  });
+  it("INTENT_MISMATCH before any RPC: PRINT accepted digest built with the terms file digest", async () => {
+    const { substituted, subject } = await setup();
+    const { pending, fake } = await substituted({ acceptedPolicyDigest: digestFor(subject, FILE_VERSION_DIGEST) });
     await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("acceptedPolicyDigest") });
     expect(fake.state.log).toEqual([]);
   });
@@ -261,12 +307,11 @@ describe("Thursday PRINT buyer expectation", () => {
     expect((await pending).unchecked).toEqual([]);
   });
   it("accepts the exact 10-day floor with zero live margin", async () => {
-    const { fx, own } = await setup();
-    // Rebuild the signed policy rather than mutating its committed wire configs.
-    const changed = await buildFixture({ chainId: 84532, usdc: TOKEN, jobId: fx.jobId, termsHash: TERMS,
-      acceptedPolicyDigest: fx.message.acceptedPolicyDigest, reclaimAt: [NOW + MIN_RECLAIM_DELAY],
+    const { fx, own, buildConfigured } = await setup();
+    // Rebuild the signed policy and derived commitments for its submitted deadline.
+    const changed = await buildConfigured({ reclaimAt: [NOW + MIN_RECLAIM_DELAY],
       configure: (cs) => { Object.assign(cs[0]!, fx.configs[0], { reclaimAt: NOW + MIN_RECLAIM_DELAY }); },
-    }, { payer: fx.payer, operator: fx.operator });
+    });
     const chain = makeChain(changed);
     expect((await prepareFunding({ payload: changed.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
       quote: { maxTotalGross: 750_000n }, expect: own, pins: testPins(changed), marginSeconds: 0n })).unchecked).toEqual([]);
