@@ -478,10 +478,10 @@ describe("pcc-wallet ceremony", () => {
     expect(output).not.toContain("ready");
   });
 
-  it("fund 502 exits nonzero and prints the faucet error code", async () => {
+  it("init 502 faucet_error is linked unfunded with errorClass unknown", async () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 502 }).start();
-    expect(await run(gateway, "init", ["--yes"])).not.toBe(0);
-    expect(stderr.join("\n").trim()).toBe("faucet_error");
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    expect(stdout.join("\n")).toContain("linked (unfunded: faucet_error, unknown)");
     expect(stdout.join("\n")).not.toContain("ready");
   });
 
@@ -809,7 +809,7 @@ describe("W2 init funding outcome", () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 503 }).start();
     expect(await run(gateway, "init", ["--yes"])).toBe(0);
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
-    expect(stdout.join("")).toContain("linked (unfunded)");
+    expect(stdout.join("")).toContain("linked (unfunded: faucet_unavailable)");
     expect(stdout.join("")).not.toContain("ready");
   });
 });
@@ -867,4 +867,21 @@ it("ed25519 device init links without a fund request; fund refuses locally befor
   expect(await run(gateway, "fund", [], "device")).toBe(1);
   expect(stderr.join("")).toContain("not_fundable");
   expect(gateway.requests).toHaveLength(0);
+});
+
+describe("init funding refusal mapping", () => {
+  it.each([
+    [403, { error: "link_inactive" }],
+    [409, { error: "cap_reached", cap: "address" }],
+    [409, { error: "not_fundable" }],
+    [502, { error: "faucet_error", errorClass: "rate_limit_exceeded" }],
+    [503, { error: "faucet_unavailable" }],
+  ] as const)("init HTTP %s %j keeps an approved wallet linked unfunded and exits zero", async (fundStatus, fundBody) => {
+    const gateway = await new Gateway({ statuses: ["approved"], fundStatus, fundBody }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    const suffix = "errorClass" in fundBody ? `, ${fundBody.errorClass}` : "";
+    expect(stdout.join("")).toContain(`linked (unfunded: ${fundBody.error}${suffix})`);
+    expect(stdout.join("")).not.toContain("ready");
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+  });
 });

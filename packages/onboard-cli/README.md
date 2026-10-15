@@ -128,8 +128,11 @@ transaction receipt on Base Sepolia through `--rpc-url` / `PCC_RPC_URL`
 (default `https://sepolia.base.org`). Gateway and RPC URLs require HTTPS,
 except loopback HTTP for local use. Partial funding prints each claim and exits
 nonzero; retrying is idempotent. Pending funding retries at most eight times
-with bounded backoff. A missing faucet or `faucet_unavailable` leaves the wallet
-linked and unfunded, with exit 0. After `capability_expired`, ask the account
+with bounded backoff. A missing faucet route leaves the wallet linked and unfunded, with exit 0.
+During init, `link_inactive`, `cap_reached`, `not_fundable`, `faucet_error` and
+`faucet_unavailable` leave the approved wallet linked and unfunded, with exit 0.
+The `fund` command exits nonzero for these five errors. `faucet_error` always
+prints its safe error class. After `capability_expired`, ask the account
 owner to fund the link from the dashboard or the owner funding API.
 
 ## License

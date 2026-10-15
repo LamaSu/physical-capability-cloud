@@ -207,12 +207,12 @@ describe("W2 CLI funding", () => {
     expect(errors.join("")).toContain("funding_pending");
     expect(output.join("")).not.toContain("funded");
   });
-  it.each([[404, "not_found"], [503, "faucet_unavailable"]] as const)("%s/%s is linked (unfunded), exit zero", async (status, error) => {
+  it.each([[404, "not_found"]] as const)("%s/%s is linked (unfunded), exit zero", async (status, error) => {
     store(); gateway({ error }, status);
     expect(await fund()).toBe(0);
     expect(output.join("")).toContain("linked (unfunded)");
   });
-  it.each([[502, "faucet_error"], [403, "link_inactive"], [403, "capability_expired"]] as const)("%s/%s exits nonzero", async (status, error) => {
+  it.each([[502, "faucet_error"], [403, "link_inactive"], [403, "capability_expired"], [409, "not_fundable"], [503, "faucet_unavailable"]] as const)("%s/%s exits nonzero", async (status, error) => {
     store(); gateway({ error, detail: "untrusted funding error" }, status);
     expect(await fund()).not.toBe(0);
     expect(errors.join("")).toContain(error);
@@ -581,5 +581,19 @@ describe("bounded receipt polling and RPC retries", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("faucet errorClass safety", () => {
+  it.each(["faucet_limit_exceeded", "rate_limit_exceeded", "unauthorized", "forbidden", "bad_gateway", "internal_server_error", "network_timeout", "network_connection_failed", "timeout", "invalid_tx_hash", "unknown"])("fund prints 502 faucet_error and errorClass %s", async errorClass => {
+    store(); gateway({ error: "faucet_error", errorClass }, 502);
+    expect(await fund()).toBe(1);
+    expect(errors.join("")).toContain(`faucet_error, ${errorClass}`);
+  });
+  it.each([undefined, "untrusted diagnostic text", { nested: true }])("502 always prints a safe errorClass for %j", async errorClass => {
+    store(); gateway({ error: "faucet_error", errorClass }, 502);
+    expect(await fund()).toBe(1);
+    expect(errors.join("")).toContain("faucet_error, unknown");
+    expect(errors.join("")).not.toContain("untrusted diagnostic text");
   });
 });

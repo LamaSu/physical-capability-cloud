@@ -176,13 +176,17 @@ export async function requestFunding(
   if (response.status === 404 && object(data) && exactKeys(data, ["error"]) && data.error === "not_found") {
     return { status: "unavailable", claims: [] };
   }
-  if (response.status === 503 && object(data) && data.error === "faucet_unavailable") {
-    return { status: "unavailable", claims: [] };
-  }
   if (!response.ok) {
+    if (response.status === 502 && object(data) && data.error === "faucet_error") {
+      const allowed = ["faucet_limit_exceeded", "rate_limit_exceeded", "unauthorized", "forbidden",
+        "bad_gateway", "internal_server_error", "network_timeout", "network_connection_failed",
+        "timeout", "invalid_tx_hash", "unknown"];
+      const errorClass = typeof data.errorClass === "string" && allowed.includes(data.errorClass) ? data.errorClass : "unknown";
+      throw new WalletError("faucet_error", 1, response.status, errorClass);
+    }
     if (response.status === 409 && object(data) && data.error === "cap_reached") {
       if (data.cap !== "address" && data.cap !== "account" && data.cap !== "global") invalidFundingResponse();
-      throw new WalletError(`cap_reached (cap: ${data.cap})`, 1, response.status);
+      throw new WalletError("cap_reached", 1, response.status, undefined, data.cap);
     }
     if (response.status === 403 && object(data) && data.error === "capability_expired") {
       throw new WalletError("capability_expired: ask the account owner to fund the link using POST /api/wallets/:linkId/fund", 1, response.status);

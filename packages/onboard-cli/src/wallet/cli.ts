@@ -279,7 +279,19 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
     });
     wallet = await linkWallet(wallet, io, args.kernelId);
     if (wallet.keyType === "ed25519") { io.stdout("linked (unfunded: not_fundable)\n"); return 0; }
-    if (await fundWallet(wallet, io, rpcUrl)) io.stdout("ready\n");
+    try {
+      if (await fundWallet(wallet, io, rpcUrl)) io.stdout("ready\n");
+    } catch (error) {
+      if (error instanceof WalletError && (
+        (error.httpStatus === 403 && error.code === "link_inactive")
+        || (error.httpStatus === 409 && ["cap_reached", "not_fundable"].includes(error.code))
+        || (error.httpStatus === 502 && error.code === "faucet_error")
+        || (error.httpStatus === 503 && error.code === "faucet_unavailable")
+      )) {
+        io.stdout(`linked (unfunded: ${error.code}${error.errorClass ? `, ${error.errorClass}` : ""})\n`);
+        if (error.cap) io.stdout(`cap: ${error.cap}\n`);
+      } else throw error;
+    }
     return 0;
   }
   let wallet = readWallet(args.label);
@@ -343,7 +355,7 @@ export async function main(argv: string[] = process.argv.slice(2), overrides: Pa
     return await execute(args, io);
   } catch (error) {
     const safe = error instanceof WalletError ? error : new WalletError("wallet_operation_failed");
-    io.stderr(`${safe.code}\n`);
+    io.stderr(`${safe.code}${safe.errorClass ? `, ${safe.errorClass}` : ""}${safe.cap ? ` (cap: ${safe.cap})` : ""}\n`);
     return safe.exitCode;
   }
 }
