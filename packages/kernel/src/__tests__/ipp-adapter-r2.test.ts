@@ -281,8 +281,10 @@ describe("PR2 round 2 regressions", () => {
     expect(printer.operationRequests(OP.CANCEL_JOB)).toEqual([]);
     expect((await start(adapter)).success).toBe(true);
   });
-  it.each([0x0400, 0x0404, 0x0405, 0x0408])("R6-2 F-B: poll code %s does not arm the terminal deadline", async statusCode => {
-    // Kills F8-any-4xx: only not-found/gone can arm on an IPP poll error.
+  it.each([0x0400, 0x0404, 0x0405, 0x0408, 0x0500, 0x0502, 0x0507].map(statusCode => ({
+    statusCode, hex: `0x${statusCode.toString(16).padStart(4, "0")}`,
+  })))("R6-2 F-B: poll code $hex does not arm the terminal deadline", async ({ statusCode }) => {
+    // Kills F8-any-4xx and MX2f: only not-found/gone can arm on an IPP poll error.
     let polls = 0;
     const printer = new FakeIppPrinter().setHandler(OP.GET_JOB_ATTRIBUTES, request => {
       polls += 1;
