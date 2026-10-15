@@ -1002,3 +1002,37 @@ describe("SIWE principals reach only their own address", () => {
     expect((await revoke(linkId, { ...invalidWithCookie, origin: "https://evil.example" })).statusCode).toBe(403);
   });
 });
+
+describe("SIWE principals: near-miss addresses and cookie-approved links", () => {
+  it("a near-miss address and another account cannot list or revoke A's key- and cookie-approved links", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const viaKey = await approve((await proved({ role: "device" })).request, skA.headers);
+    const viaCookie = await approve((await proved({ role: "device" })).request, a.headers);
+    expect([viaKey.statusCode, viaCookie.statusCode]).toEqual([200, 200]);
+    const linkIds = [viaKey.json().linkId, viaCookie.json().linkId];
+    // Same address as A except the last hex digit: kills prefix/partial-address widenings.
+    const nearMiss = a.account.address.slice(0, -1) + (a.account.address.endsWith("0") ? "1" : "0");
+    const near = sessionHeaders("near-miss-session", nearMiss as typeof a.account.address);
+    const nearKey = await mintSessionKey(near);
+    const b = await signIn();
+    for (const headers of [b.headers, near, nearKey.headers]) {
+      const listed = await app.inject({ url: "/api/wallets", headers });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toEqual({ links: [] });
+      for (const linkId of linkIds) expect((await revoke(linkId, headers)).statusCode).toBe(404);
+    }
+    expect((await app.inject({ url: "/api/wallets", headers: a.headers })).json().links).toHaveLength(2);
+  });
+});
+
+describe("X-PCC-API-Key never changes the lookup principal", () => {
+  it("lookup with X-PCC-API-Key equals the same lookup without it", async () => {
+    const { request } = await proved();
+    const plain = await lookup(request.userCode);
+    const withHeader = await lookup(request.userCode, { ...owner, "x-pcc-api-key": "pcc_test_wallet_other" });
+    expect(withHeader.statusCode).toBe(200);
+    expect(withHeader.json()).toEqual(plain.json());
+    expect(withHeader.json().consent.text).toContain("account-a");
+  });
+});

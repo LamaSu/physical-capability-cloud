@@ -7,6 +7,9 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 const sinks = vi.hoisted(() => {
   process.env.SENTRY_DSN = "https://abc123@example.invalid/1";
   process.env.POSTHOG_API_KEY = "wallet-privacy-test";
+  // CI (GITHUB_SHA) and prod (RAILWAY_GIT_COMMIT_SHA) give the SDK a release, which turns on
+  // request-session aggregates; pin one so local runs match CI.
+  process.env.SENTRY_RELEASE = "wallet-sink-test";
   return {
     sentry: [] as unknown[],
     pino: [] as string[],
@@ -374,7 +377,7 @@ describe("wallet request values never reach gateway sinks", () => {
       referer: `https://example.invalid/${marker}`, "x-review-marker": marker,
       "accept-language": marker, "x-forwarded-for": "198.51.100.9", origin: "https://capability.network",
     };
-    await Sentry.flush(3000);
+    expect(await Sentry.flush(3000)).toBe(true);
     sinks.sentry.length = 0;
     const account = privateKeyToAccount(generatePrivateKey());
     const created = await send("POST", `${PATH}?m=${marker}`, marked, {
@@ -399,18 +402,20 @@ describe("wallet request values never reach gateway sinks", () => {
     await send("GET", `/api/wallets/unrouted/${marker}?m=${marker}`, marked);
     await send("OPTIONS", `${PATH}/${marker}?m=${marker}`, { ...marked, "access-control-request-method": "POST" });
     await send("GET", `${PATH}/%41${marker}?m=${marker}`, marked);
-    await Sentry.flush(3000);
+    expect(await Sentry.flush(3000)).toBe(true);
     const walletItems = (sinks.sentry as Array<[unknown, Array<[{ type: string }, unknown]>]>)
       .flatMap(([, items]) => items);
-    // The default SDK may report dropped counts in a client_report. No event,
+    // The default SDK may report dropped counts in a client_report and, with a
+    // release set (CI, prod), request counts in a sessions aggregate; neither
+    // carries request data (the secrets scan below covers both). No event,
     // transaction, span or other wallet request payload may reach transport.
-    expect(walletItems.filter(([header]) => header.type !== "client_report")).toEqual([]);
+    expect(walletItems.filter(([header]) => header.type !== "client_report" && header.type !== "sessions")).toEqual([]);
 
     await send("GET", `/api/health?m=${control}`, {
       "user-agent": control, "x-request-id": control, "x-review-marker": control,
     });
     await send("GET", `/api/health?/api/wallets/${queryControl}`, { "user-agent": queryControl });
-    await Sentry.flush(3000);
+    expect(await Sentry.flush(3000)).toBe(true);
     const captured = JSON.stringify(sinks.sentry);
     expect(captured, "control request data must reach Sentry").toContain(control);
     expect(captured, "a wallet-looking query must not mute a non-wallet request").toContain(queryControl);
@@ -425,6 +430,14 @@ describe("wallet request values never reach gateway sinks", () => {
       "real SDK request capture must be active for the control so the wallet-zero assertion is not vacuous").toContain(control);
     expect(healthUserAgents,
       "real SDK request capture must be active for the wallet-looking query control so the wallet-zero assertion is not vacuous").toContain(queryControl);
+    for (const userAgent of [control, queryControl]) {
+      expect(controlItems.some(([header, event]) => header.type === "transaction"
+        && event.transaction === "GET /api/health"
+        && event.contexts?.trace?.op === "http.server"
+        && Object.entries(event.request?.headers ?? {})
+          .find(([name]) => name.toLowerCase() === "user-agent")?.[1] === userAgent),
+      "real http.server span path must be active for each control transaction").toBe(true);
+    }
     const secrets = [marker, KEY, request.requestId, request.userCode, request.userCode.replace("-", ""),
       linkId, account.address, account.address.toLowerCase(), signature];
     expect(secrets.filter(value => captured.includes(value))).toEqual([]);
