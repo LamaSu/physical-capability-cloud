@@ -433,6 +433,52 @@ describe("host package and crash-safe submitEvidence", () => {
     expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["T1: a sending restart keeps a --no-submit unit forfeited and claims a new job", false],
+    ["T2: a missing old manifest never stalls a sending restart after --no-submit", true],
+  ] as const)("%s", async (_name, oldInputsMissing) => {
+    const setup = await fixture();
+    setup.host = createHost({ ...setup.deps, noSubmit: true });
+    expect(await finish(setup)).toMatchObject({ state: "evidence_stored" });
+    const before = await setup.journal.read(jobId);
+    expect(before.at(-1)).toMatchObject({ state: "evidence_stored", code: "submit_disabled" });
+    expect(before.map((record) => record.state)).toContain("printed");
+    expect(setup.gateway.postRelayEvidence).toHaveBeenCalledTimes(1);
+    noSubmitSignatures(setup);
+
+    const newJob = "job:after-no-submit";
+    const jobIdHash = keccak256(toBytes(newJob));
+    const newInputs: JobInputs = { ...setup.inputs, jobName: "new-job.pdf",
+      documentData: Buffer.from("%PDF-1.7\nnew queued job"),
+      unit: { ...setup.inputs.unit, jobIdHash, challengeNonce: word(),
+        settlementUnitId: settlementUnitId({ chainId: 31337n, escrow: setup.inputs.unit.escrow!,
+          jobIdHash, milestoneIndex: 7n, stepId: setup.inputs.unit.stepId! }) } };
+    const inputSource = vi.fn<Parameters<HostDeps["inputSource"]>, ReturnType<HostDeps["inputSource"]>>(async (id) => {
+      if (id === jobId && !oldInputsMissing) return { ok: true, value: setup.inputs };
+      if (id === newJob) return { ok: true, value: newInputs };
+      return { ok: false, code: "job_inputs_not_found" };
+    });
+    setup.gateway.pollJobs.mockClear();
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
+      jobs: [{ jobId, status: "queued" }, { jobId: newJob, status: "queued" }], foreignJobsDropped: 0, truncated: false } });
+    // Hold the new job before printing so only the old unit could reach settlement.
+    const recovered = await restart(setup, { noSubmit: false, inputSource,
+      gateway: { ...setup.gateway, reportInProgress: async () => ({ ok: false, code: "network", status: null }) } });
+    for (let tick = 0; tick < 5; tick++) {
+      setup.advance();
+      await recovered.host.runOnce();
+    }
+    expect(await recovered.journal.read(jobId)).toEqual(before);
+    await expect(readFile(recovered.journal.packagePath(jobId))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(setup.gateway.postReceipt).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+    expect(setup.sentData).toHaveLength(0);
+    expect(setup.gateway.pollJobs.mock.calls.length).toBeGreaterThan(0);
+    expect(inputSource).toHaveBeenCalledWith(newJob);
+    expect(inputSource).not.toHaveBeenCalledWith(jobId);
+    expect((await recovered.journal.read(newJob)).map((record) => record.state)).toContain("claimed");
+  });
+
   it("simulated evidence in real mode never posts, builds, signs or submits", async () => {
     const setup = await fixture({ simulated: true });
     await finish(setup);

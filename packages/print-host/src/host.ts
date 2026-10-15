@@ -366,7 +366,7 @@ export function createHost(deps: HostDeps): {
             if (entry.state === "package_built" || entry.state === "receipt_stored") log("submit_disabled");
             return false;
           }
-          return entry.state !== "evidence_stored" || entry.code === undefined || entry.code === "submit_disabled";
+          return entry.state !== "evidence_stored" || entry.code === undefined;
         });
       if (recoverable) {
         const until = retries.get(recoverable.jobId)?.until;

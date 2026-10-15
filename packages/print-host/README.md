@@ -151,8 +151,13 @@ keys. `--inputs-dir` selects the local manifest/document source. Without it,
 the default source returns `job_inputs_unavailable` and no job is claimed.
 Real mode requires positive `maxFeePerGasCap`, `maxPriorityFeePerGasCap`, and
 `gasCap` before startup. Use `--no-submit` explicitly to print and relay without
-package submission; those jobs end with `evidence_stored` / `submit_disabled`.
+package submission. A unit first processed with sending disabled (`--no-submit`,
+missing caps, `realMode: false`, or no broadcaster or keys) ends
+`evidence_stored` / `submit_disabled`; a later sending run never settles it.
 All run logs contain closed codes only.
+
+A sending run never settles units that an earlier `--no-submit` (or capless) run left as `evidence_stored`/`submit_disabled` in the same data directory: they stay forfeited.
+Run `--no-submit` rehearsals in their own data directory, and use a fresh data directory for sending runs.
 
 The CLI uses the **STRICT e-stop reader by default**. Execution requires a parsed
 poll with an own `emergencyStop: "clear"` field and an own `jobs` array.
@@ -238,8 +243,9 @@ requires a NEW funded unit. A failed unit pays nothing; the payer reclaims its
 refund at `reclaimAt`. Busy jobs retry within the host's bound
 and produce no bundle; empty-event jobs end with `no_bundle`, and simulated
 evidence ends with `simulated_refused`. None submits. An explicit `realMode: false`
-library rehearsal may relay simulated evidence, but records `submit_disabled`
-and never packages or submits it. An ambiguous relay post
+library rehearsal may relay simulated evidence, but ends
+`evidence_stored` / `submit_disabled` and never packages or submits it, including
+on a later sending run. An ambiguous relay post
 ends with `evidence_indeterminate`; a refusal ends with `evidence_refused`.
 Neither reaches package submission.
 
@@ -266,9 +272,10 @@ requires no send; a conflict halts that job. In real CLI mode all three positive
 transaction caps must be configured unless `--no-submit` is explicit; disabled
 submission invokes neither package signers nor transaction signer.
 `package_inputs_missing` is likewise an `evidence_stored` code.
-An already saved package or receipt keeps its state while sending is disabled
-and logs `submit_disabled`. Recovery continues polling and checking e-stop,
-allows new claims, and an enabled run can submit the saved package later.
+An already saved package or receipt keeps its `package_built` or `receipt_stored`
+state while sending is disabled and logs `submit_disabled`. The host keeps
+polling and checking e-stop and allows new claims; an enabled run can submit
+the saved package later.
 Funding and expiry times must be integer Unix seconds in `[1_600_000_000, 2^32)`;
 millisecond values are refused before claim or session opening. Before running,
 the host checks the device key's load-time delegation parent against its operator
@@ -295,7 +302,9 @@ If it is not mined, the host keeps reading back. This round adds no resend tool.
 The host never
 automatically resends and exposes no resubmit flag. Interrupted printing or
 partial session work is journaled `interrupted` and never reprinted or reposted.
-`evidence_stored` without a skip code can resume package construction.
+Recovery covers only crash-window records: `evidence_stored` with no code,
+`package_built`, `receipt_stored`, `submit_attempted` and `submit_indeterminate`.
+Only `evidence_stored` with no code can resume package construction.
 `package_built` without `receipt_stored` re-POSTs the persisted package; the route
 is idempotent per digest. `receipt_stored` reloads and validates its artifact and
 package binding before the first attempt. Missing, malformed, or mismatched
