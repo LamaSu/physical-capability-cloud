@@ -542,6 +542,28 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("INFO-F4 ignores an inherited error member when reading a matching receipt", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: rpcReceipt() })));
+    expect(Object.hasOwn(Object.prototype, "error")).toBe(false);
+    let result = "unset";
+    Object.defineProperty(Object.prototype, "error", {
+      value: { code: -32602, message: "inherited" }, configurable: true, writable: true, enumerable: false,
+    });
+    try {
+      const pending = observedReceipt();
+      await vi.advanceTimersByTimeAsync(10_000);
+      result = await pending;
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).error;
+    }
+    expect(Object.hasOwn(Object.prototype, "error")).toBe(false);
+    expect(result).toBe("success");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([-32602, -32005])("PROBE-E1 JSON-RPC error %s takes precedence over a matching receipt in HTTP 200", async code => {
     vi.useFakeTimers();
     const started = Date.now();
