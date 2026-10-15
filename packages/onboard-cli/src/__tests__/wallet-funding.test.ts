@@ -116,6 +116,22 @@ describe("W2 funding response contract", () => {
     gateway(body);
     expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toEqual(body);
   });
+  it("PROBE-NM3a accepts two claims whose txHashes differ only in the first nibble", async () => {
+    const claims = realFundingClaims();
+    claims[0] = { ...claims[0]!, txHash: `0x1${"a".repeat(63)}` };
+    claims[1] = { ...claims[1]!, txHash: `0x2${"a".repeat(63)}` };
+    const body = { status: "funded", claims };
+    gateway(body);
+    expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toEqual(body);
+  });
+  it("PROBE-NM3b accepts two claims whose txHashes differ only in the last nibble", async () => {
+    const claims = realFundingClaims();
+    claims[0] = { ...claims[0]!, txHash: `0x${"a".repeat(63)}1` };
+    claims[1] = { ...claims[1]!, txHash: `0x${"a".repeat(63)}2` };
+    const body = { status: "funded", claims };
+    gateway(body);
+    expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toEqual(body);
+  });
   it("refuses any USDC claim for a device", async () => {
     gateway(FUNDED);
     await expect(requestFunding(ORIGIN, REQUEST_ID, "device")).rejects.toThrow("invalid_gateway_response");
