@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createServer, type Server } from "node:http";
 import { walletRequest } from "../wallet/http.js";
 
 afterEach(() => vi.restoreAllMocks());
@@ -13,5 +14,68 @@ describe("wallet HTTP transport", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     await expect(walletRequest(origin, "/x", "GET")).resolves.toEqual({});
     expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe("wallet security transport pins", () => {
+  it("pins H1: every request refuses redirect following", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    await walletRequest("http://127.0.0.1:9", "/revoke", "POST", {}, "owner-api-token");
+    expect(fetchSpy.mock.calls[0]?.[1]?.redirect).toBe("error");
+  });
+  it("bounds a stalled response body with an injectable timeout", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      return new Response(new ReadableStream({
+        start(controller) {
+          init?.signal?.addEventListener("abort", () => controller.error(new DOMException("timeout", "TimeoutError")), { once: true });
+        },
+      }));
+    });
+    const result = await Promise.race([
+      walletRequest("http://127.0.0.1:9", "/stalled", "GET", undefined, undefined, 20).then(() => "accepted", (error: unknown) => String(error)),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timeout_not_enforced"), 100)),
+    ]);
+    expect(result).toBe("WalletError: gateway_unavailable");
+  });
+});
+
+async function listen(server: Server): Promise<string> {
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("stub_address_unavailable");
+  return `http://127.0.0.1:${address.port}`;
+}
+async function close(server: Server): Promise<void> {
+  server.closeAllConnections();
+  if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+describe("wallet native HTTP security", () => {
+  it("pins H1: refuses a307 that would resend the approving bearer", async () => {
+    const targetHits: string[] = [];
+    const server = createServer((req, res) => {
+      if (req.url === "/target") {
+        targetHits.push(String(req.headers.authorization));
+        res.end('{"status":"revoked"}');
+      } else {
+        res.writeHead(307, { location: "/target" });
+        res.end();
+      }
+    });
+    try {
+      const origin = await listen(server);
+      await expect(walletRequest(origin, "/revoke", "POST", {}, "owner-api-token")).rejects.toThrow("gateway_unavailable");
+      expect(targetHits).toEqual([]);
+    } finally { await close(server); }
+  });
+  it("bounds a native stalled response body", async () => {
+    const server = createServer((_req, res) => { res.writeHead(200); res.write('{"status":'); });
+    try {
+      const origin = await listen(server);
+      await expect(walletRequest(origin, "/stall", "GET", undefined, undefined, 25)).rejects.toThrow("gateway_unavailable");
+    } finally { await close(server); }
   });
 });

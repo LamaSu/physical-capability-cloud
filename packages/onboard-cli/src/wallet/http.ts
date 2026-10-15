@@ -40,6 +40,7 @@ async function send(
   method: "GET" | "POST",
   body?: JsonObject,
   apiKey?: string,
+  timeoutMs = 15_000,
 ): Promise<Response> {
   validateTransportUrl(origin);
   if (body) checkBody(body);
@@ -52,7 +53,7 @@ async function send(
       },
       body: body === undefined ? undefined : JSON.stringify(body),
       redirect: "error",
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new WalletError("gateway_unavailable");
@@ -61,7 +62,10 @@ async function send(
 
 async function json(response: Response): Promise<unknown> {
   try { return await response.json(); }
-  catch { throw new WalletError("invalid_gateway_response"); }
+  catch (error) {
+    if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new WalletError("gateway_unavailable");
+    throw new WalletError("invalid_gateway_response");
+  }
 }
 
 export async function walletRequest(
@@ -70,8 +74,9 @@ export async function walletRequest(
   method: "GET" | "POST",
   body?: JsonObject,
   apiKey?: string,
+  timeoutMs = 15_000,
 ): Promise<JsonObject> {
-  const response = await send(origin, path, method, body, apiKey);
+  const response = await send(origin, path, method, body, apiKey, timeoutMs);
   const data = await json(response);
   if (!response.ok) {
     // Never echo arbitrary gateway text, values or diagnostic objects.
