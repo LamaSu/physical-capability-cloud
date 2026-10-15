@@ -55,7 +55,7 @@ Never put the key in a URL, capability description, job parameter, log, public i
 
 ## Revocation
 
-Revoke a key with itself: send the DELETE with that key's own `Authorization` header. Find its `id` with `GET /api/auth/keys`, sent with the same key. Another key of the same email or wallet cannot revoke it (`404`). A wallet sign-in (SIWE) session for the address, or a session key minted from one, can revoke any key of that address. The gateway admin can revoke any key.
+Revoke a key with itself: send the DELETE with that key's own `Authorization` header. Find its `id` with `GET /api/auth/keys`, sent with the same key. Another key provisioned for the same email or wallet cannot revoke it (`404`). A wallet sign-in (SIWE) session for the address, or a session key minted from one, can revoke any key of that address. The gateway admin can revoke any key.
 
 ```http
 DELETE /api/auth/keys/<keyId> HTTP/1.1
@@ -63,4 +63,4 @@ Host: capability.network
 Authorization: Bearer pcc_live_REDACTED
 ```
 
-Revocation is permanent for that key. To rotate a key that is still in use, provision the new key, move your clients to it, then revoke the old key with the old key's own header before you discard it. If a key leaked, revoke it with itself first, then provision its replacement.
+Revocation is permanent for that key. To rotate a key that is still in use, provision the new key, move your clients to it, then revoke the old key with the old key's own header before you discard it. If a key leaked, revoke it with itself first, then provision its replacement. If provisioning answers `429` `too_many_keys`, the identity already has 5 unrevoked keys (expired keys count too): revoke one you hold with itself, then provision. After a key revokes itself, every request with it answers `401`, a repeated DELETE included; that `401` confirms the revocation.
