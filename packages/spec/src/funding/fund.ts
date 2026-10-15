@@ -68,7 +68,10 @@ export interface FundingResult {
   alreadyFunded: boolean;
   /** The last step attempted. */
   stage: "precheck" | "approve" | "fund";
-  /** Actual approve outcome, whenever approve was sent or may have been sent. Token state may have changed. */
+  /**
+   * Actual approve outcome when sending was attempted, including a local pre-broadcast refusal (`not_sent`).
+   * Token state may have changed if approve was sent or may have been sent.
+   */
   approve?: SendResult;
   /** Original approve hash; replacement receipts are possible (see SendResult). */
   approveTx?: Hex;
@@ -249,11 +252,17 @@ export interface ApproveAndFundArgs {
  * Approve exactly ΣG to the verified escrow, then send the payer's `fund()`, and report the outcome from the escrow's
  * own state: committed, unchanged or indeterminate (see the module comment). Throws a `FundingRefusal` only before
  * its first broadcast; after that it always returns a result.
+ * A refusal during local transaction preparation, signing or signed-byte checks is returned, not thrown. At the
+ * approve stage it returns approve.kind `not_sent` and outcome `unchanged` when the read-back shows unfunded.
  *
  * Retries: after an indeterminate result, resolve with readFundedState (or wait for the earlier transactions) before
  * retrying. While the payer has any transaction pending (its nonce at "pending" above "latest"), this refuses
  * PAYER_TX_PENDING and sends nothing; once the escrow reads funded under this policy, it returns `committed` with
  * `alreadyFunded: true` and sends nothing.
+ * With a nonceManager account, a local refusal after nonce consumption leaves that nonce in viem's nonceMap.
+ * This creates a nonce gap: a retry signs N+1 while the node still expects N. The retry can queue with an
+ * indeterminate outcome and execute late when a transaction at N arrives. Recover by using a fresh nonceManager,
+ * or by sending a transaction at the skipped nonce.
  */
 export async function approveAndFund(args: ApproveAndFundArgs): Promise<FundingResult> {
   const prepared = assertPrepared(args.prepared);
