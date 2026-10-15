@@ -12,6 +12,7 @@ import {
 } from "@pcc/contracts/vnext";
 import {
   computeAcceptedPolicyDigest, computeBindingsRoot, computePlanUnitKey, computeSubjectBlockHash,
+  formatOperatorPrincipalId, principalTupleWord,
   type SubjectBinding, type SubjectBlockFields,
 } from "@pcc/spec";
 import { main } from "../src/cli.js";
@@ -121,7 +122,8 @@ async function fixture() {
   };
   // Synthetic fields exercise the producer; this is not an oracle golden vector.
   const subjectBlock: SubjectBlockFields = {
-    payer: word("cli-payer"), operatorPrincipal: word("cli-operator-principal"),
+    payer: principalTupleWord("operator", formatOperatorPrincipalId(84532, policy.payer)),
+    operatorPrincipal: principalTupleWord("operator", formatOperatorPrincipalId(84532, policy.operator)),
     operatorSettlementAddress: address("dd").toLowerCase() as `0x${string}`,
     authorizedTuplesRoot: word("cli-tuples"), expertSetRoot: word("cli-experts"),
     executorSetRoot: word("cli-executors"), expectedRecipient: word("cli-recipient"),
@@ -173,9 +175,10 @@ describe("print-host sign-policy CLI", () => {
     const output = JSON.parse(await readFile(current.outputFile, "utf8")) as {
       operator: `0x${string}`; chainId: number; escrow: `0x${string}`; acceptanceDigest: Hex; signature: Hex;
       subjectBlockHash: Hex; bindingsRoot: Hex; acceptedPolicyDigest: Hex;
+      subjectBlock: SubjectBlockFields; bindings: SubjectBinding[];
     };
     expect(Object.keys(output).sort()).toEqual([
-      "acceptanceDigest", "acceptedPolicyDigest", "bindingsRoot", "chainId", "escrow", "operator", "signature", "subjectBlockHash",
+      "acceptanceDigest", "acceptedPolicyDigest", "bindings", "bindingsRoot", "chainId", "escrow", "operator", "signature", "subjectBlock", "subjectBlockHash",
     ]);
     expect(output.operator).toBe(current.generated.identity.operatorAddress);
     expect(output.chainId).toBe(84532);
@@ -183,6 +186,10 @@ describe("print-host sign-policy CLI", () => {
     expect(output.subjectBlockHash).toBe(current.commitments.subjectBlockHash);
     expect(output.bindingsRoot).toBe(current.commitments.bindingsRoot);
     expect(output.acceptedPolicyDigest).toBe(current.commitments.acceptedPolicyDigest);
+    expect(output.subjectBlock).toEqual(current.input.subjectBlock);
+    expect(output.bindings).toEqual(current.input.bindings);
+    expect(computeSubjectBlockHash(output.subjectBlock)).toBe(output.subjectBlockHash);
+    expect(computeBindingsRoot(output.bindings)).toBe(output.bindingsRoot);
     expect(output.acceptanceDigest).toBe(acceptanceDigest(
       domainSeparator(current.input.policy.chainId, current.input.policy.escrow), jobPolicyHash(current.input.policy),
     ));
@@ -450,6 +457,15 @@ async function expectJsonFailure(operation: () => Promise<unknown>, code: string
 }
 
 describe("policy JSON file boundaries", () => {
+  it("refuses an extra subject key directly at input load with bad_input", async () => {
+    const current = await fixture();
+    const candidate = JSON.parse(json(current.input)) as EditableInput;
+    candidate.subjectBlock.unapproved = "extra-subject-field";
+    await writeFile(current.inputFile, json(candidate));
+    await expect(loadJobPolicyInput(current.inputFile)).rejects.toMatchObject({
+      name: "OperatorSigningError", code: "bad_input", message: "bad_input",
+    });
+  });
   it.each([
     ["termsHash", (terms: Record<string, unknown>) => { delete terms.termsHash; }],
     ["committedProgramHash pin", (terms: Record<string, unknown>) => { terms.subjectPins = {}; }],

@@ -25,6 +25,8 @@ import {
   computeBindingsRoot,
   computePlanUnitKey,
   computeSubjectBlockHash,
+  formatOperatorPrincipalId,
+  principalTupleWord,
   type SubjectBinding,
   type SubjectBlockFields,
 } from "@pcc/spec";
@@ -48,7 +50,20 @@ import {
 } from "../src/keys.js";
 import { validateHostTerms } from "../src/operator-signing.js";
 
-const failure = vi.hoisted(() => ({ enabled: false, signCalls: 0 }));
+const failure = vi.hoisted(() => ({ enabled: false, signCalls: 0, principalProducer: "" }));
+vi.mock("@pcc/spec", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pcc/spec")>();
+  return { ...actual,
+    formatOperatorPrincipalId: (...args: Parameters<typeof actual.formatOperatorPrincipalId>) => {
+      if (failure.principalProducer === "formatOperatorPrincipalId") throw new Error("producer-private-input");
+      return actual.formatOperatorPrincipalId(...args);
+    },
+    principalTupleWord: (...args: Parameters<typeof actual.principalTupleWord>) => {
+      if (failure.principalProducer === "principalTupleWord") throw new Error("producer-private-input");
+      return actual.principalTupleWord(...args);
+    },
+  };
+});
 vi.mock("viem/accounts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("viem/accounts")>();
   return { ...actual, privateKeyToAccount: (...args: Parameters<typeof actual.privateKeyToAccount>) => {
@@ -103,9 +118,10 @@ function changedByte(value: Hex): Hex {
   return `${value.slice(0, -2)}${byte.toString(16).padStart(2, "0")}` as Hex;
 }
 // These are synthetic shape fixtures, not an oracle subject-block golden.
-function subjectBlock(): SubjectBlockFields {
+function subjectBlock(chainId = 84532, operator = key?.address ?? payer, payingAddress = payer): SubjectBlockFields {
   return {
-    payer: word("payer-principal"), operatorPrincipal: word("operator-principal"),
+    payer: principalTupleWord("operator", formatOperatorPrincipalId(chainId, payingAddress)),
+    operatorPrincipal: principalTupleWord("operator", formatOperatorPrincipalId(chainId, operator)),
     operatorSettlementAddress: payoutRecipient.toLowerCase() as Address,
     authorizedTuplesRoot: word("authorized-tuples"), expertSetRoot: word("experts"),
     executorSetRoot: word("executors"), expectedRecipient: word("expected-recipient"),
@@ -132,7 +148,7 @@ function unit(overrides: Partial<UnitConfig> = {}, index = 0): UnitConfig {
   };
 }
 function input(configs: UnitConfig[] = [unit()], overrides: Partial<JobPolicyFields> = {}) {
-  const subject = subjectBlock();
+  const subject = subjectBlock(Number(overrides.chainId ?? 84532n), key.address, overrides.payer ?? payer);
   const boundUnit = configs[0] ?? unit();
   const bindings: SubjectBinding[] = [{
     planUnitKey: computePlanUnitKey(0, boundUnit.milestoneIndex, boundUnit.stepId),
@@ -201,6 +217,7 @@ async function accepts(candidate: ReturnType<typeof input>, bound = key): Promis
 beforeEach(async () => {
   failure.enabled = false;
   failure.signCalls = 0;
+  failure.principalProducer = "";
   directory = await mkdtemp(join(tmpdir(), "ph-policy-"));
   await chmod(directory, 0o700);
   secret = generatePrivateKey();
@@ -303,6 +320,47 @@ describe("JobPolicy acceptance binds the pinned terms and program with the spec 
     await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
     expect(failure.signCalls).toBe(0);
   });
+  it("accepts an uppercase-hex policy termsHash (case-insensitive pin)", async () => {
+    const candidate = input();
+    candidate.policy.termsHash = `0x${thursdayTermsHash.slice(2).toUpperCase()}` as Hex;
+    refreshPolicyIdentity(candidate);
+    await accepts(candidate);
+    expect(failure.signCalls).toBe(1);
+  });
+  it("accepts an uppercase-hex acceptedPolicyDigest", async () => {
+    const candidate = input();
+    candidate.policy.acceptedPolicyDigest = `0x${candidate.policy.acceptedPolicyDigest.slice(2).toUpperCase()}` as Hex;
+    refreshPolicyIdentity(candidate);
+    await accepts(candidate);
+    expect(failure.signCalls).toBe(1);
+  });
+  it("refuses a settlement address that is another ALLOWED payout recipient", async () => {
+    const bound = await loadOperatorKey(path, 84532, { now, clock: () => now,
+      terms: { ...terms(), allowedPayoutRecipients: [payoutRecipient, otherRecipient] } });
+    const candidate = input();
+    candidate.subjectBlock.operatorSettlementAddress = otherRecipient.toLowerCase() as Address;
+    refreshAcceptedPolicy(candidate);
+    await refusal(() => bound.signJobPolicyAcceptance(candidate), "settlement_address_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses an incorrect operator principal even when its optional terms pin agrees", async () => {
+    const candidate = input();
+    candidate.subjectBlock.operatorPrincipal = changedByte(candidate.subjectBlock.operatorPrincipal);
+    const bound = await loadOperatorKey(path, 84532, { now, clock: () => now,
+      terms: { ...terms(), subjectPins: { ...terms().subjectPins,
+        operatorPrincipal: candidate.subjectBlock.operatorPrincipal } } });
+    refreshAcceptedPolicy(candidate);
+    await refusal(() => bound.signJobPolicyAcceptance(candidate), "operator_principal_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  for (const producer of ["formatOperatorPrincipalId", "principalTupleWord"]) {
+    it(`maps a ${producer} throw to bad_input before signing`, async () => {
+      const candidate = input();
+      failure.principalProducer = producer;
+      await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+      expect(failure.signCalls).toBe(0);
+    });
+  }
   for (const field of ["committedProgramHash", "targetSystemIdentity"] as const) {
     it(`refuses a ${field} pin one byte off even with its recomputed acceptedPolicyDigest`, async () => {
       const candidate = input();
@@ -977,6 +1035,21 @@ describe("JobPolicy acceptance also enforces buildUnitConfig's context-free rule
 });
 
 describe("JobPolicy acceptance snapshots only strict data fields", () => {
+  it("derives both principal checks from the snapshot before the clock mutates payer and subject words", async () => {
+    const candidate = input();
+    const signedPolicy = { ...candidate.policy };
+    const clock = vi.fn(() => {
+      candidate.policy.payer = otherRecipient;
+      candidate.subjectBlock.payer = changedByte(candidate.subjectBlock.payer);
+      candidate.subjectBlock.operatorPrincipal = changedByte(candidate.subjectBlock.operatorPrincipal);
+      return now;
+    });
+    const bound = await loadOperatorKey(path, 84532, { now, clock, terms: terms() });
+    const signature = await bound.signJobPolicyAcceptance(candidate);
+    expect(await verifyTypedData({ ...jobPolicyTypedData(signedPolicy), address: bound.address, signature })).toBe(true);
+    expect(clock).toHaveBeenCalledTimes(1);
+    expect(failure.signCalls).toBe(1);
+  });
   for (const level of ["input", "policy", "unit", "payout", "units array", "payouts array",
     "subjectBlock", "binding", "bindings array"] as const) {
     for (const variant of ["extra", "accessor", "inherited"] as const) {

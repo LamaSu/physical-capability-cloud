@@ -47,6 +47,8 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
       operator: key.address, chainId: config.chain.chainId, escrow: input.policy.escrow,
       acceptanceDigest: acceptanceDigest(domainSeparator(input.policy.chainId, input.policy.escrow), jobPolicyHash(input.policy)),
       ...commitments,
+      subjectBlock: input.subjectBlock,
+      bindings: input.bindings,
       signature,
     };
     let file;

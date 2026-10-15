@@ -55,6 +55,10 @@ For the Thursday acceptance hand-off, run:
 node packages/print-host/dist/cli.js sign-policy --config /absolute/host.json --terms /absolute/terms.json --input /absolute/policy.json --out /absolute/signature.json
 ```
 
+`sign-policy` requires `process.getBuiltinModule`: Node >= 20.16 on the 20.x
+line or >= 22.3 on the 22.x line. The `@pcc/spec` producer uses that API; on an
+older Node, every `sign-policy` call fails closed with `bad_input`.
+
 The terms file strictly contains `chainId` (a required integer number, 84532 or
 31337), `factory` and `implementation` (required,
 valid non-zero deployment addresses), `minG` (an unsigned decimal string),
@@ -79,24 +83,57 @@ case-insensitively. Optional bytes32 `bindingsRoot` pins the computed bindings r
 Unknown fields, accessors, and non-plain terms or pin objects are refused with
 `bad_terms`.
 
-Thursday's PRINT unit uses these pinned values in the terms file:
+Thursday's PRINT unit uses the following terms template. Replace the three
+host-specific placeholders with the values computed below:
 
 ```json
 {
   "termsHash": "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7",
   "subjectPins": {
-    "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a"
+    "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
+    "operatorPrincipal": "<derived host operator word>",
+    "operatorSettlementAddress": "<host EOA>",
+    "authorizedTuplesRoot": "<oracle host tuple root>",
+    "childrenRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expertSetRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "executorSetRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedRecipient": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "targetSystemIdentity": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "recipeRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "sampleManifestRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "operatingEnvelopeHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedRouteArea": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedLocationHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "captureNonceAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "challengeAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "integrityGrade": 0
   },
+  "bindingsRoot": "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd",
   "reclaimMaxSeconds": 1814400
 }
 ```
+
+Compute `operatorPrincipal` with the `@pcc/spec` producers
+`principalTupleWord("operator", formatOperatorPrincipalId(chainId, <host EOA>))`.
+The host also checks this word against the signing operator EOA in code.
+`operatorSettlementAddress` is the host EOA and must equal
+`operatorPayoutRecipient`. At Wednesday's sitting, compute `authorizedTuplesRoot`
+over the host's one (operator, kernel, device) triple with the oracle's
+`computeAuthorizedTuplesRoot([authorizedTuple(<operator id>, <kernelId>, "ed25519:<device key>")])`,
+then cross-check the computation against the oracle's Thursday-shape golden
+(`pcc-oracle` commit `87bc14e`,
+`config/testnet/s2-subject-block-thursday-shape-golden.json`; vendored in
+`test/fixtures/oracle-87bc14e-s2-thursday-shape-golden.json`). `@pcc/spec` exports
+`authorizedTuple` but has no public root producer. A root without the host's
+triple prevents settlement, so Thursday's terms must pin this value. Thursday
+uses `bindings: []`, whose root is the pin above. All twelve zero fields and
+`integrityGrade: 0` are exact pins.
 
 These fields extend the complete host terms described above. For Thursday,
 `reclaimMaxSeconds` must be at least 1814400 because `reclaimAt` is policy creation
 plus 21 days. The pinned `termsHash` is the hash of economics' terms document;
 the host's tier limits, payout allowlist, and other local terms are configuration
-and are not its preimage. The remaining subject fields arrive with the prepared
-policy; this example does not supply an oracle subject-block golden vector.
+and are not its preimage.
 Terms for one chain never load for a key bound to another chain; the loader
 refuses them before reading the key file. Loaders validate and freeze all terms
 at key load; a key loaded without terms
@@ -165,11 +202,24 @@ from `@pcc/spec`. A configured root pin that differs gives
 and an all-zero `compositionRoot`, otherwise `composition_not_supported`.
 All these refusals happen before signing.
 
+The host derives both principal words with
+`principalTupleWord("operator", formatOperatorPrincipalId(chainId, address))`
+from `@pcc/spec`, using the loaded terms' chain and the same input snapshot as
+the acceptance checks. `subjectBlock.operatorPrincipal` must match the signing
+operator EOA's word (`operator_principal_mismatch`), and `subjectBlock.payer`
+must match `policy.payer`'s word (`payer_principal_mismatch`), compared
+case-insensitively. An optional `operatorPrincipal` pin remains allowed; the
+derived check runs regardless of that pin's value or presence. A producer throw
+gives `bad_input`. These checks also run before signing.
+
 Success creates a new mode-0644 JSON file containing exactly `operator`, `chainId`
 (a number), `escrow`, `acceptanceDigest`, `signature`, `subjectBlockHash`,
-`bindingsRoot`, and `acceptedPolicyDigest`. Existing output files
+`bindingsRoot`, `acceptedPolicyDigest`, `subjectBlock`, and `bindings`. The subject
+block and bindings are the public objects as parsed, with lowercase hex, so the
+hand-off carries the objects signed over alongside their hashes. Existing output files
 are refused. If chmod, writing or closing fails after creation, the command removes
-the file it created so the operator can retry. This command prints no policy or private key data; on failure it
+the file it created so the operator can retry. The command exposes only public
+identity, acceptance and subject data; on failure it
 prints only a closed error code.
 
 The strict JSON configuration has `kernelId`, `deviceId`, `printer.uri`,

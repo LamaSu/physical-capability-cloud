@@ -2,6 +2,7 @@ import { encodeFunctionData, getAddress, isAddress, zeroAddress, zeroHash, type 
 import { types as utilTypes } from "node:util";
 import {
   computeAcceptedPolicyDigest, computeBindingsRoot, computeSubjectBlockHash,
+  formatOperatorPrincipalId, principalTupleWord,
   type SubjectBinding, type SubjectBlockFields,
 } from "@pcc/spec";
 import {
@@ -19,6 +20,7 @@ export type OperatorSigningErrorCode = "bad_input" | "bad_escrow" | "bad_bytes32
   "payout_recipient_not_allowed" | "pass_through_too_high" | "fee_split_mismatch" | "payout_sum_mismatch" |
   "acceptance_expired" | "acceptance_too_long" | "terms_hash_mismatch" |
   "subject_pin_mismatch" | "settlement_address_mismatch" | "bindings_root_mismatch" |
+  "operator_principal_mismatch" | "payer_principal_mismatch" |
   "accepted_policy_mismatch" | "composition_not_supported";
 
 /** Signing errors retain only a closed code, never inputs or library exceptions. */
@@ -362,6 +364,18 @@ export function prepareJobPolicyAcceptance(input: JobPolicyAcceptanceInput, chai
     throw new OperatorSigningError("deployment_mismatch");
   }
   if (policy.termsHash.toLowerCase() !== terms.termsHash.toLowerCase()) throw new OperatorSigningError("terms_hash_mismatch");
+  let operatorPrincipal: Hex;
+  let payerPrincipal: Hex;
+  try {
+    operatorPrincipal = principalTupleWord("operator", formatOperatorPrincipalId(terms.chainId, operator));
+    payerPrincipal = principalTupleWord("operator", formatOperatorPrincipalId(terms.chainId, policy.payer));
+  } catch { throw new OperatorSigningError("bad_input"); }
+  if (subjectBlock.operatorPrincipal.toLowerCase() !== operatorPrincipal.toLowerCase()) {
+    throw new OperatorSigningError("operator_principal_mismatch");
+  }
+  if (subjectBlock.payer.toLowerCase() !== payerPrincipal.toLowerCase()) {
+    throw new OperatorSigningError("payer_principal_mismatch");
+  }
   for (const field of Object.keys(terms.subjectPins) as (keyof SubjectBlockFields)[]) {
     const pin = terms.subjectPins[field];
     const value = subjectBlock[field];
