@@ -27,4 +27,10 @@ describe("VITE_VNEXT_JOB_IDS parser", () => {
     const { parseVnextJobIds } = await import(configModule);
     expect([...parseVnextJobIds(" job-1,job-1, job-1 ,Job-1 ")]).toEqual(["job-1", "Job-1"]);
   });
+
+  it("refuses ':' and '.' (a compiler planId:operator id is not a gateway job id)", async () => {
+    const { parseVnextJobIds } = await import(configModule);
+    const op = `0x${"a".repeat(40)}`;
+    expect([...parseVnextJobIds(["job:x", "job.x", `plan.resv-1:${op}`, "pcc:vnext:golden:job", "job-ok"].join(","))]).toEqual(["job-ok"]);
+  });
 });

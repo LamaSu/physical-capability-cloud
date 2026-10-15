@@ -268,4 +268,37 @@ describe("JobFlowCard href boundaries", () => {
     host = await render(dto);
     expect(host.querySelectorAll("a")).toHaveLength(0);
   });
+
+  it.each(["job-print-10", "job-print", "JOB-PRINT-1", "Job-print-1", "xjob-print-1"])("near-miss id %s is not the listed V-next job", async (jobId) => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
+    const dto = jobFlowFixture();
+    dto.job.jobId = jobId;
+    const { isFailedPrintWithNoRelease } = await import(cardModule);
+    expect.soft(isFailedPrintWithNoRelease(dto, new Set(["job-print-1"]))).toBe(false);
+    const host = await render(dto);
+    expect.soft(host.querySelectorAll("a")).toHaveLength(0);
+    expect.soft(host.textContent).not.toContain(noRelease);
+  });
+
+  it("a listed job's own record address wins over the V-next config, and an invalid one never falls back", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
+    const dto = jobFlowFixture();
+    dto.settlement.record = { contractAddress: tx } as NonNullable<typeof dto.settlement.record>;
+    let host = await render(dto);
+    expect.soft([...host.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual([`https://sepolia.basescan.org/tx/${tx}`]);
+    dto.settlement.record.contractAddress = "https://evil.example/escrow";
+    host = await render(dto);
+    expect.soft(host.querySelectorAll("a")).toHaveLength(0);
+  });
+
+  it("pins the R15 line's exact stale text", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
+    const host = await render(jobFlowFixture(), true);
+    expect(host.querySelector('[aria-label="Money"] span')!.textContent).toBe(noRelease);
+  });
 });
