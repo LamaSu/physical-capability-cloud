@@ -12,6 +12,18 @@ import { __resetSignatureVerifierForTests, setSignatureVerifierTransportForTests
 const url = process.env.PCC_LIVE_SIGVERIFY_RPC_URL;
 describe.skipIf(!url)("live Base Sepolia universal signature validator", () => {
   afterEach(() => { __resetSignatureVerifierForTests(); vi.unstubAllEnvs(); });
+  it("rejects the zero address with an unrecoverable signature", async () => {
+    setSignatureVerifierTransportForTests(null);
+    vi.stubEnv("PCC_SIGVERIFY_RPC_URL", url!);
+    vi.stubEnv("PCC_SIGVERIFY_CHAIN_ID", "84532");
+    expect(await verifyEvmMessageSignature({
+      address: "0x0000000000000000000000000000000000000000",
+      message: "Zero address must never authenticate",
+      signature: `0x${"00".repeat(64)}1b`,
+      chainId: 84532,
+    })).toEqual({ ok: false, reason: "invalid" });
+  });
+
   it("accepts an undeployed CSW and rejects meaningful tampering, wrong messages, owners and chains", async () => {
     const owner = privateKeyToAccount(generatePrivateKey());
     const client = createPublicClient({ chain: baseSepolia, transport: http(url!) });

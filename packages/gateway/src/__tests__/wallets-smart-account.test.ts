@@ -106,6 +106,23 @@ async function smartProof(request: LinkRequest) {
 }
 
 describe("W11 smart-account wallet link proofs", () => {
+  it("rejects a zero-address proof even when the universal validator accepts it", async () => {
+    const zeroAddress = "0x0000000000000000000000000000000000000000";
+    setSignatureVerifierTransportForTests(custom({ request: async ({ method, params }) => {
+      requests.push({ method, params });
+      if (method === "eth_chainId") return "0x14a34";
+      if (method === "eth_call") return "0x01";
+      throw new Error("unexpected verifier method");
+    } }, { retryCount: 0 }));
+    const request = await create({ address: zeroAddress });
+    const response = await proof(request, `0x${"00".repeat(64)}1b`);
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "invalid_proof" });
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "failed" });
+    expect(await resolveActiveWalletLink({ address: zeroAddress, chainId: 84532 })).toBeNull();
+    expect(requests).toHaveLength(0);
+  });
+
   it("links an undeployed CSW v1.1 and resolves its approved link", async () => {
     const request = await create();
     const response = await proof(request, await smartProof(request));

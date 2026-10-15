@@ -70,6 +70,23 @@ describe("smart-account signature verifier", () => {
     expect(await check(await owner.signMessage({ message }))).toEqual({ ok: false, reason: "invalid" });
     expect(requests).toHaveLength(0);
   });
+  it("refuses the zero address before any transport requests with configured and unset RPC", async () => {
+    const results = [];
+    for (const rpc of [url, ""]) {
+      vi.stubEnv("PCC_SIGVERIFY_RPC_URL", rpc);
+      requests = [];
+      // The real universal validator can return true for this failed ecrecover.
+      recording();
+      results.push({
+        result: await check(`0x${"00".repeat(64)}1b`, { address: "0x0000000000000000000000000000000000000000" }),
+        requests: requests.length,
+      });
+    }
+    expect(results).toEqual([
+      { result: { ok: false, reason: "invalid" }, requests: 0 },
+      { result: { ok: false, reason: "invalid" }, requests: 0 },
+    ]);
+  });
   it.each([false, true])("verifies exact deployless data for a deployed=%s CSW with an explicit gas cap", async deployed => {
     const signature = await smartSignature(deployed); exact(signature);
     expect(await check(signature)).toEqual({ ok: true, kind: "contract" });
@@ -113,6 +130,27 @@ describe("smart-account signature verifier", () => {
     const started = Date.now();
     expect(await check(signature)).toEqual({ ok: false, reason: "unavailable" });
     expect(Date.now() - started).toBeLessThan(2000);
+  }, 2500);
+  it("clamps a sub-minimum timeout to at least 1000 ms when transport never answers", async () => {
+    const signature = await smartSignature(); vi.stubEnv("PCC_SIGVERIFY_TIMEOUT_MS", "100");
+    recording(() => new Promise(() => {}));
+    const started = Date.now();
+    expect(await check(signature)).toEqual({ ok: false, reason: "unavailable" });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(900);
+    expect(elapsed).toBeLessThan(2000);
+  }, 2500);
+  it("rejects a late answer after eth_call blocks the deadline timer", async () => {
+    const signature = await smartSignature(); vi.stubEnv("PCC_SIGVERIFY_TIMEOUT_MS", "1000");
+    recording(req => {
+      if (req.method === "eth_chainId") return "0x14a34";
+      const until = Date.now() + 1200;
+      // Block the event loop so only the post-answer deadline check can reject.
+      while (Date.now() < until) { /* synchronous transport work */ }
+      return "0x01";
+    });
+    expect(await check(signature)).toEqual({ ok: false, reason: "unavailable" });
+    expect(requests.map(r => r.method)).toEqual(["eth_chainId", "eth_call"]);
   }, 2500);
   it("uses one deadline across chain check and validator, ignoring a late success", async () => {
     const signature = await smartSignature(); vi.stubEnv("PCC_SIGVERIFY_TIMEOUT_MS", "1000");

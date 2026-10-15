@@ -19,6 +19,7 @@ export class SignatureVerifierUnavailableError extends Error {
 }
 
 export const SIGVERIFY_GAS_CAP = 3_000_000n;
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 let testTransport: Transport | null = null;
 const verifiedChains = new Map<string, number>();
 
@@ -95,6 +96,7 @@ export async function verifyEvmMessageSignature({ address, message, signature, c
       typeof message !== "string" || message.length === 0 || message.length > 8192) {
       return { ok: false, reason: "malformed" };
     }
+    if (address.toLowerCase() === ZERO_ADDRESS) return { ok: false, reason: "invalid" };
     const hexSignature = signature as Hex;
     const eoaLength = signature.length === 130 || signature.length === 132;
     if (eoaLength && !isErc6492Signature(hexSignature)) {

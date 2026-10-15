@@ -354,7 +354,12 @@ export async function siweAuthPlugin(app: FastifyInstance) {
             return reply.status(503).send({ error: "smart_account_signin_unavailable" });
           case "unavailable":
             return reply.header("Retry-After", "5").status(503).send({ error: "signature_verifier_unavailable" });
+          default: {
+            const _exhaustiveReason: never = check.reason;
+            break;
+          }
         }
+        return reply.status(401).send({ error: "Invalid signature" });
       }
     } catch {
       return reply

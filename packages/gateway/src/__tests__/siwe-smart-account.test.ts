@@ -18,6 +18,8 @@ import { apiGate } from "../middleware/api-gate.js";
 import * as sc from "../middleware/scope-checker.js";
 
 const SMART_ADDRESS = "0x1111111111111111111111111111111111111111";
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+const ZERO_SIGNATURE = `0x${"00".repeat(64)}1b` as Hex;
 let apps: FastifyInstance[];
 let remoteAddress: string;
 let testNumber = 0;
@@ -143,6 +145,22 @@ describe("SIWE smart-account signatures", () => {
     expect(getRepos().sessions.countActive()).toBe(0);
   });
 
+  it("rejects the zero address even when the validator accepts it and burns the nonce", async () => {
+    const app = await buildApp();
+    const message = await makeMessage(app, ZERO_ADDRESS);
+    installTransport(() => "0x01");
+    const sessionsBefore = getRepos().sessions.countActive();
+    const rejected = await verify(app, message, ZERO_SIGNATURE);
+    expect(rejected.statusCode).toBe(401);
+    expect(rejected.json()).toEqual({ error: "Invalid signature" });
+    expect(getRepos().sessions.countActive()).toBe(sessionsBefore);
+    expect(requests).toEqual([]);
+    const retried = await verify(app, message, ZERO_SIGNATURE);
+    expect(retried.statusCode).toBe(401);
+    expect(retried.json()).toEqual({ error: "Nonce expired or invalid" });
+    expect(getRepos().sessions.countActive()).toBe(sessionsBefore);
+  });
+
   it("signs in an undeployed CSW v1.1 as its own address and mints a session key", async () => {
     const app = await buildApp();
     const account = await smartAccount();
@@ -163,6 +181,20 @@ describe("SIWE smart-account signatures", () => {
     expect(minted.json().operator_id).toBe(account.address);
     expect(minted.json().api_key).toMatch(/^pcc_live_/);
     expect(requests.map(({ method }) => method)).toEqual(["eth_chainId", "eth_call"]);
+  });
+
+  it("rejects replaying a successful sign-in and keeps exactly one session", async () => {
+    const app = await buildApp();
+    const account = await smartAccount();
+    const message = await makeMessage(app, account.address);
+    const signature = await account.signMessage({ message });
+    acceptOnly(validatorData(account.address, message, signature));
+    const signedIn = await verify(app, message, signature);
+    expect(signedIn.statusCode).toBe(200);
+    const replayed = await verify(app, message, signature);
+    expect(replayed.statusCode).toBe(401);
+    expect(replayed.json()).toEqual({ error: "Nonce expired or invalid" });
+    expect(getRepos().sessions.countActive()).toBe(1);
   });
 
   it("burns the nonce after a tampered signature before a valid retry", async () => {
