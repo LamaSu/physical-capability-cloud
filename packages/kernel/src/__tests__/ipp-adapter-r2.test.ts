@@ -281,6 +281,21 @@ describe("PR2 round 2 regressions", () => {
     expect(printer.operationRequests(OP.CANCEL_JOB)).toEqual([]);
     expect((await start(adapter)).success).toBe(true);
   });
+  it.each([0x0400, 0x0404, 0x0405, 0x0408])("R6-2 F-B: poll code %s does not arm the terminal deadline", async statusCode => {
+    // Kills F8-any-4xx: only not-found/gone can arm on an IPP poll error.
+    let polls = 0;
+    const printer = new FakeIppPrinter().setHandler(OP.GET_JOB_ATTRIBUTES, request => {
+      polls += 1;
+      if (polls === 1) return ippResponse(request, { statusCode });
+      return jobResponse(request, { jobState: polls <= 10 ? 5 : 9 });
+    });
+    const { adapter, events } = make(printer, { cancelConfirmMs: 200, pollIntervalMs: 50 });
+    expect((await start(adapter)).success).toBe(true);
+    await vi.advanceTimersByTimeAsync(600);
+    expect(events.map(event => event.type)).toEqual(["execution_started", "execution_completed"]);
+    expect(printer.operationRequests(OP.CANCEL_JOB)).toEqual([]);
+    await adapter.quiesceEvidence();
+  });
   it("F2: the default cancel deadline is 20 seconds and does not wait for a poll tick", async () => {
     const { adapter, events } = make(undefined, { pollIntervalMs: 600000 });
     await start(adapter); await adapter.cancelJob(77);
