@@ -245,6 +245,41 @@ describe("buyer intent from the caller's own records", () => {
     expect(chain.state.log).toEqual([]);
   });
 
+  it("refuses inherited allowUnchecked true exactly as if it were absent, before any RPC", async () => {
+    const { fx, chain } = await setup();
+    const args: PrepareFundingArgs = {
+      payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx),
+      expect: { ...testExpect(fx), termsHash: "unchecked" },
+    };
+    const absent = await prepareFunding(args).catch((error: FundingRefusal) => error);
+    expect(absent).toBeInstanceOf(FundingRefusal);
+    const inherited = Object.assign(Object.create({ allowUnchecked: true }), args);
+    await expect(prepareFunding(inherited)).rejects.toMatchObject({
+      code: "BAD_EXPECTATION", message: (absent as FundingRefusal).message,
+    });
+    expect(chain.state.log).toEqual([]);
+  });
+
+  it.each([true, false])("reads an own allowUnchecked getter once and uses its first value (%s)", async (first) => {
+    const { fx, chain } = await setup();
+    let reads = 0;
+    const args: PrepareFundingArgs = {
+      payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx),
+      expect: { ...testExpect(fx), termsHash: "unchecked" },
+      get allowUnchecked() { return ++reads === 1 ? first : !first; },
+    };
+    const result = prepareFunding(args);
+    if (first) {
+      expect((await result).unchecked).toEqual(["termsHash"]);
+    } else {
+      await expect(result).rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+      expect(chain.state.log).toEqual([]);
+    }
+    expect(reads).toBe(1);
+  });
+
   it("the default waiver refusal names all waived fields and the MVP rule", async () => {
     const { fx, chain, prepare } = await setup();
     const result = prepare(fx.wire(), { expect: { ...testExpect(fx), termsHash: "unchecked", acceptedPolicyDigest: "unchecked", compositionRoots: "unchecked" } });

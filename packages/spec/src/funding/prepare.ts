@@ -125,7 +125,10 @@ export interface PrepareFundingArgs {
   quote: { maxTotalGross: bigint };
   /** Required independent buyer intent; explicit "unchecked" waivers are recorded in PreparedFunding.unchecked. */
   expect: FundingExpectations;
-  /** Explicit opt-in to exact-literal commitment waivers outside the MVP. Defaults to false. */
+  /**
+   * Explicit opt-in to exact-literal commitment waivers outside the MVP: omit it or pass a boolean.
+   * Only an own property is used; an own getter is read once.
+   */
   allowUnchecked?: boolean;
   /**
    * Extra pins by chain id; required for the factory until a V-next deployment is pinned in this module.
@@ -456,12 +459,13 @@ function typedDataProblem(got: PreparePayload["typedData"], want: JobPolicyTyped
 }
 
 export async function prepareFunding(args: PrepareFundingArgs): Promise<PreparedFunding> {
-  if ("allowUnchecked" in args && typeof args.allowUnchecked !== "boolean") {
+  const allowUnchecked = Object.prototype.hasOwnProperty.call(args, "allowUnchecked") ? args.allowUnchecked : false;
+  if (typeof allowUnchecked !== "boolean") {
     refuse("BAD_EXPECTATION", "allowUnchecked must be true or false");
   }
   const expect = copyExpectations(args.expect);
   const waived = (["termsHash", "acceptedPolicyDigest", "compositionRoots"] as const).filter((field) => expect[field] === "unchecked");
-  if (waived.length !== 0 && args.allowUnchecked !== true) {
+  if (waived.length !== 0 && allowUnchecked !== true) {
     refuse("BAD_EXPECTATION", `${waived.join(", ")} waived without allowUnchecked: true; the PCC MVP binds its commitments exactly and must not waive them`);
   }
   // Everything judged below comes from this parse, taken before the first await.
