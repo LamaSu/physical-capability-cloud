@@ -225,13 +225,21 @@ export async function waitForFundingReceipt(
         });
         if (!response.ok) {
           await response.body?.cancel();
-          if (response.status !== 429 && (response.status < 500 || response.status > 599)) {
+          if (response.status !== 408 && response.status !== 429 && (response.status < 500 || response.status > 599)) {
             throw new WalletError("funding_rpc_unavailable");
           }
         } else {
           const data = await json(response, true);
-          if (!object(data) || !Object.hasOwn(data, "result")) throw new WalletError("funding_rpc_unavailable");
-          if (data.result !== null) {
+          if (!object(data)) throw new WalletError("funding_rpc_unavailable");
+          if (Object.hasOwn(data, "error")) {
+            // Limit-exceeded and internal errors are transient; share the same
+            // polling interval and deadline as HTTP 408, 429 and 5xx failures.
+            if (!object(data.error) || (data.error.code !== -32005 && data.error.code !== -32603)) {
+              throw new WalletError("funding_rpc_unavailable");
+            }
+          } else if (!Object.hasOwn(data, "result")) {
+            throw new WalletError("funding_rpc_unavailable");
+          } else if (data.result !== null) {
             const receipt = data.result;
             if (!object(receipt)) throw new WalletError("funding_receipt_invalid");
             if (typeof receipt.transactionHash !== "string" || receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {

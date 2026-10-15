@@ -468,6 +468,73 @@ describe("bounded receipt polling and RPC retries", () => {
       error => error instanceof Error ? error.message : String(error),
     );
   }
+  function rpcError(code: number): Response {
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code, message: "test RPC error" } }));
+  }
+
+  it.each([-32005, -32603])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      attempts.push(Date.now() - started);
+      return attempts.length === 1 ? rpcError(code) : reply(1, rpcReceipt());
+    });
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(attempts).toEqual([0]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe("success");
+    expect(attempts).toEqual([0, 2_000]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("transient RPC HTTP 408 is retried then succeeds", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      attempts.push(Date.now() - started);
+      return attempts.length === 1 ? new Response("request timed out", { status: 408 }) : reply(1, rpcReceipt());
+    });
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(attempts).toEqual([0]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe("success");
+    expect(attempts).toEqual([0, 2_000]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("permanent JSON-RPC -32602 inside HTTP 200 fails without retrying", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async () => rpcError(-32602))
+      .mockImplementation(async () => reply(1, rpcReceipt()));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([-32005, -32603, 408])("persistent transient RPC %s exhausts the receipt budget without later polling", async failure => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      attempts.push(Date.now() - started);
+      return failure === 408 ? new Response("request timed out", { status: 408 }) : rpcError(failure);
+    });
+    const result = observedReceipt(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await result).toBe("funding_receipt_timeout");
+    expect(attempts).toEqual([0, 2_000, 4_000]);
+    const callsAtTimeout = fetchSpy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(callsAtTimeout);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it("receipt polls are at least 2000 ms apart", async () => {
     vi.useFakeTimers();
