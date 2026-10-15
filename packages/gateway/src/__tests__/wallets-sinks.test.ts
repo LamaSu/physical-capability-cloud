@@ -344,7 +344,8 @@ describe("wallet request values never reach gateway sinks", () => {
       expect(client.getIntegrationByName(integration), integration).toBeDefined();
     }
     // Real HTTP requests exercise the default server span and RequestData
-    // instrumentation, without synthetic spans or normalized request metadata.
+    // instrumentation. Check their request fields below so the synthetic
+    // onResponse spans cannot satisfy the capture control on their own.
     await app.listen({ port: 0, host: "127.0.0.1" });
     const port = (app.server.address() as { port: number }).port;
     const send = (method: string, path: string, headers: Record<string, string>, body?: unknown): Promise<{ status: number; text: string }> =>
@@ -413,6 +414,17 @@ describe("wallet request values never reach gateway sinks", () => {
     const captured = JSON.stringify(sinks.sentry);
     expect(captured, "control request data must reach Sentry").toContain(control);
     expect(captured, "a wallet-looking query must not mute a non-wallet request").toContain(queryControl);
+    const controlItems = (sinks.sentry as Array<[unknown, Array<[{ type: string }, Event]>]>)
+      .flatMap(([, items]) => items);
+    const healthUserAgents = controlItems
+      .filter(([header, event]) => header.type === "transaction" && event.transaction === "GET /api/health")
+      // Node supplies lowercase header names; accept other SDK casing as well.
+      .map(([, event]) => Object.entries(event.request?.headers ?? {})
+        .find(([name]) => name.toLowerCase() === "user-agent")?.[1]);
+    expect(healthUserAgents,
+      "real SDK request capture must be active for the control so the wallet-zero assertion is not vacuous").toContain(control);
+    expect(healthUserAgents,
+      "real SDK request capture must be active for the wallet-looking query control so the wallet-zero assertion is not vacuous").toContain(queryControl);
     const secrets = [marker, KEY, request.requestId, request.userCode, request.userCode.replace("-", ""),
       linkId, account.address, account.address.toLowerCase(), signature];
     expect(secrets.filter(value => captured.includes(value))).toEqual([]);
