@@ -135,6 +135,32 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
     }
   }
 
+  for (const status of ["102 Processing", "103 Early Hints"]) {
+    it(`R5 gap-a: production transport refuses trailing HTAB after ${status}`, async ({ skip }) => {
+      await withServer((_req, res) => {
+        res.socket?.end(`HTTP/1.1 ${status}\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\nRAW-BODY-NOT-CHUNKED`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
+      }, skip);
+    });
+  }
+
+  it("R5 gap-b: production transport refuses 101 with Content-Length zero as framing", async ({ skip }) => {
+    await withServer((_req, res) => {
+      res.socket?.end("HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\n");
+    }, async (transport, request) => {
+      expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
+    }, skip);
+  });
+
+  it("R5 gap-c: production transport accepts case-insensitive Chunked framing", async ({ skip }) => {
+    await withServer((_req, res) => {
+      res.socket?.end("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n3\r\nIPP\r\n0\r\n\r\n");
+    }, async (transport, request) => {
+      expect(await transport(request)).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+    }, skip);
+  });
+
   it("T13: agent:false closes the real socket after too_large before server teardown", async ({ skip }) => {
     let onClose!: () => void;
     const closed = new Promise<void>(resolve => { onClose = resolve; });

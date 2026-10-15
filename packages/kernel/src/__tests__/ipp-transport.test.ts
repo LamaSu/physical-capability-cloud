@@ -149,6 +149,21 @@ describe("HTTP IPP transport, socket-free", () => {
     }
   });
 
+  it.each(["102 Processing", "103 Early Hints"])("R5 gap-a: refuses trailing HTAB after %s", async status => {
+    const { transport } = scripted(`HTTP/1.1 ${status}\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\nRAW-BODY-NOT-CHUNKED`);
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
+  it("R5 gap-b: refuses 101 Switching Protocols with Content-Length zero as framing", async () => {
+    const { transport } = scripted("HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\n");
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
+  it("R5 gap-c: accepts case-insensitive Chunked framing", async () => {
+    const { transport } = scripted("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n3\r\nIPP\r\n0\r\n\r\n");
+    expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+  });
+
   it.each([
     ["identical duplicate Content-Length", "Content-Length: 3\r\nContent-Length: 3"],
     ["different duplicate Content-Length", "Content-Length: 3\r\nContent-Length: 4"],
