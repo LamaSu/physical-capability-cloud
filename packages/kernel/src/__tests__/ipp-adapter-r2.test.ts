@@ -4,6 +4,7 @@ import type { EvidenceEvent } from "@pcc/spec";
 import { IppAdapter, type IppAdapterConfig } from "../adapters/ipp-adapter.js";
 import { IPP_OPERATION as OP, type IppMessage } from "../adapters/ipp-codec.js";
 import type { IppTransportResult } from "../adapters/ipp-transport.js";
+import { DEFAULT_CANCEL_WINDOW_MS } from "../printer-job.js";
 import { FakeIppPrinter, deferred, ippResponse, jobResponse, printerResponse } from "./helpers/fake-ipp-printer.js";
 
 type Event = Omit<EvidenceEvent, "id" | "hash">;
@@ -288,15 +289,13 @@ describe("PR2 round 2 regressions", () => {
     expect(events.at(-1)?.payload).toEqual({ ippJobId: 77, state: "unobservable", reason: "cancel-unconfirmed", jobStateReasons: [], origin: "device" });
     await adapter.quiesceEvidence();
   });
-  it("R4 #7962(a): real IPP defaults fit within the documented kernel cancel window", () => {
-    // No kernel cancelWindowMs default is exported on this PR2 branch. 30000 is
-    // documented in IppAdapterConfig.cancelConfirmMs (ipp-adapter.ts); the kernel
-    // default lives in PR1 @226e8a04 printer-job.ts:329, pending the merge.
+  it("R4 #7962(a): real IPP defaults fit within the kernel cancel window", () => {
     // Kills cancel-default-28000 and poll-default-10000 (sum reaches 30000).
     const adapter = new IppAdapter("cancel-defaults", { uri: "ipp://printer.test/ipp/print", kernelId: "k", transport: new FakeIppPrinter().transport });
     adapters.push(adapter);
     const defaults = Reflect.get(adapter, "config") as Required<Pick<IppAdapterConfig, "cancelConfirmMs" | "pollIntervalMs">>;
-    expect(defaults.cancelConfirmMs + defaults.pollIntervalMs).toBeLessThan(30_000);
+    expect(DEFAULT_CANCEL_WINDOW_MS).toBe(30_000);
+    expect(defaults.cancelConfirmMs + defaults.pollIntervalMs).toBeLessThan(DEFAULT_CANCEL_WINDOW_MS);
   });
   it("R4 #7962(b): a silent printer with real defaults records one device cancel-unconfirmed", async () => {
     // PR1's cancellation-aware runPrintJob is absent here; the lane must test
