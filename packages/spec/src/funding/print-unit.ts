@@ -129,10 +129,12 @@ export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectation
     } catch (error) {
       // The producer validates the original plain data object before reading address words.
       // Only its address-casing refusal is retried; no accessor or Proxy is copied or read.
-      if (!(error instanceof AcceptedPolicyDigestInputError) || error.field !== "subject.operatorSettlementAddress" ||
-          typeof subject.operatorSettlementAddress !== "string" || !isAddress(subject.operatorSettlementAddress, { strict: false })) throw error;
+      if (!(error instanceof AcceptedPolicyDigestInputError) || error.field !== "subject.operatorSettlementAddress") throw error;
+      const settlementAddress = Object.getOwnPropertyDescriptor(subject, "operatorSettlementAddress");
+      if (!settlementAddress?.enumerable || !Object.prototype.hasOwnProperty.call(settlementAddress, "value") ||
+          typeof settlementAddress.value !== "string" || !isAddress(settlementAddress.value, { strict: false })) throw error;
       subjectBlockHash = computeSubjectBlockHash({ ...subject,
-        operatorSettlementAddress: subject.operatorSettlementAddress.toLowerCase() as Address });
+        operatorSettlementAddress: settlementAddress.value.toLowerCase() as Address });
     }
     const mismatch = (field: string, got: unknown, want: unknown): never =>
       refuse("INTENT_MISMATCH", `PRINT subject.${field} is ${String(got)}; the buyer expects ${String(want)}`);
@@ -153,8 +155,8 @@ export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectation
       feeRecipients: [p.feeRecipient], tiers: [p.requestedTier], termsHash: p.termsHash,
       acceptedPolicyDigest, compositionRoots: [p.compositionRoot],
       compositionSchemaVersion: p.compositionSchemaVersion, unitCount: p.unitCount, unitGross: p.g,
-        unitPayouts: [{ recipient: host, amount: p.hostPayoutAmount }, { recipient: p.passThroughRecipient, amount: p.passThrough }],
-        chainId: BigInt(p.chainId), earliestReclaimAt: latestBlockTimestamp + MIN_RECLAIM_DELAY,
+      unitPayouts: [{ recipient: host, amount: p.hostPayoutAmount }, { recipient: p.passThroughRecipient, amount: p.passThrough }],
+      chainId: BigInt(p.chainId), earliestReclaimAt: latestBlockTimestamp + MIN_RECLAIM_DELAY,
       latestReclaimAt: latestBlockTimestamp + maxDelay,
     };
   } catch (error) {

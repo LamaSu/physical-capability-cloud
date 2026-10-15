@@ -64,8 +64,8 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
  * or jobPolicyHash, which commits to everything), and must not waive them. Values come from the caller's own pins;
  * Thursday PRINT buyers use PRINT_UNIT_THURSDAY_V1 from economics' decisions and exact terms-file bytes. Never
  * copy values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require
- * allowUnchecked: true and leave
- * the terms, evidence policy or composition to the payload's author; prepared.unchecked lists them.
+ * allowUnchecked: true and leave the terms, evidence policy or composition to the payload's author;
+ * prepared.unchecked lists them.
  * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
  * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
  * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within

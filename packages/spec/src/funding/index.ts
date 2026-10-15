@@ -44,3 +44,7 @@ export type { FundingRefusalCode } from "./errors.js";
 export { CIRCLE_USDC } from "./pins.js";
 export type { FundingPins } from "./pins.js";
 export type { JobPolicyMessage, JobPolicyTypedData, PayoutEntry, UnitConfig } from "./vnext.js";
+
+/** A Thursday PRINT-unit buyer calls printUnitThursdayExpectation and never passes allowUnchecked. */
+export { PRINT_UNIT_THURSDAY_V1, RECLAIM_SKEW_SECONDS, printUnitPrincipalWord, printUnitThursdayExpectation } from "./print-unit.js";
+export type { PrintUnitThursdayExpectationInput } from "./print-unit.js";

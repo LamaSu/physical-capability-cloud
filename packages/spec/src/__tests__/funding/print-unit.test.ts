@@ -106,7 +106,9 @@ describe("Thursday PRINT pins and public producers", () => {
   });
   it.each(["0x1234", `0x${"g".repeat(40)}`, "", null])("BAD_EXPECTATION: malformed principal address %s", async (address) => {
     const { printUnitPrincipalWord } = await api();
+    const chain = makeChain(await buildFixture());
     expect(() => printUnitPrincipalWord(address as Address)).toThrow(expect.objectContaining({ code: "BAD_EXPECTATION" }));
+    expect(chain.state.log).toEqual([]);
   });
   it("pins bindingsRoot using computeBindingsRoot([])", async () => {
     expect(computeBindingsRoot([])).toBe(EMPTY_ROOT);
@@ -176,6 +178,16 @@ describe("Thursday PRINT buyer expectation", () => {
     expect(changed.acceptedPolicyDigest).toBe(own.acceptedPolicyDigest);
     expect(subject.operatorSettlementAddress).toBe(address);
   });
+  it("BAD_EXPECTATION before any RPC: never reads a settlement-address getter", async () => {
+    const { input, chain } = await setup();
+    let reads = 0;
+    const subject = { ...input.subject };
+    Object.defineProperty(subject, "operatorSettlementAddress", { enumerable: true, get: () => { reads++; return input.host; } });
+    const { printUnitThursdayExpectation } = await api();
+    expect(() => printUnitThursdayExpectation({ ...input, subject })).toThrow(expect.objectContaining({ code: "BAD_EXPECTATION" }));
+    expect(reads).toBe(0);
+    expect(chain.state.log).toEqual([]);
+  });
   it("INTENT_MISMATCH before any RPC: bindings must be empty", async () => {
     const { input, chain } = await setup();
     const binding: SubjectBinding = { planUnitKey: computePlanUnitKey(0, 0n, ONE), requirementIdHash: ONE,
@@ -198,12 +210,12 @@ describe("Thursday PRINT buyer expectation", () => {
     ["compositionRoot", "INTENT_MISMATCH", (cs) => { cs[0]!.compositionRoot = ONE; }],
     ["compositionSchemaVersion", "INTENT_MISMATCH", (cs) => { cs[0]!.compositionSchemaVersion = 1; }],
     ["third payee", "INTENT_MISMATCH", (cs) => {
-      cs[0]!.payouts[0]!.amount -= 1n; cs[0]!.payouts.push({ recipient: POSTAGE, amount: 1n });
+      cs[0]!.payouts[0]!.amount -= 1n; cs[0]!.payouts = [...cs[0]!.payouts, { recipient: POSTAGE, amount: 1n }];
     }],
     ["split 400000/350000", "INTENT_MISMATCH", (cs) => {
       cs[0]!.payouts[0]!.amount = 400_000n; cs[0]!.payouts[1]!.amount = 350_000n;
     }],
-    ["payees swapped", "INTENT_MISMATCH", (cs) => { cs[0]!.payouts.reverse(); }],
+    ["payees swapped", "INTENT_MISMATCH", (cs) => { cs[0]!.payouts = [...cs[0]!.payouts].reverse(); }],
     ["feeBps", "INTENT_MISMATCH", (cs) => {
       const c = cs[0]!; c.feeBps = 1; c.f = 75n; c.n -= 75n; c.feeRecipient = POSTAGE; c.payouts[0]!.amount -= 75n;
     }],
@@ -262,6 +274,18 @@ describe("Thursday PRINT buyer expectation", () => {
 });
 
 describe("optional exact funding expectations", () => {
+  it.each(["unitGross", "payout length", "payout recipient", "maxFeeBps"])("independently checks %s before any RPC", async (field) => {
+    const fx = await buildFixture({ reclaimAt: [NOW + 30n * 86_400n] });
+    const chain = makeChain(fx);
+    const own: FundingExpectations = testExpect(fx);
+    if (field === "unitGross") own.unitGross = 1n;
+    if (field === "payout length") own.unitPayouts = [...fx.configs[0]!.payouts, { recipient: fx.operator.address, amount: 0n }];
+    if (field === "payout recipient") own.unitPayouts = [{ recipient: OTHER, amount: fx.configs[0]!.n }];
+    if (field === "maxFeeBps") own.maxFeeBps = 234;
+    await expect(prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, expect: own, pins: testPins(fx) })).rejects.toMatchObject({ code: "INTENT_MISMATCH" });
+    expect(chain.state.log).toEqual([]);
+  });
   // These tests run independently of the new PRINT module: first-run failures demonstrate the r3 shape gap.
   it.each([
     ["compositionSchemaVersion", 0], ["unitCount", 2], ["unitGross", 1_000_000n],
