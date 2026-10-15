@@ -484,3 +484,112 @@ describe("session credential notices", () => {
     expect(auth.authNotice).toBeNull();
   });
 });
+
+describe("wallet session transitions", () => {
+  it("discards a pending login credential when the wallet disconnects", async () => {
+    let finish!: (response: Response) => void;
+    mintReply = () => new Promise((resolve) => { finish = resolve; });
+    let login!: Promise<void>;
+    await act(async () => { login = auth.login(); });
+    await vi.waitFor(() => expect(count("/api/auth/session-key")).toBe(1));
+    wallet.isConnected = false;
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
+    await act(async () => { finish(minted()); await login; });
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+  });
+
+  it.each([401, 403, 200])("keeps another tab's persisted key when renewal ends the wallet session (%s)", async (status) => {
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    const network = fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (pathOf(input) === "/api/auth/me") {
+        calls.push({ path: "/api/auth/me", init: init ?? {} });
+        return reply(status, status === 200 ? { address: "0x9999999999999999999999999999999999999999" } : { error: "session_required" });
+      }
+      return network(input, init);
+    }));
+    calls = [];
+    requestReply = () => reply(401, { error: "api_key_required" });
+    expect((await request()).status).toBe(401);
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({ sessionToken: null, sessionKeyId: null, sessionKeyExpiresAt: null });
+    expect(container.textContent).toMatch(/sign in again/i);
+    expect(count("/api/auth/me")).toBe(1);
+    expect(count("/api/auth/session-key")).toBe(0);
+    expect(count("/api/jobs/submit")).toBe(1);
+  });
+
+  it("keeps another tab's persisted key when the wallet disconnects", async () => {
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    calls = [];
+    wallet.isConnected = false;
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState()).toMatchObject({ sessionToken: null, sessionKeyId: null, sessionKeyExpiresAt: null });
+    expect(calls.map((call) => call.path)).toEqual(["/api/auth/keys/session-key-1", "/api/auth/logout"]);
+  });
+
+  it("clears the persisted key on explicit sign-out after reconnecting the wallet", async () => {
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    wallet.isConnected = false;
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
+    wallet.isConnected = true;
+    await act(async () => { root.render(<Harness />); });
+    await signIn();
+    expect(hasStoredApiKey()).toBe(true);
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
+    await act(async () => { await auth.logout(); });
+    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    const network = fetch;
+    let finishLogout!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (pathOf(input) === "/api/auth/logout") return new Promise<Response>((resolve) => { finishLogout = resolve; });
+      return network(input, init);
+    }));
+    wallet.isConnected = false;
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
+    await vi.waitFor(() => expect(finishLogout).toBeTypeOf("function"));
+    await act(async () => {
+      const logout = auth.logout();
+      finishLogout(reply(200, {}));
+      await logout;
+    });
+    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(hasStoredApiKey()).toBe(false);
+    expect(useAuthStore.getState().sessionToken).toBeNull();
+  });
+
+  it("prompts sign-in when the wallet address changes during a pending login mint", async () => {
+    let finish!: (response: Response) => void;
+    mintReply = () => new Promise((resolve) => { finish = resolve; });
+    let login!: Promise<void>;
+    await act(async () => { login = auth.login(); });
+    await vi.waitFor(() => expect(count("/api/auth/session-key")).toBe(1));
+    const signed = wallet.address;
+    const late = minted();
+    wallet.address = "0x9999999999999999999999999999999999999999";
+    try {
+      await act(async () => { root.render(<Harness />); });
+      await act(async () => { finish(late); await login; });
+      expect(hasStoredApiKey()).toBe(false);
+      expect(useAuthStore.getState()).toMatchObject({ address: wallet.address, sessionToken: "session-token", sessionKeyId: null });
+      expect(auth.isAuthenticated).toBe(true);
+      expect(auth.authNotice).toBe("Your wallet is signed in. Sign in again to enable operator actions.");
+      expect(container.textContent).toContain(auth.authNotice);
+    } finally {
+      wallet.address = signed;
+    }
+  });
+});

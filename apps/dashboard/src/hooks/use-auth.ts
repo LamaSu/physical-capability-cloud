@@ -59,7 +59,7 @@ export function useAuth() {
 
   useConnectionEffect({
     onDisconnect() {
-      if (useAuthStore.getState().sessionKeyId) void signOutWallet();
+      if (useAuthStore.getState().sessionKeyId) void signOutWallet({ keepPersisted: true });
       else {
         setAddress(null);
         setSession(null);
