@@ -41,7 +41,7 @@ function bodyOptions(schema: z.ZodTypeAny, properties: Record<string, unknown>, 
   };
 }
 
-function accountPrincipal(req: FastifyRequest): string {
+export function accountPrincipal(req: FastifyRequest): string {
   const accountId = req.operatorId ?? req.userId;
   if (!accountId) throw new WalletLinkError(401, "api_key_required");
   return accountId;

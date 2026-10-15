@@ -137,6 +137,7 @@ function isPublicRoute(url: string, method?: string): boolean {
   const path = url.split("?")[0];
   // Only the device-authorization capability endpoints are public.
   if (method === "POST" && path === "/api/wallets/link-requests") return true;
+  if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/fund$/.test(path)) return true;
   if (method === "POST" && /^\/api\/wallets\/link-requests\/[^/]+\/proof$/.test(path)) return true;
   if ((method === "GET" || method === "HEAD") && /^\/api\/wallets\/link-requests\/[^/]+$/.test(path)) return true;
   if (PUBLIC_PREFIXES.some((p) => path.startsWith(p))) return true;
