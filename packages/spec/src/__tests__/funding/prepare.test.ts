@@ -728,9 +728,9 @@ describe("v2.1 derived buyer commitments", () => {
   const OTHER_HASH: Hex = `0x${"11".repeat(32)}`;
   const mismatches: Array<[string, DerivedOptions, string]> = [
     ["old terms file hash", { policyTermsHash: fileDigest }, "termsHash"],
-    ["different reclaimAt with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1]!.deadline += 1n; } }, "termsHash"],
-    ["different stepId with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1]!.stepId = OTHER_HASH; } }, "termsHash"],
-    ["different milestoneIndex with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1]!.milestoneIndex += 9n; } }, "termsHash"],
+    ["different reclaimAt with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1] = { ...ms[1]!, deadline: ms[1]!.deadline + 1n }; } }, "termsHash"],
+    ["different stepId with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1] = { ...ms[1]!, stepId: OTHER_HASH }; } }, "termsHash"],
+    ["different milestoneIndex with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1] = { ...ms[1]!, milestoneIndex: ms[1]!.milestoneIndex + 9n }; } }, "termsHash"],
     ["forged termsHash and digest pair", { policyTermsHash: OTHER_HASH }, "termsHash"],
     ["accepted digest built with file hash", { digestTermsHash: fileDigest }, "acceptedPolicyDigest"],
     ["requestedTier allowed by tiers but not assuranceTier", { configure: (cs) => { cs[1]!.requestedTier = 1; } }, "requestedTier"],
@@ -793,5 +793,13 @@ describe("v2.1 derived buyer commitments", () => {
       quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx), expect: { ...own, termsHash: "unchecked" }, allowUnchecked: true }))
       .rejects.toMatchObject({ code: "BAD_EXPECTATION" });
     expect(chain.state.log).toEqual([]);
+  });
+});
+
+describe("derived PRINT buyer documentation", () => {
+  it("documents funded-config v2.1 terms and the pending re-issued oracle vector", () => {
+    const source = readFileSync(new URL("../../funding/prepare.ts", import.meta.url), "utf8");
+    expect(source).toContain("A PRINT buyer's termsHash is the v2.1 hash of the configs it funds (#8165)");
+    expect(source).toContain("The oracle's Thursday-shape vector test is added when the oracle re-issues it");
   });
 });
