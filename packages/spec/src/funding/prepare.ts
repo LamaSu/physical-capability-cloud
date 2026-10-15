@@ -74,11 +74,12 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
  * prepared.unchecked lists them.
  * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
  * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
- * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set, reclaimAt within
+ * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set outside derive mode, reclaimAt within
  * the permitted window, each unit's feeBps up to maxFeeBps (which fixes f and n), its fee recipient within
- * feeRecipients, and its compositionRoot within compositionRoots. Deriving termsHash binds it to these configs;
- * it does not independently constrain these choices. A mixed tier set hands the choice of release authority to the
- * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
+ * feeRecipients, and its compositionRoot within compositionRoots. Deriving termsHash binds it to these configs
+ * and pins requiredTier and requestedTier to assuranceTier; it does not independently constrain the other choices.
+ * Outside derive mode, a mixed tier set hands the choice of release authority to the payload's author, unit by unit:
+ * a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
  * the cohort's assertion once its challenge window closes. The buyer can contest it only by posting a bond within
  * that window, which opens an appeal. The unit still releases unless the appeal rules for the buyer, and appeal
  * silence releases. Show prepared.configs to the buyer, or bind jobPolicyHash.
@@ -144,11 +145,12 @@ export interface PrepareFundingArgs {
  * A payload that passed every check, with every value the SDK recomputed. Deep-frozen.
  * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
  * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
- * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set, reclaimAt within
+ * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set outside derive mode, reclaimAt within
  * the permitted window, each unit's feeBps up to maxFeeBps (which fixes f and n), its fee recipient within
- * feeRecipients, and its compositionRoot within compositionRoots. Deriving termsHash binds it to these configs;
- * it does not independently constrain these choices. A mixed tier set hands the choice of release authority to the
- * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
+ * feeRecipients, and its compositionRoot within compositionRoots. Deriving termsHash binds it to these configs
+ * and pins requiredTier and requestedTier to assuranceTier; it does not independently constrain the other choices.
+ * Outside derive mode, a mixed tier set hands the choice of release authority to the payload's author, unit by unit:
+ * a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
  * the cohort's assertion once its challenge window closes. The buyer can contest it only by posting a bond within
  * that window, which opens an appeal. The unit still releases unless the appeal rules for the buyer, and appeal
  * silence releases. Show prepared.configs to the buyer, or bind jobPolicyHash.
