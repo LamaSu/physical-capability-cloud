@@ -209,15 +209,19 @@ describe("API key management requires a proven owner for other keys", () => {
     expect(getRepos().apiKeys.findById(other.row.id)!.revokedAt).toBeNull();
   });
 
-  it("a proven wallet lists its address keys and its own key and revokes another address key", async () => {
+  it("a request-level proven wallet is not owner proof for listing or revoking other keys", async () => {
     const caller = insertKey(OTHER_ADDRESS);
     const target = insertKey();
     const peer = insertKey();
     const app = await buildApp({ provenWallet: ADDRESS });
 
-    await expectKeys(app, bearer(caller.rawKey), [target.row.id, peer.row.id, caller.row.id]);
-    expect((await revoke(app, bearer(caller.rawKey), target.row.id)).statusCode).toBe(200);
-    expect(getRepos().apiKeys.findById(target.row.id)!.revokedAt).not.toBeNull();
+    await expectKeys(app, bearer(caller.rawKey), [caller.row.id]);
+    const response = await revoke(app, bearer(caller.rawKey), target.row.id);
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Key not found" });
+    const row = getRepos().apiKeys.findById(target.row.id)!;
+    expect(row.revokedAt).toBeNull();
+    expect(getRepos().apiKeys.findActiveByHash(row.keyHash)?.id).toBe(target.row.id);
   });
 
   it("the admin secret allows an authenticated caller to revoke any address key", async () => {

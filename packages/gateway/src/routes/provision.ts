@@ -25,14 +25,12 @@ import {
 
 /**
  * Only a proven owner or the admin may list or revoke another key of an address.
- * Owner proof comes from exactly: authorityOf(req).provenWallet; a verified SIWE
- * cookie or bearer session resolved by resolveSession; or an unexpired, unrevoked
+ * Owner proof comes from exactly: a verified SIWE cookie or bearer session
+ * resolved by resolveSession; or an unexpired, unrevoked
  * API key whose metadata.source is "siwe-session", using its stored operatorId.
+ * A request-level proven wallet set by any other proof is not owner proof for managing other keys.
  */
 export function provenOwnerAddress(req: FastifyRequest): string | null {
-  const provenWallet = authorityOf(req).provenWallet;
-  if (provenWallet) return provenWallet.toLowerCase();
-
   const session = resolveSession(req);
   if (session) return session.address.toLowerCase();
 
