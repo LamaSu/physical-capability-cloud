@@ -18,6 +18,7 @@ import {
 import { main } from "../src/cli.js";
 import { generateHostKeys } from "../src/keygen.js";
 import { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "../src/policy-json.js";
+import { computeTermsHash } from "../src/terms-hash.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof fs>();
@@ -36,7 +37,7 @@ afterEach(async () => {
 
 const address = (byte: string) => getAddress(`0x${byte.repeat(20)}`);
 const word = (label: string): Hex => `0x${createHash("sha256").update(label).digest("hex")}`;
-const thursdayTermsHash: Hex = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+const settlementToken = getAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
 const s2ProgramHash: Hex = "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a";
 const zeroWord = (): Hex => `0x${"00".repeat(32)}`;
 const oneByteOff = (value: Hex): Hex => `${value.slice(0, -2)}${value.endsWith("00") ? "01" : "00"}` as Hex;
@@ -114,7 +115,10 @@ async function fixture() {
   const policy: JobPolicyFields = {
     chainId: 84532n, factory: address("aa"), implementation: address("bb"),
     escrow: address("ee"), payer: address("dd"), operator: generated.identity.operatorAddress as `0x${string}`,
-    jobIdHash: word("cli-job"), termsHash: thursdayTermsHash, policyNonce: 0n,
+    jobIdHash: word("cli-job"), termsHash: computeTermsHash({
+      token: settlementToken, assuranceTier: unit.requiredTier,
+      milestones: [{ milestoneIndex: unit.milestoneIndex, stepId: unit.stepId, amount: unit.g, deadline: unit.reclaimAt }],
+    }), policyNonce: 0n,
     prePolicyRoot: prePolicyRoot([unit]), unitsRoot: unitsRoot([settlementUnitId({
       chainId: 84532n, escrow: address("ee"), jobIdHash: word("cli-job"),
       milestoneIndex: unit.milestoneIndex, stepId: unit.stepId,
@@ -148,7 +152,7 @@ async function fixture() {
     maxUnits: 2, maxAcceptanceSeconds: 600,
     factory: policy.factory, implementation: policy.implementation,
     operatorPayoutRecipient: address("dd"), maxPassThrough: 0n,
-    termsHash: thursdayTermsHash, subjectPins: { committedProgramHash: s2ProgramHash },
+    settlementToken, subjectPins: { committedProgramHash: s2ProgramHash },
   };
   await writeFile(termsFile, json(terms), { mode: 0o600 });
   await writeFile(inputFile, json(input), { mode: 0o600 });
@@ -174,15 +178,22 @@ describe("print-host sign-policy CLI", () => {
     expect(captured.output()).toEqual({ stdout: "", stderr: "" });
     const output = JSON.parse(await readFile(current.outputFile, "utf8")) as {
       operator: `0x${string}`; chainId: number; escrow: `0x${string}`; acceptanceDigest: Hex; signature: Hex;
-      subjectBlockHash: Hex; bindingsRoot: Hex; acceptedPolicyDigest: Hex;
+      termsHash: Hex; subjectBlockHash: Hex; bindingsRoot: Hex; acceptedPolicyDigest: Hex;
       subjectBlock: SubjectBlockFields; bindings: SubjectBinding[];
     };
     expect(Object.keys(output).sort()).toEqual([
-      "acceptanceDigest", "acceptedPolicyDigest", "bindings", "bindingsRoot", "chainId", "escrow", "operator", "signature", "subjectBlock", "subjectBlockHash",
+      "acceptanceDigest", "acceptedPolicyDigest", "bindings", "bindingsRoot", "chainId", "escrow", "operator", "signature", "subjectBlock", "subjectBlockHash", "termsHash",
     ]);
     expect(output.operator).toBe(current.generated.identity.operatorAddress);
     expect(output.chainId).toBe(84532);
     expect(output.escrow).toBe(current.input.policy.escrow);
+    expect(output.termsHash).toBe(current.input.policy.termsHash);
+    expect(output.termsHash).toBe(computeTermsHash({
+      token: current.terms.settlementToken, assuranceTier: current.input.units[0]!.requiredTier,
+      milestones: current.input.units.map((unit) => ({
+        milestoneIndex: unit.milestoneIndex, stepId: unit.stepId, amount: unit.g, deadline: unit.reclaimAt,
+      })),
+    }));
     expect(output.subjectBlockHash).toBe(current.commitments.subjectBlockHash);
     expect(output.bindingsRoot).toBe(current.commitments.bindingsRoot);
     expect(output.acceptedPolicyDigest).toBe(current.commitments.acceptedPolicyDigest);
@@ -341,9 +352,10 @@ describe("print-host sign-policy CLI", () => {
     ["missing allowedPayoutRecipients", (value) => { delete value.allowedPayoutRecipients; }],
     ["missing factory", (value) => { delete value.factory; }],
     ["missing implementation", (value) => { delete value.implementation; }],
-    ["missing termsHash", (value) => { delete value.termsHash; }],
-    ["zero termsHash", (value) => { value.termsHash = zeroWord(); }],
-    ["malformed termsHash", (value) => { value.termsHash = "private-terms-hash"; }],
+    ["superseded termsHash field", (value) => { value.termsHash = word("old-terms-file"); }],
+    ["missing settlementToken", (value) => { delete value.settlementToken; }],
+    ["zero settlementToken", (value) => { value.settlementToken = address("00"); }],
+    ["malformed settlementToken", (value) => { value.settlementToken = "private-token"; }],
     ["missing subjectPins", (value) => { delete value.subjectPins; }],
     ["subjectPins lacking committedProgramHash", (value) => { value.subjectPins = {}; }],
     ["an unknown subject pin", (value) => {
@@ -467,12 +479,21 @@ describe("policy JSON file boundaries", () => {
     });
   });
   it.each([
-    ["termsHash", (terms: Record<string, unknown>) => { delete terms.termsHash; }],
+    ["settlementToken", (terms: Record<string, unknown>) => { delete terms.settlementToken; }],
     ["committedProgramHash pin", (terms: Record<string, unknown>) => { terms.subjectPins = {}; }],
   ] as const)("refuses a missing %s at terms load", async (_field, mutate) => {
     const current = await fixture();
     const terms = JSON.parse(json(current.terms));
     mutate(terms);
+    await writeFile(current.termsFile, json(terms));
+    await expect(loadHostTerms(current.termsFile)).rejects.toMatchObject({
+      name: "OperatorSigningError", code: "bad_terms", message: "bad_terms",
+    });
+  });
+
+  it("refuses the superseded termsHash field directly at terms load with bad_terms", async () => {
+    const current = await fixture();
+    const terms = { ...current.terms, termsHash: current.input.policy.termsHash };
     await writeFile(current.termsFile, json(terms));
     await expect(loadHostTerms(current.termsFile)).rejects.toMatchObject({
       name: "OperatorSigningError", code: "bad_terms", message: "bad_terms",

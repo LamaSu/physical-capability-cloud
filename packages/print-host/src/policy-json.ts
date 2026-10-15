@@ -63,7 +63,7 @@ const termsSchema = z.object({
   allowedFeeRecipients: z.array(address), allowedPayoutRecipients: z.array(address).nonempty(),
   operatorPayoutRecipient: address, maxPassThrough: decimal,
   maxUnits: integer, maxAcceptanceSeconds: integer,
-  termsHash: bytes32, subjectPins: subjectPinsSchema, bindingsRoot: bytes32.optional(),
+  settlementToken: address, subjectPins: subjectPinsSchema, bindingsRoot: bytes32.optional(),
 }).strict();
 
 async function readJson(path: string, maxBytes: number, expectedUid?: number): Promise<unknown> {

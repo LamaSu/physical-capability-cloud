@@ -17,6 +17,7 @@ import { getAddress, verifyTypedData, zeroAddress, zeroHash, type Address, type 
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { loadOperatorKey, OperatorSigningError, type HostTerms, type OperatorKey } from "../src/keys.js";
 import { computeJobPolicyCommitments, type JobPolicyAcceptanceInput } from "../src/operator-signing.js";
+import { computeTermsHash } from "../src/terms-hash.js";
 
 // Provenance: pcc-oracle commit 87bc14e,
 // config/testnet/s2-subject-block-thursday-shape-golden.json.
@@ -49,6 +50,7 @@ vi.mock("viem/accounts", async (importOriginal) => {
 });
 
 const now = new Date("2026-10-10T12:00:00.000Z");
+const settlementToken = getAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
 const nowSeconds = BigInt(now.getTime() / 1000);
 const zeroFields = [
   "childrenRoot", "expertSetRoot", "executorSetRoot", "expectedRecipient", "targetSystemIdentity",
@@ -97,7 +99,7 @@ function terms(subject = runtimeSubject()): HostTerms {
   };
   return {
     chainId: golden.chainId, factory, implementation,
-    termsHash: golden.termsHash, subjectPins, bindingsRoot: golden.bindingsRoot,
+    settlementToken, subjectPins, bindingsRoot: golden.bindingsRoot,
     operatorPayoutRecipient: hostAddress,
     maxPassThrough: 0n, minG: 1_000n, allowedRequiredTiers: [1],
     reclaimMinSeconds: 864_000, reclaimMaxSeconds: 1_728_000,
@@ -131,7 +133,12 @@ function input(subjectBlock = runtimeSubject()): JobPolicyAcceptanceInput {
   const policy: JobPolicyFields = {
     chainId: BigInt(golden.chainId), factory, implementation, escrow: zeroAddress,
     payer: getAddress(golden.inputs.payerAddress), operator: getAddress(subjectBlock.operatorSettlementAddress),
-    jobIdHash: word("thursday-job"), termsHash: golden.termsHash, policyNonce: 1n,
+    jobIdHash: word("thursday-job"), termsHash: computeTermsHash({
+      token: settlementToken, assuranceTier: units[0]!.requiredTier,
+      milestones: units.map((unit) => ({
+        milestoneIndex: unit.milestoneIndex, stepId: unit.stepId, amount: unit.g, deadline: unit.reclaimAt,
+      })),
+    }), policyNonce: 1n,
     prePolicyRoot: prePolicyRoot(units), unitsRoot: zeroHash, expiry: nowSeconds + 300n,
     acceptedPolicyDigest: zeroHash,
   };
@@ -186,7 +193,12 @@ describe("the oracle's Thursday subject-block golden", () => {
     expect(subjectBlock).toEqual(golden.subjects);
     expect(authorizedTuple(operatorId, golden.inputs.kernelId, `ed25519:${golden.inputs.devicePublicKey}`))
       .toEqual(golden.authorizedTuples[0]);
-    expect(computeJobPolicyCommitments(input(subjectBlock))).toEqual({
+    // This vector pins digest arithmetic over the oracle's literal termsHash;
+    // end-to-end acceptance below derives termsHash from its own funded units.
+    const arithmeticVector = input(subjectBlock);
+    arithmeticVector.policy.termsHash = golden.termsHash;
+    refresh(arithmeticVector);
+    expect(computeJobPolicyCommitments(arithmeticVector)).toEqual({
       subjectBlockHash: golden.subjectBlockHash,
       bindingsRoot: golden.bindingsRoot,
       acceptedPolicyDigest: golden.acceptedPolicyDigest,

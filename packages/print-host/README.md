@@ -74,7 +74,8 @@ must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
 its entire `n`; the cap applies across the policy, including all its units.
 Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
 864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
-The file also requires a non-zero bytes32 `termsHash` and a `subjectPins` object.
+The file also requires a valid non-zero address `settlementToken` and a
+`subjectPins` object. A `termsHash` field in a terms file is refused with `bad_terms`.
 Pins may contain only the 18 `SubjectBlockFields` keys from `@pcc/spec`, with exact
 bytes32 values, an address for `operatorSettlementAddress`, or an integer number
 for `integrityGrade` (0–255). `committedProgramHash` is required. An
@@ -88,7 +89,7 @@ host-specific placeholders with the values computed below:
 
 ```json
 {
-  "termsHash": "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7",
+  "settlementToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   "subjectPins": {
     "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
     "operatorPrincipal": "<derived host operator word>",
@@ -131,9 +132,27 @@ uses `bindings: []`, whose root is the pin above. All twelve zero fields and
 
 These fields extend the complete host terms described above. For Thursday,
 `reclaimMaxSeconds` must be at least 1814400 because `reclaimAt` is policy creation
-plus 21 days. The pinned `termsHash` is the hash of economics' terms document;
-the host's tier limits, payout allowlist, and other local terms are configuration
-and are not its preimage.
+plus 21 days.
+Thursday's settlement token is Circle USDC on Base Sepolia at the address above.
+Economics #8165 supersedes the old `termsHash` pin:
+`0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7`
+is only a FILE-VERSION digest of economics' terms document and goes into no policy.
+Each policy derives its own `termsHash` from its funded units using the ratified
+v2.1 rule:
+
+```text
+TERMS_DOMAIN = keccak256(utf8("PCC:vnext:job-terms:v1"))
+milestones[i] = (units[i].milestoneIndex, units[i].stepId, units[i].g, units[i].reclaimAt)
+milestonesRoot = keccak256(abi.encode((uint256,bytes32,uint256,uint64)[] milestones))
+termsHash = keccak256(abi.encode(bytes32 TERMS_DOMAIN, address settlementToken, uint8 assuranceTier, bytes32 milestonesRoot))
+```
+
+Both encodings use `abi.encode`. Milestones retain the funded `UnitConfig[]`
+order, including each unit's own reclaim deadline. Every unit must have the same
+`requiredTier`, and its `requestedTier` must match that job-level assurance tier.
+The host's tier limits, payout allowlist, and other local terms are configuration
+outside this preimage. The local producer follows `pcc-oracle src/terms-hash.ts`
+at `87bc14e` and will be replaced by `@pcc/spec`'s producer when it merges.
 Terms for one chain never load for a key bound to another chain; the loader
 refuses them before reading the key file. Loaders validate and freeze all terms
 at key load; a key loaded without terms
@@ -189,8 +208,11 @@ acceptance expiry must be in the future and no farther away than
 `maxAcceptanceSeconds`. The signature uses the compiler's `jobPolicyTypedData`
 unchanged; its verifying contract is `policy.escrow`.
 
-The host also requires `policy.termsHash` to match the loaded pin
-(`terms_hash_mismatch`), checks every subject pin (`subject_pin_mismatch`), and
+The host also requires `policy.termsHash` to match the derivation from the loaded
+settlement token and the same ordered units snapshot (`terms_hash_mismatch`).
+Mixed required tiers give `assurance_tier_mismatch`; the existing compiler
+validation refuses a mismatched requested tier with `bad_input`.
+The host checks every subject pin (`subject_pin_mismatch`), and
 requires `subjectBlock.operatorSettlementAddress` to equal the configured payout
 recipient (`settlement_address_mismatch`). It computes `subjectBlockHash` with
 `computeSubjectBlockHash`, `bindingsRoot` with `computeBindingsRoot`, and
@@ -214,7 +236,8 @@ gives `bad_input`. These checks also run before signing.
 
 Success creates a new mode-0644 JSON file containing exactly `operator`, `chainId`
 (a number), `escrow`, `acceptanceDigest`, `signature`, `subjectBlockHash`,
-`bindingsRoot`, `acceptedPolicyDigest`, `subjectBlock`, and `bindings`. The subject
+`bindingsRoot`, `acceptedPolicyDigest`, `termsHash`, `subjectBlock`, and `bindings`.
+The output `termsHash` is the derived value checked before signing. The subject
 block and bindings are the public objects as parsed, with lowercase hex, so the
 hand-off carries the objects signed over alongside their hashes. Existing output files
 are refused. If chmod, writing or closing fails after creation, the command removes

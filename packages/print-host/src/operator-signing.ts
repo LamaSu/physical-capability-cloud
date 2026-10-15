@@ -9,6 +9,7 @@ import {
   VNEXT, buildUnitConfig, computeFee, jobPolicyTypedData, policySalt, predictEscrow, prePolicyRoot, settlementUnitId, unitsRoot,
   type JobPolicyFields, type UnitConfig,
 } from "@pcc/contracts/vnext";
+import { computeTermsHash } from "./terms-hash.js";
 
 export type OperatorChainId = 84532 | 31337;
 export type OperatorSigningErrorCode = "bad_input" | "bad_escrow" | "bad_bytes32" |
@@ -18,7 +19,7 @@ export type OperatorSigningErrorCode = "bad_input" | "bad_escrow" | "bad_bytes32
   "units_count" | "gross_below_min" | "tier_not_allowed" | "reclaim_too_soon" |
   "reclaim_too_late" | "fee_too_high" | "fee_recipient_not_allowed" |
   "payout_recipient_not_allowed" | "pass_through_too_high" | "fee_split_mismatch" | "payout_sum_mismatch" |
-  "acceptance_expired" | "acceptance_too_long" | "terms_hash_mismatch" |
+  "acceptance_expired" | "acceptance_too_long" | "terms_hash_mismatch" | "assurance_tier_mismatch" |
   "subject_pin_mismatch" | "settlement_address_mismatch" | "bindings_root_mismatch" |
   "operator_principal_mismatch" | "payer_principal_mismatch" |
   "accepted_policy_mismatch" | "composition_not_supported";
@@ -60,7 +61,7 @@ export interface HostTerms {
   readonly factory: Address;
   readonly implementation: Address;
   readonly operatorPayoutRecipient: Address;
-  readonly termsHash: Hex;
+  readonly settlementToken: Address;
   readonly subjectPins: Readonly<Partial<SubjectBlockFields> & Pick<SubjectBlockFields, "committedProgramHash">>;
   readonly bindingsRoot?: Hex;
   readonly maxPassThrough: bigint;
@@ -258,7 +259,7 @@ function pinGrade(value: unknown): SubjectBlockFields["integrityGrade"] {
 /** Strict validation also copies and freezes the lists, closing mutation after key load. */
 export function validateHostTerms(input: HostTerms): HostTerms {
   try {
-    const r = inputRecord(input, ["chainId", "factory", "implementation", "operatorPayoutRecipient", "termsHash", "subjectPins", "maxPassThrough",
+    const r = inputRecord(input, ["chainId", "factory", "implementation", "operatorPayoutRecipient", "settlementToken", "subjectPins", "maxPassThrough",
       "minG", "allowedRequiredTiers", "reclaimMinSeconds", "reclaimMaxSeconds",
       "maxFeeBps", "allowedFeeRecipients", "allowedPayoutRecipients", "maxUnits", "maxAcceptanceSeconds"], ["bindingsRoot"]);
     const chainId = r.chainId;
@@ -266,8 +267,8 @@ export function validateHostTerms(input: HostTerms): HostTerms {
     const factory = policyAddress(r.factory);
     const implementation = policyAddress(r.implementation);
     const operatorPayoutRecipient = policyAddress(r.operatorPayoutRecipient);
-    const termsHash = policyBytes32(r.termsHash).toLowerCase() as Hex;
-    if (termsHash === zeroHash) throw new OperatorSigningError("bad_terms");
+    const settlementToken = policyAddress(r.settlementToken);
+    if (settlementToken === zeroAddress) throw new OperatorSigningError("bad_terms");
     const pins = snapshotProducerRecord(r.subjectPins);
     const pinRecord = inputRecord(pins, ["committedProgramHash"], subjectKeys.filter((key) => key !== "committedProgramHash"));
     const subjectPins: Record<string, unknown> = Object.create(null);
@@ -300,7 +301,7 @@ export function validateHostTerms(input: HostTerms): HostTerms {
       || reclaimMinSeconds > reclaimMaxSeconds || maxUnits === 0 || maxAcceptanceSeconds === 0) {
       throw new OperatorSigningError("bad_terms");
     }
-    return Object.freeze({ chainId, factory, implementation, operatorPayoutRecipient, termsHash,
+    return Object.freeze({ chainId, factory, implementation, operatorPayoutRecipient, settlementToken,
       subjectPins: Object.freeze(subjectPins) as HostTerms["subjectPins"],
       ...(bindingsRoot === undefined ? {} : { bindingsRoot }), maxPassThrough,
       minG, allowedRequiredTiers: Object.freeze(allowedRequiredTiers), reclaimMinSeconds,
@@ -363,7 +364,6 @@ export function prepareJobPolicyAcceptance(input: JobPolicyAcceptanceInput, chai
     || policy.implementation.toLowerCase() !== terms.implementation.toLowerCase()) {
     throw new OperatorSigningError("deployment_mismatch");
   }
-  if (policy.termsHash.toLowerCase() !== terms.termsHash.toLowerCase()) throw new OperatorSigningError("terms_hash_mismatch");
   let operatorPrincipal: Hex;
   let payerPrincipal: Hex;
   try {
@@ -388,9 +388,6 @@ export function prepareJobPolicyAcceptance(input: JobPolicyAcceptanceInput, chai
   }
   if (terms.bindingsRoot !== undefined && commitments.bindingsRoot !== terms.bindingsRoot.toLowerCase()) {
     throw new OperatorSigningError("bindings_root_mismatch");
-  }
-  if (commitments.acceptedPolicyDigest !== policy.acceptedPolicyDigest.toLowerCase()) {
-    throw new OperatorSigningError("accepted_policy_mismatch");
   }
   if (units.length < 1 || units.length > terms.maxUnits) throw new OperatorSigningError("units_count");
   let passThrough = 0n;
@@ -426,6 +423,22 @@ export function prepareJobPolicyAcceptance(input: JobPolicyAcceptanceInput, chai
       const validated = buildUnitConfig(unit);
       if (unit.requestedTier !== validated.requestedTier) throw new OperatorSigningError("bad_input");
     } catch { throw new OperatorSigningError("bad_input"); }
+  }
+  // Job-level assurance must agree across the same ordered snapshot used below.
+  // The per-unit requestedTier equality is already enforced by buildUnitConfig above.
+  const assuranceTier = units[0]!.requiredTier;
+  if (units.some((unit) => unit.requiredTier !== assuranceTier)) {
+    throw new OperatorSigningError("assurance_tier_mismatch");
+  }
+  let termsHash: Hex;
+  try {
+    termsHash = computeTermsHash({ token: terms.settlementToken, assuranceTier,
+      milestones: units.map((unit) => ({ milestoneIndex: unit.milestoneIndex, stepId: unit.stepId,
+        amount: unit.g, deadline: unit.reclaimAt })) });
+  } catch { throw new OperatorSigningError("bad_input"); }
+  if (policy.termsHash.toLowerCase() !== termsHash.toLowerCase()) throw new OperatorSigningError("terms_hash_mismatch");
+  if (commitments.acceptedPolicyDigest !== policy.acceptedPolicyDigest.toLowerCase()) {
+    throw new OperatorSigningError("accepted_policy_mismatch");
   }
   if (passThrough > terms.maxPassThrough) throw new OperatorSigningError("pass_through_too_high");
   if (policy.expiry * 1000n <= nowMs) throw new OperatorSigningError("acceptance_expired");

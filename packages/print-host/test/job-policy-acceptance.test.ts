@@ -49,6 +49,7 @@ import {
   type OperatorKey,
 } from "../src/keys.js";
 import { validateHostTerms } from "../src/operator-signing.js";
+import { computeTermsHash } from "../src/terms-hash.js";
 
 const failure = vi.hoisted(() => ({ enabled: false, signCalls: 0, principalProducer: "" }));
 vi.mock("@pcc/spec", async (importOriginal) => {
@@ -85,7 +86,8 @@ const payer = getAddress(`0x${"12".repeat(20)}`);
 const feeRecipient = getAddress(`0x${"ab34".repeat(10)}`);
 const otherRecipient = getAddress(`0x${"56".repeat(20)}`);
 const payoutRecipient = getAddress(`0x${"ab78".repeat(10)}`);
-const thursdayTermsHash: Hex = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+const settlementToken = getAddress("0x036CbD53842c5426634e7929541eC2318f3dCF7e");
+const supersededTermsFileDigest: Hex = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
 const s2ProgramHash: Hex = "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a";
 let directory: string;
 let path: string;
@@ -95,7 +97,7 @@ let key: OperatorKey;
 function terms(chainId: 84532 | 31337 = 84532) {
   return {
     chainId, factory, implementation,
-    termsHash: thursdayTermsHash,
+    settlementToken,
     subjectPins: { committedProgramHash: s2ProgramHash, targetSystemIdentity: word("target-system") },
     operatorPayoutRecipient: payoutRecipient,
     maxPassThrough: 20_000n,
@@ -147,6 +149,12 @@ function unit(overrides: Partial<UnitConfig> = {}, index = 0): UnitConfig {
     ...overrides,
   };
 }
+function termsHashFromUnits(configs: UnitConfig[], token: Address = settlementToken,
+  assuranceTier = configs[0].requiredTier): Hex {
+  return computeTermsHash({ token, assuranceTier, milestones: configs.map((config) => ({
+    milestoneIndex: config.milestoneIndex, stepId: config.stepId, amount: config.g, deadline: config.reclaimAt,
+  })) });
+}
 function input(configs: UnitConfig[] = [unit()], overrides: Partial<JobPolicyFields> = {}) {
   const subject = subjectBlock(Number(overrides.chainId ?? 84532n), key.address, overrides.payer ?? payer);
   const boundUnit = configs[0] ?? unit();
@@ -154,12 +162,14 @@ function input(configs: UnitConfig[] = [unit()], overrides: Partial<JobPolicyFie
     planUnitKey: computePlanUnitKey(0, boundUnit.milestoneIndex, boundUnit.stepId),
     requirementIdHash: word("requirement"), sourceKind: 1, propositionKind: 2, valueRef: word("value-ref"),
   }];
+  // Empty-unit candidates are refused by units_count before a terms derivation is possible.
+  const derivedTermsHash = configs.length === 0 ? zeroHash : termsHashFromUnits(configs);
   const policy: JobPolicyFields = {
     chainId: 84532n, factory, implementation, escrow: unrelatedEscrow, payer, operator: key.address,
-    jobIdHash: word("job"), termsHash: thursdayTermsHash, policyNonce: 1n,
+    jobIdHash: word("job"), termsHash: derivedTermsHash, policyNonce: 1n,
     prePolicyRoot: prePolicyRoot(configs), unitsRoot: word("temporary-root"),
     expiry: nowSeconds + 300n, acceptedPolicyDigest: computeAcceptedPolicyDigest({
-      termsHash: overrides.termsHash ?? thursdayTermsHash,
+      termsHash: overrides.termsHash ?? derivedTermsHash,
       subjectBlockHash: computeSubjectBlockHash(subject), bindingsRoot: computeBindingsRoot(bindings),
     }),
     ...overrides,
@@ -299,30 +309,90 @@ describe("JobPolicy acceptance uses the canonical compiler bytes", () => {
   });
 });
 
-describe("JobPolicy acceptance binds the pinned terms and program with the spec producer", () => {
+describe("JobPolicy acceptance derives terms from its units and binds the pinned program with the spec producer", () => {
   it("signs a policy built with the spec subject, bindings and accepted-policy producers", async () => {
     const candidate = input();
     const subjectBlockHash = computeSubjectBlockHash(candidate.subjectBlock);
     const bindingsRoot = computeBindingsRoot(candidate.bindings);
     expect(candidate.subjectBlock.committedProgramHash).toBe(s2ProgramHash);
-    expect(candidate.policy.termsHash).toBe(thursdayTermsHash);
+    expect(candidate.policy.termsHash).toBe(termsHashFromUnits(candidate.units));
     expect(candidate.bindings[0].planUnitKey).toBe(computePlanUnitKey(0,
       candidate.units[0].milestoneIndex, candidate.units[0].stepId));
     expect(subjectBlockHash).not.toBe(bindingsRoot);
     expect(candidate.policy.acceptedPolicyDigest).toBe(computeAcceptedPolicyDigest({
-      termsHash: thursdayTermsHash, subjectBlockHash, bindingsRoot,
+      termsHash: termsHashFromUnits(candidate.units), subjectBlockHash, bindingsRoot,
     }));
     await accepts(candidate);
     expect(failure.signCalls).toBe(1);
   });
   it("refuses a termsHash one byte off even with its recomputed digest and predicted escrow", async () => {
-    const candidate = input([unit()], { termsHash: changedByte(thursdayTermsHash) });
+    const configs = [unit()];
+    const candidate = input(configs, { termsHash: changedByte(termsHashFromUnits(configs)) });
     await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
     expect(failure.signCalls).toBe(0);
   });
-  it("accepts an uppercase-hex policy termsHash (case-insensitive pin)", async () => {
+  it("refuses a changed termsHash before checking a stale accepted-policy digest", async () => {
     const candidate = input();
-    candidate.policy.termsHash = `0x${thursdayTermsHash.slice(2).toUpperCase()}` as Hex;
+    candidate.policy.termsHash = changedByte(candidate.policy.termsHash);
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("maps a terms producer throw for duplicate milestones to bad_input before signing", async () => {
+    const candidate = input([unit(), unit({}, 1)]);
+    candidate.units[1] = { ...candidate.units[0] };
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "bad_input");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("signs units in their funded unsorted order", async () => {
+    const candidate = input([unit({}, 1), unit({}, 0)]);
+    await accepts(candidate);
+    expect(failure.signCalls).toBe(1);
+  });
+  it("refuses a termsHash derived from the same two units in another order before signing", async () => {
+    const configs = [unit({}, 1), unit({}, 0)];
+    const candidate = input(configs, { termsHash: termsHashFromUnits([...configs].reverse()) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses a termsHash derived with gross amount off by one before signing", async () => {
+    const configs = [unit()];
+    const candidate = input(configs, { termsHash: termsHashFromUnits([{ ...configs[0], g: configs[0].g + 1n }]) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses a termsHash derived with reclaimAt off by one second before signing", async () => {
+    const configs = [unit()];
+    const candidate = input(configs, { termsHash: termsHashFromUnits([
+      { ...configs[0], reclaimAt: configs[0].reclaimAt + 1n },
+    ]) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses a termsHash derived with another settlement token before signing", async () => {
+    const configs = [unit()];
+    const candidate = input(configs, { termsHash: termsHashFromUnits(configs, otherRecipient) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses a termsHash derived with tier two while the units require tier one before signing", async () => {
+    const configs = [unit()];
+    const candidate = input(configs, { termsHash: termsHashFromUnits(configs, settlementToken, 2) });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses the superseded economics terms-file digest before signing", async () => {
+    const candidate = input([unit()], { termsHash: supersededTermsFileDigest });
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "terms_hash_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("refuses units with mixed requiredTier even when each requestedTier agrees before signing", async () => {
+    const candidate = input([unit(), unit({ requiredTier: 2, requestedTier: 2 }, 1)]);
+    await refusal(() => key.signJobPolicyAcceptance(candidate), "assurance_tier_mismatch");
+    expect(failure.signCalls).toBe(0);
+  });
+  it("accepts an uppercase-hex policy termsHash (case-insensitive derivation comparison)", async () => {
+    const candidate = input();
+    candidate.policy.termsHash = `0x${candidate.policy.termsHash.slice(2).toUpperCase()}` as Hex;
     refreshPolicyIdentity(candidate);
     await accepts(candidate);
     expect(failure.signCalls).toBe(1);
@@ -827,8 +897,10 @@ describe("HostTerms bind authorization to the key's chain", () => {
 
 describe("HostTerms loading refuses malformed authorizations", () => {
   const malformed: Array<[string, Record<string, unknown>]> = [
-    ["zero termsHash", { termsHash: zeroHash }], ["invalid termsHash", { termsHash: "invalid" }],
-    ["short termsHash", { termsHash: `0x${"00".repeat(31)}` }],
+    ["superseded termsHash field", { termsHash: supersededTermsFileDigest }],
+    ["zero settlement token", { settlementToken: zeroAddress }],
+    ["invalid settlement token", { settlementToken: "invalid" }],
+    ["short settlement token", { settlementToken: `0x${"00".repeat(19)}` }],
     ["missing committedProgramHash pin", { subjectPins: { targetSystemIdentity: word("target-system") } }],
     ["empty subjectPins", { subjectPins: {} }], ["null subjectPins", { subjectPins: null }],
     ["array subjectPins", { subjectPins: [] }],
@@ -885,7 +957,7 @@ describe("HostTerms loading refuses malformed authorizations", () => {
     });
   }
   for (const field of ["allowedPayoutRecipients", "operatorPayoutRecipient", "maxPassThrough", "factory", "implementation",
-    "termsHash", "subjectPins"] as const) {
+    "settlementToken", "subjectPins"] as const) {
     it(`requires the ${field} authorization field at load`, async () => {
       const supplied: Partial<ReturnType<typeof terms>> = terms();
       delete supplied[field];
@@ -963,16 +1035,18 @@ describe("HostTerms loading refuses malformed authorizations", () => {
     expect(() => Object.assign(validated.subjectPins, { committedProgramHash: word("replacement-program") }))
       .toThrow(TypeError);
   });
-  it("snapshots termsHash, program pins and bindingsRoot at key load", async () => {
+  it("snapshots settlementToken, program pins and bindingsRoot at key load", async () => {
     const candidate = input();
     const supplied = { ...terms(), bindingsRoot: computeBindingsRoot(candidate.bindings) };
     const bound = await loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied });
-    supplied.termsHash = changedByte(thursdayTermsHash);
+    supplied.settlementToken = otherRecipient;
     supplied.subjectPins.committedProgramHash = changedByte(s2ProgramHash);
     supplied.subjectPins.targetSystemIdentity = word("changed-system");
     supplied.bindingsRoot = word("changed-bindings-root");
     await accepts(candidate, bound);
-    await refusal(() => bound.signJobPolicyAcceptance(input([unit()], { termsHash: supplied.termsHash })),
+    await refusal(() => bound.signJobPolicyAcceptance(input([unit()], {
+      termsHash: termsHashFromUnits([unit()], supplied.settlementToken),
+    })),
       "terms_hash_mismatch");
     const programChanged = input();
     programChanged.subjectBlock.committedProgramHash = supplied.subjectPins.committedProgramHash;
@@ -1035,6 +1109,23 @@ describe("JobPolicy acceptance also enforces buildUnitConfig's context-free rule
 });
 
 describe("JobPolicy acceptance snapshots only strict data fields", () => {
+  it("derives terms from the same unit snapshot before the clock mutates caller units", async () => {
+    const candidate = input([unit({}, 1), unit({}, 0)]);
+    const signedPolicy = { ...candidate.policy };
+    const clock = vi.fn(() => {
+      candidate.units.reverse();
+      candidate.units[0].g += 1n;
+      candidate.units[0].reclaimAt += 1n;
+      candidate.units[0].requiredTier = 2;
+      candidate.units[0].requestedTier = 2;
+      return now;
+    });
+    const bound = await loadOperatorKey(path, 84532, { now, clock, terms: terms() });
+    const signature = await bound.signJobPolicyAcceptance(candidate);
+    expect(await verifyTypedData({ ...jobPolicyTypedData(signedPolicy), address: bound.address, signature })).toBe(true);
+    expect(clock).toHaveBeenCalledTimes(1);
+    expect(failure.signCalls).toBe(1);
+  });
   it("derives both principal checks from the snapshot before the clock mutates payer and subject words", async () => {
     const candidate = input();
     const signedPolicy = { ...candidate.policy };

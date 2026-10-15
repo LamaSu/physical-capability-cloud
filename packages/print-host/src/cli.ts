@@ -45,6 +45,7 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
     const signature = await key.signJobPolicyAcceptance(input);
     const output = {
       operator: key.address, chainId: config.chain.chainId, escrow: input.policy.escrow,
+      termsHash: input.policy.termsHash.toLowerCase(),
       acceptanceDigest: acceptanceDigest(domainSeparator(input.policy.chainId, input.policy.escrow), jobPolicyHash(input.policy)),
       ...commitments,
       subjectBlock: input.subjectBlock,
