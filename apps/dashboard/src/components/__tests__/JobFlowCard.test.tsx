@@ -38,13 +38,24 @@ describe("R15(b) exact truth table", () => {
       const dto = jobFlowFixture();
       Object.assign(dto.execution, { phase });
       Object.assign(dto.settlement, { payout, link });
-      expect(isFailedPrintWithNoRelease(dto), `${phase}/${payout}/${link}`).toBe(phase === "failed" && payout === "unknown" && link === "not_linked");
+      expect(isFailedPrintWithNoRelease(dto, new Set([dto.job.jobId])), `${phase}/${payout}/${link}`).toBe(phase === "failed" && payout === "unknown" && link === "not_linked");
+    }
+  });
+
+  it("an unlisted job never triggers across all 330 phase, payout and link combinations", async () => {
+    const { isFailedPrintWithNoRelease } = await import(cardModule);
+    for (const phase of phases) for (const payout of payouts) for (const link of links) {
+      const dto = jobFlowFixture();
+      dto.execution.phase = phase;
+      Object.assign(dto.settlement, { payout, link });
+      expect.soft(isFailedPrintWithNoRelease(dto, new Set(["another-job"])), `${phase}/${payout}/${link}`).toBe(false);
     }
   });
 });
 
 describe("JobFlowCard fixed rendering", () => {
   it("shows the R15 text with adjacent configured trace and explorer links only for the trigger", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
     vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "https://trace.example/jobs/{jobId}.json");
     vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
     for (const phase of phases) for (const payout of payouts) for (const link of links) {
@@ -65,17 +76,48 @@ describe("JobFlowCard fixed rendering", () => {
   });
 
   it("a failed print is neutral and never pending or waiting", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
     const host = await render();
+    expect(host.textContent).toContain(noRelease);
     expect(host.textContent).not.toMatch(/pending|waiting/i);
     expect(host.querySelector('[aria-label="Money"] span')!.className).toBe(payoutClass("unknown", false));
     expect(host.innerHTML).not.toMatch(/green|emerald/);
   });
 
-  it.each(payouts)("Paid appears only for payout %s", async (payout) => {
+  it.each([
+    ["paid", "Released to the operator", "Released to the operator (as of the last read)"],
+    ["reported_released", "Recorded as released (not confirmed)", "Recorded as released (not confirmed) (as of the last read)"],
+    ["refunded", "Refunded to the payer (operator not paid)", "Refunded to the payer (operator not paid) (as of the last read)"],
+    ["not_paid", "Not released", "Not released (as of the last read)"],
+    ["simulated", "Simulated escrow: no money moved", "Simulated escrow: no money moved (as of the last read)"],
+    ["unknown", "Payment status unknown", "Payment status unknown (as of the last read)"],
+  ] as const)("pins exact money badge text fresh and stale for %s", async (payout, freshText, staleText) => {
     const dto = jobFlowFixture();
     dto.settlement.payout = payout;
-    const host = await render(dto);
-    expect([...host.querySelectorAll('[aria-label="Money"] span')].some(e => e.textContent === "Paid")).toBe(payout === "paid");
+    dto.settlement.link = "linked";
+    for (const [stale, expected] of [[false, freshText], [true, staleText]] as const) {
+      const host = await render(dto, stale);
+      expect.soft(host.querySelector('[aria-label="Money"] span')!.textContent, `stale=${stale}`).toBe(expected);
+    }
+  });
+
+  it.each([
+    ["trace", "", address],
+    ["explorer", "/trace/{jobId}.json", ""],
+    ["both", "", ""],
+  ])("never renders the R15 line when %s citations are missing", async (_missing, trace, escrow) => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", trace);
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", escrow);
+    for (const stale of [false, true]) {
+      const host = await render(jobFlowFixture(), stale);
+      const money = host.querySelector('[aria-label="Money"]')!;
+      expect.soft(money.textContent).not.toContain(noRelease);
+      expect.soft(money.querySelector("span")!.textContent).toBe(stale ? "Payment status unknown (as of the last read)" : "Payment status unknown");
+      expect.soft(money.querySelector("span")!.className).toContain("text-white/60");
+    }
   });
 
   it.each(["settled", "refunded", "waiting", "running", "failed", "unknown"] as MoneyTone[])("payout controls money color despite record tone %s", async (tone) => {
@@ -108,10 +150,13 @@ describe("JobFlowCard fixed rendering", () => {
     const host = await render(dto, true);
     const money = host.querySelector('[aria-label="Money"]')!;
     expect(money.querySelector("span")!.className).toBe(payoutClass("paid", true));
-    expect(money.textContent).toContain("Paid");
+    expect(money.querySelector("span")!.textContent).toBe("Released to the operator (as of the last read)");
   });
 
   it("keeps received evidence unverified and capture checks separate from outcome and money", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
     const dto = jobFlowFixture();
     Object.assign(dto.verification.captureChecks, { state: "present", pass: 7, partial: 2, fail: 1 });
     const host = await render(dto);
@@ -151,6 +196,29 @@ describe("JobFlowCard fixed rendering", () => {
 });
 
 describe("JobFlowCard href boundaries", () => {
+  it("an invalid job id cannot opt into V-next trace or fallback links", async () => {
+    const dto = jobFlowFixture();
+    dto.job.jobId = "https://evil.example/a?b#c";
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", dto.job.jobId);
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
+    const host = await render(dto);
+    expect.soft(host.querySelectorAll("a")).toHaveLength(0);
+    expect.soft(host.textContent).not.toContain(noRelease);
+  });
+
+  it.each(links)("an unlisted job gets no trace or V-next fallback explorer for link %s", async (link) => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "another-job");
+    vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
+    vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", address);
+    const dto = jobFlowFixture();
+    dto.settlement.link = link;
+    const host = await render(dto);
+    expect.soft(host.querySelectorAll("a")).toHaveLength(0);
+    expect.soft(host.textContent).not.toContain(noRelease);
+    expect.soft(host.querySelector('[aria-label="Money"] span')!.textContent).toBe("Payment status unknown");
+  });
+
   it("never turns DTO names or URL-like job ids into hrefs", async () => {
     const dto = jobFlowFixture();
     Object.assign(dto.job, { jobId: "javascript:alert(1)", capabilityName: "https://evil.example", kernelName: '<img src=x onerror="alert(1)">' });
@@ -162,19 +230,21 @@ describe("JobFlowCard href boundaries", () => {
   });
 
   it.each(["javascript:alert(1)/{jobId}", "http://trace.example/{jobId}", "//trace.example/{jobId}", "/\\evil/{jobId}", "/trace/\n{jobId}", "https://trace.example/no-placeholder"])("refuses unsafe trace config %j", async (template) => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
     vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", template);
     expect((await render()).querySelectorAll("a")).toHaveLength(0);
   });
 
   it("encodes job ids into a safe relative trace config", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", " job-print-1 , job-print-1 ");
     vi.stubEnv("VITE_DEMO_TRACE_URL_TEMPLATE", "/trace/{jobId}.json");
     const dto = jobFlowFixture();
-    dto.job.jobId = 'https://evil.example/a?b#c';
     const host = await render(dto);
     expect(host.querySelector("a")!.getAttribute("href")).toBe(`/trace/${encodeURIComponent(dto.job.jobId)}.json`);
   });
 
   it.each(["0xabc", "javascript:alert(1)", `0x${"g".repeat(40)}`, `0x${"a".repeat(41)}`])("refuses invalid explorer config %s", async (hex) => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
     vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", hex);
     const host = await render();
     expect(host.querySelectorAll("a")).toHaveLength(0);
@@ -182,6 +252,7 @@ describe("JobFlowCard href boundaries", () => {
   });
 
   it("builds transaction explorer links only on the fixed origin", async () => {
+    vi.stubEnv("VITE_VNEXT_JOB_IDS", "job-print-1");
     vi.stubEnv("VITE_VNEXT_ESCROW_ADDRESS", tx);
     const host = await render();
     expect(host.querySelector(`a[href="https://sepolia.basescan.org/tx/${tx}"]`)).not.toBeNull();

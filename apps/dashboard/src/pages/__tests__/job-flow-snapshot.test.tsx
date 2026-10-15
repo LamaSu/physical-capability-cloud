@@ -135,6 +135,6 @@ describe("job flow snapshot boundary", () => {
     expect(host.textContent).toContain(`Snapshot read at ${dto.asOf}`);
     const money = host.querySelector('[aria-label="Money"]')!;
     expect(money.querySelector("span")!.className).toContain("text-white/60");
-    expect(money.textContent).toContain("Paid");
+    expect(money.querySelector("span")!.textContent).toBe("Released to the operator (as of the last read)");
   });
 });

@@ -211,7 +211,6 @@ function DashboardShell() {
               <Route path="/build/:type" element={<BuilderPage />} />
               <Route path="/workflow" element={<WorkflowPage />} />
               <Route path="/jobs" element={<JobsPage />} />
-              <Route path="/jobs/flow" element={<JobFlowPage />} />
               <Route path="/jobs/:jobId" element={<JobDetailPage />} />
               <Route path="/kernels" element={<KernelsPage />} />
               <Route path="/kernels/leaderboard" element={<KernelLeaderboardPage />} />

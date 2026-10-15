@@ -155,7 +155,7 @@ describe("live job flow reads", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await advance(1);
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(moneyBadge().textContent).toBe("Paid");
+    expect(moneyBadge().textContent).toBe("Released to the operator");
     await advance(60_000);
     expect(fetchMock).toHaveBeenCalledTimes(4);
     await act(async () => refresh().click());
@@ -195,7 +195,7 @@ describe("live job flow reads", () => {
     fetchMock.mockResolvedValueOnce(response(200, dto));
     await render();
     expect(host.textContent).toContain("Last good paid print");
-    expect(moneyBadge().textContent).toBe("Paid");
+    expect(moneyBadge().textContent).toBe("Released to the operator");
     fetchMock.mockResolvedValue(response(status as number));
     await act(async () => refresh().click());
     await settle();
@@ -221,7 +221,7 @@ describe("live job flow reads", () => {
     expect(host.textContent).toContain("Last good paid print");
     expect(host.textContent).toContain(dto.asOf);
     expect(host.textContent).toContain("last successful read");
-    expect(moneyBadge().textContent).toBe("Paid");
+    expect(moneyBadge().textContent).toBe("Released to the operator (as of the last read)");
     expect(moneyBadge().className).toContain("bg-white/5");
     expect(moneyBadge().className).not.toMatch(/green|gold|red/);
   });

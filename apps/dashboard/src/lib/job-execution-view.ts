@@ -90,7 +90,7 @@ export const NOTICE_TEXT: Readonly<Record<JobExecutionNoticeCode, string>> = Obj
  * cannot make it.
  */
 export function payoutBadge(payout: PayoutState, stale: boolean): { label: string; color: MoneyBadgeColor } {
-  const v = PAYOUT_VIEW[payout];
+  const v = Object.prototype.hasOwnProperty.call(PAYOUT_VIEW, payout) ? PAYOUT_VIEW[payout] : PAYOUT_VIEW.unknown;
   return stale ? { label: `${v.label} (as of the last read)`, color: "gray" } : v;
 }
 

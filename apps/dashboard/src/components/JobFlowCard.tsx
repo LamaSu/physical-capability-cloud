@@ -1,20 +1,13 @@
 import React from "react";
 import { GlowBadge } from "@pcc/ui";
-import type { EvidenceAxisState, JobExecutionDTO, PayoutState, SettlementLink } from "@pcc/spec";
+import type { EvidenceAxisState, JobExecutionDTO, SettlementLink } from "@pcc/spec";
 import { PHASE_VIEW, NOTICE_TEXT, payoutBadge } from "../lib/job-execution-view.js";
+import { configuredVnextJobIds } from "../lib/vnext-job-config.js";
 
 const EVIDENCE_COPY: Record<EvidenceAxisState, string> = {
   none: "No evidence received",
   received: "Evidence received (not verified here)",
   unavailable: "Evidence could not be read",
-};
-const PAYOUT_COPY: Record<PayoutState, string> = {
-  paid: "Paid",
-  reported_released: "Reported released (payment not confirmed)",
-  refunded: "Refunded to the payer (operator not paid)",
-  not_paid: "Not paid: no release in the settlement record",
-  simulated: "Simulated settlement: no money moved",
-  unknown: "Payment status unknown",
 };
 const LINK_COPY: Record<SettlementLink, string> = {
   linked: "Settlement record linked",
@@ -29,11 +22,12 @@ const CAPTURE_COPY = {
   unavailable: "Capture checks could not be read",
 };
 
-/** Steward R15(b): this exception is exactly these three clauses. */
-export function isFailedPrintWithNoRelease(dto: JobExecutionDTO): boolean {
+/** Steward R15(b): all four conditions, including membership from the run trace. */
+export function isFailedPrintWithNoRelease(dto: JobExecutionDTO, vnextJobIds: ReadonlySet<string>): boolean {
   return dto.execution.phase === "failed"
     && dto.settlement.payout === "unknown"
-    && dto.settlement.link === "not_linked";
+    && dto.settlement.link === "not_linked"
+    && vnextJobIds.has(dto.job.jobId);
 }
 
 function fixed<T extends string>(copy: Record<T, string>, value: string, fallback: string): string {
@@ -53,8 +47,8 @@ function traceHref(jobId: string): string | null {
   }
 }
 
-function explorerHref(dto: JobExecutionDTO): string | null {
-  const hex: unknown = dto.settlement.record?.contractAddress ?? import.meta.env.VITE_VNEXT_ESCROW_ADDRESS;
+function explorerHref(dto: JobExecutionDTO, isVnext: boolean): string | null {
+  const hex: unknown = dto.settlement.record?.contractAddress ?? (isVnext ? import.meta.env.VITE_VNEXT_ESCROW_ADDRESS : undefined);
   if (typeof hex !== "string") return null;
   const kind = /^0x[0-9a-fA-F]{40}$/.test(hex) ? "address" : /^0x[0-9a-fA-F]{64}$/.test(hex) ? "tx" : null;
   return kind ? `https://sepolia.basescan.org/${kind}/${hex}` : null;
@@ -81,10 +75,11 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 
 /** A text-only projection. No fetching, side effects, raw status claims or DTO-provided links. */
 export function JobFlowCard({ dto, stale }: { dto: JobExecutionDTO; stale: boolean }) {
-  const trace = traceHref(dto.job.jobId);
-  const explorer = explorerHref(dto);
-  const noRelease = isFailedPrintWithNoRelease(dto);
-  const moneyColor = payoutBadge(dto.settlement.payout, stale).color;
+  const vnextJobIds = configuredVnextJobIds();
+  const trace = vnextJobIds.has(dto.job.jobId) ? traceHref(dto.job.jobId) : null;
+  const explorer = explorerHref(dto, vnextJobIds.has(dto.job.jobId));
+  const noRelease = isFailedPrintWithNoRelease(dto, vnextJobIds) && trace !== null && explorer !== null;
+  const money = payoutBadge(dto.settlement.payout, stale);
   const phase = Object.prototype.hasOwnProperty.call(PHASE_VIEW, dto.execution.phase)
     ? PHASE_VIEW[dto.execution.phase].label : "Print phase unknown";
   const cc = dto.verification.captureChecks;
@@ -122,7 +117,7 @@ export function JobFlowCard({ dto, stale }: { dto: JobExecutionDTO; stale: boole
     </Row>
     <Row label="Money">
       <div className="flex flex-wrap items-center gap-2">
-        <GlowBadge color={moneyColor}>{noRelease ? "Not paid: no release recorded" : fixed(PAYOUT_COPY, dto.settlement.payout, "Payment status unknown")}</GlowBadge>
+        <GlowBadge color={money.color}>{noRelease ? "Not paid: no release recorded" : money.label}</GlowBadge>
         {noRelease && <Trace href={trace} />}
         {explorer ? <a className="underline" href={explorer}>Base Sepolia explorer</a> : <span>explorer link not configured</span>}
       </div>
