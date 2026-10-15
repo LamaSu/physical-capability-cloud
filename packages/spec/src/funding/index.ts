@@ -20,13 +20,16 @@
  * PCC MVP units bind all three commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots);
  * bind jobPolicyHash as well when you hold it. An MVP integration never passes allowUnchecked.
  * Values come from the caller's own pins;
- * Thursday PRINT uses PRINT_UNIT_THURSDAY_V1 from economics' decisions and exact terms-file bytes. Never copy
+ * Thursday PRINT uses printUnitThursdayExpectation and economics' PRINT_UNIT_THURSDAY_V1 pins. Its termsHash is
+ * derived from the funded configs as v2.1 (#8165), carried privately until evidence's public producer (#8168). Never copy
  * values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
  * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.
  * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
  * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
- * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within
- * the permitted window. A mixed tier set hands the choice of release authority to the
+ * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set, reclaimAt within
+ * the permitted window, each unit's feeBps up to maxFeeBps (which fixes f and n), its fee recipient within
+ * feeRecipients, and its compositionRoot within compositionRoots. Deriving termsHash binds it to these configs;
+ * it does not independently constrain these choices. A mixed tier set hands the choice of release authority to the
  * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
  * the cohort's assertion once its challenge window closes. The buyer can contest it only by posting a bond within
  * that window, which opens an appeal. The unit still releases unless the appeal rules for the buyer, and appeal
