@@ -116,6 +116,10 @@ There is no key export; encryption and Windows storage are not in v1.
 Only the API key that approved a link can list or revoke it through the API.
 For a link approved in the dashboard, use Wallets → Unlink in the dashboard;
 `revoke --api-key` refuses clearly when that credential did not approve it.
+Prefer `PCC_API_KEY`: `--api-key` is visible to other local users in argv and
+can remain in shell history. Create requests include the installed CLI version.
+Device links accept `--kernel-id <id>` on `init` or `link`.
+An already approved wallet refuses `link`; revoke it before linking again.
 
 ## License
 

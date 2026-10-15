@@ -135,6 +135,7 @@ class Gateway {
           role: body.role as string,
           uri: `${this.origin}/link`,
         };
+        if (body.kernelId !== undefined) message.kernelId = body.kernelId as string;
         this.options.mutateEd?.(message);
         this.signedMessage = PREFIX + canonical(message);
       }
@@ -713,5 +714,59 @@ describe("approving credential refusal", () => {
     expect(stderr.join("")).toContain("This API key did not approve the link");
     expect(stderr.join("")).toContain("dashboard (Wallets → Unlink)");
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+  });
+});
+
+describe("wallet create metadata and options", () => {
+  it("warns about argv API keys and prefers PCC_API_KEY silently", async () => {
+    const gateway = await linked();
+    expect(await run(gateway, "revoke", ["--api-key", "owner-api-token"])).toBe(0);
+    expect(stderr.join("")).toContain("--api-key is visible to other local users; prefer PCC_API_KEY");
+    stderr.length = 0;
+    vi.stubEnv("PCC_API_KEY", "owner-api-token");
+    expect(await run(gateway, "revoke")).toBe(0);
+    expect(stderr).toEqual([]);
+  });
+  it("includes the installed client version in anonymous create", async () => {
+    vi.stubEnv("PCC_API_KEY", "owner-api-token");
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    const version = (JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
+    expect(gateway.created.clientInfo).toEqual({ name: "pcc-wallet", version });
+    expect(gateway.requests[0]?.headers.authorization).toBeUndefined();
+  });
+  it("checks an existing label before showing consent or prompting", async () => {
+    const gateway = await linked();
+    stdout.length = 0;
+    prompt.mockClear();
+    gateway.requests.length = 0;
+    expect(await run(gateway, "init", [], "agent", "wallet-test", true)).toBe(1);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(stdout).toEqual([]);
+    expect(stderr.join("")).toContain("wallet_file_already_exists");
+    expect(gateway.requests).toEqual([]);
+  });
+  it("sends and signs a device kernelId accepted by W1", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    expect(await run(gateway, "init", ["--yes", "--kernel-id", "printer_1"], "device")).toBe(0);
+    expect(gateway.created.kernelId).toBe("printer_1");
+    expect(JSON.parse(gateway.signedMessage.slice(PREFIX.length)).kernelId).toBe("printer_1");
+    expect(gateway.signatureVerified).toBe(true);
+  });
+  it("rejects a gateway that changes the requested device kernelId", async () => {
+    const gateway = await new Gateway({ mutateEd: (message) => { message.kernelId = "printer_2"; } }).start();
+    expect(await run(gateway, "init", ["--yes", "--kernel-id", "printer_1"], "device")).toBe(1);
+    expect(stderr.join("")).toContain("refusing to sign: kernelId mismatch");
+    expect(gateway.proofs()).toEqual([]);
+  });
+  it.each(["", "bad id", "eip155:84532:x", "ED25519:x", "x".repeat(129)])("refuses invalid device kernelId %# before creating", async (kernelId) => {
+    expect(await main(["init", "--role", "device", "--label", "wallet-test", "--gateway", "http://127.0.0.1:9", "--yes", "--kernel-id", kernelId], runtime())).toBe(1);
+    expect(stderr.join("")).toContain("invalid_kernel_id");
+    expect(await readdir(walletDir)).toEqual([]);
+  });
+  it("refuses an agent kernelId before creating", async () => {
+    expect(await main(["init", "--role", "agent", "--label", "wallet-test", "--gateway", "http://127.0.0.1:9", "--yes", "--kernel-id", "printer_1"], runtime())).toBe(1);
+    expect(stderr.join("")).toContain("kernel_id_requires_device");
+    expect(await readdir(walletDir)).toEqual([]);
   });
 });

@@ -1,17 +1,19 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveConfig } from "../lib/config.js";
 import { WalletError } from "./errors.js";
 import {
-  createWallet, readWallet, updateLink, validateLabel, walletPath,
+  assertWalletAbsent, createWallet, readWallet, updateLink, validateLabel, walletPath,
   type WalletRecord, type Role, type KeyType,
 } from "./keystore.js";
 import { signWalletMessage } from "./keys.js";
 import { validateProofMessage } from "./proof.js";
 import { requestFunding, validateTransportUrl, walletRequest } from "./http.js";
+
+const CLIENT_VERSION = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 export interface WalletRuntime {
   stdout: (text: string) => void;
@@ -40,6 +42,7 @@ Options:
   --key-type secp256k1|ed25519          Defaults: agent secp256k1, device ed25519
   --chain-id 84532                     Base Sepolia only
   --gateway <origin>                   Same gateway resolution as onboard
+  --kernel-id <id>                     Optional device binding on init/link
   --yes                               Skip typed create only on non-TTY stdin
   --api-key <owner-key>                Revoke only (env: PCC_API_KEY)
   --reason <reason>                    Revoke reason: lowercase letters/_
@@ -61,6 +64,7 @@ interface Args {
   yes: boolean;
   apiKey?: string;
   reason?: string;
+  kernelId?: string;
 }
 
 function parseArgs(argv: string[]): Args | null {
@@ -75,7 +79,7 @@ function parseArgs(argv: string[]): Args | null {
   for (let i = 0; i < flags.length; i++) {
     const flag = flags[i];
     if (flag === "--yes") { yes = true; continue; }
-    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason"].includes(flag)) {
+    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason", "--kernel-id"].includes(flag)) {
       throw new WalletError("invalid_wallet_option");
     }
     const value = flags[++i];
@@ -97,9 +101,15 @@ function parseArgs(argv: string[]): Args | null {
   }
   const reason = values["--reason"];
   if (reason !== undefined && !/^[a-z_]{1,32}$/.test(reason)) throw new WalletError("invalid_revoke_reason");
+  const kernelId = values["--kernel-id"];
+  if (kernelId !== undefined) {
+    if (role !== "device") throw new WalletError("kernel_id_requires_device");
+    if (!/^[\x21-\x7E]{1,128}$/.test(kernelId) || /^(?:eip155|ed25519):/i.test(kernelId)) throw new WalletError("invalid_kernel_id");
+    if (command !== "init" && command !== "link") throw new WalletError("invalid_wallet_option");
+  }
   return {
     command: command as Command, role, label, keyType, chainId: 84532,
-    gateway: values["--gateway"], yes, apiKey: values["--api-key"], reason,
+    gateway: values["--gateway"], yes, apiKey: values["--api-key"], reason, kernelId,
   };
 }
 
@@ -158,11 +168,13 @@ function saveState(wallet: WalletRecord, data: Record<string, unknown>): WalletR
   });
 }
 
-async function linkWallet(wallet: WalletRecord, io: WalletRuntime): Promise<WalletRecord> {
+async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: string): Promise<WalletRecord> {
   const created = await walletRequest(wallet.gatewayOrigin, "/api/wallets/link-requests", "POST", {
     keyType: wallet.keyType,
     ...(wallet.keyType === "secp256k1" ? { address: wallet.address } : { publicKey: wallet.publicKey }),
     role: wallet.role, label: wallet.label, chainId: wallet.chainId,
+    clientInfo: { name: "pcc-wallet", version: CLIENT_VERSION },
+    ...(kernelId === undefined ? {} : { kernelId }),
   });
   if (!identifier(created.requestId) || !created.requestId.startsWith("lr_")
     || typeof created.userCode !== "string" || !/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(created.userCode)
@@ -172,7 +184,7 @@ async function linkWallet(wallet: WalletRecord, io: WalletRuntime): Promise<Wall
   const expiresAt = Date.parse(created.expiresAt);
   if (!Number.isFinite(expiresAt) || expiresAt <= io.now()) invalidResponse();
   wallet = updateLink(wallet, { requestId: created.requestId, status: "pending_proof" });
-  validateProofMessage(created.message, wallet, created.requestId, io.now());
+  validateProofMessage(created.message, wallet, created.requestId, io.now(), kernelId);
   const signature = await signWalletMessage(wallet, created.message);
   const proof = await walletRequest(wallet.gatewayOrigin, `${requestPath(created.requestId)}/proof`, "POST", { signature });
   if (proof.status !== "awaiting_approval") invalidResponse();
@@ -212,6 +224,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
   }
   const origin = gatewayOrigin(args.gateway);
   if (args.command === "init") {
+    assertWalletAbsent(args.label);
     io.stdout(`pcc wallet init --role ${args.role} --label ${args.label}\nThis creates a NEW wallet key on this computer:\n  file      ${walletPath(args.label)} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser; then test funds arrive.\nType "create" to continue:\n`);
     if (!(args.yes && !io.stdinIsTTY) && (await io.prompt()).trim() !== "create") {
       throw new WalletError("creation_cancelled");
@@ -221,7 +234,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       keyType: args.keyType ?? (args.role === "agent" ? "secp256k1" : "ed25519"),
       chainId: args.chainId, gatewayOrigin: origin, createdAt: new Date(io.now()).toISOString(),
     });
-    wallet = await linkWallet(wallet, io);
+    wallet = await linkWallet(wallet, io, args.kernelId);
     if (await fundWallet(wallet, io)) io.stdout("ready\n");
     return 0;
   }
@@ -237,7 +250,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
   switch (args.command) {
     case "link":
       if (wallet.link.status === "approved" && wallet.link.linkId) throw new WalletError("wallet_already_linked");
-      await linkWallet(wallet, io);
+      await linkWallet(wallet, io, args.kernelId);
       return 0;
     case "fund":
       await fundWallet(wallet, io);
@@ -282,6 +295,7 @@ export async function main(argv: string[] = process.argv.slice(2), overrides: Pa
   try {
     const args = parseArgs(argv);
     if (!args) { io.stdout(HELP); return 0; }
+    if (args.apiKey) io.stderr("Note: --api-key is visible to other local users; prefer PCC_API_KEY.\n");
     return await execute(args, io);
   } catch (error) {
     const safe = error instanceof WalletError ? error : new WalletError("wallet_operation_failed");

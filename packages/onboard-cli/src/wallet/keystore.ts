@@ -62,6 +62,13 @@ export function walletPath(label: string): string {
   return join(storageDirectory(), `${label}.json`);
 }
 
+export function assertWalletAbsent(label: string): void {
+  try {
+    requirePosix();
+    if (optionalStat(walletPath(label))) throw new WalletError("wallet_file_already_exists");
+  } catch (error) { wrap(error); }
+}
+
 function optionalStat(path: string): Stats | undefined {
   try { return lstatSync(path); } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
