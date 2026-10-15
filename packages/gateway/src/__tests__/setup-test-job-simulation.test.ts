@@ -447,7 +447,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     }, 20_000);
   });
 
-  // ── 3b'. Real IPP has no transport-loading or simulation fallback ────
+  // ── 3b'. Real IPP refuses document-free jobs without simulation ────
 
   describe("an IPP configured for real transport", () => {
     it("refuses a document-free test job as simulated:false, passed:false", async () => {
