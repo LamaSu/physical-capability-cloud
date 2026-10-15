@@ -81,6 +81,19 @@ describe("wallet-link proof messages", () => {
     expect(await verifyProofMessage({ ...row, message }, signature.slice(2), config, now)).toBe(false);
   });
 
+  it.each(["agent", "device"] as const)("pins the exact Ed25519 %s message JSON key set", role => {
+    const pair = generateKeyPairSync("ed25519");
+    const publicHex = pair.publicKey.export({ type: "spki", format: "der" }).subarray(-32).toString("hex");
+    const row = { ...request("ed25519", publicHex), role, kernel_id: role === "device" ? "kernel_test_device" : null };
+    const message = composeProofMessage(row, config);
+    expect(message.startsWith("PCC-LINK-V1\n")).toBe(true);
+    expect(Object.keys(JSON.parse(message.slice("PCC-LINK-V1\n".length))).sort()).toEqual([
+      "chainId", "consent", "domain", "env", "expirationTime", "issuedAt",
+      ...(role === "device" ? ["kernelId"] : []),
+      "label", "nonce", "publicKey", "requestId", "role", "uri",
+    ]);
+  });
+
   it.each([
     ["env", { env: "prod" }],
     ["domain", { domain: "other.example", publicOrigin: "https://other.example", uri: "https://other.example/link" }],

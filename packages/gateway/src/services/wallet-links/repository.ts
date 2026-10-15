@@ -26,6 +26,7 @@ type LinkRow = {
   id: string; account_id: string; role: "agent" | "device"; key_type: "secp256k1" | "ed25519";
   address_or_pubkey: string; chain_id: number; label: string; created_at: string; expires_at: string | null;
   revoked_at: string | null;
+  account_proof: "siwe" | "claimed";
 };
 
 export class WalletLinkError extends Error {
@@ -119,7 +120,7 @@ export function lookupLinkRequestByCode(code: string, now: number): LinkRequestR
       AND expires_at > ${new Date(now).toISOString()}`);
 }
 
-export function decideLinkRequest(id: string, accountId: string, decision: "approve" | "deny", now: number, approvedByKeyId: string | null = null) {
+export function decideLinkRequest(id: string, accountId: string, decision: "approve" | "deny", now: number, approvedByKeyId: string | null = null, accountProof: "siwe" | "claimed" = "claimed") {
   const db = getStore().db;
   return db.transaction(tx => {
     const timestamp = new Date(now).toISOString();
@@ -145,18 +146,22 @@ export function decideLinkRequest(id: string, accountId: string, decision: "appr
     tx.run(sql`INSERT INTO wallet_links
       (id, account_id, role, subject_type, subject_id, key_type, address_or_pubkey, chain_id, label,
        consent_version, consent_sha256, proof_message, proof_signature, approval_signature,
-       request_id, approved_by, created_at, expires_at, created_by_key_id, approved_by_key_id)
+       request_id, approved_by, created_at, expires_at, created_by_key_id, approved_by_key_id, account_proof)
       VALUES (${linkId}, ${accountId}, ${row.role}, ${row.role}, ${row.kernel_id}, ${row.key_type},
        ${row.address_or_pubkey}, ${row.chain_id}, ${row.label}, ${row.consent_version}, ${row.consent_sha256},
-       ${row.message}, ${row.proof_signature}, NULL, ${row.id}, ${accountId}, ${timestamp}, ${expiresAt}, ${row.created_by_key_id}, ${approvedByKeyId})`);
+       ${row.message}, ${row.proof_signature}, NULL, ${row.id}, ${accountId}, ${timestamp}, ${expiresAt}, ${row.created_by_key_id}, ${approvedByKeyId}, ${accountProof})`);
     tx.run(sql`UPDATE wallet_link_requests SET link_id = ${linkId} WHERE id = ${row.id}`);
     return { status: "approved" as const, linkId, accountId };
   }, { behavior: "immediate" });
 }
 
-export function listWalletLinks(accountId: string, now: number, approvedByKeyId: string | null = null) {
-  return getStore().db.all<LinkRow>(sql`SELECT * FROM wallet_links WHERE account_id = ${accountId}
-    AND ${approvedByKeyId === null ? sql`approved_by_key_id IS NULL` : sql`approved_by_key_id = ${approvedByKeyId}`}
+function ownershipFilter(accountId: string, approvedByKeyId: string | null, provenAddress: string | null) {
+  return provenAddress ? sql`lower(account_id) = ${provenAddress.toLowerCase()}` : sql`account_id = ${accountId}
+    AND ${approvedByKeyId === null ? sql`approved_by_key_id IS NULL` : sql`approved_by_key_id = ${approvedByKeyId}`}`;
+}
+
+export function listWalletLinks(accountId: string, now: number, approvedByKeyId: string | null = null, provenAddress: string | null = null) {
+  return getStore().db.all<LinkRow>(sql`SELECT * FROM wallet_links WHERE ${ownershipFilter(accountId, approvedByKeyId, provenAddress)}
     ORDER BY created_at, id`).map(row => ({
     linkId: row.id, role: row.role, keyType: row.key_type,
     ...(row.key_type === "secp256k1" ? { address: row.address_or_pubkey } : { publicKey: row.address_or_pubkey }),
@@ -166,14 +171,13 @@ export function listWalletLinks(accountId: string, now: number, approvedByKeyId:
   }));
 }
 
-export function revokeWalletLink(id: string, accountId: string, reason: string | undefined, now: number, approvedByKeyId: string | null = null) {
+export function revokeWalletLink(id: string, accountId: string, reason: string | undefined, now: number, approvedByKeyId: string | null = null, provenAddress: string | null = null) {
   const timestamp = new Date(now).toISOString();
   const row = getStore().db.get<{ revoked_at: string }>(sql`UPDATE wallet_links
     SET revoked_at = COALESCE(revoked_at, ${timestamp}),
       revoked_by = CASE WHEN revoked_at IS NULL THEN ${accountId} ELSE revoked_by END,
       revoke_reason = CASE WHEN revoked_at IS NULL THEN ${reason ?? null} ELSE revoke_reason END
-    WHERE id = ${id} AND account_id = ${accountId}
-      AND ${approvedByKeyId === null ? sql`approved_by_key_id IS NULL` : sql`approved_by_key_id = ${approvedByKeyId}`}
+    WHERE id = ${id} AND ${ownershipFilter(accountId, approvedByKeyId, provenAddress)}
       RETURNING revoked_at`);
   if (!row) throw new WalletLinkError(404, "not_found");
   return { status: "revoked", revokedAt: row.revoked_at };
@@ -186,6 +190,6 @@ export async function resolveActiveWalletLink(input: { keyType?: "secp256k1"; ad
     WHERE key_type = ${input.keyType ?? "secp256k1"} AND lower(address_or_pubkey) = ${input.address.toLowerCase()}
       AND chain_id = ${input.chainId} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ${now})`);
   if (!row) return null;
-  return { linkId: row.id, accountId: row.account_id, role: row.role, label: row.label,
+  return { linkId: row.id, accountId: row.account_id, accountProof: row.account_proof, role: row.role, label: row.label,
     keyType: row.key_type, chainId: row.chain_id, createdAt: row.created_at, expiresAt: row.expires_at };
 }
