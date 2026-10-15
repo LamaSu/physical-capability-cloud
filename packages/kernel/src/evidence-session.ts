@@ -39,6 +39,7 @@
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
+import { failureText } from "./failure-text.js";
 
 /** An event as an adapter emits it, before the emitter ids and hashes it. */
 export type EmittedEvidence = Omit<EvidenceEvent, "id" | "hash">;
@@ -187,8 +188,7 @@ function ask(adapter: EvidenceAdapter, tap: Tap): Promise<void> {
 }
 
 const logUnanswered = (adapterId: string) => (err: unknown) => {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(`[evidence-session] adapter ${adapterId} could not confirm its evidence is complete: ${message}`);
+  console.error(`[evidence-session] adapter ${adapterId} could not confirm its evidence is complete: ${failureText(err)}`);
 };
 
 /**

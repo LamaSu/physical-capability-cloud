@@ -7,6 +7,8 @@ node_modules
 *.md
 packages/contracts/out
 packages/contracts/cache
+packages/contracts/out-testnet
+packages/contracts/cache-testnet
 packages/contracts/lib
 ai
 scripts/.daily-report-state.json

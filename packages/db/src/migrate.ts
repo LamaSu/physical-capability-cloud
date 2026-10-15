@@ -1996,7 +1996,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
   safeAddColumn("api_keys", "onchain_chain_id", "INTEGER");
   safeAddColumn("api_keys", "onchain_attempted_at", "TEXT");
   safeAddColumn("api_keys", "onchain_error", "TEXT");
-  // Option A ownership stopgap: per-operator operational wallet.
+  // Wallet metadata columns remain compatible with existing table definitions.
   safeAddColumn("api_keys", "operator_wallet_address", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_private_key", "TEXT");
   safeAddColumn("api_keys", "operator_wallet_custody", "TEXT DEFAULT 'gateway'");
@@ -2026,6 +2026,119 @@ export function migrateDatabase(sqlite: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS passkey_sessions_expires_at ON passkey_sessions(expires_at);
   `);
+
+  // Settlement package receipt and one-use gateway challenge ledger.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS gateway_receipts (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      kernel_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      escrow TEXT NOT NULL,
+      settlement_unit_id TEXT NOT NULL,
+      package_digest TEXT NOT NULL,
+      received_at INTEGER NOT NULL,
+      receipt_digest TEXT NOT NULL,
+      signature_hex TEXT NOT NULL,
+      kid TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_job_idx
+      ON gateway_receipts(job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS gateway_receipts_unit_idx
+      ON gateway_receipts(chain_id, escrow, settlement_unit_id);
+
+    CREATE TABLE IF NOT EXISTS settlement_challenges (
+      id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      escrow TEXT NOT NULL,
+      settlement_unit_id TEXT NOT NULL,
+      nonce TEXT NOT NULL,
+      t_challenge_ref TEXT NOT NULL,
+      state TEXT NOT NULL CONSTRAINT settlement_challenges_state_check CHECK (state IN ('issued', 'consumed')),
+      issued_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS settlement_challenges_open_unit_idx
+      ON settlement_challenges(chain_id, escrow, settlement_unit_id) WHERE state = 'issued';
+  `);
+  scrubOperatorWalletPrivateKeys(sqlite);
+}
+
+/**
+ * NULL the legacy key column and zero the bytes this UPDATE frees. Whenever
+ * keys were NULLed, or an unfinished compaction is found, VACUUM rebuilds the
+ * live DB file so earlier copies cannot survive in live or free pages. A
+ * checked TRUNCATE checkpoint then empties the WAL.
+ *
+ * This cannot erase pre-existing backups/volume snapshots or filesystem
+ * blocks belonging to deleted or truncated files. VACUUM holds the boot-time
+ * write lock and needs roughly the DB's size in free volume space for the WAL,
+ * plus temporary space for the rebuild.
+ */
+export function scrubOperatorWalletPrivateKeys(sqlite: Database.Database): void {
+  const columns = sqlite.prepare("PRAGMA table_info(api_keys)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "operator_wallet_private_key")) return;
+
+  const previousSecureDelete = sqlite.pragma("secure_delete", { simple: true }) as number;
+  let changes: number;
+  try {
+    sqlite.pragma("secure_delete = ON");
+    changes = sqlite.transaction(() => {
+      const updated = sqlite.prepare(
+        "UPDATE api_keys SET operator_wallet_private_key = NULL WHERE operator_wallet_private_key IS NOT NULL",
+      ).run().changes;
+      // The flag commits with the UPDATE: a failed/interrupted rebuild must
+      // still be retried on a boot that finds no remaining non-NULL keys.
+      if (updated > 0) {
+        sqlite.exec("CREATE TABLE IF NOT EXISTS operator_wallet_key_vacuum_pending (pending INTEGER)");
+      }
+      return updated;
+    }).immediate();
+  } finally {
+    sqlite.pragma(`secure_delete = ${previousSecureDelete === 2 ? "FAST" : previousSecureDelete}`);
+  }
+
+  const remaining = sqlite.prepare(
+    "SELECT COUNT(*) AS count FROM api_keys WHERE operator_wallet_private_key IS NOT NULL",
+  ).get() as { count: number };
+  if (remaining.count !== 0) {
+    throw new Error(`Wallet private key scrub verification failed: ${remaining.count}`);
+  }
+
+  const pending = sqlite.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operator_wallet_key_vacuum_pending'",
+  ).get();
+  if (changes === 0 && !pending) return;
+
+  // VACUUM must run after the scrub transaction has committed.
+  sqlite.exec("VACUUM");
+  checkpointWalletKeyScrub(sqlite);
+  sqlite.exec("DROP TABLE operator_wallet_key_vacuum_pending");
+  try {
+    // Dropping the flag writes another WAL frame; empty that WAL as well.
+    checkpointWalletKeyScrub(sqlite);
+  } catch (error) {
+    // Compaction already succeeded, but a failed final checkpoint should
+    // also leave durable retry state and propagate out of store creation.
+    sqlite.exec("CREATE TABLE IF NOT EXISTS operator_wallet_key_vacuum_pending (pending INTEGER)");
+    throw error;
+  }
+}
+
+function checkpointWalletKeyScrub(sqlite: Database.Database): void {
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const [result] = sqlite.pragma("wal_checkpoint(TRUNCATE)") as Array<{
+      busy: number; log: number; checkpointed: number;
+    }>;
+    // Non-WAL databases report log = checkpointed = -1, which is clean.
+    if (result?.busy === 0 && result.log === result.checkpointed) return;
+    if (attempt < 2) Atomics.wait(wait, 0, 0, 10);
+  }
+  throw new Error("Wallet private key scrub checkpoint failed");
 }
 
 /**
