@@ -286,6 +286,15 @@ describe("buyer intent from the caller's own records", () => {
     expect((await prepare(fx.wire(), { expect: { ...testExpect(fx), maxFeeBps: 0, feeRecipients: [] } })).unchecked).toEqual([]);
   });
 
+  it("refuses a nonzero feeRecipient on a zero-fee unit before any RPC (ESC E3)", async () => {
+    const { fx, chain, prepare } = await setup({ configure: (cs) => { for (const c of cs) {
+      c.feeBps = 0; c.f = 0n; c.n = c.g; c.feeRecipient = OTHER; c.payouts[0]!.amount = c.n;
+    } } });
+    await expect(prepare(fx.wire(), { expect: { ...testExpect(fx), maxFeeBps: 0, feeRecipients: [] } }))
+      .rejects.toMatchObject({ code: "FUND_ARGS_MISMATCH", message: expect.stringContaining("feeRecipient") });
+    expect(chain.state.log).toEqual([]);
+  });
+
   it("binds feeRecipient when feeBps is positive even if its fee rounds to zero (ESC E3)", async () => {
     const { fx, prepare } = await setup({ configure: (cs) => { const c = cs[1]!;
       c.g = 5n; c.f = 0n; c.n = 5n; c.feeBps = 1; c.feeRecipient = OTHER; c.payouts[0]!.amount = 5n;
