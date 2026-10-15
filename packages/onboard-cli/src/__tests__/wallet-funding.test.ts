@@ -502,6 +502,27 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([405, 407, 409, 410])("PROBE-X1 RPC HTTP %s stays permanent", async status => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response("request refused", { status }));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([-32000, -32004, -32006, -32600, -32601])("PROBE-X2 JSON-RPC %s inside HTTP 200 stays permanent", async code => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => rpcError(code));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([-32005, -32603])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
     vi.useFakeTimers();
     const started = Date.now();
