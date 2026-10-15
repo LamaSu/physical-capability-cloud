@@ -236,7 +236,10 @@ async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: strin
       if (io.now() >= deadline) { printClaims(result, io); throw new WalletError("funding_pending"); }
       continue;
     }
-    if (result.status === "partial") printClaims(result, io);
+    if (result.status === "partial") {
+      printClaims(result, io);
+      io.stdout("Run pcc-wallet fund again after 30 s to retry failed claims.\n");
+    }
     const receiptDeadline = io.now() + io.receiptTimeoutMs;
     for (const claim of result.claims) {
       if (!claim.txHash) continue;

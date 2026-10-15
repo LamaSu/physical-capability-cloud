@@ -185,6 +185,7 @@ describe("W2 CLI funding", () => {
     for (const value of ["eth", "0.0001", "succeeded", "usdc", "1", "failed"]) expect(text).toContain(value);
     expect(text).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
     expect(text).not.toContain("ready");
+    expect(output.join("")).toContain("pcc-wallet fund again after 30 s");
   });
   it("pending re-polls the SAME POST path with bounded backoff", async () => {
     store();

@@ -795,6 +795,7 @@ describe("W2 init funding outcome", () => {
     expect(stdout.join("")).toContain("eth 0.0001 failed");
     expect(stdout.join("")).not.toContain("ready");
     expect(stdout.join("")).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
+    expect(stdout.join("")).toContain("pcc-wallet fund again after 30 s");
   });
   it("init pending waits for final claims and receipts before ready", async () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundSequence: [
