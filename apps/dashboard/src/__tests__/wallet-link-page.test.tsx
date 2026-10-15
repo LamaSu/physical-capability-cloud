@@ -501,11 +501,15 @@ describe("wallet link ceremony", () => {
     expect(button("Approve and link").disabled).toBe(true);
   });
 
-  it("explains a fetch rejection without logging private details", async () => {
-    authorizedFetch.mockRejectedValueOnce(new Error("WDJBMJHT req_w4_private"));
+  it.each([
+    ...failures.filter(({ name }) => ["fetch rejection", "500 internal_error", "502 bad_gateway", "invalid success body"].includes(name)),
+    { name: "503 service_unavailable", reply: () => Promise.resolve(json({ error: "service_unavailable", detail: privateFailure }, 503)) },
+  ])("explains lookup $name without logging private details or offering Sign out", async ({ reply }) => {
+    authorizedFetch.mockImplementationOnce(reply);
     await loadConsent();
     expect(container.querySelector('[role="alert"]')!.textContent).toBe("Could not reach PCC. Nothing was linked.");
     expect(container.textContent).not.toContain("req_w4_private");
+    expect([...container.querySelectorAll("button")].some((element) => element.textContent === "Sign out")).toBe(false);
   });
 
   const hygieneScenarios = (["agent", "device"] as const).flatMap((role) => (["lookup", "approve", "deny"] as const).flatMap((stage) => [
@@ -542,6 +546,7 @@ describe("wallet link ceremony", () => {
     }
     for (const [name, storage] of [["localStorage", localStorage], ["sessionStorage", sessionStorage]] as const) {
       const calls = storageWrites.mock.calls.filter((_call, index) => (storageWrites.mock.instances[index] as unknown) === storage);
+      expect(calls, `${name} writes`).toHaveLength(0);
       for (const [key, value] of calls) {
         expectNoSensitive(key, `${name} write key`);
         expectNoSensitive(value, `${name} write value`);
@@ -553,8 +558,10 @@ describe("wallet link ceremony", () => {
     }
     for (const spy of [pushState, replaceState]) {
       for (const call of spy.mock.calls) expectNoSensitive(String(call[2] ?? ""), "history URL");
+      expect(spy).not.toHaveBeenCalled();
     }
     expectNoSensitive(window.location.href, "current browser URL");
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe("/link");
     expect(authorizedFetch).toHaveBeenCalledTimes(stage === "lookup" ? 1 : 2);
     expect(container.querySelector("main")!.classList.contains("ph-no-capture")).toBe(true);
     expect(container.querySelector("main")!.classList.contains("sentry-block")).toBe(true);
