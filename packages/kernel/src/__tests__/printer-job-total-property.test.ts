@@ -10,7 +10,8 @@
  * never reaches the failure path's own sites (close(), cleanup()), so each of those prints records
  * the sites it touched after its fault, and a second pass throws at the first fault and then
  * again at each of those. Every injected print must resolve with a PrintJobResult, must not report
- * success without its device job's completion in its bundle, and must leave nothing unhandled;
+ * success without its device job's completion in its bundle, must keep every failure eventless
+ * except an exact signed terminal failure, and must leave nothing unhandled;
  * then the same step must print again on the same collaborators and succeed (after at most two
  * "quiescing" refusals, which a rejected hook earns by design), so no lease, session or printer
  * is left held.
@@ -27,7 +28,7 @@ type Emitted = Omit<EvidenceEvent, "id" | "hash">;
 
 const KERNEL_ID = "kernel-print-total-property";
 /** Calls whose contract returns a promise: these are also made to reject. */
-const ASYNC = new Set(["execute", "getProgress", "getStatus", "quiesceEvidence", "dispose", "addEvent", "finalizeBundle"]);
+const ASYNC = new Set(["execute", "cancelJob", "getProgress", "getStatus", "quiesceEvidence", "dispose", "addEvent", "finalizeBundle"]);
 
 /** A fault: the nth read of a property, or the nth call of a method, of a named collaborator, throws (or rejects). */
 interface Fault {
@@ -106,8 +107,10 @@ function instrumentEmitter(emitter: EvidenceEmitter, inj: Injector): void {
 function rig(caseId: string, inj: Injector) {
   const source: EvidenceSource = { deviceId: `p-${caseId}`, deviceType: "controller", kernelId: KERNEL_ID };
   const listeners: Array<(e: Emitted) => void> = [];
+  const observed: Emitted[] = [];
   const emit = (type: Emitted["type"], payload: Record<string, unknown>) => {
     const e: Emitted = { type, timestamp: new Date().toISOString(), source, payload };
+    observed.push(e);
     for (const l of [...listeners]) l(e);
   };
   let nextJob = 100;
@@ -146,7 +149,139 @@ function rig(caseId: string, inj: Injector) {
     evidenceQuiesceTimeoutMs: 500,
     evidenceSettleTimeoutMs: 500,
   };
-  return { opts: instrument("opts", opts, inj) };
+  // This rig has no cancelJob: neither a timeout nor an abort can qualify for a signed
+  // cancellation failure. Check against the events actually emitted, never just the
+  // result's claimed failure.kind (which would weaken the eventless-failure oracle).
+  return { opts: instrument("opts", opts, inj), observed };
+}
+
+type CancelResponse = "device-failure" | "breaches-quiesce-contract-silent" | "no-cancel";
+
+/**
+ * A live job which aborts inside start and never completes. The device-failure variant
+ * honours quiesce: a failed cancel leaves the job live and the hook pending. The explicitly
+ * named silent variant breaches that contract, solely to census the kernel-failure defence
+ * in depth. The no-cancel variant also reaches the adapter-id read in that refusal.
+ */
+function cancelRig(caseId: string, inj: Injector, response: CancelResponse) {
+  const source: EvidenceSource = { deviceId: `p-${caseId}`, deviceType: "controller", kernelId: KERNEL_ID };
+  const listeners: Array<(e: Emitted) => void> = [];
+  const observed: Emitted[] = [];
+  const controller = new AbortController();
+  let completeOnStart = false;
+  let live = false;
+  let done: Promise<void> = Promise.resolve();
+  let endWork = () => {};
+  let nextJob = 100;
+  const finish = () => {
+    live = false;
+    endWork();
+  };
+  const emit = (type: Emitted["type"], payload: Record<string, unknown>) => {
+    const event: Emitted = { type, timestamp: new Date().toISOString(), source, payload };
+    observed.push(event);
+    for (const listener of [...listeners]) listener(event);
+  };
+  const printer: MachineAdapter = {
+    id: `p-${caseId}`,
+    type: "ipp-2d",
+    source,
+    async getStatus() { return live ? "busy" : "idle"; },
+    async getProgress() { return 0; },
+    async execute(command) {
+      if (command.type !== "start") return { success: true, message: "ok" };
+      const job = nextJob++;
+      live = true;
+      done = new Promise<void>((resolve) => { endWork = resolve; });
+      emit("execution_started", { ippJobId: job });
+      if (completeOnStart) {
+        emit("execution_completed", { ippJobId: job, totalPages: 1 });
+        finish();
+      } else {
+        controller.abort();
+      }
+      return { success: true, message: `job ${job} accepted`, data: { jobId: job } };
+    },
+    ...(response === "no-cancel" ? {} : {
+      async cancelJob(job: string | number) {
+        if (response === "device-failure") {
+          emit("execution_failed", { ippJobId: job, state: "canceled", origin: "device" });
+          finish();
+        }
+      },
+    }),
+    onEvidence(callback) { listeners.push(callback); },
+    async quiesceEvidence() {
+      if (response === "breaches-quiesce-contract-silent") return;
+      await done;
+    },
+    async dispose() { finish(); },
+  };
+  const emitter = new EvidenceEmitter(KERNEL_ID);
+  instrumentEmitter(emitter, inj);
+  const options: PrintJobOptions = {
+    adapter: instrument("adapter", printer, inj),
+    emitter,
+    jobId: `print-${caseId}`,
+    jobName: "a.pdf",
+    totalPages: 1,
+    signal: instrument("signal", controller.signal, inj),
+    timeoutMs: 20,
+    cancelWindowMs: 5,
+    evidenceQuiesceTimeoutMs: 20,
+    evidenceSettleTimeoutMs: 500,
+  };
+  return {
+    opts: instrument("opts", options, inj),
+    observed,
+    prepareReprint() {
+      // Finish any still-live test work before checking the handoff, including when a
+      // fault prevented cancelJob from running. A reprint uses the same device and step.
+      finish();
+      completeOnStart = true;
+      options.signal = undefined;
+    },
+  };
+}
+
+/** The exact signed-failure exceptions each rig can earn, based on the evidence it emitted. */
+function exactSignedFailure(result: PrintJobResult, observed: readonly Emitted[], jobId: string, cancelResponse?: CancelResponse): boolean {
+  const failure = result.failure;
+  const bundle = result.bundle;
+  if (result.success || failure === undefined || bundle === undefined) return false;
+  const completed = observed.some((event) => event.type === "execution_completed" && event.payload.ippJobId === 100);
+  const failed = observed.some((event) => event.type === "execution_failed" && event.payload.ippJobId === 100);
+  let kernelEvent = false;
+  if (cancelResponse === undefined) {
+    // Timeout/abort require an actual cancelJob call. The completing rig has none.
+    if (failure.origin !== "device" || result.cancelRequested !== undefined || !failed) return false;
+    if (failure.kind !== (completed ? "contradiction" : "device_reported")) return false;
+  } else {
+    if (cancelResponse === "no-cancel" || completed || result.cancelRequested !== "aborted" || failure.kind !== "aborted") return false;
+    kernelEvent = cancelResponse === "breaches-quiesce-contract-silent";
+    // A fault that prevents cancel in the honest variant leaves live work, so cannot sign.
+    if (failure.origin !== (kernelEvent ? "kernel" : "device") || failed === kernelEvent) return false;
+  }
+  if (bundle.jobId !== jobId || bundle.stepId !== jobId || bundle.kernelId !== KERNEL_ID) return false;
+  if (result.events !== bundle.events || bundle.events.length !== observed.length + Number(kernelEvent)) return false;
+  if (bundle.kernelSignature.algorithm !== "secp256k1"
+    || bundle.kernelSignature.signer !== "0x0000000000000000000000000000000000000000"
+    || bundle.kernelSignature.value !== `test_sig_${bundle.bundleHash.slice(0, 16)}`) return false;
+  // Device events must correspond, in order, to evidence the adapter really emitted;
+  // only the emitter's PCC job commitment is added. The breach-only synthetic exception
+  // permits exactly one kernel event, with the expected identity, reason and source.
+  return bundle.events.every((event, index) => {
+    if (kernelEvent && index === observed.length) {
+      return event.type === "execution_failed" && Number.isFinite(Date.parse(event.timestamp))
+        && JSON.stringify(event.source) === JSON.stringify(observed[0]?.source)
+        && JSON.stringify(event.payload) === JSON.stringify({ ippJobId: 100, reason: "aborted", origin: "kernel", jobId });
+    }
+    const original = observed[index];
+    return original !== undefined && event.payload.ippJobId === 100 && event.payload.jobId === jobId
+      && event.type === original.type && event.timestamp === original.timestamp
+      && JSON.stringify(event.source) === JSON.stringify(original.source)
+      && JSON.stringify(event.payload) === JSON.stringify({ ...original.payload, jobId });
+  });
 }
 
 /** Runs `body`, and collects every rejection Node reports as unhandled meanwhile. */
@@ -170,7 +305,9 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("runPrintJob: whatever one collaborator throws, wherever, the print resolves and releases what it holds (steward #5604)", () => {
   /** The faults to try at `site`: a throw; and a rejection too, where the call returns a promise. */
@@ -180,9 +317,10 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
   };
 
   /** Runs one plan; returns what went wrong (empty when nothing did), and the sites touched after its first fault. */
-  async function check(plan: Fault[], caseId: string): Promise<{ failures: string[]; afterFirst: string[] }> {
+  async function check(plan: Fault[], caseId: string, cancelResponse?: CancelResponse): Promise<{ failures: string[]; afterFirst: string[] }> {
     const inj = injector(plan);
-    const { opts } = rig(caseId, inj);
+    const testRig = cancelResponse === undefined ? rig(caseId, inj) : cancelRig(caseId, inj, cancelResponse);
+    const { opts, observed } = testRig;
     const label = plan.map((f) => `${f.how} at ${f.site}`).join(", then ");
     const failures: string[] = [];
     const out = await catchingUnhandled(() => runPrintJob(opts));
@@ -193,12 +331,18 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
     if (result !== undefined) {
       if (typeof result.success !== "boolean" || typeof result.durationMs !== "number" || !Array.isArray(result.events)) failures.push(`${label}: not a PrintJobResult`);
       if (!result.success && typeof result.error !== "string") failures.push(`${label}: a failure with no text`);
-      if (!result.success && result.events.length > 0) failures.push(`${label}: a failure with events`);
+      if (!result.success && !exactSignedFailure(result, observed, `print-${caseId}`, cancelResponse)) {
+        if (result.events.length > 0) failures.push(`${label}: an ineligible failure with events`);
+        if (result.bundle !== undefined) failures.push(`${label}: an ineligible failure with a bundle`);
+        if (result.failure !== undefined) failures.push(`${label}: an ineligible failure with a signed verdict`);
+      }
       if (result.success && !result.events.some((e) => e.type === "execution_completed" && e.payload.ippJobId === result.completion?.printerJobId)) {
         failures.push(`${label}: success without its device job's completion`);
       }
+      if (result.success && result.events.some((e) => e.type === "execution_failed")) failures.push(`${label}: success with a device job's failure`);
     }
     if (out.unhandled > 0) failures.push(`${label}: ${out.unhandled} unhandled rejection(s)`);
+    if ("prepareReprint" in testRig && typeof testRig.prepareReprint === "function") testRig.prepareReprint();
     // Every fault has fired once; the same step prints again on the same collaborators.
     let again: { value?: PrintJobResult; rejected: boolean; unhandled: number } | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -229,4 +373,48 @@ describe("runPrintJob: whatever one collaborator throws, wherever, the print res
     for (const plan of doubles) failures.push(...(await check(plan, `p${++runs}`)).failures);
     expect(failures, `${singles.length} single and ${doubles.length} double faults`).toEqual([]);
   });
+
+  for (const response of ["device-failure", "breaches-quiesce-contract-silent", "no-cancel"] as const) {
+    it(`at every cancellation site and every failure-path site (${response})`, { timeout: 300_000 }, async () => {
+      const census = injector([]);
+      const censusRig = cancelRig(`cancel-census-${response}`, census, response);
+      const result = await runPrintJob(censusRig.opts);
+      expect(result.success, "the cancellation census print").toBe(false);
+      if (response === "no-cancel") {
+        expect(result).toMatchObject({ events: [], error: expect.stringContaining("cannot cancel") });
+        expect(result.bundle).toBeUndefined();
+      } else {
+        expect(exactSignedFailure(result, censusRig.observed, `print-cancel-census-${response}`, response), "the census earns the exact signed-failure exception").toBe(true);
+      }
+      censusRig.prepareReprint();
+
+      // All three reads are independent sites: before holding anything, after listener
+      // installation, and after start. The source's third read builds the kernel event;
+      // the no-cancel id read formats the refusal after start.
+      expect(census.seen).toEqual(expect.arrayContaining([
+        "read signal.aborted#1", "read signal.aborted#2", "read signal.aborted#3",
+        "call signal.addEventListener#1", "call signal.removeEventListener#1",
+        "read adapter.cancelJob#1",
+        ...(response === "no-cancel" ? ["read adapter.id#1"] : ["call adapter.cancelJob#1"]),
+        ...(response === "breaches-quiesce-contract-silent" ? ["read adapter.source#3"] : []),
+      ]));
+      if (response === "no-cancel") {
+        expect(census.seen[census.seen.indexOf("read adapter.cancelJob#1") + 1], "the refusal reads the adapter id").toBe("read adapter.id#1");
+      }
+      const singles = [...new Set(census.seen)].flatMap(faultsAt);
+      if (response !== "no-cancel") {
+        expect(singles).toContainEqual({ site: "call adapter.cancelJob#1", how: "reject" });
+      }
+      const failures: string[] = [];
+      const doubles: Fault[][] = [];
+      let runs = 0;
+      for (const first of singles) {
+        const { failures: found, afterFirst } = await check([first], `cancel-${response}-${++runs}`, response);
+        failures.push(...found);
+        for (const site of afterFirst) for (const second of faultsAt(site)) doubles.push([first, second]);
+      }
+      for (const plan of doubles) failures.push(...(await check(plan, `cancel-${response}-${++runs}`, response)).failures);
+      expect(failures, `${singles.length} cancellation single and ${doubles.length} double faults`).toEqual([]);
+    });
+  }
 });

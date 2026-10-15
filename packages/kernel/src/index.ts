@@ -84,6 +84,8 @@ export {
 export type {
   PrintJobOptions,
   PrintJobResult,
+  PrintJobFailure,
+  PrintJobBusy,
   PrintCompletion,
   KernelEd25519Signer,
   IppPrintKernelOptions,
