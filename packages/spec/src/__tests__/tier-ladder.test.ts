@@ -181,8 +181,9 @@ describe("tier ladder — compilation fails closed", () => {
       results[f] = await codeOf(CsdSchema.parse(JSON.parse(readFileSync(dir + f, "utf8"))));
     }
     expect(results["document-print-and-mail.csd.json"]).toBe("compiled");
+    expect(results["document-print-leg.csd.json"]).toBe("compiled");
     for (const [f, code] of Object.entries(results)) {
-      if (f !== "document-print-and-mail.csd.json") expect(code, f).toBe("tier-adds-no-event-type");
+      if (f !== "document-print-and-mail.csd.json" && f !== "document-print-leg.csd.json") expect(code, f).toBe("tier-adds-no-event-type");
     }
   });
 });

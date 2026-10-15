@@ -883,6 +883,7 @@ describe("checkCommittedProgramForTier — independence rests on evidence-owned 
     expect(computeCommittedProgramHash(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM)).toBe(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM_HASH);
     expect(COMMITTED_PROGRAM_REGISTRY).toEqual([
       { csd: CSD, tier: "tier2", program: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM, programHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH },
+      { csd: "document-print-leg", tier: "tier1", program: committedProgramModule.DOCUMENT_PRINT_LEG_PROGRAM, programHash: committedProgramModule.DOCUMENT_PRINT_LEG_PROGRAM_HASH },
     ]);
     expect(violationsFor(PRINT_AND_MAIL_INDEPENDENCE_PROGRAM)).toEqual([]);
     expect(violationsFor(PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM)).toEqual([]);

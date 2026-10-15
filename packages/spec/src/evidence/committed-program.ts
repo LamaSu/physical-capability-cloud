@@ -48,8 +48,11 @@
  * oracle-enforcing mode (`requireImplementedVerifier`). Otherwise the program
  * would be sold for evidence nobody can check, and the unenforced tier
  * evidence above would silently weaken the promise. As authored,
- * document-print-and-mail is eligible only at tier 0, so its tier2 program
- * stays pinned but cannot be funded until the CSD and its verifiers are fixed.
+ * the registry has two entries: document-print-and-mail tier2 stays pinned but
+ * is eligible only at tier 0 until the CSD and its verifiers are fixed;
+ * document-print-leg tier1 is pinned for the oracle and the host, but the
+ * production gate refuses it until S3 re-anchors receipt.kernel_signed away
+ * from its absent ident.registered_key dependency.
  *
  * The production gate takes no overrides. `assertAcceptedProgramForTier(input)`
  * always resolves against `COMMITTED_PROGRAM_REGISTRY` and the built-in
@@ -141,10 +144,19 @@ export const PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM: CommittedProgram = {
   ],
 };
 
+/** The Thursday PRINT unit: kernel-signed success, no failure, and no simulated event. */
+export const DOCUMENT_PRINT_LEG_PROGRAM: CommittedProgram = {
+  version: 1,
+  schemaHash: "verification-program/v1",
+  stages: [...PRINT_LEG, { id: "auth", predicate: "not-simulated" }],
+};
+
 export const PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH =
   "0xd229c8daa76cb3022041b6ff076d30a5ecb614d71f50a07f80f680629dcc2b86" as const;
 export const PRINT_AND_MAIL_HONEST_ASYMMETRY_PROGRAM_HASH =
   "0x6e00cad1095c6a2913671e30969436897bd12ce60b3957f7b259f56875c863e0" as const;
+export const DOCUMENT_PRINT_LEG_PROGRAM_HASH =
+  "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a" as const;
 
 export interface CommittedProgramEntry {
   /** CSD name, e.g. "document-print-and-mail". */
@@ -157,11 +169,12 @@ export interface CommittedProgramEntry {
 
 /**
  * The one committed program per (CSD, non-zero tier). A tier with no entry has
- * no committed program and cannot be funded above tier 0. Only
- * document-print-and-mail tier2 (independent carrier acceptance scan) has one
- * today; tier1 (print only) and tier3 (close on delivery) have none. An entry
- * is necessary, not sufficient: the gate also requires the tier to be
- * eligible, which print-and-mail tier2 is not yet (see the module header).
+ * no committed program and cannot be funded above tier 0. There are two entries:
+ * document-print-and-mail tier2 (independent carrier acceptance scan), and
+ * document-print-leg tier1, pinned for the oracle and the host. DPM tier1 and
+ * tier3 still have none. An entry is necessary, not sufficient: DPM tier2 is
+ * not eligible, and the production gate refuses print-leg tier1 until S3
+ * re-anchors receipt.kernel_signed (see the module header).
  */
 export const COMMITTED_PROGRAM_REGISTRY: readonly CommittedProgramEntry[] = [
   {
@@ -169,6 +182,12 @@ export const COMMITTED_PROGRAM_REGISTRY: readonly CommittedProgramEntry[] = [
     tier: "tier2",
     program: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM,
     programHash: PRINT_AND_MAIL_INDEPENDENCE_PROGRAM_HASH,
+  },
+  {
+    csd: "document-print-leg",
+    tier: "tier1",
+    program: DOCUMENT_PRINT_LEG_PROGRAM,
+    programHash: DOCUMENT_PRINT_LEG_PROGRAM_HASH,
   },
 ];
 
