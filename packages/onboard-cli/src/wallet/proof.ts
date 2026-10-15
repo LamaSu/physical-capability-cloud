@@ -47,13 +47,19 @@ export function canonicalizeFlat(value: unknown): string {
   }
 }
 
+function canonicalTimestamp(value: unknown, field: string): number {
+  if (typeof value !== "string") mismatch(field);
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) mismatch(field);
+  return timestamp;
+}
+
 function checkTimes(issuedAt: unknown, expirationTime: unknown, nowMs: number): void {
-  const issuedMs = issuedAt instanceof Date ? issuedAt.getTime()
-    : typeof issuedAt === "string" ? Date.parse(issuedAt) : NaN;
-  const expirationMs = expirationTime instanceof Date ? expirationTime.getTime()
-    : typeof expirationTime === "string" ? Date.parse(expirationTime) : NaN;
+  const issuedMs = canonicalTimestamp(issuedAt, "issuedAt");
+  const expirationMs = canonicalTimestamp(expirationTime, "expirationTime");
   if (!Number.isFinite(issuedMs) || issuedMs < nowMs - 600_000 || issuedMs > nowMs + 300_000) mismatch("issuedAt");
-  if (!Number.isFinite(expirationMs) || expirationMs <= nowMs) mismatch("expirationTime");
+  // W1 requests last ten minutes; retain five minutes of allowed clock skew.
+  if (expirationMs <= nowMs || expirationMs <= issuedMs || expirationMs - issuedMs > 900_000) mismatch("expirationTime");
 }
 
 function gatewayHost(origin: string): string {
@@ -87,9 +93,17 @@ function validateSecpMessage(message: string, wallet: WalletRecord, requestId: s
   const resources = parsed.resources ?? [];
   if (!resources.includes(`urn:pcc:link-request:${requestId}`) || !resources.includes(`urn:pcc:role:${wallet.role}`)) mismatch("resources");
   const consents = resources.filter((resource) => resource.startsWith("urn:pcc:consent:"));
-  if (consents.length !== 1 || !/^urn:pcc:consent:wallet-link-v1:sha256:[a-fA-F0-9]{64}$/.test(consents[0] ?? "")) mismatch("consent");
-  checkTimes(parsed.issuedAt, parsed.expirationTime, nowMs);
-  if (typeof parsed.nonce !== "string" || !/^[A-Za-z0-9]{16,}$/.test(parsed.nonce)) mismatch("nonce");
+  if (consents.length !== 1 || !/^urn:pcc:consent:wallet-link-v1:sha256:[a-f0-9]{64}$/.test(consents[0] ?? "")) mismatch("consent");
+  const environment = resources[1];
+  if (typeof environment !== "string" || !/^urn:pcc:env:[a-z0-9-]{1,32}$/.test(environment)) mismatch("env");
+  const expectedResources = [
+    `urn:pcc:link-request:${requestId}`, environment, `urn:pcc:role:${wallet.role}`, consents[0],
+  ];
+  if (resources.length !== expectedResources.length || resources.some((resource, index) => resource !== expectedResources[index])) mismatch("resources");
+  // Read the timestamp bytes too: parseSiweMessage converts them to Dates and
+  // would otherwise hide a non-ISO representation before the template rebuild.
+  checkTimes(/^Issued At: (.*)$/m.exec(message)?.[1], /^Expiration Time: (.*)$/m.exec(message)?.[1], nowMs);
+  if (typeof parsed.nonce !== "string" || !/^[A-Za-z0-9]{16,64}$/.test(parsed.nonce)) mismatch("nonce");
   // The SIWE parser ignores lines outside its known fields. Rebuilding W1's
   // exact template prevents signing any extra content hidden from these checks.
   if (parsed.scheme !== undefined || parsed.notBefore !== undefined) mismatch("message");
@@ -106,7 +120,7 @@ function validateSecpMessage(message: string, wallet: WalletRecord, requestId: s
   }
 }
 
-function validateEdMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number): void {
+function validateEdMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string): void {
   const prefix = "PCC-LINK-V1\n";
   if (!message.startsWith(prefix)) mismatch("prefix");
   const json = message.slice(prefix.length);
@@ -118,6 +132,15 @@ function validateEdMessage(message: string, wallet: WalletRecord, requestId: str
   } catch {
     return mismatch("canonical JSON");
   }
+  const stringFields = [
+    "consent", "domain", "env", "expirationTime", "issuedAt", "label", "nonce", "publicKey", "requestId", "role", "uri",
+    ...(expectedKernelId === undefined ? [] : ["kernelId"]),
+  ];
+  const expectedKeys = ["chainId", ...stringFields].sort();
+  const keys = Object.keys(parsed).sort();
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])
+    || !Number.isSafeInteger(parsed.chainId) || stringFields.some((field) => typeof parsed[field] !== "string")) mismatch("fields");
+  if (expectedKernelId !== undefined && (wallet.role !== "device" || parsed.kernelId !== expectedKernelId)) mismatch("kernelId");
   if (parsed.domain !== gatewayHost(wallet.gatewayOrigin)) mismatch("domain");
   if (parsed.uri !== `${wallet.gatewayOrigin}/link`) mismatch("uri");
   if (parsed.chainId !== wallet.chainId || parsed.chainId !== 84532) mismatch("chainId");
@@ -125,15 +148,17 @@ function validateEdMessage(message: string, wallet: WalletRecord, requestId: str
   if (parsed.requestId !== requestId) mismatch("requestId");
   if (parsed.role !== wallet.role) mismatch("role");
   if (parsed.label !== wallet.label) mismatch("label");
-  if (typeof parsed.consent !== "string" || !/^wallet-link-v1:sha256:[a-fA-F0-9]{64}$/.test(parsed.consent)) mismatch("consent");
+  if (typeof parsed.consent !== "string" || !/^wallet-link-v1:sha256:[a-f0-9]{64}$/.test(parsed.consent)) mismatch("consent");
+  if (typeof parsed.env !== "string" || !/^[a-z0-9-]{1,32}$/.test(parsed.env)) mismatch("env");
+  if (typeof parsed.nonce !== "string" || !/^[A-Za-z0-9]{16,64}$/.test(parsed.nonce)) mismatch("nonce");
   checkTimes(parsed.issuedAt, parsed.expirationTime, nowMs);
 }
 
 /** Check the gateway's message before either key type signs any bytes. */
-export function validateProofMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number): void {
+export function validateProofMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string): void {
   try {
     if (wallet.keyType === "secp256k1") validateSecpMessage(message, wallet, requestId, nowMs);
-    else validateEdMessage(message, wallet, requestId, nowMs);
+    else validateEdMessage(message, wallet, requestId, nowMs, expectedKernelId);
   } catch (error) {
     if (error instanceof WalletError) throw error;
     mismatch("message");

@@ -161,3 +161,107 @@ describe("wallet ed25519 proof checks", () => {
     }
   });
 });
+
+describe("wallet exact W1 proof template", () => {
+  it.each(["scope", "kernelId"])("refuses an ed25519 %s field that the CLI did not send", (field) => {
+    expect(() => validateProofMessage(edMessage({ [field]: "unrequested-value" }), edWallet, requestId, now))
+      .toThrow("refusing to sign: fields mismatch");
+  });
+
+  it.each(Object.keys(edFields()))("requires the ed25519 %s property", (field) => {
+    const fields = edFields();
+    delete fields[field];
+    expect(() => validateProofMessage(`PCC-LINK-V1\n${independentCanonical(fields)}`, edWallet, requestId, now)).toThrow();
+  });
+
+  it.each(Object.keys(edFields()).filter((field) => field !== "chainId"))("requires a string for ed25519 %s", (field) => {
+    expect(() => validateProofMessage(edMessage({ [field]: 1 }), edWallet, requestId, now))
+      .toThrow("refusing to sign: fields mismatch");
+  });
+
+  it.each(["84532", 84532.5])("requires an integer ed25519 chainId: %s", (chainId) => {
+    expect(() => validateProofMessage(edMessage({ chainId }), edWallet, requestId, now)).toThrow();
+  });
+
+  it("accepts only the device kernelId that the CLI sent", () => {
+    const kernelId = "kernel_test_device";
+    expect(() => validateProofMessage(edMessage({ kernelId }), edWallet, requestId, now, kernelId)).not.toThrow();
+    expect(() => validateProofMessage(edMessage({ kernelId: "kernel_other_device" }), edWallet, requestId, now, kernelId))
+      .toThrow("refusing to sign: kernelId mismatch");
+    expect(() => validateProofMessage(edMessage(), edWallet, requestId, now, kernelId))
+      .toThrow("refusing to sign: fields mismatch");
+    expect(() => validateProofMessage(edMessage({ kernelId: 1 }), edWallet, requestId, now, kernelId))
+      .toThrow("refusing to sign: fields mismatch");
+  });
+
+  it("refuses a kernelId for an agent even when supplied by the caller", () => {
+    const wallet = { ...edWallet, role: "agent" as const };
+    expect(() => validateProofMessage(edMessage({ role: "agent", kernelId: "kernel_test_device" }), wallet, requestId, now, "kernel_test_device"))
+      .toThrow("refusing to sign: kernelId mismatch");
+  });
+
+  it.each(["ed25519", "secp256k1"] as const)("requires W1's lowercase consent hash for %s", (keyType) => {
+    const wallet = keyType === "ed25519" ? edWallet : secpWallet;
+    const consent = `wallet-link-v1:sha256:${consentHash.toUpperCase()}`;
+    const message = keyType === "ed25519" ? edMessage({ consent })
+      : siwe({ resources: [...resources.slice(0, 3), `urn:pcc:consent:${consent}`] });
+    expect(() => validateProofMessage(message, wallet, requestId, now)).toThrow("refusing to sign: consent mismatch");
+  });
+
+  it.each(["x", "A".repeat(15), "A".repeat(65), "ABCDEFGHIJKLMNOP-"])("refuses an ed25519 nonce outside W1's bounds: %s", (nonce) => {
+    expect(() => validateProofMessage(edMessage({ nonce }), edWallet, requestId, now))
+      .toThrow("refusing to sign: nonce mismatch");
+  });
+
+  it.each(["", "Test", "test_env", "a".repeat(33)])("refuses an ed25519 env outside W1's syntax: %s", (env) => {
+    expect(() => validateProofMessage(edMessage({ env }), edWallet, requestId, now))
+      .toThrow("refusing to sign: env mismatch");
+  });
+
+  it.each(["issuedAt", "expirationTime"])("requires exact ISO ed25519 %s bytes", (field) => {
+    const value = field === "issuedAt" ? now : now + 600_000;
+    expect(() => validateProofMessage(edMessage({ [field]: new Date(value).toUTCString() }), edWallet, requestId, now))
+      .toThrow(`refusing to sign: ${field} mismatch`);
+  });
+
+  it.each(["Issued At", "Expiration Time"])("requires exact ISO SIWE %s bytes", (field) => {
+    const value = field === "Issued At" ? now : now + 600_000;
+    const message = siwe().replace(`${field}: ${new Date(value).toISOString()}`, `${field}: ${new Date(value).toUTCString()}`);
+    const errorField = field === "Issued At" ? "issuedAt" : "expirationTime";
+    expect(() => validateProofMessage(message, secpWallet, requestId, now))
+      .toThrow(`refusing to sign: ${errorField} mismatch`);
+  });
+
+  it.each(["ed25519", "secp256k1"] as const)("bounds %s proof lifetime to ten minutes plus clock skew", (keyType) => {
+    const wallet = keyType === "ed25519" ? edWallet : secpWallet;
+    const build = (issuedAt: number, expirationTime: number) => keyType === "ed25519"
+      ? edMessage({ issuedAt: new Date(issuedAt).toISOString(), expirationTime: new Date(expirationTime).toISOString() })
+      : siwe({ issuedAt: new Date(issuedAt), expirationTime: new Date(expirationTime) });
+    expect(() => validateProofMessage(build(now, now + 900_000), wallet, requestId, now)).not.toThrow();
+    expect(() => validateProofMessage(build(now, now + 900_001), wallet, requestId, now))
+      .toThrow("refusing to sign: expirationTime mismatch");
+    // Both dates remain within the clock checks; only the positive-span rule can refuse these.
+    expect(() => validateProofMessage(build(now + 120_000, now + 120_000), wallet, requestId, now))
+      .toThrow("refusing to sign: expirationTime mismatch");
+    expect(() => validateProofMessage(build(now + 120_000, now + 60_000), wallet, requestId, now))
+      .toThrow("refusing to sign: expirationTime mismatch");
+  });
+
+  it.each([
+    ["extra resource", [...resources, "https://evil.example/grant"]],
+    ["missing env", resources.filter((resource) => !resource.startsWith("urn:pcc:env:"))],
+    ["reordered resources", [resources[0], resources[1], resources[3], resources[2]]],
+  ])("refuses SIWE resources outside W1's exact order: %s", (_reason, altered) => {
+    expect(() => validateProofMessage(siwe({ resources: altered }), secpWallet, requestId, now)).toThrow();
+  });
+
+  it.each(["", "Test", "test_env", "a".repeat(33)])("refuses SIWE env outside W1's syntax: %s", (env) => {
+    expect(() => validateProofMessage(siwe({ resources: [resources[0], `urn:pcc:env:${env}`, ...resources.slice(2)] }), secpWallet, requestId, now))
+      .toThrow("refusing to sign: env mismatch");
+  });
+
+  it("refuses a SIWE nonce longer than 64 alphanumeric characters", () => {
+    expect(() => validateProofMessage(siwe({ nonce: "A".repeat(65) }), secpWallet, requestId, now))
+      .toThrow("refusing to sign: nonce mismatch");
+  });
+});
