@@ -28,8 +28,8 @@
  * A job without a settlement record is otherwise unchanged: its node finishes
  * it (adk #452). The
  * system's own writers (the kernel service, the settlement path) write through
- * the repository and are not guarded here. WHO may write a job's status is
- * N85(b), gateway's owner checks in WP-C.
+ * the repository and are not guarded here. The operator relay checks WHO may
+ * write through the shared kernel-authority "operate" rule (N85).
  */
 import { schema, eq, and, sql } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
@@ -52,7 +52,7 @@ type JobRow = NonNullable<ReturnType<ReturnType<typeof getRepos>["jobs"]["findBy
 
 export type GuardedStatusWrite =
   | { readonly kind: "not_found" }
-  | { readonly kind: "refused"; readonly currentStatus: string }
+  | { readonly kind: "refused"; readonly currentStatus: string; readonly kernelChanged?: true }
   | { readonly kind: "written"; readonly job: JobRow };
 
 export const SETTLEMENT_OWNED_MESSAGE =
@@ -70,11 +70,17 @@ export function hasSettlementRecord(job: { readonly id: string; readonly cwmId?:
   return Boolean(job.cwmId && getRepos().escrows.findByCwm(job.cwmId));
 }
 
-/** Write a job's status for a GENERIC writer, under N85(a). */
-export function writeJobStatusGuarded(jobId: string, status: string, progress?: number): GuardedStatusWrite {
+/** Write a job's status under N85(a), optionally bound to the kernel the relay authorized. */
+export function writeJobStatusGuarded(jobId: string, status: string, progress?: number, checkedKernelId?: string | null): GuardedStatusWrite {
   const repos = getRepos();
   const job = repos.jobs.findById(jobId);
   if (!job) return { kind: "not_found" };
+  // Defense in depth: this pre-check reports a reassignment early. The null-safe
+  // kernel predicate on the conditional UPDATE below enforces the same boundary
+  // atomically; no synchronous case depends on this pre-check alone.
+  if (checkedKernelId !== undefined && (job.kernelId ?? null) !== checkedKernelId) {
+    return { kind: "refused", currentStatus: job.status, kernelChanged: true };
+  }
   const paid = hasSettlementRecord(job);
   if (paid && (TERMINAL as readonly string[]).includes(status)) return { kind: "refused", currentStatus: job.status };
   const owned: readonly string[] = CLOSED;
@@ -89,6 +95,9 @@ export function writeJobStatusGuarded(jobId: string, status: string, progress?: 
     .where(
       and(
         eq(schema.jobs.id, jobId),
+        // Null-safe comparison also binds an admin's write of a legacy job without a kernel.
+        // Other generic writers omit this parameter and keep their N85(a) behavior.
+        checkedKernelId === undefined ? undefined : sql`${schema.jobs.kernelId} IS ${checkedKernelId}`,
         sql`${schema.jobs.status} NOT IN (${sql.join(
           owned.map((s) => sql`${s}`),
           sql`, `,
@@ -97,6 +106,13 @@ export function writeJobStatusGuarded(jobId: string, status: string, progress?: 
     )
     .returning()
     .get();
-  if (!written) return { kind: "refused", currentStatus: repos.jobs.findById(jobId)?.status ?? job.status };
+  if (!written) {
+    const current = repos.jobs.findById(jobId);
+    return {
+      kind: "refused",
+      currentStatus: current?.status ?? job.status,
+      ...(checkedKernelId !== undefined && current && (current.kernelId ?? null) !== checkedKernelId ? { kernelChanged: true as const } : {}),
+    };
+  }
   return { kind: "written", job: written as JobRow };
 }

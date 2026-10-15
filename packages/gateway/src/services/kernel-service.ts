@@ -73,8 +73,9 @@ interface RunningJob {
  * driving its real transport. Any other adapter counts as real only when its
  * source says `simulated: false`: an extension registered at runtime, a
  * subclass, Hamilton (@pcc/kernel does not export it), and IPP. A real-mode
- * IppAdapter serves mock answers while its optional `ipp` import is still
- * pending, before any marker is set, so an unmarked IPP counts as simulated.
+ * IppAdapter marks itself `simulated: true` from construction until its optional
+ * `ipp` import has loaded; while loading, it serves mock answers. Counting an
+ * unmarked IPP as simulated remains defence in depth.
  */
 const MARKS_ITS_OWN_SIMULATION: ReadonlySet<object> = new Set<object>([
   OctoPrintAdapter.prototype,

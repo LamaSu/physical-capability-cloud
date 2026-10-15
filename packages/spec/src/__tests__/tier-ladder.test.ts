@@ -228,13 +228,31 @@ describe("tier ladder — one owned snapshot (E15 Q1)", () => {
     const c = twoTierCsd();
     const expected = structuredClone(c);
     const tier = tierOf(c, 1);
+    let trapCalls = 0;
     tier.required = new Proxy(tier.required, {
       get(target, property, receiver) {
+        trapCalls += 1;
         if (property === Symbol.iterator) return function* () { yield "execution_completed"; };
         return Reflect.get(target, property, receiver);
       },
+      getPrototypeOf(target) {
+        trapCalls += 1;
+        return Reflect.getPrototypeOf(target);
+      },
+      ownKeys(target) {
+        trapCalls += 1;
+        return Reflect.ownKeys(target);
+      },
+      getOwnPropertyDescriptor(target, property) {
+        trapCalls += 1;
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
     });
-    await expectRefusalOrSameSnapshot(compileTierLadder(c), expected);
+    const pending = compileTierLadder(c);
+    await expectRefusalOrSameSnapshot(pending, expected);
+    await expect(pending).rejects.toBeInstanceOf(TierLadderError);
+    await expect(pending).rejects.toHaveProperty("code", "non-canonical-input");
+    expect(trapCalls).toBe(0);
   });
 
   it("primitive parameters retain strict and an owned identity when the caller mutates before await", async () => {
@@ -281,10 +299,15 @@ describe("tier ladder — one owned snapshot (E15 Q1)", () => {
     ["non-plain object", () => new Date()],
     ["symbol property", () => ({ [Symbol("hidden")]: true })],
     ["non-enumerable property", () => Object.defineProperty({}, "hidden", { value: true })],
+    ["accessor property", (onGet: () => void) => Object.defineProperty({}, "x", {
+      get: () => { onGet(); return 1; }, enumerable: true,
+    })],
   ] as const)("caller input containing a %s throws TierLadderError", async (_label, makeValue) => {
     const c = csd();
-    (c as unknown as Record<string, unknown>).extra = makeValue();
+    let getterCalls = 0;
+    (c as unknown as Record<string, unknown>).extra = makeValue(() => { getterCalls += 1; });
     await expect(compileTierLadder(c)).rejects.toBeInstanceOf(TierLadderError);
+    expect(getterCalls).toBe(0);
   });
 });
 

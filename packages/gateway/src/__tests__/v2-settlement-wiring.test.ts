@@ -35,6 +35,8 @@ import {
   type Hex,
 } from "viem";
 import { PCCProtocolV2ABI, MilestoneEscrowV2ABI } from "@pcc/contracts/abi";
+import { sql } from "@pcc/store";
+import { privateKeyToAccount } from "viem/accounts";
 
 /**
  * Assert the dispatched ABI is the V2 escrow ABI. We can't use reference
@@ -513,8 +515,20 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
 
   it("createEscrowV2 uses the chain-config token (0x18bef3…), NOT the Flow env token, then addMilestone", { timeout: 15000 }, async () => {
     const { initStore, closeStore } = await import("../db.js");
-    initStore({ seed: true });
+    const store = initStore({ seed: true });
     try {
+      const operator = "0x" + "27".repeat(20);
+      const legacyWallet = "0x" + "38".repeat(20);
+      store.repos.kernels.update("kernel-nyc", { operatorAddress: operator });
+      store.db.run(sql`
+        INSERT INTO api_keys (
+          id, key_hash, key_prefix, operator_id, scopes, rate_limit, created_at,
+          operator_wallet_address
+        ) VALUES (
+          'key-v2-legacy-wallet', 'hash-v2-legacy-wallet', 'pcc_v2', ${operator},
+          '[]', '{}', '2026-01-01T00:00:00.000Z', ${legacyWallet}
+        )
+      `);
       const { createJobFromSession } = await import("../routes/paid-job-flow.js");
 
       // Minimal committed session row (the shape createJobFromSession reads).
@@ -532,7 +546,8 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
         quote: { totalPrice: "10.00", currency: "USDC", bondAmount: "0.00" },
         contractTerms: {
           milestones: [
-            { stepId: "step-aaa", amount: "10.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
+            { stepId: "step-aaa", amount: "4.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
+            { stepId: "step-bbb", amount: "6.00", bondAmount: "0.00", challengeWindowSeconds: 0 },
           ],
           deadline: new Date(Date.now() + 86_400_000).toISOString(),
           assuranceTier: 0,
@@ -571,6 +586,15 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
       // V2 addMilestone is 7-arg: [stepId, operator, amount, bond, window, tier, jobId]
       expect(addCall![0].args).toHaveLength(7);
       expect(addCall![0].args[6]).toBe("job-v2-token");
+      const gatewaySigner = privateKeyToAccount(process.env.PCC_GATEWAY_PRIVATE_KEY as Hex).address;
+      const milestoneCalls = writeContract.mock.calls.filter(
+        (c) => c[0].functionName === "addMilestone",
+      );
+      expect(milestoneCalls).toHaveLength(2);
+      for (const [call] of milestoneCalls) {
+        expect(call.args[1]).toBe(gatewaySigner);
+        expect((call.args[1] as string).toLowerCase()).not.toBe(legacyWallet);
+      }
 
       // Ordering: createEscrowV2 must come before addMilestone.
       const createIdx = writeContract.mock.calls.findIndex((c) => c[0].functionName === "createEscrowV2");

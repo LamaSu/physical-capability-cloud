@@ -18,6 +18,8 @@ import fastifySwaggerUi from "@fastify/swagger-ui";
 import { createOperationIdTransform } from "./openapi/operation-id.js";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos, getStore } from "./db.js";
+import { resolveListenHost } from "./config/listen-host.js";
+import { shouldSeedDemoData, warnInvalidSeedDataOverride } from "./config/seed-policy.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
@@ -135,6 +137,7 @@ import { ot2LegacyGoneRoutes } from "./routes/ot2-legacy-gone.js";
 import { deviceRelayRoutes } from "./routes/device-relay.js";
 import { paidJobFlowRoutes } from "./routes/paid-job-flow.js";
 import { operatorRelayRoutes } from "./routes/operator-relay.js";
+import { settlementReceiptRoutes } from "./routes/settlement-receipts.js";
 import { diagnosticLogRoutes } from "./routes/diagnostic-logs.js";
 import { supportMessageRoutes } from "./routes/support-messages.js";
 import { analyticsRoutes } from "./routes/analytics.js";
@@ -178,9 +181,10 @@ import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
 
 export async function createGateway(port = 3200) {
-  // Initialize SQLite store — only seed demo data in dev (not production)
-  const shouldSeed = process.env.PCC_SEED_DATA === "true" || process.env.NODE_ENV !== "production";
-  initStore({ seed: shouldSeed });
+  const host = resolveListenHost(process.env.PCC_LISTEN_HOST);
+  warnInvalidSeedDataOverride(process.env.PCC_SEED_DATA, process.env.NODE_ENV);
+  // Seed outside production by default; exact true/false overrides always win.
+  initStore({ seed: shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV) });
 
   // Initialize KernelService (mock mode by default)
   const { initKernelService } = await import("./services/kernel-service.js");
@@ -696,6 +700,7 @@ export async function createGateway(port = 3200) {
   await app.register(captureSimRoutes);
   await app.register(pizzaDemoRoutes);
   await app.register(operatorRelayRoutes);
+  await app.register(settlementReceiptRoutes);
   await app.register(diagnosticLogRoutes);
   await app.register(supportMessageRoutes);
   await app.register(negotiationRoutes);
@@ -1044,8 +1049,8 @@ export async function createGateway(port = 3200) {
       // Start ERC-8004 identity write retry sweeper (no-op if write disabled)
       import("./services/erc8004-identity-sweeper.js")
         .then(({ startIdentitySweeper }) => startIdentitySweeper())
-        .catch((err) =>
-          console.warn("[gateway] ERC-8004 sweeper init failed:", err),
+        .catch(() =>
+          console.warn("[gateway] ERC-8004 sweeper init failed:", { code: "unknown" }),
         );
 
       // Start mock streaming producers
@@ -1091,7 +1096,7 @@ export async function createGateway(port = 3200) {
         console.warn("[gateway] settlement-keeper start failed:", err);
       }
 
-      const address = await app.listen({ port, host: "0.0.0.0" });
+      const address = await app.listen({ port, host });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
     },

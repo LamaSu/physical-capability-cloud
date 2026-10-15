@@ -89,7 +89,7 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
     expect(result?.events.map((e) => e.type)).toEqual(PRINTED);
   });
 
-  it("(real mode) a print the printer aborts fails with the printer's reason, its events under the PCC job", async () => {
+  it("(real mode) a print the printer aborts fails on its own device job's execution_failed, with the printer's reason", async () => {
     const ipp = await realModePrinter("ipp-bind-abort", 8);
     const emitter = new EvidenceEmitter(KERNEL_ID);
     const outcome = runPrintJob({ adapter: ipp, emitter, jobId: "job-ipp-4", jobName: "doc", totalPages: 3, documentData: "%PDF-1.4" }).then(
@@ -100,9 +100,20 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
 
     const { result, rejected } = await outcome;
     expect(rejected, "runPrintJob rejected").toBeUndefined();
-    expect(result).toMatchObject({ success: false, error: expect.stringContaining("printer reported failure") });
-    expect(result?.events.map((e) => e.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_failed"]);
-    for (const event of result?.events ?? []) expect(event.payload, event.type).toMatchObject({ jobId: "job-ipp-4", ippJobId: 77 });
+    // Its own device job's failure is retained in the bundle even after its step is detached.
+    expect(result?.bundle).toBeDefined();
+    if (!result?.bundle) throw new Error("the device-reported failure must have a bundle");
+    expect(result).toEqual({
+      success: false,
+      bundle: expect.any(Object),
+      events: result.bundle.events,
+      error: 'printer reported failure: {"ippJobId":77,"state":"aborted"}',
+      failure: { kind: "device_reported", origin: "device" },
+      durationMs: expect.any(Number),
+    });
+    expect(result?.events.map((event) => event.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_failed"]);
+    expect(emitter.getEvents("job-ipp-4", "job-ipp-4")).toEqual([]);
+    expect(console.warn, "an event excluded as naming no device job").not.toHaveBeenCalledWith(expect.stringContaining("names no device job"));
   });
 
   it("(mock mode) every event of a print records under the PCC job", async () => {
