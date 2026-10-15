@@ -149,6 +149,8 @@ function pollState(data: Record<string, unknown>): string {
 
 function saveState(wallet: WalletRecord, data: Record<string, unknown>): WalletRecord {
   const status = pollState(data);
+  if (["authorization_pending", "slow_down"].includes(status)
+    && ((wallet.link.status === "approved" && wallet.link.linkId) || wallet.link.status === "revoked")) return wallet;
   return updateLink(wallet, {
     ...wallet.link, status,
     ...(status === "approved" ? { linkId: data.linkId as string,
@@ -234,6 +236,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
   if (wallet.gatewayOrigin !== origin) throw new WalletError("wallet_gateway_mismatch");
   switch (args.command) {
     case "link":
+      if (wallet.link.status === "approved" && wallet.link.linkId) throw new WalletError("wallet_already_linked");
       await linkWallet(wallet, io);
       return 0;
     case "fund":

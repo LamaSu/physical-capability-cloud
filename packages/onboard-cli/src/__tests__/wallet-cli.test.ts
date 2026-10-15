@@ -668,3 +668,24 @@ describe("opaque account ids", () => {
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID, accountId });
   });
 });
+
+describe("terminal link state", () => {
+  it("status slow_down preserves approved so fund still works", async () => {
+    const gateway = await linked({ statuses: ["approved", "slow_down"] });
+    expect(await run(gateway, "status")).toBe(0);
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+    expect(await run(gateway, "fund")).toBe(0);
+    expect(stderr.join("")).not.toContain("approved_link_required");
+  });
+  it("link on an approved wallet refuses clearly and preserves its stored linkId", async () => {
+    const gateway = await linked();
+    gateway.requests.length = 0;
+    gateway.options.statuses = ["authorization_pending"];
+    gateway.options.lifetimeMs = 6_000;
+    gateway.pollIndex = 0;
+    expect(await run(gateway, "link")).toBe(1);
+    expect(stderr.join("")).toContain("wallet_already_linked");
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID, accountId: ACCOUNT_ID });
+    expect(gateway.requests).toEqual([]);
+  });
+});
