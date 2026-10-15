@@ -2029,6 +2029,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE TABLE IF NOT EXISTS wallet_links (
       id TEXT PRIMARY KEY,
       account_id TEXT NOT NULL,
+      account_proof TEXT NOT NULL CHECK (account_proof IN ('siwe', 'claimed')),
       role TEXT NOT NULL CHECK (role IN ('agent', 'device')),
       subject_type TEXT NOT NULL,
       subject_id TEXT,
@@ -2055,6 +2056,7 @@ export function migrateDatabase(sqlite: Database.Database): void {
       ON wallet_links(key_type, lower(address_or_pubkey), chain_id)
       WHERE revoked_at IS NULL;
     CREATE INDEX IF NOT EXISTS wallet_links_account_idx ON wallet_links(account_id);
+    CREATE INDEX IF NOT EXISTS wallet_links_account_lower_idx ON wallet_links (lower(account_id));
   `);
 
   // ── ALTER TABLE migrations (ERC-8004 onchain tracking) ──────────

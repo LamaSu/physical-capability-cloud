@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { getAddress, isAddress } from "viem";
 import { isValidKernelId } from "@pcc/spec";
+import { sql } from "@pcc/store";
+import { getRepos, getStore } from "../db.js";
 import { requireAuth } from "../auth/require-auth.js";
 import { resolveSession } from "../auth/siwe-auth.js";
 import { walletLinkConfig } from "../services/wallet-links/config.js";
@@ -45,6 +47,22 @@ function accountPrincipal(req: FastifyRequest): string {
   const accountId = req.operatorId ?? req.userId;
   if (!accountId) throw new WalletLinkError(401, "api_key_required");
   return accountId;
+}
+
+/** Only the SIWE login flow can mint this metadata marker; public keys claim accounts. */
+function siweProvenAddress(req: FastifyRequest): string | null {
+  if (!req.apiKeyId) return resolveSession(req)?.address ?? null;
+  const key = getRepos().apiKeys.findById(req.apiKeyId);
+  if (!key) return null;
+  let metadata;
+  try { metadata = JSON.parse(key.metadata ?? "{}"); } catch { return null; }
+  if (metadata?.source !== "siwe-session" || typeof metadata.sessionId !== "string") return null;
+  // Session rows last at least as long as their keys and logout revokes those
+  // keys. Cross-check the minting session rather than trusting a marker alone.
+  const session = getStore().db.get<{ wallet_address: string; expires_at: string }>(sql`
+    SELECT wallet_address, expires_at FROM sessions WHERE id = ${metadata.sessionId}`);
+  return session && Date.parse(session.expires_at) > Date.now() &&
+    session.wallet_address.toLowerCase() === key.operatorId.toLowerCase() ? key.operatorId : null;
 }
 
 function credentialPrincipal(req: FastifyRequest): string {
@@ -117,10 +135,10 @@ export async function walletsRoutes(app: FastifyInstance) {
     const row = getLinkRequest(req.params.id);
     if (!row) throw new WalletLinkError(404, "not_found");
     const now = Date.now();
-    if (limits.poll(row.id, row.expires_at, now)) return { status: "slow_down" };
-    if (row.status === "approved") return { status: "approved", linkId: row.link_id, accountId: row.account_id };
+    if (row.status === "approved") return { status: "approved", linkId: row.link_id };
     if (row.status === "denied" || row.status === "failed") return { status: row.status };
     if (Date.parse(row.expires_at) <= now || row.status === "expired") return { status: "expired" };
+    if (limits.poll(row.id, row.expires_at, now)) return { status: "slow_down" };
     return { status: "authorization_pending" };
   });
 
@@ -163,15 +181,18 @@ export async function walletsRoutes(app: FastifyInstance) {
     }
     if (Date.parse(row.expires_at) <= now) throw new WalletLinkError(410, "expired");
     if (row.status !== "awaiting_approval") throw new WalletLinkError(409, "already_decided");
-    return decideLinkRequest(row.id, accountId, input.decision, now, req.apiKeyId ?? null);
+    return decideLinkRequest(row.id, accountId, input.decision, now, req.apiKeyId ?? null, siweProvenAddress(req) ? "siwe" : "claimed");
   });
 
-  app.get("/api/wallets", { onRequest: requireAuth }, async req => ({ links: listWalletLinks(accountPrincipal(req), Date.now(), req.apiKeyId ?? null) }));
+  app.get("/api/wallets", { onRequest: requireAuth }, async req => ({ links: listWalletLinks(accountPrincipal(req), Date.now(), req.apiKeyId ?? null, siweProvenAddress(req)) }));
 
   app.post<{ Params: { linkId: string } }>("/api/wallets/:linkId/revoke", {
     ...bodyOptions(revokeSchema, { reason: { type: "string", pattern: "^[a-z_]{1,32}$" } }), onRequest: requireAuth,
     preValidation: async req => {
       if (req.body == null && req.headers["transfer-encoding"] === undefined && Number(req.headers["content-length"] ?? 0) === 0) req.body = {};
     },
-  }, async req => revokeWalletLink(req.params.linkId, accountPrincipal(req), revokeSchema.parse(req.body).reason, Date.now(), req.apiKeyId ?? null));
+  }, async req => {
+    checkApprovalOrigin(req, walletLinkConfig().publicOrigin);
+    return revokeWalletLink(req.params.linkId, accountPrincipal(req), revokeSchema.parse(req.body).reason, Date.now(), req.apiKeyId ?? null, siweProvenAddress(req));
+  });
 }
