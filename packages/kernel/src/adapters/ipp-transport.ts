@@ -92,8 +92,8 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
             return;
           }
         }
-        // Only an HTTP/d.d 2xx-9xx block is final. Anything else (a 1xx in any protocol, 101,
-        // stray bytes) keeps scanning; the gate below refuses a final response the scan missed.
+        // The scan stops at an HTTP/d.d 2xx-9xx block and keeps scanning after other blocks.
+        // The response gate below requires that the scan recognized such a block.
         if (!/^HTTP\/\d\.\d [2-9]\d\d(?: |$)/.test(lines[0])) { headerSize = 0; continue; }
         headersChecked = true;
         framingSocket?.removeListener("data", inspectRawHeaders);
