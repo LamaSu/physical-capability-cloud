@@ -423,3 +423,22 @@ it("wallet help exposes no --usdc input", async () => {
   expect(await main(["--help"], runtime())).toBe(0);
   expect(output.join("")).not.toContain("--usdc");
 });
+
+describe("funding 404 discrimination", () => {
+  it.each(["link_request_not_found", "link_not_found", "other_code"])("404 %s is an error with its code, never route absent", async error => {
+    store(); gateway({ error }, 404);
+    expect(await fund()).toBe(1);
+    expect(errors.join("")).toContain(error);
+    expect(output.join("")).not.toContain("linked (unfunded)");
+  });
+  it("404 not_found with extra fields is an error", async () => {
+    store(); gateway({ error: "not_found", extra: true }, 404);
+    expect(await fund()).toBe(1);
+    expect(errors.join("")).toContain("not_found");
+  });
+  it("non-JSON 404 is an error with invalid_gateway_response", async () => {
+    store(); vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("missing route", { status: 404 }));
+    expect(await fund()).toBe(1);
+    expect(errors.join("")).toContain("invalid_gateway_response");
+  });
+});

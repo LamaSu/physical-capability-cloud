@@ -462,7 +462,7 @@ describe("pcc-wallet ceremony", () => {
   });
 
   it("fund 404 prints linked (unfunded) and exits zero without ready", async () => {
-    const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 404 }).start();
+    const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 404, fundBody: { error: "not_found" } }).start();
     expect(await run(gateway, "init", ["--yes"])).toBe(0);
     const output = [...stdout, ...stderr].join("\n");
     expect(output).toContain("funding is not available on this gateway; ask the operator for test funds");
@@ -840,4 +840,11 @@ describe("W1 final API contract", () => {
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
     expect(gateway.requests.some((request) => request.path === "/api/wallets")).toBe(false);
   });
+});
+
+it("init treats 404 link_request_not_found as an error with its code", async () => {
+  const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 404, fundBody: { error: "link_request_not_found" } }).start();
+  expect(await run(gateway, "init", ["--yes"])).toBe(1);
+  expect(stderr.join("")).toContain("link_request_not_found");
+  expect(stdout.join("")).not.toContain("linked (unfunded)");
 });

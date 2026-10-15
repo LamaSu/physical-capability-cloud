@@ -172,17 +172,10 @@ export async function requestFunding(
   role: Role = "agent",
 ): Promise<FundingResult> {
   const response = await send(origin, `/api/wallets/link-requests/${encodeURIComponent(requestId)}/fund`, "POST", {});
-  let data: unknown;
-  try { data = await json(response); }
-  catch (error) {
-    // Unknown-route HTML or an empty body still means no funding capability.
-    // Oversized and stalled responses retain their separate refusal codes.
-    if (response.status === 404 && error instanceof WalletError && error.code === "invalid_gateway_response") {
-      return { status: "unavailable", claims: [] };
-    }
-    throw error;
+  const data = await json(response);
+  if (response.status === 404 && object(data) && exactKeys(data, ["error"]) && data.error === "not_found") {
+    return { status: "unavailable", claims: [] };
   }
-  if (response.status === 404) return { status: "unavailable", claims: [] };
   if (response.status === 503 && object(data) && data.error === "faucet_unavailable") {
     return { status: "unavailable", claims: [] };
   }
