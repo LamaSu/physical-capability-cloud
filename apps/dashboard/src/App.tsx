@@ -33,6 +33,7 @@ const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ def
 const WorkflowPage = lazy(() => import("./pages/WorkflowPage.js").then(m => ({ default: m.WorkflowPage })));
 const JobsPage = lazy(() => import("./pages/JobsPage.js").then(m => ({ default: m.JobsPage })));
 const JobDetailPage = lazy(() => import("./pages/JobDetailPage.js").then(m => ({ default: m.JobDetailPage })));
+const JobFlowPage = lazy(() => import("./pages/JobFlowPage.js").then(m => ({ default: m.JobFlowPage })));
 const KernelsPage = lazy(() => import("./pages/KernelsPage.js").then(m => ({ default: m.KernelsPage })));
 const KernelDetailPage = lazy(() => import("./pages/KernelDetailPage.js").then(m => ({ default: m.KernelDetailPage })));
 const EscrowPage = lazy(() => import("./pages/EscrowPage.js").then(m => ({ default: m.EscrowPage })));
@@ -210,6 +211,7 @@ function DashboardShell() {
               <Route path="/build/:type" element={<BuilderPage />} />
               <Route path="/workflow" element={<WorkflowPage />} />
               <Route path="/jobs" element={<JobsPage />} />
+              <Route path="/jobs/flow" element={<JobFlowPage />} />
               <Route path="/jobs/:jobId" element={<JobDetailPage />} />
               <Route path="/kernels" element={<KernelsPage />} />
               <Route path="/kernels/leaderboard" element={<KernelLeaderboardPage />} />
@@ -309,6 +311,10 @@ function Shell() {
   // Auth gate — redirect to login for non-public pages
   if (!isAuthenticated && !isPublicPage) {
     return <LoginPage />;
+  }
+
+  if (location.pathname === "/jobs/flow") {
+    return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }
 
   // Landing page — agent-first (root)

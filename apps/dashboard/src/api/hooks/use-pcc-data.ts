@@ -15,6 +15,7 @@
  * are shielded from the wire format.
  */
 
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { JobExecutionDTO } from "@pcc/spec";
 import { api, ApiError } from "../gateway.js";
@@ -114,9 +115,17 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
  * because finishing the work never makes the money final. A 404, 401 or 403 is final (no
  * retry), and the page then shows only that refusal, never data cached from an earlier read;
  * any other failure is retried once and then surfaces as an error. It never falls back to
- * fixtures. The cache is cleared when the signed-in identity changes (onIdentityChange).
+ * fixtures. Polling pauses while the tab is hidden. The cache is cleared when the signed-in
+ * identity changes (onIdentityChange).
  */
 export function useJobExecution(jobId: string | undefined) {
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
+  useEffect(() => {
+    const onVisibilityChange = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
   return useQuery<JobExecutionDTO>({
     queryKey: ["jobExecution", jobId],
     queryFn: () => api.getJobExecution(jobId!),
@@ -124,7 +133,7 @@ export function useJobExecution(jobId: string | undefined) {
     retry: (failureCount, error) =>
       !(error instanceof ApiError && (error.status === 404 || error.status === 401 || error.status === 403)) && failureCount < 1,
     refetchInterval: (query) =>
-      query.state.data?.execution.terminal ? JOB_EXECUTION_TERMINAL_REFRESH_MS : JOB_EXECUTION_REFRESH_MS,
+      visible && (query.state.data?.execution.terminal ? JOB_EXECUTION_TERMINAL_REFRESH_MS : JOB_EXECUTION_REFRESH_MS),
   });
 }
 
