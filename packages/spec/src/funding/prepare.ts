@@ -75,7 +75,9 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
  * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within
  * the permitted window. A mixed tier set hands the choice of release authority to the
  * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
- * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
+ * the cohort's assertion once its challenge window closes. The buyer can contest it only by posting a bond within
+ * that window, which opens an appeal. The unit still releases unless the appeal rules for the buyer, and appeal
+ * silence releases. Show prepared.configs to the buyer, or bind jobPolicyHash.
  */
 export interface FundingExpectations {
   jobId: string;
@@ -138,7 +140,9 @@ export interface PrepareFundingArgs {
  * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set and reclaimAt within
  * the permitted window. A mixed tier set hands the choice of release authority to the
  * payload's author, unit by unit: a tier-0 unit releases only on the buyer's approval; a tier-1+ unit releases on
- * the cohort's assertion unless the buyer challenges. Show prepared.configs to the buyer, or bind jobPolicyHash.
+ * the cohort's assertion once its challenge window closes. The buyer can contest it only by posting a bond within
+ * that window, which opens an appeal. The unit still releases unless the appeal rules for the buyer, and appeal
+ * silence releases. Show prepared.configs to the buyer, or bind jobPolicyHash.
  * These choices are not waivers and do not appear in unchecked.
  */
 export interface PreparedFunding {
