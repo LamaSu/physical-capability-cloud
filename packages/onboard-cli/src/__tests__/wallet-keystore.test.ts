@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPublicKey, verify } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { verifyMessage } from "viem";
 import { WalletError } from "../wallet/errors.js";
 import { signWalletMessage } from "../wallet/keys.js";
@@ -17,7 +17,13 @@ import {
 } from "../wallet/keystore.js";
 
 const defaultHome = vi.hoisted(() => ({ path: undefined as string | undefined }));
-const storageMocks = vi.hoisted(() => ({ foreignPath: undefined as string | undefined }));
+const storageMocks = vi.hoisted(() => ({
+  foreignPath: undefined as string | undefined,
+  directoryFsyncError: undefined as string | undefined,
+  fileFsyncError: undefined as string | undefined,
+  recordIO: false,
+  calls: [] as string[],
+}));
 vi.mock("node:os", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:os")>();
   return { ...original, homedir: () => defaultHome.path ?? original.homedir() };
@@ -37,6 +43,29 @@ vi.mock("node:fs", async (importOriginal) => {
       }
       return stat;
     },
+    writeFileSync: (...args: Parameters<typeof original.writeFileSync>) => {
+      if (storageMocks.recordIO) storageMocks.calls.push("write:file");
+      return original.writeFileSync(...args);
+    },
+    fsyncSync: (descriptor: number) => {
+      const kind = original.fstatSync(descriptor).isDirectory() ? "directory" : "file";
+      if (storageMocks.recordIO) storageMocks.calls.push(`fsync:${kind}`);
+      const code = kind === "directory" ? storageMocks.directoryFsyncError : storageMocks.fileFsyncError;
+      if (code) throw Object.assign(new Error("injected fsync failure"), { code });
+      return original.fsyncSync(descriptor);
+    },
+    linkSync: (...args: Parameters<typeof original.linkSync>) => {
+      if (storageMocks.recordIO) storageMocks.calls.push("publish:link");
+      return original.linkSync(...args);
+    },
+    renameSync: (...args: Parameters<typeof original.renameSync>) => {
+      if (storageMocks.recordIO) storageMocks.calls.push("publish:rename");
+      return original.renameSync(...args);
+    },
+    unlinkSync: (...args: Parameters<typeof original.unlinkSync>) => {
+      if (storageMocks.recordIO) storageMocks.calls.push("unlink:temporary");
+      return original.unlinkSync(...args);
+    },
   };
 });
 
@@ -47,6 +76,10 @@ let previousDirectory: string | undefined;
 beforeEach(() => {
   defaultHome.path = undefined;
   storageMocks.foreignPath = undefined;
+  storageMocks.directoryFsyncError = undefined;
+  storageMocks.fileFsyncError = undefined;
+  storageMocks.recordIO = false;
+  storageMocks.calls = [];
   previousDirectory = process.env.PCC_WALLET_DIR;
   root = mkdtempSync(join(tmpdir(), "pcc-wallet-keystore-"));
   directory = join(root, "wallets");
@@ -85,6 +118,69 @@ function expectSafeError(action: () => unknown, wallet: WalletRecord): void {
 }
 
 describe("wallet keystore", () => {
+  it("does not publish an empty key file after SIGKILL immediately following the exclusive open", () => {
+    const packageDirectory = fileURLToPath(new URL("../../", import.meta.url));
+    const build = spawnSync(process.execPath, [join(packageDirectory, "node_modules/typescript/bin/tsc"), "-p", "."], {
+      cwd: packageDirectory, encoding: "utf8",
+    });
+    expect(build.status, build.stderr).toBe(0);
+    const entry = pathToFileURL(join(packageDirectory, "dist/wallet/keystore.js")).href;
+    const script = [
+      'import fs from "node:fs";',
+      'import { syncBuiltinESMExports } from "node:module";',
+      'const originalOpen = fs.openSync; const originalStat = fs.lstatSync;',
+      'fs.lstatSync = (...args) => { const stat = originalStat(...args); if (["/", "/mnt", "/tmp"].includes(args[0]) && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0; return stat; };',
+      'fs.openSync = (...args) => { const fd = originalOpen(...args); if (typeof args[0] === "string" && args[0].startsWith(process.env.PCC_WALLET_DIR + "/") && (args[1] & fs.constants.O_CREAT)) process.kill(process.pid, "SIGKILL"); return fd; };',
+      'syncBuiltinESMExports();',
+      `const { createWallet } = await import(${JSON.stringify(entry)});`,
+      'createWallet({ label: "participant", role: "agent", keyType: "secp256k1", chainId: 84532, gatewayOrigin: "http://127.0.0.1:3200", createdAt: "2026-10-13T12:00:00.000Z" });',
+    ].join("\n");
+    const crashed = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      env: { ...process.env }, encoding: "utf8",
+    });
+    expect(crashed.signal).toBe("SIGKILL");
+    expect(existsSync(walletPath("participant"))).toBe(false);
+    create();
+    expect(readWallet("participant").label).toBe("participant");
+  });
+
+  it("fsyncs a temporary key file before no-clobber publication and directory fsync", () => {
+    storageMocks.recordIO = true;
+    create();
+    expect(storageMocks.calls).toEqual([
+      "write:file", "fsync:file", "publish:link", "unlink:temporary", "fsync:directory",
+    ]);
+  });
+
+  it("fsyncs a temporary link update before rename and directory fsync", () => {
+    const wallet = create();
+    storageMocks.recordIO = true;
+    updateLink(wallet, { requestId: "lr_durable", status: "awaiting_approval" });
+    expect(storageMocks.calls).toEqual(["write:file", "fsync:file", "publish:rename", "fsync:directory"]);
+  });
+
+  it.each(["EINVAL", "ENOTSUP"])("tolerates unsupported directory fsync (%s) for create and update", (code) => {
+    storageMocks.directoryFsyncError = code;
+    const wallet = create();
+    updateLink(wallet, { requestId: "lr_durable", status: "awaiting_approval" });
+    expect(readWallet("participant").link.requestId).toBe("lr_durable");
+    expect(lstatSync(walletPath("participant")).mode & 0o777).toBe(0o600);
+  });
+
+  it("keeps a complete published key file when directory fsync fails with EIO", () => {
+    storageMocks.directoryFsyncError = "EIO";
+    expect(() => create()).toThrow(/wallet_storage_failed/);
+    expect(readWallet("participant").label).toBe("participant");
+  });
+
+  it.each(["EINVAL", "ENOTSUP", "EIO"])("refuses file fsync failure (%s) before publishing a key", (code) => {
+    storageMocks.fileFsyncError = code;
+    expect(() => create()).toThrow(/wallet_storage_failed/);
+    expect(existsSync(walletPath("participant"))).toBe(false);
+    storageMocks.fileFsyncError = undefined;
+    create();
+  });
+
   function useDefaultDirectory(): string {
     defaultHome.path = root;
     delete process.env.PCC_WALLET_DIR;

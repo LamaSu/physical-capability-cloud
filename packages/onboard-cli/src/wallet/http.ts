@@ -61,11 +61,32 @@ async function send(
 }
 
 async function json(response: Response): Promise<unknown> {
-  try { return await response.json(); }
+  const limit = 64 * 1024;
+  const reader = response.body?.getReader();
+  if (!reader) throw new WalletError("invalid_gateway_response");
+  try {
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        void reader.cancel().catch(() => { /* refusal already reported */ });
+        throw new WalletError("gateway_response_too_large");
+      }
+      chunks.push(value);
+    }
+    const body = new Uint8Array(bytes);
+    let offset = 0;
+    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
+  }
   catch (error) {
+    if (error instanceof WalletError) throw error;
     if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new WalletError("gateway_unavailable");
     throw new WalletError("invalid_gateway_response");
-  }
+  } finally { reader.releaseLock(); }
 }
 
 export async function walletRequest(
@@ -97,10 +118,10 @@ export async function requestFunding(origin: string, linkId: string): Promise<{
   txHashes: string[];
 }> {
   const response = await send(origin, `/api/wallets/${encodeURIComponent(linkId)}/fund`, "POST", {});
+  const data = await json(response);
   if (response.status === 404) return { funded: false, txHashes: [] };
   if (!response.ok) throw new WalletError(String(response.status));
   if (response.status === 204) return { funded: true, txHashes: [] };
-  const data = await json(response);
   const hashes = new Set<string>();
   function collect(value: unknown): void {
     if (typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)) hashes.add(value);

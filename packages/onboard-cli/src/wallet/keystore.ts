@@ -1,5 +1,5 @@
 import {
-  chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
+  chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync,
   openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, type Stats,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -171,7 +171,12 @@ function checkStorage(create: boolean): Stats {
 
 function fsyncDirectory(directory: string): void {
   const descriptor = openSync(directory, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_DIRECTORY);
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
+  try {
+    try { fsyncSync(descriptor); } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EINVAL" && code !== "ENOTSUP") throw error;
+    }
+  } finally { closeSync(descriptor); }
 }
 
 function wrap(error: unknown): never {
@@ -213,9 +218,8 @@ export function createWallet(input: Pick<WalletRecord,
   "label" | "role" | "keyType" | "chainId" | "gatewayOrigin" | "createdAt"
 >): WalletRecord {
   let descriptor: number | undefined;
-  let created = false;
+  let temporary: string | undefined;
   let createdStat: Stats | undefined;
-  let path: string | undefined;
   try {
     requirePosix();
     validateLabel(input.label);
@@ -223,11 +227,11 @@ export function createWallet(input: Pick<WalletRecord,
     if (input.role !== "agent" && input.role !== "device") throw new WalletError("unsupported_role");
     if (input.keyType !== "secp256k1" && input.keyType !== "ed25519") throw new WalletError("unsupported_key_type");
     const directoryStat = checkStorage(true);
-    path = walletPath(input.label);
-    // A regular existing file proceeds to the exclusive open; it is never replaced.
+    const path = walletPath(input.label);
+    // Publication uses link(2), so an existing target can never be replaced.
     if (optionalStat(path)?.isSymbolicLink()) throw new WalletError("wallet_file_symlink_refused");
-    descriptor = openSync(path, CREATE_FLAGS, FILE_MODE);
-    created = true;
+    temporary = join(storageDirectory(), `.${input.label}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`);
+    descriptor = openSync(temporary, CREATE_FLAGS, FILE_MODE);
     createdStat = fstatSync(descriptor);
     fchmodSync(descriptor, FILE_MODE);
     assertFile(fstatSync(descriptor));
@@ -237,21 +241,29 @@ export function createWallet(input: Pick<WalletRecord,
     fsyncSync(descriptor);
     const descriptorStat = fstatSync(descriptor);
     assertFile(descriptorStat);
-    const pathStat = lstatSync(path);
-    assertFile(pathStat);
-    if (!sameFile(descriptorStat, pathStat) || !sameFile(directoryStat, lstatSync(storageDirectory()))) {
+    const temporaryStat = lstatSync(temporary);
+    assertFile(temporaryStat);
+    if (!sameFile(descriptorStat, temporaryStat) || !sameFile(directoryStat, checkStorage(false))) {
       throw new WalletError("wallet_storage_changed");
     }
     closeSync(descriptor);
     descriptor = undefined;
+    linkSync(temporary, path);
+    const pathStat = lstatSync(path);
+    assertFile(pathStat);
+    if (!sameFile(descriptorStat, pathStat) || !sameFile(directoryStat, checkStorage(false))) {
+      throw new WalletError("wallet_storage_changed");
+    }
+    unlinkSync(temporary);
+    temporary = undefined;
     fsyncDirectory(storageDirectory());
     return wallet;
   } catch (error) {
     if (descriptor !== undefined) { try { closeSync(descriptor); } catch { /* public error only */ } }
-    if (created && path && createdStat) {
+    if (temporary && createdStat) {
       try {
-        const current = optionalStat(path);
-        if (current && !current.isSymbolicLink() && sameFile(createdStat, current)) unlinkSync(path);
+        const current = optionalStat(temporary);
+        if (current && !current.isSymbolicLink() && sameFile(createdStat, current)) unlinkSync(temporary);
       } catch { /* public error only */ }
     }
     return wrap(error);

@@ -79,3 +79,33 @@ describe("wallet native HTTP security", () => {
     } finally { await close(server); }
   });
 });
+
+describe("gateway response size cap", () => {
+  const limit = 64 * 1024;
+  function payload(bytes: number): string { return JSON.stringify({ padding: "a".repeat(bytes - JSON.stringify({ padding: "" }).length) }); }
+  it("accepts a JSON response at exactly64KiB", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(payload(limit)));
+    await expect(walletRequest("http://127.0.0.1:9", "/x", "GET")).resolves.toHaveProperty("padding");
+  });
+  it.each([200, 400, 404, 503])("refuses a gateway response over64KiB (HTTP%i)", async (status) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(payload(limit + 1), { status }));
+    await expect(walletRequest("http://127.0.0.1:9", "/x", "GET")).rejects.toThrow("gateway_response_too_large");
+  });
+  it("counts fragmented UTF8 bytes and cancels the oversized body", async () => {
+    let cancelled = false;
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(new ReadableStream({
+      start(controller) {
+        const chunk = new TextEncoder().encode("é".repeat(1024));
+        for (let index = 0; index < 33; index++) controller.enqueue(chunk);
+      },
+      cancel() { cancelled = true; },
+    })));
+    await expect(walletRequest("http://127.0.0.1:9", "/x", "GET")).rejects.toThrow("gateway_response_too_large");
+    expect(cancelled).toBe(true);
+  });
+  it("caps funding404 bodies before declaring the route unavailable", async () => {
+    const { requestFunding } = await import("../wallet/http.js");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(payload(limit + 1), { status: 404 }));
+    await expect(requestFunding("http://127.0.0.1:9", "lr_test")).rejects.toThrow("gateway_response_too_large");
+  });
+});
