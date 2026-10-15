@@ -237,10 +237,13 @@ async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: strin
       continue;
     }
     if (result.status === "partial") printClaims(result, io);
+    const receiptDeadline = io.now() + io.receiptTimeoutMs;
     for (const claim of result.claims) {
       if (!claim.txHash) continue;
+      const remaining = receiptDeadline - io.now();
+      if (remaining < 2) throw new WalletError("funding_receipt_timeout");
       let receipt: { status: "success" | "reverted" };
-      try { receipt = await io.waitForReceipt(claim.txHash, rpcUrl, io.receiptTimeoutMs); }
+      try { receipt = await io.waitForReceipt(claim.txHash, rpcUrl, remaining); }
       catch (error) {
         if (error instanceof WalletError) throw error;
         throw new WalletError("funding_rpc_unavailable");

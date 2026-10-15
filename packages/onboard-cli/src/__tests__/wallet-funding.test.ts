@@ -442,3 +442,144 @@ describe("funding 404 discrimination", () => {
     expect(errors.join("")).toContain("invalid_gateway_response");
   });
 });
+
+describe("bounded receipt polling and RPC retries", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  function rpcReceipt() {
+    return {
+      transactionHash: TX_ETH, transactionIndex: "0x0", blockHash: TX_USDC,
+      blockNumber: "0x1", from: "0x0000000000000000000000000000000000000001",
+      to: "0x0000000000000000000000000000000000000002", cumulativeGasUsed: "0x5208",
+      gasUsed: "0x5208", effectiveGasPrice: "0x1", contractAddress: null,
+      logs: [], logsBloom: `0x${"00".repeat(256)}`, type: "0x2", status: "0x1",
+    };
+  }
+  function reply(id: number, result: unknown): Response {
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+      headers: { "content-type": "application/json" },
+    });
+  }
+  function observedReceipt(timeoutMs = 10_000) {
+    return waitForFundingReceipt(TX_ETH, "http://127.0.0.1:8545", timeoutMs).then(
+      result => result.status,
+      error => error instanceof Error ? error.message : String(error),
+    );
+  }
+
+  it("receipt polls are at least 2000 ms apart", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    let block = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body)) as { method: string; id: number };
+      if (payload.method === "eth_blockNumber") return reply(payload.id, `0x${(++block).toString(16)}`);
+      attempts.push(Date.now() - started);
+      return reply(payload.id, attempts.length < 3 ? null : rpcReceipt());
+    });
+    const result = observedReceipt();
+    try {
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(attempts).toEqual([0]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(attempts).toEqual([0, 2_000]);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await result).toBe("success");
+      expect(attempts).toEqual([0, 2_000, 4_000]);
+    } finally { await vi.runAllTimersAsync(); }
+  });
+
+  it.each([429, 500, 503, "network"] as const)("transient RPC %s is retried within the receipt budget", async failure => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    let block = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body)) as { method: string; id: number };
+      if (payload.method === "eth_blockNumber") return reply(payload.id, `0x${(++block).toString(16)}`);
+      attempts++;
+      if (attempts === 1) return reply(payload.id, null);
+      if (attempts === 2) {
+        if (failure === "network") throw new TypeError("test network failure");
+        return new Response("temporarily unavailable", { status: failure });
+      }
+      return reply(payload.id, rpcReceipt());
+    });
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("success");
+    expect(attempts).toBe(3);
+  });
+
+  it("persistent 429s exhaust one receipt budget and leave no later RPC polling", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    let block = 0;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body)) as { method: string; id: number };
+      if (payload.method === "eth_blockNumber") return reply(payload.id, `0x${(++block).toString(16)}`);
+      attempts.push(Date.now() - started);
+      return new Response("rate limited", { status: 429 });
+    });
+    const result = observedReceipt(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await result).toBe("funding_receipt_timeout");
+    expect(attempts).toEqual([0, 2_000, 4_000]);
+    const callsAtTimeout = fetchSpy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(callsAtTimeout);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([400, 401, 403, 404])("permanent RPC HTTP %s fails without retrying", async status => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const payload = JSON.parse(String(init?.body)) as { method: string; id: number };
+      if (payload.method === "eth_blockNumber") return reply(payload.id, "0x1");
+      attempts++;
+      return new Response("request refused", { status });
+    });
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(attempts).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("one overall receipt budget covers every funding claim", async () => {
+    store(); gateway(FUNDED);
+    const waiter = vi.fn(async (_hash: `0x${string}`, _rpcUrl: string, _timeoutMs: number) => {
+      clock += 15_000;
+      return { status: "success" as const };
+    });
+    expect(await fund("agent", [], runtime({ waitForReceipt: waiter, receiptTimeoutMs: 60_000 }))).toBe(1);
+    expect(waiter).toHaveBeenCalledTimes(4);
+    expect(errors.join("")).toContain("funding_receipt_timeout");
+    expect(output.join("")).not.toContain("funded");
+  });
+
+  it("a stalled receipt body is aborted at the overall deadline without later polling", async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const abort = () => { aborted = true; controller.error(new DOMException("aborted", "AbortError")); };
+          if (init?.signal?.aborted) abort();
+          else init?.signal?.addEventListener("abort", abort, { once: true });
+        },
+      });
+      return new Response(body, { headers: { "content-type": "application/json" } });
+    });
+    const result = observedReceipt(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await result).toBe("funding_receipt_timeout");
+    expect(aborted).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});

@@ -1,5 +1,4 @@
-import { createPublicClient, http, type Hex } from "viem";
-import { baseSepolia } from "viem/chains";
+import type { Hex } from "viem";
 import type { Role } from "./keystore.js";
 import { WalletError } from "./errors.js";
 
@@ -143,6 +142,7 @@ function parseFunding(data: unknown, role: Role): FundingResult {
   const hashes = new Set<string>();
   const claims = data.claims.map((value: unknown, index: number): FundingClaim => {
     if (!object(value) || !exactKeys(value, ["token", "amount", "status"], ["txHash"])
+      || (value.token !== "eth" && value.token !== "usdc")
       || value.token !== (index < 5 ? "eth" : "usdc")
       || value.amount !== (value.token === "eth" ? "0.0001" : "1")
       || (value.status !== "succeeded" && value.status !== "failed" && value.status !== "pending")
@@ -203,30 +203,55 @@ export async function waitForFundingReceipt(
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 2 || timeoutMs > 60_000) {
     throw new WalletError("invalid_receipt_timeout");
   }
+  const deadline = Date.now() + timeoutMs;
+  const controller = new AbortController();
+  // The same timer bounds fetch, response-body reads and every retry.
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const client = createPublicClient({
-      chain: baseSepolia,
-      // viem starts its block watcher after the first receipt request settles.
-      // Finish that request before the overall timer can clean up the watcher.
-      transport: http(url, { timeout: Math.min(Math.floor(timeoutMs / 2), 15_000), retryCount: 0, fetchOptions: { redirect: "error" } }),
-    });
-    const receipt = await client.waitForTransactionReceipt({
-      hash, timeout: timeoutMs, pollingInterval: 1_000, checkReplacement: false,
-    });
-    if (receipt.transactionHash?.toLowerCase() !== hash.toLowerCase()) {
-      throw new WalletError("funding_receipt_mismatch");
-    }
-    if (receipt.status !== "success" && receipt.status !== "reverted") throw new WalletError("funding_receipt_invalid");
-    return { status: receipt.status };
-  } catch (error) {
-    if (error instanceof WalletError) throw error;
-    let cause: unknown = error;
-    for (let depth = 0; depth < 8 && cause instanceof Error; depth++) {
-      if (["WaitForTransactionReceiptTimeoutError", "TimeoutError", "AbortError"].includes(cause.name)) {
-        throw new WalletError("funding_receipt_timeout");
+    for (;;) {
+      if (controller.signal.aborted || Date.now() >= deadline) throw new WalletError("funding_receipt_timeout");
+      try {
+        const response = await fetch(url, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [hash] }),
+          redirect: "error", signal: controller.signal,
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          if (response.status !== 429 && (response.status < 500 || response.status > 599)) {
+            throw new WalletError("funding_rpc_unavailable");
+          }
+        } else {
+          const data = await json(response);
+          if (!object(data) || !Object.hasOwn(data, "result")) throw new WalletError("funding_rpc_unavailable");
+          if (data.result !== null) {
+            const receipt = data.result;
+            if (!object(receipt)) throw new WalletError("funding_receipt_invalid");
+            if (typeof receipt.transactionHash !== "string" || receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {
+              throw new WalletError("funding_receipt_mismatch");
+            }
+            if (receipt.status !== "0x1" && receipt.status !== "0x0") throw new WalletError("funding_receipt_invalid");
+            return { status: receipt.status === "0x1" ? "success" : "reverted" };
+          }
+        }
+      } catch (error) {
+        if (controller.signal.aborted || Date.now() >= deadline) throw new WalletError("funding_receipt_timeout");
+        if (error instanceof WalletError) {
+          if (["invalid_gateway_response", "gateway_response_too_large", "gateway_unavailable"].includes(error.code)) {
+            throw new WalletError("funding_rpc_unavailable");
+          }
+          throw error;
+        }
+        if (!(error instanceof TypeError)) throw new WalletError("funding_rpc_unavailable");
+        // fetch reports transient network failures as TypeError. Retry within
+        // the same deadline; redirects remain refused by fetch itself.
       }
-      cause = (cause as Error & { cause?: unknown }).cause;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new WalletError("funding_receipt_timeout");
+      await new Promise<void>(done => setTimeout(done, Math.min(2_000, remaining)));
     }
-    throw new WalletError("funding_rpc_unavailable");
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
   }
 }
