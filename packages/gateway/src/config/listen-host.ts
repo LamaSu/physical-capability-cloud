@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 
-/** Resolve a bind address without changing the all-interface default. */
+/** Resolve a bind address without changing the default of every IPv4 interface. */
 export function resolveListenHost(value: string | undefined): string {
   const host = value?.trim();
   if (!host) return "0.0.0.0";
@@ -15,5 +15,5 @@ export function resolveListenHost(value: string | undefined): string {
     );
   if (validHostname) return host;
 
-  throw new Error(`Invalid HOST ${JSON.stringify(value)}: expected an IPv4 literal, IPv6 literal or hostname`);
+  throw new Error(`Invalid PCC_LISTEN_HOST ${JSON.stringify(value)}: expected an IPv4 literal, IPv6 literal or hostname`);
 }

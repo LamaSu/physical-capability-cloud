@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { shouldSeedDemoData } from "./seed-policy.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { shouldSeedDemoData, warnInvalidSeedDataOverride } from "./seed-policy.js";
 
 describe.each([
   ["production", false],
@@ -36,4 +36,35 @@ describe("shouldSeedDemoData with an existing always-on demo default", () => {
   ] as const)("applies PCC_SEED_DATA=%j in production", (value, expected) => {
     expect(shouldSeedDemoData(value, "production", true)).toBe(expected);
   });
+});
+
+describe("warnInvalidSeedDataOverride", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["production", false],
+    ["development", true],
+  ] as const)("warns once for FALSE with the %s default", (nodeEnv, defaultSeed) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    warnInvalidSeedDataOverride("FALSE", nodeEnv);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      `Invalid PCC_SEED_DATA "FALSE"; falling back to default ${defaultSeed}.`,
+    );
+  });
+
+  it.each([undefined, "true", "false"] as const)(
+    "does not warn for PCC_SEED_DATA=%j",
+    (value) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      warnInvalidSeedDataOverride(value, "production");
+
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
 });

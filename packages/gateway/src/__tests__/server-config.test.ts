@@ -39,7 +39,7 @@ describe("gateway startup configuration", () => {
     vi.stubEnv("PCC_DB_PATH", join(directory, "pcc.sqlite"));
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("PCC_SEED_DATA", "false");
-    vi.stubEnv("HOST", "127.0.0.1");
+    vi.stubEnv("PCC_LISTEN_HOST", "127.0.0.1");
     vi.stubEnv("SERVE_DASHBOARD", "false");
     vi.stubEnv("ENABLE_MOCK_STREAMING", "false");
     vi.stubEnv("SETTLEMENT_KEEPER_ENABLED", "false");
@@ -66,7 +66,7 @@ describe("gateway startup configuration", () => {
     }
   });
 
-  it("passes HOST to Fastify when starting the gateway", async () => {
+  it("passes PCC_LISTEN_HOST to Fastify when starting the gateway", async () => {
     gateway = await createGateway(0);
     const listen = vi.spyOn(gateway.app, "listen")
       .mockResolvedValue("http://127.0.0.1:3200");
@@ -74,7 +74,27 @@ describe("gateway startup configuration", () => {
     expect(listen).toHaveBeenCalledWith({ port: 0, host: "127.0.0.1" });
   }, 120_000);
 
-  it("binds the real HTTP listener to HOST", async () => {
+  it("ignores HOST when PCC_LISTEN_HOST is set", async () => {
+    vi.stubEnv("HOST", "http://ignored.example");
+    gateway = await createGateway(0);
+    const listen = vi.spyOn(gateway.app, "listen")
+      .mockResolvedValue("http://127.0.0.1:3200");
+    await gateway.start();
+    expect(listen).toHaveBeenCalledWith({ port: 0, host: "127.0.0.1" });
+  }, 120_000);
+
+  it("defaults to 0.0.0.0 when only the old HOST is set", async () => {
+    vi.stubEnv("HOST", "127.0.0.1");
+    vi.stubEnv("PCC_LISTEN_HOST", "");
+    delete process.env.PCC_LISTEN_HOST;
+    gateway = await createGateway(0);
+    const listen = vi.spyOn(gateway.app, "listen")
+      .mockResolvedValue("http://0.0.0.0:3200");
+    await gateway.start();
+    expect(listen).toHaveBeenCalledWith({ port: 0, host: "0.0.0.0" });
+  }, 120_000);
+
+  it("binds the real HTTP listener to PCC_LISTEN_HOST", async () => {
     gateway = await createGateway(0);
     await gateway.start();
     expect((gateway.app.server.address() as AddressInfo).address).toBe("127.0.0.1");
@@ -94,10 +114,32 @@ describe("gateway startup configuration", () => {
     expect(getRepos().jobs.findAll()).toHaveLength(0);
   }, 120_000);
 
-  it("rejects invalid HOST at startup with the configured value", async () => {
-    vi.stubEnv("HOST", "http://localhost");
+  it("production with PCC_SEED_DATA unset seeds nothing", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("PCC_SEED_DATA", "");
+    delete process.env.PCC_SEED_DATA;
+    gateway = await createGateway(0);
+    expect(getRepos().kernels.findAll()).toHaveLength(0);
+    expect(getRepos().jobs.findAll()).toHaveLength(0);
+  }, 120_000);
+
+  it("development with PCC_SEED_DATA unset still seeds the demo kernels", async () => {
+    vi.stubEnv("PCC_SEED_DATA", "");
+    delete process.env.PCC_SEED_DATA;
+    gateway = await createGateway(0);
+    expect(getRepos().kernels.findById("kernel-nyc")).toBeDefined();
+  }, 120_000);
+
+  it("rejects invalid PCC_LISTEN_HOST at startup with the configured value", async () => {
+    vi.stubEnv("PCC_LISTEN_HOST", "http://localhost");
     await expect(createGateway(0).then((created) => {
       gateway = created;
-    })).rejects.toThrow('Invalid HOST "http://localhost"');
+    })).rejects.toThrow('Invalid PCC_LISTEN_HOST "http://localhost"');
+  }, 120_000);
+
+  it("an invalid listen host fails before the store file is opened", async () => {
+    vi.stubEnv("PCC_LISTEN_HOST", "http://localhost");
+    await expect(createGateway(0)).rejects.toThrow('Invalid PCC_LISTEN_HOST "http://localhost"');
+    expect(existsSync(join(directory, "pcc.sqlite"))).toBe(false);
   }, 120_000);
 });

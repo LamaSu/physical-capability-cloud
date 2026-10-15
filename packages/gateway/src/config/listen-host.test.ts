@@ -13,9 +13,10 @@ describe("resolveListenHost", () => {
     ["0.0.0.0", "0.0.0.0"],
     ["2001:db8::1", "2001:db8::1"],
     ["gateway.example", "gateway.example"],
+    ["Gateway.Example", "Gateway.Example"],
     ["gateway.example.", "gateway.example."],
     ["1-gateway.example", "1-gateway.example"],
-  ])("resolves HOST=%j to %s", (value, expected) => {
+  ])("resolves PCC_LISTEN_HOST=%j to %s", (value, expected) => {
     expect(resolveListenHost(value)).toBe(expected);
   });
 
@@ -37,8 +38,8 @@ describe("resolveListenHost", () => {
     "  bad host  ",
     "a".repeat(64) + ".example",
     Array(4).fill("a".repeat(63)).join("."),
-  ])("rejects invalid HOST=%j and names its value", (value) => {
-    expect(() => resolveListenHost(value)).toThrow("HOST");
+  ])("rejects invalid PCC_LISTEN_HOST=%j and names its value", (value) => {
+    expect(() => resolveListenHost(value)).toThrow("PCC_LISTEN_HOST");
     expect(() => resolveListenHost(value)).toThrow(JSON.stringify(value));
   });
 });
