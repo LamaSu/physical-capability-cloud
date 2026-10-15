@@ -9,6 +9,14 @@ from pcc_node import cli, crypto
 from pcc_node.discovery import DiscoveredDevice
 
 
+def _runner_with_separate_stderr():
+    """Capture stderr separately across Click versions."""
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
+
+
 @pytest.mark.parametrize("command", ["start", "discover"])
 @pytest.mark.parametrize(
     "refusal_type, message",
@@ -65,7 +73,7 @@ def test_commands_print_key_refusals_and_stop(command, refusal_type, message, tm
          mock.patch.object(cli, "register_signing_key") as register_key, \
          mock.patch.object(cli, "save_config") as save, \
          mock.patch.object(cli, "run_daemon") as daemon:
-        result = CliRunner().invoke(cli.main, args)
+        result = _runner_with_separate_stderr().invoke(cli.main, args)
 
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit)

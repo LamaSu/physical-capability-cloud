@@ -1505,12 +1505,16 @@ def _e17b_directory_metadata(monkeypatch, directory, *, owner, mode):
 
 @needs_nacl
 class TestE17bSecureAncestorChain:
+    @pytest.mark.parametrize("depth", [1, 2, 3], ids=["depth-1", "depth-2", "depth-3"])
     @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
     def test_a_foreign_owned_0755_ancestor_is_refused(
-        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing, depth
     ):
         ancestor = _private_dir(tmp_path / "foreign-ancestor")
-        target = _private_dir(ancestor / "private") / "keys.json"
+        directory = ancestor
+        for component in ("a", "b")[:depth - 1]:
+            directory = _private_dir(directory / component)
+        target = _private_dir(directory / "private") / "keys.json"
         if existing:
             _new_key_pair_file(target)
         inspected = _e17b_directory_metadata(
@@ -1523,13 +1527,16 @@ class TestE17bSecureAncestorChain:
         assert inspected, "the ancestor's held descriptor was not inspected"
         assert target.exists() == existing
 
-
+    @pytest.mark.parametrize("depth", [1, 2, 3], ids=["depth-1", "depth-2", "depth-3"])
     @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
     def test_a_group_writable_ancestor_is_refused(
-        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing, depth
     ):
         ancestor = _private_dir(tmp_path / "group-writable-ancestor")
-        target = _private_dir(ancestor / "private") / "keys.json"
+        directory = ancestor
+        for component in ("a", "b")[:depth - 1]:
+            directory = _private_dir(directory / component)
+        target = _private_dir(directory / "private") / "keys.json"
         if existing:
             _new_key_pair_file(target)
         inspected = _e17b_directory_metadata(
@@ -1692,6 +1699,46 @@ class TestE17bPersistentExposure:
                 first_record = marker.read_bytes()
             assert marker.read_bytes() == first_record, "a retained marker was replaced"
 
+    def test_a_concurrent_marker_is_rechecked_before_returning_the_identity(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace
+    ):
+        target = tmp_path / "keys.json"
+        load_or_create_keys(str(target))
+        original = target.read_bytes()
+        os.chmod(target, 0o644)
+        marker = target.with_name(target.name + ".exposed")
+        real_judge = crypto_module._judge_key_file
+        judged = []
+
+        def mark_and_restrict_before_judging(fd, key_path, legacy=False):
+            if not judged:
+                # Another detector acts after this load's marker checks but
+                # before its first fstat. Only the terminal re-check sees it.
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                marker_fd = os.open(marker, flags, 0o600)
+                with os.fdopen(marker_fd, "w", encoding="utf-8") as f:
+                    f.write("concurrent detector recorded exposure\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                directory_fd = os.open(tmp_path, crypto_module._directory_flags())
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+                os.chmod(target, 0o600)
+            judged.append(key_path)
+            return real_judge(fd, key_path, legacy=legacy)
+
+        monkeypatch.setattr(crypto_module, "_judge_key_file", mark_and_restrict_before_judging)
+        with pytest.raises(KeyFileError, match="identity is compromised") as refused:
+            load_or_create_keys(str(target))
+        assert str(target) in str(refused.value)
+        assert str(marker) in str(refused.value)
+        assert judged == [str(target)], "the terminal marker check must refuse before judging again"
+        unchanged = target.read_bytes() == original
+        assert unchanged, "the concurrent exposure refusal changed the key's contents"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
     def test_the_marker_is_durable_in_the_verified_directory_before_chmod(
         self, monkeypatch, tmp_path, _e17b_checked_test_namespace
     ):
@@ -1848,7 +1895,7 @@ class TestE17bPersistentExposure:
             with pytest.raises(KeyFileError, match="identity is compromised"):
                 load_or_create_keys(str(target))
 
-    def test_a_marker_blocks_exclusive_creation_without_writing(
+    def test_a_marker_refuses_exclusive_creation_and_leaves_only_the_marker(
         self, tmp_path, _e17b_checked_test_namespace
     ):
         target = tmp_path / "keys.json"
