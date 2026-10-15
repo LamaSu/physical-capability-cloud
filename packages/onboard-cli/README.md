@@ -106,7 +106,8 @@ and the dashboard behave identically.
 Run `pcc-wallet init --role agent --label my-agent` (or `onboard wallet init`)
 to create a key on this computer, hand the printed code and URL to your PCC
 account owner for browser approval, and request Base Sepolia test funds.
-Devices default to Ed25519; agents default to secp256k1. Keys stay in
+Devices default to Ed25519; agents default to secp256k1. Ed25519 keys link
+without funding, and `fund` refuses locally for them. Keys stay in
 `~/.pcc/wallets/<label>.json` (0600, directory 0700), or `PCC_WALLET_DIR`.
 Gateway resolution is the same as onboard. `--yes` skips typed consent only
 on non-TTY stdin; browser approval still requires the human owner.

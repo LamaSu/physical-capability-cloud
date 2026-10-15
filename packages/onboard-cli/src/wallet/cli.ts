@@ -218,6 +218,7 @@ function printClaims(result: FundingResult, io: WalletRuntime): void {
 }
 
 async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: string): Promise<boolean> {
+  if (wallet.keyType === "ed25519") throw new WalletError("not_fundable");
   if (!wallet.link.linkId || !wallet.link.requestId || wallet.link.status !== "approved") throw new WalletError("approved_link_required");
   const deadline = io.now() + 60_000;
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -263,16 +264,18 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
   if (args.command === "init" || args.command === "fund") validateTransportUrl(rpcUrl, "rpc");
   if (args.command === "init") {
     assertWalletAbsent(args.label);
-    io.stdout(`pcc wallet init --role ${args.role} --label ${args.label}\nThis creates a NEW wallet key on this computer:\n  file      ${walletPath(args.label)} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser; then test funds arrive.\nType "create" to continue:\n`);
+    const keyType = args.keyType ?? (args.role === "agent" ? "secp256k1" : "ed25519");
+    io.stdout(`pcc wallet init --role ${args.role} --label ${args.label}\nThis creates a NEW wallet key on this computer:\n  file      ${walletPath(args.label)} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser; ${keyType === "ed25519" ? "No test funds are available for ed25519 keys." : "then test funds arrive."}\nType "create" to continue:\n`);
     if (!(args.yes && !io.stdinIsTTY) && (await io.prompt()).trim() !== "create") {
       throw new WalletError("creation_cancelled");
     }
     let wallet = createWallet({
       label: args.label, role: args.role,
-      keyType: args.keyType ?? (args.role === "agent" ? "secp256k1" : "ed25519"),
+      keyType,
       chainId: args.chainId, gatewayOrigin: origin, createdAt: new Date(io.now()).toISOString(),
     });
     wallet = await linkWallet(wallet, io, args.kernelId);
+    if (wallet.keyType === "ed25519") { io.stdout("linked (unfunded: not_fundable)\n"); return 0; }
     if (await fundWallet(wallet, io, rpcUrl)) io.stdout("ready\n");
     return 0;
   }

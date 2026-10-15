@@ -353,9 +353,15 @@ describe("pcc-wallet ceremony", () => {
     const output = stdout.join("\n");
     expect(output).toContain("BCDF-GHJK");
     expect(output).toContain(`${gateway.origin}/link`);
-    expect(output).toContain("ready");
-    expect(output).toContain("funded");
-    expect(output).toContain(TX_HASH);
+    if (keyType === "ed25519") {
+      expect(output).toContain("linked (unfunded: not_fundable)");
+      expect(output).toContain("No test funds are available for ed25519 keys");
+      expect(output).not.toContain("ready");
+    } else {
+      expect(output).toContain("ready");
+      expect(output).toContain("funded");
+      expect(output).toContain(TX_HASH);
+    }
     expect(gateway.signatureVerified).toBe(true);
     expect(sleeps).toEqual([5000, 5000, 10000]);
     const wallet = await stored();
@@ -366,7 +372,9 @@ describe("pcc-wallet ceremony", () => {
     expect(wallet.chainId).toBe(84532);
     expect(wallet.gatewayOrigin).toBe(gateway.origin);
     expect(wallet.link).toMatchObject({ requestId: REQUEST_ID, linkId: LINK_ID, accountId: ACCOUNT_ID, status: "approved" });
-    expect(gateway.requests.filter((request) => request.path.endsWith("/fund"))[0]?.body).toEqual({});
+    const fundCalls = gateway.requests.filter((request) => request.path.endsWith("/fund"));
+    if (keyType === "ed25519") expect(fundCalls).toHaveLength(0);
+    else expect(fundCalls[0]?.body).toEqual({});
     for (const request of gateway.requests.filter((request) => request.method === "POST")) expect(request.headers["content-type"]).toContain("application/json");
   });
 
@@ -847,4 +855,16 @@ it("init treats 404 link_request_not_found as an error with its code", async () 
   expect(await run(gateway, "init", ["--yes"])).toBe(1);
   expect(stderr.join("")).toContain("link_request_not_found");
   expect(stdout.join("")).not.toContain("linked (unfunded)");
+});
+
+it("ed25519 device init links without a fund request; fund refuses locally before any request", async () => {
+  const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 409, fundBody: { error: "not_fundable" } }).start();
+  expect(await run(gateway, "init", ["--yes"], "device")).toBe(0);
+  expect(stdout.join("")).toContain("linked (unfunded: not_fundable)");
+  expect(stdout.join("")).toContain("No test funds are available for ed25519 keys");
+  expect(gateway.requests.some(request => request.path.endsWith("/fund"))).toBe(false);
+  gateway.requests.length = 0;
+  expect(await run(gateway, "fund", [], "device")).toBe(1);
+  expect(stderr.join("")).toContain("not_fundable");
+  expect(gateway.requests).toHaveLength(0);
 });
