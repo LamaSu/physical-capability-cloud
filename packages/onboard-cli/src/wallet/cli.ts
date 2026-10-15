@@ -215,8 +215,9 @@ async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: st
   throw new WalletError("expired");
 }
 
-function printClaims(result: FundingResult, io: WalletRuntime): void {
+function printClaims(result: FundingResult, role: Role, io: WalletRuntime): void {
   for (const claim of result.claims) io.stdout(`${claim.token} ${claim.amount} ${claim.status}${claim.txHash ? ` ${claim.txHash}` : ""}\n`);
+  if (role === "agent" && !result.claims.some(claim => claim.token === "usdc")) io.stdout("This grant has no USDC claim.\n");
 }
 
 async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: string): Promise<boolean> {
@@ -231,15 +232,15 @@ async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: strin
     }
     if (result.status === "pending") {
       if (attempt === 7 || io.now() >= deadline) {
-        printClaims(result, io);
+        printClaims(result, wallet.role, io);
         throw new WalletError("funding_pending");
       }
       await io.sleep(Math.min(500 * 2 ** attempt, 10_000, deadline - io.now()));
-      if (io.now() >= deadline) { printClaims(result, io); throw new WalletError("funding_pending"); }
+      if (io.now() >= deadline) { printClaims(result, wallet.role, io); throw new WalletError("funding_pending"); }
       continue;
     }
     if (result.status === "partial") {
-      printClaims(result, io);
+      printClaims(result, wallet.role, io);
       io.stdout("Run pcc-wallet fund again after 30 s to retry failed claims.\n");
     }
     const receiptDeadline = io.now() + io.receiptTimeoutMs;
@@ -256,7 +257,7 @@ async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: strin
       if (receipt.status !== "success") throw new WalletError("funding_transaction_reverted");
     }
     if (result.status === "partial") throw new WalletError("funding_partial");
-    printClaims(result, io);
+    printClaims(result, wallet.role, io);
     io.stdout("funded\n");
     return true;
   }

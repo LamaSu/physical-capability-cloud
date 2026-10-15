@@ -141,7 +141,8 @@ function exactKeys(value: JsonObject, required: readonly string[], optional: rea
 function parseFunding(data: unknown, role: Role): FundingResult {
   if (!object(data) || !exactKeys(data, ["status", "claims"])
     || (data.status !== "funded" && data.status !== "partial" && data.status !== "pending")
-    || !Array.isArray(data.claims) || data.claims.length !== (role === "agent" ? 6 : 5)) invalidFundingResponse();
+    || !Array.isArray(data.claims)
+    || (role === "agent" ? data.claims.length !== 5 && data.claims.length !== 6 : data.claims.length !== 5)) invalidFundingResponse();
   const hashes = new Set<string>();
   const claims = data.claims.map((value: unknown, index: number): FundingClaim => {
     if (!object(value) || !exactKeys(value, ["token", "amount", "status"], ["txHash"])
