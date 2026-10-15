@@ -18,6 +18,8 @@ import fastifySwaggerUi from "@fastify/swagger-ui";
 import { createOperationIdTransform } from "./openapi/operation-id.js";
 import websocket from "@fastify/websocket";
 import { initStore, closeStore, getRepos, getStore } from "./db.js";
+import { resolveListenHost } from "./config/listen-host.js";
+import { shouldSeedDemoData, warnInvalidSeedDataOverride } from "./config/seed-policy.js";
 import { capabilityRoutes } from "./routes/capabilities.js";
 import { graphSearchRoutes } from "./routes/graph-search.js";
 import { buildRoutes } from "./routes/build.js";
@@ -179,9 +181,10 @@ import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
 
 export async function createGateway(port = 3200) {
-  // Initialize SQLite store — only seed demo data in dev (not production)
-  const shouldSeed = process.env.PCC_SEED_DATA === "true" || process.env.NODE_ENV !== "production";
-  initStore({ seed: shouldSeed });
+  const host = resolveListenHost(process.env.PCC_LISTEN_HOST);
+  warnInvalidSeedDataOverride(process.env.PCC_SEED_DATA, process.env.NODE_ENV);
+  // Seed outside production by default; exact true/false overrides always win.
+  initStore({ seed: shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV) });
 
   // Initialize KernelService (mock mode by default)
   const { initKernelService } = await import("./services/kernel-service.js");
@@ -1093,7 +1096,7 @@ export async function createGateway(port = 3200) {
         console.warn("[gateway] settlement-keeper start failed:", err);
       }
 
-      const address = await app.listen({ port, host: "0.0.0.0" });
+      const address = await app.listen({ port, host });
       console.log(`PCC Gateway listening on ${address}`);
       return address;
     },
