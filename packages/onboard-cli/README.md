@@ -125,9 +125,10 @@ Device links accept `--kernel-id <id>` on `init` or `link`.
 An already approved wallet refuses `link`; revoke it before linking again.
 Funding uses the approved request's anonymous capability for up to 60 minutes.
 Agents receive five ETH claims plus one USDC claim unless the faucet's USDC cap
-is reached (then five ETH claims alone, and the CLI says so); secp256k1 devices
-receive five ETH claims. Funding takes no amount input. The CLI waits for every
-transaction receipt on Base Sepolia through `--rpc-url` / `PCC_RPC_URL`
+is reached (then the gateway reports the USDC claim as skipped, and the CLI
+prints it with its reason); secp256k1 devices receive five ETH claims. Funding
+takes no amount input. The CLI waits for every transaction receipt on Base
+Sepolia through `--rpc-url` / `PCC_RPC_URL`
 (default `https://sepolia.base.org`). Gateway and RPC URLs require HTTPS,
 except loopback HTTP for local use. Partial funding prints each claim and exits
 nonzero; run `pcc-wallet fund` again after 30 s to retry failed claims.

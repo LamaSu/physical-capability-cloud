@@ -128,6 +128,7 @@ export interface FundingClaim {
 export interface FundingResult {
   status: "funded" | "partial" | "pending" | "unavailable";
   claims: FundingClaim[];
+  skipped?: { token: "usdc"; amount: "1"; reason: "cap_reached"; cap: "global" }[];
 }
 
 function invalidFundingResponse(): never { throw new WalletError("invalid_gateway_response"); }
@@ -139,10 +140,20 @@ function exactKeys(value: JsonObject, required: readonly string[], optional: rea
 }
 
 function parseFunding(data: unknown, role: Role): FundingResult {
-  if (!object(data) || !exactKeys(data, ["status", "claims"])
+  if (!object(data) || !exactKeys(data, ["status", "claims"], ["skipped"])
     || (data.status !== "funded" && data.status !== "partial" && data.status !== "pending")
     || !Array.isArray(data.claims)
     || (role === "agent" ? data.claims.length !== 5 && data.claims.length !== 6 : data.claims.length !== 5)) invalidFundingResponse();
+  let skipped: FundingResult["skipped"];
+  if (role === "agent" && data.claims.length === 5) {
+    if (!Object.hasOwn(data, "skipped") || !Array.isArray(data.skipped) || data.skipped.length !== 1) invalidFundingResponse();
+    skipped = data.skipped.map((value: unknown) => {
+      if (!object(value) || !exactKeys(value, ["token", "amount", "reason", "cap"])
+        || value.token !== "usdc" || value.amount !== "1"
+        || value.reason !== "cap_reached" || value.cap !== "global") invalidFundingResponse();
+      return { token: value.token, amount: value.amount, reason: value.reason, cap: value.cap };
+    });
+  } else if (Object.hasOwn(data, "skipped")) invalidFundingResponse();
   const hashes = new Set<string>();
   const claims = data.claims.map((value: unknown, index: number): FundingClaim => {
     if (!object(value) || !exactKeys(value, ["token", "amount", "status"], ["txHash"])
@@ -166,7 +177,7 @@ function parseFunding(data: unknown, role: Role): FundingResult {
     : claims.some(claim => claim.status === "pending") ? "pending"
     : claims.some(claim => claim.status === "succeeded") ? "partial" : undefined;
   if (data.status !== expectedStatus) invalidFundingResponse();
-  return { status: data.status as FundingResult["status"], claims };
+  return { status: data.status as FundingResult["status"], claims, ...(skipped ? { skipped } : {}) };
 }
 
 /** Request-ID capability: no owner credential or owner funding route is used. */

@@ -19,6 +19,7 @@ const TX_USDC = USDC.txHash!;
 const FUNDED = { status: "funded", claims: realFundingClaims() };
 const PARTIAL = { status: "partial", claims: [...realFundingClaims("device"), { token: "usdc", amount: "1", status: "failed" }] };
 const PENDING = { status: "pending", claims: realFundingClaims().map(({ txHash: _hash, ...claim }) => ({ ...claim, status: "pending" })) };
+const SKIPPED = [{ token: "usdc", amount: "1", reason: "cap_reached", cap: "global" }];
 let directory: string;
 let output: string[];
 let errors: string[];
@@ -80,7 +81,9 @@ describe("W2 funding response contract", () => {
   it("uses requestId path, JSON {}, no Authorization even with an owner key in env", async () => {
     vi.stubEnv("PCC_API_KEY", "owner-test-token");
     const fetchSpy = gateway(FUNDED);
-    expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toEqual(FUNDED);
+    const result = await requestFunding(ORIGIN, REQUEST_ID, "agent");
+    expect(result).toEqual(FUNDED);
+    expect(Object.hasOwn(result, "skipped")).toBe(false);
     const [url, init] = fetchSpy.mock.calls[0]!;
     expect(url).toBe(`${ORIGIN}/api/wallets/link-requests/${REQUEST_ID}/fund`);
     expect(init?.method).toBe("POST");
@@ -99,7 +102,9 @@ describe("W2 funding response contract", () => {
   it("accepts device ETH claims", async () => {
     const device = { status: "funded", claims: realFundingClaims("device") };
     gateway(device);
-    expect(await requestFunding(ORIGIN, REQUEST_ID, "device")).toEqual(device);
+    const result = await requestFunding(ORIGIN, REQUEST_ID, "device");
+    expect(result).toEqual(device);
+    expect(Object.hasOwn(result, "skipped")).toBe(false);
   });
   it.each(["funded", "partial", "pending"] as const)("Q3 accepts an agent five-ETH-only %s grant", async status => {
     const claims = realFundingClaims("agent", false).map((claim, index) => {
@@ -107,9 +112,40 @@ describe("W2 funding response contract", () => {
       const { txHash: _hash, ...rest } = claim;
       return { ...rest, status: status === "pending" ? "pending" as const : "failed" as const };
     });
-    const body = { status, claims };
+    const body = { status, claims, skipped: SKIPPED };
     gateway(body);
-    expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toEqual(body);
+    expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toStrictEqual(body);
+  });
+  it.each<[string, Record<string, unknown>]>([
+    ["missing skipped", {}],
+    ["empty skipped", { skipped: [] }],
+    ["null skipped", { skipped: null }],
+    ["object skipped", { skipped: {} }],
+    ["string skipped", { skipped: "usdc" }],
+    ["two skipped entries", { skipped: [...SKIPPED, ...SKIPPED] }],
+    ["extra skipped entry key", { skipped: [{ ...SKIPPED[0], extra: true }] }],
+    ...["token", "amount", "reason", "cap"].map<[string, Record<string, unknown>]>(key => [
+      `missing skipped entry ${key}`, { skipped: [Object.fromEntries(Object.entries(SKIPPED[0]!).filter(([name]) => name !== key))] },
+    ]),
+    ["null skipped entry", { skipped: [null] }],
+    ["array skipped entry", { skipped: [[]] }],
+    ["string skipped entry", { skipped: ["usdc"] }],
+    ["wrong skipped token", { skipped: [{ ...SKIPPED[0], token: "eth" }] }],
+    ["wrong skipped amount", { skipped: [{ ...SKIPPED[0], amount: "2" }] }],
+    ["numeric skipped amount", { skipped: [{ ...SKIPPED[0], amount: 1 }] }],
+    ["wrong skipped reason", { skipped: [{ ...SKIPPED[0], reason: "unavailable" }] }],
+    ["address skipped cap", { skipped: [{ ...SKIPPED[0], cap: "address" }] }],
+    ["account skipped cap", { skipped: [{ ...SKIPPED[0], cap: "account" }] }],
+  ])("refuses %s on an agent five-ETH-only grant", async (_name, fields) => {
+    gateway({ status: "funded", claims: realFundingClaims("agent", false), ...fields });
+    await expect(requestFunding(ORIGIN, REQUEST_ID, "agent")).rejects.toThrow("invalid_gateway_response");
+  });
+  it.each(["agent", "device"] as const)("refuses any own skipped key on a full %s grant", async role => {
+    for (const skipped of [SKIPPED, [], null, {}, "usdc"]) {
+      gateway({ status: "funded", claims: realFundingClaims(role), skipped });
+      await expect(requestFunding(ORIGIN, REQUEST_ID, role)).rejects.toThrow("invalid_gateway_response");
+      vi.mocked(fetch).mockRestore();
+    }
   });
   it("Q3 refuses four ETH claims for a device", async () => {
     gateway({ status: "funded", claims: realFundingClaims("device").slice(0, 4) });
@@ -158,7 +194,7 @@ describe("W2 funding response contract", () => {
     ["empty claims", { status: "funded", claims: [] }],
     ["Q3 four claims for an agent", { status: "funded", claims: realFundingClaims("agent", false).slice(0, 4) }],
     ["Q3 seven claims for an agent", { status: "funded", claims: [...realFundingClaims(), { ...USDC, txHash: `0x${"0f".repeat(32)}` }] }],
-    ["Q3 five claims ending in USDC for an agent", { status: "funded", claims: [...realFundingClaims().slice(0, 4), USDC] }],
+    ["Q3 five claims ending in USDC for an agent", { status: "funded", claims: [...realFundingClaims().slice(0, 4), USDC], skipped: SKIPPED }],
     ["Q3 six claims ending in ETH for an agent", { status: "funded", claims: [...realFundingClaims("agent", false), { ...ETH, txHash: `0x${"0f".repeat(32)}` }] }],
     ["null claim", { status: "funded", claims: [null, ...realFundingClaims().slice(1)] }],
     ["unknown token", claimResponse({ ...ETH, token: "btc" })],
@@ -174,7 +210,7 @@ describe("W2 funding response contract", () => {
     ["partial without failed claim", claimResponse(ETH, "partial")],
     ["pending without pending claim", claimResponse(ETH, "pending")],
     ["duplicate txHash", { status: "funded", claims: realFundingClaims().map(claim => ({ ...claim, txHash: TX_ETH })) }],
-    ["four ETH claims", { status: "funded", claims: realFundingClaims().slice(1) }],
+    ["four ETH claims", { status: "funded", claims: realFundingClaims().slice(1), skipped: SKIPPED }],
     ["claims out of order", { status: "funded", claims: realFundingClaims().reverse() }],
     ["hash on failed claim", claimResponse({ ...USDC, status: "failed" }, "partial")],
     ["hash on pending claim", claimResponse({ ...USDC, status: "pending" }, "pending")],
@@ -196,15 +232,15 @@ describe("W2 funding response contract", () => {
 });
 
 describe("W2 CLI funding", () => {
-  it("Q3 an agent five-ETH-only grant prints the notice before funded and waits for five receipts", async () => {
+  it("Q3 an agent five-ETH-only grant prints skipped before funded and waits for five receipts", async () => {
     const claims = realFundingClaims("agent", false);
-    store(); gateway({ status: "funded", claims });
+    store(); gateway({ status: "funded", claims, skipped: SKIPPED });
     const waiter = vi.fn(async (_hash: `0x${string}`) => ({ status: "success" as const }));
     expect(await fund("agent", [], runtime({ waitForReceipt: waiter }))).toBe(0);
     expect(waiter).toHaveBeenCalledTimes(5);
     expect(waiter.mock.calls.map(call => call[0])).toEqual(claims.map(claim => claim.txHash));
     expect(output.join("")).toBe(claims.map(claim => `eth 0.0001 succeeded ${claim.txHash}\n`).join("")
-      + "This grant has no USDC claim.\nfunded\n");
+      + "usdc 1 skipped: cap_reached (global)\nfunded\n");
     expect(errors).toEqual([]);
   });
   it("Q3 a device grant prints no no-USDC notice", async () => {
@@ -217,11 +253,13 @@ describe("W2 CLI funding", () => {
   it("Q3 an agent five-ETH-only partial grant exits nonzero", async () => {
     const claims = realFundingClaims("agent", false);
     claims[4] = { token: "eth", amount: "0.0001", status: "failed" };
-    store(); gateway({ status: "partial", claims });
+    store(); gateway({ status: "partial", claims, skipped: SKIPPED });
     const waiter = vi.fn(async () => ({ status: "success" as const }));
     expect(await fund("agent", [], runtime({ waitForReceipt: waiter }))).toBe(1);
     expect(waiter.mock.calls).toHaveLength(4);
     for (const claim of claims) expect(output.join("")).toContain(`eth 0.0001 ${claim.status}`);
+    expect(output.join("")).toContain("usdc 1 skipped: cap_reached (global)\n");
+    expect(output.join("")).not.toContain("This grant has no USDC claim.");
     expect(output.join("")).toContain("Run pcc-wallet fund again after 30 s to retry failed claims.\n");
     expect(output.join("")).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
     expect(errors.join("")).toContain("funding_partial");
