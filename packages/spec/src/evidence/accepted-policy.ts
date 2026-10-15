@@ -566,6 +566,112 @@ export function computeSubjectBlockHash(subject: SubjectBlockFields): Bytes32Hex
   ]);
 }
 
+interface PinnedAuthorizedTuple {
+  tuple: readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex];
+  words: readonly [Uint8Array, Uint8Array, Uint8Array];
+}
+
+/** Validate and snapshot both the outer list and each exactly-three-word tuple. */
+function pinAuthorizedTuples(tuples: unknown): PinnedAuthorizedTuple[] {
+  const admittedArray = admitPlainArray(tuples, "tuples");
+  const pinned: PinnedAuthorizedTuple[] = [];
+  for (let i = 0; i < admittedArray.length; i++) {
+    const field = `tuples[${i}]`;
+    const snapshot = admitPlainArray(admittedArray[i], field);
+    if (snapshot.length !== 3) {
+      throw new AcceptedPolicyDigestInputError(field, "expected exactly three words (operator, kernel, device)");
+    }
+    const operator = snapshot[0];
+    const kernel = snapshot[1];
+    const device = snapshot[2];
+    const words: PinnedAuthorizedTuple["words"] = [
+      bytes32Word(`${field}[0]`, operator),
+      bytes32Word(`${field}[1]`, kernel),
+      bytes32Word(`${field}[2]`, device),
+    ];
+    pinned.push({
+      tuple: [operator as Bytes32Hex, kernel as Bytes32Hex, device as Bytes32Hex],
+      words,
+    });
+  }
+  return pinned;
+}
+
+/** Fixed-width lowercase words have the same lexicographic order as their bytes. */
+function compareAuthorizedTuples(a: PinnedAuthorizedTuple, b: PinnedAuthorizedTuple): number {
+  for (let i = 0; i < 3; i++) {
+    if (a.tuple[i]! < b.tuple[i]!) return -1;
+    if (a.tuple[i]! > b.tuple[i]!) return 1;
+  }
+  return 0;
+}
+
+/**
+ * authorizedTuplesRoot = keccak256(abi.encode((bytes32,bytes32,bytes32)[] tuples)):
+ * uint256(0x20), uint256(length), then each (operator, kernel, device) word in order.
+ * Each word must be 0x + 64 lowercase hex characters. The list must already be strictly
+ * ascending lexicographically by (operator, kernel, device); unsorted or duplicate tuples
+ * are refused, never silently sorted, because the oracle re-hashes the funded list as given.
+ *
+ * This is the funded root the oracle requires a bundle's (operator, kernel, device) triple
+ * to belong to. Under principal-id v1 semantics, each word hashes the UTF-8 principal id:
+ * an operator's canonical chain-and-address id, a kernel's validated registry id, or a
+ * device's canonical Ed25519 id; the principal kind is not part of the hash preimage.
+ * Pass words produced by `principalTupleWord` / `authorizedTuple`, after authenticating the
+ * kernel registry row. An empty list is allowed and hashes uint256(0x20) || uint256(0),
+ * but an empty funded list makes every bundle unauthorized.
+ *
+ * Both array levels are admitted as dense, non-Proxy arrays and read once into snapshots;
+ * validation, ordering, and hashing use only those snapshots, never the caller's arrays.
+ */
+export function computeAuthorizedTuplesRoot(
+  tuples: readonly (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[],
+): Bytes32Hex {
+  const pinned = pinAuthorizedTuples(tuples);
+  for (let i = 1; i < pinned.length; i++) {
+    const order = compareAuthorizedTuples(pinned[i - 1]!, pinned[i]!);
+    if (order >= 0) {
+      throw new AcceptedPolicyDigestInputError(
+        `tuples[${i}]`,
+        order === 0
+          ? "duplicate tuple (operator, kernel, device)"
+          : "tuples must be strictly ascending lexicographically by (operator, kernel, device)",
+      );
+    }
+  }
+  const words: Uint8Array[] = [encodeUint(32n), encodeUint(toBigInt(pinned.length))];
+  for (const entry of pinned) words.push(...entry.words);
+  return keccakWords(words);
+}
+
+/**
+ * Return a new list of new (operator, kernel, device) tuples, sorted strictly ascending
+ * lexicographically by those three words, without mutating the input. Every word is
+ * validated as 0x + 64 lowercase hex characters; duplicate tuples are refused.
+ *
+ * Submit this canonical list as the funded list and to `computeAuthorizedTuplesRoot`,
+ * which hashes abi.encode((bytes32,bytes32,bytes32)[]): uint256(0x20), uint256(length),
+ * then the ordered words. Its root is the one the oracle requires the bundle's triple to
+ * belong to. Principal-id v1 words hash the UTF-8 canonical operator chain-and-address id,
+ * validated kernel registry id, and canonical device Ed25519 id, without the principal kind
+ * in the preimage; use `principalTupleWord` / `authorizedTuple` after authenticating the
+ * kernel registry row. An empty list is allowed, producing the root of uint256(0x20) ||
+ * uint256(0), but an empty funded list makes every bundle unauthorized.
+ */
+export function canonicalAuthorizedTuples(
+  tuples: readonly (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[],
+): (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[] {
+  const pinned = pinAuthorizedTuples(tuples).sort(compareAuthorizedTuples);
+  const canonical: (readonly [Bytes32Hex, Bytes32Hex, Bytes32Hex])[] = [];
+  for (let i = 0; i < pinned.length; i++) {
+    if (i > 0 && compareAuthorizedTuples(pinned[i - 1]!, pinned[i]!) === 0) {
+      throw new AcceptedPolicyDigestInputError(`tuples[${i}]`, "duplicate tuple (operator, kernel, device)");
+    }
+    canonical.push(pinned[i]!.tuple);
+  }
+  return canonical;
+}
+
 /** One `evidenceSubjectBindings` entry: which requirement backs a plan unit, and where its value comes from. */
 export interface SubjectBinding {
   /** Chain-independent (evidence #876): `computePlanUnitKey(unitOrdinal, milestoneIndex, stepId)`. */
