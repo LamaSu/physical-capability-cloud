@@ -453,6 +453,7 @@ describe("pcc-wallet ceremony", () => {
     expect([...stdout, ...stderr].join("\n")).toContain(status);
     expect(gateway.requests.some((request) => request.path.endsWith("/fund"))).toBe(false);
     expect((await stored()).link).toMatchObject({ status });
+    if (status === "expired") expect(stderr.join("")).toContain("start again with a new key");
   });
 
   it("stops polling at the request expiry", async () => {
@@ -461,6 +462,7 @@ describe("pcc-wallet ceremony", () => {
     expect([...stdout, ...stderr].join("\n")).toContain("expired");
     expect(clock).toBeLessThanOrEqual(BASE_TIME + 12_000);
     expect(gateway.pollIndex).toBe(2);
+    expect(stderr.join("")).toContain("The request expired, or the owner's page said it was already linked; start again with a new key.");
   });
 
   it("honours the server polling interval", async () => {

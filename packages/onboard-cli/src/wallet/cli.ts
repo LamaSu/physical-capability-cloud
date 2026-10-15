@@ -359,6 +359,7 @@ export async function main(argv: string[] = process.argv.slice(2), overrides: Pa
   } catch (error) {
     const safe = error instanceof WalletError ? error : new WalletError("wallet_operation_failed");
     io.stderr(`${safe.code}${safe.errorClass ? `, ${safe.errorClass}` : ""}${safe.cap ? ` (cap: ${safe.cap})` : ""}\n`);
+    if (safe.code === "expired") io.stderr("The request expired, or the owner's page said it was already linked; start again with a new key.\n");
     return safe.exitCode;
   }
 }
