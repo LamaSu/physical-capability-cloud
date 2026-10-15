@@ -132,7 +132,8 @@ transaction receipt on Base Sepolia through `--rpc-url` / `PCC_RPC_URL`
 except loopback HTTP for local use. Partial funding prints each claim and exits
 nonzero; run `pcc-wallet fund` again after 30 s to retry failed claims.
 Retrying is idempotent. Pending funding retries at most eight times
-with bounded backoff. A missing faucet route leaves the wallet linked and unfunded, with exit 0.
+with bounded backoff; a node still indexing transactions is retried within the
+receipt budget. A missing faucet route leaves the wallet linked and unfunded, with exit 0.
 During init, `link_inactive`, `cap_reached`, `not_fundable`, `faucet_error` and
 `faucet_unavailable` leave the approved wallet linked and unfunded, with exit 0.
 The `fund` command exits nonzero for these five errors. `faucet_error` always

@@ -533,8 +533,8 @@ describe("bounded receipt polling and RPC retries", () => {
       error => error instanceof Error ? error.message : String(error),
     );
   }
-  function rpcError(code: number): Response {
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code, message: "test RPC error" } }));
+  function rpcError(code: number, details: Record<string, unknown> = { message: "test RPC error" }): Response {
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code, ...details } }));
   }
 
   it("PROBE-P1 reads a receipt body that also carries error: null", async () => {
@@ -684,6 +684,64 @@ describe("bounded receipt polling and RPC retries", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(await result).toBe("success");
     expect(attempts).toEqual([0, 2_000]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([false, true])("X indexing error with data=%s is retried then succeeds", async withData => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      attempts.push(Date.now() - started);
+      return attempts.length === 1 ? rpcError(-32000, {
+        message: "transaction indexing is in progress",
+        ...(withData ? { data: "transaction indexing is in progress" } : {}),
+      }) : reply(1, rpcReceipt());
+    });
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(attempts).toEqual([0]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe("success");
+    expect(attempts).toEqual([0, 2_000]);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("X persistent indexing error exhausts the receipt budget without later polling", async () => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      attempts.push(Date.now() - started);
+      return rpcError(-32000, { message: "transaction indexing is in progress" });
+    });
+    const result = observedReceipt(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await result).toBe("funding_receipt_timeout");
+    expect(attempts).toEqual([0, 2_000, 4_000]);
+    const callsAtTimeout = fetchSpy.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(callsAtTimeout);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ["case variant", { message: "Transaction indexing is in progress" }],
+    ["punctuation variant", { message: "transaction indexing is in progress." }],
+    ["whitespace variant", { message: " transaction indexing is in progress" }],
+    ["shorter message", { message: "transaction indexing" }],
+    ["other error", { message: "header not found" }],
+    ["numeric message", { message: 42 }],
+    ["missing message", {}],
+  ])("X -32000 near miss %s stays permanent", async (_name, details) => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => rpcError(-32000, details));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
 
