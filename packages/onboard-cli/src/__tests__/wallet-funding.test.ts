@@ -483,6 +483,25 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it.each([-32602, -32005])("PROBE-E1 JSON-RPC error %s takes precedence over a matching receipt in HTTP 200", async code => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const attempts: number[] = [];
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      attempts.push(Date.now() - started);
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0", id: 1, error: { code, message: "test RPC error" }, result: rpcReceipt(),
+      }));
+    });
+    const result = observedReceipt(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await result).toBe(code === -32602 ? "funding_rpc_unavailable" : "funding_receipt_timeout");
+    expect(attempts).toEqual(code === -32602 ? [0] : [0, 2_000, 4_000]);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchSpy).toHaveBeenCalledTimes(code === -32602 ? 1 : 3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([-32005, -32603])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
     vi.useFakeTimers();
     const started = Date.now();
