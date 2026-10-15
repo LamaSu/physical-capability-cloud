@@ -34,12 +34,8 @@ vi.mock("node:fs", async (importOriginal) => {
     ...original,
     lstatSync: (path: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
       const stat = original.lstatSync(path, options);
-      // Some sandboxes map their mount owners to nobody. Supplemental runs
-      // explicitly normalize only those known mount points, never user paths.
-      if (stat && typeof path === "string" && typeof stat.uid === "number") {
-        if (["/", "/mnt", "/tmp"].includes(path)
-          && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
-        if (path === storageMocks.foreignPath) stat.uid = process.getuid!() + 1;
+      if (stat && typeof path === "string" && typeof stat.uid === "number" && path === storageMocks.foreignPath) {
+        stat.uid = process.getuid!() + 1;
       }
       return stat;
     },
@@ -128,8 +124,7 @@ describe("wallet keystore", () => {
     const script = [
       'import fs from "node:fs";',
       'import { syncBuiltinESMExports } from "node:module";',
-      'const originalOpen = fs.openSync; const originalStat = fs.lstatSync;',
-      'fs.lstatSync = (...args) => { const stat = originalStat(...args); if (["/", "/mnt", "/tmp"].includes(args[0]) && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0; return stat; };',
+      'const originalOpen = fs.openSync;',
       'fs.openSync = (...args) => { const fd = originalOpen(...args); if (typeof args[0] === "string" && args[0].startsWith(process.env.PCC_WALLET_DIR + "/") && (args[1] & fs.constants.O_CREAT)) process.kill(process.pid, "SIGKILL"); return fd; };',
       'syncBuiltinESMExports();',
       `const { createWallet } = await import(${JSON.stringify(entry)});`,
@@ -503,4 +498,11 @@ describe("keystore surviving-mutant rules", () => {
     writeFileSync(path, JSON.stringify({ ...data, gatewayOrigin: "http://pcc.example" }), { mode: 0o600 });
     expect(() => readWallet("participant")).toThrow(/invalid_keystore/);
   });
+});
+
+it("uses the real root ancestor owner, including uid-mapped sandbox mounts", async () => {
+  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  const rootOwner = actual.lstatSync("/").uid;
+  if (rootOwner === 0 || rootOwner === process.getuid!()) expect(() => create()).not.toThrow();
+  else expect(() => create()).toThrow(/wallet_directory_owner_mismatch/);
 });

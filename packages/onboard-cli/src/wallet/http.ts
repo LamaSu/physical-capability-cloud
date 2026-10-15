@@ -62,10 +62,11 @@ async function send(
   }
 }
 
-async function json(response: Response): Promise<unknown> {
+async function json(response: Response, retryBodyNetworkErrors = false): Promise<unknown> {
   const limit = 64 * 1024;
   const reader = response.body?.getReader();
   if (!reader) throw new WalletError("invalid_gateway_response");
+  let reading = true;
   try {
     const chunks: Uint8Array[] = [];
     let bytes = 0;
@@ -82,9 +83,11 @@ async function json(response: Response): Promise<unknown> {
     const body = new Uint8Array(bytes);
     let offset = 0;
     for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+    reading = false;
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown;
   }
   catch (error) {
+    if (retryBodyNetworkErrors && reading && error instanceof TypeError) throw error;
     if (error instanceof WalletError) throw error;
     if (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) throw new WalletError("gateway_unavailable");
     throw new WalletError("invalid_gateway_response");
@@ -226,7 +229,7 @@ export async function waitForFundingReceipt(
             throw new WalletError("funding_rpc_unavailable");
           }
         } else {
-          const data = await json(response);
+          const data = await json(response, true);
           if (!object(data) || !Object.hasOwn(data, "result")) throw new WalletError("funding_rpc_unavailable");
           if (data.result !== null) {
             const receipt = data.result;

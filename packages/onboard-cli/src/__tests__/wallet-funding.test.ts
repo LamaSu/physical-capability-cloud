@@ -7,20 +7,6 @@ import { main, type WalletRuntime } from "../wallet/cli.js";
 import { requestFunding, waitForFundingReceipt } from "../wallet/http.js";
 import { createWallet, updateLink, type Role } from "../wallet/keystore.js";
 
-// Explicit supplemental normalization for sandbox-mapped root mounts only.
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    lstatSync: ((path: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
-      const stat = actual.lstatSync(path, options);
-      if (stat && typeof path === "string" && typeof stat.uid === "number" && ["/", "/mnt", "/tmp"].includes(path)
-        && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
-      return stat;
-    }) as typeof actual.lstatSync,
-  };
-});
-
 import { realFundingClaims } from "./wallet-funding-fixtures.js";
 
 const ORIGIN = "https://wallets.invalid";
@@ -491,7 +477,7 @@ describe("bounded receipt polling and RPC retries", () => {
     } finally { await vi.runAllTimersAsync(); }
   });
 
-  it.each([429, 500, 503, "network"] as const)("transient RPC %s is retried within the receipt budget", async failure => {
+  it.each([429, 500, 503, "network", "network body"] as const)("transient RPC %s is retried within the receipt budget", async failure => {
     vi.useFakeTimers();
     let attempts = 0;
     let block = 0;
@@ -502,6 +488,9 @@ describe("bounded receipt polling and RPC retries", () => {
       if (attempts === 1) return reply(payload.id, null);
       if (attempts === 2) {
         if (failure === "network") throw new TypeError("test network failure");
+        if (failure === "network body") return new Response(new ReadableStream({
+          start(controller) { controller.error(new TypeError("test connection reset during body")); },
+        }));
         return new Response("temporarily unavailable", { status: failure });
       }
       return reply(payload.id, rpcReceipt());

@@ -17,20 +17,6 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.path };
 });
 
-// Explicit supplemental normalization for sandbox-mapped root mounts only.
-vi.mock("node:fs", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs")>();
-  return {
-    ...actual,
-    lstatSync: ((path: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
-      const stat = actual.lstatSync(path, options);
-      if (stat && typeof path === "string" && typeof stat.uid === "number" && ["/", "/mnt", "/tmp"].includes(path)
-        && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
-      return stat;
-    }) as typeof actual.lstatSync,
-  };
-});
-
 type Body = Record<string, unknown>;
 type Recorded = { path: string; method: string; body: Body; headers: IncomingHttpHeaders };
 type StubOptions = {
