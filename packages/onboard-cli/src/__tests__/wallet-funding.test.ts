@@ -472,6 +472,17 @@ describe("bounded receipt polling and RPC retries", () => {
     return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code, message: "test RPC error" } }));
   }
 
+  it("PROBE-P1 reads a receipt body that also carries error: null", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: rpcReceipt(), error: null })));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("success");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([-32005, -32603])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
     vi.useFakeTimers();
     const started = Date.now();

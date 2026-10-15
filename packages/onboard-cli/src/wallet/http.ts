@@ -231,7 +231,7 @@ export async function waitForFundingReceipt(
         } else {
           const data = await json(response, true);
           if (!object(data)) throw new WalletError("funding_rpc_unavailable");
-          if (Object.hasOwn(data, "error")) {
+          if (Object.hasOwn(data, "error") && data.error !== null) {
             // Limit-exceeded and internal errors are transient; share the same
             // polling interval and deadline as HTTP 408, 429 and 5xx failures.
             if (!object(data.error) || (data.error.code !== -32005 && data.error.code !== -32603)) {
