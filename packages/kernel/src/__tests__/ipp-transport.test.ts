@@ -155,6 +155,11 @@ describe("HTTP IPP transport, socket-free", () => {
     expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
   });
 
+  it.each(["RTSP/1.0 200 OK", "ICE/1.0 200 OK"])("R7 LOW-X1: refuses %s with clean Content-Length framing", async status => {
+    const { transport } = scripted(`${status}\r\nContent-Length: 3\r\n\r\nIPP`);
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
   it.each([
     ["leading CRLFs", "\r\n\r\n"],
     ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
