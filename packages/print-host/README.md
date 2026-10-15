@@ -76,6 +76,10 @@ Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
 864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
 The file also requires a valid non-zero address `settlementToken` and a
 `subjectPins` object. A `termsHash` field in a terms file is refused with `bad_terms`.
+On chain 84532, `settlementToken` must equal Base Sepolia USDC
+(`0x036CbD53842c5426634e7929541eC2318f3dCF7e`), compared case-insensitively;
+another token is refused at load with `bad_terms`. Chain 31337 accepts any
+valid non-zero token address for anvil mocks.
 Pins may contain only the 18 `SubjectBlockFields` keys from `@pcc/spec`, with exact
 bytes32 values, an address for `operatorSettlementAddress`, or an integer number
 for `integrityGrade` (0–255). `committedProgramHash` is required. An
@@ -84,11 +88,28 @@ case-insensitively. Optional bytes32 `bindingsRoot` pins the computed bindings r
 Unknown fields, accessors, and non-plain terms or pin objects are refused with
 `bad_terms`.
 
-Thursday's PRINT unit uses the following terms template. Replace the three
-host-specific placeholders with the values computed below:
+Thursday's PRINT unit uses the following complete terms template. Replace the
+host-specific placeholders with the values computed below, take `factory` and
+`implementation` from GO-1's CANONICAL deployment record, and set
+`maxAcceptanceSeconds` to the operator's quote-to-sign window in integer seconds.
+Economics' terms file does not specify that acceptance window.
 
 ```json
 {
+  "chainId": 84532,
+  "factory": "<factory from GO-1 CANONICAL record>",
+  "implementation": "<implementation from GO-1 CANONICAL record>",
+  "maxUnits": 1,
+  "allowedRequiredTiers": [1],
+  "minG": "750000",
+  "maxFeeBps": 0,
+  "allowedFeeRecipients": [],
+  "operatorPayoutRecipient": "<host EOA>",
+  "allowedPayoutRecipients": ["<host EOA>", "0x6463ACd05141c1EF6583E4Fd978FC61Fff4045DC"],
+  "maxPassThrough": "250000",
+  "reclaimMinSeconds": 864000,
+  "reclaimMaxSeconds": 1814400,
+  "maxAcceptanceSeconds": "<operator quote-to-sign window in integer seconds>",
   "settlementToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
   "subjectPins": {
     "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
@@ -109,8 +130,7 @@ host-specific placeholders with the values computed below:
     "challengeAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
     "integrityGrade": 0
   },
-  "bindingsRoot": "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd",
-  "reclaimMaxSeconds": 1814400
+  "bindingsRoot": "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd"
 }
 ```
 
@@ -118,25 +138,34 @@ Compute `operatorPrincipal` with the `@pcc/spec` producers
 `principalTupleWord("operator", formatOperatorPrincipalId(chainId, <host EOA>))`.
 The host also checks this word against the signing operator EOA in code.
 `operatorSettlementAddress` is the host EOA and must equal
-`operatorPayoutRecipient`. At Wednesday's sitting, compute `authorizedTuplesRoot`
-over the host's one (operator, kernel, device) triple with the oracle's
-`computeAuthorizedTuplesRoot([authorizedTuple(<operator id>, <kernelId>, "ed25519:<device key>")])`,
-then cross-check the computation against the oracle's Thursday-shape golden
-(`pcc-oracle` commit `87bc14e`,
+`operatorPayoutRecipient`. At Wednesday's sitting, construct the host's one
+(operator, kernel, device) triple with the `@pcc/spec` producers:
+
+```text
+authorizedTuple(formatOperatorPrincipalId(84532, <host EOA>), <kernelId>, formatDevicePrincipalId(<device public key>))
+```
+
+`formatDevicePrincipalId` produces `ed25519:0x` followed by 64 lowercase hex
+digits. Feed that tuple into the oracle's `computeAuthorizedTuplesRoot([tuple])`,
+then cross-check the computation against the oracle's Thursday-shape golden v2
+(`pcc-oracle` commit `23bdcc2`,
 `config/testnet/s2-subject-block-thursday-shape-golden.json`; vendored in
-`test/fixtures/oracle-87bc14e-s2-thursday-shape-golden.json`). `@pcc/spec` exports
+`test/fixtures/oracle-23bdcc2-s2-thursday-shape-golden-v2.json`). `@pcc/spec` exports
 `authorizedTuple` but has no public root producer. A root without the host's
 triple prevents settlement, so Thursday's terms must pin this value. Thursday
 uses `bindings: []`, whose root is the pin above. All twelve zero fields and
 `integrityGrade: 0` are exact pins.
 
-These fields extend the complete host terms described above. For Thursday,
-`reclaimMaxSeconds` must be at least 1814400 because `reclaimAt` is policy creation
-plus 21 days.
-Thursday's settlement token is Circle USDC on Base Sepolia at the address above.
-Economics #8165 supersedes the old `termsHash` pin:
+These economic limits mirror economics' Thursday terms file at
+`/mnt/sparkbulk/pcc-reconciliation/returns/pcc-economics-work/terms/print-unit-thursday.v1.json`.
+Thursday allows only tier 1: tier 2 must NOT be allowed because S2's ladder is
+`tier1`. The reclaim maximum is 1814400 seconds because `reclaimAt` is policy
+creation plus 21 days. Thursday's settlement token is Circle USDC on Base Sepolia
+at the address above. Economics #8165 supersedes the old `termsHash` pin; the file's
+version digest
 `0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7`
-is only a FILE-VERSION digest of economics' terms document and goes into no policy.
+is only a FILE-VERSION digest of economics' terms document, never a policy's
+`termsHash`, and goes into no policy.
 Each policy derives its own `termsHash` from its funded units using the ratified
 v2.1 rule:
 

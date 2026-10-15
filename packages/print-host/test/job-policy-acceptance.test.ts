@@ -865,6 +865,25 @@ describe("HostTerms cap total pass-through across the policy", () => {
 });
 
 describe("HostTerms bind authorization to the key's chain", () => {
+  it("refuses another settlement token on Base Sepolia at validation and key load with bad_terms", async () => {
+    const supplied = { ...terms(), settlementToken: otherRecipient };
+    await refusal(async () => validateHostTerms(supplied), "bad_terms");
+    await refusal(() => loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied }), "bad_terms");
+  });
+  it.each([settlementToken, settlementToken.toLowerCase() as Address])(
+    "loads Base Sepolia USDC case-insensitively at validation and key load (%s)", async (token) => {
+      const supplied = { ...terms(), settlementToken: token };
+      expect(validateHostTerms(supplied).settlementToken).toBe(token);
+      const bound = await loadOperatorKey(path, 84532, { now, clock: () => now, terms: supplied });
+      expect(bound.address).toBe(key.address);
+    },
+  );
+  it("loads a non-zero mock settlement token on anvil at validation and key load", async () => {
+    const supplied = { ...terms(31337), settlementToken: otherRecipient };
+    expect(validateHostTerms(supplied).settlementToken).toBe(otherRecipient);
+    const bound = await loadOperatorKey(path, 31337, { now, clock: () => now, terms: supplied });
+    expect(bound.address).toBe(key.address);
+  });
   for (const chainId of [84532, 31337] as const) {
     const otherChainId = chainId === 84532 ? 31337 : 84532;
     it(`loads terms for chain ${chainId} with a key bound to chain ${chainId}`, async () => {

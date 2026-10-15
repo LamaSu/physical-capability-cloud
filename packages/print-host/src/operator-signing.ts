@@ -120,6 +120,8 @@ const d1Types = Object.freeze({
 
 const uint256Max = (1n << 256n) - 1n;
 const isProxy = utilTypes.isProxy;
+// Circle USDC from packages/contracts/ts/chain-config.ts (Base Sepolia).
+const BASE_SEPOLIA_USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 
 /** Snapshot data properties once. Reject extras, inherited fields and accessors. */
 function inputRecord(input: unknown, fields: readonly string[], optional: readonly string[] = []): Record<string, unknown> {
@@ -269,6 +271,9 @@ export function validateHostTerms(input: HostTerms): HostTerms {
     const operatorPayoutRecipient = policyAddress(r.operatorPayoutRecipient);
     const settlementToken = policyAddress(r.settlementToken);
     if (settlementToken === zeroAddress) throw new OperatorSigningError("bad_terms");
+    if (chainId === 84532 && settlementToken.toLowerCase() !== BASE_SEPOLIA_USDC.toLowerCase()) {
+      throw new OperatorSigningError("bad_terms");
+    }
     const pins = snapshotProducerRecord(r.subjectPins);
     const pinRecord = inputRecord(pins, ["committedProgramHash"], subjectKeys.filter((key) => key !== "committedProgramHash"));
     const subjectPins: Record<string, unknown> = Object.create(null);

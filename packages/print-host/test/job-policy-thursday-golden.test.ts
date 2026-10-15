@@ -16,8 +16,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAddress, verifyTypedData, zeroAddress, zeroHash, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { loadOperatorKey, OperatorSigningError, type HostTerms, type OperatorKey } from "../src/keys.js";
-import { computeJobPolicyCommitments, type JobPolicyAcceptanceInput } from "../src/operator-signing.js";
-import { computeTermsHash } from "../src/terms-hash.js";
+import {
+  computeJobPolicyCommitments, prepareJobPolicyAcceptance, validateHostTerms, type JobPolicyAcceptanceInput,
+} from "../src/operator-signing.js";
+import { computeMilestonesRoot, computeTermsHash } from "../src/terms-hash.js";
 
 // Provenance: pcc-oracle commit 87bc14e,
 // config/testnet/s2-subject-block-thursday-shape-golden.json.
@@ -35,6 +37,23 @@ const golden = JSON.parse(goldenBytes.toString("utf8")) as {
   subjectBlockHash: Hex;
   bindingsRoot: Hex;
   acceptedPolicyDigest: Hex;
+};
+
+// Provenance: pcc-oracle fold/thursday-20261015-r2 @23bdcc2,
+// config/testnet/s2-subject-block-thursday-shape-golden.json (schema v2).
+// The unchanged vendored copy has SHA-256
+// bd5aeb3100b8d1115fce22961c160f4634608c8d1228fd679b261d8dc3bc9ed2.
+const goldenV2Bytes = readFileSync(new URL("./fixtures/oracle-23bdcc2-s2-thursday-shape-golden-v2.json", import.meta.url));
+const goldenV2 = JSON.parse(goldenV2Bytes.toString("utf8")) as typeof golden & {
+  schema: "pcc.oracle.s2-subject-block-thursday-shape-golden/v2";
+  terms: {
+    policyBuildTime: number;
+    reclaimDelaySeconds: number;
+    reclaimAt: number;
+    token: Address;
+    assuranceTier: number;
+    milestones: { milestoneIndex: number; stepId: Hex; amount: number; deadline: number }[];
+  };
 };
 
 const signing = vi.hoisted(() => ({ calls: 0 }));
@@ -146,6 +165,49 @@ function input(subjectBlock = runtimeSubject()): JobPolicyAcceptanceInput {
   refresh(candidate);
   return candidate;
 }
+function v2Terms(): HostTerms {
+  return validateHostTerms({
+    ...terms(goldenV2.subjects),
+    settlementToken: goldenV2.terms.token,
+    bindingsRoot: goldenV2.bindingsRoot,
+    operatorPayoutRecipient: goldenV2.inputs.hostAddress,
+    maxPassThrough: 250_000n, minG: 750_000n, allowedRequiredTiers: [1],
+    reclaimMinSeconds: 864_000, reclaimMaxSeconds: 1_814_400,
+    maxFeeBps: 0, allowedFeeRecipients: [],
+    allowedPayoutRecipients: [goldenV2.inputs.hostAddress, "0x6463ACd05141c1EF6583E4Fd978FC61Fff4045DC"],
+    maxUnits: 1, maxAcceptanceSeconds: 600,
+  });
+}
+function v2Input(): JobPolicyAcceptanceInput {
+  const units = goldenV2.terms.milestones.map((milestone) => buildUnitConfig({
+    milestoneIndex: BigInt(milestone.milestoneIndex), stepId: milestone.stepId,
+    requiredTier: goldenV2.terms.assuranceTier, g: BigInt(milestone.amount),
+    feeBps: 0, feeRecipient: zeroAddress, reclaimAt: BigInt(milestone.deadline),
+    compositionSchemaVersion: 0, compositionRoot: zeroHash,
+    payouts: [
+      { recipient: goldenV2.inputs.hostAddress, amount: 500_000n },
+      { recipient: "0x6463ACd05141c1EF6583E4Fd978FC61Fff4045DC", amount: 250_000n },
+    ],
+  }));
+  const policy: JobPolicyFields = {
+    chainId: BigInt(goldenV2.chainId), factory, implementation, escrow: zeroAddress,
+    payer: goldenV2.inputs.payerAddress, operator: goldenV2.inputs.hostAddress,
+    jobIdHash: word("thursday-v2-job"), termsHash: goldenV2.termsHash, policyNonce: 1n,
+    prePolicyRoot: prePolicyRoot(units), unitsRoot: zeroHash,
+    expiry: BigInt(goldenV2.terms.policyBuildTime) + 300n, acceptedPolicyDigest: zeroHash,
+  };
+  const candidate = {
+    policy, units, subjectBlock: structuredClone(goldenV2.subjects), bindings: structuredClone(goldenV2.bindings),
+  };
+  refresh(candidate);
+  return candidate;
+}
+function prepareV2(candidate: JobPolicyAcceptanceInput) {
+  // Sign one second after construction, keeping reclaimAt + 1 inside the F1
+  // reclaim window so its refusal specifically exercises the derived termsHash.
+  return prepareJobPolicyAcceptance(candidate, goldenV2.chainId, goldenV2.inputs.hostAddress,
+    v2Terms(), () => new Date((goldenV2.terms.policyBuildTime + 1) * 1000));
+}
 async function refusal(candidate: JobPolicyAcceptanceInput, code: OperatorSigningError["code"], bound = key): Promise<void> {
   refresh(candidate);
   await expect(bound.signJobPolicyAcceptance(candidate)).rejects.toMatchObject({
@@ -177,7 +239,7 @@ describe("the oracle's Thursday subject-block golden", () => {
     expect(createHash("sha256").update(goldenBytes).digest("hex"))
       .toBe("4fbfa2d9d334c601f7670935b6235c5c6bc401b0779f2789baf75a1ae26e54a8");
   });
-  it("derives both principal words and matches all three oracle hashes through the host path", () => {
+  it("pins digest arithmetic over the 87bc14e oracle's literal termsHash input and derived principal words", () => {
     const payerId = formatOperatorPrincipalId(golden.chainId, golden.inputs.payerAddress);
     const operatorId = formatOperatorPrincipalId(golden.chainId, golden.inputs.hostAddress);
     expect(payerId).toBe(golden.principals.payer.id);
@@ -258,5 +320,62 @@ describe("the oracle's Thursday subject-block golden", () => {
       valueRef: word("thursday-binding-value"),
     });
     await refusal(candidate, "bindings_root_mismatch");
+  });
+});
+
+describe("the oracle's v2 Thursday derived-termsHash golden", () => {
+  it("preserves the 23bdcc2 schema-v2 fixture's exact bytes and provenance checksum", () => {
+    expect(goldenV2.schema).toBe("pcc.oracle.s2-subject-block-thursday-shape-golden/v2");
+    expect(createHash("sha256").update(goldenV2Bytes).digest("hex"))
+      .toBe("bd5aeb3100b8d1115fce22961c160f4634608c8d1228fd679b261d8dc3bc9ed2");
+  });
+  it("derives the v2 milestonesRoot and termsHash from the vector's tier-1 terms", () => {
+    expect(goldenV2.terms.assuranceTier).toBe(1);
+    expect(computeMilestonesRoot(goldenV2.terms.milestones))
+      .toBe("0x16bb1546dd13804dd874e718b41d1375d606ca1ebe6650a5db23b09a682bedc2");
+    const derivedTermsHash = computeTermsHash(goldenV2.terms);
+    expect(derivedTermsHash).toBe("0x3f8dbb379a2ff55a557a24aba75661166d03898dec2b0745747b3755d69f64ae");
+    expect(derivedTermsHash).toBe(goldenV2.termsHash);
+  });
+  it("derives the v2 subjectBlockHash, bindingsRoot and acceptedPolicyDigest with @pcc/spec", () => {
+    const subjectBlockHash = computeSubjectBlockHash(goldenV2.subjects);
+    const bindingsRoot = computeBindingsRoot(goldenV2.bindings);
+    expect(subjectBlockHash).toBe(goldenV2.subjectBlockHash);
+    expect(bindingsRoot).toBe(goldenV2.bindingsRoot);
+    const acceptedPolicyDigest = computeAcceptedPolicyDigest({
+      termsHash: computeTermsHash(goldenV2.terms), subjectBlockHash, bindingsRoot,
+    });
+    expect(acceptedPolicyDigest).toBe("0x6814b378016fd7f40c1e72aa98187b14656338f002ab2774fa86d9ed9361fe23");
+    expect(acceptedPolicyDigest).toBe(goldenV2.acceptedPolicyDigest);
+    expect(computeJobPolicyCommitments(v2Input())).toEqual({
+      subjectBlockHash, bindingsRoot, acceptedPolicyDigest,
+    });
+  });
+  it("accepts the exact v2 shape with the vector host and complete F1 Thursday limits", () => {
+    const candidate = v2Input();
+    expect(candidate.subjectBlock).toEqual(goldenV2.subjects);
+    expect(candidate.bindings).toEqual(goldenV2.bindings);
+    expect(candidate.policy.acceptedPolicyDigest).toBe(goldenV2.acceptedPolicyDigest);
+    expect(prepareV2(candidate)).toEqual(jobPolicyTypedData(candidate.policy));
+    expect(signing.calls).toBe(0);
+  });
+  it("refuses the retired economics file digest on the v2 shape after refreshing digest and escrow", () => {
+    const candidate = v2Input();
+    candidate.policy.termsHash = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+    refresh(candidate);
+    expect(() => prepareV2(candidate)).toThrowError(expect.objectContaining({
+      name: "OperatorSigningError", code: "terms_hash_mismatch", message: "terms_hash_mismatch",
+    }));
+    expect(signing.calls).toBe(0);
+  });
+  it("refuses v2 reclaimAt moved by one second after refreshing the digest and escrow", () => {
+    const candidate = v2Input();
+    candidate.units[0]!.reclaimAt += 1n;
+    candidate.policy.prePolicyRoot = prePolicyRoot(candidate.units);
+    refresh(candidate);
+    expect(() => prepareV2(candidate)).toThrowError(expect.objectContaining({
+      name: "OperatorSigningError", code: "terms_hash_mismatch", message: "terms_hash_mismatch",
+    }));
+    expect(signing.calls).toBe(0);
   });
 });

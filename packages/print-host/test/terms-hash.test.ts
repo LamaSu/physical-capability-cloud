@@ -56,7 +56,7 @@ describe("CanonicalJobTermsV1 v2.1 terms hash", () => {
   });
 
   it("accepts exact unsigned integer boundaries without truncation", () => {
-    expect(() => computeTermsHash({ ...golden, assuranceTier: 255n, milestones: [{
+    expect(() => computeTermsHash({ ...golden, assuranceTier: 3n, milestones: [{
       milestoneIndex: (1n << 256n) - 1n,
       stepId: golden.milestones[0]!.stepId,
       amount: (1n << 256n) - 1n,
@@ -88,6 +88,10 @@ describe("CanonicalJobTermsV1 v2.1 terms hash", () => {
     expect(() => computeTermsHash({ ...golden, assuranceTier })).toThrow();
   });
 
+  it("refuses assurance tier 4 outside the ratified 0..3 range", () => {
+    expect(() => computeTermsHash({ ...golden, assuranceTier: 4 })).toThrow();
+  });
+
   it("refuses an empty milestone list in both producers", () => {
     expect(() => computeMilestonesRoot([])).toThrow();
     expect(() => computeTermsHash({ ...golden, milestones: [] })).toThrow();
@@ -105,6 +109,12 @@ describe("CanonicalJobTermsV1 v2.1 terms hash", () => {
 
   it("refuses duplicate milestone identities without deduplication", () => {
     expect(() => computeMilestonesRoot([golden.milestones[0]!, { ...golden.milestones[0]!, amount: 1n }])).toThrow();
+  });
+
+  it("refuses duplicate milestone identities whose stepId differs only in hex case", () => {
+    const milestone = golden.milestones[0]!;
+    const uppercaseStepId = `0x${milestone.stepId.slice(2).toUpperCase()}` as Hex;
+    expect(() => computeMilestonesRoot([milestone, { ...milestone, stepId: uppercaseStepId }])).toThrow();
   });
 
   it("accepts safe number inputs with the same result as bigint inputs", () => {

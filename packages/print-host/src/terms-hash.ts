@@ -1,5 +1,5 @@
 /**
- * Ratified CanonicalJobTermsV1 v2.1: tmp/vnext-termshash-golden-v1.md.
+ * Ratified CanonicalJobTermsV1 v2.1 (Aug 6): ~/.claude/shared/vnext-termshash-golden-v1.md.
  * Reference: pcc-oracle src/terms-hash.ts @87bc14e. Replace this local
  * producer with @pcc/spec's producer when that merges, keeping the goldens.
  */
@@ -57,6 +57,7 @@ export function computeTermsHash({ token, assuranceTier, milestones }: {
 }): Hex {
   if (typeof token !== "string" || !isAddress(token, { strict: false })) throw new Error("Invalid token");
   const tier = Number(uint(assuranceTier, 8));
+  if (tier > 3) throw new Error("Invalid assuranceTier: expected 0..3");
   return keccak256(encodeAbiParameters(
     [{ type: "bytes32" }, { type: "address" }, { type: "uint8" }, { type: "bytes32" }],
     [TERMS_DOMAIN, token, tier, computeMilestonesRoot(milestones)],

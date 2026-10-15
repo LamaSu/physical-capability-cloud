@@ -213,6 +213,35 @@ describe("print-host sign-policy CLI", () => {
       .some((fragment) => rendered.includes(fragment)), "acceptance artifact and CLI output contain no private key fragments").toBe(false);
   });
 
+  it("writes the lowercase derived termsHash when the policy supplies uppercase hex", async () => {
+    const current = await fixture();
+    const derivedTermsHash = computeTermsHash({
+      token: current.terms.settlementToken, assuranceTier: current.input.units[0]!.requiredTier,
+      milestones: current.input.units.map((unit) => ({
+        milestoneIndex: unit.milestoneIndex, stepId: unit.stepId, amount: unit.g, deadline: unit.reclaimAt,
+      })),
+    });
+    current.input.policy.termsHash = `0x${derivedTermsHash.slice(2).toUpperCase()}`;
+    expect(current.input.policy.termsHash).not.toBe(derivedTermsHash);
+    const commitments = {
+      acceptedPolicyDigest: computeAcceptedPolicyDigest({
+        termsHash: derivedTermsHash,
+        subjectBlockHash: computeSubjectBlockHash(current.input.subjectBlock),
+        bindingsRoot: computeBindingsRoot(current.input.bindings),
+      }),
+    };
+    current.input.policy.acceptedPolicyDigest = commitments.acceptedPolicyDigest;
+    bindEscrow(current.input);
+    await writeFile(current.inputFile, json(current.input));
+    const captured = capture();
+    expect(await main(current.argv, captured.io)).toBe(0);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "" });
+    const output = JSON.parse(await readFile(current.outputFile, "utf8"));
+    expect(output.termsHash).toBe(derivedTermsHash);
+    expect(output.acceptedPolicyDigest).toBe(commitments.acceptedPolicyDigest);
+    expect(output.escrow).toBe(current.input.policy.escrow);
+  });
+
   it("refuses to overwrite an existing output and leaves its bytes and permissions untouched", async () => {
     const current = await fixture();
     const existing = randomBytes(24).toString("base64");
@@ -469,6 +498,28 @@ async function expectJsonFailure(operation: () => Promise<unknown>, code: string
 }
 
 describe("policy JSON file boundaries", () => {
+  it("refuses another Base Sepolia settlement token directly at terms load with bad_terms", async () => {
+    const current = await fixture();
+    await writeFile(current.termsFile, json({ ...current.terms, settlementToken: address("ab") }));
+    await expect(loadHostTerms(current.termsFile)).rejects.toMatchObject({
+      name: "OperatorSigningError", code: "bad_terms", message: "bad_terms",
+    });
+  });
+  it.each([settlementToken, settlementToken.toLowerCase()])(
+    "loads Base Sepolia USDC case-insensitively from terms JSON (%s)", async (token) => {
+      const current = await fixture();
+      await writeFile(current.termsFile, json({ ...current.terms, settlementToken: token }));
+      expect((await loadHostTerms(current.termsFile)).settlementToken).toBe(token);
+    },
+  );
+  it("loads a non-zero anvil mock settlement token directly from terms JSON", async () => {
+    const current = await fixture();
+    const token = address("ab");
+    await writeFile(current.termsFile, json({ ...current.terms, chainId: 31337, settlementToken: token }));
+    const loaded = await loadHostTerms(current.termsFile);
+    expect(loaded.chainId).toBe(31337);
+    expect(loaded.settlementToken).toBe(token);
+  });
   it("refuses an extra subject key directly at input load with bad_input", async () => {
     const current = await fixture();
     const candidate = JSON.parse(json(current.input)) as EditableInput;
