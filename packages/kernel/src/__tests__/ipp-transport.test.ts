@@ -62,6 +62,11 @@ describe("HTTP IPP transport, socket-free", () => {
     expect(connection.destroyed).toBe(true);
   });
 
+  it.each(["HTTP/1.0 200 OK", "HTTP/1.1 200"])("R7 LOW-X2: accepts %s with Content-Length framing", async status => {
+    const { transport } = scripted(`${status}\r\nContent-Length: 3\r\n\r\nIPP`);
+    expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+  });
+
   it("T1: accepts chunked only once its terminal chunk arrives", async () => {
     // Revert the Transfer-Encoding check or res.complete check to fail.
     const { transport } = scripted("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nIPP\r\n0\r\n\r\n");
