@@ -62,8 +62,9 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
 
 /**
  * Buyer intent fixed in the caller's own records before requesting the prepare payload; never copy it from that
- * payload. PCC MVP units bind their commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots,
- * or jobPolicyHash, which commits to everything), and must not waive them. Values come from the caller's own pins;
+ * payload. PCC MVP units bind all three commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots);
+ * bind jobPolicyHash as well when you hold it. An MVP integration never passes allowUnchecked.
+ * Values come from the caller's own pins;
  * Thursday PRINT buyers use printUnitThursdayExpectation and economics' PRINT_UNIT_THURSDAY_V1 pins.
  * A PRINT buyer's termsHash is the v2.1 hash of the configs it funds (#8165), carried privately until evidence's
  * public producer is available (#8168). The oracle's Thursday-shape vector test is added when the oracle re-issues it.

@@ -17,8 +17,9 @@
  * and only after verifying the payload against caller intent and trusted pins. There is no x402 path: x402 cannot
  * fund a V-next escrow (plan G10).
  * Fix expect in your own submit record, operator choice and payee list before requesting the prepare payload.
- * PCC MVP units bind their commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots, or
- * jobPolicyHash, which commits to everything), and must not waive them. Values come from the caller's own pins;
+ * PCC MVP units bind all three commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots);
+ * bind jobPolicyHash as well when you hold it. An MVP integration never passes allowUnchecked.
+ * Values come from the caller's own pins;
  * Thursday PRINT uses PRINT_UNIT_THURSDAY_V1 from economics' decisions and exact terms-file bytes. Never copy
  * values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
  * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.
