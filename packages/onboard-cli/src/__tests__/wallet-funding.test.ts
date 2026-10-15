@@ -101,6 +101,21 @@ describe("W2 funding response contract", () => {
     gateway(device);
     expect(await requestFunding(ORIGIN, REQUEST_ID, "device")).toEqual(device);
   });
+  it("YANKEE-I1d refuses two claims whose txHashes differ only in hex case", async () => {
+    const claims = realFundingClaims();
+    claims[0] = { ...claims[0]!, txHash: `0x${"ab".repeat(32)}` };
+    claims[1] = { ...claims[1]!, txHash: `0x${"AB".repeat(32)}` };
+    gateway({ status: "funded", claims });
+    await expect(requestFunding(ORIGIN, REQUEST_ID, "agent")).rejects.toThrow("invalid_gateway_response");
+  });
+  it("YANKEE-OR3 accepts a funded body whose distinct txHashes use uppercase hex", async () => {
+    const claims = realFundingClaims().map((claim, index) => ({
+      ...claim, txHash: `0x${(index + 10).toString(16).toUpperCase().padStart(2, "0").repeat(32)}`,
+    }));
+    const body = { status: "funded", claims };
+    gateway(body);
+    expect(await requestFunding(ORIGIN, REQUEST_ID, "agent")).toEqual(body);
+  });
   it("refuses any USDC claim for a device", async () => {
     gateway(FUNDED);
     await expect(requestFunding(ORIGIN, REQUEST_ID, "device")).rejects.toThrow("invalid_gateway_response");
