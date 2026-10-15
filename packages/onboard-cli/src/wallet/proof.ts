@@ -70,15 +70,15 @@ function gatewayHost(origin: string): string {
   }
 }
 
-function validateSecpMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number): void {
+function validateSecpMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, publicOrigin: string): void {
   let parsed: ReturnType<typeof parseSiweMessage>;
   try {
     parsed = parseSiweMessage(message);
   } catch {
     return mismatch("message");
   }
-  if (parsed.domain !== gatewayHost(wallet.gatewayOrigin)) mismatch("domain");
-  if (parsed.uri !== `${wallet.gatewayOrigin}/link`) mismatch("uri");
+  if (parsed.domain !== gatewayHost(publicOrigin)) mismatch("domain");
+  if (parsed.uri !== `${publicOrigin}/link`) mismatch("uri");
   if (parsed.chainId !== wallet.chainId || parsed.chainId !== 84532) mismatch("chainId");
   if (parsed.address !== wallet.address) mismatch("address");
   try {
@@ -120,7 +120,7 @@ function validateSecpMessage(message: string, wallet: WalletRecord, requestId: s
   }
 }
 
-function validateEdMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string): void {
+function validateEdMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId: string | undefined, publicOrigin: string): void {
   const prefix = "PCC-LINK-V1\n";
   if (!message.startsWith(prefix)) mismatch("prefix");
   const json = message.slice(prefix.length);
@@ -141,8 +141,8 @@ function validateEdMessage(message: string, wallet: WalletRecord, requestId: str
   if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])
     || !Number.isSafeInteger(parsed.chainId) || stringFields.some((field) => typeof parsed[field] !== "string")) mismatch("fields");
   if (expectedKernelId !== undefined && (wallet.role !== "device" || parsed.kernelId !== expectedKernelId)) mismatch("kernelId");
-  if (parsed.domain !== gatewayHost(wallet.gatewayOrigin)) mismatch("domain");
-  if (parsed.uri !== `${wallet.gatewayOrigin}/link`) mismatch("uri");
+  if (parsed.domain !== gatewayHost(publicOrigin)) mismatch("domain");
+  if (parsed.uri !== `${publicOrigin}/link`) mismatch("uri");
   if (parsed.chainId !== wallet.chainId || parsed.chainId !== 84532) mismatch("chainId");
   if (parsed.publicKey !== wallet.publicKey) mismatch("publicKey");
   if (parsed.requestId !== requestId) mismatch("requestId");
@@ -155,10 +155,10 @@ function validateEdMessage(message: string, wallet: WalletRecord, requestId: str
 }
 
 /** Check the gateway's message before either key type signs any bytes. */
-export function validateProofMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string): void {
+export function validateProofMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string, publicOrigin = wallet.gatewayOrigin): void {
   try {
-    if (wallet.keyType === "secp256k1") validateSecpMessage(message, wallet, requestId, nowMs);
-    else validateEdMessage(message, wallet, requestId, nowMs, expectedKernelId);
+    if (wallet.keyType === "secp256k1") validateSecpMessage(message, wallet, requestId, nowMs, publicOrigin);
+    else validateEdMessage(message, wallet, requestId, nowMs, expectedKernelId, publicOrigin);
   } catch (error) {
     if (error instanceof WalletError) throw error;
     mismatch("message");

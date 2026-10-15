@@ -44,6 +44,7 @@ Options:
   --key-type secp256k1|ed25519          Defaults: agent secp256k1, device ed25519
   --chain-id 84532                     Base Sepolia only
   --gateway <origin>                   Same gateway resolution as onboard
+  --public-origin <url>                Browser/proof origin (default: gateway origin)
   --rpc-url <url>                      Base Sepolia receipts (env: PCC_RPC_URL)
   --kernel-id <id>                     Optional device binding on init/link
   --yes                               Skip typed create only on non-TTY stdin
@@ -64,6 +65,7 @@ interface Args {
   keyType?: KeyType;
   chainId: number;
   gateway?: string;
+  publicOrigin?: string;
   yes: boolean;
   apiKey?: string;
   reason?: string;
@@ -83,7 +85,7 @@ function parseArgs(argv: string[]): Args | null {
   for (let i = 0; i < flags.length; i++) {
     const flag = flags[i];
     if (flag === "--yes") { yes = true; continue; }
-    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason", "--kernel-id", "--rpc-url"].includes(flag)) {
+    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--public-origin", "--api-key", "--reason", "--kernel-id", "--rpc-url"].includes(flag)) {
       throw new WalletError("invalid_wallet_option");
     }
     const value = flags[++i];
@@ -113,7 +115,7 @@ function parseArgs(argv: string[]): Args | null {
   }
   return {
     command: command as Command, role, label, keyType, chainId: 84532,
-    gateway: values["--gateway"], yes, apiKey: values["--api-key"], reason, kernelId,
+    gateway: values["--gateway"], publicOrigin: values["--public-origin"], yes, apiKey: values["--api-key"], reason, kernelId,
     rpcUrl: values["--rpc-url"],
   };
 }
@@ -174,7 +176,7 @@ function saveState(wallet: WalletRecord, data: Record<string, unknown>): WalletR
   });
 }
 
-async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: string): Promise<WalletRecord> {
+async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: string, publicOrigin = wallet.gatewayOrigin): Promise<WalletRecord> {
   const created = await walletRequest(wallet.gatewayOrigin, "/api/wallets/link-requests", "POST", {
     keyType: wallet.keyType,
     ...(wallet.keyType === "secp256k1" ? { address: wallet.address } : { publicKey: wallet.publicKey }),
@@ -184,13 +186,13 @@ async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: st
   });
   if (!identifier(created.requestId) || !created.requestId.startsWith("lr_")
     || typeof created.userCode !== "string" || !/^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/.test(created.userCode)
-    || created.verificationUri !== `${wallet.gatewayOrigin}/link`
+    || created.verificationUri !== `${publicOrigin}/link`
     || typeof created.message !== "string" || typeof created.expiresAt !== "string"
     || !Number.isSafeInteger(created.interval) || (created.interval as number) <= 0) invalidResponse();
   const expiresAt = Date.parse(created.expiresAt);
   if (!Number.isFinite(expiresAt) || expiresAt <= io.now()) invalidResponse();
   wallet = updateLink(wallet, { requestId: created.requestId, status: "pending_proof" });
-  validateProofMessage(created.message, wallet, created.requestId, io.now(), kernelId);
+  validateProofMessage(created.message, wallet, created.requestId, io.now(), kernelId, publicOrigin);
   const signature = await signWalletMessage(wallet, created.message);
   const proof = await walletRequest(wallet.gatewayOrigin, `${requestPath(created.requestId)}/proof`, "POST", { signature });
   if (proof.status !== "awaiting_approval") invalidResponse();
@@ -266,6 +268,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
     throw new WalletError("revoke from the dashboard (Wallets → Unlink), or pass an owner API key", 2);
   }
   const origin = gatewayOrigin(args.gateway);
+  const publicOrigin = args.publicOrigin === undefined ? origin : validateTransportUrl(args.publicOrigin).origin;
   const rpcUrl = args.rpcUrl ?? (process.env.PCC_RPC_URL || "https://sepolia.base.org");
   if (args.command === "init" || args.command === "fund") validateTransportUrl(rpcUrl, "rpc");
   if (args.command === "init") {
@@ -280,7 +283,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       keyType,
       chainId: args.chainId, gatewayOrigin: origin, createdAt: new Date(io.now()).toISOString(),
     });
-    wallet = await linkWallet(wallet, io, args.kernelId);
+    wallet = await linkWallet(wallet, io, args.kernelId, publicOrigin);
     if (wallet.keyType === "ed25519") { io.stdout("linked (unfunded: not_fundable)\n"); return 0; }
     try {
       if (await fundWallet(wallet, io, rpcUrl)) io.stdout("ready\n");
@@ -309,7 +312,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
   switch (args.command) {
     case "link":
       if (wallet.link.status === "approved" && wallet.link.linkId) throw new WalletError("wallet_already_linked");
-      await linkWallet(wallet, io, args.kernelId);
+      await linkWallet(wallet, io, args.kernelId, publicOrigin);
       return 0;
     case "fund":
       await fundWallet(wallet, io, rpcUrl);

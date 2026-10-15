@@ -109,7 +109,9 @@ account owner for browser approval, and request Base Sepolia test funds.
 Devices default to Ed25519; agents default to secp256k1. Ed25519 keys link
 without funding, and `fund` refuses locally for them. Keys stay in
 `~/.pcc/wallets/<label>.json` (0600, directory 0700), or `PCC_WALLET_DIR`.
-Gateway resolution is the same as onboard. `--yes` skips typed consent only
+Gateway resolution is the same as onboard. `--public-origin <url>` selects the
+browser approval and signed proof origin; it defaults to the gateway origin
+and follows the same HTTPS or loopback HTTP rule. `--yes` skips typed consent only
 on non-TTY stdin; browser approval still requires the human owner.
 Use `link`, `fund`, `status`, `export-address`, or owner-only `revoke`
 (`--api-key` / `PCC_API_KEY`, or Wallets → Unlink in the dashboard).

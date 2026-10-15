@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPublicKey, verify } from "node:crypto";
 import { verifyMessage, type Address } from "viem";
-import { createSiweMessage, type SiweMessage } from "viem/siwe";
+import { createSiweMessage, parseSiweMessage, type SiweMessage } from "viem/siwe";
 import { main } from "../wallet/cli.js";
 import { main as onboardMain } from "../cli.js";
 
@@ -35,6 +35,7 @@ type Body = Record<string, unknown>;
 type Recorded = { path: string; method: string; body: Body; headers: IncomingHttpHeaders };
 type StubOptions = {
   statuses?: string[];
+  publicOrigin?: string;
   accountId?: unknown;
   interval?: number;
   lifetimeMs?: number;
@@ -106,10 +107,10 @@ class Gateway {
       const expiresAt = new Date(clock + (this.options.lifetimeMs ?? 600_000)).toISOString();
       if (body.keyType === "secp256k1") {
         const message: SiweMessage = {
-          domain: new URL(this.origin).host,
+          domain: new URL(this.options.publicOrigin ?? this.origin).host,
           address: body.address as Address,
           statement: `Link this key to PCC as an ${body.role} ("${body.label}"). PCC never holds this key. Consent: wallet-link v1.`,
-          uri: `${this.origin}/link`,
+          uri: `${this.options.publicOrigin ?? this.origin}/link`,
           version: "1",
           chainId: 84532,
           nonce: "PCCNonce1234567890",
@@ -129,7 +130,7 @@ class Gateway {
         const message: Record<string, string | number> = {
           chainId: 84532,
           consent: `wallet-link-v1:sha256:${CONSENT_HASH}`,
-          domain: new URL(this.origin).host,
+          domain: new URL(this.options.publicOrigin ?? this.origin).host,
           env: "test",
           expirationTime: expiresAt,
           issuedAt: new Date(clock).toISOString(),
@@ -138,7 +139,7 @@ class Gateway {
           publicKey: body.publicKey as string,
           requestId: REQUEST_ID,
           role: body.role as string,
-          uri: `${this.origin}/link`,
+          uri: `${this.options.publicOrigin ?? this.origin}/link`,
         };
         if (body.kernelId !== undefined) message.kernelId = body.kernelId as string;
         this.options.mutateEd?.(message);
@@ -148,7 +149,7 @@ class Gateway {
       const created: Body = {
         requestId: REQUEST_ID,
         userCode: "BCDF-GHJK",
-        verificationUri: `${this.origin}/link`,
+        verificationUri: `${this.options.publicOrigin ?? this.origin}/link`,
         message: this.signedMessage,
         expiresAt,
         interval: this.options.interval ?? 5,
@@ -886,5 +887,49 @@ describe("init funding refusal mapping", () => {
     expect(stdout.join("")).toContain(`linked (unfunded: ${fundBody.error}${suffix})`);
     expect(stdout.join("")).not.toContain("ready");
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+  });
+});
+
+describe("public origin for browser approval and signed proof", () => {
+  it.each(["agent", "device"])("default public origin remains the gateway for %s", async role => {
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    expect(await run(gateway, "init", ["--yes"], role)).toBe(0);
+    expect(stdout.join("")).toContain(`Open: ${gateway.origin}/link`);
+    const fields = role === "agent" ? parseSiweMessage(gateway.signedMessage) : JSON.parse(gateway.signedMessage.slice(PREFIX.length)) as Body;
+    expect(fields.domain).toBe(new URL(gateway.origin).host);
+    expect(fields.uri).toBe(`${gateway.origin}/link`);
+    expect(gateway.signatureVerified).toBe(true);
+  });
+  it.each(["agent", "device"])("--public-origin override reaches printed link and signed domain/uri for %s", async role => {
+    const publicOrigin = "https://approve.example:8443";
+    const gateway = await new Gateway({ statuses: ["approved"], publicOrigin }).start();
+    expect(await run(gateway, "init", ["--yes", "--public-origin", publicOrigin], role)).toBe(0);
+    expect(stdout.join("")).toContain(`Open: ${publicOrigin}/link`);
+    const fields = role === "agent" ? parseSiweMessage(gateway.signedMessage) : JSON.parse(gateway.signedMessage.slice(PREFIX.length)) as Body;
+    expect(fields.domain).toBe("approve.example:8443");
+    expect(fields.uri).toBe(`${publicOrigin}/link`);
+    expect(gateway.signatureVerified).toBe(true);
+    expect((await stored()).gatewayOrigin).toBe(gateway.origin);
+    expect(gateway.proofs()).toHaveLength(1);
+  });
+  it.each(["http://public.example", "http://localhost.attacker.example", "https://pcc.example/path", "https://pcc.example?x=1"])("refuses unsafe --public-origin %s before prompt, storage or requests", async publicOrigin => {
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    expect(await run(gateway, "init", ["--public-origin", publicOrigin])).toBe(1);
+    expect(prompt).not.toHaveBeenCalled();
+    expect(await readdir(walletDir)).toEqual([]);
+    expect(gateway.requests).toHaveLength(0);
+    expect(stderr.join("")).toMatch(/(?:insecure|invalid)_gateway_origin/);
+  });
+  it("--public-origin accepts loopback HTTP", async () => {
+    const publicOrigin = "http://localhost:8080";
+    const gateway = await new Gateway({ statuses: ["approved"], publicOrigin }).start();
+    expect(await run(gateway, "init", ["--yes", "--public-origin", publicOrigin])).toBe(0);
+    expect(stdout.join("")).toContain(`Open: ${publicOrigin}/link`);
+  });
+  it("refuses a gateway signing its API origin when --public-origin differs", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    expect(await run(gateway, "init", ["--yes", "--public-origin", "https://approve.example"])).toBe(1);
+    expect(gateway.proofs()).toHaveLength(0);
+    expect(stdout.join("")).not.toContain("Open:");
   });
 });
