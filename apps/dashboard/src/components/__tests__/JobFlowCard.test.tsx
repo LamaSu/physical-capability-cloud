@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { GlowBadge } from "@pcc/ui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExecutionPhase, PayoutState, SettlementLink, MoneyTone } from "@pcc/spec";
 import { classifyMoneyStatus } from "@pcc/spec";
 import { jobFlowFixture } from "../../lib/__tests__/job-flow-fixture.js";
+import { payoutBadge } from "../../lib/job-execution-view.js";
 
 const phases: ExecutionPhase[] = ["pending", "queued", "dispatched", "running", "awaiting_handoff", "paused", "completed", "failed", "timed_out", "cancelled", "unknown"];
 const payouts: PayoutState[] = ["paid", "reported_released", "refunded", "not_paid", "simulated", "unknown"];
@@ -19,6 +21,12 @@ async function render(dto = jobFlowFixture(), stale = false) {
   const host = document.createElement("div");
   host.innerHTML = renderToStaticMarkup(<JobFlowCard dto={dto} stale={stale} />);
   return host;
+}
+
+function payoutClass(payout: PayoutState, stale: boolean): string {
+  const host = document.createElement("div");
+  host.innerHTML = renderToStaticMarkup(<GlowBadge color={payoutBadge(payout, stale).color}>reference</GlowBadge>);
+  return host.querySelector("span")!.className;
 }
 
 afterEach(() => { vi.unstubAllEnvs(); });
@@ -59,7 +67,7 @@ describe("JobFlowCard fixed rendering", () => {
   it("a failed print is neutral and never pending or waiting", async () => {
     const host = await render();
     expect(host.textContent).not.toMatch(/pending|waiting/i);
-    expect(host.querySelector('[aria-label="Money"]')!.getAttribute("data-tone")).toBe("unknown");
+    expect(host.querySelector('[aria-label="Money"] span')!.className).toBe(payoutClass("unknown", false));
     expect(host.innerHTML).not.toMatch(/green|emerald/);
   });
 
@@ -70,7 +78,7 @@ describe("JobFlowCard fixed rendering", () => {
     expect([...host.querySelectorAll('[aria-label="Money"] span')].some(e => e.textContent === "Paid")).toBe(payout === "paid");
   });
 
-  it.each(["settled", "refunded", "waiting", "running", "failed", "unknown"] as MoneyTone[])("uses canonical record tone %s without inference", async (tone) => {
+  it.each(["settled", "refunded", "waiting", "running", "failed", "unknown"] as MoneyTone[])("payout controls money color despite record tone %s", async (tone) => {
     const dto = jobFlowFixture();
     dto.settlement.link = "linked";
     dto.settlement.record = {
@@ -79,10 +87,12 @@ describe("JobFlowCard fixed rendering", () => {
       milestoneMatch: "exact", milestoneClaimants: 1, milestone: null,
       escrowTotal: { amount: "1", currency: "USDC" }, createdAt: dto.asOf, deadline: dto.asOf, statusObservedAt: null,
     };
-    const host = await render(dto);
-    const money = host.querySelector('[aria-label="Money"]')!;
-    expect(money.getAttribute("data-tone")).toBe(tone);
-    if (tone === "unknown" || tone === "refunded") expect(money.innerHTML).not.toMatch(/green|emerald/);
+    for (const record of [dto.settlement.record, null]) for (const payout of payouts) for (const stale of [false, true]) {
+      Object.assign(dto.settlement, { record, payout });
+      const host = await render(dto, stale);
+      const badge = host.querySelector('[aria-label="Money"] span')!;
+      expect.soft(badge.className, `${record ? tone : "no record"}/${payout}/stale=${stale}`).toBe(payoutClass(payout, stale));
+    }
   });
 
   it.each(["settled", "running", "failed"] as MoneyTone[])("a stale read renders %s money in neutral gray", async (tone) => {
@@ -97,8 +107,7 @@ describe("JobFlowCard fixed rendering", () => {
     };
     const host = await render(dto, true);
     const money = host.querySelector('[aria-label="Money"]')!;
-    expect(money.getAttribute("data-tone")).toBe("unknown");
-    expect(money.querySelector("span")!.className).toContain("text-white/60");
+    expect(money.querySelector("span")!.className).toBe(payoutClass("paid", true));
     expect(money.textContent).toContain("Paid");
   });
 

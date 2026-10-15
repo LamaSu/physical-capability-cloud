@@ -134,7 +134,6 @@ describe("job flow snapshot boundary", () => {
     await pick(host, dto);
     expect(host.textContent).toContain(`Snapshot read at ${dto.asOf}`);
     const money = host.querySelector('[aria-label="Money"]')!;
-    expect(money.getAttribute("data-tone")).toBe("unknown");
     expect(money.querySelector("span")!.className).toContain("text-white/60");
     expect(money.textContent).toContain("Paid");
   });

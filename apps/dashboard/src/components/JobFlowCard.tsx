@@ -1,8 +1,7 @@
 import React from "react";
 import { GlowBadge } from "@pcc/ui";
 import type { EvidenceAxisState, JobExecutionDTO, PayoutState, SettlementLink } from "@pcc/spec";
-import { PHASE_VIEW, NOTICE_TEXT } from "../lib/job-execution-view.js";
-import { moneyToneColor } from "../lib/money-badge.js";
+import { PHASE_VIEW, NOTICE_TEXT, payoutBadge } from "../lib/job-execution-view.js";
 
 const EVIDENCE_COPY: Record<EvidenceAxisState, string> = {
   none: "No evidence received",
@@ -73,8 +72,8 @@ function short(value: string): string {
   return value.length > 16 ? `${value.slice(0, 10)}…${value.slice(-4)}` : value;
 }
 
-function Row({ label, children, tone }: { label: string; children: React.ReactNode; tone?: string }) {
-  return <section aria-label={label} data-tone={tone} className="border-b border-white/10 p-4 last:border-0">
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return <section aria-label={label} className="border-b border-white/10 p-4 last:border-0">
     <h3 className="font-semibold text-white/80 mb-2">{label}</h3>
     <div className="space-y-1 text-sm text-white/60 break-words [overflow-wrap:anywhere]">{children}</div>
   </section>;
@@ -85,7 +84,7 @@ export function JobFlowCard({ dto, stale }: { dto: JobExecutionDTO; stale: boole
   const trace = traceHref(dto.job.jobId);
   const explorer = explorerHref(dto);
   const noRelease = isFailedPrintWithNoRelease(dto);
-  const tone = stale || noRelease ? "unknown" : (dto.settlement.record?.escrow?.tone ?? "unknown");
+  const moneyColor = payoutBadge(dto.settlement.payout, stale).color;
   const phase = Object.prototype.hasOwnProperty.call(PHASE_VIEW, dto.execution.phase)
     ? PHASE_VIEW[dto.execution.phase].label : "Print phase unknown";
   const cc = dto.verification.captureChecks;
@@ -121,9 +120,9 @@ export function JobFlowCard({ dto, stale }: { dto: JobExecutionDTO; stale: boole
       <p>Capture-check counts: pass {count(cc.pass)} · partial {count(cc.partial)} · fail {count(cc.fail)} · unrecognized {count(cc.unrecognized)}</p>
       {cc.error && <p>Capture checks could not be read</p>}
     </Row>
-    <Row label="Money" tone={tone}>
+    <Row label="Money">
       <div className="flex flex-wrap items-center gap-2">
-        <GlowBadge color={moneyToneColor(tone)}>{noRelease ? "Not paid: no release recorded" : fixed(PAYOUT_COPY, dto.settlement.payout, "Payment status unknown")}</GlowBadge>
+        <GlowBadge color={moneyColor}>{noRelease ? "Not paid: no release recorded" : fixed(PAYOUT_COPY, dto.settlement.payout, "Payment status unknown")}</GlowBadge>
         {noRelease && <Trace href={trace} />}
         {explorer ? <a className="underline" href={explorer}>Base Sepolia explorer</a> : <span>explorer link not configured</span>}
       </div>

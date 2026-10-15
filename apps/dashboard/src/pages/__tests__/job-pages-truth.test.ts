@@ -80,6 +80,12 @@ describe("JobDetailPage reads the gateway read model", () => {
 });
 
 describe("JobFlowCard preserves the live page's truth gates", () => {
+  it("NEGATIVE (review P1-4): the card colors money only through payoutBadge", () => {
+    const card = read("../components/JobFlowCard.tsx");
+    expect(card).toContain("payoutBadge(");
+    expect(card).not.toMatch(/escrow\??\.tone|moneyToneColor|moneyBadgeColor|classifyMoneyStatus|moneyStatusColor/);
+  });
+
   it("renders the card only after the latest-read refusal gate", () => {
     const gate = detail.indexOf('state.show !== "data"');
     expect(gate).toBeGreaterThan(-1);
