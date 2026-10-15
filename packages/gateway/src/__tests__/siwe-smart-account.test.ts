@@ -20,6 +20,7 @@ import * as sc from "../middleware/scope-checker.js";
 const SMART_ADDRESS = "0x1111111111111111111111111111111111111111";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const ZERO_SIGNATURE = `0x${"00".repeat(64)}1b` as Hex;
+const ZERO_R_ONE_S_SIGNATURE = `0x${"00".repeat(63)}011c` as Hex;
 let apps: FastifyInstance[];
 let remoteAddress: string;
 let testNumber = 0;
@@ -145,17 +146,20 @@ describe("SIWE smart-account signatures", () => {
     expect(getRepos().sessions.countActive()).toBe(0);
   });
 
-  it("rejects the zero address even when the validator accepts it and burns the nonce", async () => {
+  it.each([
+    ["all-zero v=27", ZERO_SIGNATURE],
+    ["r=0, s=1, v=28", ZERO_R_ONE_S_SIGNATURE],
+  ] as const)("rejects the zero address with %s even when the validator accepts it and burns the nonce", async (_shape, signature) => {
     const app = await buildApp();
     const message = await makeMessage(app, ZERO_ADDRESS);
     installTransport(() => "0x01");
     const sessionsBefore = getRepos().sessions.countActive();
-    const rejected = await verify(app, message, ZERO_SIGNATURE);
+    const rejected = await verify(app, message, signature);
     expect(rejected.statusCode).toBe(401);
     expect(rejected.json()).toEqual({ error: "Invalid signature" });
     expect(getRepos().sessions.countActive()).toBe(sessionsBefore);
     expect(requests).toEqual([]);
-    const retried = await verify(app, message, ZERO_SIGNATURE);
+    const retried = await verify(app, message, signature);
     expect(retried.statusCode).toBe(401);
     expect(retried.json()).toEqual({ error: "Nonce expired or invalid" });
     expect(getRepos().sessions.countActive()).toBe(sessionsBefore);

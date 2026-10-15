@@ -19,6 +19,8 @@ export class SignatureVerifierUnavailableError extends Error {
 }
 
 export const SIGVERIFY_GAS_CAP = 3_000_000n;
+export const SIGVERIFY_MAX_IN_FLIGHT = 16;
+let inFlight = 0;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 let testTransport: Transport | null = null;
 const verifiedChains = new Map<string, number>();
@@ -30,6 +32,7 @@ export function setSignatureVerifierTransportForTests(transport: Transport | nul
 
 export function __resetSignatureVerifierForTests(): void {
   setSignatureVerifierTransportForTests(null);
+  inFlight = 0;
 }
 
 function positiveInteger(value: string | undefined, fallback?: number): number | undefined {
@@ -114,33 +117,39 @@ export async function verifyEvmMessageSignature({ address, message, signature, c
     const url = configuredUrl();
     if (!url) return { ok: false, reason: eoaLength ? "invalid" : "unconfigured" };
 
-    registerOutboundSecretUrl(url);
-    const timeout = Math.min(15000, Math.max(1000,
-      positiveInteger(process.env.PCC_SIGVERIFY_TIMEOUT_MS, 5000) ?? 5000));
-    const deadline = Date.now() + timeout;
-    // Recreate the HTTP transport for each request to give it only the remaining budget.
-    const client = () => createPublicClient({
-      ccipRead: false,
-      batch: { multicall: false },
-      transport: testTransport ?? http(url, { retryCount: 0, timeout: Math.max(1, deadline - Date.now()), batch: false }),
-    });
-    if (verifiedChains.get(url) !== configuredChain) {
-      try {
-        const rpcChain = await withinDeadline(() => withSuppressedTracing(() => client().getChainId()), deadline);
-        if (rpcChain !== configuredChain) return { ok: false, reason: "unavailable" };
-        verifiedChains.set(url, rpcChain);
-      } catch {
-        // A chain query failure is an infrastructure failure, regardless of its RPC code.
-        return { ok: false, reason: "unavailable" };
+    if (inFlight >= SIGVERIFY_MAX_IN_FLIGHT) return { ok: false, reason: "unavailable" };
+    inFlight++;
+    try {
+      registerOutboundSecretUrl(url);
+      const timeout = Math.min(15000, Math.max(1000,
+        positiveInteger(process.env.PCC_SIGVERIFY_TIMEOUT_MS, 5000) ?? 5000));
+      const deadline = Date.now() + timeout;
+      // Recreate the HTTP transport for each request to give it only the remaining budget.
+      const client = () => createPublicClient({
+        ccipRead: false,
+        batch: { multicall: false },
+        transport: testTransport ?? http(url, { retryCount: 0, timeout: Math.max(1, deadline - Date.now()), batch: false }),
+      });
+      if (verifiedChains.get(url) !== configuredChain) {
+        try {
+          const rpcChain = await withinDeadline(() => withSuppressedTracing(() => client().getChainId()), deadline);
+          if (rpcChain !== configuredChain) return { ok: false, reason: "unavailable" };
+          verifiedChains.set(url, rpcChain);
+        } catch {
+          // A chain query failure is an infrastructure failure, regardless of its RPC code.
+          return { ok: false, reason: "unavailable" };
+        }
       }
+      const data = encodeDeployData({
+        abi: erc6492SignatureValidatorAbi,
+        bytecode: erc6492SignatureValidatorByteCode,
+        args: [getAddress(address), hashMessage(message), hexSignature],
+      });
+      const result = await withinDeadline(() => withSuppressedTracing(() => client().call({ data, gas: SIGVERIFY_GAS_CAP })), deadline);
+      return result.data === "0x01" ? { ok: true, kind: "contract" } : { ok: false, reason: "invalid" };
+    } finally {
+      inFlight--;
     }
-    const data = encodeDeployData({
-      abi: erc6492SignatureValidatorAbi,
-      bytecode: erc6492SignatureValidatorByteCode,
-      args: [getAddress(address), hashMessage(message), hexSignature],
-    });
-    const result = await withinDeadline(() => withSuppressedTracing(() => client().call({ data, gas: SIGVERIFY_GAS_CAP })), deadline);
-    return result.data === "0x01" ? { ok: true, kind: "contract" } : { ok: false, reason: "invalid" };
   } catch (error) {
     // Never expose viem errors: they can embed both RPC credentials and signed bytes.
     return { ok: false, reason: isRevert(error) ? "invalid" : "unavailable" };

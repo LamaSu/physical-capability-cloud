@@ -146,6 +146,17 @@ describe("W11 smart-account wallet link proofs", () => {
     expect(response.json()).toEqual({ error: "invalid_proof" });
   });
 
+  it("burns a 6492 proof on a verifier chain mismatch without any RPC", async () => {
+    vi.stubEnv("PCC_SIGVERIFY_CHAIN_ID", "8453");
+    const request = await create();
+    const response = await proof(request, await smartProof(request));
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "invalid_proof" });
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "failed" });
+    expect(await resolveActiveWalletLink({ address: smartAddress, chainId: 84532 })).toBeNull();
+    expect(requests).toHaveLength(0);
+  });
+
   it("burns an unavailable proof with 503 and permits a fresh request after recovery", async () => {
     const first = await create();
     const signature = await smartProof(first);

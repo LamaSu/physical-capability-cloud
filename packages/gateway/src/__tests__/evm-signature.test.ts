@@ -10,7 +10,7 @@ import { toCoinbaseSmartAccount } from "viem/account-abstraction";
 import { baseSepolia } from "viem/chains";
 import {
   __resetSignatureVerifierForTests, setSignatureVerifierTransportForTests,
-  SIGVERIFY_GAS_CAP, verifyEvmMessageSignature,
+  SIGVERIFY_GAS_CAP, SIGVERIFY_MAX_IN_FLIGHT, verifyEvmMessageSignature,
 } from "../auth/evm-signature.js";
 import { isOutboundSecretUrl } from "../services/outbound-secrets.js";
 
@@ -42,9 +42,9 @@ function recording(answer: (request: { method: string; params?: any }) => any = 
 function check(signature: string, overrides: Record<string, unknown> = {}) {
   return verifyEvmMessageSignature({ address: A, message, signature, chainId: 84532, ...overrides });
 }
-function exact(signature: Hex) {
+function exact(signature: Hex, address: Hex = A) {
   const data = encodeDeployData({ abi: erc6492SignatureValidatorAbi, bytecode: erc6492SignatureValidatorByteCode,
-    args: [A, hashMessage(message), signature] });
+    args: [address, hashMessage(message), signature] });
   recording(req => req.method === "eth_chainId" ? "0x14a34" : req.params[0].data === data ? "0x01" : "0x00");
 }
 beforeEach(() => {
@@ -71,21 +71,29 @@ describe("smart-account signature verifier", () => {
     expect(requests).toHaveLength(0);
   });
   it("refuses the zero address before any transport requests with configured and unset RPC", async () => {
+    const zero = "0".repeat(64);
+    const one = `${"0".repeat(63)}1`;
+    const order = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
+    const signatures = [
+      `0x${zero}${zero}1b`,
+      `0x${zero}${one}1c`,
+      `0x${order}${one}1b`,
+      `0x${one}${zero}1b`,
+    ];
     const results = [];
     for (const rpc of [url, ""]) {
       vi.stubEnv("PCC_SIGVERIFY_RPC_URL", rpc);
-      requests = [];
-      // The real universal validator can return true for this failed ecrecover.
-      recording();
-      results.push({
-        result: await check(`0x${"00".repeat(64)}1b`, { address: "0x0000000000000000000000000000000000000000" }),
-        requests: requests.length,
-      });
+      for (const signature of signatures) {
+        requests = [];
+        // The real universal validator can return true for each failed ecrecover.
+        recording();
+        results.push({
+          result: await check(signature, { address: "0x0000000000000000000000000000000000000000" }),
+          requests: requests.length,
+        });
+      }
     }
-    expect(results).toEqual([
-      { result: { ok: false, reason: "invalid" }, requests: 0 },
-      { result: { ok: false, reason: "invalid" }, requests: 0 },
-    ]);
+    expect(results).toEqual(Array.from({ length: 8 }, () => ({ result: { ok: false, reason: "invalid" }, requests: 0 })));
   });
   it.each([false, true])("verifies exact deployless data for a deployed=%s CSW with an explicit gas cap", async deployed => {
     const signature = await smartSignature(deployed); exact(signature);
@@ -94,6 +102,59 @@ describe("smart-account signature verifier", () => {
     expect(requests[1].params[0]).not.toHaveProperty("to");
     expect(SIGVERIFY_GAS_CAP).toBe(3_000_000n);
     expect(requests[1].params[0].gas).toBe("0x2dc6c0");
+  });
+  it("verifies exact deployless data for a near-zero contract address", async () => {
+    const address = "0x00000000000000000000000000000000000000ff";
+    const signature = await smartSignature(); exact(signature, address);
+    expect(await check(signature, { address })).toEqual({ ok: true, kind: "contract" });
+    expect(requests.map(r => r.method)).toEqual(["eth_chainId", "eth_call"]);
+    expect(requests[1].params[0]).not.toHaveProperty("to");
+  });
+  it("caps in-flight RPC work and frees every slot after success and transport failure", async () => {
+    const signature = await smartSignature();
+    const freshMessage = `${message}: fresh check`;
+    const freshData = encodeDeployData({ abi: erc6492SignatureValidatorAbi, bytecode: erc6492SignatureValidatorByteCode,
+      args: [A, hashMessage(freshMessage), signature] });
+    const held: { resolve: (data: Hex) => void; reject: (error: Error) => void }[] = [];
+    const checks: ReturnType<typeof check>[] = [];
+    let refilling = false;
+    recording(req => {
+      if (req.method === "eth_chainId") return "0x14a34";
+      if (req.params[0].data === freshData || (!refilling && held.length >= 16)) return "0x01";
+      return new Promise<Hex>((resolve, reject) => { held.push({ resolve, reject }); });
+    });
+    try {
+      const first = Array.from({ length: 16 }, () => check(signature));
+      checks.push(...first);
+      await vi.waitFor(() => expect(held).toHaveLength(16), { timeout: 1000 });
+      expect(requests.filter(req => req.method === "eth_call")).toHaveLength(16);
+      const before = requests.length;
+      const overflowUrl = `https://overflow.invalid/v2/${randomBytes(16).toString("hex")}`;
+      vi.stubEnv("PCC_SIGVERIFY_RPC_URL", overflowUrl);
+      expect(await check(signature)).toEqual({ ok: false, reason: "unavailable" });
+      expect(requests).toHaveLength(before);
+      expect(isOutboundSecretUrl(overflowUrl)).toBe(false);
+      vi.stubEnv("PCC_SIGVERIFY_RPC_URL", url);
+      expect(SIGVERIFY_MAX_IN_FLIGHT).toBe(16);
+
+      held.forEach((call, index) => {
+        if (index < 8) call.resolve("0x01");
+        else call.reject(new HttpRequestError({ url: "https://sigverify.invalid", details: "offline" }));
+      });
+      expect(await Promise.all(first)).toEqual([
+        ...Array.from({ length: 8 }, () => ({ ok: true, kind: "contract" })),
+        ...Array.from({ length: 8 }, () => ({ ok: false, reason: "unavailable" })),
+      ]);
+
+      // Occupy fifteen fresh slots so even one leaked slot refuses the final check.
+      refilling = true;
+      checks.push(...Array.from({ length: 15 }, () => check(signature)));
+      expect(await check(signature, { message: freshMessage })).toEqual({ ok: true, kind: "contract" });
+      expect(held).toHaveLength(31);
+    } finally {
+      held.forEach(call => call.resolve("0x01"));
+      await Promise.all(checks);
+    }
   });
   it("rejects a one-byte tamper and a different message using the exact personal-sign hash", async () => {
     const signature = await smartSignature(); exact(signature);
