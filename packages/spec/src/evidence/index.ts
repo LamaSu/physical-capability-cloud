@@ -81,6 +81,9 @@ export * from "./measurement-profile.js";
 // Principal ids for FinalMilestonePackageV2: operator = CAIP-10 (D1 signer),
 // device = ed25519:0x<key> (D2 signer, registry-held, never a compromised key).
 export * from "./principal-id.js";
+// compileTierLadder — a CSD's own per-tier event requirements, the ladder the
+// oracle's /settle tier recompute reads (N19/N33).
+export * from "./tier-ladder.js";
 export * from "./verifier-interface.js";
 export * from "./verifiers/index.js";
 export * from "./emitter-manifest.js";
