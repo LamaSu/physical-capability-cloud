@@ -16,11 +16,18 @@ import {
   type WalletRecord,
 } from "../wallet/keystore.js";
 
+const defaultHome = vi.hoisted(() => ({ path: undefined as string | undefined }));
+vi.mock("node:os", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:os")>();
+  return { ...original, homedir: () => defaultHome.path ?? original.homedir() };
+});
+
 let root: string;
 let directory: string;
 let previousDirectory: string | undefined;
 
 beforeEach(() => {
+  defaultHome.path = undefined;
   previousDirectory = process.env.PCC_WALLET_DIR;
   root = mkdtempSync(join(tmpdir(), "pcc-wallet-keystore-"));
   directory = join(root, "wallets");
@@ -29,6 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  defaultHome.path = undefined;
   if (previousDirectory === undefined) delete process.env.PCC_WALLET_DIR;
   else process.env.PCC_WALLET_DIR = previousDirectory;
   rmSync(root, { recursive: true, force: true });
@@ -58,6 +66,53 @@ function expectSafeError(action: () => unknown, wallet: WalletRecord): void {
 }
 
 describe("wallet keystore", () => {
+  function useDefaultDirectory(): string {
+    defaultHome.path = root;
+    delete process.env.PCC_WALLET_DIR;
+    const parent = join(root, ".pcc");
+    mkdirSync(parent, { mode: 0o755 });
+    chmodSync(parent, 0o755);
+    directory = join(parent, "wallets");
+    return parent;
+  }
+
+  it("accepts the default wallets path under an existing 0755 .pcc without loosening key storage", () => {
+    const parent = useDefaultDirectory();
+    create();
+    expect(lstatSync(parent).mode & 0o777).toBe(0o755);
+    expect(lstatSync(directory).mode & 0o777).toBe(0o700);
+    expect(lstatSync(walletPath("participant")).mode & 0o777).toBe(0o600);
+    expect(readWallet("participant").label).toBe("participant");
+  });
+
+  it.each([0o775, 0o777])("refuses a writable default .pcc parent (%i) with its path and chmod guidance", (mode) => {
+    const parent = useDefaultDirectory();
+    chmodSync(parent, mode);
+    let failure: unknown;
+    try { create(); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(WalletError);
+    expect(String(failure)).toContain(parent);
+    expect(String(failure)).toContain("chmod 700");
+    expect(existsSync(directory)).toBe(false);
+  });
+
+  it("refuses a default .pcc parent belonging to another non-root uid", () => {
+    useDefaultDirectory();
+    vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+    expect(() => create()).toThrow(/owner/);
+    expect(existsSync(directory)).toBe(false);
+  });
+
+  it("refuses a symlinked default .pcc parent", () => {
+    defaultHome.path = root;
+    delete process.env.PCC_WALLET_DIR;
+    const target = join(root, "parent-target");
+    mkdirSync(target, { mode: 0o755 });
+    symlinkSync(target, join(root, ".pcc"), "dir");
+    expect(() => create()).toThrow(/symlink/);
+    expect(existsSync(join(target, "wallets"))).toBe(false);
+  });
+
   it.each([0o000, 0o777])("creates a 0600 file in a 0700 directory even under umask %i", (mask) => {
     // Node forbids changing the process-wide umask from a worker thread. Run
     // this same assertion in a single fork, which owns its process and umask.

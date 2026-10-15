@@ -80,6 +80,17 @@ function assertDirectory(stat: Stats): void {
   if ((stat.mode & 0o077) !== 0) throw new WalletError("wallet_directory_permissions_refused");
 }
 
+function assertParentDirectory(stat: Stats, directory: string): void {
+  if (stat.isSymbolicLink()) throw new WalletError("wallet_directory_symlink_refused");
+  if (!stat.isDirectory()) throw new WalletError("wallet_directory_not_directory");
+  if (stat.uid !== process.getuid!() && stat.uid !== 0) {
+    throw new WalletError(`wallet_directory_owner_mismatch: ${JSON.stringify(directory)}`);
+  }
+  if ((stat.mode & 0o022) !== 0) {
+    throw new WalletError(`wallet_directory_permissions_refused: ${JSON.stringify(directory)}; run chmod 700 ${JSON.stringify(directory)}`);
+  }
+}
+
 function assertFile(stat: Stats): void {
   if (stat.isSymbolicLink()) throw new WalletError("wallet_file_symlink_refused");
   if (!stat.isFile()) throw new WalletError("wallet_file_not_regular");
@@ -146,7 +157,7 @@ function checkStorage(create: boolean): Stats {
   if (!process.env.PCC_WALLET_DIR) {
     const parent = join(homedir(), ".pcc");
     if (create) makeDirectories(parent);
-    assertDirectory(lstatSync(parent));
+    assertParentDirectory(lstatSync(parent), parent);
   }
   if (create) makeDirectories(directory);
   else rejectDirectorySymlinks(directory);
