@@ -11,6 +11,8 @@ import { scopeChecker, __resetScopeCacheForTests } from "../middleware/scope-che
 import { tenantContext } from "../middleware/tenant-context.js";
 import { rateLimiter, __resetRateLimitState } from "../middleware/rate-limiter.js";
 import { hashApiKey } from "../auth/api-key-auth.js";
+import { siweAuthPlugin } from "../auth/siwe-auth.js";
+import { provisionRoutes } from "../routes/provision.js";
 import { walletsRoutes } from "../routes/wallets.js";
 import { decideLinkRequest, getLinkRequest, resolveActiveWalletLink } from "../services/wallet-links/repository.js";
 import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
@@ -25,11 +27,12 @@ let app: FastifyInstance;
 let logLines: string[];
 let clockNow: number;
 let bodyStreamIterations: number;
+let provisioningIp = 1;
 
 async function buildApp() {
   const instance = Fastify({ logger: { level: "info", stream: { write: (s: string) => { logLines.push(s); } } }, disableRequestLogging: true });
   instance.addHook("onRequest", telemetryLookalikeHook);
-  await instance.register(cookie);
+  await instance.register(cookie, { secret: "w1-wallet-route-test-cookie-secret" });
   await instance.register(rateLimiter);
   await instance.register(apiGate);
   await instance.register(tenantContext);
@@ -40,6 +43,8 @@ async function buildApp() {
     req.raw[Symbol.asyncIterator] = function () { bodyStreamIterations++; return iterator.call(this); };
   });
   instance.get("/api/dht/w1-rate-control", async () => ({ ok: true }));
+  await instance.register(siweAuthPlugin);
+  await instance.register(provisionRoutes);
   await instance.register(walletsRoutes);
   await instance.ready();
   return instance;
@@ -52,6 +57,9 @@ beforeEach(async () => {
   vi.stubEnv("NODE_ENV", "staging");
   vi.stubEnv("PCC_DEPLOYMENT_ENV", "");
   vi.stubEnv("RAILWAY_ENVIRONMENT_NAME", "");
+  vi.stubEnv("PCC_GATEWAY_PRIVATE_KEY", "");
+  vi.stubEnv("DEPLOYER_PRIVATE_KEY", "");
+  vi.stubEnv("POSTHOG_API_KEY", "");
   clockNow = Date.now();
   vi.spyOn(Date, "now").mockImplementation(() => clockNow);
   logLines = [];
@@ -99,7 +107,35 @@ function sessionHeaders(token: string, accountId = privateKeyToAccount(generateP
   getRepos().sessions.insert({ id: token, token, walletAddress: accountId,
     createdAt: new Date(clockNow).toISOString(), lastActiveAt: new Date(clockNow).toISOString(),
     expiresAt: new Date(clockNow + 86400000).toISOString() });
-  return { cookie: `pcc_session=${token}`, origin: "https://capability.network" };
+  return { cookie: `pcc_session=${app.signCookie(token)}`, origin: "https://capability.network" };
+}
+
+async function signIn(account = privateKeyToAccount(generatePrivateKey())) {
+  const { nonce } = (await app.inject({ url: "/api/auth/nonce", headers: { host: "capability.network" } })).json();
+  const message = `capability.network wants you to sign in with your Ethereum account:\n${account.address}\n\nSign in to PCC.\n\nURI: https://capability.network\nVersion: 1\nChain ID: 84532\nNonce: ${nonce}\nIssued At: ${new Date(clockNow).toISOString()}`;
+  const response = await app.inject({ method: "POST", url: "/api/auth/verify", headers: { host: "capability.network" },
+    payload: { message, signature: await account.signMessage({ message }) } });
+  expect(response.statusCode).toBe(200);
+  const headers = { cookie: `pcc_session=${app.signCookie(response.json().token)}`, origin: "https://capability.network" };
+  return { account, headers, token: response.json().token as string };
+}
+
+async function mintSessionKey(headers: Record<string, string>) {
+  const response = await app.inject({ method: "POST", url: "/api/auth/session-key", headers });
+  expect(response.statusCode).toBe(201);
+  return { headers: { authorization: `Bearer ${response.json().api_key}` }, id: response.json().key_id as string };
+}
+
+async function provisionClaimedKey(address: string) {
+  const response = await app.inject({ method: "POST", url: "/api/auth/provision", remoteAddress: `198.51.100.${provisioningIp++}`,
+    payload: { walletAddress: address, metadata: { source: "siwe-session", sessionId: "forged" } } });
+  expect(response.statusCode).toBe(201);
+  expect(JSON.parse(getRepos().apiKeys.findById(response.json().key_id)!.metadata!)).toMatchObject({ source: "landing-page" });
+  return { headers: { authorization: `Bearer ${response.json().api_key}` }, id: response.json().key_id as string };
+}
+
+async function revoke(linkId: string, headers: Record<string, string>, payload: Record<string, unknown> = {}) {
+  return app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers, payload });
 }
 function updateRequest(id: string, set: ReturnType<typeof sql>) {
   getStore().db.run(sql`UPDATE wallet_link_requests SET ${set} WHERE id = ${id}`);
@@ -129,7 +165,7 @@ describe("W1 wallet ceremony", () => {
     expect(linkId).toMatch(/^wl_[A-Z2-7]{26}$/);
     expect(accountId).toBe("account-a");
     clockNow += 5000;
-    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "approved", linkId, accountId });
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "approved", linkId });
     const list = await app.inject({ url: "/api/wallets", headers: owner });
     expect(list.json().links).toHaveLength(1);
     expect(list.json().links[0]).toMatchObject({ linkId, status: "active", address: account.address, role: "agent" });
@@ -205,6 +241,72 @@ describe("W1 wallet ceremony", () => {
     }
   });
 
+  it("C2 keeps the creating key write-once through proof, approval and revocation", async () => {
+    const { account, request } = await create({}, "203.0.113.27", owner);
+    const creator = () => getLinkRequest(request.requestId)?.created_by_key_id;
+    expect(creator()).toBe("owner");
+    const proof = await app.inject({ method: "POST", url: `${path}/${request.requestId}/proof`, headers: other,
+      payload: { signature: await account.signMessage({ message: request.message }) } });
+    expect(proof.statusCode).toBe(200);
+    expect(getLinkRequest(request.requestId)?.status).toBe("awaiting_approval");
+    expect(creator()).toBe("owner");
+
+    const approval = await approve(request, sameAccount);
+    expect(approval.statusCode).toBe(200);
+    const { linkId } = approval.json();
+    const receipt = () => getStore().db.get<{ created_by_key_id: string; approved_by_key_id: string }>(
+      sql`SELECT created_by_key_id, approved_by_key_id FROM wallet_links WHERE id = ${linkId}`);
+    expect(getLinkRequest(request.requestId)).toMatchObject({ status: "approved", created_by_key_id: "owner", approved_by_key_id: "same-account-key" });
+    expect(receipt()).toEqual({ created_by_key_id: creator(), approved_by_key_id: "same-account-key" });
+
+    expect((await revoke(linkId, sameAccount)).statusCode).toBe(200);
+    expect(creator()).toBe("owner");
+    expect(receipt()?.created_by_key_id).toBe(creator());
+    expect(getStore().db.get<{ revoked_at: string | null }>(sql`SELECT revoked_at FROM wallet_links WHERE id = ${linkId}`)?.revoked_at).not.toBeNull();
+  });
+
+  it("C2 keeps the creating key write-once through denial", async () => {
+    const { request } = await proved({}, owner);
+    expect(getLinkRequest(request.requestId)?.created_by_key_id).toBe("owner");
+    const denied = await approve(request, sameAccount, { decision: "deny" });
+    expect(denied.statusCode).toBe(200);
+    expect(denied.json()).toEqual({ status: "denied" });
+    expect(getLinkRequest(request.requestId)).toMatchObject({ status: "denied", created_by_key_id: "owner", approved_by_key_id: "same-account-key", link_id: null });
+    expect(getStore().db.get<{ n: number }>(sql`SELECT count(*) AS n FROM wallet_links WHERE request_id = ${request.requestId}`)?.n).toBe(0);
+  });
+
+  it.each(["pending_proof", "awaiting_approval"] as const)("C2 keeps the creating key write-once when %s expires", async status => {
+    const { request } = status === "pending_proof" ? await create({}, "203.0.113.27", owner) : await proved({}, owner);
+    expect(getLinkRequest(request.requestId)).toMatchObject({ status, created_by_key_id: "owner" });
+    clockNow = Date.parse(request.expiresAt) + 1;
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "expired" });
+    expect(getLinkRequest(request.requestId)?.created_by_key_id).toBe("owner");
+    // Creation persists expiration of old pending rows as part of slot cleanup.
+    await create({}, "203.0.113.28", other);
+    expect(getLinkRequest(request.requestId)).toMatchObject({ status: "expired", created_by_key_id: "owner", link_id: null });
+    expect(getStore().db.get<{ n: number }>(sql`SELECT count(*) AS n FROM wallet_links WHERE request_id = ${request.requestId}`)?.n).toBe(0);
+  });
+
+  it.each(["id", "requestId"])("C2 rejects a client-chosen %s and generates fresh request ids", async field => {
+    const chosenId = `lr_${"A".repeat(26)}`;
+    const account = privateKeyToAccount(generatePrivateKey());
+    const rejected = await app.inject({ method: "POST", url: path, headers: owner,
+      payload: { keyType: "secp256k1", address: account.address, role: "agent", label: "cli", chainId: 84532, [field]: chosenId } });
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json()).toEqual({ error: "invalid_request" });
+    expect(getStore().db.get<{ n: number }>(sql`SELECT count(*) AS n FROM wallet_link_requests`)?.n).toBe(0);
+    const first = await create({}, "203.0.113.27", owner);
+    const second = await create({}, "203.0.113.27", owner);
+    const ids = [first.request.requestId, second.request.requestId];
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) {
+      expect(id).toMatch(/^lr_[A-Z2-7]{26}$/);
+      expect(id).not.toBe(chosenId);
+      expect(getLinkRequest(id)?.id).toBe(id);
+    }
+    expect(getLinkRequest(chosenId)).toBeUndefined();
+  });
+
   it("anonymous create and cookie approval store null key ids on the request and link", async () => {
     const { request } = await proved();
     expect(getStore().db.get<any>(sql`SELECT * FROM wallet_link_requests WHERE id = ${request.requestId}`).created_by_key_id).toBeNull();
@@ -226,6 +328,31 @@ describe("W1 wallet ceremony", () => {
       expect(response.statusCode).toBe(401); expect(response.json().error).toBe("api_key_required");
       expect(getStore().db.get<any>(sql`SELECT count(*) AS n FROM wallet_link_requests`).n).toBe(0);
     }
+  });
+
+  it.each([
+    ["valid", "pcc_test_wallet_owner"], ["invalid", "pcc_test_invalid_wallet_key"], ["empty", ""],
+  ])("create refuses a %s X-PCC-API-Key with or without Authorization before persisting", async (_kind, key) => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    for (const authorization of [undefined, owner.authorization]) {
+      const response = await app.inject({ method: "POST", url: path,
+        headers: { "x-pcc-api-key": key, ...(authorization ? { authorization } : {}) },
+        payload: { keyType: "secp256k1", address: account.address, role: "agent", label: "cli", chainId: 84532 } });
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ error: "api_key_required" });
+      expect(response.json().message).toContain("Authorization: Bearer <key>");
+      expect(response.json().message).toMatch(/X-PCC-API-Key.*not read/i);
+      expect(getStore().db.get<any>(sql`SELECT count(*) AS n FROM wallet_link_requests`).n).toBe(0);
+    }
+  });
+
+  it("create remains anonymous without credentials and records a valid Authorization bearer key", async () => {
+    const anonymous = await create();
+    const authenticated = await create({}, "203.0.113.27", owner);
+    expect(getStore().db.get<any>(sql`SELECT created_by_key_id FROM wallet_link_requests WHERE id = ${anonymous.request.requestId}`))
+      .toEqual({ created_by_key_id: null });
+    expect(getStore().db.get<any>(sql`SELECT created_by_key_id FROM wallet_link_requests WHERE id = ${authenticated.request.requestId}`))
+      .toEqual({ created_by_key_id: "owner" });
   });
 
   it("scopeChecker enforces POST /api/wallets/** endpoint scopes for an owner key without wildcard", async () => {
@@ -313,6 +440,15 @@ describe("W1 wallet ceremony", () => {
     expect(response.statusCode).toBe(409); expect(response.json()).toEqual({ error: "consent_changed" });
     updateRequest(request.requestId, sql`consent_sha256 = ${"0".repeat(64)}`);
     expect((await approve(request)).json()).toEqual({ error: "consent_changed" });
+  });
+
+  it("approval refuses a stored consent version changed since proof", async () => {
+    const { request } = await proved();
+    updateRequest(request.requestId, sql`consent_version = 'wallet-link-obsolete'`);
+    const response = await approve(request);
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: "consent_changed" });
+    expect(getStore().db.get<any>(sql`SELECT count(*) AS n FROM wallet_links`).n).toBe(0);
   });
 
   it("wrong code is 403 and fifth wrong code blocks later attempts with 429", async () => {
@@ -452,6 +588,46 @@ describe("W1 wallet ceremony", () => {
     expect((await revoke(owner, { reason: "BAD" })).json()).toEqual({ error: "invalid_request" });
   });
 
+  it("cookie-session revoke rejects a foreign Origin without changing any links", async () => {
+    const headers = sessionHeaders("cookie-revoke-foreign-origin");
+    const linkIds: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const { request } = await proved();
+      const approval = await approve(request, headers);
+      expect(approval.statusCode).toBe(200);
+      linkIds.push(approval.json().linkId);
+    }
+    const before = getStore().db.all(sql`SELECT * FROM wallet_links ORDER BY id`);
+    for (const linkId of linkIds) {
+      const response = await revoke(linkId, { ...headers, origin: "https://evil.example" });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({ error: "origin_mismatch" });
+    }
+    expect(getStore().db.all(sql`SELECT * FROM wallet_links ORDER BY id`)).toEqual(before);
+    expect((await app.inject({ url: "/api/wallets", headers })).json().links.map((link: { status: string }) => link.status)).toEqual(["active", "active"]);
+  });
+
+  it("cookie-session revoke accepts the configured public Origin", async () => {
+    const headers = sessionHeaders("cookie-revoke-public-origin");
+    const { account, request } = await proved();
+    const approval = await approve(request, headers);
+    expect(approval.statusCode).toBe(200);
+    const response = await revoke(approval.json().linkId, headers);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("revoked");
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toBeNull();
+  });
+
+  it("API-key-authenticated revoke remains valid with a foreign Origin", async () => {
+    const { account, request } = await proved();
+    const approval = await approve(request);
+    expect(approval.statusCode).toBe(200);
+    const response = await revoke(approval.json().linkId, { ...owner, origin: "https://evil.example" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("revoked");
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toBeNull();
+  });
+
   it("the approving API key alone lists and revokes a link when another key claims the same account", async () => {
     const { request } = await proved({}, sameAccount);
     const { linkId } = (await approve(request, owner)).json();
@@ -478,16 +654,145 @@ describe("W1 wallet ceremony", () => {
     expect((await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: anotherSession, payload: {} })).statusCode).toBe(200);
   });
 
-  it("API-key-approved links are hidden from and not revocable by a cookie session of the same account", async () => {
+  it("API-key-approved links are manageable by a SIWE cookie session of the same account", async () => {
     const accountId = privateKeyToAccount(generatePrivateKey()).address;
     const cookieHeaders = sessionHeaders("cookie-with-key-approved-link", accountId);
     getStore().db.run(sql`UPDATE api_keys SET operator_id = ${accountId} WHERE id = 'owner'`);
     const { request } = await proved();
     const { linkId } = (await approve(request)).json();
-    expect((await app.inject({ url: "/api/wallets", headers: cookieHeaders })).json()).toEqual({ links: [] });
+    expect((await app.inject({ url: "/api/wallets", headers: cookieHeaders })).json().links).toHaveLength(1);
     const response = await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: cookieHeaders, payload: {} });
-    expect(response.statusCode).toBe(404); expect(response.json()).toEqual({ error: "not_found" });
+    expect(response.statusCode).toBe(200); expect(response.json().status).toBe("revoked");
     expect((await app.inject({ method: "POST", url: `/api/wallets/${linkId}/revoke`, headers: owner, payload: {} })).statusCode).toBe(200);
+  });
+
+  it.each(["session-key", "cookie"] as const)("a rotated session key leaves DEVICE links manageable through %s", async management => {
+    const session = await signIn();
+    const sk1 = await mintSessionKey(session.headers);
+    const { account, request } = await proved({ role: "device" });
+    const approval = await approve(request, sk1.headers);
+    expect(approval.statusCode).toBe(200);
+    const { linkId } = approval.json();
+    const sk2 = await mintSessionKey(session.headers);
+    expect(sk2.id).not.toBe(sk1.id);
+    expect(getRepos().apiKeys.findById(sk1.id)?.revokedAt).not.toBeNull();
+    expect((await app.inject({ url: "/api/wallets", headers: sk1.headers })).statusCode).toBe(401);
+    const headers = management === "session-key" ? sk2.headers : session.headers;
+    const listed = await app.inject({ url: "/api/wallets", headers });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().links).toHaveLength(1);
+    expect(listed.json().links[0]).toMatchObject({ linkId, address: account.address, expiresAt: null });
+    const response = await revoke(linkId, headers);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("revoked");
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toBeNull();
+    const row = getStore().db.get<any>(sql`SELECT revoked_by FROM wallet_links WHERE id = ${linkId}`);
+    expect(row.revoked_by).toBe(session.account.address);
+    clockNow += 1000;
+    expect((await revoke(linkId, headers)).json()).toEqual(response.json());
+  });
+
+  it("a publicly provisioned key claiming the owner address cannot list or revoke the owner's link", async () => {
+    const session = await signIn();
+    const sk = await mintSessionKey(session.headers);
+    const { request } = await proved({ role: "device" });
+    const approval = await approve(request, sk.headers);
+    expect(approval.statusCode).toBe(200);
+    const claimed = await provisionClaimedKey(session.account.address);
+    expect((await app.inject({ url: "/api/wallets", headers: claimed.headers })).json()).toEqual({ links: [] });
+    const response = await revoke(approval.json().linkId, claimed.headers);
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "not_found" });
+  });
+
+  it("owner revocation after rotation allows a new DEVICE link for the same EOA", async () => {
+    const session = await signIn();
+    const sk1 = await mintSessionKey(session.headers);
+    const { account, request } = await proved({ role: "device" });
+    const first = await approve(request, sk1.headers);
+    expect(first.statusCode).toBe(200);
+    const sk2 = await mintSessionKey(session.headers);
+    expect((await revoke(first.json().linkId, sk2.headers)).statusCode).toBe(200);
+    const second = await create({ role: "device", address: account.address });
+    const proof = await app.inject({ method: "POST", url: `${path}/${second.request.requestId}/proof`,
+      payload: { signature: await account.signMessage({ message: second.request.message }) } });
+    expect(proof.statusCode).toBe(200);
+    const approval = await approve(second.request, sk2.headers);
+    expect(approval.statusCode).toBe(200);
+    expect(approval.json().linkId).not.toBe(first.json().linkId);
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 }))
+      .toMatchObject({ linkId: approval.json().linkId, accountProof: "siwe" });
+  });
+
+  it("the checksummed SIWE owner can revoke a stranger's claimed approval filed under the lowercase address", async () => {
+    const victim = await signIn();
+    const stranger = await provisionClaimedKey(victim.account.address.toLowerCase());
+    const { account: strangerEoa, request } = await proved({ role: "device" });
+    const approval = await approve(request, stranger.headers);
+    expect(approval.statusCode).toBe(200);
+    const listed = await app.inject({ url: "/api/wallets", headers: victim.headers });
+    expect(listed.json().links).toHaveLength(1);
+    expect(listed.json().links[0].linkId).toBe(approval.json().linkId);
+    expect((await revoke(approval.json().linkId, victim.headers)).statusCode).toBe(200);
+    expect(await resolveActiveWalletLink({ address: strangerEoa.address, chainId: 84532 })).toBeNull();
+  });
+
+  it("a SIWE owner can list and revoke after the approving plain API key is revoked", async () => {
+    const session = await signIn();
+    const plain = await provisionClaimedKey(session.account.address);
+    const { account, request } = await proved({ role: "device" });
+    expect(account.address).not.toBe(session.account.address);
+    const approval = await approve(request, plain.headers);
+    expect(approval.statusCode).toBe(200);
+    const keyRevocation = await app.inject({ method: "DELETE", url: `/api/auth/keys/${plain.id}`, headers: plain.headers });
+    expect(keyRevocation.statusCode).toBe(200);
+    expect((await app.inject({ url: "/api/wallets", headers: plain.headers })).statusCode).toBe(401);
+    const listed = await app.inject({ url: "/api/wallets", headers: session.headers });
+    expect(listed.json().links).toHaveLength(1);
+    expect(listed.json().links[0].linkId).toBe(approval.json().linkId);
+    expect((await revoke(approval.json().linkId, session.headers)).statusCode).toBe(200);
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toBeNull();
+  });
+
+  it.each(["cookie", "session-key", "claimed-key"] as const)("resolver records %s account proof without adding it to HTTP responses", async principal => {
+    const session = await signIn();
+    const caller = principal === "cookie" ? session : principal === "session-key"
+      ? await mintSessionKey(session.headers) : await provisionClaimedKey(session.account.address);
+    const { account, request } = await proved();
+    const approval = await approve(request, caller.headers);
+    expect(approval.statusCode).toBe(200);
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 }))
+      .toMatchObject({ accountProof: principal === "claimed-key" ? "claimed" : "siwe" });
+    expect(approval.json()).not.toHaveProperty("accountProof");
+    const listed = await app.inject({ url: "/api/wallets", headers: caller.headers });
+    expect(listed.json().links[0]).not.toHaveProperty("accountProof");
+  });
+
+  it.each(["malformed", "missing-session", "wrong-address"] as const)("a key with %s SIWE metadata remains a claimed principal", async mismatch => {
+    const session = await signIn();
+    const approving = await mintSessionKey(session.headers);
+    const { request } = await proved({ role: "device" });
+    const approval = await approve(request, approving.headers);
+    expect(approval.statusCode).toBe(200);
+    const claimant = await provisionClaimedKey(session.account.address);
+    const sessionRow = getRepos().sessions.findByToken(session.token)!;
+    const metadata = mismatch === "malformed" ? "{malformed" : JSON.stringify({ source: "siwe-session",
+      sessionId: mismatch === "missing-session" ? "not-a-session" : sessionRow.id });
+    getStore().db.run(sql`UPDATE api_keys SET metadata = ${metadata} WHERE id = ${claimant.id}`);
+    if (mismatch === "wrong-address") {
+      getStore().db.run(sql`UPDATE sessions SET wallet_address = ${privateKeyToAccount(generatePrivateKey()).address} WHERE id = ${sessionRow.id}`);
+    }
+    expect((await app.inject({ url: "/api/wallets", headers: claimant.headers })).json()).toEqual({ links: [] });
+    expect((await revoke(approval.json().linkId, claimant.headers)).statusCode).toBe(404);
+  });
+
+  it("revoke refuses an unknown body member before changing the receipt", async () => {
+    const { request } = await proved();
+    const { linkId } = (await approve(request)).json();
+    const response = await revoke(linkId, owner, { unknown: true });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "invalid_request" });
+    expect(getStore().db.get<any>(sql`SELECT revoked_at FROM wallet_links WHERE id = ${linkId}`).revoked_at).toBeNull();
   });
 
   it("revoke without a body is treated as an empty object and remains idempotent", async () => {
@@ -532,6 +837,44 @@ describe("W1 wallet ceremony", () => {
     expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "slow_down" });
     clockNow += 5000;
     expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "authorization_pending" });
+  });
+
+  it("approved public poll has exactly status and linkId", async () => {
+    const { request } = await proved();
+    const approval = await approve(request);
+    expect(approval.statusCode).toBe(200);
+    expect(approval.json()).toMatchObject({ accountId: "account-a" });
+    const response = await app.inject(`${path}/${request.requestId}`);
+    expect(response.json()).toEqual({ status: "approved", linkId: approval.json().linkId });
+    expect(Object.keys(response.json()).sort()).toEqual(["linkId", "status"]);
+  });
+
+  it.each(["approved", "denied", "failed", "expired"] as const)("public poll returns final %s one second apart despite the pending poll interval", async status => {
+    const { account, request } = await create();
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "authorization_pending" });
+    const signer = status === "failed" ? privateKeyToAccount(generatePrivateKey()) : account;
+    const proof = await app.inject({ method: "POST", url: `${path}/${request.requestId}/proof`,
+      payload: { signature: await signer.signMessage({ message: request.message }) } });
+    expect(proof.statusCode).toBe(status === "failed" ? 401 : 200);
+    let linkId: string | undefined;
+    if (status === "approved" || status === "denied") {
+      const decision = await approve(request, owner, { decision: status === "approved" ? "approve" : "deny" });
+      expect(decision.statusCode).toBe(200);
+      linkId = decision.json().linkId;
+    }
+    if (status === "expired") updateRequest(request.requestId, sql`expires_at = ${new Date(clockNow - 1).toISOString()}`);
+    const expected = status === "approved" ? { status, linkId } : { status };
+    clockNow += 1000;
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual(expected);
+    clockNow += 1000;
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual(expected);
+  });
+
+  it("a pending public poll one second after the first still returns slow_down", async () => {
+    const { request } = await proved();
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "authorization_pending" });
+    clockNow += 1000;
+    expect((await app.inject(`${path}/${request.requestId}`)).json()).toEqual({ status: "slow_down" });
   });
 
   it("POST lookup is hidden until proof and unknown ids have 404", async () => {
@@ -593,7 +936,7 @@ describe("W1 wallet ceremony", () => {
       createdAt: new Date(clockNow).toISOString(), lastActiveAt: new Date(clockNow).toISOString(),
       expiresAt: new Date(clockNow + 86400000).toISOString() });
     const { request } = await proved();
-    const sessionCookie = { cookie: "pcc_session=session-owner" };
+    const sessionCookie = { cookie: `pcc_session=${app.signCookie("session-owner")}` };
     expect((await approve(request, sessionCookie)).statusCode).toBe(403);
     expect((await approve(request, { ...sessionCookie, origin: "https://evil.example" })).statusCode).toBe(403);
     expect((await approve(request, { ...sessionCookie, origin: "https://capability.network" })).statusCode).toBe(200);

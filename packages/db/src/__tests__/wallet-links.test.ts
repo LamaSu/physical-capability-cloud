@@ -31,10 +31,10 @@ describe("wallet link migration", () => {
   function insertLink(id: string, accountId: string, address = ADDRESS, chainId = 84532) {
     sqlite.prepare(`
       INSERT INTO wallet_links (
-        id, account_id, role, subject_type, key_type, address_or_pubkey,
+        id, account_id, account_proof, role, subject_type, key_type, address_or_pubkey,
         chain_id, label, consent_version, consent_sha256, proof_message,
         proof_signature, request_id, approved_by, created_at, expires_at
-      ) VALUES (?, ?, 'agent', 'agent', 'secp256k1', ?, ?, 'db-test',
+      ) VALUES (?, ?, 'claimed', 'agent', 'agent', 'secp256k1', ?, ?, 'db-test',
         'wallet-link-v1', ?, 'message', 'signature', ?, ?, ?, ?)
     `).run(id, accountId, address, chainId, "a".repeat(64), `request-${id}`, accountId, NOW, "2026-11-12T00:00:00.000Z");
   }
@@ -110,6 +110,28 @@ describe("wallet link migration", () => {
     expect(sqlite.prepare(`
       SELECT created_by_key_id, approved_by_key_id FROM wallet_links WHERE id = ?
     `).get("wl-cookie")).toEqual({ created_by_key_id: null, approved_by_key_id: null });
+  });
+
+  it("requires an account proof on every link receipt", () => {
+    const columns = sqlite.prepare("PRAGMA table_info(wallet_links)").all() as Array<{ name: string; type: string; notnull: number; dflt_value: unknown }>;
+    expect(columns.find(column => column.name === "account_proof"))
+      .toMatchObject({ type: "TEXT", notnull: 1, dflt_value: null });
+  });
+
+  it("refuses account proofs other than siwe or claimed", () => {
+    insertLink("wl-proof", "account-owner");
+    for (const proof of ["trusted", "SIWE", "", "claimed-by-owner"]) {
+      expect(() => sqlite.prepare("UPDATE wallet_links SET account_proof = ? WHERE id = ?").run(proof, "wl-proof"))
+        .toThrow(/CHECK constraint failed/);
+    }
+  });
+
+  it("uses the owner expression index for case-insensitive account lookup", () => {
+    insertLink("wl-owner", "Account-Owner");
+    const query = "SELECT id FROM wallet_links WHERE lower(account_id) = lower(?)";
+    const plan = sqlite.prepare(`EXPLAIN QUERY PLAN ${query}`).all("account-owner") as Array<{ detail: string }>;
+    expect(plan.some(({ detail }) => detail.includes("USING INDEX wallet_links_account_lower_idx"))).toBe(true);
+    expect(sqlite.prepare(query).all("account-owner")).toEqual([{ id: "wl-owner" }]);
   });
 
   it("matches migration 0004 and runtime wallet DDL statement for statement", () => {

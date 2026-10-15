@@ -168,6 +168,10 @@ async function apiGateImpl(app: FastifyInstance) {
     if (!req.url.startsWith("/api/")) return;
 
     const optionalCreate = req.method === "POST" && req.url.split("?")[0] === "/api/wallets/link-requests";
+    if (optionalCreate && req.headers["x-pcc-api-key"] !== undefined) {
+      return reply.status(401).send({ error: "api_key_required",
+        message: "Send the key as Authorization: Bearer <key>; X-PCC-API-Key is not read." });
+    }
     // A presented credential on create must be validated even though create is public.
     if (isPublicRoute(req.url, req.method) && !(optionalCreate && req.headers.authorization !== undefined)) return;
 

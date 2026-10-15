@@ -366,42 +366,7 @@ export async function readAgentURI(agentId: bigint): Promise<string | null> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Option A ownership stopgap — per-operator operational wallet + setAgentWallet
-// See coord bulletin 234 (A/B/C debate) and 235 (strategic alignment).
-//
-// Flow:
-//   1. Gateway generates a fresh EOA per operator at provision time.
-//   2. Gateway custodies the private key at bootstrap (stored on api_keys row).
-//   3. After `register()` mints the identity to the gateway signer, gateway
-//      calls `setAgentWallet(agentId, operatorEOA, deadline, signature)` where
-//      the signature is an EIP-712 typed-data signature from the operator EOA
-//      (gateway holds the key so gateway signs on the operator's behalf).
-//   4. On-chain: agentId → agentWallet points at the operator's per-operator
-//      EOA (independently claimable/exportable). NFT owner stays the gateway
-//      (v2 via ERC-4337 passkey smart wallet will fix that — bulletin 235).
-//
-// Failure is non-fatal: if the setAgentWallet call reverts (e.g. the EIP-712
-// domain/typehash doesn't exactly match the deployed contract), we log it and
-// keep the operator's off-chain wallet — provisioning still succeeds.
-// ---------------------------------------------------------------------------
-
-export interface OperatorWallet {
-  address: `0x${string}`;
-  privateKey: `0x${string}`;
-}
-
-/**
- * Generate a fresh operator operational wallet (random EOA). The gateway
- * custodies the key at bootstrap; the operator can later claim it via a
- * future export endpoint.
- */
-export async function generateOperatorWallet(): Promise<OperatorWallet> {
-  const { generatePrivateKey, privateKeyToAccount } = await import("viem/accounts");
-  const privateKey = generatePrivateKey() as `0x${string}`;
-  const account = privateKeyToAccount(privateKey);
-  return { address: account.address, privateKey };
-}
+// The gateway never generates or holds an operator wallet key.
 
 export interface SetAgentWalletInput {
   agentId: bigint;

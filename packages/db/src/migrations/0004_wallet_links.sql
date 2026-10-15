@@ -41,6 +41,7 @@ CREATE INDEX IF NOT EXISTS wallet_link_requests_expires_idx
 CREATE TABLE IF NOT EXISTS wallet_links (
   id TEXT PRIMARY KEY,
   account_id TEXT NOT NULL,
+  account_proof TEXT NOT NULL CHECK (account_proof IN ('siwe', 'claimed')),
   role TEXT NOT NULL CHECK (role IN ('agent', 'device')),
   subject_type TEXT NOT NULL,
   subject_id TEXT,
@@ -67,3 +68,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS wallet_links_active_key_uq
   ON wallet_links(key_type, lower(address_or_pubkey), chain_id)
   WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS wallet_links_account_idx ON wallet_links(account_id);
+CREATE INDEX IF NOT EXISTS wallet_links_account_lower_idx ON wallet_links (lower(account_id));
