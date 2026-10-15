@@ -758,6 +758,15 @@ describe("v2.1 derived buyer commitments", () => {
     await expect(prepare({ ...own, termsHash: fx.message.termsHash })).rejects.toMatchObject({ code: "INTENT_MISMATCH" });
     expect(chain.state.log).toEqual([]);
   });
+  it.each(["literal", "unchecked"] as const)(
+    "INTENT_MISMATCH before any RPC: derived terms stay binding with %s accepted digest", async (digestMode) => {
+      const { fx, chain, own } = await derivedSetup({ policyTermsHash: fileDigest });
+      await expect(prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+        quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx), allowUnchecked: digestMode === "unchecked",
+        expect: { ...own, acceptedPolicyDigest: digestMode === "unchecked" ? "unchecked" : fx.message.acceptedPolicyDigest } }))
+        .rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("termsHash") });
+      expect(chain.state.log).toEqual([]);
+    });
   const badTerms: Array<[string, unknown]> = [
     ["token differs from pins.usdc", { derive: "v2.1", token: OTHER, assuranceTier: 2 }],
     ["tier 4", { derive: "v2.1", token: OTHER, assuranceTier: 4 }],
