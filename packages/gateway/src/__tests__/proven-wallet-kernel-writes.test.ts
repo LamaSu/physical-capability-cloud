@@ -155,7 +155,7 @@ describe("self-linked wallets cannot transfer existing kernel ownership", () => 
     await decideRefused(KERNEL_A, headers);
   });
 
-  it("(b) a key claiming A and self-linked to B re-registers without changing A, and neither header can DECIDE", async () => {
+  it("characterization (gateway #8098): the current claimed-identity owner check lets a key claiming A and self-linked to B update A's profile; neither header can DECIDE", async () => {
     const key = await provision(walletA.address);
     await selfLink(key);
     const registered = await app.inject({ method: "POST", url: "/api/kernels", headers: selected(key),

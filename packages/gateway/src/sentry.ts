@@ -23,7 +23,7 @@ function withoutWalletHeader<T>(value: T, seen = new WeakMap<object, object>()):
   seen.set(value, output);
   let changed = false;
   for (const [key, item] of Object.entries(value)) {
-    const lowerKey = key.toLowerCase();
+    const lowerKey = key.toLowerCase().replace(/_/g, "-");
     if (lowerKey === "x-pcc-wallet" || lowerKey === "http.request.header.x-pcc-wallet") {
       changed = true;
       continue;

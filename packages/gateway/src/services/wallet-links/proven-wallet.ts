@@ -4,6 +4,7 @@ import { findSelfLinkedWallet } from "./repository.js";
 declare module "fastify" {
   interface FastifyRequest {
     provenWallet?: string | null;
+    provenWalletVia?: string | null;
   }
 }
 
@@ -18,8 +19,10 @@ async function bindProof(req: FastifyRequest, reply: FastifyReply): Promise<void
   }
   if (occurrences !== 1) return;
   try {
-    if (findSelfLinkedWallet({ address, apiKeyId: req.apiKeyId, operatorId: req.operatorId, now: Date.now() })) {
+    const role = findSelfLinkedWallet({ address, apiKeyId: req.apiKeyId, operatorId: req.operatorId, now: Date.now() });
+    if (role !== null) {
       req.provenWallet = address.toLowerCase();
+      req.provenWalletVia = `self-link:${role}`;
     }
   } catch {
     await reply.code(503).send({ error: "wallet_link_unavailable" });

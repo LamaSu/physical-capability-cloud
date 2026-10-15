@@ -332,6 +332,37 @@ describe("API key self-linked proven wallet", () => {
     expect(response.statusCode).toBe(503);
     expect(response.json()).toEqual({ error: "wallet_link_unavailable" });
   });
+  it("13 projects a non-wallet 503 on a cross-origin IR GET to an empty object", async () => {
+    const unavailableApp = Fastify();
+    try {
+      await unavailableApp.register(cors, { delegator: corsDelegator });
+      unavailableApp.addHook("onSend", irCorsReadProjection);
+      unavailableApp.get("/api/jobs", async (_req, reply) => reply.code(503).send({ error: "x" }));
+      const response = await unavailableApp.inject({ url: "/api/jobs", headers: { origin: "https://untrusted.example" } });
+      expect(response.statusCode).toBe(503);
+      expect(response.headers["access-control-allow-origin"]).toBe("*");
+      expect(response.json()).toEqual({});
+    } finally {
+      await unavailableApp.close();
+    }
+  });
+  it("13 adds report_hint to a non-wallet single-key 503", async () => {
+    const unavailableApp = Fastify();
+    try {
+      unavailableApp.addHook("onSend", async (req, reply, payload) => typeof payload === "string"
+        ? decorateWithReportHint(payload, { statusCode: reply.statusCode,
+          contentType: String(reply.getHeader("content-type") ?? ""), url: req.url, method: req.method })
+        : payload);
+      unavailableApp.get("/api/jobs", async (_req, reply) => reply.code(503).send({ error: "x" }));
+      const response = await unavailableApp.inject({ url: "/api/jobs" });
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ error: "x", report_hint: {
+        tool: "pcc_report", send: { endpoint: "/api/jobs", method: "GET", status: 503, errorCode: "x" },
+      } });
+    } finally {
+      await unavailableApp.close();
+    }
+  });
   it("14 refuses a valid proof for a different kernel operatorAddress", async () => {
     await link();
     getRepos().kernels.update(KERNEL, { operatorAddress: privateKeyToAccount(generatePrivateKey()).address });
