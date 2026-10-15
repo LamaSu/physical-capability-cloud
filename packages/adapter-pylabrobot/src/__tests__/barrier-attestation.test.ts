@@ -193,7 +193,8 @@ describe("the fix's own rules (astra pack 194)", () => {
     const result = await adapter.execute({ type: "start", payload: { protocolSource: "inline-ops" } });
     expect(result.success).toBe(false);
     expect(result.message).toMatch(/start needs the job's id/);
-    expect(fake.methods().filter((m) => m !== "backend.init")).toEqual([]);
+    // Not even backend.init, which can run a backend's setup() on the device (astra pack 197).
+    expect(fake.methods(), "calls the refused start made").toEqual([]);
   });
 
   it("a sidecar that names no generation cannot attest a window: the start fails, and opens none", async () => {

@@ -466,7 +466,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
       }
       const machine = svcInternals.machines.get("dev-ipp-loading");
       expect(Object.getPrototypeOf(machine)).toBe(IppAdapter.prototype);
-      expect("simulated" in (machine?.source ?? {})).toBe(false); // loading: no marker yet
+      expect(machine?.source.simulated).not.toBe(false); // loading: not marked real
       const body = (await post({ kernelId: KERNEL_ID, deviceId: "dev-ipp-loading", assuranceTier: 0 })).json();
       expect(body).toMatchObject({ ran: true, status: "completed", simulated: true, passed: false });
     }, 20_000);
@@ -524,6 +524,7 @@ describe("POST /api/setup/test-job — real adapters, simulation honesty (N59 F2
     it("[F] an exact IppAdapter with no marker is simulated: it can serve mock answers while its import is pending (round 5)", () => {
       const adapter = new IppAdapter("dev-unit-ipp", { uri: "ipp://127.0.0.1:9/ipp/print", kernelId: KERNEL_ID, mockMode: false });
       try {
+        delete (adapter.source as { simulated?: boolean }).simulated;
         expect("simulated" in adapter.source).toBe(false); // nothing has settled yet
         expect(adapterIsSimulated(adapter)).toBe(true);
       } finally {

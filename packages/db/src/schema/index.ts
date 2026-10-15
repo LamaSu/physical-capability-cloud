@@ -3,6 +3,7 @@ export * from "./capabilities.js";
 export * from "./jobs.js";
 export * from "./evidence.js";
 export * from "./settlement.js";
+export * from "./gateway-receipts.js";
 export * from "./orchestrator.js";
 export * from "./protocols.js";
 export * from "./sensors.js";

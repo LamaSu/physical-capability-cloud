@@ -23,7 +23,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Result } from "@pcc/spec";
+import { executionPhaseOf, type Result } from "@pcc/spec";
 import { getRepos, getStore } from "../db.js";
 import { getJobFacade, getKernelFacade } from "../facades/index.js";
 import { JOB_STATUSES, normalizeJobStatus } from "../config/job-status.js";
@@ -32,13 +32,14 @@ import { commitRelayEvidence } from "../services/relay-evidence-commitment.js";
 import { v4 as uuidv4 } from "uuid";
 import { writeJobStatusGuarded, SETTLEMENT_OWNED_MESSAGE } from "../services/settlement-owned-status.js";
 import { authorityOf, isAnonymous, refuseKernelAction, AUTHENTICATION_REQUIRED, type KernelAction } from "../auth/kernel-authority.js";
+import { emergencyStopState } from "./device-relay.js";
 
 function isNonEmptyId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
 /** Shared authority check for poll/heartbeat targets and the kernel read from a job row. */
-function refuseKernelRequest(req: FastifyRequest, kernelId: unknown, action: KernelAction = "operate"): { status: number; body: Record<string, string> } | null {
+export function refuseKernelRequest(req: FastifyRequest, kernelId: unknown, action: KernelAction = "operate"): { status: number; body: Record<string, string> } | null {
   const authority = authorityOf(req);
   if (isAnonymous(authority)) return { status: 401, body: AUTHENTICATION_REQUIRED };
   if (kernelId === null || kernelId === undefined) {
@@ -101,7 +102,7 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
    *   kernelId  — filter by kernel (required)
    *   status    — filter by status (default: "queued")
    *
-   * Returns { jobs: Job[] }
+   * Returns { jobs: Job[], emergencyStop: "clear" | "stopped" | "unavailable" }
    */
   app.get<{
     Querystring: { kernelId?: string; status?: string };
@@ -115,9 +116,16 @@ export async function operatorRelayRoutes(app: FastifyInstance) {
     const refusal = refuseKernelRequest(req, kernelId);
     if (refusal) return reply.code(refusal.status).send(refusal.body);
 
+    const emergencyStop = emergencyStopState(kernelId);
+    // The HOST must treat anything but "clear", including an absent field, as stop.
+
     const result = await jobFacade.list({ kernelId, status });
-    if (!result.success) return { jobs: [] };
-    return { jobs: result.data.items ?? [] };
+    if (!result.success) return { jobs: [], emergencyStop };
+    const jobs = result.data.items ?? [];
+    return {
+      jobs: emergencyStop === "clear" ? jobs : jobs.filter((job) => executionPhaseOf(job.status) !== "queued"),
+      emergencyStop,
+    };
   });
 
   /**
