@@ -300,6 +300,9 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
     if (!req.url.startsWith("/api/")) return;
 
+    // Registration consent may be requested by any authenticated principal; the route enforces authentication.
+    if (req.method === "POST" && req.url.split("?")[0] === "/api/kernels/registration-challenges") return;
+
     const rowsReady = ensureScopeCacheReady();
 
     // Public requests have no principal; a wallet session holds no scopes.

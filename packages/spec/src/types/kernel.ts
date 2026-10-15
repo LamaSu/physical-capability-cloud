@@ -8,6 +8,25 @@
 
 // ── Device Adapter Types ────────────────────────────────────────────────────
 
+/** Server-issued consent to bind a kernel signing key. */
+export interface KernelRegistrationChallengeInput {
+  kernelId: string;
+  signer: { algorithm: "ed25519"; publicKey: string } | { algorithm: "secp256k1"; address: string };
+}
+
+export interface KernelRegistrationChallenge {
+  challengeId: string;
+  /** EIP-4361 text for secp256k1, or base64-encoded message bytes for Ed25519. */
+  message: string;
+  expiresAt: string;
+}
+
+export interface KernelRegistrationProof {
+  challengeId: string;
+  /** EIP-191 hex signature for secp256k1, or a raw detached hex signature for Ed25519. */
+  signature: string;
+}
+
 /** Supported device adapter protocols */
 export type AdapterType = "octoprint" | "modbus" | "opcua" | "sila" | "generic-http" | "opentrons";
 

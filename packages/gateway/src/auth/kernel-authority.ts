@@ -76,7 +76,7 @@ function ownerOf(operatorAddress: unknown): string | null {
 }
 
 /** The admin secret, or a proven wallet equal to the kernel's operator (both compared as addresses). */
-function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean {
+export function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean {
   if (a.admin) return true;
   const owner = ownerOf(operatorAddress);
   if (owner === null || !WALLET_RE.test(owner) || a.provenWallet === null || !WALLET_RE.test(a.provenWallet)) return false;

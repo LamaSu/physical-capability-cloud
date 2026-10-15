@@ -38,6 +38,11 @@ type Signer =
   | { algorithm: "ed25519"; publicKey: string }
   | { algorithm: "secp256k1"; address: string };
 
+const PREVIOUS_LEGACY_PROOF = process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+const PREVIOUS_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+const ADMIN_KEY = "kernel-signing-test-admin";
+const adminHeaders = { "x-admin-key": ADMIN_KEY };
+
 interface KernelBody {
   kernel: {
     signingAddress?: string | null;
@@ -63,6 +68,8 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
   let app: FastifyInstance;
 
   beforeAll(async () => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
+    process.env.PCC_ADMIN_KEY = ADMIN_KEY;
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
     app = Fastify({ logger: false });
@@ -73,6 +80,10 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
   afterAll(async () => {
     await app.close();
     closeStore();
+    if (PREVIOUS_LEGACY_PROOF === undefined) delete process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+    else process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = PREVIOUS_LEGACY_PROOF;
+    if (PREVIOUS_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = PREVIOUS_ADMIN_KEY;
   });
 
   it("persists an Ed25519 signing key proven by a matching detached signature", async () => {
@@ -83,6 +94,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Ed25519 Kernel",
@@ -129,6 +141,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Ed25519 Bare Pub",
@@ -158,6 +171,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Mismatch Ed Kernel",
@@ -180,6 +194,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Unproven Ed Kernel",
@@ -200,6 +215,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Garbage Proof Ed Kernel",
@@ -224,6 +240,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Bad Pub Ed Kernel",
@@ -248,6 +265,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Replay Ed Kernel",
@@ -269,6 +287,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "No Signing Ed Kernel",
@@ -291,6 +310,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Set-Once Ed Kernel",
@@ -307,6 +327,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const second = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Hijack Attempt",
@@ -330,6 +351,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const first = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Ed Set-Once Cross",
@@ -349,6 +371,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const second = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Cross Hijack",
@@ -368,12 +391,13 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
   it("atomically allows only one of two concurrent SET-ONCE binds", async () => {
     const id = `kernel_ed_cas_${Date.now()}`;
     expect((await app.inject({
-      method: "POST", url: "/api/kernels", payload: { id, name: "CAS Kernel" },
+      method: "POST", url: "/api/kernels", headers: adminHeaders, payload: { id, name: "CAS Kernel" },
     })).statusCode).toBe(201);
 
     const bind = (kp: typeof KP_A) => app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         signingKeyAlgorithm: "ed25519",
@@ -403,6 +427,7 @@ describe("POST /api/kernels — Ed25519 signing-key proof-of-possession (primiti
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "Secp Tagged Kernel",

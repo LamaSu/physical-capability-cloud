@@ -165,8 +165,8 @@ describe("coarse by default: nobody reads the exact site or the street address",
     expect(JSON.stringify(pkg)).toContain(`the centre of geohash cell ${CELL}`);
   });
 
-  it("the owner's own reads are coarse too: the registration response and GET /api/kernels/:id", async () => {
-    const res = await register({ id: "kernel-n68-a", name: "N68 A" });
+  it("an authorized registration response and the owner's reads stay coarse", async () => {
+    const res = await register({ id: "kernel-n68-a", name: "N68 A" }, { ...bearer(ownerKey), "x-admin-key": ADMIN });
     expect(res.statusCode).toBe(200);
     expect(res.json().kernel).toMatchObject({ location: CENTRE, locationPrecision: "approximate", physicalAddress: null });
     const own = (await app.inject({ method: "GET", url: "/api/kernels/kernel-n68-a", headers: bearer(ownerKey) })).json();
@@ -301,16 +301,16 @@ describe("exact only by explicit opt-in, which needs the admin key or a proven w
     ]);
   });
 
-  it("re-registering without naming the choice keeps it (pcc-node re-registers on every start)", async () => {
+  it("an authorized re-registration without naming the choice keeps it", async () => {
     const moved = { lat: 47.6097, lng: -122.3331 };
-    expect((await register({ id: "kernel-n68-a", name: "N68 A", location: moved })).statusCode).toBe(200);
+    expect((await register({ id: "kernel-n68-a", name: "N68 A", location: moved }, { ...bearer(ownerKey), "x-admin-key": ADMIN })).statusCode).toBe(200);
     const k = await kernelIn("kernel-n68-a");
     expect([k.location, k.locationPrecision]).toEqual([moved, "exact"]);
-    expect((await register({ id: "kernel-n68-a", location: SITE })).statusCode).toBe(200);
+    expect((await register({ id: "kernel-n68-a", location: SITE }, { ...bearer(ownerKey), "x-admin-key": ADMIN })).statusCode).toBe(200);
   });
 
-  it("the owner can opt out with no admin key, and every read is coarse again", async () => {
-    const res = await register({ id: "kernel-n68-a", locationVisibility: "approximate" });
+  it("an authorized upsert can opt out, and every read is coarse again", async () => {
+    const res = await register({ id: "kernel-n68-a", locationVisibility: "approximate" }, { ...bearer(ownerKey), "x-admin-key": ADMIN });
     expect(res.statusCode).toBe(200);
     const k = await kernelIn("kernel-n68-a");
     expect([k.location, k.locationPrecision, k.physicalAddress]).toEqual([CENTRE, "approximate", null]);

@@ -25,6 +25,11 @@ type Signer =
   | { algorithm: "ed25519"; publicKey: string }
   | { algorithm: "secp256k1"; address: string };
 
+const PREVIOUS_LEGACY_PROOF = process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+const PREVIOUS_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+const ADMIN_KEY = "kernel-signing-test-admin";
+const adminHeaders = { "x-admin-key": ADMIN_KEY };
+
 interface KernelBody {
   kernel: { signingAddress?: string | null; signingKey?: Signer | null };
 }
@@ -33,6 +38,8 @@ describe("SDK buildEd25519RegistrationProof → POST /api/kernels (#235 loop-clo
   let app: FastifyInstance;
 
   beforeAll(async () => {
+    process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = "allow";
+    process.env.PCC_ADMIN_KEY = ADMIN_KEY;
     process.env.PCC_DB_PATH = ":memory:";
     initStore({ seed: false });
     app = Fastify({ logger: false });
@@ -43,6 +50,10 @@ describe("SDK buildEd25519RegistrationProof → POST /api/kernels (#235 loop-clo
   afterAll(async () => {
     await app.close();
     closeStore();
+    if (PREVIOUS_LEGACY_PROOF === undefined) delete process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
+    else process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF = PREVIOUS_LEGACY_PROOF;
+    if (PREVIOUS_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+    else process.env.PCC_ADMIN_KEY = PREVIOUS_ADMIN_KEY;
   });
 
   it("binds the SDK-proven Ed25519 key as the kernel's settlement signer", async () => {
@@ -67,6 +78,7 @@ describe("SDK buildEd25519RegistrationProof → POST /api/kernels (#235 loop-clo
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "SDK E2E Kernel",
@@ -104,6 +116,7 @@ describe("SDK buildEd25519RegistrationProof → POST /api/kernels (#235 loop-clo
     const create = await app.inject({
       method: "POST",
       url: "/api/kernels",
+      headers: adminHeaders,
       payload: {
         id,
         name: "SDK E2E Replay Kernel",

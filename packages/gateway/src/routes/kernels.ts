@@ -1,12 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Result } from "@pcc/spec";
+import type { KernelRegistrationChallengeInput, Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
 import { jobReadScopeOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
 import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
 import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
+import { issueKernelRegistrationChallenge, legacySigningProofAllowed } from "../auth/kernel-registration.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -90,6 +91,20 @@ function refuseOperate(req: FastifyRequest, kernelId: string): { status: number;
 
 export async function kernelRoutes(app: FastifyInstance) {
   const facade = getKernelFacade();
+  app.log.info(`PCC_KERNEL_LEGACY_SIGNING_PROOF=${legacySigningProofAllowed() ? "allow" : "deny"}`);
+
+  app.post<{ Body: KernelRegistrationChallengeInput }>("/api/kernels/registration-challenges", async (req, reply) => {
+    if (isAnonymous(authorityOf(req))) return reply.code(401).send(AUTHENTICATION_REQUIRED);
+    try {
+      const challenge = issueKernelRegistrationChallenge(req.body, req.apiKeyId ?? null);
+      return reply.code(201).send(challenge);
+    } catch (error) {
+      if (error instanceof Error && error.name === "BadRequestError") {
+        return reply.code(400).send({ error: "invalid_registration_challenge", message: error.message });
+      }
+      throw error;
+    }
+  });
 
   /**
    * List all kernels with staleness detection and capability type enrichment.

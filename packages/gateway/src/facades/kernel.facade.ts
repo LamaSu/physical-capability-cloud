@@ -9,8 +9,15 @@
 import crypto from "node:crypto";
 import { recoverMessageAddress } from "viem";
 import { kernelSigningProofMessage } from "@pcc/kernel";
-import { type Result, type RegisteredSigner, ok, err, Errors } from "@pcc/spec";
+import { type Result, type RegisteredSigner, type KernelRegistrationProof, ok, err, Errors } from "@pcc/spec";
 import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
+import { getStore } from "../db.js";
+import { mayDecide } from "../auth/kernel-authority.js";
+import {
+  legacySigningProofAllowed,
+  normalizeRegistrationSigner,
+  verifyKernelRegistrationProof,
+} from "../auth/kernel-registration.js";
 import { BaseFacade } from "./base.facade.js";
 import type {
   KernelDTO,
@@ -64,43 +71,14 @@ export interface CreateKernelInput {
    * when omitted (most operators support tier 0/1/2 evidence by default).
    */
   maxAssuranceTier?: 0 | 1 | 2 | 3;
-  /**
-   * The kernel's claimed secp256k1 signing address (checksummed 0x…). This is
-   * the address that signs the kernel's machine-log entries. It is persisted
-   * ONLY when accompanied by a valid `signingProof` that recovers to it —
-   * otherwise it is ignored and `signingAddress` stays null (fail closed).
-   *
-   * secp256k1 is the DEFAULT lane: a body with `signingAddress`+`signingProof`
-   * and NO `signingKeyAlgorithm` is verified as secp256k1 (unchanged from #230).
-   */
+  /** Claimed secp256k1 signer, persisted only after proof verification. */
   signingAddress?: string;
-  /**
-   * Proof-of-possession signature over the kernelId-bound challenge
-   * `kernelSigningProofMessage(id)` = `pcc-kernel-signing-key:${id}`. Same
-   * challenge for both algorithms — only the verification differs:
-   *   - secp256k1 (default): EIP-191 signature; the gateway recovers the signer
-   *     and persists `signingAddress` only if it matches the claimed address.
-   *   - ed25519 (`signingKeyAlgorithm:"ed25519"`): a 128-hex raw detached
-   *     signature verified against `signingPublicKey` with node:crypto.
-   * The binding to the kernelId means a proof captured for one kernel cannot
-   * register another kernel's key.
-   */
+  /** Static proof, accepted only with the explicit legacy opt-in. */
   signingProof?: string;
-  /**
-   * Option C — the signing-key algorithm the proof is for. Omit (or "secp256k1")
-   * for the default EVM-address lane. Set to "ed25519" to prove a raw Ed25519
-   * signing key (the native key of pcc-node / kernel-sdk devices) via
-   * `signingPublicKey` + a 128-hex `signingProof`.
-   */
+  /** Fresh server-issued registration consent. */
+  registrationProof?: KernelRegistrationProof;
   signingKeyAlgorithm?: "secp256k1" | "ed25519";
-  /**
-   * The kernel's claimed Ed25519 signing public key ("0x"+64hex, raw 32-byte
-   * pubkey). Required when `signingKeyAlgorithm === "ed25519"`. Persisted to
-   * `signingKey` (and `signingKeyPublicKey`) ONLY when `signingProof` verifies
-   * against it over the kernelId-bound challenge — otherwise ignored (fail
-   * closed). For secp256k1 kernels this is null and the identity is
-   * `signingAddress`.
-   */
+  /** Raw Ed25519 public key, hex encoded with an optional 0x prefix. */
   signingPublicKey?: string;
 }
 
@@ -350,6 +328,9 @@ export class KernelFacade extends BaseFacade {
     userAgent?: string,
     authority: LocationOptInAuthority = NO_OPT_IN_AUTHORITY,
   ): Promise<Result<{ kernel: KernelDTO; created: boolean }>> {
+    if (body.signingProof !== undefined && !legacySigningProofAllowed()) {
+      return err("legacy_signing_proof_disabled", "Legacy kernel signing proof is disabled", 403);
+    }
     return this.execute("register", async () => {
       const repos = this.repos;
       const requestedVisibility: unknown = body.locationVisibility;
@@ -366,202 +347,194 @@ export class KernelFacade extends BaseFacade {
       const id = body.id || `kernel_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
       const context = this.defaultContext();
 
-      const existing = repos.kernels.findById(id);
-      if (existing) {
-        const unownedOperatorAddresses = new Set([
-          "",
-          "0x0000000000000000000000000000000000000000",
-        ]);
-        const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
-        // Authorization only — authentication is apiGate's job (POST /api/kernels
-        // is Bearer-gated → 401 without a key), so a real request always carries
-        // an actorId here. We enforce OWNERSHIP: an authenticated non-owner may
-        // not mutate someone else's kernel. When actorId is absent (a facade-level
-        // unit test with no apiGate wired) there is no owner to check against; the
-        // SET-ONCE signer bind still fail-closes via the CAS below.
-        if (actorId && (
-          (hasRecordedOwner && existing.operatorAddress !== actorId) ||
-          (!hasRecordedOwner && !authority.admin)
-        )) {
-          throw Object.assign(
-            new Error(`Authenticated actor does not own kernel '${id}'`),
-            { name: "ForbiddenError" },
-          );
+      const provenSigner = body.registrationProof !== undefined
+        ? normalizeRegistrationSigner(body.signingKeyAlgorithm === "ed25519"
+          ? { algorithm: "ed25519", publicKey: body.signingPublicKey }
+          : { algorithm: body.signingKeyAlgorithm ?? "secp256k1", address: body.signingAddress })
+        : await this.verifySigningProof(id, body);
+      const consumeProof = body.registrationProof !== undefined
+        ? await verifyKernelRegistrationProof(id, provenSigner, body.registrationProof)
+        : () => {};
+
+      // Authority, challenge consumption, profile writes and the set-once bind commit together.
+      return getStore().db.transaction(() => {
+        const existing = repos.kernels.findById(id);
+        if (existing) {
+          const unownedOperatorAddresses = new Set([
+            "",
+            "0x0000000000000000000000000000000000000000",
+          ]);
+          const hasRecordedOwner = !unownedOperatorAddresses.has(existing.operatorAddress);
+          // Unowned rows retain the admin-only assignment rule.
+          if (actorId && !hasRecordedOwner && !authority.admin) {
+            throw Object.assign(
+              new Error(`Authenticated actor does not own kernel '${id}'`),
+              { name: "ForbiddenError" },
+            );
+          }
+          const boundSigner = this.signerFromRow(existing);
+          const decides = mayDecide({ ...authority, claimed: actorId ?? null }, existing.operatorAddress);
+          const provesBoundSigner = boundSigner !== null && provenSigner !== null && this.sameSigner(boundSigner, provenSigner);
+          if (hasRecordedOwner && !decides && !provesBoundSigner) {
+            throw Object.assign(new Error(`Kernel '${id}' requires owner authority or its bound signing key`), { name: "ForbiddenError" });
+          }
+          if (boundSigner && provenSigner && !this.sameSigner(boundSigner, provenSigner)) {
+            throw Object.assign(new Error(`Kernel '${id}' already has a different registered signer`), { name: "ConflictError" });
+          }
+          // Upsert: update heartbeat + optional fields
+          const updates: Record<string, unknown> = {
+            lastHeartbeat: new Date().toISOString(),
+            status: "online",
+          };
+          // Unowned rows are owned by nobody, so non-admin actors are refused above.
+          // Only an admin's update may assign its actor as the operator of such a row.
+          if (actorId && authority.admin && !hasRecordedOwner) updates.operatorAddress = actorId;
+          if (body.name) updates.name = body.name;
+          // Upsert: physicalAddress accepts the literal string OR the legacy string
+          // form of `location`. Object location goes to the `location` column below.
+          if (body.physicalAddress) {
+            updates.physicalAddress = body.physicalAddress;
+          } else if (typeof body.location === "string" && body.location.length > 0) {
+            updates.physicalAddress = body.location;
+          }
+          // Omitted location visibility preserves the current choice. Publishing an exact
+          // location requires the admin secret or the proven owner wallet.
+          const currentVisibility = locationVisibilityOf(existing.location);
+          const visibility = (requestedVisibility as LocationVisibility | undefined) ?? currentVisibility;
+          if (visibility === "exact" && currentVisibility !== "exact") {
+            const owner = (updates.operatorAddress as string | undefined) ?? existing.operatorAddress;
+            if (!mayPublishExactLocation(authority, owner)) throw exactLocationRefusal(id);
+          }
+          let point: { lat: number; lng: number } | null = null;
+          if (typeof body.location === "object" && body.location !== null) {
+            const loc = body.location as { lat?: number; lng?: number };
+            if (typeof loc.lat === "number" && typeof loc.lng === "number") {
+              point = { lat: loc.lat, lng: loc.lng };
+            }
+          }
+          if (point || visibility !== currentVisibility) {
+            updates.location = storedLocation(point ?? rawStoredPoint(existing.location), visibility);
+          }
+          if (typeof body.maxAssuranceTier === "number") {
+            updates.maxAssuranceTier = body.maxAssuranceTier;
+          }
+          // Heartbeat/profile fields are a normal update. The signing identity is
+          // deliberately excluded and committed through the atomic CAS below.
+          consumeProof();
+          let kernel = repos.kernels.update(id, updates) ?? existing;
+          if (provenSigner) {
+            const cols = this.signerToColumns(provenSigner);
+            const bound = repos.kernels.bindSignerIfUnregistered(id, cols);
+            if (bound) {
+              kernel = bound;
+            } else {
+              // An existing binding accepts only an idempotent proof of the same signer.
+              const current = repos.kernels.findById(id) ?? kernel;
+              const currentSigner = this.signerFromRow(current);
+              if (!currentSigner || !this.sameSigner(currentSigner, provenSigner)) {
+                throw Object.assign(
+                  new Error(`Kernel '${id}' already has a different registered signer`),
+                  { name: "ConflictError" },
+                );
+              }
+              kernel = current;
+            }
+          }
+          if (visibility !== currentVisibility) {
+            auditService.log({
+              eventType: "kernel.location_visibility",
+              actor: actorId ?? existing.operatorAddress,
+              resourceType: "kernel",
+              resourceId: id,
+              action: "update",
+              metadata: {
+                from: currentVisibility,
+                to: visibility,
+                authority: authority.admin ? "admin_key" : authority.provenWallet ? "proven_wallet" : "owner",
+              },
+              ip,
+              userAgent,
+            });
+          }
+          const capabilities = repos.capabilities.findByKernel(id);
+          return {
+            kernel: populateKernelDTO(kernel as any as RawKernel, capabilities, context),
+            created: false,
+          };
         }
-        // Upsert: update heartbeat + optional fields
-        const updates: Record<string, unknown> = {
-          lastHeartbeat: new Date().toISOString(),
-          status: "online",
-        };
-        // Unowned rows are owned by nobody, so non-admin actors are refused above.
-        // Only an admin's update may assign its actor as the operator of such a row.
-        if (actorId && authority.admin && !hasRecordedOwner) updates.operatorAddress = actorId;
-        if (body.name) updates.name = body.name;
-        // Upsert: physicalAddress accepts the literal string OR the legacy string
-        // form of `location`. Object location goes to the `location` column below.
-        if (body.physicalAddress) {
-          updates.physicalAddress = body.physicalAddress;
-        } else if (typeof body.location === "string" && body.location.length > 0) {
-          updates.physicalAddress = body.location;
-        }
-        // N68: the operator's location choice survives an update that does not name it, so
-        // re-registering (as pcc-node does) never silently un-publishes a storefront. A change
-        // to "exact" needs LocationOptInAuthority for the kernel's operator;
-        // nothing is written when it is refused.
-        const currentVisibility = locationVisibilityOf(existing.location);
-        const visibility = (requestedVisibility as LocationVisibility | undefined) ?? currentVisibility;
-        if (visibility === "exact" && currentVisibility !== "exact") {
-          const owner = (updates.operatorAddress as string | undefined) ?? existing.operatorAddress;
-          if (!mayPublishExactLocation(authority, owner)) throw exactLocationRefusal(id);
-        }
-        let point: { lat: number; lng: number } | null = null;
+
+        // Coordinates and the postal address are persisted in separate columns.
+        let geoLocation: { lat: number; lng: number } = { lat: 0, lng: 0 };
+        let addressString = body.physicalAddress ?? "";
         if (typeof body.location === "object" && body.location !== null) {
           const loc = body.location as { lat?: number; lng?: number };
           if (typeof loc.lat === "number" && typeof loc.lng === "number") {
-            point = { lat: loc.lat, lng: loc.lng };
+            geoLocation = { lat: loc.lat, lng: loc.lng };
           }
+        } else if (typeof body.location === "string" && body.location.length > 0) {
+          // Legacy alias: string location populates physicalAddress only.
+          addressString = addressString || body.location;
         }
-        if (point || visibility !== currentVisibility) {
-          updates.location = storedLocation(point ?? rawStoredPoint(existing.location), visibility);
+
+        // New rows take the authenticated actor as their owner.
+        const operatorAddress = actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000";
+        // Exact location publication requires the admin secret or proven owner wallet.
+        const visibility = (requestedVisibility as LocationVisibility | undefined) ?? "approximate";
+        if (visibility === "exact" && !mayPublishExactLocation(authority, operatorAddress)) {
+          throw exactLocationRefusal(id);
         }
-        if (typeof body.maxAssuranceTier === "number") {
-          updates.maxAssuranceTier = body.maxAssuranceTier;
-        }
-        // Heartbeat/profile fields are a normal update. The signing identity is
-        // deliberately excluded and committed through the atomic CAS below.
-        let kernel = repos.kernels.update(id, updates) ?? existing;
-        const provenSigner = await this.verifySigningProof(id, body);
-        if (provenSigner) {
-          const cols = this.signerToColumns(provenSigner);
-          const bound = repos.kernels.bindSignerIfUnregistered(id, cols);
-          if (bound) {
-            kernel = bound;
-          } else {
-            // Another request won the SET-ONCE race (or the row was already
-            // bound). Re-read and accept only an idempotent proof of that same
-            // signer; a different signer is a loud conflict.
-            const current = repos.kernels.findById(id) ?? kernel;
-            const currentSigner = this.signerFromRow(current);
-            if (!currentSigner || !this.sameSigner(currentSigner, provenSigner)) {
-              throw Object.assign(
-                new Error(`Kernel '${id}' already has a different registered signer`),
-                { name: "ConflictError" },
-              );
-            }
-            kernel = current;
-          }
-        }
-        if (visibility !== currentVisibility) {
-          auditService.log({
-            eventType: "kernel.location_visibility",
-            actor: actorId ?? existing.operatorAddress,
-            resourceType: "kernel",
-            resourceId: id,
-            action: "update",
-            metadata: {
-              from: currentVisibility,
-              to: visibility,
-              authority: authority.admin ? "admin_key" : authority.provenWallet ? "proven_wallet" : "owner",
-            },
-            ip,
-            userAgent,
-          });
-        }
+
+        const signerColumns = this.signerToColumns(provenSigner);
+
+        const now = new Date();
+        const kernelData = {
+          id,
+          name: body.name || "New Kernel",
+          operatorAddress,
+          // The compatibility publicKey column is independent of the signing identity.
+          publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
+          signingAddress: signerColumns.signingAddress,
+          signingKeyAlgorithm: signerColumns.signingKeyAlgorithm,
+          signingKeyPublicKey: signerColumns.signingKeyPublicKey,
+          location: storedLocation(geoLocation, visibility),
+          physicalAddress: addressString,
+          status: "online",
+          registeredAt: now.toISOString(),
+          lastHeartbeat: now.toISOString(),
+          version: "0.1.0",
+          reputation: 0,
+          totalJobsCompleted: 0,
+          // Omitted assurance tier defaults to 2.
+          maxAssuranceTier: body.maxAssuranceTier ?? 2,
+          // New kernels receive the same initial TTL as a heartbeat refresh.
+          validUntil: computeValidUntilIso(now),
+        };
+
+        consumeProof();
+        const inserted = repos.kernels.insert(kernelData);
+
+        trackServerEvent(
+          "kernel_registered",
+          { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
+          actorId,
+        );
+        auditService.log({
+          eventType: "kernel.created",
+          actor: actorId ?? kernelData.operatorAddress,
+          resourceType: "kernel",
+          resourceId: id,
+          action: "create",
+          metadata: { name: kernelData.name, operatorAddress: kernelData.operatorAddress, locationVisibility: visibility },
+          ip,
+          userAgent,
+        });
+
         const capabilities = repos.capabilities.findByKernel(id);
         return {
-          kernel: populateKernelDTO(kernel as any as RawKernel, capabilities, context),
-          created: false,
+          kernel: populateKernelDTO(inserted as any as RawKernel, capabilities, context),
+          created: true,
         };
-      }
-
-      // Location: accept either { lat, lng } object (geo) OR a string (address)
-      // OR both. Object goes to `location`, string goes to `physicalAddress`.
-      // Fix for coord task a8207dfa: previously hardcoded { lat: 0, lng: 0 }
-      // regardless of input, silently dropping any submitted coordinates.
-      let geoLocation: { lat: number; lng: number } = { lat: 0, lng: 0 };
-      let addressString = body.physicalAddress ?? "";
-      if (typeof body.location === "object" && body.location !== null) {
-        const loc = body.location as { lat?: number; lng?: number };
-        if (typeof loc.lat === "number" && typeof loc.lng === "number") {
-          geoLocation = { lat: loc.lat, lng: loc.lng };
-        }
-      } else if (typeof body.location === "string" && body.location.length > 0) {
-        // Legacy alias: string location populates physicalAddress only.
-        addressString = addressString || body.location;
-      }
-
-      // Authenticated creates are owned by the stable actor identity. A body field cannot
-      // nominate a different owner for a SET-ONCE signing bind.
-      const operatorAddress = actorId || body.operatorAddress || "0x0000000000000000000000000000000000000000";
-      // N68: a new kernel reads coarse unless it opts in, which needs LocationOptInAuthority.
-      const visibility = (requestedVisibility as LocationVisibility | undefined) ?? "approximate";
-      if (visibility === "exact" && !mayPublishExactLocation(authority, operatorAddress)) {
-        throw exactLocationRefusal(id);
-      }
-
-      // Proof-of-possession: verify the kernel's signing-key proof and resolve
-      // the tagged RegisteredSigner. Only a key cryptographically proven by a
-      // matching signature over the kernelId-bound challenge is persisted;
-      // absent / mismatched / malformed proof → null in every signing column
-      // (never persist an unproven signer, which could otherwise clear
-      // settlement for forged machine logs). Supports both secp256k1 (EVM
-      // address) and ed25519 (raw pubkey) via the algorithm tag.
-      const provenSigner = await this.verifySigningProof(id, body);
-      const signerColumns = this.signerToColumns(provenSigner);
-
-      const now = new Date();
-      const kernelData = {
-        id,
-        name: body.name || "New Kernel",
-        operatorAddress,
-        // Legacy random field (not used for auth); kept for the NOT NULL column.
-        // The authenticated identity is the tagged signing key below.
-        publicKey: `0x${crypto.randomBytes(32).toString("hex")}`,
-        signingAddress: signerColumns.signingAddress,
-        signingKeyAlgorithm: signerColumns.signingKeyAlgorithm,
-        signingKeyPublicKey: signerColumns.signingKeyPublicKey,
-        location: storedLocation(geoLocation, visibility),
-        physicalAddress: addressString,
-        status: "online",
-        registeredAt: now.toISOString(),
-        lastHeartbeat: now.toISOString(),
-        version: "0.1.0",
-        reputation: 0,
-        totalJobsCompleted: 0,
-        // Fix for coord task c6b48ca1: respect the operator's submitted tier
-        // instead of hardcoding 2. Default to 2 when omitted (most operators
-        // sustain tier 0/1/2 evidence by default).
-        maxAssuranceTier: body.maxAssuranceTier ?? 2,
-        // feat/ed25519-keys-and-kernel-ttl — set initial soft expiry.
-        // Without this, a registered-but-never-heartbeated kernel would
-        // never appear in default listings (sweeper would mark expired
-        // on its first run). One heartbeat extends to now + TTL.
-        validUntil: computeValidUntilIso(now),
-      };
-
-      const inserted = repos.kernels.insert(kernelData);
-
-      trackServerEvent(
-        "kernel_registered",
-        { kernelId: id, name: kernelData.name, operatorAddress: kernelData.operatorAddress },
-        actorId,
-      );
-      auditService.log({
-        eventType: "kernel.created",
-        actor: actorId ?? kernelData.operatorAddress,
-        resourceType: "kernel",
-        resourceId: id,
-        action: "create",
-        metadata: { name: kernelData.name, operatorAddress: kernelData.operatorAddress, locationVisibility: visibility },
-        ip,
-        userAgent,
       });
-
-      const capabilities = repos.capabilities.findByKernel(id);
-      return {
-        kernel: populateKernelDTO(inserted as any as RawKernel, capabilities, context),
-        created: true,
-      };
     });
   }
 
@@ -746,28 +719,7 @@ export class KernelFacade extends BaseFacade {
 
   // ── Private Helpers ────────────────────────────────────────────────────────
 
-  /**
-   * Verify a kernel signing-key proof-of-possession and return the tagged
-   * `RegisteredSigner` it proves, or `null` (fail closed).
-   *
-   * TWO LANES, ONE challenge — the signed message is `kernelSigningProofMessage(
-   * kernelId)` for BOTH algorithms, so a proof captured for one kernel cannot be
-   * replayed to register a different kernel's key:
-   *   - secp256k1 (DEFAULT — #230 behavior, UNCHANGED): an EIP-191 signature;
-   *     recover the signer and accept iff it matches the claimed
-   *     `signingAddress`. Returns `{algorithm:"secp256k1", address:<checksummed>}`.
-   *   - ed25519 (Option C — when `signingKeyAlgorithm === "ed25519"`): verify the
-   *     128-hex detached signature against the claimed raw public key with
-   *     node:crypto (`auth/ed25519.ts`). Returns
-   *     `{algorithm:"ed25519", publicKey:"0x"+<64hex>}`.
-   *
-   * Fail closed on absent / malformed / mismatched input in EITHER lane: the
-   * money path must never persist a signer that was not cryptographically
-   * proven, or a forged machine log could clear settlement and release escrow.
-   *
-   * @param kernelId - The kernel being registered (challenge binding).
-   * @param input    - The signing fields from the registration body.
-   */
+  /** Verify an opted-in static proof; absent or invalid proof never binds a signer. */
   private async verifySigningProof(
     kernelId: string,
     input: {

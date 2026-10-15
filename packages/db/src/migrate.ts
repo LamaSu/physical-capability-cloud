@@ -2064,6 +2064,31 @@ export function migrateDatabase(sqlite: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS settlement_challenges_open_unit_idx
       ON settlement_challenges(chain_id, escrow, settlement_unit_id) WHERE state = 'issued';
   `);
+
+  // Registration challenges preserve the exact message and issuing key identity.
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS kernel_registration_challenges (
+      id TEXT PRIMARY KEY,
+      kernel_id TEXT NOT NULL,
+      algorithm TEXT NOT NULL CHECK (algorithm IN ('ed25519', 'secp256k1')),
+      signer TEXT NOT NULL,
+      created_by_key_id TEXT,
+      nonce TEXT NOT NULL,
+      env TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      domain TEXT NOT NULL,
+      message TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    CREATE TRIGGER IF NOT EXISTS kernel_registration_challenges_creator_immutable
+      BEFORE UPDATE OF created_by_key_id ON kernel_registration_challenges
+      WHEN NEW.created_by_key_id IS NOT OLD.created_by_key_id
+      BEGIN
+        SELECT RAISE(ABORT, 'Registration challenge creator is immutable');
+      END;
+  `);
   scrubOperatorWalletPrivateKeys(sqlite);
 }
 
