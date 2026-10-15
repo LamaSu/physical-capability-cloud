@@ -24,6 +24,8 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
+import { AcceptedPolicyDigestInputError, computeAcceptedPolicyDigest } from "../evidence/accepted-policy.js";
+import { computeTermsHashV21, TermsHashV21Error } from "./terms-hash-v21.js";
 import { assertChain, describeRevert, pinBlock, pinnedReader } from "./chain.js";
 import { refuse } from "./errors.js";
 import { parsePreparePayload, type PreparePayload } from "./payload.js";
@@ -83,8 +85,10 @@ export interface FundingExpectations {
   tiers: readonly number[];
   /** Latest permitted reclaim time, in chain seconds. */
   latestReclaimAt: bigint;
-  termsHash: Hex | "unchecked";
-  acceptedPolicyDigest: Hex | "unchecked";
+  /** Pin a hash, derive v2.1 from the funded configs, or explicitly waive outside the MVP. */
+  termsHash: Hex | "unchecked" | { derive: "v2.1"; token: Address; assuranceTier: number };
+  /** Roots bind the public digest producer to the termsHash the buyer checked; unchecked terms are refused. */
+  acceptedPolicyDigest: Hex | "unchecked" | { subjectBlockHash: Hex; bindingsRoot: Hex };
   compositionRoots: readonly Hex[] | "unchecked";
   /** Exact UnitConfig composition schema version, uint16; never waivable. */
   compositionSchemaVersion?: number;
@@ -225,8 +229,30 @@ function copyExpectations(raw: unknown): FundingExpectations {
   if (typeof e.latestReclaimAt !== "bigint" || e.latestReclaimAt < 0n || e.latestReclaimAt >= 1n << 256n) {
     refuse("BAD_EXPECTATION", "expect.latestReclaimAt must be a non-negative uint256 bigint in chain seconds");
   }
-  const termsHash = e.termsHash === "unchecked" ? e.termsHash : hash(e.termsHash, "termsHash");
-  const acceptedPolicyDigest = e.acceptedPolicyDigest === "unchecked" ? e.acceptedPolicyDigest : hash(e.acceptedPolicyDigest, "acceptedPolicyDigest");
+  const fields = (v: object, keys: readonly string[], field: string): Record<string, unknown> => {
+    if (Array.isArray(v) || ![Object.prototype, null].includes(Object.getPrototypeOf(v)) ||
+        keys.some((key) => !Object.prototype.hasOwnProperty.call(v, key)) ||
+        Object.keys(v).some((key) => !keys.includes(key))) {
+      refuse("BAD_EXPECTATION", `expect.${field} must contain only ${keys.join(", ")}`);
+    }
+    return v as Record<string, unknown>;
+  };
+  let termsHash: FundingExpectations["termsHash"];
+  if (typeof e.termsHash === "object" && e.termsHash !== null) {
+    const t = fields(e.termsHash, ["derive", "token", "assuranceTier"], "termsHash");
+    if (t.derive !== "v2.1") refuse("BAD_EXPECTATION", "expect.termsHash.derive must be v2.1");
+    if (typeof t.assuranceTier !== "number" || !Number.isInteger(t.assuranceTier) || t.assuranceTier < 0 || t.assuranceTier > 3) {
+      refuse("BAD_EXPECTATION", "expect.termsHash.assuranceTier must be an integer in [0, 3]");
+    }
+    termsHash = { derive: "v2.1", token: address(t.token, "termsHash.token"), assuranceTier: t.assuranceTier };
+  } else termsHash = e.termsHash === "unchecked" ? e.termsHash : hash(e.termsHash, "termsHash");
+  let acceptedPolicyDigest: FundingExpectations["acceptedPolicyDigest"];
+  if (typeof e.acceptedPolicyDigest === "object" && e.acceptedPolicyDigest !== null) {
+    const a = fields(e.acceptedPolicyDigest, ["subjectBlockHash", "bindingsRoot"], "acceptedPolicyDigest");
+    if (termsHash === "unchecked") refuse("BAD_EXPECTATION", "expect.acceptedPolicyDigest roots require a checked termsHash");
+    acceptedPolicyDigest = { subjectBlockHash: hash(a.subjectBlockHash, "acceptedPolicyDigest.subjectBlockHash"),
+      bindingsRoot: hash(a.bindingsRoot, "acceptedPolicyDigest.bindingsRoot") };
+  } else acceptedPolicyDigest = e.acceptedPolicyDigest === "unchecked" ? e.acceptedPolicyDigest : hash(e.acceptedPolicyDigest, "acceptedPolicyDigest");
   let compositionRoots: readonly Hex[] | "unchecked";
   if (e.compositionRoots === "unchecked") compositionRoots = e.compositionRoots;
   else {
@@ -289,8 +315,35 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
   if (e.chainId !== undefined && p.chainId !== e.chainId) mismatch("chainId", p.chainId, e.chainId);
   if (!same(m.jobIdHash, expectedJob)) mismatch("jobId (message.jobIdHash)", m.jobIdHash, expectedJob);
   if (!same(m.operator, e.operator)) mismatch("operator", m.operator, e.operator);
-  if (e.termsHash !== "unchecked" && !same(m.termsHash, e.termsHash)) mismatch("termsHash", m.termsHash, e.termsHash);
-  if (e.acceptedPolicyDigest !== "unchecked" && !same(m.acceptedPolicyDigest, e.acceptedPolicyDigest)) mismatch("acceptedPolicyDigest", m.acceptedPolicyDigest, e.acceptedPolicyDigest);
+  let checkedTermsHash: Hex | undefined;
+  if (typeof e.termsHash === "object") {
+    const { token, assuranceTier } = e.termsHash;
+    p.fund.configs.forEach((c, i) => {
+      for (const field of ["requiredTier", "requestedTier"] as const) {
+        if (c[field] !== assuranceTier) mismatch(`assuranceTier (fund.configs[${i}].${field})`, c[field], assuranceTier);
+      }
+    });
+    try {
+      checkedTermsHash = computeTermsHashV21({ token, assuranceTier,
+        milestones: p.fund.configs.map((c) => ({ milestoneIndex: c.milestoneIndex, stepId: c.stepId, amount: c.g, deadline: c.reclaimAt })) });
+    } catch (error) {
+      if (error instanceof TermsHashV21Error) refuse("INTENT_MISMATCH", `termsHash: ${error.message}`);
+      throw error;
+    }
+  } else if (e.termsHash !== "unchecked") checkedTermsHash = e.termsHash;
+  if (checkedTermsHash !== undefined && !same(m.termsHash, checkedTermsHash)) mismatch("termsHash", m.termsHash, checkedTermsHash);
+  let checkedDigest: Hex | undefined;
+  if (typeof e.acceptedPolicyDigest === "object") {
+    try {
+      checkedDigest = computeAcceptedPolicyDigest({ termsHash: checkedTermsHash!.toLowerCase() as Hex,
+        subjectBlockHash: e.acceptedPolicyDigest.subjectBlockHash.toLowerCase() as Hex,
+        bindingsRoot: e.acceptedPolicyDigest.bindingsRoot.toLowerCase() as Hex });
+    } catch (error) {
+      if (error instanceof AcceptedPolicyDigestInputError) refuse("INTENT_MISMATCH", `acceptedPolicyDigest: ${error.message}`);
+      throw error;
+    }
+  } else if (e.acceptedPolicyDigest !== "unchecked") checkedDigest = e.acceptedPolicyDigest;
+  if (checkedDigest !== undefined && !same(m.acceptedPolicyDigest, checkedDigest)) mismatch("acceptedPolicyDigest", m.acceptedPolicyDigest, checkedDigest);
   if (e.unitCount !== undefined && p.fund.configs.length !== e.unitCount) mismatch("unitCount (fund.configs.length)", p.fund.configs.length, e.unitCount);
   p.fund.configs.forEach((c, i) => {
     if (e.unitGross !== undefined && c.g !== e.unitGross) mismatch(`unitGross (fund.configs[${i}].g)`, c.g, e.unitGross);
@@ -402,6 +455,9 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   }
   // Everything judged below comes from this parse, taken before the first await.
   const p = parsePreparePayload(args.payload);
+  if (expect.chainId !== undefined && p.chainId !== expect.chainId) {
+    refuse("INTENT_MISMATCH", `chainId is ${p.chainId}; the buyer expects ${expect.chainId}`);
+  }
   const maxTotalGross = args.quote?.maxTotalGross;
   if (typeof maxTotalGross !== "bigint" || maxTotalGross < 0n) throw new TypeError("quote.maxTotalGross must be a non-negative bigint");
   const margin = args.marginSeconds ?? DEFAULT_MARGIN_SECONDS;
@@ -415,6 +471,9 @@ export async function prepareFunding(args: PrepareFundingArgs): Promise<Prepared
   //    one (plan §3 step 6, S1 negative 5). Without a factory pin, every check below could be met by a look-alike
   //    deployment whose fund() pays someone else.
   if (pins.usdc === undefined) refuse("TOKEN_NOT_PINNED", `chain ${p.chainId} has no USDC pin`);
+  if (typeof expect.termsHash === "object" && !same(expect.termsHash.token, pins.usdc)) {
+    refuse("BAD_EXPECTATION", `expect.termsHash.token must equal pinned USDC ${pins.usdc}`);
+  }
   if (!same(p.usdc, pins.usdc)) refuse("TOKEN_NOT_PINNED", `usdc ${p.usdc} is not the pinned USDC ${pins.usdc}`);
   if (pins.factory === undefined) refuse("FACTORY_NOT_PINNED", `chain ${p.chainId} has no factory pin: pass pins["${p.chainId}"].factory`);
   if (!same(p.factory, pins.factory)) refuse("FACTORY_NOT_PINNED", `factory ${p.factory} is not the pinned factory ${pins.factory}`);

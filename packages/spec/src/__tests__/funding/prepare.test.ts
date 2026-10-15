@@ -6,10 +6,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { getAbiItem, getAddress, hashTypedData, maxUint256, recoverAddress, toFunctionSelector, zeroAddress, zeroHash, type Hex, type LocalAccount } from "viem";
-import { FundingRefusal, jobIdHashOf, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs } from "../../funding/index.js";
+import { FundingRefusal, jobIdHashOf, prepareFunding, type FundingRefusalCode, type PrepareFundingArgs, type FundingExpectations } from "../../funding/index.js";
 import { CIRCLE_USDC } from "../../funding/pins.js";
 import { parsePreparePayload } from "../../funding/payload.js";
-import { ESCROW_ABI, FACTORY_ABI } from "../../funding/vnext.js";
+import { computeAcceptedPolicyDigest, computeBindingsRoot } from "../../evidence/accepted-policy.js";
+import { computeTermsHashV21, type TermsMilestoneV21 } from "../../funding/terms-hash-v21.js";
+import { ESCROW_ABI, FACTORY_ABI, prePolicyRoot, type UnitConfig } from "../../funding/vnext.js";
 import {
   DAY,
   FACTORY_PREDICT_ABI,
@@ -677,5 +679,110 @@ describe("trusted pin source documentation", () => {
       expect(doc).toContain("caller's own trusted configuration");
       expect(doc).toContain("never from the gateway payload or any gateway response");
     }
+  });
+});
+
+describe("v2.1 derived buyer commitments", () => {
+  const fileDigest: Hex = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
+  const roots = { subjectBlockHash: zeroHash, bindingsRoot: computeBindingsRoot([]) };
+  type DerivedOptions = {
+    configure?: (configs: UnitConfig[]) => void;
+    hashMilestones?: (milestones: TermsMilestoneV21[]) => void;
+    policyTermsHash?: Hex;
+    digestTermsHash?: Hex;
+  };
+  async function derivedSetup(o: DerivedOptions = {}) {
+    const configure = (configs: UnitConfig[]) => {
+      for (const c of configs) { c.requiredTier = 2; c.requestedTier = 2; }
+      o.configure?.(configs);
+    };
+    const seed = await buildFixture({ configure });
+    const milestones = seed.configs.map((c) => ({ milestoneIndex: c.milestoneIndex, stepId: c.stepId, amount: c.g, deadline: c.reclaimAt }));
+    o.hashMilestones?.(milestones);
+    const checkedTermsHash = o.policyTermsHash ?? computeTermsHashV21({ token: seed.usdc, assuranceTier: 2, milestones });
+    const fx = await buildFixture({ configure, termsHash: checkedTermsHash,
+      acceptedPolicyDigest: computeAcceptedPolicyDigest({ termsHash: o.digestTermsHash ?? checkedTermsHash, ...roots }),
+    }, { payer: seed.payer, operator: seed.operator });
+    const chain = makeChain(fx);
+    const own: FundingExpectations = { ...testExpect(fx), tiers: [1, 2, 3],
+      termsHash: { derive: "v2.1", token: fx.usdc, assuranceTier: 2 }, acceptedPolicyDigest: { ...roots } };
+    const prepare = (intent: FundingExpectations = own) => prepareFunding({ payload: fx.wire(), wallet: chain.wallet(),
+      publicClient: chain.publicClient, quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx), expect: intent });
+    return { fx, chain, own, prepare, checkedTermsHash };
+  }
+  it("passes its own config derivation and public accepted digest; snapshots nested expectation forms", async () => {
+    const { fx, own, prepare } = await derivedSetup();
+    const pending = prepare();
+    (own.termsHash as { assuranceTier: number }).assuranceTier = 3;
+    (own.acceptedPolicyDigest as { subjectBlockHash: Hex }).subjectBlockHash = OTHER_HASH;
+    const prepared = await pending;
+    expect(prepared.typedData.message.termsHash).toBe(fx.message.termsHash);
+    expect(prepared.typedData.message.acceptedPolicyDigest).toBe(computeAcceptedPolicyDigest({ termsHash: fx.message.termsHash, ...roots }));
+    expect(prepared.expect.termsHash).toEqual({ derive: "v2.1", token: fx.usdc, assuranceTier: 2 });
+    expect(prepared.expect.acceptedPolicyDigest).toEqual(roots);
+    expect(Object.isFrozen(prepared.expect.termsHash)).toBe(true);
+    expect(Object.isFrozen(prepared.expect.acceptedPolicyDigest)).toBe(true);
+    expect(Object.isFrozen(own.termsHash)).toBe(false);
+    expect(prepared.unchecked).toEqual([]);
+  });
+  const OTHER_HASH: Hex = `0x${"11".repeat(32)}`;
+  const mismatches: Array<[string, DerivedOptions, string]> = [
+    ["old terms file hash", { policyTermsHash: fileDigest }, "termsHash"],
+    ["different reclaimAt with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1]!.deadline += 1n; } }, "termsHash"],
+    ["different stepId with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1]!.stepId = OTHER_HASH; } }, "termsHash"],
+    ["different milestoneIndex with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1]!.milestoneIndex += 9n; } }, "termsHash"],
+    ["forged termsHash and digest pair", { policyTermsHash: OTHER_HASH }, "termsHash"],
+    ["accepted digest built with file hash", { digestTermsHash: fileDigest }, "acceptedPolicyDigest"],
+    ["requestedTier allowed by tiers but not assuranceTier", { configure: (cs) => { cs[1]!.requestedTier = 1; } }, "requestedTier"],
+    ["requiredTier allowed by tiers but not assuranceTier", { configure: (cs) => { cs[1]!.requiredTier = 1; } }, "requiredTier"],
+    ["duplicate milestone pair maps helper error", { configure: (cs) => {
+      cs[1]!.milestoneIndex = cs[0]!.milestoneIndex; cs[1]!.stepId = cs[0]!.stepId;
+    }, policyTermsHash: OTHER_HASH }, "termsHash"],
+    ["deadline 2^64 maps helper error", { configure: (cs) => { cs[1]!.reclaimAt = 1n << 64n; }, policyTermsHash: OTHER_HASH }, "termsHash"],
+  ];
+  it.each(mismatches)("INTENT_MISMATCH before any RPC: %s", async (_name, options, field) => {
+    const { fx, chain, prepare } = await derivedSetup(options);
+    expect(prePolicyRoot(fx.configs)).toBe(fx.message.prePolicyRoot);
+    await expect(prepare()).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining(field) });
+    expect(chain.state.log).toEqual([]);
+  });
+  it("supports accepted digest roots with a pinned Hex, including uppercase checked hash and roots", async () => {
+    const { fx, own, prepare } = await derivedSetup();
+    const upper = (hex: Hex): Hex => `0x${hex.slice(2).toUpperCase()}`;
+    const prepared = await prepare({ ...own, termsHash: upper(fx.message.termsHash),
+      acceptedPolicyDigest: { subjectBlockHash: upper(roots.subjectBlockHash), bindingsRoot: upper(roots.bindingsRoot) } });
+    expect(prepared.typedData.message.acceptedPolicyDigest).toBe(fx.message.acceptedPolicyDigest);
+  });
+  it("refuses digest mismatch with a buyer-pinned Hex before any RPC", async () => {
+    const { fx, chain, own, prepare } = await derivedSetup({ digestTermsHash: fileDigest });
+    await expect(prepare({ ...own, termsHash: fx.message.termsHash })).rejects.toMatchObject({ code: "INTENT_MISMATCH" });
+    expect(chain.state.log).toEqual([]);
+  });
+  const badTerms: Array<[string, unknown]> = [
+    ["token differs from pins.usdc", { derive: "v2.1", token: OTHER, assuranceTier: 2 }],
+    ["tier 4", { derive: "v2.1", token: OTHER, assuranceTier: 4 }],
+    ["fractional tier", { derive: "v2.1", token: OTHER, assuranceTier: 1.5 }],
+    ["malformed token", { derive: "v2.1", token: "0x1234", assuranceTier: 2 }],
+    ["unknown derivation", { derive: "v2", token: OTHER, assuranceTier: 2 }],
+    ["extra derivation key", { derive: "v2.1", token: OTHER, assuranceTier: 2, extra: true }],
+  ];
+  it.each(badTerms)("BAD_EXPECTATION before any RPC: %s", async (_name, termsHash) => {
+    const { chain, own, prepare } = await derivedSetup();
+    await expect(prepare({ ...own, termsHash: termsHash as FundingExpectations["termsHash"] })).rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+    expect(chain.state.log).toEqual([]);
+  });
+  it.each([{}, { ...roots, subjectBlockHash: "0x12" }, { ...roots, bindingsRoot: "0x12" }, { ...roots, extra: true }])(
+    "BAD_EXPECTATION before any RPC: malformed accepted digest roots %j", async (acceptedPolicyDigest) => {
+      const { chain, own, prepare } = await derivedSetup();
+      await expect(prepare({ ...own, acceptedPolicyDigest: acceptedPolicyDigest as FundingExpectations["acceptedPolicyDigest"] }))
+        .rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+      expect(chain.state.log).toEqual([]);
+    });
+  it("BAD_EXPECTATION before any RPC: digest roots with unchecked terms even with allowUnchecked", async () => {
+    const { fx, chain, own } = await derivedSetup();
+    await expect(prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx), expect: { ...own, termsHash: "unchecked" }, allowUnchecked: true }))
+      .rejects.toMatchObject({ code: "BAD_EXPECTATION" });
+    expect(chain.state.log).toEqual([]);
   });
 });
