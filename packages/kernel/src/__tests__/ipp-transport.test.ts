@@ -150,6 +150,11 @@ describe("HTTP IPP transport, socket-free", () => {
     expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
   });
 
+  it("R6-3 F-E: refuses 101 with Content-Length zero followed by a valid 200 in the same chunk", async () => {
+    const { transport } = scripted("HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nIPP");
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
   it.each([
     ["leading CRLFs", "\r\n\r\n"],
     ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],

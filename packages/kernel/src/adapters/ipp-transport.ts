@@ -146,6 +146,10 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
           fail("framing", "IPP response headers could not be checked before parsing");
           return;
         }
+        if (res.statusCode === undefined || res.statusCode < 200) {
+          fail("framing", "IPP response has no final HTTP status");
+          return;
+        }
 
         const lengths: string[] = [];
         const transfers: string[] = [];
