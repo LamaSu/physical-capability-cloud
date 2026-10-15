@@ -67,7 +67,8 @@ export const DEFAULT_MARGIN_SECONDS = 300n;
  * Values come from the caller's own pins;
  * Thursday PRINT buyers use printUnitThursdayExpectation and economics' PRINT_UNIT_THURSDAY_V1 pins.
  * A PRINT buyer's termsHash is the v2.1 hash of the configs it funds (#8165), carried privately until evidence's
- * public producer is available (#8168). The oracle's Thursday-shape vector test is added when the oracle re-issues it.
+ * public producer is available (#8168). The oracle's Thursday-shape vector test exists in
+ * `print-unit-golden-v2.test.ts`: `reproduces v2.1 milestonesRoot and DERIVED termsHash from the example terms`.
  * Never copy values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require
  * allowUnchecked: true and leave the terms, evidence policy or composition to the payload's author;
  * prepared.unchecked lists them.

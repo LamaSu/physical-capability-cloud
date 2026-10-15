@@ -835,6 +835,7 @@ describe("derived PRINT buyer documentation", () => {
   it("documents funded-config v2.1 terms and the pending re-issued oracle vector", () => {
     const source = readFileSync(new URL("../../funding/prepare.ts", import.meta.url), "utf8");
     expect(source).toContain("A PRINT buyer's termsHash is the v2.1 hash of the configs it funds (#8165)");
-    expect(source).toContain("The oracle's Thursday-shape vector test is added when the oracle re-issues it");
+    expect(source).toContain("The oracle's Thursday-shape vector test exists in");
+    expect(source).toContain("`print-unit-golden-v2.test.ts`: `reproduces v2.1 milestonesRoot and DERIVED termsHash from the example terms`");
   });
 });
