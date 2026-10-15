@@ -1,10 +1,10 @@
 import {
   chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readFileSync, renameSync, unlinkSync, writeFileSync, type Stats,
+  openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, type Stats,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, parse, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { WalletError } from "./errors.js";
 import { validateTransportUrl } from "./http.js";
 import { generateWalletKeys, validateWalletKeys } from "./keys.js";
@@ -86,7 +86,7 @@ function assertParentDirectory(stat: Stats, directory: string): void {
   if (stat.uid !== process.getuid!() && stat.uid !== 0) {
     throw new WalletError(`wallet_directory_owner_mismatch: ${JSON.stringify(directory)}`);
   }
-  if ((stat.mode & 0o022) !== 0) {
+  if ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) {
     throw new WalletError(`wallet_directory_permissions_refused: ${JSON.stringify(directory)}; run chmod 700 ${JSON.stringify(directory)}`);
   }
 }
@@ -102,20 +102,28 @@ function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-/** Refuse symlinks anywhere in the path, including existing parent components. */
-function rejectDirectorySymlinks(directory: string): void {
-  let current = directory;
-  const root = parse(current).root;
-  while (current !== root) {
-    const stat = optionalStat(current);
-    if (stat?.isSymbolicLink()) throw new WalletError("wallet_directory_symlink_refused");
-    if (stat && !stat.isDirectory()) throw new WalletError("wallet_directory_not_directory");
-    current = dirname(current);
+/** The key directory stays private; resolved ancestors follow safe_path rules. */
+function assertSafeAncestors(directory: string): void {
+  const directoryStat = optionalStat(directory);
+  if (directoryStat?.isSymbolicLink()) throw new WalletError("wallet_directory_symlink_refused");
+  if (directoryStat && !directoryStat.isDirectory()) throw new WalletError("wallet_directory_not_directory");
+  let existingParent = dirname(directory);
+  while (!optionalStat(existingParent)) {
+    const parent = dirname(existingParent);
+    if (parent === existingParent) throw new WalletError("wallet_directory_unavailable");
+    existingParent = parent;
+  }
+  let current = realpathSync(existingParent);
+  for (;;) {
+    assertParentDirectory(lstatSync(current), current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
 }
 
 function makeDirectories(directory: string): void {
-  rejectDirectorySymlinks(directory);
+  assertSafeAncestors(directory);
   const missing: string[] = [];
   let current = directory;
   while (!optionalStat(current)) {
@@ -154,13 +162,8 @@ function makeDirectories(directory: string): void {
 function checkStorage(create: boolean): Stats {
   requirePosix();
   const directory = storageDirectory();
-  if (!process.env.PCC_WALLET_DIR) {
-    const parent = join(homedir(), ".pcc");
-    if (create) makeDirectories(parent);
-    assertParentDirectory(lstatSync(parent), parent);
-  }
   if (create) makeDirectories(directory);
-  else rejectDirectorySymlinks(directory);
+  else assertSafeAncestors(directory);
   const stat = lstatSync(directory);
   assertDirectory(stat);
   return stat;

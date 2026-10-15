@@ -83,9 +83,9 @@ export async function walletRequest(
     const code = object(data) ? data.error : undefined;
     if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)
       && !/private_?key|secret|seed|mnemonic/i.test(code)) {
-      throw new WalletError(code);
+      throw new WalletError(code, 1, response.status);
     }
-    throw new WalletError("invalid_gateway_response");
+    throw new WalletError("invalid_gateway_response", 1, response.status);
   }
   if (!object(data)) throw new WalletError("invalid_gateway_response");
   return data;

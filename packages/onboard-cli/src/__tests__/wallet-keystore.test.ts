@@ -17,9 +17,27 @@ import {
 } from "../wallet/keystore.js";
 
 const defaultHome = vi.hoisted(() => ({ path: undefined as string | undefined }));
+const storageMocks = vi.hoisted(() => ({ foreignPath: undefined as string | undefined }));
 vi.mock("node:os", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:os")>();
   return { ...original, homedir: () => defaultHome.path ?? original.homedir() };
+});
+vi.mock("node:fs", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...original,
+    lstatSync: (path: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
+      const stat = original.lstatSync(path, options);
+      // Some sandboxes map their mount owners to nobody. Supplemental runs
+      // explicitly normalize only those known mount points, never user paths.
+      if (typeof path === "string" && typeof stat.uid === "number") {
+        if (["/", "/mnt", "/tmp"].includes(path)
+          && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
+        if (path === storageMocks.foreignPath) stat.uid = process.getuid!() + 1;
+      }
+      return stat;
+    },
+  };
 });
 
 let root: string;
@@ -28,6 +46,7 @@ let previousDirectory: string | undefined;
 
 beforeEach(() => {
   defaultHome.path = undefined;
+  storageMocks.foreignPath = undefined;
   previousDirectory = process.env.PCC_WALLET_DIR;
   root = mkdtempSync(join(tmpdir(), "pcc-wallet-keystore-"));
   directory = join(root, "wallets");
@@ -103,14 +122,68 @@ describe("wallet keystore", () => {
     expect(existsSync(directory)).toBe(false);
   });
 
-  it("refuses a symlinked default .pcc parent", () => {
+  it("accepts a safe symlinked default .pcc parent", () => {
     defaultHome.path = root;
     delete process.env.PCC_WALLET_DIR;
     const target = join(root, "parent-target");
     mkdirSync(target, { mode: 0o755 });
     symlinkSync(target, join(root, ".pcc"), "dir");
-    expect(() => create()).toThrow(/symlink/);
-    expect(existsSync(join(target, "wallets"))).toBe(false);
+    directory = join(root, ".pcc", "wallets");
+    create();
+    expect(readWallet("participant").label).toBe("participant");
+    expect(existsSync(join(target, "wallets", "participant.json"))).toBe(true);
+  });
+
+  it("accepts a safe symlinked ancestor for create, read and link updates", () => {
+    const target = join(root, "resolved-parent");
+    mkdirSync(target, { mode: 0o700 });
+    const alias = join(root, "alias-parent");
+    symlinkSync(target, alias, "dir");
+    directory = join(alias, "wallets");
+    process.env.PCC_WALLET_DIR = directory;
+    const wallet = create();
+    updateLink(wallet, { requestId: "lr_safe", status: "awaiting_approval" });
+    expect(readWallet("participant").link.requestId).toBe("lr_safe");
+    expect(lstatSync(join(target, "wallets")).mode & 0o777).toBe(0o700);
+    expect(lstatSync(join(target, "wallets", "participant.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it.each([0o770, 0o777])("refuses a writable non-sticky ancestor (%i) before creating storage", (mode) => {
+    const parent = join(root, "unsafe-parent");
+    mkdirSync(parent, { mode });
+    chmodSync(parent, mode);
+    directory = join(parent, "wallets");
+    process.env.PCC_WALLET_DIR = directory;
+    expect(() => create()).toThrow(/permissions/);
+    expect(existsSync(directory)).toBe(false);
+  });
+
+  it("allows a sticky shared ancestor while retaining a private wallets directory", () => {
+    const parent = join(root, "sticky-parent");
+    mkdirSync(parent, { mode: 0o1777 });
+    chmodSync(parent, 0o1777);
+    directory = join(parent, "wallets");
+    process.env.PCC_WALLET_DIR = directory;
+    create();
+    expect(lstatSync(directory).mode & 0o777).toBe(0o700);
+  });
+
+  it("refuses a foreign non-root ancestor after resolving it", () => {
+    const parent = join(root, "foreign-parent");
+    mkdirSync(parent, { mode: 0o700 });
+    storageMocks.foreignPath = parent;
+    directory = join(parent, "wallets");
+    process.env.PCC_WALLET_DIR = directory;
+    expect(() => create()).toThrow(/owner/);
+    expect(existsSync(directory)).toBe(false);
+  });
+
+  it("allows a sticky default .pcc parent", () => {
+    const parent = useDefaultDirectory();
+    chmodSync(parent, 0o1777);
+    create();
+    expect(lstatSync(parent).mode & 0o7777).toBe(0o1777);
+    expect(lstatSync(directory).mode & 0o777).toBe(0o700);
   });
 
   it.each([0o000, 0o777])("creates a 0600 file in a 0700 directory even under umask %i", (mask) => {

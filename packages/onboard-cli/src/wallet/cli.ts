@@ -31,7 +31,7 @@ Commands: init, link, fund, status, revoke, export-address
   link            Request browser approval for an existing key
   fund            Request test funds for an approved link
   status          Show public local facts and the stored request's status
-  revoke          Unlink using an owner API key, or use Wallets → Unlink
+  revoke          Use the approving API key; dashboard approvals: Wallets → Unlink
   export-address  Print the address or public key only
 
 Options:
@@ -259,8 +259,16 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       const apiKey = args.apiKey || process.env.PCC_API_KEY;
       if (!apiKey) throw new WalletError("revoke from the dashboard (Wallets → Unlink), or pass an owner API key", 2);
       if (!wallet.link.linkId) throw new WalletError("linked_wallet_required");
-      const data = await walletRequest(origin, `/api/wallets/${encodeURIComponent(wallet.link.linkId)}/revoke`, "POST",
-        args.reason ? { reason: args.reason } : {}, apiKey);
+      let data: Record<string, unknown>;
+      try {
+        data = await walletRequest(origin, `/api/wallets/${encodeURIComponent(wallet.link.linkId)}/revoke`, "POST",
+          args.reason ? { reason: args.reason } : {}, apiKey);
+      } catch (error) {
+        if (error instanceof WalletError && error.httpStatus === 404) {
+          throw new WalletError("This API key did not approve the link; use the approving API key or revoke from the dashboard (Wallets → Unlink).", 2);
+        }
+        throw error;
+      }
       if (data.status !== "revoked") invalidResponse();
       updateLink(wallet, { ...wallet.link, status: "revoked" });
       io.stdout("revoked\n");

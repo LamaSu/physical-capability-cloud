@@ -15,6 +15,20 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => home.path };
 });
 
+// Explicit supplemental normalization for sandbox-mapped root mounts only.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    lstatSync: ((path: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
+      const stat = actual.lstatSync(path, options);
+      if (typeof path === "string" && typeof stat.uid === "number" && ["/", "/mnt", "/tmp"].includes(path)
+        && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
+      return stat;
+    }) as typeof actual.lstatSync,
+  };
+});
+
 type Body = Record<string, unknown>;
 type Recorded = { path: string; method: string; body: Body; headers: IncomingHttpHeaders };
 type StubOptions = {
@@ -25,6 +39,7 @@ type StubOptions = {
   fundStatus?: number;
   createError?: { status: number; body: unknown };
   proofError?: { status: number; body: unknown };
+  revokeStatus?: number;
   mutateSiwe?: (message: SiweMessage) => void;
   mutateEd?: (message: Record<string, string | number>) => void;
   mutateText?: (message: string) => string;
@@ -171,7 +186,8 @@ class Gateway {
       return;
     }
     if (path === `/api/wallets/${LINK_ID}/revoke` && req.method === "POST") {
-      reply(200, { status: "revoked", revokedAt: new Date(clock).toISOString() });
+      if (this.options.revokeStatus === 404) reply(404, { error: "not_found" });
+      else reply(200, { status: "revoked", revokedAt: new Date(clock).toISOString() });
       return;
     }
     reply(404, { error: "not_found" });
@@ -687,5 +703,15 @@ describe("terminal link state", () => {
     expect(stderr.join("")).toContain("wallet_already_linked");
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID, accountId: ACCOUNT_ID });
     expect(gateway.requests).toEqual([]);
+  });
+});
+
+describe("approving credential refusal", () => {
+  it("revoke404 explains approving credential and dashboard with exit2", async () => {
+    const gateway = await linked({ revokeStatus: 404 });
+    expect(await run(gateway, "revoke", ["--api-key", "owner-api-token"])).toBe(2);
+    expect(stderr.join("")).toContain("This API key did not approve the link");
+    expect(stderr.join("")).toContain("dashboard (Wallets → Unlink)");
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
   });
 });

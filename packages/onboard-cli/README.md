@@ -113,6 +113,9 @@ on non-TTY stdin; browser approval still requires the human owner.
 Use `link`, `fund`, `status`, `export-address`, or owner-only `revoke`
 (`--api-key` / `PCC_API_KEY`, or Wallets → Unlink in the dashboard).
 There is no key export; encryption and Windows storage are not in v1.
+Only the API key that approved a link can list or revoke it through the API.
+For a link approved in the dashboard, use Wallets → Unlink in the dashboard;
+`revoke --api-key` refuses clearly when that credential did not approve it.
 
 ## License
 
