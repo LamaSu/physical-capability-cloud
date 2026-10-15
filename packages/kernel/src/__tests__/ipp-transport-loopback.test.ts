@@ -118,6 +118,20 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
   }
 
   for (const [name, prefix] of [
+    ["RTSP 100 with keep-alive", "RTSP/1.0 100 Continue\r\nConnection: keep-alive\r\n\r\n"],
+    ["ICE 100 with keep-alive", "ICE/1.0 100 Continue\r\nConnection: keep-alive\r\n\r\n"],
+    ["CR before HTTP 100", "\rHTTP/1.1 100 Continue\r\n\r\n"],
+  ]) {
+    it(`R6-1 F-A(b): production transport refuses trailing HTAB after ${name}`, async ({ skip }) => {
+      await withServer((_req, res) => {
+        res.socket?.end(`${prefix}HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\nRAW-BODY-NOT-CHUNKED`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
+      }, skip);
+    });
+  }
+
+  for (const [name, prefix] of [
     ["leading CRLFs", "\r\n\r\n"],
     ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
   ]) {

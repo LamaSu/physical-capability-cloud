@@ -92,8 +92,9 @@ export function createHttpIppTransport(options: HttpIppTransportOptions = {}): I
             return;
           }
         }
-        // An informational response is followed by another header block.
-        if (/^HTTP\/\d+\.\d+ 1\d\d(?: |$)/.test(lines[0])) { headerSize = 0; continue; }
+        // Only an HTTP/d.d 2xx-9xx block is final. Anything else (a 1xx in any protocol, 101,
+        // stray bytes) keeps scanning; the gate below refuses a final response the scan missed.
+        if (!/^HTTP\/\d\.\d [2-9]\d\d(?: |$)/.test(lines[0])) { headerSize = 0; continue; }
         headersChecked = true;
         framingSocket?.removeListener("data", inspectRawHeaders);
         return;

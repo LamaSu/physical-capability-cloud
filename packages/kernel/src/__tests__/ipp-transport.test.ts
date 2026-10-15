@@ -137,6 +137,20 @@ describe("HTTP IPP transport, socket-free", () => {
   });
 
   it.each([
+    ["RTSP 100 with keep-alive", "RTSP/1.0 100 Continue\r\nConnection: keep-alive\r\n\r\n"],
+    ["ICE 100 with keep-alive", "ICE/1.0 100 Continue\r\nConnection: keep-alive\r\n\r\n"],
+    ["CR before HTTP 100", "\rHTTP/1.1 100 Continue\r\n\r\n"],
+  ])("R6-1 F-A(b): refuses trailing HTAB after %s", async (_name, prefix) => {
+    const { transport } = scripted(`${prefix}HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\t\r\n\r\nRAW-BODY-NOT-CHUNKED`);
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
+  it("R6-1 F7: refuses 101 Switching Protocols with a terminal zero chunk", async () => {
+    const { transport } = scripted("HTTP/1.1 101 Switching Protocols\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+    expect(await transport(request())).toMatchObject({ ok: false, kind: "framing", sent: true });
+  });
+
+  it.each([
     ["leading CRLFs", "\r\n\r\n"],
     ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
   ])("R5 LOW-1: accepts valid Content-Length and chunked framing with %s", async (_name, prefix) => {
