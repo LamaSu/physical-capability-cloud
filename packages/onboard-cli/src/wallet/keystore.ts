@@ -174,7 +174,7 @@ function validateLink(link: unknown): asserts link is WalletRecord["link"] {
   if (link === null || typeof link !== "object" || Array.isArray(link)) throw new WalletError("invalid_keystore");
   for (const [key, value] of Object.entries(link)) {
     if (!LINK_FIELDS.has(key) || typeof value !== "string"
-      || (key === "status" ? !LINK_STATUSES.has(value) : !LINK_ID.test(value))) throw new WalletError("invalid_keystore");
+      || (key === "status" ? !LINK_STATUSES.has(value) : key !== "accountId" && !LINK_ID.test(value))) throw new WalletError("invalid_keystore");
   }
 }
 

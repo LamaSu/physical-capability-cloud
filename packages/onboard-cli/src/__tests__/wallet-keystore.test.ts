@@ -166,7 +166,7 @@ describe("wallet keystore", () => {
     expect(readWallet("participant").link).toEqual(pending.link);
   });
 
-  it.each(["status", "requestId", "linkId", "accountId"])("refuses unsafe stored link %s without revealing contents", (field) => {
+  it.each(["status", "requestId", "linkId"])("refuses unsafe stored link %s without revealing contents", (field) => {
     const wallet = create();
     writeFileSync(walletPath("participant"), JSON.stringify({
       ...wallet, link: { [field]: `invalid ${secretForms(wallet)[0]}` },
@@ -234,5 +234,13 @@ describe("wallet key signatures", () => {
     expect(failure).toBeInstanceOf(WalletError);
     for (const secret of secretForms(wallet)) expect(String(failure)).not.toContain(secret);
     expect(String(failure)).not.toMatch(/privateKey|seed/);
+  });
+});
+
+describe("opaque stored account ids", () => {
+  it("round-trips an email accountId without using it as a filename", () => {
+    const wallet = updateLink(create(), { status: "approved", linkId: "wl_test", accountId: "alice@example.com" });
+    expect(readWallet("participant").link.accountId).toBe("alice@example.com");
+    expect(walletPath(wallet.label)).toBe(join(directory, "participant.json"));
   });
 });

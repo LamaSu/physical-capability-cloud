@@ -142,7 +142,8 @@ function pollState(data: Record<string, unknown>): string {
   if (typeof status !== "string" || ![
     "authorization_pending", "slow_down", "approved", "denied", "expired", "failed",
   ].includes(status)) invalidResponse();
-  if (status === "approved" && (!identifier(data.linkId) || !identifier(data.accountId))) invalidResponse();
+  if (status === "approved" && (!identifier(data.linkId)
+    || (data.accountId !== undefined && typeof data.accountId !== "string"))) invalidResponse();
   return status;
 }
 
@@ -150,7 +151,8 @@ function saveState(wallet: WalletRecord, data: Record<string, unknown>): WalletR
   const status = pollState(data);
   return updateLink(wallet, {
     ...wallet.link, status,
-    ...(status === "approved" ? { linkId: data.linkId as string, accountId: data.accountId as string } : {}),
+    ...(status === "approved" ? { linkId: data.linkId as string,
+      ...(typeof data.accountId === "string" ? { accountId: data.accountId } : {}) } : {}),
   });
 }
 

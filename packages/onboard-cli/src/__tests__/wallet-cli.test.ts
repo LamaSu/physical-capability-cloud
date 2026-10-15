@@ -19,6 +19,7 @@ type Body = Record<string, unknown>;
 type Recorded = { path: string; method: string; body: Body; headers: IncomingHttpHeaders };
 type StubOptions = {
   statuses?: string[];
+  accountId?: unknown;
   interval?: number;
   lifetimeMs?: number;
   fundStatus?: number;
@@ -161,7 +162,7 @@ class Gateway {
     if (path === `/api/wallets/link-requests/${REQUEST_ID}` && req.method === "GET") {
       const statuses = this.options.statuses ?? ["authorization_pending", "slow_down", "approved"];
       const status = statuses[Math.min(this.pollIndex++, statuses.length - 1)];
-      reply(200, status === "approved" ? { status, linkId: LINK_ID, accountId: ACCOUNT_ID } : { status });
+      reply(200, status === "approved" ? { status, linkId: LINK_ID, accountId: this.options.accountId ?? ACCOUNT_ID } : { status });
       return;
     }
     if (path === `/api/wallets/${LINK_ID}/fund` && req.method === "POST") {
@@ -657,5 +658,13 @@ describe("wallet security pins", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected_http_request"));
     await expect(walletRequest("http://127.0.0.1:9", "/x", "POST", { nested: { private_key: "v" } })).rejects.toThrow("key_material_refused");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("opaque account ids", () => {
+  it.each(["alice@example.com", "a".repeat(254), "path/../is-data", "owner name", "", "非ASCII"])("accepts approved accountId as opaque string %#", async (accountId) => {
+    const gateway = await new Gateway({ statuses: ["approved"], accountId }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID, accountId });
   });
 });
