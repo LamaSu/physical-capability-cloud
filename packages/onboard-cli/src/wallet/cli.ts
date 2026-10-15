@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveConfig } from "../lib/config.js";
@@ -281,7 +282,13 @@ export async function main(argv: string[] = process.argv.slice(2), overrides: Pa
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+function isDirectRun(): boolean {
+  try {
+    return Boolean(process.argv[1]) && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolve(process.argv[1]));
+  } catch { return false; }
+}
+
+if (isDirectRun()) {
   main().then((code) => { process.exitCode = code; }, () => {
     process.stderr.write("wallet_operation_failed\n");
     process.exitCode = 1;
