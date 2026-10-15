@@ -523,6 +523,23 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("PROBE-NM1 transient -32005 with a data member (Infura shape) is retried then succeeds", async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockImplementationOnce(async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: {
+        code: -32005, message: "daily request count exceeded, request rate limited",
+        data: { rate: { allowed_rps: 1, backoff_seconds: 30, current_rps: 1.4 }, see: "https://infura.io/dashboard" },
+      } })))
+      .mockImplementation(async () => reply(1, rpcReceipt()));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toBe("success");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([-32005, -32603])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
     vi.useFakeTimers();
     const started = Date.now();
