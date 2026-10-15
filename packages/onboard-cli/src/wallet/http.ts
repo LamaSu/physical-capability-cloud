@@ -1,3 +1,6 @@
+import { createPublicClient, http, type Hex } from "viem";
+import { baseSepolia } from "viem/chains";
+import type { Role } from "./keystore.js";
 import { WalletError } from "./errors.js";
 
 type JsonObject = Record<string, unknown>;
@@ -89,6 +92,16 @@ async function json(response: Response): Promise<unknown> {
   } finally { reader.releaseLock(); }
 }
 
+function gatewayError(data: unknown, status: number): never {
+  // A gateway can supply a code, never arbitrary diagnostic text.
+  const code = object(data) ? data.error : undefined;
+  if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)
+    && !/private_?key|secret|seed|mnemonic/i.test(code)) {
+    throw new WalletError(code, 1, status);
+  }
+  throw new WalletError("invalid_gateway_response", 1, status);
+}
+
 export async function walletRequest(
   origin: string,
   path: string,
@@ -99,35 +112,133 @@ export async function walletRequest(
 ): Promise<JsonObject> {
   const response = await send(origin, path, method, body, apiKey, timeoutMs);
   const data = await json(response);
-  if (!response.ok) {
-    // Never echo arbitrary gateway text, values or diagnostic objects.
-    const code = object(data) ? data.error : undefined;
-    if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)
-      && !/private_?key|secret|seed|mnemonic/i.test(code)) {
-      throw new WalletError(code, 1, response.status);
-    }
-    throw new WalletError("invalid_gateway_response", 1, response.status);
-  }
+  if (!response.ok) gatewayError(data, response.status);
   if (!object(data)) throw new WalletError("invalid_gateway_response");
   return data;
 }
 
-/** W2 integration point: change the funding endpoint/response here only. */
-export async function requestFunding(origin: string, linkId: string): Promise<{
-  funded: boolean;
-  txHashes: string[];
-}> {
-  const response = await send(origin, `/api/wallets/${encodeURIComponent(linkId)}/fund`, "POST", {});
-  const data = await json(response);
-  if (response.status === 404) return { funded: false, txHashes: [] };
-  if (!response.ok) throw new WalletError(String(response.status));
-  if (response.status === 204) return { funded: true, txHashes: [] };
-  const hashes = new Set<string>();
-  function collect(value: unknown): void {
-    if (typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value)) hashes.add(value);
-    else if (Array.isArray(value)) value.forEach(collect);
-    else if (object(value)) Object.values(value).forEach(collect);
+export interface FundingClaim {
+  token: "eth" | "usdc";
+  amount: "0.0001" | "1";
+  status: "succeeded" | "failed" | "pending";
+  txHash?: Hex;
+}
+export interface FundingResult {
+  status: "funded" | "partial" | "pending" | "unavailable";
+  claims: FundingClaim[];
+}
+
+function invalidFundingResponse(): never { throw new WalletError("invalid_gateway_response"); }
+
+function exactKeys(value: JsonObject, required: readonly string[], optional: readonly string[] = []): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every(key => Object.hasOwn(value, key))
+    && Object.keys(value).every(key => allowed.has(key));
+}
+
+function parseFunding(data: unknown, role: Role): FundingResult {
+  if (!object(data) || !exactKeys(data, ["status", "claims"])
+    || (data.status !== "funded" && data.status !== "partial" && data.status !== "pending")
+    || !Array.isArray(data.claims) || data.claims.length < 1 || data.claims.length > 2) invalidFundingResponse();
+  const tokens = new Set<string>();
+  const claims = data.claims.map((value: unknown): FundingClaim => {
+    if (!object(value) || !exactKeys(value, ["token", "amount", "status"], ["txHash"])
+      || (value.token !== "eth" && value.token !== "usdc")
+      || (role === "device" && value.token !== "eth")
+      || value.amount !== (value.token === "eth" ? "0.0001" : "1")
+      || (value.status !== "succeeded" && value.status !== "failed" && value.status !== "pending")
+      || (Object.hasOwn(value, "txHash") && (typeof value.txHash !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value.txHash)))
+      || (value.status === "succeeded" && typeof value.txHash !== "string")
+      || tokens.has(value.token)) invalidFundingResponse();
+    tokens.add(value.token);
+    return {
+      token: value.token,
+      amount: value.amount as FundingClaim["amount"],
+      status: value.status,
+      ...(typeof value.txHash === "string" ? { txHash: value.txHash as Hex } : {}),
+    };
+  });
+  if ((data.status === "funded" && !claims.every(claim => claim.status === "succeeded" && claim.txHash))
+    || (data.status === "partial" && !claims.some(claim => claim.status === "failed"))
+    || (data.status === "pending" && !claims.some(claim => claim.status === "pending"))) invalidFundingResponse();
+  return { status: data.status as FundingResult["status"], claims };
+}
+
+/** Request-ID capability: no owner credential or owner funding route is used. */
+export async function requestFunding(
+  origin: string,
+  requestId: string,
+  role: Role = "agent",
+  usdc?: 1 | 2 | 3,
+): Promise<FundingResult> {
+  if (usdc !== undefined) {
+    if (role !== "agent") throw new WalletError("usdc_agent_only");
+    if (![1, 2, 3].includes(usdc)) throw new WalletError("invalid_usdc_amount");
   }
-  collect(data);
-  return { funded: true, txHashes: [...hashes] };
+  const response = await send(origin, `/api/wallets/link-requests/${encodeURIComponent(requestId)}/fund`, "POST",
+    usdc === undefined ? {} : { usdc });
+  let data: unknown;
+  try { data = await json(response); }
+  catch (error) {
+    // Unknown-route HTML or an empty body still means no funding capability.
+    // Oversized and stalled responses retain their separate refusal codes.
+    if (response.status === 404 && error instanceof WalletError && error.code === "invalid_gateway_response") {
+      return { status: "unavailable", claims: [] };
+    }
+    throw error;
+  }
+  if (response.status === 404) return { status: "unavailable", claims: [] };
+  if (response.status === 503 && object(data) && data.error === "faucet_unavailable") {
+    return { status: "unavailable", claims: [] };
+  }
+  if (!response.ok) {
+    if (response.status === 409 && object(data) && data.error === "cap_reached") {
+      if (data.cap !== "address" && data.cap !== "account" && data.cap !== "global") invalidFundingResponse();
+      throw new WalletError(`cap_reached (cap: ${data.cap})`, 1, response.status);
+    }
+    if (response.status === 403 && object(data) && data.error === "capability_expired") {
+      throw new WalletError("capability_expired: ask the account owner to fund the link using POST /api/wallets/:linkId/fund", 1, response.status);
+    }
+    gatewayError(data, response.status);
+  }
+  if (response.status !== 200) invalidFundingResponse();
+  return parseFunding(data, role);
+}
+
+/** Receipt checks use public RPC requests and never access wallet key material. */
+export async function waitForFundingReceipt(
+  hash: Hex,
+  rpcUrl: string,
+  timeoutMs = 60_000,
+): Promise<{ status: "success" | "reverted" }> {
+  const url = validateTransportUrl(rpcUrl, "rpc").toString();
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 2 || timeoutMs > 60_000) {
+    throw new WalletError("invalid_receipt_timeout");
+  }
+  try {
+    const client = createPublicClient({
+      chain: baseSepolia,
+      // viem starts its block watcher after the first receipt request settles.
+      // Finish that request before the overall timer can clean up the watcher.
+      transport: http(url, { timeout: Math.min(Math.floor(timeoutMs / 2), 15_000), retryCount: 0, fetchOptions: { redirect: "error" } }),
+    });
+    const receipt = await client.waitForTransactionReceipt({
+      hash, timeout: timeoutMs, pollingInterval: 1_000, checkReplacement: false,
+    });
+    if (receipt.transactionHash?.toLowerCase() !== hash.toLowerCase()) {
+      throw new WalletError("funding_receipt_mismatch");
+    }
+    if (receipt.status !== "success" && receipt.status !== "reverted") throw new WalletError("funding_receipt_invalid");
+    return { status: receipt.status };
+  } catch (error) {
+    if (error instanceof WalletError) throw error;
+    let cause: unknown = error;
+    for (let depth = 0; depth < 8 && cause instanceof Error; depth++) {
+      if (["WaitForTransactionReceiptTimeoutError", "TimeoutError", "AbortError"].includes(cause.name)) {
+        throw new WalletError("funding_receipt_timeout");
+      }
+      cause = (cause as Error & { cause?: unknown }).cause;
+    }
+    throw new WalletError("funding_rpc_unavailable");
+  }
 }

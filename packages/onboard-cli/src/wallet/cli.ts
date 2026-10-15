@@ -11,7 +11,7 @@ import {
 } from "./keystore.js";
 import { signWalletMessage } from "./keys.js";
 import { validateProofMessage } from "./proof.js";
-import { requestFunding, validateTransportUrl, walletRequest } from "./http.js";
+import { requestFunding, validateTransportUrl, waitForFundingReceipt, walletRequest, type FundingResult } from "./http.js";
 
 const CLIENT_VERSION = (JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
@@ -22,6 +22,8 @@ export interface WalletRuntime {
   prompt: () => Promise<string>;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
+  waitForReceipt: (hash: `0x${string}`, rpcUrl: string, timeoutMs: number) => Promise<{ status: "success" | "reverted" }>;
+  receiptTimeoutMs: number;
 }
 
 const HELP = `pcc-wallet — a wallet key held on your computer
@@ -42,6 +44,8 @@ Options:
   --key-type secp256k1|ed25519          Defaults: agent secp256k1, device ed25519
   --chain-id 84532                     Base Sepolia only
   --gateway <origin>                   Same gateway resolution as onboard
+  --rpc-url <url>                      Base Sepolia receipts (env: PCC_RPC_URL)
+  --usdc 1|2|3                        Optional agent funding amount
   --kernel-id <id>                     Optional device binding on init/link
   --yes                               Skip typed create only on non-TTY stdin
   --api-key <owner-key>                Revoke only (env: PCC_API_KEY)
@@ -65,6 +69,8 @@ interface Args {
   apiKey?: string;
   reason?: string;
   kernelId?: string;
+  rpcUrl?: string;
+  usdc?: 1 | 2 | 3;
 }
 
 function parseArgs(argv: string[]): Args | null {
@@ -79,7 +85,7 @@ function parseArgs(argv: string[]): Args | null {
   for (let i = 0; i < flags.length; i++) {
     const flag = flags[i];
     if (flag === "--yes") { yes = true; continue; }
-    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason", "--kernel-id"].includes(flag)) {
+    if (!["--role", "--label", "--key-type", "--chain-id", "--gateway", "--api-key", "--reason", "--kernel-id", "--rpc-url", "--usdc"].includes(flag)) {
       throw new WalletError("invalid_wallet_option");
     }
     const value = flags[++i];
@@ -107,9 +113,16 @@ function parseArgs(argv: string[]): Args | null {
     if (!/^[\x21-\x7E]{1,128}$/.test(kernelId) || /^(?:eip155|ed25519):/i.test(kernelId)) throw new WalletError("invalid_kernel_id");
     if (command !== "init" && command !== "link") throw new WalletError("invalid_wallet_option");
   }
+  const usdc = values["--usdc"];
+  if (usdc !== undefined) {
+    if (role !== "agent") throw new WalletError("usdc_agent_only");
+    if (!/^[123]$/.test(usdc)) throw new WalletError("invalid_usdc_amount");
+    if (command !== "init" && command !== "fund") throw new WalletError("invalid_wallet_option");
+  }
   return {
     command: command as Command, role, label, keyType, chainId: 84532,
     gateway: values["--gateway"], yes, apiKey: values["--api-key"], reason, kernelId,
+    rpcUrl: values["--rpc-url"], usdc: usdc === undefined ? undefined : Number(usdc) as 1 | 2 | 3,
   };
 }
 
@@ -134,6 +147,7 @@ function defaults(): WalletRuntime {
     stderr: (text) => { process.stderr.write(text); },
     stdinIsTTY: Boolean(process.stdin.isTTY), prompt: promptCreate, now: Date.now,
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
+    waitForReceipt: waitForFundingReceipt, receiptTimeoutMs: 60_000,
   };
 }
 
@@ -207,15 +221,45 @@ async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: st
   throw new WalletError("expired");
 }
 
-async function fundWallet(wallet: WalletRecord, io: WalletRuntime): Promise<boolean> {
-  if (!wallet.link.linkId || wallet.link.status !== "approved") throw new WalletError("approved_link_required");
-  const result = await requestFunding(wallet.gatewayOrigin, wallet.link.linkId);
-  if (!result.funded) {
-    io.stdout("funding is not available on this gateway; ask the operator for test funds\nlinked (unfunded)\n");
-    return false;
+function printClaims(result: FundingResult, io: WalletRuntime): void {
+  for (const claim of result.claims) io.stdout(`${claim.token} ${claim.amount} ${claim.status}${claim.txHash ? ` ${claim.txHash}` : ""}\n`);
+}
+
+async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: string, usdc?: 1 | 2 | 3): Promise<boolean> {
+  if (!wallet.link.linkId || !wallet.link.requestId || wallet.link.status !== "approved") throw new WalletError("approved_link_required");
+  const deadline = io.now() + 60_000;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const result = await requestFunding(wallet.gatewayOrigin, wallet.link.requestId, wallet.role, usdc);
+    if (result.status === "unavailable") {
+      io.stdout("funding is not available on this gateway; ask the operator for test funds\nlinked (unfunded)\n");
+      return false;
+    }
+    if (result.status === "pending") {
+      if (attempt === 7 || io.now() >= deadline) {
+        printClaims(result, io);
+        throw new WalletError("funding_pending");
+      }
+      await io.sleep(Math.min(500 * 2 ** attempt, 10_000, deadline - io.now()));
+      if (io.now() >= deadline) { printClaims(result, io); throw new WalletError("funding_pending"); }
+      continue;
+    }
+    if (result.status === "partial") printClaims(result, io);
+    for (const claim of result.claims) {
+      if (!claim.txHash) continue;
+      let receipt: { status: "success" | "reverted" };
+      try { receipt = await io.waitForReceipt(claim.txHash, rpcUrl, io.receiptTimeoutMs); }
+      catch (error) {
+        if (error instanceof WalletError) throw error;
+        throw new WalletError("funding_rpc_unavailable");
+      }
+      if (receipt.status !== "success") throw new WalletError("funding_transaction_reverted");
+    }
+    if (result.status === "partial") throw new WalletError("funding_partial");
+    printClaims(result, io);
+    io.stdout("funded\n");
+    return true;
   }
-  io.stdout(`funded\n${result.txHashes.map((hash) => `${hash}\n`).join("")}`);
-  return true;
+  throw new WalletError("funding_pending");
 }
 
 async function execute(args: Args, io: WalletRuntime): Promise<number> {
@@ -223,6 +267,8 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
     throw new WalletError("revoke from the dashboard (Wallets → Unlink), or pass an owner API key", 2);
   }
   const origin = gatewayOrigin(args.gateway);
+  const rpcUrl = args.rpcUrl ?? (process.env.PCC_RPC_URL || "https://sepolia.base.org");
+  if (args.command === "init" || args.command === "fund") validateTransportUrl(rpcUrl, "rpc");
   if (args.command === "init") {
     assertWalletAbsent(args.label);
     io.stdout(`pcc wallet init --role ${args.role} --label ${args.label}\nThis creates a NEW wallet key on this computer:\n  file      ${walletPath(args.label)} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser; then test funds arrive.\nType "create" to continue:\n`);
@@ -235,7 +281,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       chainId: args.chainId, gatewayOrigin: origin, createdAt: new Date(io.now()).toISOString(),
     });
     wallet = await linkWallet(wallet, io, args.kernelId);
-    if (await fundWallet(wallet, io)) io.stdout("ready\n");
+    if (await fundWallet(wallet, io, rpcUrl, args.usdc)) io.stdout("ready\n");
     return 0;
   }
   let wallet = readWallet(args.label);
@@ -253,7 +299,7 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
       await linkWallet(wallet, io, args.kernelId);
       return 0;
     case "fund":
-      await fundWallet(wallet, io);
+      await fundWallet(wallet, io, rpcUrl, args.usdc);
       return 0;
     case "status": {
       io.stdout(`label: ${wallet.label}\nrole: ${wallet.role}\nkey type: ${wallet.keyType}\n${wallet.address ? "address" : "public key"}: ${wallet.address ?? wallet.publicKey}\nchain: ${wallet.chainId}\ngateway: ${wallet.gatewayOrigin}\nfile: ${walletPath(wallet.label)} (mode 0600)\ncreated: ${wallet.createdAt}\nlocal status: ${wallet.link.status ?? "unlinked"}\n`);

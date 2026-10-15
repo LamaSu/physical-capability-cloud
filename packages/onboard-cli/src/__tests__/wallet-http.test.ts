@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { walletRequest } from "../wallet/http.js";
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); });
 
 describe("wallet HTTP transport", () => {
   it("refuses public HTTP before fetch even for a direct client call", async () => {

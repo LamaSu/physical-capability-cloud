@@ -22,7 +22,7 @@ vi.mock("node:fs", async (importOriginal) => {
     ...actual,
     lstatSync: ((path: import("node:fs").PathLike, options?: import("node:fs").StatOptions) => {
       const stat = actual.lstatSync(path, options);
-      if (typeof path === "string" && typeof stat.uid === "number" && ["/", "/mnt", "/tmp"].includes(path)
+      if (stat && typeof path === "string" && typeof stat.uid === "number" && ["/", "/mnt", "/tmp"].includes(path)
         && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
       return stat;
     }) as typeof actual.lstatSync,
@@ -37,6 +37,8 @@ type StubOptions = {
   interval?: number;
   lifetimeMs?: number;
   fundStatus?: number;
+  fundBody?: unknown;
+  fundSequence?: unknown[];
   createError?: { status: number; body: unknown };
   proofError?: { status: number; body: unknown };
   revokeStatus?: number;
@@ -66,6 +68,7 @@ class Gateway {
   signatureVerified = false;
   created: Body = {};
   pollIndex = 0;
+  fundIndex = 0;
 
   constructor(readonly options: StubOptions = {}) {
     this.server = createServer((req, res) => {
@@ -181,9 +184,12 @@ class Gateway {
       reply(200, status === "approved" ? { status, linkId: LINK_ID, accountId: this.options.accountId ?? ACCOUNT_ID } : { status });
       return;
     }
-    if (path === `/api/wallets/${LINK_ID}/fund` && req.method === "POST") {
+    if (path === `/api/wallets/link-requests/${REQUEST_ID}/fund` && req.method === "POST") {
       const status = this.options.fundStatus ?? 200;
-      reply(status, status < 300 ? { status: "funded", txHashes: [TX_HASH] } : { error: "funding_failed" });
+      const sequence = this.options.fundSequence;
+      reply(status, sequence ? sequence[Math.min(this.fundIndex++, sequence.length - 1)] : this.options.fundBody ?? (status < 300
+        ? { status: "funded", claims: [{ token: "eth", amount: "0.0001", status: "succeeded", txHash: TX_HASH }] }
+        : { error: status === 503 ? "faucet_unavailable" : "faucet_error" }));
       return;
     }
     if (path === `/api/wallets/${LINK_ID}/revoke` && req.method === "POST") {
@@ -295,6 +301,7 @@ function runtime(stdinIsTTY = false) {
     stdout: (text: string) => { stdout.push(text); },
     stderr: (text: string) => { stderr.push(text); },
     stdinIsTTY,
+    waitForReceipt: async () => ({ status: "success" as const }),
     prompt,
     now: () => clock,
     sleep: async (ms: number) => { sleeps.push(ms); clock += ms; },
@@ -461,10 +468,10 @@ describe("pcc-wallet ceremony", () => {
     expect(output).not.toContain("ready");
   });
 
-  it("fund 502 exits nonzero and prints only HTTP status for the error", async () => {
+  it("fund 502 exits nonzero and prints the faucet error code", async () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 502 }).start();
     expect(await run(gateway, "init", ["--yes"])).not.toBe(0);
-    expect(stderr.join("\n").trim()).toMatch(/^(?:HTTP )?502$/);
+    expect(stderr.join("\n").trim()).toBe("faucet_error");
     expect(stdout.join("\n")).not.toContain("ready");
   });
 
@@ -472,7 +479,7 @@ describe("pcc-wallet ceremony", () => {
     const gateway = await linked();
     gateway.requests.length = 0;
     expect(await run(gateway, "fund")).toBe(0);
-    expect(gateway.requests.map((request) => request.path)).toEqual([`/api/wallets/${LINK_ID}/fund`]);
+    expect(gateway.requests.map((request) => request.path)).toEqual([`/api/wallets/link-requests/${REQUEST_ID}/fund`]);
     expect(gateway.requests[0]?.body).toEqual({});
     expect(stdout.join("\n")).toContain(TX_HASH);
   });
@@ -768,5 +775,31 @@ describe("wallet create metadata and options", () => {
     expect(await main(["init", "--role", "agent", "--label", "wallet-test", "--gateway", "http://127.0.0.1:9", "--yes", "--kernel-id", "printer_1"], runtime())).toBe(1);
     expect(stderr.join("")).toContain("kernel_id_requires_device");
     expect(await readdir(walletDir)).toEqual([]);
+  });
+});
+
+describe("W2 init funding outcome", () => {
+  it("init partial prints each failed claim and never ready", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"], fundBody: { status: "partial", claims: [{ token: "eth", amount: "0.0001", status: "failed" }] } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stdout.join("")).toContain("eth 0.0001 failed");
+    expect(stdout.join("")).not.toContain("ready");
+    expect(stdout.join("")).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
+  });
+  it("init pending waits for final claims and receipts before ready", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"], fundSequence: [
+      { status: "pending", claims: [{ token: "eth", amount: "0.0001", status: "pending" }] },
+      { status: "funded", claims: [{ token: "eth", amount: "0.0001", status: "succeeded", txHash: TX_HASH }] },
+    ] }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    expect(gateway.requests.filter((request) => request.path.endsWith("/fund"))).toHaveLength(2);
+    expect(stdout.join("")).toContain("ready");
+  });
+  it("init503 faucet_unavailable keeps the approved link, exits0 without ready", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"], fundStatus: 503 }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+    expect(stdout.join("")).toContain("linked (unfunded)");
+    expect(stdout.join("")).not.toContain("ready");
   });
 });

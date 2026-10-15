@@ -36,7 +36,7 @@ vi.mock("node:fs", async (importOriginal) => {
       const stat = original.lstatSync(path, options);
       // Some sandboxes map their mount owners to nobody. Supplemental runs
       // explicitly normalize only those known mount points, never user paths.
-      if (typeof path === "string" && typeof stat.uid === "number") {
+      if (stat && typeof path === "string" && typeof stat.uid === "number") {
         if (["/", "/mnt", "/tmp"].includes(path)
           && process.env.PCC_WALLET_TEST_ROOT_UID === String(stat.uid)) stat.uid = 0;
         if (path === storageMocks.foreignPath) stat.uid = process.getuid!() + 1;

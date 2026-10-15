@@ -120,6 +120,15 @@ Prefer `PCC_API_KEY`: `--api-key` is visible to other local users in argv and
 can remain in shell history. Create requests include the installed CLI version.
 Device links accept `--kernel-id <id>` on `init` or `link`.
 An already approved wallet refuses `link`; revoke it before linking again.
+Funding uses the approved request's anonymous capability for up to 60 minutes.
+Agents may pass `--usdc 1|2|3`; devices receive ETH only. The CLI waits for every
+transaction receipt on Base Sepolia through `--rpc-url` / `PCC_RPC_URL`
+(default `https://sepolia.base.org`). Gateway and RPC URLs require HTTPS,
+except loopback HTTP for local use. Partial funding prints each claim and exits
+nonzero; retrying is idempotent. Pending funding retries at most eight times
+with bounded backoff. A missing faucet or `faucet_unavailable` leaves the wallet
+linked and unfunded, with exit 0. After `capability_expired`, ask the account
+owner to fund the link from the dashboard or the owner funding API.
 
 ## License
 
