@@ -803,3 +803,39 @@ describe("W2 init funding outcome", () => {
     expect(stdout.join("")).not.toContain("ready");
   });
 });
+
+describe("W1 final API contract", () => {
+  it("anonymous create/proof/fund never use lookup or put user codes in URLs", async () => {
+    vi.stubEnv("PCC_API_KEY", "owner-api-token");
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    expect(await run(gateway, "init", ["--yes", "--api-key", "owner-api-token"])).toBe(0);
+    expect(gateway.requests.every((request) => !request.path.includes("lookup") && !request.path.includes("BCDF-GHJK"))).toBe(true);
+    expect(gateway.requests.every((request) => request.headers.authorization === undefined)).toBe(true);
+    expect(gateway.requests.map((request) => request.path)).toEqual([
+      "/api/wallets/link-requests", `/api/wallets/link-requests/${REQUEST_ID}/proof`,
+      `/api/wallets/link-requests/${REQUEST_ID}`, `/api/wallets/link-requests/${REQUEST_ID}/fund`,
+    ]);
+    expect(gateway.created).not.toHaveProperty("apiKey");
+    expect(gateway.created).not.toHaveProperty("keyId");
+    expect(stdout.join("")).toContain("ready");
+  });
+  it.each([undefined, "operator_unlink"])("revoke uses the supplied approving credential and exact JSON body %#", async (reason) => {
+    const gateway = await linked();
+    vi.stubEnv("PCC_API_KEY", "another-owner-key");
+    gateway.requests.length = 0;
+    expect(await run(gateway, "revoke", ["--api-key", "approving-owner-key", ...(reason ? ["--reason", reason] : [])])).toBe(0);
+    expect(gateway.requests).toHaveLength(1);
+    expect(gateway.requests[0]?.headers.authorization).toBe("Bearer approving-owner-key");
+    expect(gateway.requests[0]?.headers["content-type"]).toBe("application/json");
+    expect(gateway.requests[0]?.body).toEqual(reason ? { reason } : {});
+    expect((await stored()).link).toMatchObject({ status: "revoked", linkId: LINK_ID });
+  });
+  it("keeps a dashboard-approved link when an API credential cannot revoke it", async () => {
+    const gateway = await linked({ revokeStatus: 404 });
+    vi.stubEnv("PCC_API_KEY", "another-owner-key");
+    expect(await run(gateway, "revoke")).toBe(2);
+    expect(stderr.join("")).toContain("dashboard (Wallets → Unlink)");
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+    expect(gateway.requests.some((request) => request.path === "/api/wallets")).toBe(false);
+  });
+});
