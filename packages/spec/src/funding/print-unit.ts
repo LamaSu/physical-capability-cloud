@@ -98,8 +98,12 @@ export function printUnitPrincipalWord(address: Address): Hex {
 
 export interface PrintUnitThursdayExpectationInput {
   jobId: string;
+  /** All-lowercase hex or valid EIP-55; any other casing refuses BAD_EXPECTATION before any RPC. */
   host: Address;
-  /** Must be the address of the wallet passed to prepareFunding; the returned `payer` expectation enforces it. */
+  /**
+   * Must be the address of the wallet passed to prepareFunding; the returned `payer` expectation enforces it.
+   * All-lowercase hex or valid EIP-55; any other casing refuses BAD_EXPECTATION before any RPC.
+   */
   fundingWallet: Address;
   /** Full subject block; hashes are canonical lowercase, settlement address accepts any hex casing. */
   subject: SubjectBlockFields;

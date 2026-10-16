@@ -189,6 +189,41 @@ describe("Thursday PRINT buyer expectation", () => {
     expect(apiModule.printUnitThursdayExpectation({ ...input, host: input.host.toLowerCase() as Address }).operator)
       .toBe(input.host.toLowerCase());
   });
+  it.each(["host", "fundingWallet"] as const)("BAD_EXPECTATION before any RPC: all-uppercase %s", async (field) => {
+    const { input, fx, chain } = await setup();
+    const address = `0x${POSTAGE.slice(2).toUpperCase()}` as Address;
+    const changed = { ...input, [field]: address };
+    changed.subject = subjectFor(changed.host, changed.fundingWallet);
+    const own = (await api()).printUnitThursdayExpectation(changed);
+    await expect(prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, expect: own, pins: testPins(fx) })).rejects.toMatchObject({
+      code: "BAD_EXPECTATION", message: expect.stringContaining(field === "host" ? "operator" : "payer"),
+    });
+    expect(chain.state.log).toEqual([]);
+  });
+  it.each(["host", "fundingWallet"] as const)("BAD_EXPECTATION before any RPC: bad-checksum %s", async (field) => {
+    const { input, fx, chain } = await setup();
+    const changed = { ...input, [field]: BAD_CHECKSUM };
+    changed.subject = subjectFor(changed.host, changed.fundingWallet);
+    const own = (await api()).printUnitThursdayExpectation(changed);
+    await expect(prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, expect: own, pins: testPins(fx) })).rejects.toMatchObject({
+      code: "BAD_EXPECTATION", message: expect.stringContaining(field === "host" ? "operator" : "payer"),
+    });
+    expect(chain.state.log).toEqual([]);
+  });
+  it.each([
+    ["host", "EIP-55"], ["host", "lowercase"],
+    ["fundingWallet", "EIP-55"], ["fundingWallet", "lowercase"],
+  ] as const)("prepares PRINT with %s in %s casing", async (field, casing) => {
+    const { input, fx, chain } = await setup();
+    const address = casing === "lowercase" ? input[field].toLowerCase() as Address : input[field];
+    const own = (await api()).printUnitThursdayExpectation({ ...input, [field]: address });
+    const prepared = await prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, expect: own, pins: testPins(fx) });
+    expect(prepared.expect[field === "host" ? "operator" : "payer"]).toBe(address);
+    expect(prepared.unchecked).toEqual([]);
+  });
   it.each(["checksum", "uppercase"])("accepts an equal subject settlement address in %s casing", async (casing) => {
     const { input, own, fx } = await setup();
     const address = casing === "checksum" ? input.host : `0x${input.host.slice(2).toUpperCase()}` as Address;
