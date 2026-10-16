@@ -71,6 +71,10 @@ describe("wallet secp256k1 proof checks", () => {
     expect(() => validateProofMessage(siwe(), secpWallet, requestId, now)).not.toThrow();
   });
 
+  it.each(["0123456789abcdef0123456789abcdef", "9f86d081884c7d659a2feaa0c55ad015"])("accepts a W1 hex nonce for SIWE: %s", nonce => {
+    expect(() => validateProofMessage(siwe({ nonce }), secpWallet, requestId, now)).not.toThrow();
+  });
+
   it("returns the validated SIWE expiration time in milliseconds", () => {
     const expirationTime = new Date(now + 600_000);
     expect(validateProofMessage(siwe({ expirationTime }), secpWallet, requestId, now))
@@ -128,6 +132,10 @@ describe("wallet secp256k1 proof checks", () => {
 describe("wallet ed25519 proof checks", () => {
   it("accepts canonical W1 bytes with the configured wallet fields", () => {
     expect(() => validateProofMessage(edMessage(), edWallet, requestId, now)).not.toThrow();
+  });
+
+  it.each(["0123456789abcdef0123456789abcdef", "9f86d081884c7d659a2feaa0c55ad015"])("accepts a W1 hex nonce for ed25519: %s", nonce => {
+    expect(() => validateProofMessage(edMessage({ nonce }), edWallet, requestId, now)).not.toThrow();
   });
 
   it("returns the validated ed25519 expiration time in milliseconds", () => {
