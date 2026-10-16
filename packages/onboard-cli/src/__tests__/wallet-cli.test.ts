@@ -37,6 +37,7 @@ type StubOptions = {
   mutateEd?: (message: Record<string, string | number>) => void;
   mutateText?: (message: string) => string;
   mutateCreated?: (created: Body) => void;
+  onPoll?: () => void;
 };
 
 const REQUEST_ID = "lr_0123456789ABCDEFGHJKMNPQRST";
@@ -170,6 +171,7 @@ class Gateway {
       return;
     }
     if (path === `/api/wallets/link-requests/${REQUEST_ID}` && req.method === "GET") {
+      this.options.onPoll?.();
       const statuses = this.options.statuses ?? ["authorization_pending", "slow_down", "approved"];
       const status = statuses[Math.min(this.pollIndex++, statuses.length - 1)];
       reply(200, status === "approved" ? { status, linkId: LINK_ID, ...(this.options.omitAccountId ? {} : { accountId: this.options.accountId ?? ACCOUNT_ID }) } : { status });
@@ -498,6 +500,18 @@ describe("pcc-wallet ceremony", () => {
     expect(clock).toBe(BASE_TIME + 600_000);
     expect(gateway.pollIndex).toBe(85);
   }, 120_000);
+
+  it("expires an approved poll answered after the signed expiry when the gateway expiry is later", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"], onPoll: () => { clock += 601_000; }, mutateCreated: (created) => {
+      created.expiresAt = new Date(BASE_TIME + 365 * 86_400_000).toISOString();
+    } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toMatch(/^expired\n/);
+    expect(stdout.join("")).not.toContain("linked");
+    expect(clock).toBe(BASE_TIME + 606_000);
+    expect(gateway.pollIndex).toBe(1);
+    expect((await stored()).link).toMatchObject({ status: "expired" });
+  });
 
   it("stops polling at the gateway expiry when the signed message expiry is later", async () => {
     const gateway = await new Gateway({ statuses: ["authorization_pending"], mutateCreated: (created) => {
