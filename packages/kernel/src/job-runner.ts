@@ -137,7 +137,11 @@ export class JobRunner {
         return refuse("input data is not well-formed text");
       }
       // Keep the hashed bytes private, including when the caller uses SharedArrayBuffer.
-      inputBytes = typeof data === "string" ? new Uint8Array(Buffer.from(data, "utf8")) : new Uint8Array(data);
+      try {
+        inputBytes = typeof data === "string" ? new Uint8Array(Buffer.from(data, "utf8")) : new Uint8Array(data);
+      } catch {
+        return refuse("input data must be a string or bytes");
+      }
       const computed = `sha256:${createHash("sha256").update(inputBytes).digest("hex")}`;
       if (computed !== gcodeHash) return refuse("input data does not match its hash");
     }

@@ -236,6 +236,14 @@ describe("B synchronous refusals", () => {
     else bad.tiers[0]!.minimumEvents++;
     await refusal({ tierLadder: bad }, "tier ladder is malformed: malformed-ladder", undefined, new LegacyStub());
   });
+  it.each((["prepare", "legacy"] as const).flatMap((path) =>
+    (["inputData", "gcodeData"] as const).map((field) => ({ path, field }))))(
+    "INFO-1 detached $field on $path is refused before commands or registerStep", async ({ path, field }) => {
+      const bytes = new Uint8Array([1, 2, 3]); const inputHash = hash(bytes);
+      structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+      await refusal({ inputData: undefined, gcodeData: undefined, [field]: bytes, inputHash },
+        "input data must be a string or bytes", undefined, path === "prepare" ? new NeutralStub() : new LegacyStub());
+    });
   it("X-17 empty input data with another hash is refused", async () => {
     await refusal({ inputData: "", inputHash: H }, "input data does not match its hash");
   });
