@@ -314,8 +314,11 @@ describe("W2 CLI funding", () => {
   });
   it("permanent pending agent five-ETH-only grant prints skipped and exits with funding_pending", async () => {
     const claims = realFundingClaims("agent", false).map(({ txHash: _hash, ...claim }) => ({ ...claim, status: "pending" }));
-    store(); gateway({ status: "pending", claims, skipped: SKIPPED });
+    store();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(JSON.stringify({ status: "pending", claims, skipped: SKIPPED }), { status: 200 }));
     expect(await fund()).toBe(1);
+    expect(fetchSpy.mock.calls.map(call => [String(call[0]), call[1]?.method]))
+      .toEqual(Array(8).fill([`${ORIGIN}/api/wallets/link-requests/${REQUEST_ID}/fund`, "POST"]));
     expect(output.join("")).toBe("eth 0.0001 pending\n".repeat(5) + "usdc 1 skipped: cap_reached (global)\n");
     expect(output.join("")).not.toContain("funded");
     expect(errors.join("")).toBe("funding_pending\n");
