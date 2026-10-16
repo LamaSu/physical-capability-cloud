@@ -47,6 +47,46 @@ function exact(signature: Hex, address: Hex = A) {
     args: [address, hashMessage(message), signature] });
   recording(req => req.method === "eth_chainId" ? "0x14a34" : req.params[0].data === data ? "0x01" : "0x00");
 }
+function capHarness() {
+  const held: { resolve: (data: Hex) => void; reject: (error: Error) => void }[] = [];
+  const checks: ReturnType<typeof check>[] = [];
+  let draining = false;
+  return {
+    // Changing transports clears only the chain cache, preserving the counter under test.
+    install(mode: "ok" | "mismatch" | "throw" = "ok") {
+      recording(req => {
+        if (req.method === "eth_chainId") {
+          if (mode === "throw") throw new HttpRequestError({ url: "https://sigverify.invalid", details: "offline" });
+          return mode === "mismatch" ? "0x2105" : "0x14a34";
+        }
+        if (draining) return "0x01";
+        return new Promise<Hex>((resolve, reject) => { held.push({ resolve, reject }); });
+      });
+    },
+    async burst(signature: string) {
+      const start = held.length;
+      const before = requests.filter(req => req.method === "eth_call").length;
+      const settled: Awaited<ReturnType<typeof check>>[] = [];
+      // Start together: a yield between the cap check and increment would wrongly admit 17.
+      const calls = Array.from({ length: 17 }, () => check(signature).then(result => {
+        settled.push(result);
+        return result;
+      }));
+      checks.push(...calls);
+      await vi.waitFor(() => expect(held.length - start + settled.length).toBe(17), { timeout: 1000 });
+      expect(held.length - start).toBe(16);
+      expect(requests.filter(req => req.method === "eth_call").length - before).toBe(16);
+      expect(settled).toEqual([{ ok: false, reason: "unavailable" }]);
+      return { calls, held: held.slice(start) };
+    },
+    async drain() {
+      // Also settle calls that reach the transport after a failed assertion, before reset.
+      draining = true;
+      held.forEach(call => call.resolve("0x01"));
+      await Promise.all(checks);
+    },
+  };
+}
 beforeEach(() => {
   requests = [];
   url = `https://sigverify.invalid/v2/${randomBytes(16).toString("hex")}`;
@@ -154,6 +194,72 @@ describe("smart-account signature verifier", () => {
     } finally {
       held.forEach(call => call.resolve("0x01"));
       await Promise.all(checks);
+    }
+  });
+  it("cap burst admits exactly sixteen simultaneous checks and refuses one immediately", async () => {
+    const signature = await smartSignature();
+    const cap = capHarness();
+    cap.install();
+    try {
+      expect(SIGVERIFY_MAX_IN_FLIGHT).toBe(16);
+      await cap.burst(signature);
+    } finally {
+      await cap.drain();
+    }
+  });
+  it("cap placement leaves EOA verification and config refusals available when full", async () => {
+    const signature = await smartSignature();
+    const cap = capHarness();
+    cap.install();
+    try {
+      await cap.burst(signature);
+      const before = requests.length;
+      const owner = privateKeyToAccount(generatePrivateKey());
+      const eoaSignature = await owner.signMessage({ message });
+      expect(await check(eoaSignature, { address: owner.address })).toEqual({ ok: true, kind: "eoa" });
+      expect(await check(signature, { chainId: 8453 })).toEqual({ ok: false, reason: "wrong_chain" });
+      vi.stubEnv("PCC_SIGVERIFY_CHAIN_ID", "bad");
+      expect(await check(signature)).toEqual({ ok: false, reason: "unconfigured" });
+      vi.stubEnv("PCC_SIGVERIFY_CHAIN_ID", "84532");
+      vi.stubEnv("PCC_SIGVERIFY_RPC_URL", "");
+      expect(await check(signature)).toEqual({ ok: false, reason: "unconfigured" });
+      expect(await check(`0x${"ab".repeat(65)}`)).toEqual({ ok: false, reason: "invalid" });
+      expect(requests).toHaveLength(before);
+    } finally {
+      await cap.drain();
+    }
+  });
+  it("cap release frees exactly one slot on every RPC exit and enforces sixteen again", async () => {
+    const signature = await smartSignature();
+    const cap = capHarness();
+    cap.install();
+    try {
+      const first = await cap.burst(signature);
+      first.held.forEach((call, index) => {
+        if (index < 6) call.resolve("0x01");
+        else if (index < 11) call.resolve("0x00");
+        else call.reject(new HttpRequestError({ url: "https://sigverify.invalid", details: "offline" }));
+      });
+      const results = await Promise.all(first.calls);
+      expect(results.filter(result => result.ok)).toEqual(Array.from({ length: 6 }, () => ({ ok: true, kind: "contract" })));
+      expect(results.filter(result => !result.ok && result.reason === "invalid")).toHaveLength(5);
+      expect(results.filter(result => !result.ok && result.reason === "unavailable")).toHaveLength(6);
+      for (const mode of ["mismatch", "throw"] as const) {
+        cap.install(mode);
+        const before = requests.length;
+        for (let i = 0; i < 20; i++) {
+          expect(await check(signature)).toEqual({ ok: false, reason: "unavailable" });
+        }
+        expect(requests.slice(before).map(req => req.method)).toEqual(Array(20).fill("eth_chainId"));
+      }
+      cap.install();
+      const again = await cap.burst(signature);
+      again.held.forEach(call => call.resolve("0x01"));
+      const finalResults = await Promise.all(again.calls);
+      expect(finalResults.filter(result => result.ok)).toEqual(Array.from({ length: 16 }, () => ({ ok: true, kind: "contract" })));
+      expect(finalResults.filter(result => !result.ok)).toEqual([{ ok: false, reason: "unavailable" }]);
+    } finally {
+      await cap.drain();
     }
   });
   it("rejects a one-byte tamper and a different message using the exact personal-sign hash", async () => {
