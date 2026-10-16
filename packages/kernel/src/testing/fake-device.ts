@@ -163,6 +163,11 @@ export class FakeDevice implements MachineAdapter {
     for (const role of ["startedType", "progressType", "completedType", "failedType"] as const) {
       if (!eventTypes.has(this[role])) throw new Error(`invalid ${role}`);
     }
+    for (const role of ["startedType", "progressType"] as const) {
+      if (this[role] === "execution_completed" || this[role] === "execution_failed") {
+        throw new Error(`${role} must not be a native terminal event type`);
+      }
+    }
     if (
       this.completedType === this.failedType ||
       [this.startedType, this.progressType].includes(this.completedType) ||

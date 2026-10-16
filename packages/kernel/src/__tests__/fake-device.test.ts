@@ -55,6 +55,15 @@ describe("FakeDevice construction", () => {
     expect(() => fixture(options as unknown as FakeDeviceOptions)).toThrow();
   });
 
+  it.each([
+    ["startedType", "execution_completed"], ["startedType", "execution_failed"],
+    ["progressType", "execution_completed"], ["progressType", "execution_failed"],
+  ] as const)("rejects native terminal %s=%s even with custom terminal roles", (role, type) => {
+    expect(() => fixture({
+      [role]: type, completedType: "batch_session_completed", failedType: "sensor_anomaly_detected",
+    })).toThrow(`${role} must not be a native terminal event type`);
+  });
+
   it("accepts every evidence device type and uses capability-specific event roles", async () => {
     for (const deviceType of EVIDENCE_DEVICE_TYPES) expect(fixture({ deviceType }).source.deviceType).toBe(deviceType);
     const device = await accepted({
