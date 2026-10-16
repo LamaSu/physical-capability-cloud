@@ -269,6 +269,16 @@ describe("smart-account signature verifier", () => {
     cap.install();
     try {
       const first = await cap.burst(signature);
+      // The cap is global: while the sixteen cold eth_calls are held, a check from another caller (its own
+      // address, message and signature) is refused without a request. It takes the warm path: the chain check is cached.
+      const coldFull = requests.length;
+      const other = check(`0x${"ab".repeat(100)}`, { address: "0x2222222222222222222222222222222222222222", message: `${message}: another caller` });
+      extra.push(other);
+      let otherResult: unknown = "pending";
+      void other.then(result => { otherResult = result; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(otherResult).toEqual({ ok: false, reason: "unavailable" });
+      expect(requests).toHaveLength(coldFull);
       first.held.forEach((call, index) => {
         if (index < 8) call.resolve("0x01");
         else call.reject(Object.assign(new Error("execution reverted"), { code: 3, data: "0x12345678" }));
