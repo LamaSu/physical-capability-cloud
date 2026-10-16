@@ -4,6 +4,7 @@
  */
 
 import { authorizedFetch } from "./authorized-fetch.js";
+import { scopeErrorMessage } from "./scope-notice.js";
 
 const API_BASE = "/api";
 
@@ -14,6 +15,8 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
+    const notice = await scopeErrorMessage(res, path.startsWith("/api/") ? path : `${API_BASE}${path}`, "POST");
+    if (notice) throw new Error(notice);
     let message = `API error: ${res.status}`;
     try {
       const json = (await res.json()) as { error?: string; message?: string };
