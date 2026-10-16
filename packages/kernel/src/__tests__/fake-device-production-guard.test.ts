@@ -11,18 +11,12 @@ const sourceRoot = fileURLToPath(new URL("..", import.meta.url));
 const testingRoot = path.join(sourceRoot, "testing");
 
 /** Parse module specifiers, so comments and ordinary string literals cannot trip the guard. */
-function testingSpecifiers(source: string, filename: string): string[] {
+function moduleSpecifiers(source: string, filename: string): string[] {
   const parsed = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
   const found: string[] = [];
   const inspect = (specifier: ts.Expression | undefined): void => {
     if (!specifier || !ts.isStringLiteralLike(specifier)) return;
-    const value = specifier.text;
-    const relative = value.startsWith(".") || path.isAbsolute(value)
-      ? path.resolve(path.dirname(filename), value) : undefined;
-    if (
-      value === "@pcc/kernel/testing" || value.startsWith("@pcc/kernel/testing/") ||
-      relative === testingRoot || relative?.startsWith(testingRoot + path.sep)
-    ) found.push(value);
+    found.push(specifier.text);
   };
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) inspect(node.moduleSpecifier);
@@ -38,6 +32,26 @@ function testingSpecifiers(source: string, filename: string): string[] {
   };
   visit(parsed);
   return found;
+}
+
+function testingSpecifiers(source: string, filename: string): string[] {
+  return moduleSpecifiers(source, filename).filter((value) => {
+    const relative = value.startsWith(".") || path.isAbsolute(value)
+      ? path.resolve(path.dirname(filename), value) : undefined;
+    return value === "@pcc/kernel/testing" || value.startsWith("@pcc/kernel/testing/") ||
+      relative === testingRoot || relative?.startsWith(testingRoot + path.sep);
+  });
+}
+
+function vitestSpecifiers(source: string, filename: string): string[] {
+  return moduleSpecifiers(source, filename).filter((value) => {
+    const relative = value.startsWith(".") || path.isAbsolute(value)
+      ? path.resolve(path.dirname(filename), value).replace(/\.(?:js|ts)$/, "") : undefined;
+    return value === "vitest" || value.startsWith("vitest/") ||
+      value === "@pcc/kernel/conformance/vitest" ||
+      value.startsWith("@pcc/kernel/conformance/vitest/") ||
+      relative === path.join(sourceRoot, "conformance", "vitest");
+  });
 }
 
 function productionSources(directory: string): string[] {
@@ -71,6 +85,9 @@ describe("FakeDevice production isolation", () => {
       path.join("adapters", "types.ts"), path.join("adapters", "ipp-adapter.ts"),
       path.join("adapters", "sila", "sila-adapter.ts"), path.join("digital", "accounting-kernel.ts"),
       path.join("opentrons", "adapter.ts"), path.join("safety", "governor.ts"),
+      path.join("conformance", "index.ts"), path.join("conformance", "clauses.ts"),
+      path.join("conformance", "report.ts"), path.join("conformance", "runner.ts"),
+      path.join("conformance", "vitest.ts"),
     ]));
     for (const relative of scanned) {
       expect(relative).not.toMatch(/\.(?:test|spec)\.ts$/);
@@ -110,6 +127,56 @@ describe("FakeDevice production isolation", () => {
     expect(violations).toEqual([]);
   });
 
+  it.each([
+    ["static import", 'import { it } from "vitest";', "conformance/runner.ts", "vitest"],
+    ["export star", 'export * from "./vitest.js";', "conformance/index.ts", "./vitest.js"],
+    ["dynamic import", 'const module = import("vitest/node");', "conformance/index.ts", "vitest/node"],
+    ["require", 'const module = require("@pcc/kernel/conformance/vitest");', "conformance/index.ts", "@pcc/kernel/conformance/vitest"],
+    ["import equals", 'import module = require("vitest");', "conformance/report.ts", "vitest"],
+    ["root re-export", 'export * from "./conformance/vitest.js";', "index.ts", "./conformance/vitest.js"],
+    ["deeper relative path", 'import { wrapper } from "../conformance/vitest.js";', "adapters/anything.ts", "../conformance/vitest.js"],
+    ["package subpath", 'export * from "@pcc/kernel/conformance/vitest/extra";', "index.ts", "@pcc/kernel/conformance/vitest/extra"],
+  ])("Vitest matcher catches %s", (_label, source, filename, specifier) => {
+    expect(vitestSpecifiers(source, path.join(sourceRoot, filename))).toEqual([specifier]);
+  });
+
+  it.each([
+    'import { result } from "./vitest-utils.js";',
+    'const name = "vitest";',
+    '// import { it } from "vitest";\nconsole.log("./vitest.js");',
+  ])("Vitest matcher ignores near-miss %s", (source) => {
+    expect(vitestSpecifiers(source, path.join(sourceRoot, "conformance", "index.ts"))).toEqual([]);
+  });
+
+  it("the main conformance entry and its core modules never import Vitest", () => {
+    const directory = path.join(sourceRoot, "conformance");
+    const scanned = productionSources(directory).filter((filename) => filename !== path.join(directory, "vitest.ts"));
+    expect(scanned.map((filename) => path.basename(filename)).sort()).toEqual([
+      "clauses.ts", "index.ts", "report.ts", "runner.ts",
+    ]);
+    const violations = scanned.flatMap((filename) =>
+      vitestSpecifiers(readFileSync(filename, "utf8"), filename).map((specifier) => ({
+        file: path.relative(sourceRoot, filename), specifier,
+      })),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it("all production sources except the opt-in wrapper never import Vitest", () => {
+    const wrapper = path.join(sourceRoot, "conformance", "vitest.ts");
+    const scanned = productionSources(sourceRoot).filter((filename) => filename !== wrapper);
+    expect(scanned).toEqual(expect.arrayContaining([
+      path.join(sourceRoot, "index.ts"), path.join(sourceRoot, "conformance", "index.ts"),
+    ]));
+    expect(scanned).not.toContain(wrapper);
+    const violations = scanned.flatMap((filename) =>
+      vitestSpecifiers(readFileSync(filename, "utf8"), filename).map((specifier) => ({
+        file: path.relative(sourceRoot, filename), specifier,
+      })),
+    );
+    expect(violations).toEqual([]);
+  });
+
   it.each(["fake", "fake-device"])("factory refuses unregistered %s instead of silently fabricating", (adapterType) => {
     const device: DeviceConfig = {
       id: "fake-device-production-guard", type: "machine",
@@ -129,5 +196,17 @@ describe("FakeDevice production isolation", () => {
     expect(testingExports).toEqual([["./testing", {
       types: "./dist/testing/index.d.ts", import: "./dist/testing/index.js", default: "./dist/testing/index.js",
     }]]);
+  });
+
+  it("package.json exposes conformance and Vitest through separate opt-in subpaths", () => {
+    const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as {
+      exports: Record<string, Record<string, string>>;
+    };
+    expect(manifest.exports["./conformance"]).toEqual({
+      types: "./dist/conformance/index.d.ts", import: "./dist/conformance/index.js", default: "./dist/conformance/index.js",
+    });
+    expect(manifest.exports["./conformance/vitest"]).toEqual({
+      types: "./dist/conformance/vitest.d.ts", import: "./dist/conformance/vitest.js", default: "./dist/conformance/vitest.js",
+    });
   });
 });

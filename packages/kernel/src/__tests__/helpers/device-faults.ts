@@ -6,6 +6,7 @@ export const DEVICE_FAULTS = [
   "emitAfterQuiesce", "quiesceEarly", "foreignDeviceJob", "unboundTerminal",
   "noDeviceJobId", "busyWithoutFlag", "cancelOtherJob", "stopInsteadOfCancel",
   "emitAfterDispose", "untagged",
+  "doubleTerminal", "payloadJobId", "noCancelJob", "acceptsUndeclared",
 ] as const;
 
 export type DeviceFault = typeof DEVICE_FAULTS[number];
@@ -55,12 +56,17 @@ export function withFault(device: FakeDevice, fault: DeviceFault): MachineAdapte
       delete event.source.simulated;
       delete event.payload.mock;
     }
+    if (fault === "payloadJobId") event.payload.jobId = boundId;
 
     publish(event);
+    if (fault === "doubleTerminal" && terminal && !changedEvent) {
+      changedEvent = true;
+      publish(event);
+    }
     if (terminal) activeId = undefined;
   });
 
-  return {
+  const adapter: MachineAdapter = {
     id: device.id,
     type: device.type,
     source: device.source,
@@ -69,6 +75,9 @@ export function withFault(device: FakeDevice, fault: DeviceFault): MachineAdapte
     onEvidence: (listener) => { listeners.add(listener); },
     async execute(command: MachineCommand) {
       const result = await device.execute(command);
+      if (fault === "acceptsUndeclared" && result.message === `undeclared command: ${command.type}`) {
+        return { ...result, success: true };
+      }
       if (command.type === "start" && result.success) {
         const id = result.data?.jobId;
         if (typeof id === "string" || typeof id === "number") activeId = id;
@@ -129,4 +138,6 @@ export function withFault(device: FakeDevice, fault: DeviceFault): MachineAdapte
       if (fault !== "emitAfterDispose") listeners.clear();
     },
   };
+  if (fault === "noCancelJob") delete adapter.cancelJob;
+  return adapter;
 }

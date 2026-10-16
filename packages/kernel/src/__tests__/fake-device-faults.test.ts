@@ -143,11 +143,12 @@ function withoutLastEvent(observation: Observation): Observation {
 }
 
 describe("FakeDevice test-only fault isolation", () => {
-  it("lists exactly the ten conformance faults", () => {
+  it("lists exactly the fourteen conformance faults", () => {
     expect(DEVICE_FAULTS).toEqual([
       "emitAfterQuiesce", "quiesceEarly", "foreignDeviceJob", "unboundTerminal",
       "noDeviceJobId", "busyWithoutFlag", "cancelOtherJob", "stopInsteadOfCancel",
       "emitAfterDispose", "untagged",
+      "doubleTerminal", "payloadJobId", "noCancelJob", "acceptsUndeclared",
     ]);
   });
 
@@ -317,6 +318,58 @@ describe("FakeDevice test-only fault isolation", () => {
     for (const source of repaired.sources) source.simulated = true;
     for (const payload of repaired.payloads) payload.mock = true;
     expect(repaired).toEqual(honest);
+  });
+
+  it("doubleTerminal adds exactly one bound terminal before quiescence", async () => {
+    const honest = await lifecycle();
+    const faulted = await lifecycle("doubleTerminal");
+    expect(faulted.eventTypes).toEqual(["execution_progress", "execution_completed", "execution_completed"]);
+    expect(faulted.bindingValues).toEqual(["work-1", "work-1", "work-1"]);
+    expect(faulted.quiesceOrder).toEqual([
+      "event:execution_progress", "event:execution_completed", "event:execution_completed", "quiesced",
+    ]);
+    const repaired = structuredClone(faulted);
+    for (const field of ["eventTypes", "bindingValues", "tags", "payloads", "sources", "quiesceOrder"] as const) {
+      repaired[field].splice(2, 1);
+    }
+    expect(repaired).toEqual(honest);
+  });
+
+  it("payloadJobId adds only the device identity under the PCC-reserved payload field", async () => {
+    const honest = await lifecycle();
+    const faulted = await lifecycle("payloadJobId");
+    expect(faulted.payloads).toHaveLength(2);
+    for (const payload of faulted.payloads) expect(payload).toHaveProperty("jobId", "work-1");
+    const repaired = structuredClone(faulted);
+    for (const payload of repaired.payloads) delete payload.jobId;
+    expect(repaired).toEqual(honest);
+  });
+
+  it("noCancelJob removes only the cancellation function", async () => {
+    const honestDevice = new FakeDevice("device-1", "kernel-1");
+    const faultedDevice = new FakeDevice("device-1", "kernel-1");
+    const faultedAdapter = withFault(faultedDevice, "noCancelJob");
+    expect(typeof honestDevice.cancelJob).toBe("function");
+    expect(faultedAdapter).not.toHaveProperty("cancelJob");
+    await honestDevice.dispose();
+    await faultedAdapter.dispose();
+    expect(await lifecycle("noCancelJob")).toEqual(await lifecycle());
+  });
+
+  it("acceptsUndeclared changes only the unsupported command result's success", async () => {
+    const run = async (fault?: DeviceFault): Promise<Observation> => {
+      const device = new FakeDevice("device-1", "kernel-1");
+      const adapter = fault ? withFault(device, fault) : device;
+      const observed = observe(device, adapter);
+      const result = await adapter.execute({ type: "load_gcode", payload: { gcode: "G28" } });
+      await observed.quiesce();
+      return observed.finish(result);
+    };
+    const honest = await run();
+    const faulted = await run("acceptsUndeclared");
+    expect(honest.start.success).toBe(false);
+    expect(faulted.start).toEqual({ ...honest.start, success: true });
+    expectSameExcept(faulted, honest, ["start"]);
   });
 
   it("terminal-role faults honor the configured vocabulary and binding key", async () => {
