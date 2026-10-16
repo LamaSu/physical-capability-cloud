@@ -89,6 +89,37 @@ class TestIndex(unittest.TestCase):
                 self.assertEqual(event["report"]["phase"], event["phase"], key)
                 self.assertIn(event["report"]["outcome"], OUTCOMES, key)
 
+    def assert_key_leak_guidance_covers_selected_path(self, guidance):
+        # F3 follow-up: rotation must delete the same key that step 3 selected.
+        signing = between(phase_text("00-prerequisites.md"), "## 3.", "## 4.")
+        examples = re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", signing)
+        self.assertEqual(len(examples), 1, "step 3 must have one node key example")
+        selections = [
+            node.value for node in ast.parse(examples[0]).body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "key_path" for target in node.targets)
+        ]
+        self.assertEqual(len(selections), 1, "step 3 must select one key path")
+        calls = [node for node in ast.walk(selections[0]) if isinstance(node, ast.Call)]
+        environment_names = [
+            call.args[0].value for call in calls if ast.unparse(call.func) == "os.environ.get"
+        ]
+        default_paths = [
+            call.args[0].value for call in calls if ast.unparse(call.func) == "os.path.expanduser"
+        ]
+        self.assertTrue(environment_names, "step 3 must select key path overrides")
+        self.assertEqual(len(default_paths), 1, "step 3 must select one default key path")
+        for reference in environment_names + default_paths:
+            self.assertIn(reference, guidance, f"prerequisites.key-leaked must mention {reference}")
+
+    def test_key_leak_guidance_covers_step_3_key_path_selection(self):
+        self.assert_key_leak_guidance_covers_selected_path(self.events["prerequisites.key-leaked"]["do"])
+
+    def test_key_leak_guidance_rejects_a_missing_key_path_override(self):
+        guidance = self.events["prerequisites.key-leaked"]["do"].replace("PCC_NODE_KEY_PATH", "")
+        with self.assertRaisesRegex(AssertionError, "prerequisites.key-leaked must mention PCC_NODE_KEY_PATH"):
+            self.assert_key_leak_guidance_covers_selected_path(guidance)
+
 
 class TestTruths(unittest.TestCase):
     def test_no_call_goes_to_production(self):
