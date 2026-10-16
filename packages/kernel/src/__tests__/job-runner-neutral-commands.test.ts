@@ -226,9 +226,19 @@ describe("B synchronous refusals", () => {
     else bad.tiers[0]!.minimumEvents++;
     await refusal({ tierLadder: bad }, "tier ladder is malformed: malformed-ladder", undefined, new LegacyStub());
   });
+  it("X-17 empty input data with another hash is refused", async () => {
+    await refusal({ inputData: "", inputHash: H }, "input data does not match its hash");
+  });
 });
 
 describe("C exact data hashing", () => {
+  it("X-17 empty input data is delivered as empty bytes", async () => {
+    const f = setup(); const inputHash = hash("");
+    expect((await f.run({ inputData: "", inputHash })).success).toBe(true);
+    expect(f.machine.commands[0]).toStrictEqual({
+      type: "prepare", payload: { jobId: f.config.jobId, inputHash, inputData: new Uint8Array(0) },
+    });
+  });
   it("C1 accepts the spec string hash", async () => {
     const f = setup(); const inputData = "liquid protocol";
     expect((await f.run({ inputData, inputHash: await sha256(inputData) })).success).toBe(true);
