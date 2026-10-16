@@ -2,12 +2,13 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { isFabricated, type EvidenceEvent } from "@pcc/spec";
 import type { MachineAdapter } from "../adapters/types.js";
 import {
-  CLAUSES, runAdapterConformance, type ClauseId, type ClauseStatus, type ConformanceReport,
+  CLAUSES, runAdapterConformance, type ClauseId, type ClauseStatus, type ConformanceProfile, type ConformanceReport,
 } from "../conformance/index.js";
 import {
   generateNegativeControls, SHIPPED_DEVICE_FAULTS,
   type NegativeControl, type NegativeControlOptions, type ShippedDeviceFault,
 } from "../testing/index.js";
+import { fakeConformanceFixture } from "./helpers/conformance-fixtures.js";
 
 type DeviceEvent = Omit<EvidenceEvent, "id" | "hash">;
 type Fault = ShippedDeviceFault | "modeFlip";
@@ -58,6 +59,10 @@ function generatedEntries() {
 
 function clauseOutcomes(report: ConformanceReport) {
   return Object.fromEntries(report.clauses.map(({ id, status, reason }) => [id, { status, reason }]));
+}
+
+function profileData({ name, kind, mode, bindingKey, declaredCommands, busy, terminalEvents }: ConformanceProfile) {
+  return { name, kind, mode, bindingKey, declaredCommands, busy, terminalEvents };
 }
 
 interface Delivery {
@@ -258,6 +263,30 @@ describe("generated adapter conformance negative controls", () => {
     expect(honest).toMatchObject({ id: "honest", clauseId: undefined, fault: undefined });
     expect(honest.profile.mode).toBe("mock");
     expect(controls.find(({ fault }) => fault === "modeFlip")?.profile.mode).toBe("real");
+  });
+
+  it.each([
+    {},
+    { preset: "ipp" },
+    { bindingKey: "runId" },
+    { preset: "ipp", bindingKey: "ippJobId" },
+    { bindingKey: "runId", deviceOptions: {
+      completedType: "batch_session_completed", failedType: "sensor_anomaly_detected",
+    } },
+  ] satisfies NegativeControlOptions[])("honest profile data matches the test helper for %j", (options) => {
+    const { honest } = generateNegativeControls(options);
+    const helper = fakeConformanceFixture({
+      preset: options.preset,
+      deviceOptions: { ...options.deviceOptions, bindingKey: options.bindingKey },
+    });
+    expect(profileData(honest.profile)).toEqual(profileData(helper.profile));
+  });
+
+  it("profile data comparison detects declaredCommands drift", () => {
+    const { honest } = generateNegativeControls();
+    expect(profileData(honest.profile)).not.toEqual(profileData({
+      ...honest.profile, declaredCommands: ["status"],
+    }));
   });
 
   it.each(generatedEntries().map((entry) => [entry.id, entry] as const))(
