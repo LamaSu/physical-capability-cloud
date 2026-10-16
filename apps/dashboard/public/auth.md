@@ -50,7 +50,7 @@ Never put the key in a URL, capability description, job parameter, log, public i
 - `401` means the protected request has no valid credential. Provision a key or replace the invalid/revoked key.
 - `404` during revocation means the key does not exist, or it is not the calling key and the caller has no wallet sign-in for its address.
 - `409` during revocation means the key was already revoked.
-- `429` means a rate limit was reached. Respect `Retry-After` when present and back off instead of rotating identities.
+- `429` means a rate limit was reached. Respect `Retry-After` when present and back off instead of rotating identities. Provisioning's `429` `too_many_keys` is the 5-key cap, not a rate limit: see Revocation.
 - `5xx` means the gateway could not complete the operation. Retry idempotent reads with bounded exponential backoff; do not blindly repeat physical or settlement writes.
 
 ## Revocation
@@ -63,4 +63,4 @@ Host: capability.network
 Authorization: Bearer pcc_live_REDACTED
 ```
 
-Revocation is permanent for that key. To rotate a key that is still in use, provision the new key, move your clients to it, then revoke the old key with the old key's own header before you discard it. If a key leaked, revoke it with itself first, then provision its replacement. If provisioning answers `429` `too_many_keys`, the identity already has 5 unrevoked keys (expired keys count too): revoke one you hold with itself, then provision. After a key revokes itself, every request with it answers `401`, a repeated DELETE included; that `401` confirms the revocation.
+Revocation is permanent for that key. To rotate a key that is still in use, provision the new key, move your clients to it, then revoke the old key with the old key's own header before you discard it. If a key leaked, revoke it with itself first, then provision its replacement. If provisioning answers `429` `too_many_keys`, the identity already has 5 unrevoked keys (expired keys count too): revoke a live key you hold with itself, then provision. An expired key can't authenticate, so it can't revoke itself; a wallet sign-in (SIWE) session can revoke any key of its address, and otherwise ask the gateway admin. After a key revokes itself, every protected request with it answers `401`, a repeated DELETE included (public reads such as `GET /api/health` ignore the key); that `401` confirms the revocation.
