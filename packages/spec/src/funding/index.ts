@@ -26,7 +26,9 @@
  * values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
  * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.
  * Optional expectations bind chainId, unit count, each unit's gross, ordered payouts, composition schema and
- * reclaim floor exactly when supplied. Without jobPolicyHash, unbound values remain the payload author's choices,
+ * reclaim floor exactly when supplied. Unless pinned by an optional expectation, the unit count, each g,
+ * the payout split and compositionSchemaVersion remain the payload author's choices.
+ * Without jobPolicyHash, unbound values remain the payload author's choices,
  * including milestoneIndex, stepId, expiry, policyNonce, each tier within the allowed set outside derive mode, reclaimAt within
  * the permitted window, each unit's feeBps up to maxFeeBps (which fixes f and n), its fee recipient within
  * feeRecipients, and its compositionRoot within compositionRoots. Deriving termsHash binds it to these configs
