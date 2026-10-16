@@ -13,37 +13,43 @@ export function fakeConformanceFixture(options: {
   deviceOptions?: FakeDeviceOptions;
   wrap?: (device: FakeDevice) => MachineAdapter;
 } = {}) {
-  const devices = new WeakMap<MachineAdapter, FakeDevice>();
+  // Test-only inspection history: one conformance run creates ten adapters.
+  // Each test owns its fixture; shipped controls retain devices only weakly.
   const made: Array<{ adapter: MachineAdapter; device: FakeDevice }> = [];
+  // Keep arbitrary device behavior available for runner edge tests without
+  // exporting the generator's private fixture or its restricted option policy.
+  const timing = { cancelConfirmMs: 35, pollMs: 5, jobTimeoutMs: 100, quiesceTimeoutMs: 50, settleMs: 10 };
+  const deviceOptions: FakeDeviceOptions = {
+    startedEvent: "inside-start",
+    ...options.deviceOptions,
+    ...(options.preset === undefined ? {} : { preset: options.preset }),
+    cancelConfirmMs: options.deviceOptions?.cancelConfirmMs ?? timing.cancelConfirmMs,
+  };
+  const ipp = deviceOptions.preset === "ipp";
+  const devices = new WeakMap<MachineAdapter, FakeDevice>();
   const makeAdapter = (): MachineAdapter => {
-    const device = new FakeDevice("conformance-device", "conformance-kernel", {
-      ...(options.preset ? { preset: options.preset } : {}),
-      startedEvent: "inside-start",
-      cancelConfirmMs: 35,
-      ...options.deviceOptions,
-    });
+    const device = new FakeDevice("conformance-device", "conformance-kernel", deviceOptions);
     const adapter = options.wrap?.(device) ?? (options.fault ? withFault(device, options.fault) : device);
     devices.set(adapter, device);
     made.push({ adapter, device });
     return adapter;
   };
   const profile: ConformanceProfile = {
-    name: options.preset ? "FakeDevice ipp" : "FakeDevice generic",
+    name: ipp ? "FakeDevice ipp" : "FakeDevice generic",
     kind: "physical",
     mode: "mock",
-    bindingKey: options.preset ? "ippJobId" : "deviceJobId",
-    declaredCommands: ["start", "stop", "status"],
+    bindingKey: deviceOptions.bindingKey ?? (ipp ? "ippJobId" : "deviceJobId"),
+    declaredCommands: [...(deviceOptions.declaredCommands ?? ["start", "stop", "status"])],
     busy: "second-start",
-    timing: {
-      cancelConfirmMs: 35,
-      pollMs: 5,
-      jobTimeoutMs: 100,
-      quiesceTimeoutMs: 50,
-      settleMs: 10,
-    },
+    timing,
+    ...(deviceOptions.completedType === undefined && deviceOptions.failedType === undefined ? {} : {
+      terminalEvents: {
+        completed: [deviceOptions.completedType ?? "execution_completed"],
+        failed: [deviceOptions.failedType ?? "execution_failed"],
+      },
+    }),
     prepareStart(adapter) {
-      const device = devices.get(adapter)!;
-      device.scriptStart({ outcome: "accept", deviceJobId: options.preset ? 41 : "device-job-1" });
+      devices.get(adapter)!.scriptStart({ outcome: "accept", deviceJobId: ipp ? 41 : "device-job-1" });
     },
     startCommand: (_adapter, { pccJobId }) => ({ type: "start", payload: { pccJobId } }),
     finish(adapter) {
