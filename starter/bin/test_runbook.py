@@ -136,28 +136,54 @@ class TestTruths(unittest.TestCase):
                     self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
         self.assertEqual(calls, 1)  # the operator's own; phase 6's buyer key went with its submission (115e)
 
-    def test_no_text_claims_a_server_made_or_returned_private_key(self):
+    def assert_no_server_private_key_claims(self, text, name):
         # E17e NC2: provisioning binds our public key; it never supplies a private one.
-        verbs = r"(?:generat\w*|creat\w*|return\w*|contain\w*|send\w*|provid\w*|receiv\w*)"
-        private_key = r"\bprivate(?:\s+signing)?\s+key\b"
+        verbs = r"(?:generat\w*|creat\w*|return\w*|contain\w*|send\w*|provid\w*|receiv\w*|mak\w*|made|issu\w*|includ\w*|hand\w*)"
+        private_key = r"\bprivate(?:[\s_]+signing)?[\s_]+key\b"
         negated = re.compile(
             rf"(?i)\b(?:never|does not|doesn't|will not|won't)\s+(?:{verbs}\s+(?:or|and)\s+)*"
-            rf"{verbs}\s+(?:(?:a|the|your|its|any)\s+)?{private_key}"
+            rf"{verbs}\s+(?:back\s+)?(?:(?:a|the|your|its|any)\s+)?{private_key}"
         )
         claim = re.compile(
-            rf"(?i)\bserver[- ](?:made|generated|created)\s+{private_key}|"
-            rf"\b(?:server|gateway|api|response)\b[^.!?\n]*\b{verbs}\b[^.!?\n]*{private_key}|"
-            rf"\b(?:return\w*|receiv\w*)\b[^.!?\n]*{private_key}|"
-            rf"{private_key}[^.!?\n]*\b(?:returned|received)\b"
+            rf"(?i)\b(?:server|gateway|api)[- ](?:made|generated|created|issued)\s+{private_key}|"
+            rf"\b(?:server|gateway|api|response)\b[^!?\n]*\b{verbs}\b[^!?\n]*{private_key}|"
+            rf"\b(?:return\w*|receiv\w*|hand\w*)\b[^!?\n]*{private_key}|"
+            rf"{private_key}[^!?\n]*\b(?:returned|received)\b"
         )
+        for sentence in re.split(r"(?<=[.!?])\s+|\n", text):
+            self.assertNotRegex(negated.sub("", sentence), claim, f"{name}: {sentence}")
+
+    def test_no_text_claims_a_server_made_or_returned_private_key(self):
         for path, text in text_files():
-            for sentence in re.split(r"(?<=[.!?])\s+|\n", text):
-                self.assertNotRegex(negated.sub("", sentence), claim, f"{path.name}: {sentence}")
+            self.assert_no_server_private_key_claims(text, path.name)
+
+    def test_private_key_claim_check_rejects_near_miss_wording(self):
+        # E17g N5: these three paraphrases escaped the original NC2 regression pin.
+        for text in (
+            "Provisioning gets a gateway-made private key back in the response.",
+            "Provisioning without it hands back a fresh private signing key.",
+            "The response then includes `ed25519.private_key`.",
+            "The gateway makes a private key.",
+            "The API issues a private signing key.",
+        ):
+            with self.subTest(text=text):
+                with self.assertRaises(AssertionError):
+                    self.assert_no_server_private_key_claims(text, "negative control")
+        self.assert_no_server_private_key_claims(
+            "The gateway never generates or returns a private signing key.", "allowed guidance"
+        )
+
+    def test_secrets_are_not_claimed_to_live_only_in_onboarding_state(self):
+        # The node signing key lives outside the onboarding folder, including its .pcc/.
+        for path, text in text_files():
+            self.assertNotRegex(
+                text, r"(?i)\b(?:secrets|keys)\b[*_`]*\s+live\s+only\s+in\s+[*_`]*\.pcc/", path.name
+            )
 
     def test_every_node_key_call_uses_the_selected_external_path(self):
         # R2, NC3 and NC5: older releases default to a key inside the onboarding folder.
         expected = ast.parse(
-            'os.environ.get("PCC_NODE_KEY_PATH") or os.path.expanduser("~/.pcc-node/keys.json")',
+            'os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")',
             mode="eval",
         ).body
         sources = list(text_files())
@@ -202,13 +228,53 @@ class TestTruths(unittest.TestCase):
                         ]
                         self.assertTrue(bindings, f"{path.name}: key path must be built here")
                         location = bindings[-1]
-                    self.assertEqual(ast.dump(location), ast.dump(expected), f"{path.name}: key path must select PCC_NODE_KEY_PATH or ~/.pcc-node/keys.json")
+                    self.assertEqual(ast.dump(location), ast.dump(expected), f"{path.name}: key path must select PCC_NODE_KEY_PATH, PCC_NODE_KEYS_FILE or ~/.pcc-node/keys.json")
                     phase_locations.setdefault(path.name, []).append(ast.dump(location))
             if documented_calls is not None:
                 self.assertEqual(found, documented_calls, f"{path.name}: every key call must be in a checked Python example")
         # L3: phase 5 must reopen exactly the location chosen in phase 0.
         self.assertEqual(phase_locations["00-prerequisites.md"], [ast.dump(expected)])
         self.assertEqual(phase_locations["05-register.md"], phase_locations["00-prerequisites.md"])
+
+    def assert_node_key_location_guard(self, text, name):
+        # r2 has no location checks: both snippets must refuse before creating directories.
+        examples = [
+            code for code in re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", text)
+            if re.search(r"\bload_or_create_keys\s*\(", code)
+        ]
+        self.assertEqual(len(examples), 1, f"{name}: expected one node key example")
+        code = examples[0]
+        tree = ast.parse(code)
+        selected = [
+            i for i, node in enumerate(tree.body)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "key_path" for target in node.targets)
+        ]
+        self.assertEqual(len(selected), 1, f"{name}: expected one key path selection")
+        guard = tree.body[selected[0] + 1]
+        expected = ast.parse(
+            'if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):\n'
+            '    raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")'
+        ).body[0]
+        self.assertEqual(
+            ast.dump(guard), ast.dump(expected),
+            f"{name}: key path guard must refuse non-absolute and in-folder paths immediately after selection",
+        )
+        return ast.get_source_segment(code, guard)
+
+    def test_both_node_key_snippets_guard_the_selected_location(self):
+        for name in ("00-prerequisites.md", "05-register.md"):
+            with self.subTest(name=name):
+                self.assert_node_key_location_guard(phase_text(name), name)
+
+    def test_removing_either_node_key_guard_is_rejected(self):
+        for name in ("00-prerequisites.md", "05-register.md"):
+            with self.subTest(name=name):
+                text = phase_text(name)
+                guard = self.assert_node_key_location_guard(text, name)
+                without_guard = text.replace(guard, "", 1)
+                with self.assertRaisesRegex(AssertionError, "key path guard must refuse"):
+                    self.assert_node_key_location_guard(without_guard, name)
 
     def test_node_key_location_guidance_requires_linux_and_an_external_home(self):
         # E17e NC4: retain the location constraints even when an older release cannot enforce them.
