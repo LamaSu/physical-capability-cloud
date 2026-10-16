@@ -651,12 +651,15 @@ export async function createJobFromSession(
   // operator daemon (which polls status=queued) never sees, stranding a
   // stranger's paid job forever. Treat "not our own kernel" as external.
   let localKernelId: string | undefined;
+  let hasExplicitConfig = false;
   try {
-    localKernelId = getKernelService().kernelId;
+    const service = getKernelService();
+    localKernelId = service.kernelId;
+    hasExplicitConfig = service.hasExplicitConfig;
   } catch {
     localKernelId = undefined;
   }
-  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId);
+  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId, hasExplicitConfig);
 
   repos.jobs.insert({
     id: jobId,

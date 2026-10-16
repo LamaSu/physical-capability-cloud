@@ -23,7 +23,7 @@ import {
   populateJobList,
 } from "./populators/job.populator.js";
 import { getKernelService } from "../services/kernel-service.js";
-import { canDispatchJobLocally } from "../services/local-job-dispatch.js";
+import { localJobDispatchDecision } from "../services/local-job-dispatch.js";
 import { auditService } from "../services/audit-service.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { trackServerEvent } from "../services/posthog-service.js";
@@ -76,12 +76,15 @@ export interface SubmitJobInput {
   description?: string;
   title?: string;
   parameters?: Record<string, unknown>;
+  /** A strict true can only remove local dispatch. */
+  queueOnly?: unknown;
 }
 
 export interface JobSubmitResult {
   jobId: string;
   deviceId: string | null;
   status: "queued" | "accepted";
+  reason?: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"];
 }
 
 export interface JobStatusResult {
@@ -322,31 +325,32 @@ export class JobFacade extends BaseFacade {
         // KernelService not initialized — treat as external kernel path
       }
 
-      const queued = () => {
+      const queued = (reason: Extract<ReturnType<typeof localJobDispatchDecision>, { ok: false }>["reason"]) => {
         pipelineTelemetry.emit(jobId, "job_submit", "completed", {
-          metadata: { kernelId, stepId, external: true },
+          metadata: { kernelId, stepId, external: true, reason },
         });
-        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true }, actorId);
+        trackServerEvent("job_submitted", { kernelId, capabilityType: body.capabilityId, external: true, reason }, actorId);
         auditService.log({
           eventType: "job.submitted",
           actor: actorId,
           resourceType: "job",
           resourceId: jobId,
           action: "create",
-          metadata: { kernelId, stepId, external: true, assuranceTier },
+          metadata: { kernelId, stepId, external: true, assuranceTier, reason },
           ip,
           userAgent,
         });
-        return { jobId, deviceId: null, status: "queued" as const };
+        return { jobId, deviceId: null, status: "queued" as const, reason };
       };
 
-      if (!svc || !canDispatchJobLocally(svc.kernelId, kernelId)) return queued();
+      const decision = localJobDispatchDecision(svc?.kernelId, kernelId, svc?.hasExplicitConfig ?? false, body.queueOnly);
+      if (!decision.ok) return queued(decision.reason);
 
       // Local kernel: fire-and-forget via KernelService
       try {
-        const result = await svc.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier });
+        const result = await svc!.submitJob({ jobId, kernelId, stepId, deviceId, gcodeHash, assuranceTier });
         // The stop or operator switch may have changed during safety preflight.
-        if (result.status === "queued") return queued();
+        if (result.status === "queued") return queued(result.reason);
         pipelineTelemetry.emit(result.jobId, "job_submit", "completed", {
           metadata: { kernelId, stepId, deviceId: result.deviceId },
         });

@@ -170,7 +170,7 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
 
   it("dispatches a job as 'queued' when kernelId differs from the gateway's own kernel", async () => {
     // Gateway owns "kernel-home" in-process; the job targets a different kernel.
-    vi.mocked(getKernelService).mockReturnValue({ kernelId: "kernel-home" } as any);
+    vi.mocked(getKernelService).mockReturnValue({ kernelId: "kernel-home", hasExplicitConfig: true } as any);
 
     const job = await submitJob(app, "kernel-nyc", "user-seam1-different");
     expect(job.status).toBe("queued");
@@ -179,7 +179,7 @@ describe("SEAM-1: remote-kernel job dispatch routing", () => {
   it("keeps a gateway-local job 'active' in mock settlement (gateway owns the kernel — OT-2/pizza in-process demo)", async () => {
     // Gateway owns kernel-nyc in-process AND the job targets it -> local path.
     // This must NOT regress: the in-process demos rely on immediate "active".
-    vi.mocked(getKernelService).mockReturnValue({ kernelId: "kernel-nyc" } as any);
+    vi.mocked(getKernelService).mockReturnValue({ kernelId: "kernel-nyc", hasExplicitConfig: true } as any);
 
     const job = await submitJob(app, "kernel-nyc", "user-seam1-local");
     expect(job.status).toBe("active");

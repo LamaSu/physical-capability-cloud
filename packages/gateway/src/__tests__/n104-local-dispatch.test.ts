@@ -1,9 +1,13 @@
 /** N104: every submission entry point fails closed before in-process actuation. */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Fastify, { type FastifyInstance } from "fastify";
+import { JobRunner } from "@pcc/kernel";
 import { schema, eq } from "@pcc/store";
 import { closeStore, getRepos, getStore, initStore } from "../db.js";
-import { getKernelService } from "../services/kernel-service.js";
+import { getKernelService, KernelService } from "../services/kernel-service.js";
+import { pipelineTelemetry } from "../telemetry.js";
+import { auditService } from "../services/audit-service.js";
+import { UNAVAILABLE_POLICY_CASES, applyUnavailablePolicy } from "./helpers/emergency-stop-policy-cases.js";
 import { jobSubmitRoutes } from "../routes/job-submit.js";
 import { paidJobFlowRoutes } from "../routes/paid-job-flow.js";
 import { negotiationRoutes } from "../routes/negotiation.js";
@@ -48,10 +52,10 @@ vi.mock("../services/kernel-service.js", async (importActual) => ({
 const KERNEL = "kernel-nyc";
 const ADMIN = "n104-submit-admin";
 const headers = { "x-admin-key": ADMIN };
-const ENV_KEYS = ["PCC_JOB_SUBMIT_QUEUE_ONLY", "PCC_ADMIN_KEY", "PCC_A2A_AUTH_DISABLED", "MOCK_SETTLEMENT", "PCC_DB_PATH"] as const;
+const ENV_KEYS = ["PCC_JOB_SUBMIT_QUEUE_ONLY", "PCC_ADMIN_KEY", "PCC_A2A_AUTH_DISABLED", "MOCK_SETTLEMENT", "PCC_DB_PATH", "NODE_ENV", "KERNEL_CONFIG", "KERNEL_CONFIG_FILE", "KERNEL_ID"] as const;
 let savedEnv: Record<string, string | undefined>;
 let app: FastifyInstance;
-let kernel: { kernelId: unknown; submitJob: ReturnType<typeof vi.fn> };
+let kernel: { kernelId: unknown; hasExplicitConfig: boolean; submitJob: ReturnType<typeof vi.fn> };
 
 function stopKernel() {
   const { db } = getStore();
@@ -170,6 +174,7 @@ const paths = [
 beforeEach(async () => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
   delete process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
+  process.env.NODE_ENV = "test";
   process.env.PCC_ADMIN_KEY = ADMIN;
   process.env.PCC_A2A_AUTH_DISABLED = "true";
   process.env.MOCK_SETTLEMENT = "true";
@@ -178,6 +183,7 @@ beforeEach(async () => {
   __resetA2ATasksForTest();
   kernel = {
     kernelId: KERNEL,
+    hasExplicitConfig: true,
     submitJob: vi.fn(async (input: { jobId: string }) => ({ jobId: input.jobId, deviceId: "n104-machine", status: "accepted" })),
   };
   vi.mocked(getKernelService).mockImplementation(() => kernel as any);
@@ -200,6 +206,12 @@ afterEach(async () => {
 });
 
 describe.each(paths)("N104 $name", (path) => {
+  it("queues when the local runtime config was not explicit", async () => {
+    kernel.hasExplicitConfig = false;
+    expect((await path.submit()).status).toBe("queued");
+    expect(kernel.submitJob).not.toHaveBeenCalled();
+  });
+
   it("queues when the initialized KernelService has no kernelId", async () => {
     kernel.kernelId = undefined;
     expect((await path.submit()).status).toBe("queued");
@@ -229,6 +241,20 @@ describe.each(paths)("N104 $name", (path) => {
     // proving each entry point rechecks at routing rather than relying on it.
     vi.mocked(getKernelService).mockImplementation(() => {
       stopKernel();
+      return kernel as any;
+    });
+    expect((await path.submit()).status).toBe("queued");
+    expect(kernel.submitJob).not.toHaveBeenCalled();
+  });
+
+  it.each(UNAVAILABLE_POLICY_CASES)("queues unreadable policy: $label", async (policyCase) => {
+    // Install after quote/review reads, just as the stop can change before routing.
+    let installed = false;
+    vi.mocked(getKernelService).mockImplementation(() => {
+      if (!installed) {
+        installed = true;
+        applyUnavailablePolicy(KERNEL, policyCase);
+      }
       return kernel as any;
     });
     expect((await path.submit()).status).toBe("queued");
@@ -289,7 +315,7 @@ describe("N104 local identity and operator-only flag", () => {
     expect(kernel.submitJob).not.toHaveBeenCalled();
   });
 
-  it("a client cannot enable operator queue-only mode", async () => {
+  it("a client can request queue-only for its own submission", async () => {
     const res = await app.inject({
       method: "POST", url: "/api/jobs/submit",
       payload: {
@@ -299,7 +325,81 @@ describe("N104 local identity and operator-only flag", () => {
       },
     });
     expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "queued", deviceId: null, reason: "queue_only" });
+    expect(kernel.submitJob).not.toHaveBeenCalled();
+  });
+
+  it.each([false, "true", "false", "TRUE", 1, 0, null, {}, []])("ignores non-true client queueOnly %j", async (value) => {
+    const res = await app.inject({
+      method: "POST", url: "/api/jobs/submit",
+      payload: { kernelId: KERNEL, stepId: "client-strict-boolean", queueOnly: value },
+    });
+    expect(res.statusCode).toBe(200);
     expect(res.json().status).toBe("accepted");
     expect(kernel.submitJob).toHaveBeenCalledOnce();
+  });
+
+  it.each([undefined, "true", "TRUE", "0", ""])('production defaults to queue-only for %j', async (value) => {
+    process.env.NODE_ENV = "production";
+    if (value === undefined) delete process.env.PCC_JOB_SUBMIT_QUEUE_ONLY;
+    else process.env.PCC_JOB_SUBMIT_QUEUE_ONLY = value;
+    const res = await app.inject({
+      method: "POST", url: "/api/jobs/submit", payload: { kernelId: KERNEL, stepId: "prod-default" },
+    });
+    expect(res.json()).toMatchObject({ status: "queued", deviceId: null, reason: "queue_only" });
+    expect(kernel.submitJob).not.toHaveBeenCalled();
+  });
+
+  it('production exact "false" permits an explicitly configured local kernel', async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PCC_JOB_SUBMIT_QUEUE_ONLY = "false";
+    const res = await app.inject({
+      method: "POST", url: "/api/jobs/submit", payload: { kernelId: KERNEL, stepId: "prod-local-opt-in" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("accepted");
+    expect(kernel.submitJob).toHaveBeenCalledOnce();
+  });
+
+  it("P1: production's unconfigured placeholder queues without running", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.KERNEL_CONFIG;
+    delete process.env.KERNEL_CONFIG_FILE;
+    delete process.env.KERNEL_ID;
+    const repos = getRepos();
+    repos.kernels.insert({ ...repos.kernels.findById(KERNEL)!, id: "kernel_dev_001" });
+    repos.capabilities.insert({ ...repos.capabilities.findById("cap-nyc-fdm")!, id: "cap-placeholder", kernelId: "kernel_dev_001" });
+    const run = vi.spyOn(JobRunner.prototype, "run").mockImplementation(() => new Promise(() => {}));
+    const service = new KernelService();
+    expect(service.hasExplicitConfig).toBe(false);
+    vi.mocked(getKernelService).mockReturnValue(service);
+    const res = await app.inject({
+      method: "POST", url: "/api/jobs/submit",
+      payload: { kernelId: "kernel_dev_001", stepId: "p1" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "queued", deviceId: null, reason: "no_configured_local_kernel" });
+    expect(job(res.json().jobId).status).toBe("queued");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("records a late-blocked local job as queued in telemetry and audit", async () => {
+    const telemetry = vi.spyOn(pipelineTelemetry, "emit");
+    kernel.submitJob.mockImplementation(async ({ jobId }: { jobId: string }) => {
+      stopKernel();
+      return { jobId, deviceId: null, status: "queued", reason: "emergency_stop" };
+    });
+    const res = await app.inject({
+      method: "POST", url: "/api/jobs/submit", payload: { kernelId: KERNEL, stepId: "late-block" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ status: "queued", deviceId: null });
+    expect(kernel.submitJob).toHaveBeenCalledOnce();
+    expect.soft(telemetry).toHaveBeenCalledWith(res.json().jobId, "job_submit", "completed", {
+      metadata: { kernelId: KERNEL, stepId: "late-block", external: true, reason: "emergency_stop" },
+    });
+    expect.soft(auditService.query({ resourceId: res.json().jobId, eventType: "job.submitted" }))
+      .toEqual([expect.objectContaining({ metadata: expect.objectContaining({ external: true, reason: "emergency_stop" }) })]);
+    expect(res.json().reason).toBe("emergency_stop");
   });
 });

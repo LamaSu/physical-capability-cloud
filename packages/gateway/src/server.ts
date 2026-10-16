@@ -180,7 +180,7 @@ import { notificationSSE } from "./sse/notifications.js";
 import { topicSSE } from "./sse/topic-sse.js";
 import { ProducerManager } from "./sse/producers.js";
 import { getOrCreateSession } from "./session.js";
-import { jobSubmitQueueOnly } from "./services/local-job-dispatch.js";
+import { jobSubmitQueueOnly, localJobDispatchDecision } from "./services/local-job-dispatch.js";
 
 export async function createGateway(port = 3200) {
   const host = resolveListenHost(process.env.PCC_LISTEN_HOST);
@@ -190,7 +190,7 @@ export async function createGateway(port = 3200) {
 
   // Initialize KernelService (mock mode by default)
   const { initKernelService } = await import("./services/kernel-service.js");
-  initKernelService();
+  const kernelService = initKernelService();
 
   const app = Fastify({
     // Default pino logger, with a request serializer that never logs the public
@@ -203,7 +203,9 @@ export async function createGateway(port = 3200) {
   app.log.info(isRelayGateOpen()
     ? "[relay] The device relay is open."
     : "[relay] The device relay is admin-only.");
-  app.log.info(`[jobs] PCC_JOB_SUBMIT_QUEUE_ONLY=${jobSubmitQueueOnly()}`);
+  const dispatch = localJobDispatchDecision(kernelService.kernelId, kernelService.kernelId, kernelService.hasExplicitConfig);
+  app.log.info({ queueOnly: jobSubmitQueueOnly(), localDispatch: dispatch.ok, reason: dispatch.ok ? undefined : dispatch.reason },
+    "[jobs] Effective local dispatch policy");
 
   // Sentry error handler — captures Fastify errors and attaches request context
   // Must be registered before other error handlers

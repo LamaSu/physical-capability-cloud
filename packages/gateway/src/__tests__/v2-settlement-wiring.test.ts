@@ -491,7 +491,7 @@ describe("createJobFromSession V2 on-chain wiring (mocked wallet, real store)", 
     // than the one an earlier test file may have initialized). Each test gets a
     // clean stub with a kernel ID, so no cross-test state leaks either.
     vi.doMock("../services/kernel-service.js", () => ({
-      getKernelService: vi.fn().mockReturnValue({ kernelId: "kernel-test-v2" }),
+      getKernelService: vi.fn().mockReturnValue({ kernelId: "kernel-test-v2", hasExplicitConfig: true }),
       initKernelService: vi.fn(),
       resetKernelService: vi.fn(),
     }));
