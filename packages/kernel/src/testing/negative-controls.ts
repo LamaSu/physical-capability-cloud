@@ -63,32 +63,39 @@ function validateBindingKey(bindingKey: unknown): void {
   }
 }
 
-function validateDeviceOptions(options: NegativeControlOptions): void {
+function validateDeviceOptions(options: NegativeControlOptions): FakeDeviceOptions {
   const device = options.deviceOptions;
-  if (device === undefined) return;
+  if (device === undefined) return {};
   if (device === null || typeof device !== "object" || Array.isArray(device)) {
     throw new TypeError("Invalid negative control deviceOptions");
   }
+  const snapshot: FakeDeviceOptions = {};
   for (const key of Reflect.ownKeys(device)) {
     if (typeof key !== "string" || !neutralDeviceKeys.has(key)) {
       throw new TypeError(`Unsupported negative control deviceOptions key: ${String(key)}`);
     }
+    const descriptor = Object.getOwnPropertyDescriptor(device, key)!;
+    if ("get" in descriptor || "set" in descriptor) {
+      throw new TypeError(`Unsupported negative control deviceOptions accessor: ${key}`);
+    }
+    Object.defineProperty(snapshot, key, { value: descriptor.value, enumerable: true });
   }
   for (const [key, opposite] of [
     ["completedType", "execution_failed"], ["failedType", "execution_completed"],
   ] as const) {
-    if (device[key] === opposite) throw new TypeError(`Invalid negative control deviceOptions.${key}`);
+    if (snapshot[key] === opposite) throw new TypeError(`Invalid negative control deviceOptions.${key}`);
   }
-  if (device.cancelConfirmMs !== undefined) {
+  if (snapshot.cancelConfirmMs !== undefined) {
     const timing = { ...defaultTiming, ...options.timing };
     const window = timing.cancelConfirmMs + timing.pollMs + timing.settleMs;
-    const ms = device.cancelConfirmMs;
+    const ms = snapshot.cancelConfirmMs;
     // The runner installs its timeout before cancellation: leave room before it.
     if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0 ||
         ms > 2_147_483_647 || !(ms < window)) {
       throw new TypeError("Invalid negative control deviceOptions.cancelConfirmMs: must fit inside the profile cancel window");
     }
   }
+  return snapshot;
 }
 
 const faultClauses: Record<ShippedDeviceFault, ClauseId> = {
@@ -168,22 +175,24 @@ function fakeDeviceConformanceFixture(
  * No control removes either fabrication signal or certifies physical equipment.
  */
 export function generateNegativeControls(options: NegativeControlOptions = {}): NegativeControls {
-  validateBindingKey(options.bindingKey);
-  validateDeviceOptions(options);
-  const baseline = fakeDeviceConformanceFixture(options);
+  const bindingKey = options.bindingKey;
+  validateBindingKey(bindingKey);
+  const deviceOptions = validateDeviceOptions(options);
+  const fixtureOptions = { preset: options.preset, bindingKey, deviceOptions, timing: options.timing };
+  const baseline = fakeDeviceConformanceFixture(fixtureOptions);
   const honest: NegativeControl = {
     id: "honest", clauseId: undefined, fault: undefined,
     makeAdapter: baseline.makeAdapter, profile: baseline.profile, expected: passVector(),
   };
   const controls: NegativeControl[] = SHIPPED_DEVICE_FAULTS.map((fault) => {
-    const fixture = fakeDeviceConformanceFixture(options, (device) => withDeviceFault(device, fault));
+    const fixture = fakeDeviceConformanceFixture(fixtureOptions, (device) => withDeviceFault(device, fault));
     const clauseId = faultClauses[fault];
     const expected = passVector();
     expected[clauseId] = "fail";
     if (fault === "noCancelJob") expected.C4 = "n/a";
     return { id: fault, clauseId, fault, makeAdapter: fixture.makeAdapter, profile: fixture.profile, expected };
   });
-  const modeFlip = fakeDeviceConformanceFixture(options);
+  const modeFlip = fakeDeviceConformanceFixture(fixtureOptions);
   controls.push({
     id: "modeFlip", clauseId: "C6", fault: "modeFlip",
     makeAdapter: modeFlip.makeAdapter,

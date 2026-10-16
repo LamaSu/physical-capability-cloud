@@ -192,6 +192,28 @@ describe("generated adapter conformance negative controls", () => {
       .toThrow(new TypeError(`Invalid negative control deviceOptions.${key}`));
   });
 
+  it.each(["get", "set"] as const)("refuses deviceOptions completedType %s accessor without calling it", (kind) => {
+    let calls = 0;
+    const accessor = () => { calls += 1; return "execution_completed"; };
+    const deviceOptions = Object.defineProperty({}, "completedType", { [kind]: accessor, enumerable: true });
+    expect(() => generateNegativeControls({ deviceOptions })).toThrow(new TypeError(
+      "Unsupported negative control deviceOptions accessor: completedType",
+    ));
+    expect(calls).toBe(0);
+  });
+
+  it("snapshots deviceOptions once before building every fixture", () => {
+    let reads = 0;
+    const deviceOptions = new Proxy({ type: "custom-machine" }, {
+      getOwnPropertyDescriptor(target, key) { reads += 1; return Reflect.getOwnPropertyDescriptor(target, key); },
+      get() { throw new Error("Caller values must be read through their validated data descriptors"); },
+    });
+    const { honest, controls } = generateNegativeControls({ deviceOptions });
+    expect(controls).toHaveLength(SHIPPED_DEVICE_FAULTS.length + 1);
+    expect(honest.profile.name).toBe("FakeDevice generic");
+    expect(reads).toBe(1);
+  });
+
   it.each([55, 56, -1, NaN, Infinity, 2_147_483_648])(
     "refuses cancelConfirmMs %s outside the overridden profile cancel window", (cancelConfirmMs) => {
       expect(() => generateNegativeControls({
