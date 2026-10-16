@@ -363,6 +363,41 @@ describe("W2 wallet faucet", () => {
     expect(calls).toHaveLength(n + 4);
     expect(rows(result.linkId)).toEqual(before);
   });
+  it("RV-P1 a failed claim retried inside its window does not stall the pending claims behind it after the window", async () => {
+    const result = await linked("device");
+    const createdAt = now;
+    behavior = async () => {
+      now += 5000;
+      throw { errorType: "faucet_limit_exceeded" };
+    };
+    const first = await fund(result);
+    expect(first.statusCode).toBe(200);
+    expect(first.json().status).toBe("pending");
+    expect(calls).toHaveLength(1);
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 1], ...Array.from({ length: 4 }, () => ["pending", 0]),
+    ]);
+
+    now = createdAt + 23 * 3_600_000;
+    const second = await fund(result, "owner");
+    expect(second.statusCode).toBe(200);
+    expect(second.json().status).toBe("pending");
+    expect(calls).toHaveLength(2);
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 2], ...Array.from({ length: 4 }, () => ["pending", 0]),
+    ]);
+
+    now = createdAt + 86_400_001;
+    behavior = async () => ({ transactionHash: hash() });
+    const n = calls.length;
+    const third = await fund(result, "owner");
+    expect(third.statusCode).toBe(200);
+    expect(third.json().status, `new CDP calls: ${calls.length - n}`).toBe("partial");
+    expect(calls).toHaveLength(n + 4);
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 2], ...Array.from({ length: 4 }, () => ["succeeded", 1]),
+    ]);
+  });
   it("5 retry waits 30 seconds and only retries failed ETH 2 and USDC", async () => {
     const result = await linked();
     behavior = async (_address, token) => {

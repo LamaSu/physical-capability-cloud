@@ -129,4 +129,17 @@ describe("wallet faucet repository lease guards", () => {
     const leased = leaseFundingClaim(result.claim, now);
     expect(leased).toMatchObject({ status: "pending", attempts: 1, last_attempt_at: new Date(now).toISOString() });
   });
+  it("RV-R1 the retry window is keyed on created_at, not on the last attempt, in JS and in SQL", async () => {
+    const createdAt = now - day - 1;
+    const result = await failedClaim(createdAt);
+    const retryAt = createdAt + 23 * 3_600_000;
+    const leased = leaseFundingClaim(result.claim, retryAt);
+    expect(leased).toMatchObject({ status: "failed", attempts: 2, last_attempt_at: new Date(retryAt).toISOString() });
+    finishFundingClaim(leased!, undefined, "unknown", retryAt);
+    const claim = fundingClaims(result.linkId)[0]!;
+    expect(claim).toMatchObject({ status: "failed", attempts: 2, lease_until: null, last_attempt_at: new Date(retryAt).toISOString() });
+    expect(attemptableClaim(claim, now)).toBe(false);
+    expect(leaseFundingClaim(claim, now)).toBeUndefined();
+    expect(fundingClaims(result.linkId)[0]).toEqual(claim);
+  });
 });
