@@ -20,6 +20,16 @@
  * next job until it does (fail closed). An adapter that cannot know when it is done waits
  * for the strongest signal it has. OutstandingWork (outstanding-work.ts) counts what is
  * outstanding for an adapter that tracks its own work.
+ *
+ * Commands and the device job. The device names its own job for the PCC job:
+ * prepare's ack supplies data.deviceJobId on the neutral path; runPrintJob uses
+ * start's data.jobId on the print path. Every event of that device job carries
+ * the id in payload.deviceJobId (neutral) or payload.ippJobId (print), compared
+ * strictly. payload.jobId is the PCC job's id, committed by the emitter (LO-EV-9).
+ * An event naming another device job is foreign; an event naming none is not
+ * that job's. runPrintJob enforces this binding; JobRunner does not yet bind
+ * events to the device job. The oracle's input.hash_bound check requires the
+ * completion's deviceJobId to equal method_loaded's deviceJobId.
  */
 
 import type { EvidenceEvent, EvidenceEventType, EvidenceSource, WorkflowChallenge } from "@pcc/spec";
@@ -27,13 +37,33 @@ import type { EvidenceEvent, EvidenceEventType, EvidenceSource, WorkflowChalleng
 /** Status a machine adapter can report */
 export type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance";
 
-/** A command to send to a machine */
+/**
+ * A command to send to a machine. prepare { jobId, inputHash } only stages and
+ * validates input: no motion, heat, dispense, or device-state change beyond
+ * staging. Anything that actuates belongs to start, whose payload is { jobId }.
+ * When input data is configured, prepare also carries inputData, a fresh
+ * Uint8Array of the exact bytes the kernel hashed (a string's UTF-8 bytes).
+ * The adapter must stage exactly those bytes. With only a hash, inputData is
+ * absent and the adapter resolves its input by inputHash.
+ *
+ * inputHash is sha256: followed by 64 lowercase hex digits, the SHA-256 of the
+ * exact input bytes without text, newline or BOM normalization. gcodeHash is
+ * its legacy alias. load_gcode carries { gcodeHash, jobId } and no input bytes.
+ * Adapters never emit method_loaded. After a matching prepare ack, the kernel
+ * records method_loaded { jobId, deviceJobId, inputHash } from its own values
+ * as the kernel-signed input proof. An adapter emission fails a prepare job.
+ */
 export interface MachineCommand {
-  type: "load_gcode" | "start" | "pause" | "resume" | "stop" | "status";
+  type: "prepare" | "load_gcode" | "start" | "pause" | "resume" | "stop" | "status";
   payload?: Record<string, unknown>;
 }
 
-/** Result of a machine command */
+/**
+ * Result of a machine command. A prepare ack must have success: true and
+ * data: { jobId, inputHash, deviceJobId }. jobId and inputHash echo the command
+ * exactly; deviceJobId is a non-empty string naming the device's staged job.
+ * Any other ack fails the job closed before start.
+ */
 export interface MachineCommandResult {
   success: boolean;
   /** The device refused because it is busy; no job was accepted. */
@@ -47,6 +77,15 @@ export interface MachineAdapter {
   readonly id: string;
   readonly type: "fdm" | "cnc-3axis" | "cnc-5axis" | "sla" | "lathe" | "laser-cut" | "ipp-2d" | "liquid-handler" | (string & {});
   readonly source: EvidenceSource;
+
+  /**
+   * The complete list of command types this adapter implements. Absent means
+   * a legacy adapter, driven as today: load_gcode then start. When present,
+   * JobRunner sends no type outside this list: it uses prepare if listed,
+   * otherwise load_gcode. Without start or either input command, it refuses
+   * the job before sending any command.
+   */
+  readonly accepts?: readonly MachineCommand["type"][];
 
   /** Get current status */
   getStatus(): Promise<MachineStatus>;
