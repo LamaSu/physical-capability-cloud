@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { computeTierLadderDigest, TierLadderError, type AssuranceTier, type SHA256, type TierLadderV1 } from "@pcc/spec";
+import { computeTierLadderDigest, TierLadderError, type AssuranceTier, type EvidenceEvent, type SHA256, type TierLadderV1 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import { openEvidenceSession } from "./evidence-session.js";
@@ -168,6 +168,19 @@ export class JobRunner {
     // Its chain then lacks that event, so the run fails: success would sign an incomplete
     // record (found with astra pack 192, where printer-job.ts swallowed the same failure).
     const unrecorded: { first: { type: string; error: string } | null } = { first: null };
+    const adapterMethodLoaded: { first: Omit<EvidenceEvent, "id" | "hash"> | null } = { first: null };
+    let deviceJobId: string | undefined;
+    const record = (event: Omit<EvidenceEvent, "id" | "hash">): void => {
+      recorded = recorded.then(async () => {
+        if (sealed) return;
+        try {
+          await this.evidenceEmitter.addEvent(jobId, stepId, event);
+        } catch (err) {
+          unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
+          console.error(err);
+        }
+      });
+    };
 
     // Every refusal below comes before any adapter command, and before registerStep,
     // which would overwrite the step of a job already running under the same ids. The
@@ -204,15 +217,14 @@ export class JobRunner {
       adapters,
       { jobId, stepId },
       (event) => {
-        recorded = recorded.then(async () => {
-          if (sealed) return;
-          try {
-            await this.evidenceEmitter.addEvent(jobId, stepId, event);
-          } catch (err) {
-            unrecorded.first ??= { type: event.type, error: err instanceof Error ? err.message : String(err) };
-            console.error(err);
+        if (prepare) {
+          const type = event.type;
+          if (type === "method_loaded") {
+            adapterMethodLoaded.first ??= event;
+            return;
           }
-        });
+        }
+        record(event);
       },
     );
     if (!opened.ok) {
@@ -260,7 +272,43 @@ export class JobRunner {
           },
         },
         async () => {
-          // 1. Load G-code
+          // 1. Stage neutral input, or use the unchanged legacy G-code command.
+          if (prepare) {
+            const prepareResult = await Sentry.startSpan(
+              { name: "job.prepare", op: "job.phase", attributes: { "job.id": jobId } },
+              async () => this.machine.execute({
+                type: "prepare",
+                payload: {
+                  jobId,
+                  inputHash: gcodeHash,
+                  ...(inputBytes !== undefined ? { inputData: new Uint8Array(inputBytes) } : {}),
+                },
+              }),
+            );
+            // Read the ack once. Only validated local values reach the kernel proof.
+            const success = prepareResult.success;
+            const message = prepareResult.message;
+            const data = prepareResult.data;
+            const ack = data !== null && typeof data === "object" && !Array.isArray(data) ? data : undefined;
+            const ackJobId = ack?.jobId;
+            const ackInputHash = ack?.inputHash;
+            const ackDeviceJobId = ack?.deviceJobId;
+            if (success !== true) return refuse(`Failed to prepare the input: ${message}`);
+            if (ack === undefined) return refuse("the prepare ack carries no data");
+            if (ackJobId !== jobId) return refuse("the prepare ack did not echo jobId");
+            if (ackInputHash !== gcodeHash) return refuse("the prepare ack did not echo inputHash");
+            if (typeof ackDeviceJobId !== "string" || ackDeviceJobId.length === 0) {
+              return refuse("the prepare ack named no deviceJobId");
+            }
+            deviceJobId = ackDeviceJobId;
+            if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
+            record({
+              type: "method_loaded",
+              timestamp: new Date().toISOString(),
+              source: { ...this.machine.source },
+              payload: { jobId, deviceJobId, inputHash: gcodeHash },
+            });
+          } else {
           const loadResult = await Sentry.startSpan(
             { name: "job.load_gcode", op: "job.phase", attributes: { "job.id": jobId } },
             async () =>
@@ -273,6 +321,7 @@ export class JobRunner {
           );
           if (!loadResult.success) {
             return { success: false, error: `Failed to load G-code: ${loadResult.message}`, durationMs: Date.now() - startTime };
+          }
           }
 
           // 2. Start sensors (Tier 1+)
@@ -371,6 +420,19 @@ export class JobRunner {
           // Check tier requirements are met, over every event the run accepted. A camera event
           // counts only as an LO-SE-1 capture for THIS job, so the check needs the jobId.
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
+          if (prepare) {
+            if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
+            // Adapter events retain their references until recording. A type changed
+            // after emission must not introduce another input proof into the bundle.
+            const methods = events.filter((event) => event.type === "method_loaded");
+            const payload = methods[0]?.payload;
+            if (methods.length !== 1 || payload === null || typeof payload !== "object" ||
+                Array.isArray(payload) || Reflect.ownKeys(payload).length !== 3 ||
+                !["jobId", "deviceJobId", "inputHash"].every((key) => Object.hasOwn(payload, key)) ||
+                payload.jobId !== jobId || payload.deviceJobId !== deviceJobId || payload.inputHash !== gcodeHash) {
+              return refuse("the bundle would carry a method_loaded the kernel did not record");
+            }
+          }
           const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, undefined, { jobId });
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
