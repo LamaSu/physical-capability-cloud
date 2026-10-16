@@ -153,6 +153,7 @@ export async function jobSubmitRoutes(app: FastifyInstance) {
           properties: {
             kernelId: { type: "string", description: "Target kernel ID." },
             capabilityId: { type: "string", description: "Capability to invoke." },
+            queueOnly: { description: "Only boolean true queues this submission without local dispatch." },
             capabilityType: {
               type: "string",
               description: "Type for fuzzy match if capabilityId omitted.",
