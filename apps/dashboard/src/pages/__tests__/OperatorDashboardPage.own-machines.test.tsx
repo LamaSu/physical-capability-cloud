@@ -16,6 +16,7 @@ import { OperatorDashboardPage } from "../OperatorDashboardPage.js";
 import { useAuthStore } from "../../stores/auth-store.js";
 import { useOperatorStore } from "../../stores/operator-store.js";
 import { useUIStore } from "../../stores/ui-store.js";
+import { kernelsOf } from "../../lib/operator-api.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -24,6 +25,12 @@ const UNTRUSTED = "<b>Private server diagnostics</b>";
 const LATHE = { id: "owned-lathe-72", name: "North lathe", status: "online", last_heartbeat: null };
 const PRINTER = { id: "owned-printer-41", name: "West printer", status: "online", last_heartbeat: "2026-10-16T10:00:00.000Z" };
 const ROUTER = { id: "owned-router-86", name: "South router", last_heartbeat: null };
+const OWNER_PROOF_COPY = "Your machines aren't shown for this sign-in: PCC needs proof that you own them. Sign in with your wallet (or use a linked wallet) to see and stop them here. Until then, use each machine's physical emergency stop.";
+const OWNER_PROOF_KERNELS = {
+  count: null,
+  items: [],
+  unavailable: "requires owner proof (SIWE sign-in, a session key, or a linked wallet)",
+};
 
 let container: HTMLDivElement;
 let root: Root;
@@ -79,6 +86,18 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status });
 }
 
+function ownerProofAnswer(kernels: unknown = OWNER_PROOF_KERNELS) {
+  const unavailable = OWNER_PROOF_KERNELS.unavailable;
+  return {
+    ...me([]),
+    kernels,
+    devices: { count: null, unavailable },
+    work: { in_flight: null, items: [], unavailable },
+    keys: { active: null, wildcard_keys: null, unavailable },
+    next: [unavailable],
+  };
+}
+
 function stopReply(id: string, status = 200) {
   return json({ stopped: true, kernelId: id, reason: UNTRUSTED }, status);
 }
@@ -132,6 +151,52 @@ function expectUnavailable() {
   expect(container.textContent).not.toContain(UNTRUSTED);
   expect(authorizedFetch.mock.calls.every(([url]) => url === "/api/agent/me")).toBe(true);
 }
+
+describe("a withheld agent/me answer and owner proof", () => {
+  it("a withheld agent/me answer shows fixed owner proof copy", async () => {
+    const answer = ownerProofAnswer();
+    authorizedFetch.mockResolvedValueOnce(json(answer));
+    await renderPage();
+    const alert = container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toBe(OWNER_PROOF_COPY);
+    expect(alert?.childElementCount).toBe(0);
+    expect(container.textContent).not.toContain(OWNER_PROOF_KERNELS.unavailable);
+    expect(container.textContent).not.toContain(UNAVAILABLE);
+    expect(kernelsOf(answer)).toBe("withheld");
+  });
+
+  it("a withheld agent/me answer has no stop button or stop request", async () => {
+    const answer = ownerProofAnswer();
+    authorizedFetch.mockResolvedValueOnce(json(answer));
+    await renderPage();
+    expect(stopButtons()).toHaveLength(0);
+    expect(authorizedFetch).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).toHaveBeenCalledWith("/api/agent/me", expect.objectContaining({ cache: "no-store" }));
+    expect(window.confirm).not.toHaveBeenCalled();
+    expect(kernelsOf(answer)).toBe("withheld");
+  });
+
+  it.each([
+    ["a different owner proof reason", { ...OWNER_PROOF_KERNELS, unavailable: "<b>owner proof details</b>" }],
+    ["owner proof count zero", { ...OWNER_PROOF_KERNELS, count: 0 }],
+    ["owner proof items non-empty", { ...OWNER_PROOF_KERNELS, items: [LATHE] }],
+    ["owner proof count non-null", { ...OWNER_PROOF_KERNELS, count: 1 }],
+    ["owner proof count text", { ...OWNER_PROOF_KERNELS, count: "null" }],
+    ["owner proof count absent", { items: [], unavailable: OWNER_PROOF_KERNELS.unavailable }],
+    ["owner proof items absent", { count: null, unavailable: OWNER_PROOF_KERNELS.unavailable }],
+    ["owner proof reason empty", { ...OWNER_PROOF_KERNELS, unavailable: "" }],
+    ["owner proof additional field", { ...OWNER_PROOF_KERNELS, ownerProof: true }],
+  ] as const)("a withheld agent/me answer with %s stays unavailable", async (_ownerProofCase, kernels) => {
+    const answer = ownerProofAnswer(kernels);
+    authorizedFetch.mockResolvedValueOnce(json(answer));
+    await renderPage();
+    expectUnavailable();
+    expect(container.textContent).not.toContain(OWNER_PROOF_COPY);
+    expect(container.textContent).not.toContain(OWNER_PROOF_KERNELS.unavailable);
+    if (kernels.unavailable) expect(container.textContent).not.toContain(kernels.unavailable);
+    expect(kernelsOf(answer)).toBe("unavailable");
+  });
+});
 
 describe("OperatorDashboardPage signed-in operator's machines", () => {
   it("loads /api/agent/me and targets only its owned ids for stop and resume (hard-coded-id mutant)", async () => {

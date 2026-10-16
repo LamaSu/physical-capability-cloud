@@ -18,7 +18,7 @@ import {
 
 const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
 
-function EmergencyStopPanel({ kernels, loading }: { kernels: OperatorMachine[] | null; loading: boolean }) {
+function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof kernelsOf>; loading: boolean }) {
   const [outcomes, setOutcomes] = React.useState<Record<string, {
     stopped: boolean;
     pending: "stop" | "resume" | null;
@@ -59,7 +59,10 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: OperatorMachine[] |
   if (loading) {
     return <p role="status" className="text-sm text-white/50">Loading your machines. Use each machine's physical emergency stop.</p>;
   }
-  if (kernels === null) {
+  if (kernels === "withheld") {
+    return <p role="alert" className="text-sm text-red-400">Your machines aren't shown for this sign-in: PCC needs proof that you own them. Sign in with your wallet (or use a linked wallet) to see and stop them here. Until then, use each machine's physical emergency stop.</p>;
+  }
+  if (kernels === "unavailable") {
     return <p role="alert" className="text-sm text-red-400">Your machines can't be read right now. Use each machine's physical emergency stop.</p>;
   }
   if (kernels.length === 0) {
@@ -151,7 +154,7 @@ export function OperatorDashboardPage() {
       const res = await authorizedFetch("/api/agent/me", { cache: "no-store", signal });
       if (!res.ok) throw new Error("Machines unavailable");
       const kernels = kernelsOf(await res.json());
-      if (kernels === null) throw new Error("Machines unavailable");
+      if (kernels === "unavailable") throw new Error("Machines unavailable");
       return kernels;
     },
     enabled: activeTab === "overview",
@@ -219,7 +222,7 @@ export function OperatorDashboardPage() {
 
       {/* Keep confirmed outcomes across tabs; a different identity gets a fresh panel. */}
       <div hidden={activeTab !== "overview"}>
-        <EmergencyStopPanel key={identity} kernels={machines.isError ? null : machines.data ?? null} loading={machines.isPending} />
+        <EmergencyStopPanel key={identity} kernels={machines.isError ? "unavailable" : machines.data ?? "unavailable"} loading={machines.isPending} />
       </div>
 
       {/* Overview Tab */}

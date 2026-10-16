@@ -8,13 +8,18 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Reject an unreadable or partial list entirely, including the route's unavailable section. */
-export function kernelsOf(me: unknown): OperatorMachine[] | null {
-  if (!record(me) || me.ok !== true || !record(me.kernels)) return null;
+const OWNER_PROOF_REQUIRED = "requires owner proof (SIWE sign-in, a session key, or a linked wallet)";
+
+/** Distinguish a withheld agent/me answer requiring owner proof. */
+export function kernelsOf(me: unknown): OperatorMachine[] | "withheld" | "unavailable" {
+  if (!record(me) || me.ok !== true || !record(me.kernels)) return "unavailable";
   const kernels = me.kernels;
+  if (kernels.count === null && Array.isArray(kernels.items) && kernels.items.length === 0 &&
+      kernels.unavailable === OWNER_PROOF_REQUIRED &&
+      Object.keys(kernels).every((key) => ["count", "items", "unavailable"].includes(key))) return "withheld";
   if (Object.keys(kernels).some((key) => key !== "count" && key !== "items") ||
       !Number.isInteger(kernels.count) || !Array.isArray(kernels.items) ||
-      kernels.count !== kernels.items.length) return null;
+      kernels.count !== kernels.items.length) return "unavailable";
 
   const ids = new Set<string>();
   const machines: OperatorMachine[] = [];
@@ -24,7 +29,7 @@ export function kernelsOf(me: unknown): OperatorMachine[] | null {
         typeof item.id !== "string" || !item.id.trim() || ids.has(item.id) ||
         ("name" in item && typeof item.name !== "string") ||
         ("status" in item && typeof item.status !== "string") ||
-        (item.last_heartbeat !== null && typeof item.last_heartbeat !== "string")) return null;
+        (item.last_heartbeat !== null && typeof item.last_heartbeat !== "string")) return "unavailable";
     ids.add(item.id);
     machines.push({ id: item.id, name: typeof item.name === "string" ? item.name : "" });
   }
