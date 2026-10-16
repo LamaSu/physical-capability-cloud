@@ -1,5 +1,5 @@
 /** Production isolation for the opt-in testing subpath (adapter-factory.ts:204-223). */
-import { readdirSync, readFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -52,6 +52,33 @@ function productionSources(directory: string): string[] {
 }
 
 describe("FakeDevice production isolation", () => {
+  it("scans exactly the independently enumerated production sources", () => {
+    // Only the two top-level trees are excluded; nested __tests__ helpers stay scanned.
+    const independent = readdirSync(sourceRoot, { recursive: true, encoding: "utf8" })
+      .filter((relative) =>
+        relative.endsWith(".ts") && !/\.(?:test|spec)\.ts$/.test(relative) &&
+        !relative.startsWith(`testing${path.sep}`) && !relative.startsWith(`__tests__${path.sep}`),
+      )
+      .map((relative) => path.join(sourceRoot, relative))
+      .filter((filename) => !lstatSync(filename).isDirectory());
+    expect(productionSources(sourceRoot).sort()).toEqual(independent.sort());
+  });
+
+  it("includes production sentinels and excludes testing trees and test files", () => {
+    const scanned = productionSources(sourceRoot).map((filename) => path.relative(sourceRoot, filename));
+    expect(scanned).toEqual(expect.arrayContaining([
+      "index.ts", "server.ts", "adapter-factory.ts", "printer-job.ts", "job-runner.ts",
+      path.join("adapters", "types.ts"), path.join("adapters", "ipp-adapter.ts"),
+      path.join("adapters", "sila", "sila-adapter.ts"), path.join("digital", "accounting-kernel.ts"),
+      path.join("opentrons", "adapter.ts"), path.join("safety", "governor.ts"),
+    ]));
+    for (const relative of scanned) {
+      expect(relative).not.toMatch(/\.(?:test|spec)\.ts$/);
+      expect(relative.startsWith(`testing${path.sep}`)).toBe(false);
+      expect(relative.startsWith(`__tests__${path.sep}`)).toBe(false);
+    }
+  });
+
   it.each([
     ["static import", 'import { FakeDevice } from "./testing/fake-device.js";', "index.ts", "./testing/fake-device.js"],
     ["multi-line import", 'import {\n FakeDevice,\n} from\n "./testing/index.js";', "index.ts", "./testing/index.js"],
