@@ -255,6 +255,7 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
       deviceType: "${adapter.deviceType}",
       kernelId: "${kernelId}",
       firmwareVersion: "${adapter.firmwareVersion}",
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 

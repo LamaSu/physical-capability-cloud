@@ -251,6 +251,7 @@ export class YourMachineAdapter implements MachineAdapter {
       deviceType: "controller",    // "controller" | "sensor" | "camera" | "robot" | "tee"
       kernelId,
       firmwareVersion: "YourAdapter-1.0.0",
+      ...(config.mockMode ? { simulated: true } : {}),
     };
   }
 
@@ -458,6 +459,8 @@ export class YourMachineAdapter implements MachineAdapter {
   }
 }
 ```
+
+Mock mode marks its source simulated, so neither its events nor the kernel's `method_loaded` (which copies the source) count toward a tier or settlement.
 
 In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, an optional `pollIntervalMs`, and `resolveInput(inputHash): Promise<Uint8Array>` for hash-only jobs. When `payload.inputData` is present, stage those exact bytes; do not replace them with data fetched by hash. When resolving input yourself, compute SHA-256 of the resolved bytes and refuse prepare without an ack unless it equals `inputHash` exactly: the kernel signs `method_loaded` as the input proof from that ack.
 
