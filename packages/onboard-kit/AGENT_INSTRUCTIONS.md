@@ -224,6 +224,7 @@ The JobRunner refuses an adapter without it. It waits for it at the end of every
 ### 2.1 MachineAdapter (required for any machine that runs jobs)
 
 ```typescript
+import { createHash } from "node:crypto";
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "@pcc/kernel";
 import { OutstandingWork } from "@pcc/kernel";
@@ -298,6 +299,10 @@ export class YourMachineAdapter implements MachineAdapter {
         // JobRunner supplies a fresh Uint8Array when JobConfig has inputData.
         // With only inputHash, resolve the input by that hash in your integration.
         const bytes = inputData ?? await this.config.resolveInput(inputHash);
+        if (inputData === undefined &&
+            `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== inputHash) {
+          return { success: false, message: "Resolved input hash mismatch" };
+        }
         let deviceJobId: string;
         if (this.config.mockMode) {
           deviceJobId = `mock-${++this.mockJobSequence}`; // no network or actuation
@@ -452,7 +457,7 @@ export class YourMachineAdapter implements MachineAdapter {
 }
 ```
 
-In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, an optional `pollIntervalMs`, and `resolveInput(inputHash): Promise<Uint8Array>` for hash-only jobs. When `payload.inputData` is present, stage those exact bytes; do not replace them with data fetched by hash.
+In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, an optional `pollIntervalMs`, and `resolveInput(inputHash): Promise<Uint8Array>` for hash-only jobs. When `payload.inputData` is present, stage those exact bytes; do not replace them with data fetched by hash. When resolving input yourself, compute SHA-256 of the resolved bytes and refuse prepare without an ack unless it equals `inputHash` exactly: the kernel signs `method_loaded` as the input proof from that ack.
 
 An FDM (G-code) machine may implement `load_gcode` instead: that is the legacy path, with the FDM default ladder when no ladder is provided. Declare `accepts` with `load_gcode` and the other commands it implements.
 
