@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { realpathSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { acceptanceDigest, domainSeparator, jobPolicyHash } from "@pcc/contracts/vnext";
 import { getAddress } from "viem";
@@ -15,6 +15,7 @@ import { defaultJobInputSource, fileJobInputSource } from "./job-inputs.js";
 import { generateHostKeys, KeyGenerationError } from "./keygen.js";
 import { KeyFileError, loadDeviceKey, loadOperatorKey, OperatorSigningError } from "./keys.js";
 import { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "./policy-json.js";
+import { computeJobPolicyCommitments } from "./operator-signing.js";
 import { readSecretFile, SecretFileError } from "./secret-file.js";
 // The kernel barrel starts a shop server at import time. This existing private
 // workspace leaf constructs only the printer adapter.
@@ -165,10 +166,15 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
       loadJobPolicyInput(flags.get("--input")!),
     ]);
     const key = await loadOperatorKey(config.keys.operatorKeyFile, config.chain.chainId, { terms });
+    const commitments = computeJobPolicyCommitments(input);
     const signature = await key.signJobPolicyAcceptance(input);
     const output = {
       operator: key.address, chainId: config.chain.chainId, escrow: input.policy.escrow,
+      termsHash: input.policy.termsHash.toLowerCase(),
       acceptanceDigest: acceptanceDigest(domainSeparator(input.policy.chainId, input.policy.escrow), jobPolicyHash(input.policy)),
+      ...commitments,
+      subjectBlock: input.subjectBlock,
+      bindings: input.bindings,
       signature,
     };
     let file;
@@ -183,8 +189,12 @@ async function signPolicy(argv: string[], io: CliIo): Promise<number> {
       // Explicit chmod makes the hand-off mode independent of the operator's umask.
       await file.chmod(0o644);
       await file.writeFile(`${JSON.stringify(output)}\n`, "utf8");
-    } catch { throw new PolicyCliError("write_failed"); }
-    finally { await file.close().catch(() => undefined); }
+      await file.close();
+    } catch {
+      await file.close().catch(() => undefined);
+      await unlink(flags.get("--out")!).catch(() => undefined);
+      throw new PolicyCliError("write_failed");
+    }
     return 0;
   } catch (error) {
     if (error instanceof OperatorSigningError || error instanceof PolicyJsonError

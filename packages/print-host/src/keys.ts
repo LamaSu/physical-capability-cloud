@@ -57,6 +57,7 @@ export interface DeviceKeyLoadOptions extends KeyLoadOptions {
 
 export interface OperatorKeyLoadOptions extends KeyLoadOptions {
   terms?: HostTerms;
+  clock?: () => Date;
 }
 
 /** Public identity, delegation signing and guarded raw32 signing; private material stays in closures. */
@@ -118,7 +119,8 @@ const operatorKeyPrototype = Object.freeze(Object.assign(Object.create(null), {
   [inspect.custom](this: OperatorKey) { return this.toString(); },
 }));
 
-function operatorKey(account: LocalAccount, chainId: OperatorChainId, terms: HostTerms | undefined): OperatorKey {
+function operatorKey(account: LocalAccount, chainId: OperatorChainId, terms: HostTerms | undefined,
+  clock: () => Date): OperatorKey {
   return Object.freeze(Object.assign(Object.create(operatorKeyPrototype), {
     address: account.address,
     async signD1(input: D1Input): Promise<Hex> {
@@ -132,7 +134,7 @@ function operatorKey(account: LocalAccount, chainId: OperatorChainId, terms: Hos
       catch { throw new OperatorSigningError("signing_failed"); }
     },
     async signJobPolicyAcceptance(input: JobPolicyAcceptanceInput): Promise<Hex> {
-      const typedData = prepareJobPolicyAcceptance(input, chainId, account.address, terms);
+      const typedData = prepareJobPolicyAcceptance(input, chainId, account.address, terms, clock);
       try { return await account.signTypedData(typedData); }
       catch { throw new OperatorSigningError("signing_failed"); }
     },
@@ -214,7 +216,11 @@ const secp256k1Order = (1n << 256n) - BigInt("0x14551231950b75fc4402da1732fc9beb
 
 export async function loadOperatorKey(path: string, chainId: OperatorChainId, options: OperatorKeyLoadOptions = {}): Promise<OperatorKey> {
   if (chainId !== 84532 && chainId !== 31337) throw new KeyFileError("bad_chain", path);
+  const suppliedClock = options.clock;
+  if (suppliedClock !== undefined && typeof suppliedClock !== "function") throw new OperatorSigningError("bad_input");
+  const clock = suppliedClock === undefined ? () => new Date() : suppliedClock;
   const terms = options.terms === undefined ? undefined : validateHostTerms(options.terms);
+  if (terms !== undefined && terms.chainId !== chainId) throw new OperatorSigningError("bad_terms");
   const bytes = await keyBytes(path, options);
   try {
     const record = parseObject(bytes, path);
@@ -228,7 +234,7 @@ export async function loadOperatorKey(path: string, chainId: OperatorChainId, op
     if (scalar <= 0n || scalar >= secp256k1Order) throw new KeyFileError("bad_key", path);
     const account = privateKeyToAccount(record.privateKey as `0x${string}`);
     if (account.address.toLowerCase() !== record.address.toLowerCase()) throw new KeyFileError("public_mismatch", path);
-    return operatorKey(account, chainId, terms);
+    return operatorKey(account, chainId, terms, clock);
   } catch (error) {
     if (error instanceof KeyFileError) throw error;
     throw new KeyFileError("bad_key", path);

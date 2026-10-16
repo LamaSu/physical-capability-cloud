@@ -57,9 +57,10 @@ the operator never sends the funding transaction
 remains open. Loading the key binds all three signing methods to the configured
 chain. JobPolicy acceptance was added by #620. D1 uses the fixed domain name
 `PCC FinalMilestonePackage`, version `2`, and the supplied escrow address for both
-the message and verifying contract. The escrow address is supplied per signing
-call until canonical deployment binding is added; no escrow configuration field
-is needed yet.
+the message and verifying contract. For D1 and `submitEvidence`, the escrow address
+is supplied per signing call until canonical deployment binding is added; no
+escrow configuration field is needed yet. Policy acceptance binds the deployment
+through the loaded terms and derives the escrow as described below.
 
 October ships no `invokeBackup` path. A recursive source guard test enforces the
 absence of its name and selector and checks the host's `submitEvidence` selector
@@ -71,28 +72,178 @@ For the Thursday acceptance hand-off, run:
 node packages/print-host/dist/cli.js sign-policy --config /absolute/host.json --terms /absolute/terms.json --input /absolute/policy.json --out /absolute/signature.json
 ```
 
-The terms file strictly contains `minG` (an unsigned decimal string),
+`sign-policy` requires `process.getBuiltinModule`: Node >= 20.16 on the 20.x
+line or >= 22.3 on the 22.x line. The `@pcc/spec` producer uses that API; on an
+older Node, every `sign-policy` call fails closed with `bad_input`.
+
+The terms file strictly contains `chainId` (a required integer number, 84532 or
+31337), `factory` and `implementation` (required,
+valid non-zero deployment addresses), `minG` (an unsigned decimal string),
 `allowedRequiredTiers` (an array of numbers), `reclaimMinSeconds`,
 `reclaimMaxSeconds`, `maxFeeBps`, `allowedFeeRecipients` (an array of addresses),
 `allowedPayoutRecipients` (a required, non-empty array of addresses with no
-case-insensitive duplicates), `maxUnits`, and `maxAcceptanceSeconds`. The payout
-allowlist binds acceptance to who receives each unit's net payment. All remaining scalar terms are integer
-numbers. Loaders validate and freeze the terms; a key loaded without terms refuses
-policy acceptance signing.
+case-insensitive duplicates), `operatorPayoutRecipient` (a required address in
+that allowlist), `maxPassThrough` (an unsigned decimal string in USDC base units),
+`maxUnits`, and `maxAcceptanceSeconds`. For each unit, the host sums every payout
+to `operatorPayoutRecipient`, comparing addresses case-insensitively. The policy's
+total pass-through is the sum of each unit's `n` minus that operator amount, and
+must be at most `maxPassThrough`. A CARRIER unit paying only the treasury counts
+its entire `n`; the cap applies across the policy, including all its units.
+Other scalar limits are integer numbers. `reclaimMinSeconds` must be at least
+864000 (10 days), and `reclaimMaxSeconds` at most 31536000 (365 days).
+The file also requires a valid non-zero address `settlementToken` and a
+`subjectPins` object. A `termsHash` field in a terms file is refused with `bad_terms`.
+On chain 84532, `settlementToken` must equal Base Sepolia USDC
+(`0x036CbD53842c5426634e7929541eC2318f3dCF7e`), compared case-insensitively;
+another token is refused at load with `bad_terms`. Chain 31337 accepts any
+valid non-zero token address for anvil mocks.
+Pins may contain only the 18 `SubjectBlockFields` keys from `@pcc/spec`, with exact
+bytes32 values, an address for `operatorSettlementAddress`, or an integer number
+for `integrityGrade` (0–255). `committedProgramHash` is required. An
+`operatorSettlementAddress` pin must equal `operatorPayoutRecipient`, compared
+case-insensitively. Optional bytes32 `bindingsRoot` pins the computed bindings root.
+Unknown fields, accessors, and non-plain terms or pin objects are refused with
+`bad_terms`.
 
-The strict input JSON is `{ "policy": { ... }, "units": [ ... ] }`, using the
-exported `JobPolicyFields` and `UnitConfig` shapes from `@pcc/contracts/vnext`.
+Thursday's PRINT unit uses the following complete terms template. Replace the
+host-specific placeholders with the values computed below, take `factory` and
+`implementation` from GO-1's CANONICAL deployment record, and set
+`maxAcceptanceSeconds` to the operator's quote-to-sign window in integer seconds.
+Economics' terms file does not specify that acceptance window.
+
+```json
+{
+  "chainId": 84532,
+  "factory": "<factory from GO-1 CANONICAL record>",
+  "implementation": "<implementation from GO-1 CANONICAL record>",
+  "maxUnits": 1,
+  "allowedRequiredTiers": [1],
+  "minG": "750000",
+  "maxFeeBps": 0,
+  "allowedFeeRecipients": [],
+  "operatorPayoutRecipient": "<host EOA>",
+  "allowedPayoutRecipients": ["<host EOA>", "0x6463ACd05141c1EF6583E4Fd978FC61Fff4045DC"],
+  "maxPassThrough": "250000",
+  "reclaimMinSeconds": 864000,
+  "reclaimMaxSeconds": 1814400,
+  "maxAcceptanceSeconds": "<operator quote-to-sign window in integer seconds>",
+  "settlementToken": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "subjectPins": {
+    "committedProgramHash": "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a",
+    "operatorPrincipal": "<derived host operator word>",
+    "operatorSettlementAddress": "<host EOA>",
+    "authorizedTuplesRoot": "<oracle host tuple root>",
+    "childrenRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expertSetRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "executorSetRoot": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedRecipient": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "targetSystemIdentity": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "recipeRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "sampleManifestRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "operatingEnvelopeHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedRouteArea": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "expectedLocationHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "captureNonceAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "challengeAnchor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "integrityGrade": 0
+  },
+  "bindingsRoot": "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd"
+}
+```
+
+Compute `operatorPrincipal` with the `@pcc/spec` producers
+`principalTupleWord("operator", formatOperatorPrincipalId(chainId, <host EOA>))`.
+The host also checks this word against the signing operator EOA in code.
+`operatorSettlementAddress` is the host EOA and must equal
+`operatorPayoutRecipient`. At Wednesday's sitting, construct the host's one
+(operator, kernel, device) triple with the `@pcc/spec` producers:
+
+```text
+authorizedTuple(formatOperatorPrincipalId(84532, <host EOA>), <kernelId>, formatDevicePrincipalId(<device public key>))
+```
+
+`formatDevicePrincipalId` produces `ed25519:0x` followed by 64 lowercase hex
+digits. Feed that tuple into the oracle's `computeAuthorizedTuplesRoot([tuple])`,
+then cross-check the computation against the oracle's Thursday-shape golden v2
+(`pcc-oracle` commit `23bdcc2`,
+`config/testnet/s2-subject-block-thursday-shape-golden.json`; vendored in
+`test/fixtures/oracle-23bdcc2-s2-thursday-shape-golden-v2.json`). `@pcc/spec` exports
+`authorizedTuple` but has no public root producer. A root without the host's
+triple prevents settlement, so Thursday's terms must pin this value. Thursday
+uses `bindings: []`, whose root is the pin above. All twelve zero fields and
+`integrityGrade: 0` are exact pins.
+
+These economic limits mirror economics' Thursday terms file at
+`/mnt/sparkbulk/pcc-reconciliation/returns/pcc-economics-work/terms/print-unit-thursday.v1.json`.
+Thursday allows only tier 1: tier 2 must NOT be allowed because S2's ladder is
+`tier1`. The reclaim maximum is 1814400 seconds because `reclaimAt` is policy
+creation plus 21 days. Thursday's settlement token is Circle USDC on Base Sepolia
+at the address above. Economics #8165 supersedes the old `termsHash` pin; the file's
+version digest
+`0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7`
+is only a FILE-VERSION digest of economics' terms document, never a policy's
+`termsHash`, and goes into no policy.
+Each policy derives its own `termsHash` from its funded units using the ratified
+v2.1 rule:
+
+```text
+TERMS_DOMAIN = keccak256(utf8("PCC:vnext:job-terms:v1"))
+milestones[i] = (units[i].milestoneIndex, units[i].stepId, units[i].g, units[i].reclaimAt)
+milestonesRoot = keccak256(abi.encode((uint256,bytes32,uint256,uint64)[] milestones))
+termsHash = keccak256(abi.encode(bytes32 TERMS_DOMAIN, address settlementToken, uint8 assuranceTier, bytes32 milestonesRoot))
+```
+
+Both encodings use `abi.encode`. Milestones retain the funded `UnitConfig[]`
+order, including each unit's own reclaim deadline. Every unit must have the same
+`requiredTier`, and its `requestedTier` must match that job-level assurance tier.
+The host's tier limits, payout allowlist, and other local terms are configuration
+outside this preimage. The local producer follows `pcc-oracle src/terms-hash.ts`
+at `87bc14e` and will be replaced by `@pcc/spec`'s producer when it merges.
+Terms for one chain never load for a key bound to another chain; the loader
+refuses them before reading the key file. Loaders validate and freeze all terms
+at key load; a key loaded without terms
+refuses policy acceptance signing. The explicit deployment terms will be replaced
+by economics' N150 canonical deployment record when it lands.
+
+Both terms and input paths must be absolute, regular files and cannot be symlinks.
+The terms file must belong to the current uid and deny group/other writes, with a
+64 KiB limit. The input has a 1 MiB limit and no ownership or mode requirement.
+Readers open without following links or blocking on FIFOs, recheck the opened
+file's identity, type and size (plus terms ownership and permissions), read bounded
+bytes, and erase their buffers after parsing.
+
+The strict input JSON is
+`{ "policy": { ... }, "units": [ ... ], "subjectBlock": { ... }, "bindings": [ ... ] }`,
+using the exported `JobPolicyFields` and `UnitConfig` shapes from
+`@pcc/contracts/vnext` and `SubjectBlockFields` and `SubjectBinding` from `@pcc/spec`.
+The subject block must have exactly its 18 fields. Bindings must have exactly
+`planUnitKey`, `requirementIdHash`, `sourceKind`, `propositionKind`, and `valueRef`;
+duplicate `requirementIdHash` values are refused. The producer requires lowercase
+bytes32 values and settlement addresses. Build each binding's `planUnitKey` with
+`computePlanUnitKey(unitOrdinal, milestoneIndex, stepId)`. Producer admission
+errors are reported only as `bad_input`.
 Every compiler `bigint` field is an unsigned decimal string: policy `chainId`,
 `policyNonce`, and `expiry`; unit `milestoneIndex`, `g`, `f`, `n`, and `reclaimAt`;
 and each payout's `amount`. Tier, fee-basis-point, and composition-version fields
 remain integer numbers. Unknown fields and a caller-supplied clock are refused.
+Library callers can set `OperatorKeyLoadOptions.clock` when loading the key;
+the closure captures that function and reads it exactly once per signing call,
+after snapshotting the input. The default returns the current time. The existing
+load option `now` only controls key-file expiry validation.
 
-Before signing, the host checks the operator address and bound chain, recomputes
+Before signing, the host checks the operator address and bound chain, requires
+the policy's factory and implementation to match the loaded deployment terms
+case-insensitively, and refuses zero factory, implementation or escrow addresses.
+It derives the escrow with the compiler's `predictEscrow` and `policySalt` from
+the full policy identity and refuses any other escrow. It recomputes
 the ordered units root with the compiler's helpers, and checks every unit against
 the terms. It also checks the compiler's pre-policy root, which commits the checked
 economic configuration. Gross payment must meet `minG`, the required tier and fee recipient must
 be allowed, fees must be at most `maxFeeBps`, and reclaim time must lie within the
-inclusive configured window from the current time. The zero fee recipient is
+inclusive window from `policy.expiry + reclaimMinSeconds` through
+`now + reclaimMaxSeconds`. Measuring the lower bound from expiry guarantees the
+minimum reclaim delay even if funding occurs at the latest allowed time.
+The zero fee recipient is
 allowed only with zero fees. Every payout recipient must be allowed, compared
 case-insensitively. The compiler's `computeFee` must match both `f` and `n`, and
 non-empty, positive payouts must sum exactly to `n`. The host also calls the
@@ -103,9 +254,41 @@ acceptance expiry must be in the future and no farther away than
 `maxAcceptanceSeconds`. The signature uses the compiler's `jobPolicyTypedData`
 unchanged; its verifying contract is `policy.escrow`.
 
+The host also requires `policy.termsHash` to match the derivation from the loaded
+settlement token and the same ordered units snapshot (`terms_hash_mismatch`).
+Mixed required tiers give `assurance_tier_mismatch`; the existing compiler
+validation refuses a mismatched requested tier with `bad_input`.
+The host checks every subject pin (`subject_pin_mismatch`), and
+requires `subjectBlock.operatorSettlementAddress` to equal the configured payout
+recipient (`settlement_address_mismatch`). It computes `subjectBlockHash` with
+`computeSubjectBlockHash`, `bindingsRoot` with `computeBindingsRoot`, and
+`acceptedPolicyDigest` with
+`computeAcceptedPolicyDigest({ termsHash, subjectBlockHash, bindingsRoot })`, all
+from `@pcc/spec`. A configured root pin that differs gives
+`bindings_root_mismatch`; a policy digest that differs gives
+`accepted_policy_mismatch`. Every unit must have `compositionSchemaVersion: 0`
+and an all-zero `compositionRoot`, otherwise `composition_not_supported`.
+All these refusals happen before signing.
+
+The host derives both principal words with
+`principalTupleWord("operator", formatOperatorPrincipalId(chainId, address))`
+from `@pcc/spec`, using the loaded terms' chain and the same input snapshot as
+the acceptance checks. `subjectBlock.operatorPrincipal` must match the signing
+operator EOA's word (`operator_principal_mismatch`), and `subjectBlock.payer`
+must match `policy.payer`'s word (`payer_principal_mismatch`), compared
+case-insensitively. An optional `operatorPrincipal` pin remains allowed; the
+derived check runs regardless of that pin's value or presence. A producer throw
+gives `bad_input`. These checks also run before signing.
+
 Success creates a new mode-0644 JSON file containing exactly `operator`, `chainId`
-(a number), `escrow`, `acceptanceDigest`, and `signature`. Existing output files
-are refused. This command prints no policy or private key data; on failure it
+(a number), `escrow`, `acceptanceDigest`, `signature`, `subjectBlockHash`,
+`bindingsRoot`, `acceptedPolicyDigest`, `termsHash`, `subjectBlock`, and `bindings`.
+The output `termsHash` is the derived value checked before signing. The subject
+block and bindings are the public objects as parsed, with lowercase hex, so the
+hand-off carries the objects signed over alongside their hashes. Existing output files
+are refused. If chmod, writing or closing fails after creation, the command removes
+the file it created so the operator can retry. The command exposes only public
+identity, acceptance and subject data; on failure it
 prints only a closed error code.
 
 The strict JSON configuration has `kernelId`, `deviceId`, `printer.uri`,

@@ -17,6 +17,9 @@ export type {
 export { loadHostConfig, checkHostConfig, HostConfigError } from "./config.js";
 export type { HostConfig, HostConfigOptions, HostConfigErrorCode, HostPublicIdentity } from "./config.js";
 export type { CliIo, CliRunRuntime, CliPrintComponents } from "./cli.js";
+export { loadHostTerms, loadJobPolicyInput, PolicyJsonError } from "./policy-json.js";
+export type { HostTermsLoadOptions, PolicyJsonErrorCode } from "./policy-json.js";
+export { TERMS_DOMAIN, computeMilestonesRoot, computeTermsHash } from "./terms-hash.js";
 export { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
 export type {
   GatewayClient, GatewayClientConfig, GatewayClientErrorCode, GwCode, GwSubCode, GwResult,
