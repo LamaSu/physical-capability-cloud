@@ -62,6 +62,16 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
     }, skip);
   });
 
+  for (const status of ["HTTP/1.0 200 OK", "HTTP/1.1 200"]) {
+    it(`R8 X2L: production transport accepts ${status} with Content-Length framing`, async ({ skip }) => {
+      await withServer((_req, res) => {
+        res.socket?.end(`${status}\r\nContent-Length: 3\r\n\r\nIPP`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+      }, skip);
+    });
+  }
+
   it("T2: Content-Length with chunked is refused", async ({ skip }) => {
     // The server emits raw bytes so its own writer does not normalize ambiguous framing.
     await withServer((_req, res) => {
