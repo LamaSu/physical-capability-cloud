@@ -58,6 +58,8 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
+  // For pasted keys, logout clears this tab's key only and leaves the wallet's
+  // cookie session live; user-facing Sign-out must call signOutWallet().
   logout: () => {
     // The key change below clears the wallet fields in the same set(), so the
     // identity change is reported once (onIdentityChange).

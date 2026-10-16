@@ -497,6 +497,7 @@ describe("wallet session transitions", () => {
     await act(async () => { finish(minted()); await login; });
     expect(hasStoredApiKey()).toBe(false);
     expect(useAuthStore.getState().sessionToken).toBeNull();
+    expect(useAuthStore.getState().authNotice).toBeNull();
   });
 
   it.each([401, 403, 200])("keeps another tab's persisted key when renewal ends the wallet session (%s)", async (status) => {
@@ -569,6 +570,36 @@ describe("wallet session transitions", () => {
     expect(localStorage.getItem("pcc-api-key")).toBeNull();
     expect(hasStoredApiKey()).toBe(false);
     expect(useAuthStore.getState().sessionToken).toBeNull();
+  });
+
+  it("clears the persisted key when the wallet disconnects during an explicit sign-out", async () => {
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    const network = fetch;
+    let finishLogout!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (pathOf(input) === "/api/auth/logout") return new Promise<Response>((resolve) => { finishLogout = resolve; });
+      return network(input, init);
+    }));
+    let logout!: Promise<void>;
+    await act(async () => { logout = auth.logout(); });
+    await vi.waitFor(() => expect(finishLogout).toBeTypeOf("function"));
+    wallet.isConnected = false;
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
+    await act(async () => { finishLogout(reply(200, {})); await logout; });
+    expect(localStorage.getItem("pcc-api-key")).toBeNull();
+    expect(hasStoredApiKey()).toBe(false);
+  });
+
+  it("keeps the persisted key on a disconnect after an explicit sign-out", async () => {
+    await signIn();
+    await act(async () => { await auth.logout(); });
+    await signIn();
+    localStorage.setItem("pcc-api-key", PASTED);
+    wallet.isConnected = false;
+    await act(async () => { wallet.onDisconnect?.(); root.render(<Harness />); });
+    await vi.waitFor(() => expect(hasStoredApiKey()).toBe(false));
+    expect(localStorage.getItem("pcc-api-key")).toBe(PASTED);
   });
 
   it("prompts sign-in when the wallet address changes during a pending login mint", async () => {
