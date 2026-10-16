@@ -10,7 +10,9 @@
  * This ships the v1 cut (16 primitives, §7.1) PLUS the additive v1.5-industrial
  * cut (#52-#55, Family L `record` + Family C telemetry — the sensor/machine-log
  * primitives that bind already-built verifiers; see
- * ai/research/pcc-evidence-vocab-sensor-machinelog.md). All `status:"active"`.
+ * ai/research/pcc-evidence-vocab-sensor-machinelog.md), plus #56
+ * `input.hash_bound` (funded-input binding, fail-closed stub).
+ * All `status:"active"`.
  * The full space is 51+ primitives; further v1.5 / v2 primitives are appended to
  * EVIDENCE_PRIMITIVES as their verifiers land (§7.2 / §7.3), each an independent
  * commitment. The vocabulary grows in DATA (registry entries), never in code
@@ -778,6 +780,26 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     objectivityBand: "B1",
     verifierStatus: "stub",
     dependsOn: ["artifact.hash"],
+  },
+
+  // #56 — Family E (confirm). Funded-input modifier; commitment location pending.
+  {
+    id: "input.hash_bound",
+    wire: "pcc.ev.input.hash_bound.v1",
+    family: "confirm",
+    status: "active",
+    proves:
+      "The device took exactly the funded input: a kernel-signed method_loaded event, on the same deviceJobId as the completion, carries payload.inputHash equal byte for byte to the input commitment the settlement gate binds to the escrow.",
+    paramsSchema: { type: "object", properties: {}, additionalProperties: false },
+    authRequirement: "inherited",
+    tierSupport: [
+      { tier: 1, conditions: "modifier: binds the run to the funded input; grants no tier alone" },
+      { tier: 2, conditions: "modifier" },
+      { tier: 3, conditions: "modifier" },
+    ],
+    objectivityBand: "B1",
+    verifierStatus: "stub",
+    dependsOn: ["receipt.kernel_signed"],
   },
 ];
 

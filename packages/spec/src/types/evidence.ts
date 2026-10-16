@@ -66,6 +66,15 @@ export const EVIDENCE_EVENT_TYPES = [
   "device_death",
   "device_heartbeat",
   "calibration_record",
+  /**
+   * Payload: { jobId, deviceJobId, inputHash }. inputHash uses exactly the
+   * kernel's JobConfig.gcodeHash format: SHA256 = `sha256:${string}` (a
+   * SHA-256 hex-encoded hash; types/common.ts), so gcodeHash may be an alias.
+   * The kernel computes inputHash itself from its input data and records
+   * method_loaded only when the device's prepare ack echoes the same jobId
+   * and inputHash. input.hash_bound reads only payload.inputHash for the
+   * input commitment comparison, on the same deviceJobId as the completion.
+   */
   "method_loaded",
   "sequence_started",
   // Photo verification events (WS2)
