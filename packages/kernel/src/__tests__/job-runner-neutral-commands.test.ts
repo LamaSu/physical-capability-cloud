@@ -55,6 +55,7 @@ class LegacyStub implements MachineAdapter {
   events: EvidenceEvent["type"][] = ["execution_completed"];
   listeners: ((event: RawEvent) => void)[] = [];
   prepareAck?: (command: MachineCommand) => unknown;
+  beforeLoad?: () => void;
   beforeStart?: () => void;
   afterEmit?: (event: RawEvent) => void;
   emit(type: EvidenceEvent["type"], payload: Record<string, unknown> = {}) {
@@ -65,6 +66,7 @@ class LegacyStub implements MachineAdapter {
   }
   async execute(command: MachineCommand): Promise<MachineCommandResult> {
     this.commands.push(command);
+    if (command.type === "load_gcode") this.beforeLoad?.();
     // Check the future command as a string so the test suite runs against unchanged types.
     if ((command.type as string) === "prepare") {
       expect(this.actuations).toEqual([]);
@@ -149,10 +151,19 @@ describe("A legacy commands", () => {
     expect(result.error).toContain("gcode_hash_verified");
     expect(f.bundles).toEqual([]);
   });
-  it("A5 still records legacy adapter method_loaded", async () => {
-    const f = legacy(); f.machine.events.unshift("method_loaded");
+  it("A5 still records legacy adapter method_loaded without inputHash unchanged", async () => {
+    const f = legacy();
+    const payload = { gcodeHash: H, jobId: f.config.jobId, mock: true };
+    let emitted: RawEvent | undefined;
+    f.machine.beforeStart = () => {
+      emitted = { type: "method_loaded", timestamp: new Date().toISOString(), source: f.machine.source, payload };
+      for (const listener of f.machine.listeners) listener(emitted);
+    };
     expect((await f.run()).success).toBe(true);
-    expect(method(f.bundles[0]!)).toHaveLength(1);
+    const methods = method(f.bundles[0]!);
+    expect(methods).toHaveLength(1);
+    expect(methods[0]).toStrictEqual({ ...emitted, id: methods[0]!.id, hash: methods[0]!.hash });
+    expect(JSON.stringify(methods[0]!.payload)).toBe(JSON.stringify(payload));
   });
   it("A6 an explicit load_gcode and start list remains legacy", async () => {
     const f = legacy(); Object.assign(f.machine, { accepts: ["load_gcode", "start"] });
@@ -347,6 +358,54 @@ describe("F only the kernel writes method_loaded", () => {
     f.machine.afterEmit = (event) => { if (event.type === "instrument_result") event.type = "method_loaded"; };
     const result = await f.run(); expect(result.success).toBe(false);
     expect(result.error).toContain("the bundle would carry a method_loaded the kernel did not record"); expect(f.bundles).toEqual([]);
+  });
+  const hashValues = [
+    ["equal", H], ["different", OTHER_H], ["undefined", undefined], ["null", null], ["empty", ""], ["number", 7],
+  ] as const;
+  it.each(hashValues.flatMap(([name, inputHash]) => (["load_gcode", "start"] as const).map((phase) => ({ name, inputHash, phase }))))(
+    "MEDIUM-1 legacy method_loaded with $name inputHash during $phase fails closed and is never recorded", async ({ inputHash, phase }) => {
+    const f = legacy();
+    const emit = () => f.machine.emit("method_loaded", { jobId: f.config.jobId, inputHash });
+    if (phase === "load_gcode") f.machine.beforeLoad = emit;
+    else f.machine.beforeStart = emit;
+    const result = await f.run();
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("an adapter emitted method_loaded");
+    expect(result.bundleId).toBeUndefined(); expect(result.bundleHash).toBeUndefined();
+    expect(result.busy).toBeUndefined(); expect(f.bundles).toEqual([]);
+    expect(f.add.mock.calls.filter((c) => c[2].type === "method_loaded")).toEqual([]);
+    expect(f.machine.commands.map((c) => c.type)).toStrictEqual(phase === "load_gcode" ? ["load_gcode"] : ["load_gcode", "start"]);
+  });
+  it.each(["payload", "type"])("MEDIUM-1 legacy post-settle %s mutation cannot forge the input proof", async (mutation) => {
+    const f = legacy();
+    // Mutate after addEvent has stored the event, so only the post-settle check can catch it.
+    f.add.mockImplementation(async (jobId, stepId, event) => {
+      const stored = await EvidenceEmitter.prototype.addEvent.call(f.emitter, jobId, stepId, event);
+      if (event.type === (mutation === "payload" ? "method_loaded" : "instrument_result")) {
+        stored.type = "method_loaded"; stored.payload.inputHash = undefined;
+      }
+      return stored;
+    });
+    f.machine.events.unshift(mutation === "payload" ? "method_loaded" : "instrument_result");
+    const result = await f.run();
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("the bundle would carry a method_loaded the kernel did not record");
+    expect(result.bundleId).toBeUndefined(); expect(result.bundleHash).toBeUndefined();
+    expect(result.busy).toBeUndefined(); expect(f.bundles).toEqual([]);
+  });
+  it.each(["payload", "type"])("MEDIUM-1 legacy queued %s mutation is never recorded", async (mutation) => {
+    const f = legacy();
+    f.machine.events.unshift(mutation === "payload" ? "method_loaded" : "instrument_result");
+    f.machine.afterEmit = (event) => {
+      if (event.type === (mutation === "payload" ? "method_loaded" : "instrument_result")) {
+        event.type = "method_loaded"; event.payload.inputHash = undefined;
+      }
+    };
+    const result = await f.run();
+    expect(result.success).toBe(false); expect(result.error).toBe("an adapter emitted method_loaded");
+    expect(result.bundleId).toBeUndefined(); expect(result.bundleHash).toBeUndefined();
+    expect(f.bundles).toEqual([]);
+    expect(f.add.mock.calls.filter((c) => c[2].type === "method_loaded")).toEqual([]);
   });
 });
 

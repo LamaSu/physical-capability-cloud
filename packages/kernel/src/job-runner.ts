@@ -170,9 +170,18 @@ export class JobRunner {
     const unrecorded: { first: { type: string; error: string } | null } = { first: null };
     const adapterMethodLoaded: { first: Omit<EvidenceEvent, "id" | "hash"> | null } = { first: null };
     let deviceJobId: string | undefined;
-    const record = (event: Omit<EvidenceEvent, "id" | "hash">): void => {
+    const carriesInputHash = (payload: Record<string, unknown>): boolean =>
+      payload !== null && typeof payload === "object" && "inputHash" in payload;
+    const forbiddenAdapterMethod = (event: Omit<EvidenceEvent, "id" | "hash">): boolean =>
+      event.type === "method_loaded" && (prepare || carriesInputHash(event.payload));
+    const record = (event: Omit<EvidenceEvent, "id" | "hash">, adapterOrigin = false): void => {
       recorded = recorded.then(async () => {
         if (sealed) return;
+        // A listener may mutate an adapter event while it waits in this queue.
+        if (adapterOrigin && carriesInputHash(event.payload) && forbiddenAdapterMethod(event)) {
+          adapterMethodLoaded.first ??= event;
+          return;
+        }
         try {
           await this.evidenceEmitter.addEvent(jobId, stepId, event);
         } catch (err) {
@@ -217,14 +226,11 @@ export class JobRunner {
       adapters,
       { jobId, stepId },
       (event) => {
-        if (prepare) {
-          const type = event.type;
-          if (type === "method_loaded") {
-            adapterMethodLoaded.first ??= event;
-            return;
-          }
+        if (forbiddenAdapterMethod(event)) {
+          adapterMethodLoaded.first ??= event;
+          return;
         }
-        record(event);
+        record(event, true);
       },
     );
     if (!opened.ok) {
@@ -322,6 +328,7 @@ export class JobRunner {
           if (!loadResult.success) {
             return { success: false, error: `Failed to load G-code: ${loadResult.message}`, durationMs: Date.now() - startTime };
           }
+          if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
           }
 
           // 2. Start sensors (Tier 1+)
@@ -420,11 +427,11 @@ export class JobRunner {
           // Check tier requirements are met, over every event the run accepted. A camera event
           // counts only as an LO-SE-1 capture for THIS job, so the check needs the jobId.
           const events = this.evidenceEmitter.getEvents(jobId, stepId);
+          if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
+          const methods = events.filter((event) => event.type === "method_loaded");
           if (prepare) {
-            if (adapterMethodLoaded.first !== null) return refuse("an adapter emitted method_loaded");
             // Adapter events retain their references until recording. A type changed
             // after emission must not introduce another input proof into the bundle.
-            const methods = events.filter((event) => event.type === "method_loaded");
             const payload = methods[0]?.payload;
             if (methods.length !== 1 || payload === null || typeof payload !== "object" ||
                 Array.isArray(payload) || Reflect.ownKeys(payload).length !== 3 ||
@@ -432,6 +439,8 @@ export class JobRunner {
                 payload.jobId !== jobId || payload.deviceJobId !== deviceJobId || payload.inputHash !== gcodeHash) {
               return refuse("the bundle would carry a method_loaded the kernel did not record");
             }
+          } else if (methods.some((event) => carriesInputHash(event.payload))) {
+            return refuse("the bundle would carry a method_loaded the kernel did not record");
           }
           const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, requirements, { jobId });
           if (!check.met) {

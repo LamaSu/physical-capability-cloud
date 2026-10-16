@@ -49,9 +49,13 @@ export type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance
  * inputHash is sha256: followed by 64 lowercase hex digits, the SHA-256 of the
  * exact input bytes without text, newline or BOM normalization. gcodeHash is
  * its legacy alias. load_gcode carries { gcodeHash, jobId } and no input bytes.
- * Adapters never emit method_loaded. After a matching prepare ack, the kernel
- * records method_loaded { jobId, deviceJobId, inputHash } from its own values
- * as the kernel-signed input proof. An adapter emission fails a prepare job.
+ * Only the kernel emits method_loaded with an inputHash key. After a matching
+ * prepare ack, it records { jobId, deviceJobId, inputHash } from its own values
+ * as the kernel-signed input proof. On every path, an adapter method_loaded
+ * carrying an inputHash key (any value) is never recorded and fails the job
+ * closed. Every adapter method_loaded fails a prepare job. Legacy emissions
+ * without inputHash remain recorded unchanged. The kernel rechecks after
+ * evidence settles to catch events mutated after emission or recording.
  */
 export interface MachineCommand {
   type: "prepare" | "load_gcode" | "start" | "pause" | "resume" | "stop" | "status";
