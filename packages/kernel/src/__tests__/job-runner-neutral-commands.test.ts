@@ -24,9 +24,10 @@ type Config = Omit<JobConfig, "gcodeHash"> & {
   inputData?: string | Uint8Array; gcodeData?: string | Uint8Array;
   tierLadder?: TierLadderV1;
 };
-const H = `sha256:${"ab".repeat(32)}` as SHA256;
-const OTHER_H = `sha256:${"cd".repeat(32)}` as SHA256;
 const hash = (bytes: string | Uint8Array): SHA256 => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+const INPUT = "liquid protocol";
+const H = hash(INPUT);
+const OTHER_H = `sha256:${"cd".repeat(32)}` as SHA256;
 let ladder: TierLadderV1;
 const csd = {
   url: "pcc://capabilities/test-liquid-transfer/v1",
@@ -99,7 +100,7 @@ function setup(machine: LegacyStub = new NeutralStub(), signer?: ReturnType<type
   const register = vi.spyOn(emitter, "registerStep");
   const add = vi.spyOn(emitter, "addEvent");
   const onPhase = vi.fn();
-  const config: Config = { jobId: `job-${machine.id}`, stepId: "step", inputHash: H,
+  const config: Config = { jobId: `job-${machine.id}`, stepId: "step", inputHash: H, inputData: INPUT,
     assuranceTier: 0, tierLadder: ladder, onPhase };
   const run = (overrides: Partial<Config> = {}) => new JobRunner(machine, [], null, emitter).run({ ...config, ...overrides } as JobConfig);
   return { machine, emitter, bundles, register, add, onPhase, config, run };
@@ -107,6 +108,7 @@ function setup(machine: LegacyStub = new NeutralStub(), signer?: ReturnType<type
 function legacy() {
   const f = setup(new LegacyStub());
   f.config.inputHash = undefined;
+  f.config.inputData = undefined;
   f.config.gcodeHash = H;
   f.config.tierLadder = undefined;
   return f;
@@ -264,17 +266,19 @@ describe("C exact data hashing", () => {
   });
   it("C4 accepts the gcodeData alias", async () => {
     const f = setup(); const gcodeData = Buffer.from("alias\r\n");
-    expect((await f.run({ gcodeData, inputHash: hash(gcodeData) })).success).toBe(true);
+    expect((await f.run({ inputData: undefined, gcodeData, inputHash: hash(gcodeData) })).success).toBe(true);
     expect(f.machine.commands[0]!.payload!.inputData).toStrictEqual(new Uint8Array(gcodeData));
   });
   it.each(["🧪", "literal \uFFFD character"])("C5 well-formed unicode %s", async (inputData) => {
     expect((await setup().run({ inputData, inputHash: hash(inputData) })).success).toBe(true);
   });
   it.each([
-    ["X-14 leading f", `sha256:f${"a".repeat(63)}`],
-    ["X-15 trailing zero", `sha256:${"a".repeat(63)}0`],
-  ])("%s is a valid input hash", async (_name, inputHash) => {
-    expect((await setup().run({ inputHash: inputHash as SHA256 })).success).toBe(true);
+    ["X-14 leading f", "hash boundary 7", /^sha256:f/],
+    ["X-15 trailing zero", "hash boundary 9", /0$/],
+  ] as const)("%s is a valid input hash", async (_name, inputData, boundary) => {
+    const inputHash = hash(inputData);
+    expect(inputHash).toMatch(boundary);
+    expect((await setup().run({ inputHash, inputData })).success).toBe(true);
   });
 });
 
@@ -291,12 +295,8 @@ describe("D neutral prepare", () => {
       expect(JSON.stringify(options.attributes)).not.toContain(f.machine.deviceJobId);
     }
   });
-  it("D1 hash only uses exactly prepare then start", async () => {
-    const f = setup(); expect((await f.run()).success).toBe(true);
-    expect(f.machine.commands).toStrictEqual([
-      { type: "prepare", payload: { jobId: f.config.jobId, inputHash: H } },
-      { type: "start", payload: { jobId: f.config.jobId } },
-    ]);
+  it.each(["inputHash", "gcodeHash"] as const)("D1 hash only via %s is refused before commands or registerStep", async (field) => {
+    await refusal({ inputHash: undefined, [field]: H, inputData: undefined }, "the prepare path needs input data");
   });
   it("D1 data delivers the exact UTF8 bytes", async () => {
     const f = setup(); const text = "🧪\r\n"; const inputHash = hash(text);

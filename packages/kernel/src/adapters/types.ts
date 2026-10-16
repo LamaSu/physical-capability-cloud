@@ -38,13 +38,12 @@ import type { EvidenceEvent, EvidenceEventType, EvidenceSource, WorkflowChalleng
 export type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance";
 
 /**
- * A command to send to a machine. prepare { jobId, inputHash } only stages and
+ * A command to send to a machine. prepare { jobId, inputHash, inputData } only stages and
  * validates input: no motion, heat, dispense, or device-state change beyond
  * staging. Anything that actuates belongs to start, whose payload is { jobId }.
- * When input data is configured, prepare also carries inputData, a fresh
- * Uint8Array of the exact bytes the kernel hashed (a string's UTF-8 bytes).
- * The adapter must stage exactly those bytes. With only a hash, inputData is
- * absent and the adapter resolves its input by inputHash.
+ * inputData is always a fresh Uint8Array of the exact bytes the kernel hashed
+ * (a string's UTF-8 bytes). The adapter must stage exactly those bytes.
+ * A hash-only prepare is refused until a verified resolve-by-hash exists.
  *
  * inputHash is sha256: followed by 64 lowercase hex digits, the SHA-256 of the
  * exact input bytes without text, newline or BOM normalization. gcodeHash is
@@ -66,6 +65,10 @@ export interface MachineCommand {
  * Result of a machine command. A prepare ack must have success: true and
  * data: { jobId, inputHash, deviceJobId }. jobId and inputHash echo the command
  * exactly; deviceJobId is a non-empty string naming the device's staged job.
+ * Echo inputHash only for the exact bytes received in payload.inputData and
+ * staged for that device job. The kernel signs an input proof only for bytes
+ * it hashed itself; a hash-only prepare is refused until a verified
+ * resolve-by-hash exists.
  * Any other ack fails the job closed before start.
  */
 export interface MachineCommandResult {

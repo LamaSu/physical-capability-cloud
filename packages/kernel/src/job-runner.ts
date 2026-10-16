@@ -30,7 +30,7 @@ export interface JobConfig {
   /** Legacy alias of inputHash. Give exactly one of inputHash and gcodeHash. */
   gcodeHash?: SHA256;
   assuranceTier: AssuranceTier;
-  /** Exact input bytes; a string means its UTF-8 bytes. Give at most one data field. */
+  /** Exact input bytes; required for prepare. A string means its UTF-8 bytes. Give at most one data field. */
   inputData?: string | Uint8Array;
   /** Legacy alias of inputData. Give at most one of inputData and gcodeData. */
   gcodeData?: string | Uint8Array;
@@ -127,6 +127,7 @@ export class JobRunner {
     if (prepare && (typeof gcodeHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(gcodeHash))) {
       return refuse("inputHash must be sha256: followed by 64 lowercase hex digits");
     }
+    if (prepare && data === undefined) return refuse("the prepare path needs input data");
     let inputBytes: Uint8Array | undefined;
     if (data !== undefined) {
       if (typeof data !== "string" && !(data instanceof Uint8Array)) {
@@ -287,7 +288,7 @@ export class JobRunner {
                 payload: {
                   jobId,
                   inputHash: gcodeHash,
-                  ...(inputBytes !== undefined ? { inputData: new Uint8Array(inputBytes) } : {}),
+                  inputData: new Uint8Array(inputBytes!),
                 },
               }),
             );
