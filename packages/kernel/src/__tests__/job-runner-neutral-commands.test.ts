@@ -400,6 +400,18 @@ describe("E prepare ack fails closed", () => {
 });
 
 describe("F only the kernel writes method_loaded", () => {
+  it("legacy: a forbidden method_loaded after another event during load_gcode is refused before start", async () => {
+    const f = legacy();
+    f.machine.beforeLoad = () => {
+      f.machine.emit("instrument_result", { step: 1 });
+      f.machine.emit("method_loaded", { jobId: f.config.jobId, inputHash: H });
+    };
+    const result = await f.run();
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("an adapter emitted method_loaded");
+    expect(f.machine.commands.map((c) => c.type)).toStrictEqual(["load_gcode"]);
+    expect(f.bundles).toEqual([]);
+  });
   it("F1 refuses adapter method_loaded inside prepare", async () => {
     const f = setup(); f.machine.prepareAck = (command) => {
       f.machine.emit("method_loaded");
