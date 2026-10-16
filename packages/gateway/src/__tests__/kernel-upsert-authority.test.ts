@@ -42,19 +42,22 @@ describe("kernel upsert owner authority", () => {
     expect(fixture.row("owned-no-signer")).toEqual(before);
   });
 
-  it("leaves a first-bind challenge available when owner authority is refused", async () => {
+  it("burns a verified first-bind challenge when owner authority is refused", async () => {
     expect((await fixture.register("denied-bind-challenge")).statusCode).toBe(201);
     const proof = await fixture.proof("denied-bind-challenge", ED_SIGNER, fixture.sameClaimKey);
     const denied = await fixture.register("denied-bind-challenge", proof, fixture.headers(fixture.sameClaimKey));
     expect(denied.statusCode).toBe(403);
     const challenge = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`) as { consumed_at: string | null };
-    expect(challenge.consumed_at).toBeNull();
-    const accepted = await fixture.register("denied-bind-challenge", proof, fixture.adminHeaders);
+    const replay = await fixture.register("denied-bind-challenge", proof, fixture.adminHeaders);
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(challenge.consumed_at).toEqual(expect.any(String));
+    const accepted = await fixture.register("denied-bind-challenge", await fixture.proof("denied-bind-challenge"), fixture.adminHeaders);
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json().kernel.signingKey).toEqual(ED_SIGNER);
   });
 
-  it.each(["update", "bindSignerIfUnregistered"] as const)("rolls back challenge consumption and profile changes if %s fails", async (operation) => {
+  it.each(["update", "bindSignerIfUnregistered"] as const)("keeps the challenge burned but rolls back profile changes if %s fails", async (operation) => {
     expect((await fixture.register("atomic-bind")).statusCode).toBe(201);
     const proof = await fixture.proof("atomic-bind");
     const before = fixture.row("atomic-bind");
@@ -64,11 +67,57 @@ describe("kernel upsert owner authority", () => {
     expect(denied.statusCode).toBe(500);
     expect(fixture.row("atomic-bind")).toEqual(before);
     const challenge = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`) as { consumed_at: string | null };
-    expect(challenge.consumed_at).toBeNull();
-    const retried = await fixture.register("atomic-bind", { ...proof, name: "Transactional profile" }, fixture.adminHeaders);
+    expect(challenge.consumed_at).toEqual(expect.any(String));
+    const replay = await fixture.register("atomic-bind", { ...proof, name: "Transactional profile" }, fixture.adminHeaders);
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row("atomic-bind")).toEqual(before);
+    const retried = await fixture.register("atomic-bind", { ...await fixture.proof("atomic-bind"), name: "Transactional profile" }, fixture.adminHeaders);
     expect(retried.statusCode).toBe(200);
     expect(retried.json().kernel.signingKey).toEqual(ED_SIGNER);
     expect(fixture.row("atomic-bind")?.name).toBe("Transactional profile");
+  });
+
+  it("keeps the challenge burned when SQLite refuses the kernel insert", async () => {
+    const id = "failed-insert";
+    const proof = await fixture.proof(id);
+    getStore().db.run(sql`CREATE TEMP TRIGGER refuse_kernel_insert BEFORE INSERT ON shop_kernels
+      BEGIN SELECT RAISE(ABORT, 'Injected kernel insert failure'); END`);
+    const denied = await fixture.register(id, proof);
+    getStore().db.run(sql`DROP TRIGGER refuse_kernel_insert`);
+    expect(denied.statusCode).toBe(500);
+    expect(fixture.row(id)).toBeUndefined();
+    const burned = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`);
+    expect(burned).toEqual({ consumed_at: expect.any(String) });
+    const replay = await fixture.register(id, proof);
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row(id)).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`)).toEqual(burned);
+    expect((await fixture.register(id, await fixture.proof(id))).statusCode).toBe(201);
+  });
+
+  it.each(["create", "update"])("burns a verified challenge on an exact-location refusal during %s", async (operation) => {
+    const id = "exact-location-refusal";
+    if (operation === "update") {
+      expect((await fixture.register(id, await fixture.proof(id))).statusCode).toBe(201);
+    }
+    const before = fixture.row(id);
+    const proof = await fixture.proof(id);
+    const denied = await fixture.register(id, { ...proof, locationVisibility: "exact", location: { lat: 37.7, lng: -122.4 } });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().message).toContain(`Publishing the exact location of kernel '${id}' needs`);
+    expect(fixture.row(id)).toEqual(before);
+    const burned = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`);
+    expect(burned).toEqual({ consumed_at: expect.any(String) });
+    const replay = await fixture.register(id, proof, fixture.adminHeaders);
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row(id)).toEqual(before);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`)).toEqual(burned);
+    const accepted = await fixture.register(id, { ...await fixture.proof(id), locationVisibility: "exact" }, fixture.adminHeaders);
+    expect(accepted.statusCode).toBe(operation === "create" ? 201 : 200);
+    expect(accepted.json().kernel.signingKey).toEqual(ED_SIGNER);
   });
 
   it("allows the admin secret to update an owned profile", async () => {
@@ -193,7 +242,11 @@ describe("kernel upsert owner authority", () => {
     const denied = await fixture.register("unowned-bound", { ...proof, name: "Unowned profile" });
     expect(denied.statusCode).toBe(403);
     expect(fixture.row("unowned-bound")).toEqual(before);
-    const accepted = await fixture.register("unowned-bound", { ...proof, name: "Admin assigned profile" }, fixture.adminHeaders);
+    const replay = await fixture.register("unowned-bound", proof, fixture.adminHeaders);
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row("unowned-bound")).toEqual(before);
+    const accepted = await fixture.register("unowned-bound", { ...await fixture.proof("unowned-bound"), name: "Admin assigned profile" }, fixture.adminHeaders);
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json().kernel.signingKey).toEqual(ED_SIGNER);
     expect(fixture.row("unowned-bound")?.name).toBe("Admin assigned profile");
@@ -204,12 +257,20 @@ describe("kernel upsert owner authority", () => {
     const before = fixture.row("set-once");
     const signer = { algorithm: "ed25519" as const, publicKey: `0x${ED_B.publicKeyHex}` };
     const challenge = await fixture.issue("set-once", signer);
-    const response = await fixture.register("set-once", {
+    const proof = {
       ...signerFields(signer), name: "Different signer profile",
       registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message, ED_B) },
-    }, fixture.adminHeaders);
+    };
+    const response = await fixture.register("set-once", proof, fixture.adminHeaders);
     expect(response.statusCode).toBe(409);
     expect(fixture.row("set-once")).toEqual(before);
     expect(fixture.row("set-once")?.signingKeyPublicKey).toBe(`0x${ED_A.publicKeyHex}`);
+    const burned = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`);
+    expect(burned).toEqual({ consumed_at: expect.any(String) });
+    const replay = await fixture.register("set-once", proof, fixture.adminHeaders);
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row("set-once")).toEqual(before);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`)).toEqual(burned);
   });
 });

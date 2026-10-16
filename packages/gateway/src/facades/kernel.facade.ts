@@ -342,7 +342,11 @@ export class KernelFacade extends BaseFacade {
         ? await verifyKernelRegistrationProof(id, provenSigner, body.registrationProof, authority)
         : () => {};
 
-      // Authority, challenge consumption, profile writes and the set-once bind commit together.
+      // Commit the verified proof's atomic burn on its own, before any action refusal or
+      // write. The action transaction must never roll back a challenge's first use.
+      consumeProof();
+
+      // Authority, profile writes and the set-once bind still commit together.
       return getStore().db.transaction(() => {
         const existing = repos.kernels.findById(id);
         if (existing) {
@@ -406,7 +410,6 @@ export class KernelFacade extends BaseFacade {
           }
           // Heartbeat/profile fields are a normal update. The signing identity is
           // deliberately excluded and committed through the atomic CAS below.
-          consumeProof();
           let kernel = repos.kernels.update(id, updates) ?? existing;
           if (provenSigner) {
             const cols = this.signerToColumns(provenSigner);
@@ -496,7 +499,6 @@ export class KernelFacade extends BaseFacade {
           validUntil: computeValidUntilIso(now),
         };
 
-        consumeProof();
         const inserted = repos.kernels.insert(kernelData);
 
         trackServerEvent(

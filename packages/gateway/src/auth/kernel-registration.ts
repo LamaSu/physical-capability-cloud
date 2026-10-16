@@ -127,7 +127,7 @@ export function issueKernelRegistrationChallenge(
   return { challengeId, message, expiresAt };
 }
 
-/** Verify the stored bytes before any registration write; consume only after authority checks. */
+/** Verify issuer, context and signature; the caller must burn before the action transaction. */
 export async function verifyKernelRegistrationProof(
   kernelId: string,
   signer: RegisteredSigner | null,

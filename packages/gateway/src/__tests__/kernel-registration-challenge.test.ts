@@ -180,6 +180,8 @@ describe("kernel registration challenges", () => {
     expect(row).toEqual({ consumed_at: null });
     expect((await fixture.register("issuer-only", proof)).statusCode).toBe(201);
     expect(fixture.row("issuer-only")?.signingKeyPublicKey).toBe(`0x${ED_A.publicKeyHex}`);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
   it("allows the admin to redeem another principal's challenge", async () => {
@@ -216,10 +218,14 @@ describe("kernel registration challenges", () => {
       expect(denied.statusCode).toBe(403);
       expect(denied.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
       expect(fixture.row("session-issuer")).toBeUndefined();
+      expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+        .toEqual({ consumed_at: null });
     }
     const accepted = await fixture.register("session-issuer", proof, issuer);
     expect(accepted.statusCode).toBe(201);
     expect(accepted.json().kernel.signingKey).toEqual(ED_SIGNER);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
   it("caps open challenges at five per API key across kernels and signers", async () => {
@@ -276,20 +282,61 @@ describe("kernel registration challenges", () => {
   });
 
   it("refuses a replayed registration proof", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const proof = await fixture.proof("single-use");
     expect((await fixture.register("single-use", proof)).statusCode).toBe(201);
     const before = fixture.row("single-use");
+    const consumed = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`);
+    expect(consumed).toEqual({ consumed_at: expect.any(String) });
+    vi.setSystemTime(Date.now() + 1_000);
     const replay = await fixture.register("single-use", { ...proof, name: "Replayed profile" });
     expect(replay.statusCode).toBe(403);
-    expect(replay.json().error).toBe("FORBIDDEN");
+    expect(replay.json()).toMatchObject({ error: "FORBIDDEN", message: "Kernel registration proof is invalid, expired, or already consumed" });
     expect(fixture.row("single-use")).toEqual(before);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`)).toEqual(consumed);
   });
 
   it("consumes a challenge once when registrations arrive concurrently", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const proof = await fixture.proof("concurrent-use");
-    const responses = await Promise.all([fixture.register("concurrent-use", proof), fixture.register("concurrent-use", proof)]);
+    const responses = await Promise.all([
+      fixture.register("concurrent-use", { ...proof, name: "First concurrent profile" }),
+      fixture.register("concurrent-use", { ...proof, name: "Second concurrent profile" }),
+    ]);
     expect(responses.map((response) => response.statusCode).sort()).toEqual([201, 403]);
-    expect(responses.find((response) => response.statusCode === 403)?.json().error).toBe("FORBIDDEN");
+    expect(responses.find((response) => response.statusCode === 403)?.json())
+      .toMatchObject({ error: "FORBIDDEN", message: "Kernel registration proof is invalid, expired, or already consumed" });
+    const before = fixture.row("concurrent-use");
+    expect(before?.name).toBe(responses.find((response) => response.statusCode === 201)?.json().kernel.name);
+    const consumed = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`);
+    expect(consumed).toEqual({ consumed_at: expect.any(String) });
+    vi.setSystemTime(Date.now() + 1_000);
+    const replay = await fixture.register("concurrent-use", { ...proof, name: "Replayed concurrent profile" });
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row("concurrent-use")).toEqual(before);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`)).toEqual(consumed);
+  });
+
+  it("refuses a second burn when both uses verified the same unconsumed challenge", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const proof = await fixture.proof("verified-before-burn");
+    const stored = getStore().db.get<{ created_by_key_id: string }>(sql`SELECT created_by_key_id FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`)!;
+    const authority = { admin: false, provenWallet: null, claimed: null, apiKeyId: stored.created_by_key_id };
+    const [first, second] = await Promise.all([
+      verifyKernelRegistrationProof("verified-before-burn", ED_SIGNER, proof.registrationProof, authority),
+      verifyKernelRegistrationProof("verified-before-burn", ED_SIGNER, proof.registrationProof, authority),
+    ]);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
+    first();
+    const consumed = getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`);
+    expect(consumed).toEqual({ consumed_at: expect.any(String) });
+    vi.setSystemTime(Date.now() + 1_000);
+    expect(second).toThrow("Kernel registration proof is invalid, expired, or already consumed");
+    expect(first).toThrow("Kernel registration proof is invalid, expired, or already consumed");
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`)).toEqual(consumed);
+    expect(fixture.row("verified-before-burn")).toBeUndefined();
   });
 
   it("refuses a proof for another kernel id", async () => {
@@ -298,7 +345,12 @@ describe("kernel registration challenges", () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
     expect(fixture.row("other-kernel")).toBeUndefined();
+    expect(fixture.row("challenged-kernel")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
     expect((await fixture.register("challenged-kernel", proof)).statusCode).toBe(201);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
   it("refuses a staging challenge on a production gateway", async () => {
@@ -309,6 +361,10 @@ describe("kernel registration challenges", () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
     expect(fixture.row("environment-bound")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
+    process.env.PCC_DEPLOYMENT_ENV = "staging";
+    expect((await fixture.register("environment-bound", proof)).statusCode).toBe(201);
   });
 
   it("uses Railway's environment when the explicit deployment environment is unset", async () => {
@@ -319,6 +375,11 @@ describe("kernel registration challenges", () => {
     const response = await fixture.register("deployment-environment-bound", proof);
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("deployment-environment-bound")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
+    process.env.RAILWAY_ENVIRONMENT_NAME = "staging";
+    expect((await fixture.register("deployment-environment-bound", proof)).statusCode).toBe(201);
   });
 
   it("refuses a challenge for a different chain", async () => {
@@ -328,6 +389,11 @@ describe("kernel registration challenges", () => {
     const response = await fixture.register("chain-bound", proof);
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("chain-bound")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
+    process.env.PCC_CHAIN_ID = "8453";
+    expect((await fixture.register("chain-bound", proof)).statusCode).toBe(201);
   });
 
   it("refuses a challenge for a different public domain", async () => {
@@ -337,6 +403,11 @@ describe("kernel registration challenges", () => {
     const response = await fixture.register("domain-bound", proof);
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("domain-bound")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
+    process.env.PCC_PUBLIC_URL = "https://staging.capability.network";
+    expect((await fixture.register("domain-bound", proof)).statusCode).toBe(201);
   });
 
   it("refuses an expired challenge", async () => {
@@ -346,6 +417,9 @@ describe("kernel registration challenges", () => {
     const response = await fixture.register("expired-challenge", proof);
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("expired-challenge")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
   });
 
   it("refuses a challenge issued more than ten minutes ago even if its expiration is later", async () => {
@@ -355,6 +429,9 @@ describe("kernel registration challenges", () => {
     const response = await fixture.register("old-challenge", proof);
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("old-challenge")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
   });
 
   it("rechecks freshness when consuming a previously verified challenge", async () => {
@@ -380,6 +457,8 @@ describe("kernel registration challenges", () => {
     expect(denied.statusCode).toBe(403);
     expect(denied.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
     expect(fixture.row("future-challenge")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${proof.registrationProof.challengeId}`))
+      .toEqual({ consumed_at: null });
   });
 
   it("refuses an unknown challenge", async () => {
@@ -397,6 +476,15 @@ describe("kernel registration challenges", () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
     expect(fixture.row("signer-bound")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: null });
+    const accepted = await fixture.register("signer-bound", {
+      ...signerFields(ED_SIGNER), registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message) },
+    });
+    expect(accepted.statusCode).toBe(201);
+    expect(accepted.json().kernel.signingKey).toEqual(ED_SIGNER);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
   it.each(["ed25519", "secp256k1"] as const)("refuses a valid signature by A when the body binds B: %s", async (algorithm) => {
@@ -412,6 +500,15 @@ describe("kernel registration challenges", () => {
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
     expect(fixture.row("unproven-body-key")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: null });
+    const accepted = await fixture.register("unproven-body-key", {
+      ...signerFields(challenged), registrationProof: { challengeId: challenge.challengeId, signature },
+    });
+    expect(accepted.statusCode).toBe(201);
+    expect(accepted.json().kernel.signingKey).toEqual(challenged);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
   it("verifies the signature over the stored challenge bytes", async () => {
@@ -422,18 +519,40 @@ describe("kernel registration challenges", () => {
     });
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("stored-message")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: null });
     expect((await fixture.register("stored-message", {
       ...signerFields(ED_SIGNER), registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message) },
     })).statusCode).toBe(201);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
-  it("refuses a signature by a different key over the same stored bytes", async () => {
-    const challenge = await fixture.issue("signature-bound");
+  it.each(["ed25519", "secp256k1"] as const)("refuses a signature by a different key over the same stored bytes: %s", async (algorithm) => {
+    const challenged = algorithm === "ed25519" ? ED_SIGNER : EVM_SIGNER;
+    const challenge = await fixture.issue("signature-bound", challenged);
+    const invalidSignature = algorithm === "ed25519"
+      ? signEd(challenge.message, ED_B)
+      : await EVM_B.signMessage({ message: challenge.message });
     const response = await fixture.register("signature-bound", {
-      ...signerFields(ED_SIGNER), registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message, ED_B) },
+      ...signerFields(challenged), registrationProof: { challengeId: challenge.challengeId, signature: invalidSignature },
     });
     expect(response.statusCode).toBe(403);
     expect(response.json().error).toBe("FORBIDDEN");
+    expect(fixture.row("signature-bound")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: null });
+    const signature = algorithm === "ed25519"
+      ? signEd(challenge.message)
+      : await EVM_A.signMessage({ message: challenge.message });
+    const accepted = await fixture.register("signature-bound", {
+      ...signerFields(challenged), registrationProof: { challengeId: challenge.challengeId, signature },
+    });
+    expect(accepted.statusCode).toBe(201);
+    expect(accepted.json().kernel.signingKey).toEqual(challenged);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
   });
 
   it.each([undefined, "deny", "ALLOW", "allow "])("refuses a legacy proof unless the flag is exactly allow (%s)", async (flag) => {
