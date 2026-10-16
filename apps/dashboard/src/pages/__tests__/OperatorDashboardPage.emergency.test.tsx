@@ -22,12 +22,14 @@ const MACHINE_ID = "kernel-owned-printer";
 const MACHINE_NAME = "North printer";
 const STOP_BUTTON = `EMERGENCY STOP: ${MACHINE_NAME}`;
 const RESUME_BUTTON = `Resume Operations: ${MACHINE_NAME}`;
-const RESUME_REFUSED = "Resume was refused for North printer with this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header).";
+const RESUME_REFUSED = "Resume was refused for this key. Resuming needs a PCC admin, or proof that you control North printer's operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate North printer, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).";
 const RESUME_FAILED = "Resume didn't go through. North printer is still stopped; try again.";
+const RESUME_UNCONFIRMED = "Resume wasn't confirmed. North printer may still be stopped, or the resume may have gone through: treat the machine as live, and press Resume Operations again to confirm.";
+const RESUME_CONFIRMATION = "Resume operations on North printer? Jobs PCC held during the stop can start on the machine.";
 const STOP_FAILED = "The stop didn't go through. North printer may still be running: use the machine's physical emergency stop, then try again.";
 const STOP_UNCONFIRMED = "The server didn't confirm the stop for North printer. The machine may still be running: use its physical emergency stop.";
-const STOP_CONFIRMATION = "EMERGENCY STOP for North printer: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?";
-const STOP_ACTIVE = "EMERGENCY STOP ACTIVE for North printer: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.";
+const STOP_CONFIRMATION = "EMERGENCY STOP for North printer: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?";
+const STOP_ACTIVE = "EMERGENCY STOP ACTIVE for North printer: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.";
 const SERVER_TEXT = "<strong>Untrusted server or network details</strong>";
 const STOPPED = "EMERGENCY STOP ACTIVE";
 
@@ -121,8 +123,10 @@ describe("OperatorDashboardPage emergency controls", () => {
     [403, RESUME_REFUSED],
     [401, "Sign in to resume North printer."],
     [404, "North printer or its policy wasn't found, so it can't be resumed here."],
-    [500, RESUME_FAILED],
-    ["network failure", RESUME_FAILED],
+    [400, RESUME_FAILED],
+    [500, RESUME_UNCONFIRMED],
+    [502, RESUME_UNCONFIRMED],
+    ["network failure", RESUME_UNCONFIRMED],
   ] as const)("resume %s keeps stopped and shows its exact message", async (status, message) => {
     await renderPage(true);
     replyWithFailure(status);
@@ -163,7 +167,7 @@ describe("OperatorDashboardPage emergency controls", () => {
     replyWithFailure("network failure");
     await click(RESUME_BUTTON);
     expectState(true);
-    expectAlert(RESUME_FAILED);
+    expectAlert(RESUME_UNCONFIRMED);
 
     let resolve!: (value: Response) => void;
     authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
@@ -205,6 +209,10 @@ describe("OperatorDashboardPage emergency controls", () => {
     ["200 stopped true without kernelId", () => new Response(JSON.stringify({ stopped: true }), { status: 200 })],
     ["200 matching kernelId without stopped", () => new Response(JSON.stringify({ kernelId: MACHINE_ID }), { status: 200 })],
     ["200 stopped true for other kernel", () => new Response(JSON.stringify({ stopped: true, kernelId: "other" }), { status: 200 })],
+    ...["kernel-nyc", `${MACHINE_ID}-2`, MACHINE_ID.toUpperCase(), ` ${MACHINE_ID}`].map((kernelId) => [
+      `200 stopped true for ${JSON.stringify(kernelId)}`,
+      () => new Response(JSON.stringify({ stopped: true, kernelId }), { status: 200 }),
+    ] as const),
   ] as const)("stop %s keeps running and shows unconfirmed copy", async (_label, reply) => {
     await renderPage();
     authorizedFetch.mockResolvedValueOnce(reply());
@@ -240,12 +248,49 @@ describe("OperatorDashboardPage emergency controls", () => {
     expect(window.confirm).toHaveBeenCalledWith(STOP_CONFIRMATION);
   });
 
-  it("rendered emergency states never claim active jobs halted", async () => {
+  it("resume confirmation dialog warns that held jobs can start with the exact copy", async () => {
+    await renderPage(true);
+    vi.mocked(window.confirm).mockClear();
+    authorizedFetch.mockResolvedValueOnce(response(204));
+    await click(RESUME_BUTTON);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(window.confirm).toHaveBeenCalledWith(RESUME_CONFIRMATION);
+  });
+
+  it("cancelled stop confirmation keeps running without a request or alert", async () => {
     await renderPage();
-    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted/);
+    vi.mocked(window.confirm).mockReturnValue(false);
+    authorizedFetch.mockResolvedValueOnce(confirmedStop());
+    await click(STOP_BUTTON);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    expectState(false);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("cancelled resume confirmation keeps stopped without a request or alert", async () => {
+    await renderPage(true);
+    vi.mocked(window.confirm).mockClear().mockReturnValue(false);
+    authorizedFetch.mockResolvedValueOnce(response(204));
+    await click(RESUME_BUTTON);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    expectState(true);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("rendered emergency states never claim active jobs halted", async () => {
+    const misleadingCopy = new RegExp([
+      ["halt", "all active jobs"].join(" "),
+      "All jobs halted",
+      ["refuse", "new work"].join(" "),
+      ["queued commands", "are cancelled"].join(" "),
+    ].join("|"));
+    await renderPage();
+    expect(container.textContent).not.toMatch(misleadingCopy);
     authorizedFetch.mockResolvedValueOnce(confirmedStop());
     await click(STOP_BUTTON);
     expectState(true);
-    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted/);
+    expect(container.textContent).not.toMatch(misleadingCopy);
   });
 });

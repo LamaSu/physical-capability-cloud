@@ -30,7 +30,10 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof k
   async function stop(targets: OperatorMachine[]) {
     if (inFlight.current) return;
     const names = targets.map(machineLabel).join(", ");
-    if (!window.confirm(`EMERGENCY STOP for ${names}: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
+    const confirmation = targets.length === 1
+      ? `EMERGENCY STOP for ${names}: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?`
+      : `EMERGENCY STOP for ${targets.length} machines (${names}): PCC stops handing work to these machines and cancels their queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with each machine's own emergency stop. Continue?`;
+    if (!window.confirm(confirmation)) return;
     inFlight.current = true;
     setBusy(true);
     setOutcomes((prev) => ({
@@ -46,7 +49,7 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof k
   }
 
   async function resume(machine: OperatorMachine) {
-    if (inFlight.current || !window.confirm(`Resume operations on ${machineLabel(machine)}?`)) return;
+    if (inFlight.current || !window.confirm(`Resume operations on ${machineLabel(machine)}? Jobs PCC held during the stop can start on the machine.`)) return;
     inFlight.current = true;
     setBusy(true);
     setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: true, pending: "resume", error: null } }));
@@ -88,11 +91,11 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof k
             <div className="text-sm font-medium text-white/70">{label}</div>
             {outcome?.stopped ? (
               <span className="text-sm text-red-400 font-medium">
-                EMERGENCY STOP ACTIVE for {label}: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.
+                {`EMERGENCY STOP ACTIVE for ${label}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`}
               </span>
             ) : (
               <p className="text-xs text-white/50">
-                No stop confirmed for {label}. A confirmed stop makes PCC refuse new work and cancel queued commands. Work already running stops only with the machine's physical emergency stop.
+                {`No stop confirmed for ${label}. A confirmed stop makes PCC stop handing work to this machine and cancel its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's physical emergency stop.`}
               </p>
             )}
             <button

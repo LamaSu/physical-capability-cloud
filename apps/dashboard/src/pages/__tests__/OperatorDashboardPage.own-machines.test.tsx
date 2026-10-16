@@ -389,3 +389,91 @@ describe("OperatorDashboardPage signed-in operator's machines", () => {
     expect(button(`Resume Operations: ${PRINTER.name}`).disabled).toBe(false);
   });
 });
+
+describe("r1c copy and confirmation per machine", () => {
+  it.each([LATHE, PRINTER])("names $name in the exact idle, stop, active and resume copy", async (target) => {
+    load([LATHE, PRINTER]);
+    await renderPage();
+    expect(machine(target.name).querySelector("p")?.textContent).toBe(`No stop confirmed for ${target.name}. A confirmed stop makes PCC stop handing work to this machine and cancel its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's physical emergency stop.`);
+    authorizedFetch.mockResolvedValueOnce(stopReply(target.id));
+    await click(`EMERGENCY STOP: ${target.name}`);
+    expect(window.confirm).toHaveBeenLastCalledWith(`EMERGENCY STOP for ${target.name}: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?`);
+    expect(machine(target.name).querySelector("span")?.textContent).toBe(`EMERGENCY STOP ACTIVE for ${target.name}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`);
+    authorizedFetch.mockResolvedValueOnce(new Response(null, { status: 204 }));
+    await click(`Resume Operations: ${target.name}`);
+    expect(window.confirm).toHaveBeenLastCalledWith(`Resume operations on ${target.name}? Jobs PCC held during the stop can start on the machine.`);
+  });
+
+  it.each([
+    [[LATHE, PRINTER]],
+    [[LATHE, PRINTER, ROUTER]],
+  ])("stop all names the count and explains held jobs for %j", async (targets) => {
+    load(targets);
+    await renderPage();
+    authorizedFetch.mockImplementation(async (_path: string, init: RequestInit) => stopReply(JSON.parse(init.body as string).kernelId));
+    await click("EMERGENCY STOP: all of your machines");
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(window.confirm).toHaveBeenCalledWith(`EMERGENCY STOP for ${targets.length} machines (${targets.map((target) => target.name).join(", ")}): PCC stops handing work to these machines and cancels their queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with each machine's own emergency stop. Continue?`);
+    expect(postedIds("/api/operator/emergency-stop")).toEqual(targets.map((target) => target.id));
+    for (const target of targets) {
+      expect(machine(target.name).querySelector("span")?.textContent).toBe(`EMERGENCY STOP ACTIVE for ${target.name}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`);
+    }
+  });
+
+  it.each([LATHE, PRINTER].flatMap((target) => [
+    ["same prefix", target.id.replace(/-\d+$/, "-nyc")],
+    ["suffix", `${target.id}-2`],
+    ["different case", target.id.toUpperCase()],
+    ["leading space", ` ${target.id}`],
+  ].map(([kind, id]) => [`${target.name}: ${kind}`, target, id] as const)))("near-miss id %s never confirms a stop", async (_label, target, id) => {
+    load([LATHE, PRINTER]);
+    await renderPage();
+    authorizedFetch.mockResolvedValueOnce(stopReply(id));
+    await click(`EMERGENCY STOP: ${target.name}`);
+    expect(postedIds("/api/operator/emergency-stop")).toEqual([target.id]);
+    expect(machine(target.name).textContent).not.toContain("EMERGENCY STOP ACTIVE");
+    expect(machine(target.name).querySelector('[role="alert"]')?.textContent).toBe(`The server didn't confirm the stop for ${target.name}. The machine may still be running: use its physical emergency stop.`);
+    expect(machine(target === LATHE ? PRINTER.name : LATHE.name).textContent).not.toContain("EMERGENCY STOP ACTIVE");
+  });
+
+  it.each([LATHE, PRINTER])("cancelling the stop dialog for $name sends nothing", async (target) => {
+    load([LATHE, PRINTER]);
+    await renderPage();
+    authorizedFetch.mockClear();
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await click(`EMERGENCY STOP: ${target.name}`);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("EMERGENCY STOP ACTIVE");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("cancelling stop all sends nothing to either machine", async () => {
+    load([LATHE, PRINTER]);
+    await renderPage();
+    authorizedFetch.mockClear();
+    vi.mocked(window.confirm).mockReturnValue(false);
+    await click("EMERGENCY STOP: all of your machines");
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("EMERGENCY STOP ACTIVE");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it.each([LATHE, PRINTER])("cancelling the resume dialog for $name preserves both stops and sends nothing", async (target) => {
+    load([LATHE, PRINTER]);
+    await renderPage();
+    authorizedFetch.mockImplementation(async (_path: string, init: RequestInit) => stopReply(JSON.parse(init.body as string).kernelId));
+    await click("EMERGENCY STOP: all of your machines");
+    authorizedFetch.mockClear();
+    vi.mocked(window.confirm).mockClear().mockReturnValue(false);
+    await click(`Resume Operations: ${target.name}`);
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    for (const stopped of [LATHE, PRINTER]) {
+      expect(machine(stopped.name).textContent).toContain(`EMERGENCY STOP ACTIVE for ${stopped.name}`);
+      expect(button(`Resume Operations: ${stopped.name}`).disabled).toBe(false);
+    }
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+});

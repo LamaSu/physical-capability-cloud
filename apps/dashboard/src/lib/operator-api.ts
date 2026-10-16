@@ -72,6 +72,7 @@ export async function emergencyStop(machine: OperatorMachine): Promise<Emergency
 export async function emergencyResume(machine: OperatorMachine): Promise<EmergencyResult> {
   const label = machineLabel(machine);
   const failureMessage = `Resume didn't go through. ${label} is still stopped; try again.`;
+  const unconfirmedMessage = `Resume wasn't confirmed. ${label} may still be stopped, or the resume may have gone through: treat the machine as live, and press Resume Operations again to confirm.`;
   try {
     const res = await authorizedFetch("/api/operator/emergency-resume", {
       method: "POST",
@@ -80,13 +81,15 @@ export async function emergencyResume(machine: OperatorMachine): Promise<Emergen
     });
     if (res.ok) return { ok: true, error: null };
     return { ok: false, error: res.status === 403
-      ? `Resume was refused for ${label} with this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header).`
+      ? `Resume was refused for this key. Resuming needs a PCC admin, or proof that you control ${label}'s operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate ${label}, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).`
       : res.status === 401
         ? `Sign in to resume ${label}.`
         : res.status === 404
           ? `${label} or its policy wasn't found, so it can't be resumed here.`
-          : failureMessage };
+          : res.status >= 500 && res.status < 600
+            ? unconfirmedMessage
+            : failureMessage };
   } catch {
-    return { ok: false, error: failureMessage };
+    return { ok: false, error: unconfirmedMessage };
   }
 }
