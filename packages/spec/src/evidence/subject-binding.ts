@@ -2,7 +2,7 @@
  * LO-EV-9 — evidence subject binding (`pcc.evidence.subject-binding.v1`).
  *
  * A valid signature over a bundle digest proves who signed which digest. It
- * does not say which job, node or output that digest is evidence FOR. The
+ * does not say which job, node, input or output that digest is evidence FOR. The
  * bundle-level `jobId`, `stepId` and `kernelId` fields are not inputs to
  * `hashBundle`, so they are unsigned labels a relay can rewrite. Checking the
  * signature alone, a genuine bundle from job A stored against job B settles
@@ -26,7 +26,12 @@
  *      equals the kernel that accepted the job;
  *   7. output, only when the subject names one: at least one event commits
  *      `payload.outputHash`, and every `payload.outputHash` equals it;
- *   8. settlement unit: the subject and the evidence must agree exactly. When
+ *   8. input, only when the subject names one: it is a canonical `sha256:` +
+ *      64 lowercase hex digest (checked with the subject in step 1); at least
+ *      one `method_loaded` event exists, EVERY `method_loaded` commits
+ *      `payload.inputHash` equal to it, and every other event that commits
+ *      `payload.inputHash` also equals it (bus #8812/#8815);
+ *   9. settlement unit: the subject and the evidence must agree exactly. When
  *      the subject names a unit, EVERY event commits `payload.settlementUnitId`,
  *      equal to it. When the subject names none, NO event may commit one
  *      (`unit-not-in-subject`, E11 F1). A job settles unit by unit
@@ -36,21 +41,30 @@
  *      the legacy /complete and /resume-settlement, which drive milestone 0 of
  *      a per-job escrow that has no unit id. Such a consumer still accepts
  *      unit-less evidence for that job;
- *   9. challenge: the same, for `payload.challengeNonce` and the
+ *  10. challenge: the same, for `payload.challengeNonce` and the
  *      gateway-issued per-unit nonce the package carries as
  *      `challengeBinding.nonce`. Evidence made before the nonce was issued
  *      cannot contain it. Evidence that carries a nonce the subject does not
  *      name is refused (`challenge-not-in-subject`).
  * Both unit fields are `0x` + 64 lowercase hex, byte-equal to the settlement
  * package's `unitBinding.settlementUnitId` and `challengeBinding.nonce`. The
- * output is different. It is content, not authorization scope, so evidence
- * may commit an output the subject does not name.
- *  10. time, only when the subject names a window: EVERY event's `timestamp`
+ * input and output are content, not authorization scope, so evidence may
+ * commit either when the subject does not name it.
+ *  11. time, only when the subject names a window: EVERY event's `timestamp`
  *      is RFC 3339 with an explicit offset and lies within the window, give
  *      or take `EVIDENCE_CLOCK_SKEW_SECONDS` (`checkEventTimes`,
  *      delegation-rules.ts, whose time path also uses only intrinsics captured
  *      at load). The consumer sets the window to the delegation's `issuedAt` ..
  *      the earlier of its `expiresAt` and the verified receipt's `receivedAt`.
+ *
+ * FUNDED INPUT AUTHORITY (bus #8812/#8815). Consumers fill `subject.inputHash`
+ * only through `recipeRefToInputHash` from the FUNDED subject block's
+ * `recipeRef`, read only from the authenticated subjects object. That
+ * per-job commitment is inside `acceptedPolicyDigest`, in the CREATE2 salt
+ * and the JobPolicy payer and operator sign before funding. This binding
+ * leg cannot authenticate that source. An older spec verifier ignores an
+ * unknown subject field, so the oracle's `input.hash_bound` verifier remains
+ * the authoritative check.
  *
  * ONE BUNDLE PER SETTLEMENT UNIT. /settle judges exactly the one kernel-signed
  * bundle the committed package names: EvidenceBlockV2 commits one events root.
@@ -62,7 +76,7 @@
  *
  * ONE READ, AND NO CALLER CODE RUNS (E11 F2, F3). Every input value is read
  * exactly once, before any check:
- *   - the input's `subject`, `bundleHash` and `events`, the subject's five
+ *   - the input's `subject`, `bundleHash` and `events`, the subject's six
  *     fields, and each event's `type`, `timestamp`, `source`, `payload`,
  *     `hash` and `id` are each read through their own data descriptor;
  *   - each event's `source` and `payload` go through `plainDataCopy`
@@ -161,6 +175,14 @@ export interface EvidenceSubject {
   kernelId: string;
   /** Digest of the delivered output, when the consumer holds one. */
   outputHash?: string;
+  /** Digest of the input, when the consumer holds the funded commitment:
+   *  canonical `sha256:` + 64 lowercase hex. Fill only via
+   *  `recipeRefToInputHash` from the FUNDED subject block's `recipeRef`, read
+   *  only from the authenticated subjects object (bus #8812/#8815). Every
+   *  `method_loaded` must commit it, and at least one must exist. Older spec
+   *  verifiers ignore this field; the oracle's `input.hash_bound` verifier is
+   *  the authoritative check. */
+  inputHash?: string;
   /** The escrow settlement unit (milestone) being settled: `0x` + 64 lowercase
    *  hex, from the unit record, never from the evidence. Omitted only by a
    *  consumer that settles no unit; that consumer then refuses evidence which
@@ -186,6 +208,8 @@ export type EvidenceSubjectBindingErrorCode =
   | "kernel-mismatch"
   | "output-not-committed"
   | "output-mismatch"
+  | "input-not-committed"
+  | "input-mismatch"
   | "unit-not-committed"
   | "unit-mismatch"
   | "unit-not-in-subject"
@@ -321,7 +345,7 @@ function refuse(reason: EvidenceSubjectBindingErrorCode, eventIndex?: number): E
 
 /**
  * Settlement unit and challenge: the subject and the evidence agree exactly
- * (header, steps 8 and 9). Named, every event commits the value. Not named, no
+ * (header, steps 9 and 10). Named, every event commits the value. Not named, no
  * event commits one. Null when they agree.
  */
 function scopeEveryEvent(
@@ -360,14 +384,14 @@ export async function verifyEvidenceSubjectBinding(
     const proxyCheck = isProxy;
     if (sha256Text === null || proxyCheck === null) return refuse("unsupported-runtime");
 
-    // ── 1. The subject: the input's field, then its own five fields, each read once.
+    // ── 1. The subject: the input's field, then its own six fields, each read once.
     const wrapper: unknown = input;
     if (!isReadableObject(wrapper, proxyCheck)) return refuse("malformed-subject");
     const subjectField = ownField(wrapper, "subject");
     if (subjectField === ABSENT || subjectField === ACCESSOR) return refuse("malformed-subject");
     const subject = subjectField.value;
     if (!isReadableObject(subject, proxyCheck)) return refuse("malformed-subject");
-    const subjectFields = ["jobId", "kernelId", "outputHash", "settlementUnitId", "challengeNonce"] as const;
+    const subjectFields = ["jobId", "kernelId", "outputHash", "inputHash", "settlementUnitId", "challengeNonce"] as const;
     const named = ObjectCreate(null) as Record<(typeof subjectFields)[number], unknown>;
     for (let k = 0; k < subjectFields.length; k++) {
       const key = subjectFields[k]!;
@@ -378,12 +402,14 @@ export async function verifyEvidenceSubjectBinding(
     const jobId = named.jobId;
     const kernelId = named.kernelId;
     const outputHash = named.outputHash;
+    const inputHash = named.inputHash;
     const settlementUnitId = named.settlementUnitId;
     const challengeNonce = named.challengeNonce;
     if (
       !isNonEmptyString(jobId) ||
       !isNonEmptyString(kernelId) ||
       (outputHash !== undefined && !isNonEmptyString(outputHash)) ||
+      (inputHash !== undefined && !isTaggedSha256(inputHash)) ||
       (settlementUnitId !== undefined && !isHex256Digest(settlementUnitId)) ||
       (challengeNonce !== undefined && !isHex256Digest(challengeNonce))
     ) {
@@ -503,7 +529,23 @@ export async function verifyEvidenceSubjectBinding(
       if (!committedOnce) return refuse("output-not-committed");
     }
 
-    // ── 8, 9. Settlement unit and challenge: exact agreement, every event.
+    // ── 8. Input: every method_loaded commits it, and at least one exists.
+    if (inputHash !== undefined) {
+      let methodLoadedOnce = false;
+      for (let i = 0; i < count; i++) {
+        const snapshot = snapshots[i]!;
+        const committed = snapshot.payload as Record<string, unknown>;
+        const commitsInput = hasOwn(committed, "inputHash");
+        if (snapshot.type === "method_loaded") {
+          if (!commitsInput) return refuse("input-not-committed", i);
+          methodLoadedOnce = true;
+        }
+        if (commitsInput && committed.inputHash !== inputHash) return refuse("input-mismatch", i);
+      }
+      if (!methodLoadedOnce) return refuse("input-not-committed");
+    }
+
+    // ── 9, 10. Settlement unit and challenge: exact agreement, every event.
     const unit = scopeEveryEvent(
       snapshots, "settlementUnitId", settlementUnitId, "unit-not-committed", "unit-mismatch", "unit-not-in-subject",
     );
@@ -513,7 +555,7 @@ export async function verifyEvidenceSubjectBinding(
     );
     if (challenge !== null) return challenge;
 
-    // ── 10. Time, only when the subject names a window, read from the verified copies.
+    // ── 11. Time, only when the subject names a window, read from the verified copies.
     if (eventTimeWindow !== undefined) {
       const timed = checkEventTimes(snapshots, eventTimeWindow);
       if (!timed.ok) {

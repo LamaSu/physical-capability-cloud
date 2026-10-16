@@ -72,8 +72,10 @@ export const EVIDENCE_EVENT_TYPES = [
    * SHA-256 hex-encoded hash; types/common.ts), so gcodeHash may be an alias.
    * The kernel computes inputHash itself from its input data and records
    * method_loaded only when the device's prepare ack echoes the same jobId
-   * and inputHash. input.hash_bound reads only payload.inputHash for the
-   * input commitment comparison, on the same deviceJobId as the completion.
+   * and inputHash. input.hash_bound compares every method_loaded event's
+   * payload.inputHash, on the same deviceJobId as the completion, with the
+   * funded subject block's nonzero recipeRef, read only from the authenticated
+   * subjects object (#8812/#8815); at least one such event must exist.
    */
   "method_loaded",
   "sequence_started",

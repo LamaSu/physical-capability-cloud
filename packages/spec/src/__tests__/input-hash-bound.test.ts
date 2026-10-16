@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { CsdSchema, type CSD } from "../csd/schema.js";
 import { computeCsdEligibility } from "../evidence/eligibility.js";
 import { EvidencePrimitiveDefSchema, getPrimitive } from "../evidence/primitives.js";
-import { compileTierLadder } from "../evidence/tier-ladder.js";
+import { compileTierLadder, PRIMITIVE_ALLOWED_BIND_TYPES } from "../evidence/tier-ladder.js";
 import { makeStubVerifier } from "../evidence/verifier-interface.js";
 import { validatePrimitiveParams } from "../types/opportunity.js";
 
@@ -66,19 +66,40 @@ describe("input.hash_bound — the non-printer input commitment contract", () =>
     });
   });
 
-  it("currently accepts another required event as the bind, without primitive-specific validation", async () => {
+  it("refuses another required event as the input.hash_bound bind", async () => {
     const csd = liquidHandlerCsd();
     csd.evidence!.tier1!.primitives![1]!.bind = "execution_completed";
 
-    const ladder = await compileTierLadder(csd);
-    expect(ladder.tiers[1]!.primitives[1]!.bind).toBe("execution_completed");
+    await expect(compileTierLadder(csd)).rejects.toMatchObject({
+      code: "primitive-bind-not-allowed",
+      detail: 'tier1: primitive "input.hash_bound" must bind "method_loaded", got "execution_completed"',
+    });
   });
 
-  it("currently accepts and preserves params in CSD validation and compilation despite the closed descriptor", async () => {
+  it("requires the method_loaded bind, including on declarations without a bind", async () => {
+    const csd = liquidHandlerCsd();
+    delete csd.evidence!.tier1!.primitives![1]!.bind;
+
+    await expect(compileTierLadder(csd)).rejects.toMatchObject({
+      code: "primitive-bind-not-allowed",
+      detail: 'tier1: primitive "input.hash_bound" must bind "method_loaded", got no bind',
+    });
+  });
+
+  it("keeps the primitive bind admission rule immutable and outside its descriptor", () => {
+    expect(PRIMITIVE_ALLOWED_BIND_TYPES["input.hash_bound"]).toEqual(["method_loaded"]);
+    expect(Object.isFrozen(PRIMITIVE_ALLOWED_BIND_TYPES)).toBe(true);
+    expect(Object.isFrozen(PRIMITIVE_ALLOWED_BIND_TYPES["input.hash_bound"])).toBe(true);
+    expect(getPrimitive("input.hash_bound")).not.toHaveProperty("allowedBindTypes");
+  });
+
+  it("preserves the existing params gap while Q-E5b's shipped-CSD preflight blocks compiler validation", async () => {
     const csd = liquidHandlerCsd();
     csd.evidence!.tier1!.primitives![1]!.params = { field: "otherField" };
 
-    // CSD refs check only the params record shape; neither path consults paramsSchema.
+    // Q-E5b 4(b) must remain unimplemented: the shipped document-print-and-mail
+    // CSD omits capture.photo_nonced's required media/minClass in tiers 2 and 3.
+    // CSD refs and compilation still check only the params record shape.
     const parsed = CsdSchema.safeParse(csd);
     expect(parsed.success).toBe(true);
     const ladder = await compileTierLadder(CsdSchema.parse(csd));

@@ -1,0 +1,303 @@
+{
+  "contract": "pcc.evidence.input-commitment.v1",
+  "description": "Per-job v1: exact raw SHA-256 bytes bridge method_loaded.payload.inputHash to the authenticated funded subject block recipeRef (#8812/#8815). Canonical spec bytes32 is lowercase. Zero recipeRef means no commitment.",
+  "inputs": [
+    {
+      "id": "empty",
+      "description": "Empty input",
+      "bytesHex": "",
+      "inputHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "recipeRef": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "id": "abc",
+      "description": "ASCII abc",
+      "bytesHex": "616263",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "id": "binary-00-ff",
+      "description": "All 256 byte values, in ascending order",
+      "bytesHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+      "inputHash": "sha256:40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880",
+      "recipeRef": "0x40aff2e9d2d8922e47afd4648e6967497158785fbd1da870e7110266bf944880"
+    },
+    {
+      "id": "bom-cr-lf-whitespace",
+      "description": "UTF-8 BOM, spaces/tabs, CR/LF and bare CR/LF; exact bytes",
+      "bytesHex": "efbbbf2009616c7068610d0a626574610a67616d6d610d64656c746120090d0a",
+      "inputHash": "sha256:0500547fe1382750932b2f425c67d535e35adfe4ba76b075c11c0eca32ed8672",
+      "recipeRef": "0x0500547fe1382750932b2f425c67d535e35adfe4ba76b075c11c0eca32ed8672"
+    }
+  ],
+  "inputHashToRecipeRefRefusals": [
+    {
+      "id": "uppercase-hex",
+      "value": "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "uppercase-prefix",
+      "value": "SHA256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "leading-space",
+      "value": " sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "trailing-space",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "trailing-lf",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "trailing-crlf",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\r\n",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "other-prefix",
+      "value": "sha512:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "raw-hex",
+      "value": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "recipe-ref",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "too-short",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015a",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "too-long",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad0",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "non-hex",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ag",
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "null",
+      "value": null,
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "number",
+      "value": 42,
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "boolean",
+      "value": true,
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "object",
+      "value": {},
+      "errorCode": "invalid-input-hash"
+    },
+    {
+      "id": "array",
+      "value": [],
+      "errorCode": "invalid-input-hash"
+    }
+  ],
+  "recipeRefToInputHashRefusals": [
+    {
+      "id": "uppercase-hex",
+      "value": "0xBA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "uppercase-prefix",
+      "value": "0Xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "leading-space",
+      "value": " 0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "trailing-space",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad ",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "trailing-lf",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "trailing-crlf",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\r\n",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "missing-prefix",
+      "value": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "input-hash",
+      "value": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "too-short",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015a",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "too-long",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad0",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "non-hex",
+      "value": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ag",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "address-width",
+      "value": "0x1111111111111111111111111111111111111111",
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "null",
+      "value": null,
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "number",
+      "value": 42,
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "boolean",
+      "value": true,
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "object",
+      "value": {},
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "array",
+      "value": [],
+      "errorCode": "invalid-recipe-ref"
+    },
+    {
+      "id": "zero",
+      "value": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "errorCode": "missing-input-commitment"
+    }
+  ],
+  "commitmentPairs": [
+    {
+      "id": "equal-empty-input",
+      "recipeRef": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "inputHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "met": true
+    },
+    {
+      "id": "equal-abc",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "met": true
+    },
+    {
+      "id": "different-digests",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "inputHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "met": false
+    },
+    {
+      "id": "zero-recipe-ref-equal-zero-hash",
+      "recipeRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "inputHash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "met": false
+    },
+    {
+      "id": "zero-recipe-ref-real-hash",
+      "recipeRef": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "met": false
+    },
+    {
+      "id": "uppercase-input-hash",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "inputHash": "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+      "met": false
+    },
+    {
+      "id": "uppercase-recipe-ref",
+      "recipeRef": "0xBA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "met": false
+    },
+    {
+      "id": "malformed-input-hash",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "inputHash": "sha256:abc",
+      "met": false
+    },
+    {
+      "id": "malformed-recipe-ref",
+      "recipeRef": "0x1234",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "met": false
+    },
+    {
+      "id": "recipe-ref-trailing-lf",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "met": false
+    },
+    {
+      "id": "input-hash-trailing-lf",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n",
+      "met": false
+    },
+    {
+      "id": "null-values",
+      "recipeRef": null,
+      "inputHash": null,
+      "met": false
+    },
+    {
+      "id": "nonstring-input",
+      "recipeRef": "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "inputHash": {
+        "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      },
+      "met": false
+    },
+    {
+      "id": "nonstring-recipe-ref",
+      "recipeRef": [
+        "0xba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      ],
+      "inputHash": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "met": false
+    }
+  ]
+}

@@ -782,14 +782,14 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     dependsOn: ["artifact.hash"],
   },
 
-  // #56 — Family E (confirm). Funded-input modifier; commitment location pending.
+  // #56 — Family E (confirm). Funded-input modifier; subject.recipeRef (#8812/#8815).
   {
     id: "input.hash_bound",
     wire: "pcc.ev.input.hash_bound.v1",
     family: "confirm",
     status: "active",
     proves:
-      "The device took exactly the funded input: a kernel-signed method_loaded event, on the same deviceJobId as the completion, carries payload.inputHash equal byte for byte to the input commitment the settlement gate binds to the escrow.",
+      "The device took exactly the funded input: at least one kernel-signed method_loaded event exists on the same deviceJobId as the completion, and every such event carries payload.inputHash equal to the nonzero SHA-256 commitment in the funded subject block's recipeRef, read only from the authenticated subjects object.",
     paramsSchema: { type: "object", properties: {}, additionalProperties: false },
     authRequirement: "inherited",
     tierSupport: [

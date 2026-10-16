@@ -27,6 +27,8 @@ const JOB_A = "job-realm-a";
 const JOB_B = "job-realm-b";
 const NODE = "kernel-realm";
 const OUTPUT = "sha256:" + "5e".repeat(32);
+const INPUT = "sha256:" + "ab".repeat(32);
+const OTHER_INPUT = "sha256:" + "cd".repeat(32);
 const U3 = "0x" + "03".repeat(32);
 const U4 = "0x" + "04".repeat(32);
 const N3 = "0x" + "a3".repeat(32);
@@ -48,6 +50,21 @@ async function bundleFor(jobId: string, unit?: { settlementUnitId: string; chall
   return { events, bundleHash: await hashBundle(events) };
 }
 
+async function inputBundleFor(inputHash?: string, otherInputHash?: string) {
+  const source = { deviceId: NODE, deviceType: "digital_agent" as const, kernelId: NODE };
+  const events = await seal([
+    {
+      type: "method_loaded", timestamp: "2026-09-24T10:00:00.000Z", source,
+      payload: { jobId: JOB_A, ...(inputHash !== undefined ? { inputHash } : {}) },
+    },
+    {
+      type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source,
+      payload: { jobId: JOB_A, ...(otherInputHash !== undefined ? { inputHash: otherInputHash } : {}) },
+    },
+  ]);
+  return { events, bundleHash: await hashBundle(events) };
+}
+
 let CASES: Array<[string, EvidenceSubjectBindingInput]> = [];
 let BASELINE: EvidenceSubjectBindingResult[] = [];
 let A_SORTED_HASHES: string[] = [];
@@ -59,6 +76,10 @@ beforeAll(async () => {
   const A = await bundleFor(JOB_A);
   const B = await bundleFor(JOB_B);
   const M3 = await bundleFor(JOB_A, { settlementUnitId: U3, challengeNonce: N3 });
+  const matchingInput = await inputBundleFor(INPUT);
+  const missingInput = await inputBundleFor();
+  const mismatchingInput = await inputBundleFor(OTHER_INPUT);
+  const mismatchingOtherInput = await inputBundleFor(INPUT, OTHER_INPUT);
   A_SORTED_HASHES = A.events.map((e) => e.hash).sort();
   // Job A's events relabelled to job B and re-hashed: they open B's own digest, never A's.
   const relabelled = await seal(
@@ -72,6 +93,11 @@ beforeAll(async () => {
     ["honest", { ...A, subject: subjectA }],
     ["honest, events reversed (hashBundle sorts)", { bundleHash: A.bundleHash, events: [...A.events].reverse(), subject: subjectA }],
     ["honest, output named", { ...A, subject: { ...subjectA, outputHash: OUTPUT } }],
+    ["honest, input named", { ...matchingInput, subject: { ...subjectA, inputHash: INPUT } }],
+    ["uppercase input subject", { ...matchingInput, subject: { ...subjectA, inputHash: INPUT.toUpperCase() } }],
+    ["method_loaded omits inputHash", { ...missingInput, subject: { ...subjectA, inputHash: INPUT } }],
+    ["method_loaded commits a different input", { ...mismatchingInput, subject: { ...subjectA, inputHash: INPUT } }],
+    ["another event commits a different input", { ...mismatchingOtherInput, subject: { ...subjectA, inputHash: INPUT } }],
     ["job A's evidence for job B", { ...A, subject: { jobId: JOB_B, kernelId: NODE } }],
     ["relabelled to B and re-hashed, under A's digest", { bundleHash: A.bundleHash, events: relabelled, subject: { jobId: JOB_B, kernelId: NODE } }],
     ["B's content carrying A's event hashes", { bundleHash: A.bundleHash, events: B.events.map((e, i) => ({ ...e, hash: A.events[i]!.hash })), subject: { jobId: JOB_B, kernelId: NODE } }],
@@ -94,6 +120,11 @@ it("the baseline is what LO-EV-9 says", () => {
     "ok",
     "ok",
     "ok",
+    "ok",
+    "malformed-subject@-",
+    "input-not-committed@0",
+    "input-mismatch@0",
+    "input-mismatch@1",
     "job-mismatch@0",
     "bundle-hash-mismatch@-",
     "event-hash-mismatch@0",

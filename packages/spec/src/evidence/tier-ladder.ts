@@ -24,7 +24,8 @@
  *
  * Compilation fails closed with a TierLadderError when the tiers are not
  * contiguous from tier0, a tier binds a primitive to something it does not
- * require, a tier drops a requirement of the tier below it, or a tier above 0
+ * require or to an event its verifier cannot read, a tier drops a requirement
+ * of the tier below it, or a tier above 0
  * adds no event type over the tier below. The last matters because the
  * recompute reads event types only: such a tier would be granted on the lower
  * tier's evidence. Legacy CSDs whose required[] lists field names rather than
@@ -92,6 +93,7 @@ export type TierLadderErrorCode =
   | "tiers-not-contiguous"
   | "malformed-tier"
   | "bind-not-required"
+  | "primitive-bind-not-allowed"
   | "tier-drops-requirement"
   | "tier-adds-no-event-type";
 
@@ -107,6 +109,14 @@ export class TierLadderError extends Error {
 
 const EVENT_TYPES = new Set<string>(EVIDENCE_EVENT_TYPES);
 const TIER_KEY = /^tier([0-3])$/;
+
+/**
+ * Fixed verifier event sources (#8812/#8815). Keep compile admission separate
+ * from EvidencePrimitiveDef: it adds no vocabulary-manifest contract field.
+ */
+export const PRIMITIVE_ALLOWED_BIND_TYPES: Readonly<Record<string, readonly EvidenceEventType[]>> = Object.freeze({
+  "input.hash_bound": Object.freeze(["method_loaded"] as const),
+});
 
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0;
@@ -211,6 +221,15 @@ function compileTier(k: number, raw: unknown): { tier: TierLadderTier; required:
       throw new TierLadderError(
         "bind-not-required",
         `tier${k}: primitive "${p.id}" binds "${bind}", which tier${k} does not require`,
+      );
+    }
+    const allowedBindTypes = Object.hasOwn(PRIMITIVE_ALLOWED_BIND_TYPES, p.id)
+      ? PRIMITIVE_ALLOWED_BIND_TYPES[p.id]
+      : undefined;
+    if (allowedBindTypes !== undefined && !allowedBindTypes.some((eventType) => eventType === bind)) {
+      throw new TierLadderError(
+        "primitive-bind-not-allowed",
+        `tier${k}: primitive "${p.id}" must bind ${allowedBindTypes.map((eventType) => `"${eventType}"`).join(" or ")}, got ${bind === null ? "no bind" : `"${bind}"`}`,
       );
     }
     const params = (p.params as Record<string, unknown> | undefined) ?? null;
