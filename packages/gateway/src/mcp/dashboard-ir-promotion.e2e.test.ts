@@ -49,6 +49,7 @@ function bootAndDeliver(projectedManifest: unknown): { mount: any; posted: any[]
   w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", id: 1, result: { protocolVersion: PROTOCOL } } }));
   const cloned = w.JSON.parse(w.JSON.stringify(projectedManifest)); // window-realm (as postMessage structured-clones)
   w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: cloned } } } }));
+  expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
   return { mount: w.document.getElementById("pcc-ir-root"), posted };
 }
 

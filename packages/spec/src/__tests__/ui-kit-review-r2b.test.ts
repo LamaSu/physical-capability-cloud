@@ -1,6 +1,5 @@
 /** @vitest-environment jsdom */
 import { readFileSync } from "node:fs";
-import vm from "node:vm";
 import { URL as NodeURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -16,7 +15,8 @@ type Kit = {
 };
 function kit() {
   const sandbox = { window: { kit: undefined as Kit | undefined, __PCC_UI_TEXT_VIOLATIONS__: 0 }, document, URL, setTimeout };
-  vm.runInNewContext(source.replace(bootTail, "  window.kit = { renderWindow, canonicalJson, dataAt, requestDescriptor, realRequestNode, approvalDetails };"), sandbox);
+  // The kit and its plain-object fixture data must share Object.prototype.
+  new Function(...Object.keys(sandbox), source.replace(bootTail, "  window.kit = { renderWindow, canonicalJson, dataAt, requestDescriptor, realRequestNode, approvalDetails };"))(...Object.values(sandbox));
   return { k: sandbox.window.kit!, count: () => sandbox.window.__PCC_UI_TEXT_VIOLATIONS__ };
 }
 function wideBody(size: number) {
@@ -49,10 +49,9 @@ describe("review N1: wide object reads stay linear", () => {
 
   it("reads only enumerable own fields and sees subsequent mutations", () => {
     const { k } = kit();
-    const raw = Object.create({ inherited: "hidden" }) as Record<string, unknown>;
-    raw.field = 1;
+    const raw: Record<string, unknown> = { field: 1 };
     Object.defineProperty(raw, "nonenumerable", { value: "hidden" });
-    expect(k.dataAt(raw, "inherited")).toBeUndefined();
+    expect(k.dataAt(raw, "toString")).toBeUndefined();
     expect(k.dataAt(raw, "nonenumerable")).toBeUndefined();
     expect(k.dataAt(raw, "field")).toBe(1);
     raw.field = 2;

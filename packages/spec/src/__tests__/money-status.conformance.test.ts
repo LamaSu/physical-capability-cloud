@@ -19,7 +19,6 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import vm from "node:vm";
 import {
   MONEY_STATUS_MAP, classifyMoneyStatus, classifySettlementRecord, VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE,
   classifySettlementRead, SETTLEMENT_READ_ROUTE, SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText,
@@ -76,10 +75,8 @@ function extractRegion(): KitRegion {
       " VNEXT_UNIT_STATES, VNEXT_STATE_PRESENTATION, VNEXT_PHASE, settlementRecordClass, settlementReadClass, SETTLEMENT_READ_ROUTE," +
       " SAFE_STATUS_WORDS, SAFE_MONEY_STATUS_WORDS, statusPillText, reportedText, idText, hexText, timeText, traceText, nameText, fieldDefaultText, foldForClaims, isMoneyClaim, isProseClaim, WITHHELD_PROSE, WITHHELD_FIELD };\n})();");
   if (helperSrc === kitSrc) throw new Error("plain kit's final boot dispatch not found");
-  vm.runInNewContext(
-    helperSrc,
-    ctx,
-  );
+  // The genuine helpers and plain-object fixture rows share Object.prototype.
+  new Function(...Object.keys(ctx), helperSrc)(...Object.values(ctx));
   return (ctx.window as { kitRegion: KitRegion }).kitRegion;
 }
 
@@ -255,7 +252,7 @@ const flush = flushKitText;
 let clickCheck: ReturnType<typeof checkKitClicks>;
 beforeEach(() => { clickCheck = checkKitClicks(); });
 afterEach(async () => {
-  // Pure helper cases run in an isolated VM; DOM boots and driven interactions use flush.
+  // Pure helper cases use their private test window; DOM boots and driven interactions use flush.
   try {
     if ((window as unknown as { __PCC_UI_BOOTED__?: boolean }).__PCC_UI_BOOTED__) await flush();
   } finally { clickCheck.mockRestore(); }

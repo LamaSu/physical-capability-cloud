@@ -21,9 +21,16 @@ import { dirname, resolve } from "node:path";
 import { TextDecoder as NodeTextDecoder, TextEncoder as NodeTextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 import { describe, it, expect } from "vitest";
-import { LIST_PROFILES, dashboardManifestToIr, validateIr } from "./dashboard-ir.js";
+import { LIST_PROFILES, dashboardManifestToIr, validateIr, readText } from "./dashboard-ir.js";
 import type { IrNode } from "./dashboard-ir.js";
-import { listWindow } from "./dashboard-ir-renderer.js";
+import { listWindow as brandedListWindow } from "./dashboard-ir-renderer.js";
+
+// Keep this disclosure table about displayed text while authenticating the new
+// object representation before reading the same expected strings.
+function listWindow(...args: Parameters<typeof brandedListWindow>) {
+  const result = brandedListWindow(...args);
+  return { empty: readText(result.empty).t, note: result.note === null ? null : readText(result.note).t };
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const KIT = readFileSync(resolve(HERE, "../../../../apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"), "utf8");
@@ -199,7 +206,7 @@ function scene(replies: Reply[], nowMs: number, opts: { origin?: boolean } = {})
     timers.splice(timers.indexOf(t), 1); now = t.at; t.fn(); await settle();
   };
   const q = (sel: string) => w.document.querySelector(sel) as any;
-  return { w, deliver, settle, nextPoll, q, close: () => w.close() };
+  return { w, deliver, settle, nextPoll, q, close: () => { expect(w.__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0); w.close(); } };
 }
 const T0 = Date.parse("2026-09-24T12:00:00.000Z");
 const iso = (ms: number) => new Date(ms).toISOString();

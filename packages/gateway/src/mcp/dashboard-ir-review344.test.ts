@@ -1,3 +1,5 @@
+import { readText } from "./dashboard-ir.js";
+import { physicalTextElement } from "./dashboard-ir-physical-text.type-test.js";
 /**
  * PX-5 (#344) cross-family review, astra via coord-watch #2504. Each finding is pinned here:
  *  - manifest prose cannot present money (title, headings, notes, action and field labels);
@@ -48,7 +50,7 @@ function withheldOf(n: IrNode | undefined): number {
 // F1" describe (unchanged) so every describe — including astra r4's below — can reuse one copy.
 type FakeEl = RElement & { attrs: Record<string, string> };
 const fdoc: RDocument = { createElement(): RElement {
-  const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+  const e: FakeEl = physicalTextElement({ textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } });
   return e;
 } };
 const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
@@ -88,7 +90,7 @@ describe("#344 money: manifest prose cannot present money", () => {
   });
 
   it("the withheld notice itself is not a money claim (it cannot self-trigger)", () => {
-    expect(isMoneyClaim(WITHHELD_PROSE)).toBe(false);
+    expect(isMoneyClaim(readText(WITHHELD_PROSE).t)).toBe(false);
   });
 });
 
@@ -137,7 +139,7 @@ describe("#344 catalog: row cap, malformed input, query keys", () => {
   type FakeEl = RElement & { attrs: Record<string, string> };
   const fdoc: RDocument = {
     createElement(): RElement {
-      const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+      const e: FakeEl = physicalTextElement({ textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } });
       return e;
     },
   };
@@ -181,6 +183,7 @@ describe("#344 catalog: row cap, malformed input, query keys", () => {
     w.dispatchEvent(new w.MessageEvent("message", { source: w.parent as never, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: m } } } }));
     await new Promise((r) => setTimeout(r, 0));
     expect(w.document.getElementById("pcc-ir-root")!.textContent).toContain("could not be verified");
+    expect((dom.window as any).__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
     dom.window.close();
   });
 
@@ -225,8 +228,8 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
   });
 
   it("recordValueText qualifies only a value read from a field named status", () => {
-    expect(recordValueText("status", "settled")).toBe("settled" + RECORD_STATUS_NOTE);
-    expect(recordValueText("job.status", "SETTLED_RELEASED")).toBe("SETTLED_RELEASED" + RECORD_STATUS_NOTE);
+    expect(recordValueText("status", "settled")).toBe("settled" + readText(RECORD_STATUS_NOTE).t);
+    expect(recordValueText("job.status", "SETTLED_RELEASED")).toBe("SETTLED_RELEASED" + readText(RECORD_STATUS_NOTE).t);
     expect(recordValueText("kernel.status", "online")).toBe("online");
     expect(recordValueText("name", "settled")).toBe("settled");     // not a status field
     expect(recordValueText("statusText", "paid")).toBe("paid");      // not a field NAMED status
@@ -234,21 +237,21 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
   });
 
   it("every renderer sink applies it: metric, run card, list badge and list meta", () => {
-    expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "status" } } as unknown as IrNode, { status: "released" }))
-      .toBe("released" + RECORD_STATUS_NOTE);
+    expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "status" } } as unknown as IrNode, { status: "released" }).t)
+      .toBe("released" + readText(RECORD_STATUS_NOTE).t);
     // astra r5 F2: progress is now a typed "percent" stat field (0..100 number) — a STRING value
     // is off-kind and UNAVAILABLE outright, replacing the pre-typing expectation that only
     // content-filtering (WITHHELD_FIELD) gated an arbitrary string here.
-    expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: "paid" }))
-      .toBe(UNAVAILABLE);
-    const slots = [{ textContent: "" }, { textContent: "" }];
+    expect(bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: "paid" }).t)
+      .toBe(readText(UNAVAILABLE).t);
+    const slots = [physicalTextElement({ textContent: "" }), physicalTextElement({ textContent: "" })];
     bindSchemaCard("run-summary-v1", { job: { status: "settled", progress: 100 } }, slots);
-    expect(slots.map((x) => x.textContent)).toEqual(["settled" + RECORD_STATUS_NOTE, "100"]);
+    expect(slots.map((x) => x.textContent)).toEqual(["settled" + readText(RECORD_STATUS_NOTE).t, "100"]);
     bindSchemaCard("run-summary-v1", { status: "running", progress: 5 }, slots);
     expect(slots[0]!.textContent).toBe("running");
     type FakeEl = RElement & { attrs: Record<string, string> };
     const fdoc: RDocument = { createElement(): RElement {
-      const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+      const e: FakeEl = physicalTextElement({ textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } });
       return e;
     } };
     const listEl = fdoc.createElement("div");
@@ -258,8 +261,8 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     expect(texts).toEqual([
       // row texts now carry PCC-owned field labels (astra r3 H2 structural framing); ids are attributed
       // (steward #5149: an identifier's grammar cannot exclude prose, so it reads "reported: ...")
-      ["ID:", REPORTED_PREFIX + "j3", "Kernel:", REPORTED_PREFIX + "k1", "Status:", "released" + RECORD_STATUS_NOTE, "Status:", "released" + RECORD_STATUS_NOTE],
-      ["ID:", REPORTED_PREFIX + "j4", "Kernel:", REPORTED_PREFIX + "k1", "Status:", "running", "Status:", "running"],
+      ["ID:", readText(REPORTED_PREFIX).t + "j3", "Kernel:", readText(REPORTED_PREFIX).t + "k1", "Status:", "released" + readText(RECORD_STATUS_NOTE).t, "Status:", "released" + readText(RECORD_STATUS_NOTE).t],
+      ["ID:", readText(REPORTED_PREFIX).t + "j4", "Kernel:", readText(REPORTED_PREFIX).t + "k1", "Status:", "running", "Status:", "running"],
     ]);
   });
 
@@ -296,11 +299,12 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
     w.dispatchEvent(new w.MessageEvent("message", { source: w.parent, data: { jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { structuredContent: { manifest: w.JSON.parse(JSON.stringify(m)) } } } }));
     for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 0));
     const text = w.document.getElementById("pcc-ir-root").textContent as string;
-    expect(text).toContain("settled" + RECORD_STATUS_NOTE);
-    expect(text).toContain("SETTLED_RELEASED" + RECORD_STATUS_NOTE);
-    expect(text.split("released" + RECORD_STATUS_NOTE).length - 1).toBe(2); // j3's meta + badge
-    expect(text.split(RECORD_STATUS_NOTE).length - 1).toBe(4);              // and nothing else is qualified
+    expect(text).toContain("settled" + readText(RECORD_STATUS_NOTE).t);
+    expect(text).toContain("SETTLED_RELEASED" + readText(RECORD_STATUS_NOTE).t);
+    expect(text.split("released" + readText(RECORD_STATUS_NOTE).t).length - 1).toBe(2); // j3's meta + badge
+    expect(text.split(readText(RECORD_STATUS_NOTE).t).length - 1).toBe(4);              // and nothing else is qualified
     expect(text).toContain("running");
+    expect((dom.window as any).__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
     dom.window.close();
   });
 });
@@ -308,7 +312,7 @@ describe("#3013 (pcc-design): a record's status word is never a payment fact", (
 describe("astra r2 (#344 @78989cc5): reproduced findings (verify before fix)", () => {
   type FakeEl = RElement & { attrs: Record<string, string> };
   const fdoc: RDocument = { createElement(): RElement {
-    const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+    const e: FakeEl = physicalTextElement({ textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } });
     return e;
   } };
   const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
@@ -335,19 +339,19 @@ describe("astra r2 (#344 @78989cc5): reproduced findings (verify before fix)", (
 
   it("F2 (HIGH): a status value 'verified' is not shown bare outside a schema card", () => {
     const stat = { type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "status" } } as unknown as IrNode;
-    expect(bindScalar(stat, { status: "verified" })).not.toBe("verified");
+    expect(bindScalar(stat, { status: "verified" }).t).not.toBe("verified");
   });
 
   it("F4 (LOW): a manifest cannot supply the PCC withheld notice as its own prose", () => {
-    const doc = ok(man([{ kind: "note", text: WITHHELD_PROSE }]));
-    expect(proseOf(doc.root)).not.toContain(WITHHELD_PROSE);
+    const doc = ok(man([{ kind: "note", text: readText(WITHHELD_PROSE).t }]));
+    expect(proseOf(doc.root)).not.toContain(readText(WITHHELD_PROSE).t);
   });
 });
 
 describe("astra r2 (#344): each fix holds for the whole class, not only the reported strings", () => {
   type FakeEl = RElement & { attrs: Record<string, string> };
   const fdoc: RDocument = { createElement(): RElement {
-    const e: FakeEl = { textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } };
+    const e: FakeEl = physicalTextElement({ textContent: "", className: "", children: [], attrs: {}, setAttr(n, v) { e.attrs[n] = v; }, appendChild(c) { e.children.push(c); return c; } });
     return e;
   } };
   const textOf = (e: RElement): string => e.textContent + (e.children as RElement[]).map(textOf).join(" ");
@@ -422,7 +426,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     expect(heading).toMatchObject({ props: { level: 2, text: "Kernels" }, untrusted: true });
     for (const n of [n1!, n2!]) { expect(n.props).toEqual({ withheld: true }); expect(n.untrusted).toBeUndefined(); }
     expect(validateIr(doc)).toEqual({ ok: true });
-    expect(JSON.stringify(doc)).not.toContain(WITHHELD_PROSE); // the notice text is never in the IR
+    expect(JSON.stringify(doc)).not.toContain(readText(WITHHELD_PROSE).t); // the notice text is never in the IR
   });
 
   it("F4: the validator refuses every forged form of the notice", () => {
@@ -431,7 +435,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
       const d = JSON.parse(JSON.stringify(doc)) as IrDoc; const [, w, fine] = d.root.children![0]!.children!; f(w!, fine!); return validateIr(d).ok;
     };
     expect(forge(() => {})).toBe(true);
-    expect(forge((_w, fine) => { (fine.props as { text: string }).text = WITHHELD_PROSE; })).toBe(false); // agent prose that IS the notice
+    expect(forge((_w, fine) => { (fine.props as { text: string }).text = readText(WITHHELD_PROSE).t; })).toBe(false); // agent prose that IS the notice
     expect(forge((w) => { w.untrusted = true; })).toBe(false); // the notice marked untrusted
     expect(forge((w) => { (w.props as Record<string, unknown>).text = "Paid"; })).toBe(false); // the notice carrying words
     expect(forge((w) => { (w.props as Record<string, unknown>).withheld = "yes"; })).toBe(false);
@@ -439,7 +443,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     // the node check alone refuses it: a dashboard whose only agent prose is its title has no join
     const lone = ok({ csd: CSD, title: "Ops", sections: [{ windows: [{ kind: "receipt" }] }] });
     const forgedTitle = JSON.parse(JSON.stringify(lone)) as IrDoc;
-    (forgedTitle.title.props as { text: string }).text = WITHHELD_PROSE;
+    (forgedTitle.title.props as { text: string }).text = readText(WITHHELD_PROSE).t;
     expect(validateIr(lone)).toEqual({ ok: true });
     expect(validateIr(forgedTitle).ok).toBe(false);
   });
@@ -452,7 +456,7 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     const walk = (e: RElement): void => { all.push(e); for (const c of e.children as RElement[]) walk(c); };
     walk(mount);
     const classes = (e: RElement): string[] => e.className.split(" ");
-    const notice = all.find((e) => e.textContent === WITHHELD_PROSE)!;
+    const notice = all.find((e) => e.textContent === readText(WITHHELD_PROSE).t)!;
     expect(classes(notice)).toEqual(expect.arrayContaining(["pcc-text", "pcc-withheld"]));
     for (const c of ["pcc-agent", "pcc-untrusted"]) expect(classes(notice)).not.toContain(c);
     expect(classes(notice).some((c) => c.startsWith("pcc-src-"))).toBe(false); // a PCC constant has no source class
@@ -465,15 +469,15 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
   });
 
   it("F2: every bound sink withholds a claim and qualifies a status word; the price fields are the card's own", () => {
-    expect(boundValueText("name", "Paid $1M \u2014 verified")).toBe(WITHHELD_FIELD);
-    expect(boundValueText("location.label", "Berlin - funds received")).toBe(WITHHELD_FIELD);
-    expect(boundValueText("id", "cap-7")).toBe("reported: cap-7");
-    expect(boundValueText("status", "verified")).toBe("verified" + RECORD_CLAIM_NOTE);
-    expect(boundValueText("kernel.status", "pagado")).toBe("pagado" + RECORD_CLAIM_NOTE);
-    expect(boundValueText("status", "settled")).toBe("settled" + RECORD_STATUS_NOTE);
-    expect(boundValueText("status", "paid 5 USDC")).toBe(WITHHELD_FIELD); // a status may not state an amount
-    expect(boundValueText("status", "withheld by PCC")).toBe(WITHHELD_FIELD); // nor pose as the notice
-    expect(boundValueText("status", "running")).toBe("running");
+    expect(boundValueText("name", "Paid $1M \u2014 verified").t).toBe(readText(WITHHELD_FIELD).t);
+    expect(boundValueText("location.label", "Berlin - funds received").t).toBe(readText(WITHHELD_FIELD).t);
+    expect(boundValueText("id", "cap-7").t).toBe("reported: cap-7");
+    expect(boundValueText("status", "verified").t).toBe("verified" + readText(RECORD_CLAIM_NOTE).t);
+    expect(boundValueText("kernel.status", "pagado").t).toBe("pagado" + readText(RECORD_CLAIM_NOTE).t);
+    expect(boundValueText("status", "settled").t).toBe("settled" + readText(RECORD_STATUS_NOTE).t);
+    expect(boundValueText("status", "paid 5 USDC").t).toBe(readText(WITHHELD_FIELD).t); // a status may not state an amount
+    expect(boundValueText("status", "withheld by PCC").t).toBe(readText(WITHHELD_FIELD).t); // nor pose as the notice
+    expect(boundValueText("status", "running").t).toBe("running");
     const listEl = fdoc.createElement("div");
     // location.label removed from the list field profile entirely (astra r5 F5: dead
     // surface -- present in 0/8 real kernel rows and 0/19 real capability rows); exercise
@@ -490,19 +494,19 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     // "name" is now attributed text (astra r5 F1): a benign value is prefixed, not bare.
     const rowTexts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(rowTexts).toEqual([
-      ["Name:", REPORTED_PREFIX + "Arm 1", "Status:", "approved"],
-      ["Name:", WITHHELD_FIELD, "Status:", "approved"],
+      ["Name:", readText(REPORTED_PREFIX).t + "Arm 1", "Status:", "approved"],
+      ["Name:", readText(WITHHELD_FIELD).t, "Status:", "approved"],
     ]);
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
     bindSchemaCard("capability-summary-v1", { name: "Refunded in full", type: "arm", pricing: { baseCost: "12.50", currency: "USDC" }, assuranceTiers: [1, 2], available: true }, slots);
-    expect(slots.map((x) => x.textContent)).toEqual([WITHHELD_FIELD, REPORTED_PREFIX + "arm", "12.50", "USDC", "1, 2", "Yes"]); // a capType is attributed (steward #5149)
+    expect(slots.map((x) => x.textContent)).toEqual([readText(WITHHELD_FIELD).t, readText(REPORTED_PREFIX).t + "arm", "12.50", "USDC", "1, 2", "Yes"]); // a capType is attributed (steward #5149)
     // astra r3 M3 / #348 r2b F1: "type" is a mistyped capType ("1,000 USDC" fails the closed
     // identifier grammar) and "assuranceTiers" is a mistyped tiers array ("Paid" is not an
     // integer) \u2014 the card now fails CLOSED on every slot instead of selectively masking just the
     // claim-bearing ones; the card's own price fields no longer get a content-based exemption,
     // they are validated like everything else.
     const ok2 = bindSchemaCard("capability-summary-v1", { name: "Arm", type: "1,000 USDC", pricing: { baseCost: "1,000 USDC", currency: "USDC" }, assuranceTiers: ["Paid", 2], available: false }, slots);
-    expect(slots.map((x) => x.textContent)).toEqual([UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE, UNAVAILABLE]);
+    expect(slots.map((x) => x.textContent)).toEqual([readText(UNAVAILABLE).t, readText(UNAVAILABLE).t, readText(UNAVAILABLE).t, readText(UNAVAILABLE).t, readText(UNAVAILABLE).t, readText(UNAVAILABLE).t]);
     expect(ok2).toBe(false);
     // the row-2 claim ("Payment received", replacing the old location.label example above) never
     // leaks unredacted into the rendered list text either.
@@ -532,8 +536,9 @@ describe("astra r2 (#344): each fix holds for the whole class, not only the repo
     for (let i = 0; i < 60; i++) await new Promise((r) => setTimeout(r, 0));
     const text = w.document.getElementById("pcc-ir-root").textContent as string;
     expect(text).toContain("Gripper");
-    expect(text).toContain(WITHHELD_FIELD);
+    expect(text).toContain(readText(WITHHELD_FIELD).t);
     expect(text).not.toContain("$1M");
+    expect((dom.window as any).__PCC_UI_TEXT_VIOLATIONS__ ?? 0).toBe(0);
     dom.window.close();
   });
 });
@@ -560,8 +565,8 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
   // fdoc/textOf are module-scope now (see top of file) — reused here unchanged.
   it("H1 (lexical): obvious claim spellings, confusables and extra currencies bypass the detector", () => {
     expect(isProseClaim("Payment complete")).toBe(true);
-    expect(boundValueText("status", "Verification passed")).not.toBe("Verification passed");
-    expect(boundValueText("name", "PAlD")).toBe(WITHHELD_FIELD); // lowercase L, not capital I
+    expect(boundValueText("status", "Verification passed").t).not.toBe("Verification passed");
+    expect(boundValueText("name", "PAlD").t).toBe(readText(WITHHELD_FIELD).t); // lowercase L, not capital I
     expect(isMoneyClaim("USDC five")).toBe(true);
     expect(isMoneyClaim("100 XLM")).toBe(true);
     expect(isMoneyClaim("\u03c0\u03bb\u03b7\u03c1\u03ce\u03b8\u03b7\u03ba\u03b5")).toBe(true); // Greek: "it was paid"
@@ -577,9 +582,9 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
   });
 
   it("M3: a hostile price field cannot reproduce PCC's exact withheld notice", () => {
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
-    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "arm", pricing: { baseCost: WITHHELD_PROSE, currency: "USDC" }, assuranceTiers: [1], available: true }, slots);
-    expect(slots.some((s) => s.textContent === WITHHELD_PROSE)).toBe(false);
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
+    bindSchemaCard("capability-summary-v1", { name: "Arm", type: "arm", pricing: { baseCost: readText(WITHHELD_PROSE).t, currency: "USDC" }, assuranceTiers: [1], available: true }, slots);
+    expect(slots.some((s) => s.textContent === readText(WITHHELD_PROSE).t)).toBe(false);
   });
 
   it("M4 (over-suppression): ordinary physical-workflow prose is not withheld", () => {
@@ -589,7 +594,7 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
   });
 
   it("#348 F1 (types): a mistyped capability card fails closed on every slot", () => {
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
     const okFlag = bindSchemaCard(
       "capability-summary-v1",
       { name: 7, type: true, pricing: { baseCost: "paid 5 USDC", currency: "verified" }, asOf: "2026-09-24T12:00:00.000Z" },
@@ -597,7 +602,7 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
     );
     const texts = slots.map((s) => s.textContent);
     for (const bad of ["7", "true", "paid 5 USDC", "verified"]) expect(texts).not.toContain(bad);
-    for (const t of texts) expect(t).toBe(UNAVAILABLE);
+    for (const t of texts) expect(t).toBe(readText(UNAVAILABLE).t);
     expect(okFlag).toBe(false);
   });
 
@@ -609,13 +614,13 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
     const text = textOf(listEl);
     expect(text).not.toContain("Payment");
     expect(text).not.toMatch(/\bcomplete\b/);
-    expect(text).toContain(WITHHELD_FIELD);
+    expect(text).toContain(readText(WITHHELD_FIELD).t);
   });
 
   it("review (survivor): a card whose ONLY bad field is its currency fails closed on every slot", () => {
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
     const okFlag = bindSchemaCard("capability-summary-v1", { name: "Arm", type: "arm", pricing: { baseCost: "5", currency: "verified" }, assuranceTiers: [1], available: true }, slots);
-    for (const t of slots.map((s) => s.textContent)) expect(t).toBe(UNAVAILABLE);
+    for (const t of slots.map((s) => s.textContent)) expect(t).toBe(readText(UNAVAILABLE).t);
     expect(okFlag).toBe(false);
   });
 
@@ -641,7 +646,7 @@ describe("astra r3 (#344 @e909337a) and #348 r2 F1: reproduced findings (verify 
     bindListRows(fdoc, listEl, node, [{ name: "Arm calibration", status: "PAID" }]);
     const text = textOf(listEl);
     expect(text).toContain("Arm calibration");
-    expect(text).toContain("PAID" + RECORD_STATUS_NOTE); // the status never stands bare: boundValueText notes it
+    expect(text).toContain("PAID" + readText(RECORD_STATUS_NOTE).t); // the status never stands bare: boundValueText notes it
   });
 });
 
@@ -679,13 +684,13 @@ describe("astra r4 (#344 @6773e870): findings 1-3 reproduced (verify before fix)
   });
 
   it("F3 (MEDIUM): a capability card whose only bad field is an off-grammar amount number fails closed on every slot", () => {
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
     const okFlag = bindSchemaCard(
       "capability-summary-v1",
       { name: "Arm", type: "arm", pricing: { baseCost: 1e100, currency: "USDC" }, assuranceTiers: [1], available: true },
       slots,
     );
-    for (const t of slots.map((s) => s.textContent)) expect(t).toBe(UNAVAILABLE);
+    for (const t of slots.map((s) => s.textContent)) expect(t).toBe(readText(UNAVAILABLE).t);
     expect(okFlag).toBe(false);
   });
 });
@@ -707,7 +712,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const texts = (listEl.children[0] as RElement).children as RElement[];
     // name is now attributed text (astra r5 F1): a benign value renders with the "reported: "
     // prefix, not bare.
-    expect(texts.map((c) => c.textContent)).toEqual(["Name:", REPORTED_PREFIX + "Gripper", "Available:", "Yes"]);
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", readText(REPORTED_PREFIX).t + "Gripper", "Available:", "Yes"]);
   });
 
   it("a mistyped id ('Your payment', not a valid id shape) fails the WHOLE row: every value UNAVAILABLE, labels kept", () => {
@@ -719,7 +724,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     bindListRows(fdoc, listEl, node, rows, { jobs: rows, total: rows.length });
     expect(listEl.children.length).toBe(1); // the row is NOT dropped (title was PRESENT, just mistyped)
     const texts = (listEl.children[0] as RElement).children as RElement[];
-    expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Kernel:", UNAVAILABLE, "Status:", UNAVAILABLE]);
+    expect(texts.map((c) => c.textContent)).toEqual(["ID:", readText(UNAVAILABLE).t, "Kernel:", readText(UNAVAILABLE).t, "Status:", readText(UNAVAILABLE).t]);
   });
 
   it("'status' in META uses the closed vocabulary (boundStatusText applies by KIND, not just as statusFrom)", () => {
@@ -729,8 +734,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     bindListRows(fdoc, listEl, node, rows, { jobs: rows, total: rows.length }); // the route's own envelope: no window note
     const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(texts).toEqual([
-      ["ID:", REPORTED_PREFIX + "j-1", "Status:", "settled" + RECORD_STATUS_NOTE], // ids are attributed (steward #5149)
-      ["ID:", REPORTED_PREFIX + "j-2", "Status:", "weirdWord" + RECORD_CLAIM_NOTE],
+      ["ID:", readText(REPORTED_PREFIX).t + "j-1", "Status:", "settled" + readText(RECORD_STATUS_NOTE).t], // ids are attributed (steward #5149)
+      ["ID:", readText(REPORTED_PREFIX).t + "j-2", "Status:", "weirdWord" + readText(RECORD_CLAIM_NOTE).t],
     ]);
   });
 
@@ -744,7 +749,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const text = textOf(listEl);
     expect(text).not.toContain("Payment");
     expect(text).not.toMatch(/\bcomplete\b/);
-    expect(text).toContain(WITHHELD_FIELD);
+    expect(text).toContain(readText(WITHHELD_FIELD).t);
   });
 
   // genui's mutation check of c3e04dd9 (round 6, SURVIVED): if the backstop joined the text
@@ -766,7 +771,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const text = textOf(listEl);
     expect(text).not.toContain("funds");
     expect(text).not.toMatch(/\breleased\b/);
-    expect(text).toContain(WITHHELD_FIELD);
+    expect(text).toContain(readText(WITHHELD_FIELD).t);
   });
 
   // Mutation survivors (Step 3): each kind's grammar needs its OWN present-but-off-grammar value
@@ -788,7 +793,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     expect(listEl.children.length).toBe(2);
     expect((listEl.children[1] as RElement).className).toBe("pcc-window");
     const texts = (rowEls[0] as RElement).children as RElement[];
-    expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "ID:", UNAVAILABLE]);
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", readText(UNAVAILABLE).t, "ID:", readText(UNAVAILABLE).t]);
   });
 
   it("mutation survivor — status kind: a present empty string is MISTYPED, fails the row closed", () => {
@@ -796,7 +801,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const listEl = fdoc.createElement("div");
     bindListRows(fdoc, listEl, node, [{ id: "j-1", status: "" }]);
     const texts = (listEl.children[0] as RElement).children as RElement[];
-    expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Status:", UNAVAILABLE]);
+    expect(texts.map((c) => c.textContent)).toEqual(["ID:", readText(UNAVAILABLE).t, "Status:", readText(UNAVAILABLE).t]);
   });
 
   it("mutation survivor — time kind: a valid timestamp is shown as-is; a non-timestamp string fails the row closed", () => {
@@ -806,8 +811,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     bindListRows(fdoc, listEl, node, jobs, { jobs, total: jobs.length }); // the route's own envelope: no window note
     const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(rows).toEqual([
-      ["ID:", REPORTED_PREFIX + "j-1", "Created:", "2026-09-24T10:00:00Z"], // ids are attributed (steward #5149)
-      ["ID:", UNAVAILABLE, "Created:", UNAVAILABLE],
+      ["ID:", readText(REPORTED_PREFIX).t + "j-1", "Created:", "2026-09-24T10:00:00Z"], // ids are attributed (steward #5149)
+      ["ID:", readText(UNAVAILABLE).t, "Created:", readText(UNAVAILABLE).t],
     ]);
   });
 
@@ -818,8 +823,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     // name is now attributed text (astra r5 F1): a benign value is prefixed, not bare.
     expect(rows).toEqual([
-      ["Name:", REPORTED_PREFIX + "K1", "Version:", "1.2.3"],
-      ["Name:", UNAVAILABLE, "Version:", UNAVAILABLE],
+      ["Name:", readText(REPORTED_PREFIX).t + "K1", "Version:", "1.2.3"],
+      ["Name:", readText(UNAVAILABLE).t, "Version:", readText(UNAVAILABLE).t],
     ]);
   });
 
@@ -835,10 +840,10 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     // name is now attributed text (astra r5 F1): a benign value is prefixed, not bare.
     expect(rows).toEqual([
-      ["Name:", REPORTED_PREFIX + "K1", "Capabilities:", "5"],
-      ["Name:", UNAVAILABLE, "Capabilities:", UNAVAILABLE],
-      ["Name:", UNAVAILABLE, "Capabilities:", UNAVAILABLE],
-      ["Name:", UNAVAILABLE, "Capabilities:", UNAVAILABLE],
+      ["Name:", readText(REPORTED_PREFIX).t + "K1", "Capabilities:", "5"],
+      ["Name:", readText(UNAVAILABLE).t, "Capabilities:", readText(UNAVAILABLE).t],
+      ["Name:", readText(UNAVAILABLE).t, "Capabilities:", readText(UNAVAILABLE).t],
+      ["Name:", readText(UNAVAILABLE).t, "Capabilities:", readText(UNAVAILABLE).t],
     ]);
   });
 
@@ -847,7 +852,7 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const listEl = fdoc.createElement("div");
     bindListRows(fdoc, listEl, node, [{ name: "Arm", type: "not a type!" }]);
     const texts = (listEl.children[0] as RElement).children as RElement[];
-    expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "Type:", UNAVAILABLE]);
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", readText(UNAVAILABLE).t, "Type:", readText(UNAVAILABLE).t]);
   });
 });
 
@@ -867,15 +872,15 @@ describe("astra r5 (#344 @c3e04dd9): findings 1-5 reproduced (verify before fix)
 
   it("F1 (HIGH): the same phrase in a capability card's Name slot is not shown bare", () => {
     const phrase = "payment from the remote operator received";
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
     bindSchemaCard("capability-summary-v1", { name: phrase, type: "arm", pricing: { baseCost: "5.00", currency: "USDC" }, assuranceTiers: [1], available: true }, slots);
     expect(slots[0]!.textContent).not.toBe(phrase);
   });
 
   it("F2 (MEDIUM): a stat bound to jobs/:id/status select=progress renders UNAVAILABLE for an off-kind boolean or string value", () => {
     const stat = { type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode;
-    expect(bindScalar(stat, { progress: true })).toBe(UNAVAILABLE);
-    expect(bindScalar(stat, { progress: "unknown-value" })).toBe(UNAVAILABLE);
+    expect(bindScalar(stat, { progress: true }).t).toBe(readText(UNAVAILABLE).t);
+    expect(bindScalar(stat, { progress: "unknown-value" }).t).toBe(readText(UNAVAILABLE).t);
   });
 
   // genui's mutation check of c3e04dd9 (round 6, SURVIVED): the "count" kind (reputation,
@@ -885,9 +890,9 @@ describe("astra r5 (#344 @c3e04dd9): findings 1-5 reproduced (verify before fix)
   // number passed the mutated (type-only) check silently.
   it("mutation survivor — stat count kind: a non-integer or negative number is off-kind, UNAVAILABLE", () => {
     const stat = { type: "stat", id: "n1", bind: { path: "/api/kernels/k1", select: "kernel.reputation" } } as unknown as IrNode;
-    expect(bindScalar(stat, { kernel: { reputation: 2.5 } })).toBe(UNAVAILABLE);
-    expect(bindScalar(stat, { kernel: { reputation: -1 } })).toBe(UNAVAILABLE);
-    expect(bindScalar(stat, { kernel: { reputation: 900 } })).toBe("900"); // control: a valid count still renders
+    expect(bindScalar(stat, { kernel: { reputation: 2.5 } }).t).toBe(readText(UNAVAILABLE).t);
+    expect(bindScalar(stat, { kernel: { reputation: -1 } }).t).toBe(readText(UNAVAILABLE).t);
+    expect(bindScalar(stat, { kernel: { reputation: 900 } }).t).toBe("900"); // control: a valid count still renders
   });
 
   it("F3 (MEDIUM): listRowsOf never accepts a bare array — only the route's own rows key", () => {
@@ -901,7 +906,7 @@ describe("astra r5 (#344 @c3e04dd9): findings 1-5 reproduced (verify before fix)
     const listEl = fdoc.createElement("div");
     bindListRows(fdoc, listEl, node, [{ id: "j1", createdAt: "2026-99-99T99:99:99Z" }]);
     const texts = (listEl.children[0] as RElement).children as RElement[];
-    expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Created:", UNAVAILABLE]);
+    expect(texts.map((c) => c.textContent)).toEqual(["ID:", readText(UNAVAILABLE).t, "Created:", readText(UNAVAILABLE).t]);
   });
 
   it("F4 (MEDIUM): a non-semver kernel version fails the whole row closed", () => {
@@ -909,7 +914,7 @@ describe("astra r5 (#344 @c3e04dd9): findings 1-5 reproduced (verify before fix)
     const listEl = fdoc.createElement("div");
     bindListRows(fdoc, listEl, node, [{ name: "K1", version: "banana" }]);
     const texts = (listEl.children[0] as RElement).children as RElement[];
-    expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "Version:", UNAVAILABLE]);
+    expect(texts.map((c) => c.textContent)).toEqual(["Name:", readText(UNAVAILABLE).t, "Version:", readText(UNAVAILABLE).t]);
   });
 
   // F5 (MEDIUM) is a coverage gap, not a behaviour: dashboard-ir-list-producers.test.ts asserts
@@ -932,19 +937,19 @@ describe("genui review of #344 r6 (@d9add4d3): an identifier cannot spell a clai
     const l = fdoc.createElement("div");
     bindListRows(fdoc, l, { type: "list", id: "n2", props: { rowTitle: "name", rowMeta: ["type"], statusFrom: "available" }, bind: { path: "/api/capabilities" } } as unknown as IrNode, [{ name: "Arm", type: claim, available: true }]);
     expect(textOf(l)).not.toContain(claim);
-    const slots = Array.from({ length: 6 }, () => ({ textContent: "" }));
+    const slots = Array.from({ length: 6 }, () => (physicalTextElement({ textContent: "" })));
     bindSchemaCard("capability-summary-v1", { name: "Arm", type: claim, pricing: { baseCost: "1", currency: "USDC" }, assuranceTiers: [0], available: true }, slots);
     expect(slots.map((x) => x.textContent)).not.toContain(claim);
   });
   it("the pair check has NO word window for identifiers (6 words between still withholds)", () => {
-    expect(identifierText("id", "payment-a-b-c-d-e-f-received")).toBe(WITHHELD_FIELD);
-    expect(identifierText("type", "fundsOfTheRemoteOperatorWereFullyReleased")).toBe(WITHHELD_FIELD); // camelCase too
+    expect(identifierText("id", "payment-a-b-c-d-e-f-received").t).toBe(readText(WITHHELD_FIELD).t);
+    expect(identifierText("type", "fundsOfTheRemoteOperatorWereFullyReleased").t).toBe(readText(WITHHELD_FIELD).t); // camelCase too
   });
   it("real identifiers are attributed, never withheld (no false positive on a single money noun or a hex segment)", () => {
     // steward #5149 (fix the property, not the detector): an identifier is attributed like free text;
     // the window-free pair check only withholds, as defense in depth.
     for (const id of ["job-3f2a9c1e-fee", "job-3f2a9c1e-ada", "cap-kernel-nyc-fdm", "kernel-nyc", "liquid-transfer", "analytical-balance", "cnc-3axis"]) {
-      expect(identifierText("id", id), id).toBe(REPORTED_PREFIX + id);
+      expect(identifierText("id", id).t, id).toBe(readText(REPORTED_PREFIX).t + id);
     }
   });
 });
@@ -960,16 +965,16 @@ describe("astra r6 (#344 @a3521bad): versions and percents are closed grammars (
   };
   it("a version carrying words, an empty or leading-zero part, or unbounded digits fails the whole row", () => {
     for (const v of ["1.0.0-paymentreceived", "1.0.0-payment-received", "1.0.0-alpha..1", "1.0.0-01", "01.0.0", "1.0.0+build", "1" + "0".repeat(2000) + ".0.0", "1.0"]) {
-      expect(versionRow(v), v).toEqual(["Name:", UNAVAILABLE, "Version:", UNAVAILABLE, "Status:", UNAVAILABLE]);
+      expect(versionRow(v), v).toEqual(["Name:", readText(UNAVAILABLE).t, "Version:", readText(UNAVAILABLE).t, "Status:", readText(UNAVAILABLE).t]);
     }
   });
   it("a real numeric version renders as is", () => {
-    expect(versionRow("1.4.0")).toEqual(["Name:", REPORTED_PREFIX + "K", "Version:", "1.4.0", "Status:", "online"]);
+    expect(versionRow("1.4.0")).toEqual(["Name:", readText(REPORTED_PREFIX).t + "K", "Version:", "1.4.0", "Status:", "online"]);
   });
   it("a percent is an integer 0..100 (a fraction is off-kind)", () => {
-    const stat = (p: unknown) => bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: p });
-    expect(stat(2.5)).toBe(UNAVAILABLE);
+    const stat = (p: unknown) => bindScalar({ type: "stat", id: "n1", bind: { path: "/api/jobs/j1/status", select: "progress" } } as unknown as IrNode, { progress: p }).t;
+    expect(stat(2.5)).toBe(readText(UNAVAILABLE).t);
     expect(stat(80)).toBe("80");
-    expect(stat(101)).toBe(UNAVAILABLE);
+    expect(stat(101)).toBe(readText(UNAVAILABLE).t);
   });
 });

@@ -81,6 +81,7 @@ const OBJECT_REFLECTION_METHODS = new Set(["defineProperty", "defineProperties",
 const SETTER_METHODS = new Set(["__defineSetter__", "__lookupSetter__"]);
 const TEXT_CONSTRUCTORS = new Set(["Text", "Option", "DOMParser", "Notification"]);
 const DIALOGS = new Set(["alert", "confirm", "prompt"]);
+const GLOBAL_CALL_MEMBER_NAMES = new Set([...DIALOGS, "print", "setTimeout", "setInterval"]);
 const REFLECTION_REFERENCES = new Set(["Reflect", "Proxy", "eval", "Function", "Object"]);
 
 function unwrap(node: ts.Node): ts.Node {
@@ -585,7 +586,9 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         }
         for (const argument of node.arguments) {
           const literal = unwrap(argument);
-          if ((ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) && isForbiddenName(literal.text) && !(config.allowedNameArguments ?? []).some((allowance) => allowance.reason.trim() && allowance.matches(node, argument))) report(argument, `forbidden member name argument: ${literal.text}`);
+          // dataAt's second argument names a member; a copy mint such as kitText('confirm') does not.
+          const globalMemberSlot = method === "dataAt" && node.arguments[1] === argument;
+          if ((ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) && (isForbiddenName(literal.text) || (globalMemberSlot && GLOBAL_CALL_MEMBER_NAMES.has(literal.text))) && !(config.allowedNameArguments ?? []).some((allowance) => allowance.reason.trim() && allowance.matches(node, argument))) report(argument, `forbidden member name argument: ${literal.text}`);
         }
         const called = calledExpression(node.expression);
         const direct = unwrap(node.expression);

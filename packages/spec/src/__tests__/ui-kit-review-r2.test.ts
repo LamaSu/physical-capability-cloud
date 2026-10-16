@@ -1,6 +1,5 @@
 /** @vitest-environment jsdom */
 import { readFileSync } from "node:fs";
-import vm from "node:vm";
 import { URL as NodeURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { identifierText } from "../../../gateway/src/mcp/dashboard-ir.js";
@@ -23,7 +22,8 @@ type Kit = {
 };
 function kit() {
   const sandbox = { window: { kit: undefined as Kit | undefined, __PCC_UI_TEXT_VIOLATIONS__: 0 }, document, URL, setTimeout };
-  vm.runInNewContext(source.replace(bootTail, "  window.kit = { fmtUsd, fmtUsdRaw, fmtTs, idText, currencyText, renderChain, renderCapability, renderReceipt, approvalDetails, realRequestNode, renderWindow, renderList, snapshotBanner };"), sandbox);
+  // The kit and its plain-object fixture data must share Object.prototype.
+  new Function(...Object.keys(sandbox), source.replace(bootTail, "  window.kit = { fmtUsd, fmtUsdRaw, fmtTs, idText, currencyText, renderChain, renderCapability, renderReceipt, approvalDetails, realRequestNode, renderWindow, renderList, snapshotBanner };"))(...Object.values(sandbox));
   return { k: sandbox.window.kit!, count: () => sandbox.window.__PCC_UI_TEXT_VIOLATIONS__ };
 }
 const ctx = (snapshot: Record<string, unknown> = {}) => ({ mode: "snapshot", snapshot, apiBase: "https://capability.network" });
@@ -61,7 +61,7 @@ describe("review F1: approved formatters fail closed", () => {
 describe("review F3: identifiers follow the IR rule", () => {
   it.each(["job-1", "fdm", "liquid-transfer", "analytical-balance", "payment-verified", "settled-and-paid", "payment-from-the-remote-operator-received", "withheld", "Verified-by-PCC:payment-released"])("same input and output across both kits and spec: %s", (raw) => {
     const { k, count } = kit();
-    const expected = identifierText("id", raw);
+    const expected = identifierText("id", raw).t;
     expect(k.idText(raw).t).toBe(expected);
     expect(specIdText(raw)).toBe(expected);
     expect(count()).toBe(0);

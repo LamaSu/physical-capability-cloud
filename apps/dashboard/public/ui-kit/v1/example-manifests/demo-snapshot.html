@@ -643,9 +643,9 @@
   // Formatting + dot-path pluck (no eval; a manual split/reduce)
   // ═══════════════════════════════════════════════════════════════════════
 
-  // Dynamic data reads admit only enumerable own fields, as a fresh JSON copy
-  // would. Read the requested field once; copying the object per read makes
-  // loops quadratic in its width. The lint reviews this exact guarded read.
+  // Keyed data reads admit only enumerable own fields of plain objects or arrays.
+  // Read the requested field once; copying the object per read makes loops
+  // quadratic in its width. The lint reviews this exact guarded read.
   // Numeric array/arguments/NodeList positions retain their requested-index semantics.
   function dataAt(raw, key) {
     if (raw == null) throw new TypeError('Cannot read absent data');
@@ -653,6 +653,11 @@
       return Array.prototype.slice.call(raw, key, key + 1)[0];
     }
     if (key === 'length' && typeof raw.length === 'number') return raw.length;
+    if (!Array.isArray(raw)) {
+      if (typeof raw !== 'object') return undefined;
+      var proto = Object.getPrototypeOf(raw);
+      if (proto !== Object.prototype && proto !== null) return undefined;
+    }
     return Object.prototype.propertyIsEnumerable.call(raw, key) ? raw[key] : undefined;
   }
   function dot(obj, path) {

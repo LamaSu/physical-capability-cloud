@@ -1,3 +1,4 @@
+import { readText } from "./dashboard-ir.js";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
@@ -19,17 +20,17 @@ describe("review F7: narrow approved bound mints", () => {
     expect(source.match(/export function recordValueText[^}]+/s)?.[0]).not.toContain("as KitText");
   });
   it("attributes non-status bound values", () => {
-    expect(boundValueText("name", "Printer")).toBe("reported: Printer");
-    expect(boundValueText("status", "custom")).toBe("custom" + RECORD_CLAIM_NOTE);
+    expect(boundValueText("name", "Printer").t).toBe("reported: Printer");
+    expect(boundValueText("status", "custom").t).toBe("custom" + readText(RECORD_CLAIM_NOTE).t);
   });
   it("reads status by field kind even when its key is state", () => {
     const code = ts.transpile(functionSource("readOwnPath") + "\n" + functionSource("readField") + '\nreadField({ state: "Verification passed" }, { kind: "status", key: "state" });', { target: ts.ScriptTarget.ES2022 });
     const result = vm.runInNewContext(code, { boundValueText, boundStatusText, UNAVAILABLE });
-    expect(result.text).toBe("Verification passed" + RECORD_CLAIM_NOTE);
+    expect(result.text.t).toBe("Verification passed" + readText(RECORD_CLAIM_NOTE).t);
   });
 });
 describe("review F9: own-key list labels", () => {
   it.each(["toString", "constructor", "__proto__"])("returns unavailable for inherited key %s", (key) => {
-    expect(listFieldLabel(key)).toBe(UNAVAILABLE);
+    expect(listFieldLabel(key).t).toBe(readText(UNAVAILABLE).t);
   });
 });

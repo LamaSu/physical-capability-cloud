@@ -9,7 +9,7 @@ const gatewayMcp = new URL("../../../gateway/src/mcp/", import.meta.url);
 const browserConfig: TextSinkConfig = {
   file: fileURLToPath(new URL("dashboard-ir-browser-entry.ts", gatewayMcp)),
   scriptKind: ts.ScriptKind.TS,
-  sinks: ["setText"],
+  sinks: ["setText", "setAuthoredText"],
   attributeMethods: ["setAttribute", "setAttr"],
   allowedAttributes: ["data-tone", "data-source", "data-as-of"],
   allowedNodeCalls: [
@@ -58,7 +58,7 @@ const plainConfig: TextSinkConfig = {
     { function: "intentState", target: "INTENT_STATE", reason: "Stores per-request state in the module's fresh null-prototype dictionary; no DOM receiver is reachable" },
   ],
   allowedComputedReads: [
-    { function: "dataAt", target: "raw", ownKey: "key", reason: "One exact propertyIsEnumerable-guarded read admits only own enumerable fields without per-read copies; numeric array/NodeList reads use slice" },
+    { function: "dataAt", target: "raw", ownKey: "key", reason: "dataAt rejects keyed receivers other than plain objects or arrays; one exact propertyIsEnumerable-guarded read admits own enumerable fields without per-read copies; numeric array/NodeList reads use slice" },
   ],
   agentText: { mint: "agentText", sink: "agentEl", reason: "One claim-checking agent mint and one sink that adds the IR's agent and untrusted classes; agent brands cannot enter kit sinks" },
   allowedNameArguments: [
@@ -304,6 +304,16 @@ describe.each(kits)("text sinks in $file", (config) => {
     const line = prefix.split("\n").length;
     const issues = lintTextSinks(prefix + "  " + bypass + "\n}\n", config);
     expect(issues.some((issue) => issue.line === line && issue.column > 0), JSON.stringify(issues)).toBe(true);
+  });
+});
+
+describe("review N4: hidden global calls through dataAt", () => {
+  it.each(["alert", "confirm", "prompt", "print", "setTimeout", "setInterval"])("reports the injected literal member name %s in the shipped kit", (name) => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const prefix = source + "\nfunction injectedJ3(raw) {\n";
+    const line = prefix.split("\n").length;
+    const issues = lintTextSinks(prefix + `  dataAt(window, '${name}')(raw);\n}\n`, plainConfig);
+    expect(issues).toContainEqual(expect.objectContaining({ line, rule: `forbidden member name argument: ${name}` }));
   });
 });
 

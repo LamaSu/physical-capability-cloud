@@ -21,14 +21,63 @@
  */
 import type { BoundSourceClass, DashboardManifest, RenderSourceClass } from "@pcc/spec";
 
-/** Display text minted by a typed IR helper; the brand has no runtime representation. */
-export type KitText = string & { readonly __kitText: unique symbol };
+// Capture the boundary's intrinsics before any module code can replace a global or prototype.
+const TEXT_STORE_GET: (this: WeakMap<object, string>, key: object) => string | undefined = WeakMap.prototype.get;
+const TEXT_STORE_SET: (this: WeakMap<object, string>, key: object, value: string) => WeakMap<object, string> = WeakMap.prototype.set;
+const TEXT_FREEZE = Object.freeze;
+const TEXT_APPLY: <T, A extends unknown[], R>(target: (this: T, ...args: A) => R, receiver: T, args: A) => R = Reflect.apply;
+const textDiagnostics = globalThis as typeof globalThis & { __PCC_UI_TEXT_VIOLATIONS__?: number };
+
+/** Opaque display objects. Their read-only .t accessor reads the module-private identity store. */
+export type KitText = Readonly<{ t: string; readonly __kitText: unique symbol }>;
 /** Manifest prose retains its authorship; only the agent-marking sink accepts it. */
-export type AgentText = string & { readonly __agentText: unique symbol };
+export type AgentText = Readonly<{ t: string; readonly __agentText: unique symbol }>;
+// ONE module owns both stores. Copying, cloning, proxying or asserting cannot register an identity.
+const TEXT_BRANDS = new WeakMap<object, string>();
+const AGENT_TEXT_BRANDS = new WeakMap<object, string>();
+textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ ??= 0;
+function textViolation(): void {
+  textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ = (textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ ?? 0) + 1;
+}
+/** Internal constructors: imports and calls are confined to the guard's declared mints. */
+export function registerKitText(t: string): KitText {
+  if (typeof t !== "string") { textViolation(); t = "—"; }
+  const identity = { get t(): string { return TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [identity]) ?? "—"; } };
+  const text = TEXT_FREEZE(identity) as KitText;
+  TEXT_APPLY(TEXT_STORE_SET, TEXT_BRANDS, [identity, t]);
+  return text;
+}
+export function registerAgentText(t: string): AgentText {
+  if (typeof t !== "string") { textViolation(); t = "—"; }
+  const identity = { get t(): string { return TEXT_APPLY(TEXT_STORE_GET, AGENT_TEXT_BRANDS, [identity]) ?? "—"; } };
+  const text = TEXT_FREEZE(identity) as AgentText;
+  TEXT_APPLY(TEXT_STORE_SET, AGENT_TEXT_BRANDS, [identity, t]);
+  return text;
+}
+export function isKitText(value: unknown): boolean {
+  return value !== null && typeof value === "object" && typeof TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [value]) === "string";
+}
+/** Checked reader retains identity for structural renderer ports; .t is a store-backed accessor,
+ * never a mutable text mirror. No property is read before the private identity lookup. */
+export function readText(value: unknown, tier?: "kit"): KitText;
+export function readText(value: unknown, tier: "agent" | "authored"): KitText | AgentText;
+export function readText(value: unknown, tier: "kit" | "agent" | "authored" = "kit"): KitText | AgentText {
+  if (value !== null && typeof value === "object" &&
+      ((tier !== "agent" && typeof TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [value]) === "string") ||
+       (tier !== "kit" && typeof TEXT_APPLY(TEXT_STORE_GET, AGENT_TEXT_BRANDS, [value]) === "string"))) {
+    return value as KitText | AgentText;
+  }
+  textViolation();
+  return INVALID_TEXT;
+}
 /** The one constructor for PCC-owned copy. Server/manifest values use typed helpers below. */
-export function kitText(s: string): KitText { return s as KitText; }
-/** Composition cannot introduce raw text: every part already carries the PCC text brand. */
-export function joinKitText(...parts: KitText[]): KitText { return parts.join("") as KitText; }
+export function kitText(s: string): KitText { return registerKitText(s); }
+const INVALID_TEXT = kitText("—");
+/** Every input must be genuine; a single forged member withholds the entire composition. */
+export function joinKitText(...parts: KitText[]): KitText {
+  for (const part of parts) if (!isKitText(part)) return readText(part);
+  return registerKitText(parts.map((part) => readText(part).t).join(""));
+}
 
 // Frozen catalog = the EXACT set of node types the adapter emits (nothing more).
 export const IR_NODE_TYPES = [
@@ -229,11 +278,13 @@ const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_
 const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
 const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
 export function identifierText(field: string, value: string): KitText {
-  if (value === "") return kitText("");
-  const t = boundValueText(field, value);
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  if (text === "") return kitText("");
+  const t = boundValueText(field, text);
   if (t === WITHHELD_FIELD) return t;
-  for (const v of views(foldForClaims(value))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
-  return (REPORTED_PREFIX + value) as KitText;
+  for (const v of views(foldForClaims(text))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+  return registerKitText(readText(REPORTED_PREFIX).t + text);
 }
 export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
 /** Does the text state an amount or a payment or verification status? */
@@ -259,7 +310,7 @@ export function isMoneyState(value: string): boolean {
 }
 /** Legacy formatting only; its raw result is deliberately not display text. */
 export function recordValueText(field: string, value: string): string {
-  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + RECORD_STATUS_NOTE : value;
+  return value !== "" && /(^|\.)status$/.test(field) && isMoneyState(value) ? value + readText(RECORD_STATUS_NOTE).t : value;
 }
 
 // ── A CLOSED safe vocabulary for bound status values (astra r3 H1) ───────────────────────
@@ -306,16 +357,20 @@ export const WITHHELD_FIELD = kitText("withheld: stated money or verification");
  *  (4) ANY other value gets RECORD_CLAIM_NOTE — never shown bare just because it wasn't
  *  independently recognised as a claim. */
 export function boundStatusText(value: string): KitText {
-  if (value === "") return kitText("");
-  if (statesAmount(value) || mentionsWithheld(value)) return WITHHELD_FIELD; // 1
-  if (isSafeStatusWord(value)) return value as KitText; // 2
-  if (isMoneyState(value)) return (value + RECORD_STATUS_NOTE) as KitText; // 3
-  return (value + RECORD_CLAIM_NOTE) as KitText; // 4 - fail closed, not "bare unless recognised"
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  if (text === "") return kitText("");
+  if (statesAmount(text) || mentionsWithheld(text)) return WITHHELD_FIELD; // 1
+  if (isSafeStatusWord(text)) return registerKitText(text); // 2
+  if (isMoneyState(text)) return registerKitText(text + readText(RECORD_STATUS_NOTE).t); // 3
+  return registerKitText(text + readText(RECORD_CLAIM_NOTE).t); // 4 - fail closed, not "bare unless recognised"
 }
 export function boundValueText(field: string, value: string): KitText {
-  if (value === "") return kitText("");
-  if (/(^|\.)status$/.test(field)) return boundStatusText(value);
-  return isMoneyClaim(value) || mentionsWithheld(value) ? WITHHELD_FIELD : (REPORTED_PREFIX + value) as KitText;
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  if (text === "") return kitText("");
+  if (/(^|\.)status$/.test(field)) return boundStatusText(text);
+  return isMoneyClaim(text) || mentionsWithheld(text) ? WITHHELD_FIELD : registerKitText(readText(REPORTED_PREFIX).t + text);
 }
 
 // ── Attributed free text (astra r5 F1; same rule astra accepted on #313's F12) ───────────
@@ -327,7 +382,9 @@ export function boundValueText(field: string, value: string): KitText {
 // detector remains defense in depth underneath this, never replaced by it).
 export const REPORTED_PREFIX = kitText("reported: ");
 export function reportedFieldText(field: string, value: string): KitText {
-  return boundValueText(field, value) === WITHHELD_FIELD ? WITHHELD_FIELD : (REPORTED_PREFIX + value) as KitText;
+  if (typeof value !== "string") return readText(null);
+  const text = value;
+  return boundValueText(field, text) === WITHHELD_FIELD ? WITHHELD_FIELD : registerKitText(readText(REPORTED_PREFIX).t + text);
 }
 
 // ── PCC-owned list field profiles (PX-5 review #2504) ────────────────────────────────────
@@ -677,7 +734,7 @@ export function metricKindForSource(path: string, source: unknown): MetricFieldK
 }
 /** Closed typed-op descriptor grammar (submit/execute/approve/deny/action). Its
  * content is DISCARDED in B, but a malformed shape is REJECTED, never stripped. */
-function isOpDescriptor(v: unknown): boolean {
+function isOpDescriptor(v: unknown): v is Record<string, unknown> {
   if (!isPlain(v) || !onlyKeys(v, ["id", "label", "confirm", "intentText", "operation_id", "arguments"])) return false;
   if (v.operation_id !== undefined && (typeof v.operation_id !== "string" || !OP_ID_GRAMMAR.test(v.operation_id))) return false;
   if (v.id !== undefined && strictStr(v.id, LIM.title) === null) return false;
@@ -913,7 +970,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         if (!field) return { ok: false, reason: "metric (route, select) not an allowlisted metric field" };
         const b = mapBind(w.binding, "metric", field.source); if (!b.ok) return b; // bind.select = REAL source path
         if (!chargeBind()) return { ok: false, reason: "bound-window budget" };
-        return { ok: true, node: { type: "stat", id, props: { label: field.label }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
+        return { ok: true, node: { type: "stat", id, props: { label: readText(field.label).t }, bind: b.bind } }; } // PCC-owned label → NOT untrusted
     case "capability":
       if (!onlyKeys(w, ["kind", "binding"])) return { ok: false, reason: "capability extra key" };
       { const b = mapBind(w.binding, "capability"); if (!b.ok) return b;
@@ -965,7 +1022,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
       if (w.deny !== undefined && !isOpDescriptor(w.deny)) return { ok: false, reason: "approval.deny grammar" };
       if (w.binding !== undefined && !isPlain(w.binding)) return { ok: false, reason: "approval.binding shape" };
       // Static notice, NO bind — live approval state is the C+D out-of-band surface.
-      return { ok: true, node: { type: "approval-notice", id, props: { notice: APPROVAL_NOTICE } } };
+      return { ok: true, node: { type: "approval-notice", id, props: { notice: readText(APPROVAL_NOTICE).t } } };
     case "chain":
       if (!onlyKeys(w, ["kind", "composeRef", "execute"])) return { ok: false, reason: "chain extra key" };
       if (!isPlain(w.composeRef)) return { ok: false, reason: "chain.composeRef shape" };
@@ -979,7 +1036,7 @@ function mapWindow(w: unknown, nextId: () => string, budget: () => boolean, bind
         for (const a of acts as unknown[]) {
           if (!budget()) return { ok: false, reason: "node budget" };
           if (!isOpDescriptor(a)) return { ok: false, reason: "action grammar" };
-          const label = strictStr((a as Record<string, unknown>).label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
+          const label = strictStr(a.label, LIM.title); if (label === null) return { ok: false, reason: "action.label" };
           children.push(proseNode("badge", nextId(), label, { tone: "neutral" }));
         }
         return { ok: true, node: { type: "grid", id, props: { kind: "actions-readonly" }, children } }; }
@@ -1131,7 +1188,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
     }
     for (const req of withheld ? Object.keys(pspec) : spec.required ?? []) if (!n.props || !hasOwn(n.props as object, req)) return `missing prop ${req} on ${n.type}`;
     // approval-notice text is the ONE fixed PCC sentence — never manifest prose
-    if (n.type === "approval-notice" && (n.props as { notice?: unknown } | undefined)?.notice !== APPROVAL_NOTICE) return "approval-notice text not the fixed PCC sentence";
+    if (n.type === "approval-notice" && (n.props as { notice?: unknown } | undefined)?.notice !== readText(APPROVAL_NOTICE).t) return "approval-notice text not the fixed PCC sentence";
     // card kind ⇒ exact companion props
     if (n.type === "card") {
       const k = (n.props as { kind?: unknown } | undefined)?.kind;
@@ -1154,7 +1211,7 @@ export function validateIr(doc: unknown): { ok: true } | { ok: false; reason: st
       const bpath = (n.bind as { path?: unknown } | undefined)?.path;
       const expected = typeof bpath === "string" ? metricLabelForSource(bpath, src) : null;
       if (expected === null) return "stat (route, source) not an allowlisted metric field";
-      if ((n.props as { label?: unknown } | undefined)?.label !== expected) return "stat label is not the PCC-owned label for its (route, source)";
+      if ((n.props as { label?: unknown } | undefined)?.label !== readText(expected).t) return "stat label is not the PCC-owned label for its (route, source)";
     }
     // lists show only their route's PCC-owned field profile (never money fields)
     if (n.type === "list") {
