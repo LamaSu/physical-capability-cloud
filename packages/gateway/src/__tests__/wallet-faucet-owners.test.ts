@@ -159,7 +159,7 @@ function rows(linkId?: string) {
     : sql`SELECT * FROM faucet_claims`);
 }
 
-async function refused(result: Linked, headers: Headers, code = 404, body: object = { error: "link_not_found" }, context?: string) {
+async function refused(result: Pick<Linked, "linkId">, headers: Headers, code = 404, body: object = { error: "link_not_found" }, context?: string) {
   const before = rows();
   const n = calls.length;
   const response = await app.inject({ method: "POST", url: `/api/wallets/${result.linkId}/fund`, headers, payload: {} });
@@ -215,9 +215,10 @@ describe("W2 owner faucet principals", () => {
     for (const [linkIndex, result] of results.entries()) {
       await refused(result, b.headers, 404, { error: "link_not_found" }, `B cookie on L${linkIndex + 1}`);
     }
-    // A last-digit near miss catches prefix matches; first and middle digits also catch
-    // suffix and shortened-display ("0x1234…abcd") partial-address matches.
-    for (const index of [2, 21, 41]) {
+    // Every hex position must participate in ownership, for cookies and minted keys
+    // against both approval paths, even when a comparison skips just one position.
+    for (let index = 2; index < 42; index++) {
+      __resetRateLimitState();
       const digit = a.account.address[index]!.toLowerCase() === "0" ? "1" : "0";
       const nearMiss = `${a.account.address.slice(0, index)}${digit}${a.account.address.slice(index + 1)}`;
       const near = sessionHeaders(`near-miss-${index}`, nearMiss);
@@ -248,6 +249,19 @@ describe("W2 owner faucet principals", () => {
     const result = await linked(sk.headers);
     const claimed = await provisionClaimedKey(session.account.address);
     await refused(result, claimed.headers);
+  });
+
+  it("T3b a valid claimed key takes precedence over its named wallet's cookie on both SIWE approval paths", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const results = [await linked(skA.headers), await linked(a.headers)];
+    const claimed = await provisionClaimedKey(a.account.address);
+    for (const result of results) {
+      await refused(result, { ...a.headers, ...claimed.headers });
+      await refused(result, { ...claimed.headers, origin: publicOrigin });
+    }
+    for (const result of results) await fund(result, a.headers);
+    expect(calls).toHaveLength(10);
   });
 
   it("T4 a SIWE owner cannot fund a stranger's claimed link but can revoke it", async () => {
@@ -322,8 +336,28 @@ describe("W2 owner faucet principals", () => {
     const first = await linked(skA.headers);
     await refused(first, { ...a.headers, origin: "https://evil.example" }, 403, { error: "origin_mismatch" });
     await refused(first, { cookie: a.headers.cookie }, 403, { error: "origin_mismatch" });
+    const b = await signIn();
+    const skB = await mintSessionKey(b.headers);
+    const bLink = await linked(skB.headers);
+    // The Origin refusal precedes both unknown-link and other-owner lookups.
+    for (const linkId of ["wl_UNKNOWNUNKNOWNUNKNOWNUNKN", bLink.linkId]) {
+      await refused({ linkId }, { ...a.headers, origin: "https://evil.example" }, 403,
+        { error: "origin_mismatch" }, linkId);
+    }
     await fund(first, a.headers);
     await fund(await linked(skA.headers), skA.headers);
     expect(calls).toHaveLength(10);
+  });
+
+  it("T22b another owner's session key is exempt from Origin checks but cannot fund either SIWE approval path", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const results = [await linked(skA.headers), await linked(a.headers)];
+    const b = await signIn();
+    const skB = await mintSessionKey(b.headers);
+    for (const result of results) {
+      await refused(result, skB.headers);
+      await refused(result, { ...skB.headers, origin: "https://evil.example" });
+    }
   });
 });

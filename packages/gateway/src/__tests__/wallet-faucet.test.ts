@@ -147,6 +147,24 @@ function oldClaim(id: string, token: Token, seq: number, address: string, accoun
   const stamp = new Date(now - age).toISOString();
   getStore().db.run(sql`INSERT INTO faucet_claims (link_id, token, seq, account_id, account_proof, approved_by_key_id, address, chain_id, amount, status, attempts, created_at, updated_at) VALUES (${id}, ${token}, ${seq}, ${account}, ${accountProof}, ${approvedByKeyId}, ${address}, 84532, ${token === "eth" ? "0.0001" : "1"}, ${status}, 1, ${stamp}, ${stamp})`);
 }
+function holdFaucetCalls(count: number) {
+  const releases: Array<() => void> = [];
+  let started!: () => void;
+  const allStarted = new Promise<void>(resolve => { started = resolve; });
+  behavior = async () => new Promise(resolve => {
+    releases.push(() => resolve({ transactionHash: hash() }));
+    if (releases.length === count) started();
+  });
+  return {
+    allStarted,
+    // New requests may complete while these first calls remain in flight.
+    allowNewCalls() { behavior = async () => ({ transactionHash: hash() }); },
+    release() {
+      behavior = async () => ({ transactionHash: hash() });
+      for (const release of releases) release();
+    },
+  };
+}
 describe("W2 wallet faucet", () => {
   it("2 agent CLI: anonymous empty body funds six ordered claims and real hashes", async () => {
     const result = await linked();
@@ -226,6 +244,8 @@ describe("W2 wallet faucet", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().status).toBe("partial");
     const first = response.json();
+    expect(Object.keys(first).sort()).toEqual(["claims", "status"]);
+    expect(first.claims).toHaveLength(6);
     expect(first.claims.filter((c: {
       status: string;
     }) => c.status === "failed").every((c: {
@@ -469,6 +489,8 @@ describe("W2 wallet faucet", () => {
     const response = await fund(result, "cli", await build({ attemptBudgetMs: 0 }));
     expect(response.statusCode).toBe(200);
     expect(response.json().status).toBe("pending");
+    expect(Object.keys(response.json()).sort()).toEqual(["claims", "status"]);
+    expect(response.json().claims).toHaveLength(6);
     expect(calls).toHaveLength(0);
     expect(rows(result.linkId).map(r => r.attempts)).toEqual(Array(6).fill(0));
     expect((await fund(result)).json().status).toBe("funded");
@@ -710,5 +732,104 @@ describe("W2 wallet faucet", () => {
     const fourth = await linked("device");
     await refused(`${path}/${fourth.request.requestId}/fund`, 409, { error: "cap_reached", cap: "account" });
   });
-
+  it("C1 pending device grants count toward the global ETH cap", async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+    for (let i = 0; i < GLOBAL_ETH_CLAIM_CAP - 10; i++)
+      oldClaim(`ge-${Math.floor(i / 5)}`, "eth", i % 5 + 1, address);
+    const links = [await linked("device"), await linked("device"), await linked("device")];
+    const held = holdFaucetCalls(2);
+    const pending = links.slice(0, 2).map(link => fund(link).then(response => response));
+    try {
+      await held.allStarted;
+      expect(rows().filter(row => row.status === "pending")).toHaveLength(10);
+      expect(calls).toHaveLength(2);
+      held.allowNewCalls();
+      await refused(`${path}/${links[2]!.request.requestId}/fund`, 409, { error: "cap_reached", cap: "global" });
+    } finally {
+      held.release();
+      await Promise.all(pending);
+    }
+    for (const response of await Promise.all(pending)) {
+      expect(response.statusCode).toBe(200);
+      expect(response.json().status).toBe("funded");
+    }
+    expect(calls).toHaveLength(10);
+  });
+  it("C2 pending grants of one approving key count toward its account cap", async () => {
+    const links = [await linked("device"), await linked("device"), await linked("device"), await linked("device")];
+    const held = holdFaucetCalls(3);
+    const pending = links.slice(0, 3).map(link => fund(link).then(response => response));
+    try {
+      await held.allStarted;
+      expect(rows().filter(row => row.status === "pending")).toHaveLength(15);
+      expect(calls).toHaveLength(3);
+      held.allowNewCalls();
+      await refused(`${path}/${links[3]!.request.requestId}/fund`, 409, { error: "cap_reached", cap: "account" });
+    } finally {
+      held.release();
+      await Promise.all(pending);
+    }
+    for (const response of await Promise.all(pending)) {
+      expect(response.statusCode).toBe(200);
+      expect(response.json().status).toBe("funded");
+    }
+    expect(calls).toHaveLength(15);
+  });
+  it("C3 a pending agent USDC claim triggers the global ETH-only fallback", async () => {
+    for (let i = 0; i < GLOBAL_USDC_CLAIM_CAP - 1; i++)
+      oldClaim(`global-${i}`, "usdc", 1, privateKeyToAccount(generatePrivateKey()).address.toLowerCase());
+    const first = await linked();
+    const second = await linked();
+    const held = holdFaucetCalls(1);
+    const pending = fund(first).then(response => response);
+    try {
+      await held.allStarted;
+      expect(rows(first.linkId).map(row => [row.token, row.status])).toEqual([
+        ...Array.from({ length: 5 }, () => ["eth", "pending"]), ["usdc", "pending"],
+      ]);
+      held.allowNewCalls();
+      const response = await fund(second);
+      expect(response.statusCode).toBe(200);
+      expect(Object.keys(response.json()).sort()).toEqual(["claims", "skipped", "status"]);
+      expect(response.json().status).toBe("funded");
+      expect(response.json().claims.map((claim: { token: string; status: string }) => [claim.token, claim.status]))
+        .toEqual(Array.from({ length: 5 }, () => ["eth", "succeeded"]));
+      expect(response.json().skipped).toEqual([{ token: "usdc", amount: "1", reason: "cap_reached", cap: "global" }]);
+      expect(rows(second.linkId).map(row => row.token)).toEqual(Array(5).fill("eth"));
+      expect(calls.slice(1).map(call => call.token)).toEqual(Array(5).fill("eth"));
+    } finally {
+      held.release();
+      await pending;
+    }
+    const completed = await pending;
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json().status).toBe("funded");
+    expect(Object.keys(completed.json()).sort()).toEqual(["claims", "status"]);
+    expect(calls).toHaveLength(11);
+  });
+  it("C4 succeeded plus budget-pending claims roll up to pending", async () => {
+    const result = await linked("device");
+    behavior = async () => {
+      now += 5000;
+      return { transactionHash: hash() };
+    };
+    const response = await fund(result);
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(response.json()).sort()).toEqual(["claims", "status"]);
+    expect(response.json().status).toBe("pending");
+    expect(response.json().claims.map((claim: { status: string }) => claim.status))
+      .toEqual(["succeeded", "pending", "pending", "pending", "pending"]);
+    expect(calls).toHaveLength(1);
+    expect(rows(result.linkId).map(row => row.attempts)).toEqual([1, 0, 0, 0, 0]);
+  });
+  it("C5 a stale lease on terminal failed claims reports the exact 502 body", async () => {
+    const result = await linked("device");
+    expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
+    // A crashed terminal attempt can leave a stale lease; no route produces this fixture.
+    getStore().db.run(sql`UPDATE faucet_claims SET status = 'failed', error_class = 'unknown', attempts = 5,
+      lease_until = ${new Date(now - 1000).toISOString()}, last_attempt_at = ${new Date(now - 61000).toISOString()}
+      WHERE link_id = ${result.linkId}`);
+    await refused(`${path}/${result.request.requestId}/fund`, 502, { error: "faucet_error", errorClass: "unknown" });
+    expect(calls).toHaveLength(0);
+  });
 });
