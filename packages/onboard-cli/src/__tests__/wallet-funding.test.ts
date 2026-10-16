@@ -346,6 +346,13 @@ describe("W2 CLI funding", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(errors.join("")).toContain("approved_link_required");
   });
+  it.each(["revoked", "expired", "denied", "awaiting_approval"])("refuses stored link status %s before requesting funds", async status => {
+    store("agent", status);
+    const fetchSpy = gateway(FUNDED);
+    expect(await fund()).toBe(1);
+    expect(errors.join("")).toBe("approved_link_required\n");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
   it.each(["http://rpc.example", "http://192.168.0.2"])("refuses insecure RPC %s before a gateway request", async rpcUrl => {
     store(); const fetchSpy = gateway(FUNDED);
     expect(await fund("agent", ["--rpc-url", rpcUrl])).not.toBe(0);

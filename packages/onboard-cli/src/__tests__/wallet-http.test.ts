@@ -18,6 +18,17 @@ describe("wallet HTTP transport", () => {
 });
 
 describe("wallet security transport pins", () => {
+  it("refuses invalid UTF-8 inside a JSON string", async () => {
+    const bytes = new Uint8Array([...new TextEncoder().encode('{"status":"'), 0xff, ...new TextEncoder().encode('"}')]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(bytes, { status: 200 }));
+    await expect(walletRequest("http://127.0.0.1:9", "/x", "GET")).rejects.toThrow("invalid_gateway_response");
+  });
+  it.each(["seed_phrase_required", "private_key_missing", "privatekey_required", "secret_expired", "mnemonic_invalid"])("refuses secret-named gateway error %s and retains its HTTP status", async error => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error }), { status: 400 }));
+    await expect(walletRequest("http://127.0.0.1:9", "/x", "GET")).rejects.toMatchObject({
+      code: "invalid_gateway_response", httpStatus: 400,
+    });
+  });
   it("pins H1: every request refuses redirect following", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     await walletRequest("http://127.0.0.1:9", "/revoke", "POST", {}, "owner-api-token");
