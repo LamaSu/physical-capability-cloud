@@ -6,7 +6,8 @@
  * signed evidence bundle.
  */
 
-import type { AssuranceTier, SHA256 } from "@pcc/spec";
+import { createHash } from "node:crypto";
+import { computeTierLadderDigest, TierLadderError, type AssuranceTier, type SHA256, type TierLadderV1 } from "@pcc/spec";
 import type { MachineAdapter, SensorAdapter, CameraAdapter } from "./adapters/types.js";
 import { EvidenceEmitter } from "./evidence-emitter.js";
 import { openEvidenceSession } from "./evidence-session.js";
@@ -24,10 +25,17 @@ export type OnPhaseCallback = (
 export interface JobConfig {
   jobId: string;
   stepId: string;
-  gcodeHash: SHA256;
+  /** Exact input bytes' SHA-256: sha256: followed by 64 lowercase hex digits. Give exactly one hash. */
+  inputHash?: SHA256;
+  /** Legacy alias of inputHash. Give exactly one of inputHash and gcodeHash. */
+  gcodeHash?: SHA256;
   assuranceTier: AssuranceTier;
-  /** Input file data (in production: fetch from storage) */
-  gcodeData?: string;
+  /** Exact input bytes; a string means its UTF-8 bytes. Give at most one data field. */
+  inputData?: string | Uint8Array;
+  /** Legacy alias of inputData. Give at most one of inputData and gcodeData. */
+  gcodeData?: string | Uint8Array;
+  /** From compileTierLadder(csd). Required for prepare; replaces FDM defaults on legacy jobs. */
+  tierLadder?: TierLadderV1;
   /**
    * Optional callback for phase telemetry events.
    * The kernel package cannot import gateway telemetry directly, so callers
@@ -94,7 +102,59 @@ export class JobRunner {
 
   async run(config: JobConfig): Promise<JobResult> {
     const startTime = Date.now();
-    const { jobId, stepId, gcodeHash, assuranceTier, onPhase } = config;
+    const { jobId, stepId, inputHash, gcodeHash: legacyGcodeHash, inputData, gcodeData, tierLadder, assuranceTier, onPhase } = config;
+    const refuse = (error: string): JobResult => ({ success: false, error, durationMs: Date.now() - startTime });
+
+    // Synchronous preflight: no session, step registration, command or phase callback.
+    if ((inputHash !== undefined) === (legacyGcodeHash !== undefined)) {
+      return refuse("give exactly one of inputHash and gcodeHash");
+    }
+    const gcodeHash = inputHash !== undefined ? inputHash : legacyGcodeHash!;
+    if (inputData !== undefined && gcodeData !== undefined) {
+      return refuse("give at most one of inputData and gcodeData");
+    }
+    const data = inputData !== undefined ? inputData : gcodeData;
+    const accepts = this.machine.accepts;
+    let prepare = false;
+    if (accepts !== undefined) {
+      if (!Array.isArray(accepts) || !accepts.every((type) => typeof type === "string")) {
+        return refuse("accepts must be a list of command types");
+      }
+      if (accepts.includes("prepare")) prepare = true;
+      else if (!accepts.includes("load_gcode")) return refuse("accepts neither prepare nor load_gcode");
+      if (!accepts.includes("start")) return refuse("adapter does not accept start");
+    }
+    if (prepare && (typeof gcodeHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(gcodeHash))) {
+      return refuse("inputHash must be sha256: followed by 64 lowercase hex digits");
+    }
+    let inputBytes: Uint8Array | undefined;
+    if (data !== undefined) {
+      if (typeof data !== "string" && !(data instanceof Uint8Array)) {
+        return refuse("input data must be a string or bytes");
+      }
+      if (typeof data === "string" && Buffer.from(data, "utf8").toString("utf8") !== data) {
+        return refuse("input data is not well-formed text");
+      }
+      // Keep the hashed bytes owned by this run, even if the caller changes its data.
+      inputBytes = typeof data === "string" ? new Uint8Array(Buffer.from(data, "utf8")) : new Uint8Array(data);
+      const computed = `sha256:${createHash("sha256").update(inputBytes).digest("hex")}`;
+      if (computed !== gcodeHash) return refuse("input data does not match its hash");
+    }
+    let requirements: TierLadderV1["tiers"] | undefined;
+    if (tierLadder !== undefined) {
+      try {
+        computeTierLadderDigest(tierLadder);
+        requirements = structuredClone(tierLadder.tiers);
+      } catch (err) {
+        const code = err instanceof TierLadderError ? err.code : "malformed-ladder";
+        return refuse(`tier ladder is malformed: ${code}`);
+      }
+      if (!requirements.some((entry) => entry.tier === assuranceTier)) {
+        return refuse(`tier ladder has no tier ${assuranceTier}`);
+      }
+    } else if (prepare) {
+      return refuse("the prepare path needs a tier ladder");
+    }
 
     // addEvent hashes asynchronously before it stores an event, so each one is
     // recorded on one chain, in the order it was emitted, and the tier check and the
