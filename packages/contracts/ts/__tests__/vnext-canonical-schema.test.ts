@@ -127,13 +127,15 @@ function committedRecord(slug: string): Record<string, unknown> {
   return JSON.parse(readFileSync(join(RECORDS_ROOT, slug, "CANONICAL.json"), "utf8"));
 }
 
+/** VNextDeploySpec.networkSlug: the one directory a chain's records may live in (as the gateway's reader checks). */
+function networkSlug(chainId: number): string {
+  return chainId === 8453 ? "base" : chainId === 84532 ? "base-sepolia" : chainId === 31337 ? "anvil" : `chain-${chainId}`;
+}
+
 /** The directory check needs the record path, which JSON Schema cannot inspect. */
 function validateCommittedRecord(slug: string, record: Record<string, unknown>): string[] {
   const errors = validate(schema, record);
-  const namedChains = new Map([["base", 8453], ["base-sepolia", 84532], ["anvil", 31337]]);
-  const chainSlug = /^chain-([1-9][0-9]*)$/.exec(slug);
-  const expectedChainId = namedChains.get(slug) ?? (chainSlug ? Number(chainSlug[1]) : undefined);
-  if (expectedChainId === undefined || record.chainId !== expectedChainId) {
+  if (typeof record.chainId !== "number" || networkSlug(record.chainId) !== slug) {
     errors.push("$.chainId: directory mismatch");
   }
   return errors;
@@ -154,7 +156,7 @@ describe("V-next CANONICAL record schema", () => {
     const check = (node: Schema, path: string): void => {
       for (const [key, property] of Object.entries(node.properties ?? {})) {
         const propertyPath = `${path}.${key}`;
-        if (property.pattern?.startsWith("^0x")) {
+        if (property.pattern !== undefined) {
           hexProperties++;
           const hexPattern = /^\^0x\[0-9a-fA-F\]\{([0-9]+)\}\$$/.exec(property.pattern);
           expect(hexPattern, propertyPath).not.toBeNull();
@@ -166,6 +168,7 @@ describe("V-next CANONICAL record schema", () => {
         if (property.type === "integer" && !Object.hasOwn(property, "const")) {
           integerProperties++;
           expect(property.minimum, propertyPath).toBeTypeOf("number");
+          expect(property.minimum, propertyPath).toBeGreaterThanOrEqual(0);
           expect(property.maximum, propertyPath).toBeTypeOf("number");
           expect(property.maximum, propertyPath).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
         }
@@ -209,6 +212,12 @@ describe("V-next CANONICAL record schema", () => {
   ] as const)("rejects a committed-record copy with %s", (_name, change, reason) => {
     const record = { ...committedRecord("base-sepolia"), ...change };
     expect(validateCommittedRecord("base-sepolia", record).some((error) => error.endsWith(`: ${reason}`))).toBe(true);
+  });
+
+  it("refuses a committed record outside its chain's one directory", () => {
+    for (const slug of ["chain-84532", "base", "anvil", "chain-8453"]) {
+      expect(validateCommittedRecord(slug, committedRecord("base-sepolia")), slug).toContain("$.chainId: directory mismatch");
+    }
   });
 
   it("parses multiline calls and ignores commented calls", () => {
