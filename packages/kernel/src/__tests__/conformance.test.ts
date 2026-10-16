@@ -28,6 +28,24 @@ const faultClauses: Record<DeviceFault, string> = {
   acceptsUndeclared: "C10",
 };
 
+const faultReasons: Record<DeviceFault, string> = {
+  emitAfterQuiesce: "Evidence arrived after quiesce resolved.",
+  quiesceEarly: "Quiesce resolved before terminal delivery.",
+  foreignDeviceJob: "Evidence did not strictly bind to the accepted device job id.",
+  unboundTerminal: "Evidence did not strictly bind to the accepted device job id.",
+  noDeviceJobId: "Accepted start did not return a device job id.",
+  doubleTerminal: "Job did not emit exactly one terminal event.",
+  cancelOtherJob: "Foreign cancellation emitted a failed terminal.",
+  // The fault invokes the inner device's stop, outside the runner's execute spy.
+  stopInsteadOfCancel: "Foreign cancellation emitted a failed terminal.",
+  busyWithoutFlag: "Second start did not refuse with busy true.",
+  untagged: "Evidence fabrication tags disagree with profile mode.",
+  emitAfterDispose: "Evidence arrived after dispose resolved.",
+  payloadJobId: "Evidence supplied a foreign PCC job id or a reserved unit field.",
+  noCancelJob: "Physical adapter has no cancelJob function.",
+  acceptsUndeclared: "Undeclared command was not refused.",
+};
+
 describe("adapter conformance", () => {
   it("pins the honest generic FakeDevice full report", async () => {
     const { makeAdapter, profile } = fakeConformanceFixture();
@@ -239,6 +257,11 @@ describe("adapter conformance", () => {
       expect(report.clauses.map((row) => row.status)).toEqual(
         faultVector(clause, fault === "noCancelJob" ? { C4: "n/a" } : {}),
       );
+      expect(report.clauses.filter((row) => row.status !== "pass").map(({ id, reason }) => ({ id, reason })))
+        .toEqual(fault === "noCancelJob" ? [
+          { id: "C4", reason: "Adapter has no cancelJob function." },
+          { id: clause, reason: faultReasons[fault] },
+        ] : [{ id: clause, reason: faultReasons[fault] }]);
     },
   );
 

@@ -82,6 +82,32 @@ describe("adapter conformance contract edges", () => {
     await expectVector(fixture, faultVector("C1"));
   });
 
+  it("C1 rejects early quiesce when an autonomous terminal is beyond the silence window", async () => {
+    const fixture = fakeConformanceFixture({ wrap(device) {
+      const adapter = forwardAdapter(device);
+      let terminal: Promise<void> | undefined;
+      adapter.execute = async (command) => {
+        const result = await device.execute(command);
+        if (command.type === "start" && result.success) {
+          terminal = delay(120).then(async () => {
+            if (await device.getStatus() === "busy") device.complete();
+          });
+        }
+        return result;
+      };
+      adapter.quiesceEvidence = async () => {};
+      // Let even C1's terminal arrive after its silence window, during cleanup.
+      adapter.dispose = async () => { await terminal; await device.dispose(); };
+      return adapter;
+    } });
+    fixture.profile.finish = undefined;
+    fixture.profile.timing.jobTimeoutMs = 400;
+    fixture.profile.timing.quiesceTimeoutMs = 400;
+    const report = await runAdapterConformance(fixture.makeAdapter, fixture.profile);
+    expect(report.clauses.map((row) => row.status)).toEqual(faultVector("C1"));
+    expect(report.clauses[0].reason).toBe("Quiesce resolved before terminal delivery.");
+  });
+
   it("C4 observes an adapter's own this.execute stop even when foreign cancellation is benign", async () => {
     const fixture = fakeConformanceFixture({ wrap(device) {
       const adapter = forwardAdapter(device);
@@ -110,6 +136,36 @@ describe("adapter conformance contract edges", () => {
     fixture.profile.busy = "none";
     const expected = faultVector("C7", { C5: "n/a" });
     await expectVector(fixture, expected);
+  });
+
+  it("C2 strictly distinguishes numeric IPP ids from string evidence ids", async () => {
+    const fixture = fakeConformanceFixture({ preset: "ipp", wrap(device) {
+      const adapter = transformEvents(device, (event) => {
+        event.payload[device.bindingKey] = String(event.payload[device.bindingKey]);
+        return event;
+      });
+      adapter.execute = async (command) => {
+        const result = await device.execute(command);
+        // Progress during the busy probe also exercises C5's strict id check.
+        if (result.busy) device.progress(25);
+        return result;
+      };
+      return adapter;
+    } });
+    const report = await runAdapterConformance(fixture.makeAdapter, fixture.profile);
+    expect(report.clauses.map((row) => row.status)).toEqual(faultVector("C2", { C5: "fail" }));
+    expect(report.clauses[1].reason).toBe("Evidence did not strictly bind to the accepted device job id.");
+    expect(report.clauses[4].reason).toBe("Second start emitted evidence for a new device job.");
+  });
+
+  it("C4 alone rejects a cancellation failure without device origin", async () => {
+    const fixture = fakeConformanceFixture({ wrap: (device) => transformEvents(device, (event) => {
+      if (event.type === "execution_failed") delete event.payload.origin;
+      return event;
+    }) });
+    const report = await runAdapterConformance(fixture.makeAdapter, fixture.profile);
+    expect(report.clauses.map((row) => row.status)).toEqual(faultVector("C4"));
+    expect(report.clauses[3].reason).toBe("Cancellation failure did not have device origin.");
   });
 
   it("C3 alone rejects a job's failed terminal without device origin", async () => {
