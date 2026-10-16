@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "@pcc/store";
 import { getRepos, getStore } from "../db.js";
+import { auditService } from "../services/audit-service.js";
 import {
   ED_A, ED_B, ED_SIGNER, EVM_SIGNER, OWNER, legacyEdProof, registrationFixture, signEd, signerFields,
   type RegistrationFixture,
@@ -84,13 +85,28 @@ describe("kernel upsert owner authority", () => {
     expect(response.json().kernel.signingKey).toEqual(ED_SIGNER);
   });
 
-  it("allows a proven owner wallet to update the profile and bind the first signer", async () => {
+  it.each(["self-link:agent", "siwe-session"])("allows a proven owner wallet from %s to update the profile and bind the first signer", async (provenWalletVia) => {
     expect((await fixture.register("proven-owner")).statusCode).toBe(201);
-    const profile = await fixture.register("proven-owner", { name: "Owner profile" }, fixture.provenHeaders);
+    const headers = { ...fixture.provenHeaders, "x-test-proven-wallet-via": provenWalletVia };
+    const profile = await fixture.register("proven-owner", { name: "Owner profile" }, headers);
     expect(profile.statusCode).toBe(200);
-    const bind = await fixture.register("proven-owner", { ...await fixture.proof("proven-owner"), name: "Owner signer" }, fixture.provenHeaders);
+    const bind = await fixture.register("proven-owner", { ...await fixture.proof("proven-owner"), name: "Owner signer" }, headers);
     expect(bind.statusCode).toBe(200);
     expect(bind.json().kernel.signingKey).toEqual(ED_SIGNER);
+  });
+
+  it.each(["admin-mint", "self-link:device", "unlisted-source", ""].flatMap(provenWalletVia =>
+    ["profile write", "first signer bind"].map(operation => ({ provenWalletVia, operation })),
+  ))("refuses owner $operation from proof source '$provenWalletVia'", async ({ provenWalletVia, operation }) => {
+    const id = "unapproved-owner-source";
+    expect((await fixture.register(id)).statusCode).toBe(201);
+    const before = fixture.row(id);
+    const headers = { ...fixture.provenHeaders, "x-test-proven-wallet-via": provenWalletVia };
+    const payload = { name: "Unapproved owner write", ...(operation === "first signer bind" ? await fixture.proof(id) : {}) };
+    const response = await fixture.register(id, payload, headers);
+    expect(response.statusCode).toBe(403);
+    expect(response.json().message).toBe(`Kernel '${id}' requires owner authority or its bound signing key`);
+    expect(fixture.row(id)).toEqual(before);
   });
 
   it("requires a valid proof even when the admin requests a first signer bind", async () => {
@@ -123,6 +139,23 @@ describe("kernel upsert owner authority", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().kernel.signingKey).toEqual(EVM_SIGNER);
     expect(fixture.row("evm-bound-reregister")).toMatchObject({ name: "EVM boot profile", operatorAddress: OWNER });
+  });
+
+  it("audits a visibility change authorized by the bound signer as bound_signer", async () => {
+    const id = "bound-signer-visibility-audit";
+    expect((await fixture.register(id, {
+      ...await fixture.proof(id), locationVisibility: "exact",
+    }, fixture.adminHeaders)).statusCode).toBe(201);
+    const audit = vi.spyOn(auditService, "log");
+    const response = await fixture.register(id, {
+      ...await fixture.proof(id, ED_SIGNER, fixture.otherKey), locationVisibility: "approximate",
+    }, fixture.headers(fixture.otherKey));
+    expect(response.statusCode).toBe(200);
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: "kernel.location_visibility",
+      resourceId: id,
+      metadata: { from: "exact", to: "approximate", authority: "bound_signer" },
+    }));
   });
 
   it("allows a bound signer's legacy proof to re-register only while the flag allows it", async () => {

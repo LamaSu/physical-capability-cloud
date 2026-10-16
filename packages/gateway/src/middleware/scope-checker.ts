@@ -300,9 +300,6 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     if (nonCanonicalTargetReason(req.url) !== null) return reply.status(400).send(NON_CANONICAL_REFUSAL);
     if (!req.url.startsWith("/api/")) return;
 
-    // Registration consent may be requested by any authenticated principal; the route enforces authentication.
-    if (req.method === "POST" && req.url.split("?")[0] === "/api/kernels/registration-challenges") return;
-
     const rowsReady = ensureScopeCacheReady();
 
     // Public requests have no principal; a wallet session holds no scopes.
@@ -339,7 +336,12 @@ async function scopeCheckerImpl(app: FastifyInstance) {
     // row is matched separately against scopeCache — so a row can only ADD a
     // requirement (via matchedRow below) and never remove or weaken the one
     // in matchedDefault.
-    const matchedDefault = firstMatch(DEFAULT_SCOPE_REQUIREMENTS, req.method, req.url);
+    let matchedDefault = firstMatch(DEFAULT_SCOPE_REQUIREMENTS, req.method, req.url);
+    // Consent issuance needs authentication, but no default operator scope. Governance rows still apply.
+    if (req.method === "POST" && req.url.split("?")[0] === "/api/kernels/registration-challenges" &&
+        matchedDefault?.method === "POST" && matchedDefault.pattern === "/api/kernels/*") {
+      matchedDefault = undefined;
+    }
     const matchedRow = firstMatch(scopeCache, req.method, req.url);
 
     // The caller must satisfy EACH rule that matched — not just one of them.

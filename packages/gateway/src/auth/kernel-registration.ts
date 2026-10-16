@@ -3,6 +3,7 @@ import { getAddress, recoverMessageAddress } from "viem";
 import { sql } from "@pcc/store";
 import {
   canonicalize,
+  isValidKernelId,
   type KernelRegistrationChallengeInput,
   type KernelRegistrationChallenge,
   type KernelRegistrationProof,
@@ -11,9 +12,11 @@ import {
 import { getStore } from "../db.js";
 import { normalizePublicKeyHex, verifyEd25519Signature } from "./ed25519.js";
 import { resolveBundlerConfig } from "../config/bundler-config.js";
-import { deploymentEnvName } from "../mcp/mcp-api-base.js";
+import { walletLinkConfig } from "../services/wallet-links/config.js";
+import type { KernelAuthority } from "./kernel-authority.js";
 
 const TTL_MS = 10 * 60 * 1000;
+const OPEN_CHALLENGE_LIMIT = 5;
 
 interface ChallengeRow {
   id: string;
@@ -27,6 +30,8 @@ interface ChallengeRow {
   issued_at: string;
   expires_at: string;
   consumed_at: string | null;
+  created_by_key_id: string | null;
+  created_by_session_identity: string | null;
   message: string;
 }
 
@@ -36,17 +41,14 @@ export function legacySigningProofAllowed(): boolean {
 }
 
 function registrationContext() {
-  const publicUrl = process.env.PCC_PUBLIC_URL ?? process.env.PCC_GATEWAY_URL ??
-    (process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : "https://capability.network");
-  const domain = new URL(publicUrl).host;
+  const { domain, publicOrigin, env } = walletLinkConfig();
   const chainId = process.env.PCC_CHAIN_ID === undefined
     ? resolveBundlerConfig().chainId
     : Number(process.env.PCC_CHAIN_ID);
-  const env = process.env.PCC_ENV ?? deploymentEnvName() ?? "prod";
   if (!domain || !Number.isSafeInteger(chainId) || chainId <= 0 || !/^[a-zA-Z0-9_-]+$/.test(env)) {
     throw new Error("Invalid kernel registration context configuration");
   }
-  return { domain, chainId, env };
+  return { domain, publicOrigin, chainId, env };
 }
 
 export function registrationProofRefusal(): Error {
@@ -72,15 +74,18 @@ const signerValue = (signer: RegisteredSigner) => signer.algorithm === "ed25519"
 
 export function issueKernelRegistrationChallenge(
   input: KernelRegistrationChallengeInput,
-  createdByKeyId: string | null,
+  authority: KernelAuthority,
 ): KernelRegistrationChallenge {
   const signer = normalizeRegistrationSigner(input?.signer);
-  if (!signer || typeof input.kernelId !== "string" || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.kernelId)) {
+  if (!signer || !isValidKernelId(input?.kernelId)) {
     throw Object.assign(new Error("A kernelId and a valid Ed25519 public key or secp256k1 address are required"), {
       name: "BadRequestError",
     });
   }
-  const { domain, chainId, env } = registrationContext();
+  const { domain, publicOrigin, chainId, env } = registrationContext();
+  const createdByKeyId = authority.apiKeyId ?? null;
+  const sessionIdentity = authority.sessionIdentity ?? null;
+  if (!createdByKeyId && !sessionIdentity) throw registrationProofRefusal();
   const challengeId = randomBytes(32).toString("hex");
   const nonce = randomBytes(16).toString("hex");
   const now = Date.now();
@@ -90,17 +95,35 @@ export function issueKernelRegistrationChallenge(
   const message = signer.algorithm === "secp256k1"
     ? `${domain} wants you to sign in with your Ethereum account:\n${signer.address}\n\n` +
       `Register this key as the signing key of PCC kernel ${kernelId}. Consent: kernel-registration v1.\n\n` +
-      `URI: https://${domain}/kernels/register\nVersion: 1\nChain ID: ${chainId}\nNonce: ${nonce}\n` +
+      `URI: ${publicOrigin}/kernels/register\nVersion: 1\nChain ID: ${chainId}\nNonce: ${nonce}\n` +
       `Issued At: ${issuedAt}\nExpiration Time: ${expiresAt}\nRequest ID: ${challengeId}\nResources:\n` +
       `- urn:pcc:kernel-registration:${challengeId}\n- urn:pcc:kernel:${kernelId}\n- urn:pcc:env:${env}`
     : Buffer.from("PCC-KERNEL-REG-V1\n" + canonicalize({
       challengeId, kernelId, nonce, env, chainId, domain, issuedAt, expiresAt, publicKey: signer.publicKey,
     }), "utf8").toString("base64");
 
-  getStore().db.run(sql`INSERT INTO kernel_registration_challenges
-    (id, kernel_id, algorithm, signer, created_by_key_id, nonce, env, chain_id, domain, issued_at, expires_at, message)
-    VALUES (${challengeId}, ${kernelId}, ${signer.algorithm}, ${signerValue(signer)}, ${createdByKeyId},
-      ${nonce}, ${env}, ${chainId}, ${domain}, ${issuedAt}, ${expiresAt}, ${message})`);
+  const db = getStore().db;
+  const issued = db.transaction(() => {
+    db.run(sql`DELETE FROM kernel_registration_challenges WHERE expires_at <= ${issuedAt}`);
+    const principalCount = db.get<{ count: number }>(sql`SELECT count(*) AS count FROM kernel_registration_challenges
+      WHERE consumed_at IS NULL AND expires_at > ${issuedAt} AND
+        ((${createdByKeyId} IS NOT NULL AND created_by_key_id = ${createdByKeyId}) OR
+         (${createdByKeyId} IS NULL AND created_by_session_identity = ${sessionIdentity}))`)!.count;
+    const signerCount = db.get<{ count: number }>(sql`SELECT count(*) AS count FROM kernel_registration_challenges
+      WHERE consumed_at IS NULL AND expires_at > ${issuedAt} AND kernel_id = ${kernelId}
+        AND algorithm = ${signer.algorithm} AND lower(signer) = ${signerValue(signer).toLowerCase()}`)!.count;
+    if (principalCount >= OPEN_CHALLENGE_LIMIT || signerCount >= OPEN_CHALLENGE_LIMIT) {
+      return false;
+    }
+    db.run(sql`INSERT INTO kernel_registration_challenges
+      (id, kernel_id, algorithm, signer, created_by_key_id, created_by_session_identity, nonce, env, chain_id, domain, issued_at, expires_at, message)
+      VALUES (${challengeId}, ${kernelId}, ${signer.algorithm}, ${signerValue(signer)}, ${createdByKeyId}, ${sessionIdentity},
+        ${nonce}, ${env}, ${chainId}, ${domain}, ${issuedAt}, ${expiresAt}, ${message})`);
+    return true;
+  });
+  if (!issued) {
+    throw Object.assign(new Error("Too many open kernel registration challenges"), { name: "RegistrationChallengeLimitError" });
+  }
   return { challengeId, message, expiresAt };
 }
 
@@ -109,12 +132,17 @@ export async function verifyKernelRegistrationProof(
   kernelId: string,
   signer: RegisteredSigner | null,
   proof: KernelRegistrationProof,
+  authority: KernelAuthority,
 ): Promise<() => void> {
   if (!signer || !proof || typeof proof.challengeId !== "string" || typeof proof.signature !== "string") {
     throw registrationProofRefusal();
   }
   const row = getStore().db.get<ChallengeRow>(sql`SELECT * FROM kernel_registration_challenges WHERE id = ${proof.challengeId}`);
   if (!row) throw registrationProofRefusal();
+  const issuedToCaller = row.created_by_key_id !== null
+    ? row.created_by_key_id === authority.apiKeyId
+    : row.created_by_session_identity !== null && row.created_by_session_identity === authority.sessionIdentity;
+  if (!authority.admin && !issuedToCaller) throw registrationProofRefusal();
   const { env, chainId, domain } = registrationContext();
   if (row.kernel_id !== kernelId) throw registrationProofRefusal();
   if (row.algorithm !== signer.algorithm || row.signer.toLowerCase() !== signerValue(signer).toLowerCase()) throw registrationProofRefusal();

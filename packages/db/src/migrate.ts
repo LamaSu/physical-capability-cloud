@@ -2162,6 +2162,18 @@ export function migrateDatabase(sqlite: Database.Database): void {
         SELECT RAISE(ABORT, 'Registration challenge creator is immutable');
       END;
   `);
+  // Session-issued challenges must retain the issuing identity on upgrades too.
+  safeAddColumn("kernel_registration_challenges", "created_by_session_identity", "TEXT");
+  sqlite.exec(`
+    CREATE TRIGGER IF NOT EXISTS kernel_registration_challenges_session_creator_immutable
+      BEFORE UPDATE OF created_by_session_identity ON kernel_registration_challenges
+      WHEN NEW.created_by_session_identity IS NOT OLD.created_by_session_identity
+      BEGIN
+        SELECT RAISE(ABORT, 'Registration challenge creator is immutable');
+      END;
+    CREATE INDEX IF NOT EXISTS kernel_registration_challenges_expires_at_idx
+      ON kernel_registration_challenges(expires_at);
+  `);
   scrubOperatorWalletPrivateKeys(sqlite);
 }
 

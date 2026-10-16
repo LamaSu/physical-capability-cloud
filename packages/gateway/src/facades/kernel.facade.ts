@@ -12,7 +12,7 @@ import { kernelSigningProofMessage } from "@pcc/kernel";
 import { type Result, type RegisteredSigner, type KernelRegistrationProof, ok, err, Errors } from "@pcc/spec";
 import { verifyEd25519Signature, normalizePublicKeyHex } from "../auth/ed25519.js";
 import { getStore } from "../db.js";
-import { mayDecide } from "../auth/kernel-authority.js";
+import { mayWriteKernelAsOwner, type KernelAuthority } from "../auth/kernel-authority.js";
 import {
   legacySigningProofAllowed,
   normalizeRegistrationSigner,
@@ -86,29 +86,15 @@ export interface CreateKernelInput {
  * Who may publish a kernel's exact location (board N68). It is the one change that reveals where
  * an operator is, so a claimed identity is not enough (anyone can self-provision a key that names
  * an email or an id): it needs the gateway's admin secret, or a wallet the caller PROVED that
- * equals the kernel's operator. WP-A (#326) sets `provenWallet` for a SIWE session or a key minted
- * from one; until it merges, only the admin secret can opt a kernel in.
+ * equals the kernel's operator, with an explicitly approved proof source.
  */
-export interface LocationOptInAuthority {
-  /** The request carried a valid X-Admin-Key. */
-  admin: boolean;
-  /** The wallet the caller proved control of; null when none. */
-  provenWallet: string | null;
-}
+export type LocationOptInAuthority = Pick<KernelAuthority, "admin" | "provenWallet" | "provenWalletVia">;
 
 export const NO_OPT_IN_AUTHORITY: LocationOptInAuthority = { admin: false, provenWallet: null };
 
-const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
-const ZERO_WALLET = "0x0000000000000000000000000000000000000000";
-
 /** True when `authority` may publish the exact location of a kernel operated by `operatorAddress`. */
 export function mayPublishExactLocation(authority: LocationOptInAuthority, operatorAddress: string): boolean {
-  if (authority.admin === true) return true;
-  const proven = authority.provenWallet;
-  if (typeof proven !== "string" || !WALLET_RE.test(proven)) return false;
-  if (typeof operatorAddress !== "string" || !WALLET_RE.test(operatorAddress)) return false;
-  const owner = operatorAddress.toLowerCase();
-  return owner !== ZERO_WALLET && proven.toLowerCase() === owner;
+  return mayWriteKernelAsOwner({ ...authority, claimed: null }, operatorAddress);
 }
 
 function exactLocationRefusal(kernelId: string): Error {
@@ -326,7 +312,7 @@ export class KernelFacade extends BaseFacade {
     actorId?: string,
     ip?: string,
     userAgent?: string,
-    authority: LocationOptInAuthority = NO_OPT_IN_AUTHORITY,
+    authority: KernelAuthority = { ...NO_OPT_IN_AUTHORITY, claimed: null },
   ): Promise<Result<{ kernel: KernelDTO; created: boolean }>> {
     if (body.signingProof !== undefined && !legacySigningProofAllowed()) {
       return err("legacy_signing_proof_disabled", "Legacy kernel signing proof is disabled", 403);
@@ -353,7 +339,7 @@ export class KernelFacade extends BaseFacade {
           : { algorithm: body.signingKeyAlgorithm ?? "secp256k1", address: body.signingAddress })
         : await this.verifySigningProof(id, body);
       const consumeProof = body.registrationProof !== undefined
-        ? await verifyKernelRegistrationProof(id, provenSigner, body.registrationProof)
+        ? await verifyKernelRegistrationProof(id, provenSigner, body.registrationProof, authority)
         : () => {};
 
       // Authority, challenge consumption, profile writes and the set-once bind commit together.
@@ -373,7 +359,7 @@ export class KernelFacade extends BaseFacade {
             );
           }
           const boundSigner = this.signerFromRow(existing);
-          const decides = mayDecide({ ...authority, claimed: actorId ?? null }, existing.operatorAddress);
+          const decides = mayWriteKernelAsOwner(authority, existing.operatorAddress);
           const provesBoundSigner = boundSigner !== null && provenSigner !== null && this.sameSigner(boundSigner, provenSigner);
           if (hasRecordedOwner && !decides && !provesBoundSigner) {
             throw Object.assign(new Error(`Kernel '${id}' requires owner authority or its bound signing key`), { name: "ForbiddenError" });
@@ -450,7 +436,7 @@ export class KernelFacade extends BaseFacade {
               metadata: {
                 from: currentVisibility,
                 to: visibility,
-                authority: authority.admin ? "admin_key" : authority.provenWallet ? "proven_wallet" : "owner",
+                authority: authority.admin ? "admin_key" : decides ? "proven_wallet" : "bound_signer",
               },
               ip,
               userAgent,

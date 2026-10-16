@@ -42,13 +42,13 @@ export function legacyEdProof(kernelId: string, key = ED_A): string {
 }
 
 export async function registrationFixture() {
-  const envNames = ["PCC_DB_PATH", "DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_ENV", "PCC_DEPLOYMENT_ENV", "RAILWAY_ENVIRONMENT_NAME", "PCC_CHAIN_ID", "PCC_PUBLIC_URL", "PCC_GATEWAY_URL", "RAILWAY_PUBLIC_DOMAIN", "PCC_ADMIN_KEY", "PCC_KERNEL_LEGACY_SIGNING_PROOF"] as const;
+  const envNames = ["PCC_DB_PATH", "DATABASE_URL", "RAILWAY_VOLUME_MOUNT_PATH", "PCC_DEPLOYMENT_ENV", "RAILWAY_ENVIRONMENT_NAME", "NODE_ENV", "PCC_CHAIN_ID", "PCC_PUBLIC_URL", "PCC_GATEWAY_URL", "RAILWAY_PUBLIC_DOMAIN", "PCC_ADMIN_KEY", "PCC_KERNEL_LEGACY_SIGNING_PROOF"] as const;
   const saved = new Map(envNames.map((name) => [name, process.env[name]]));
   delete process.env.DATABASE_URL;
   delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
   delete process.env.PCC_KERNEL_LEGACY_SIGNING_PROOF;
   process.env.PCC_DB_PATH = ":memory:";
-  process.env.PCC_ENV = "prod";
+  process.env.PCC_DEPLOYMENT_ENV = "prod";
   process.env.PCC_CHAIN_ID = "84532";
   process.env.PCC_PUBLIC_URL = "https://capability.network";
   process.env.PCC_ADMIN_KEY = ADMIN_SECRET;
@@ -58,7 +58,12 @@ export async function registrationFixture() {
   const app: FastifyInstance = Fastify({ logger: false });
   app.addHook("onRequest", async (req) => {
     const proven = req.headers["x-test-proven-wallet"];
-    if (typeof proven === "string") (req as unknown as { provenWallet: string }).provenWallet = proven;
+    if (typeof proven === "string") {
+      const authority = req as unknown as { provenWallet: string; provenWalletVia: string };
+      authority.provenWallet = proven;
+      authority.provenWalletVia = typeof req.headers["x-test-proven-wallet-via"] === "string"
+        ? req.headers["x-test-proven-wallet-via"] : "self-link:agent";
+    }
   });
   await app.register(apiGate);
   await app.register(scopeChecker);

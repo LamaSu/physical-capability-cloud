@@ -35,8 +35,12 @@ export interface KernelAuthority {
   admin: boolean;
   /** The wallet the caller proved control of (WP-A); null when none. */
   provenWallet: string | null;
-  /** Server-recorded proof origin; absence grants no buyer binding. */
+  /** Server-recorded proof origin; registration-owner and buyer writes require approved sources. */
   provenWalletVia?: string | null;
+  /** Authenticated API-key record, when the request uses a key. */
+  apiKeyId?: string | null;
+  /** Authenticated wallet-session identity, when the request uses a session. */
+  sessionIdentity?: string | null;
   /** The caller's claimed identity: its API key's operator id, or its session's address. */
   claimed: string | null;
 }
@@ -56,12 +60,15 @@ function hasAdminSecret(provided: unknown, expected: string | undefined = proces
 }
 
 export function authorityOf(req: FastifyRequest): KernelAuthority {
-  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; operatorId?: unknown; userId?: unknown };
+  const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; operatorId?: unknown; userId?: unknown; apiKeyId?: unknown };
   const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
+  const apiKeyId = text(r.apiKeyId);
   return {
     admin: hasAdminSecret(req.headers["x-admin-key"]),
     provenWallet: text(r.provenWallet),
     provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null,
+    apiKeyId,
+    sessionIdentity: apiKeyId ? null : text(r.userId)?.toLowerCase() ?? null,
     claimed: text(r.operatorId) ?? text(r.userId),
   };
 }
@@ -69,6 +76,8 @@ export function authorityOf(req: FastifyRequest): KernelAuthority {
 export const isAnonymous = (a: KernelAuthority) => !a.admin && a.provenWallet === null && a.claimed === null;
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
+/** Proof sources explicitly approved for registration-owner writes; new sources grant nothing. */
+const OWNER_PROOF_SOURCES = new Set(["self-link:agent", "siwe-session"]);
 /** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
 const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
@@ -84,6 +93,12 @@ export function mayDecide(a: KernelAuthority, operatorAddress: unknown): boolean
   const owner = ownerOf(operatorAddress);
   if (owner === null || !WALLET_RE.test(owner) || a.provenWallet === null || !WALLET_RE.test(a.provenWallet)) return false;
   return a.provenWallet.toLowerCase() === owner;
+}
+
+/** Registration owner writes require an explicitly approved proof source, or the admin secret. */
+export function mayWriteKernelAsOwner(a: KernelAuthority, operatorAddress: unknown): boolean {
+  if (a.admin) return true;
+  return OWNER_PROOF_SOURCES.has(a.provenWalletVia ?? "") && mayDecide(a, operatorAddress);
 }
 
 /** Anyone who may decide, or the caller whose claimed identity is the kernel's recorded operator. */
