@@ -22,10 +22,15 @@ export type ClauseId = typeof CLAUSES[number]["id"];
 export type ClauseStatus = "pass" | "fail" | "n/a";
 export interface ConformanceContext { readonly pccJobId: string }
 export interface ConformanceTiming {
+  /** Adapter cancel-confirm deadline; C4 observes cancelConfirmMs + pollMs + settleMs. */
   cancelConfirmMs: number;
+  /** Local observation polling interval. */
   pollMs: number;
+  /** Bounds each hook, command and status call, the factory, and the wait for a terminal. */
   jobTimeoutMs: number;
+  /** Bounds each quiesce and dispose; C1 quiesces right after start, so allow a whole job. */
   quiesceTimeoutMs: number;
+  /** Duration of each silence observation window. */
   settleMs: number;
 }
 
