@@ -1236,14 +1236,27 @@ The operator or orchestrator builds the capability's CSD and names the required 
 ```typescript
 import { compileTierLadder } from "@pcc/spec";
 
-const tierLadder = await compileTierLadder(csd);
+// Replace your CSD's evidence block with cumulative event requirements.
+const evidence = Object.fromEntries([
+  ["method_loaded", "execution_completed"],
+  ["method_loaded", "execution_completed", "instrument_result"],
+  ["method_loaded", "execution_completed", "instrument_result", "calibration_record"],
+  ["method_loaded", "execution_completed", "instrument_result", "calibration_record", "tee_attestation"],
+].map((required, tier) => [`tier${tier}`, {
+  description: `Tier ${tier}`,
+  required,
+  primitives: [{ id: "receipt.kernel_signed", bind: "execution_completed" }],
+}]));
+const tierLadder = await compileTierLadder({ ...csd, evidence });
 ```
 
 Legacy CSDs (for example, `fdm`, `sla`, `cnc-3axis`, and `laser-cut`) are refused with `TierLadderError` code `"tier-adds-no-event-type"`: their tiers do not add the event types needed to distinguish the tiers. This currently includes every built-in CSD except `document-print-leg` and `document-print-and-mail`. Update the CSD's evidence tiers to name event types before compiling.
 
 On the prepare path, the kernel refuses a missing or malformed ladder, or one that lacks the job's tier, **before any command at every tier, 0 to 3**. After the run, unmet ladder requirements fail the job at tier >= 2 and warn at tiers 0–1. The oracle recomputes the tier from the signed bundle under the funded capability's pinned ladder.
 
-`DEFAULT_TIER_REQUIREMENTS` is the FDM default (`gcode_hash_verified`, `execution_completed`, `power_profile_summary`, camera). It applies only to the legacy G-code path with no ladder.
+Only pinned ladders (today `document-print-leg` and `document-print-and-mail`) are recomputed for settlement, so the network must pin a new class's ladder.
+
+`DEFAULT_TIER_REQUIREMENTS` is the FDM default (`gcode_hash_verified`, `execution_completed`, `power_profile_summary`, camera, and tier 3's `tee_attestation`). It applies only to the legacy G-code path with no ladder.
 
 ---
 
