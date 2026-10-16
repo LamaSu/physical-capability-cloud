@@ -16,7 +16,9 @@
  *   1. the subject names a job and a kernel;
  *   2. `bundleHash` is a canonical tagged digest (LO-EV-1);
  *   3. there is at least one event, and every event is well-formed and
- *      reproduces its own `hash` (`hashEvent`);
+ *      reproduces its own `hash` (v1 when unmarked; event hash v2 for an own
+ *      data `source.writer: "kernel"`; any other own writer is refused with
+ *      `event-writer-invalid`);
  *   4. the events reproduce `bundleHash` (`hashBundle`);
  *   5. job: EVERY event commits `payload.jobId`, equal to the subject's job.
  *      The kernel signs event by event, and a session delegated for several
@@ -28,9 +30,18 @@
  *      `payload.outputHash`, and every `payload.outputHash` equals it;
  *   8. input, only when the subject names one: it is a canonical `sha256:` +
  *      64 lowercase hex digest (checked with the subject in step 1); at least
- *      one `method_loaded` event exists, EVERY `method_loaded` commits
- *      `payload.inputHash` equal to it, and every other event that commits
- *      `payload.inputHash` also equals it (bus #8812/#8815);
+ *      one `method_loaded` event exists, EVERY `method_loaded` is kernel-written
+ *      (`source.writer: "kernel"`, event hash v2) and commits `payload.inputHash`
+ *      equal to it, and every other event that commits `payload.inputHash` also
+ *      equals it (bus #8812/#8815). EVERY `method_loaded` commits an own data
+ *      `payload.deviceJobId`, a non-empty string, and they ALL name the same D.
+ *      Completion events are exactly `execution_completed`: at least one must
+ *      exist, and EVERY one must commit an own data `payload.deviceJobId` equal
+ *      to D, compared exactly. Missing, empty, non-string or different refuses
+ *      (not met; oracle #8973 mirrors this binding). Refusals distinguish
+ *      `input-not-kernel-written`, `input-device-job-not-committed`,
+ *      `input-device-job-mismatch`, `input-completion-not-committed` and
+ *      `input-completion-device-job-mismatch`;
  *   9. settlement unit: the subject and the evidence must agree exactly. When
  *      the subject names a unit, EVERY event commits `payload.settlementUnitId`,
  *      equal to it. When the subject names none, NO event may commit one
@@ -79,7 +90,8 @@
  *   - the input's `subject`, `bundleHash` and `events`, the subject's six
  *     fields, and each event's `type`, `timestamp`, `source`, `payload`,
  *     `hash` and `id` are each read through their own data descriptor;
- *   - each event's `source` and `payload` go through `plainDataCopy`
+ *   - each event's `source` goes through `copyEventSource`, which also checks
+ *     the reserved writer descriptor, and its `payload` through `plainDataCopy`
  *     (util/plain-data.ts), a one-pass plain-data copy.
  * A Proxy at any level, an accessor (getter or setter) on any field read, a
  * hole in the events array, and anything that is not JSON data inside
@@ -152,6 +164,7 @@ import {
   ObjectFreeze,
   ObjectGetOwnPropertyDescriptor,
   ObjectGetPrototypeOf,
+  ObjectKeys,
   ObjectPrototype,
   NumberIsInteger,
   deepFreeze,
@@ -179,7 +192,9 @@ export interface EvidenceSubject {
    *  canonical `sha256:` + 64 lowercase hex. Fill only via
    *  `recipeRefToInputHash` from the FUNDED subject block's `recipeRef`, read
    *  only from the authenticated subjects object (bus #8812/#8815). Every
-   *  `method_loaded` must commit it, and at least one must exist. Older spec
+   *  `method_loaded` must be kernel-written, commit it and share one non-empty
+   *  `payload.deviceJobId` with every `execution_completed`; at least one load
+   *  and one completion must exist. Older spec
    *  verifiers ignore this field; the oracle's `input.hash_bound` verifier is
    *  the authoritative check. */
   inputHash?: string;
@@ -201,6 +216,7 @@ export type EvidenceSubjectBindingErrorCode =
   | "malformed-bundle-hash"
   | "missing-events"
   | "malformed-event"
+  | "event-writer-invalid"
   | "event-hash-mismatch"
   | "bundle-hash-mismatch"
   | "job-not-committed"
@@ -210,6 +226,11 @@ export type EvidenceSubjectBindingErrorCode =
   | "output-mismatch"
   | "input-not-committed"
   | "input-mismatch"
+  | "input-not-kernel-written"
+  | "input-device-job-not-committed"
+  | "input-device-job-mismatch"
+  | "input-completion-not-committed"
+  | "input-completion-device-job-mismatch"
   | "unit-not-committed"
   | "unit-mismatch"
   | "unit-not-in-subject"
@@ -332,6 +353,38 @@ function ownField(owner: object, key: string): Field {
   const field = ObjectCreate(null) as { value: unknown };
   field.value = descriptor.value;
   return field;
+}
+
+/**
+ * Snapshot the source once, including the reserved writer descriptor even
+ * when JSON copying would omit it. Each original own data property is read
+ * only once; the plain-data walk then touches only the shallow owned copy.
+ * Proxies and accessors never run. A kernel marker must survive JSON transport,
+ * so a non-enumerable one is malformed rather than silently dropped.
+ */
+function copyEventSource(
+  value: unknown,
+  proxyCheck: (value: object) => boolean,
+): { ok: true; value: Record<string, unknown> } | { ok: false; reason: "malformed-event" | "event-writer-invalid" } {
+  if (!isReadableObject(value, proxyCheck)) return { ok: false, reason: "malformed-event" };
+  const writer = ObjectGetOwnPropertyDescriptor(value, "writer");
+  if (writer !== undefined) {
+    if (!hasOwn(writer, "value") || writer.value !== "kernel") return { ok: false, reason: "event-writer-invalid" };
+    if (writer.enumerable !== true) return { ok: false, reason: "malformed-event" };
+  }
+  const shallow = ObjectCreate(null) as Record<string, unknown>;
+  const keys = ObjectKeys(value);
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    if (key === "writer") continue;
+    const field = ownField(value, key);
+    if (field === ACCESSOR) return { ok: false, reason: "malformed-event" };
+    if (field !== ABSENT) shallow[key] = field.value;
+  }
+  if (writer !== undefined) shallow.writer = writer.value;
+  const copy = plainDataCopy(shallow);
+  if (!copy.ok || !isRecord(copy.value)) return { ok: false, reason: "malformed-event" };
+  return { ok: true, value: copy.value };
 }
 
 /** A frozen, null-prototype refusal: no `then` can be found on it. */
@@ -475,17 +528,20 @@ export async function verifyEvidenceSubjectBinding(
       ) {
         return refuse("malformed-event", i);
       }
-      const sourceCopy = plainDataCopy(source.value);
+      const sourceCopy = copyEventSource(source.value, proxyCheck);
+      if (!sourceCopy.ok) return refuse(sourceCopy.reason, i);
       const payloadCopy = plainDataCopy(payload.value);
-      if (!sourceCopy.ok || !payloadCopy.ok || !isRecord(sourceCopy.value) || !isRecord(payloadCopy.value)) {
+      if (!payloadCopy.ok || !isRecord(payloadCopy.value)) {
         return refuse("malformed-event", i);
       }
-      // Hash exactly what hashEvent hashes: the canonical JSON of these four fields.
+      // Hash exactly the producer's v1 preimage or hashKernelWrittenEvent's v2
+      // preimage, selected only from the same owned source copy we hash.
       const hashed = ObjectCreate(null) as Record<string, unknown>;
       hashed.type = type.value;
       hashed.timestamp = timestamp.value;
       hashed.source = sourceCopy.value;
       hashed.payload = payloadCopy.value;
+      if (hasOwn(sourceCopy.value, "writer")) hashed.eventHashVersion = 2;
       if (sha256Text(canonicalize(hashed)) !== hash.value) return refuse("event-hash-mismatch", i);
       const snapshot = ObjectCreate(null) as Record<string, unknown>;
       snapshot.type = type.value;
@@ -529,20 +585,40 @@ export async function verifyEvidenceSubjectBinding(
       if (!committedOnce) return refuse("output-not-committed");
     }
 
-    // ── 8. Input: every method_loaded commits it, and at least one exists.
+    // ── 8. Input: every load is kernel-written and commits it; loads and all
+    // execution_completed events bind one non-empty deviceJobId (oracle #8973).
     if (inputHash !== undefined) {
       let methodLoadedOnce = false;
+      let deviceJobId: string | undefined;
       for (let i = 0; i < count; i++) {
         const snapshot = snapshots[i]!;
         const committed = snapshot.payload as Record<string, unknown>;
         const commitsInput = hasOwn(committed, "inputHash");
         if (snapshot.type === "method_loaded") {
+          const eventSource = snapshot.source as Record<string, unknown>;
+          if (!hasOwn(eventSource, "writer") || eventSource.writer !== "kernel") return refuse("input-not-kernel-written", i);
           if (!commitsInput) return refuse("input-not-committed", i);
+          if (!hasOwn(committed, "deviceJobId") || !isNonEmptyString(committed.deviceJobId)) {
+            return refuse("input-device-job-not-committed", i);
+          }
+          if (deviceJobId !== undefined && committed.deviceJobId !== deviceJobId) return refuse("input-device-job-mismatch", i);
+          deviceJobId = committed.deviceJobId;
           methodLoadedOnce = true;
         }
         if (commitsInput && committed.inputHash !== inputHash) return refuse("input-mismatch", i);
       }
       if (!methodLoadedOnce) return refuse("input-not-committed");
+      let completionOnce = false;
+      for (let i = 0; i < count; i++) {
+        const snapshot = snapshots[i]!;
+        if (snapshot.type !== "execution_completed") continue;
+        const committed = snapshot.payload as Record<string, unknown>;
+        if (!hasOwn(committed, "deviceJobId") || committed.deviceJobId !== deviceJobId) {
+          return refuse("input-completion-device-job-mismatch", i);
+        }
+        completionOnce = true;
+      }
+      if (!completionOnce) return refuse("input-completion-not-committed");
     }
 
     // ── 9, 10. Settlement unit and challenge: exact agreement, every event.

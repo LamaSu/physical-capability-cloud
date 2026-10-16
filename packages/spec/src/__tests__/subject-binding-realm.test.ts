@@ -20,7 +20,7 @@ import {
   type EvidenceSubjectBindingInput,
   type EvidenceSubjectBindingResult,
 } from "../evidence/subject-binding.js";
-import { hashBundle, hashEvent } from "../util/canonical.js";
+import { hashBundle, hashEvent, hashKernelWrittenEvent } from "../util/canonical.js";
 import type { EvidenceEvent } from "../types/evidence.js";
 
 const JOB_A = "job-realm-a";
@@ -37,7 +37,10 @@ const N4 = "0x" + "a4".repeat(32);
 type RawEvent = Omit<EvidenceEvent, "id" | "hash">;
 
 async function seal(raw: RawEvent[]): Promise<EvidenceEvent[]> {
-  return Promise.all(raw.map(async (e, i) => ({ ...e, id: `ev-${i}`, hash: await hashEvent(e) })));
+  return Promise.all(raw.map(async (e, i) => ({
+    ...e, id: `ev-${i}`,
+    hash: await (e.source.writer === "kernel" ? hashKernelWrittenEvent(e) : hashEvent(e)),
+  })));
 }
 
 async function bundleFor(jobId: string, unit?: { settlementUnitId: string; challengeNonce: string }) {
@@ -54,12 +57,12 @@ async function inputBundleFor(inputHash?: string, otherInputHash?: string) {
   const source = { deviceId: NODE, deviceType: "digital_agent" as const, kernelId: NODE };
   const events = await seal([
     {
-      type: "method_loaded", timestamp: "2026-09-24T10:00:00.000Z", source,
-      payload: { jobId: JOB_A, ...(inputHash !== undefined ? { inputHash } : {}) },
+      type: "method_loaded", timestamp: "2026-09-24T10:00:00.000Z", source: { ...source, writer: "kernel" },
+      payload: { jobId: JOB_A, deviceJobId: "device-job-realm", ...(inputHash !== undefined ? { inputHash } : {}) },
     },
     {
       type: "execution_completed", timestamp: "2026-09-24T10:00:05.000Z", source,
-      payload: { jobId: JOB_A, ...(otherInputHash !== undefined ? { inputHash: otherInputHash } : {}) },
+      payload: { jobId: JOB_A, deviceJobId: "device-job-realm", ...(otherInputHash !== undefined ? { inputHash: otherInputHash } : {}) },
     },
   ]);
   return { events, bundleHash: await hashBundle(events) };

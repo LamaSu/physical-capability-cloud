@@ -789,7 +789,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
     family: "confirm",
     status: "active",
     proves:
-      "The device took exactly the funded input: at least one kernel-signed method_loaded event exists on the same deviceJobId as the completion, and every such event carries payload.inputHash equal to the nonzero SHA-256 commitment in the funded subject block's recipeRef, read only from the authenticated subjects object.",
+      "The device took exactly the funded input: at least one method_loaded event exists on the same deviceJobId as the completion, and EVERY method_loaded in the bundle is kernel-written (source.writer \"kernel\", event hash v2) and carries payload.inputHash equal to the nonzero SHA-256 commitment in the funded subject block's recipeRef, read only from the authenticated subjects object. Every method_loaded carries the same non-empty string payload.deviceJobId; at least one execution_completed exists and EVERY execution_completed carries that exact deviceJobId. LO-EV-9 step 8 and the oracle's input.hash_bound verifier both enforce this binding, failing closed when absent.",
     paramsSchema: { type: "object", properties: {}, additionalProperties: false },
     authRequirement: "inherited",
     tierSupport: [
@@ -806,6 +806,7 @@ export const EVIDENCE_PRIMITIVES: readonly EvidencePrimitiveDef[] = [
 // ── Version + manifest hash ─────────────────────────────────────────
 
 /** Vocabulary version. Bumps when the contract (§5.1 fields) changes.
+ *  An additive entry keeps the version; VOCAB_MANIFEST_HASH names the exact vocabulary.
  *  v2 = the additive v1.5-industrial cut (#52-#55 + Family L `record`); no v1
  *  primitive changed, so the bump is purely additive. */
 export const VOCAB_VERSION = 2 as const;

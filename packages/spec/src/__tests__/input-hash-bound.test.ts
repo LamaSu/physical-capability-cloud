@@ -93,17 +93,18 @@ describe("input.hash_bound — the non-printer input commitment contract", () =>
     expect(getPrimitive("input.hash_bound")).not.toHaveProperty("allowedBindTypes");
   });
 
-  it("preserves the existing params gap while Q-E5b's shipped-CSD preflight blocks compiler validation", async () => {
+  it("refuses non-empty input.hash_bound params under its closed-empty schema", async () => {
     const csd = liquidHandlerCsd();
     csd.evidence!.tier1!.primitives![1]!.params = { field: "otherField" };
 
-    // Q-E5b 4(b) must remain unimplemented: the shipped document-print-and-mail
-    // CSD omits capture.photo_nonced's required media/minClass in tiers 2 and 3.
-    // CSD refs and compilation still check only the params record shape.
+    // CSD parsing checks the record shape; compilation enforces closed-empty
+    // schemas without imposing full params validation on other primitives.
     const parsed = CsdSchema.safeParse(csd);
     expect(parsed.success).toBe(true);
-    const ladder = await compileTierLadder(CsdSchema.parse(csd));
-    expect(ladder.tiers[1]!.primitives[1]!.params).toEqual({ field: "otherField" });
+    await expect(compileTierLadder(CsdSchema.parse(csd))).rejects.toMatchObject({
+      code: "primitive-params-not-allowed",
+      detail: 'tier1: primitive "input.hash_bound" has a closed-empty paramsSchema and refuses non-empty params',
+    });
     expect(validatePrimitiveParams(getPrimitive("input.hash_bound")!.paramsSchema, { field: "otherField" })).toBe(false);
   });
 

@@ -24,7 +24,8 @@
  *
  * Compilation fails closed with a TierLadderError when the tiers are not
  * contiguous from tier0, a tier binds a primitive to something it does not
- * require or to an event its verifier cannot read, a tier drops a requirement
+ * require or to an event its verifier cannot read, a tier supplies params to
+ * a primitive whose paramsSchema is closed-empty, a tier drops a requirement
  * of the tier below it, or a tier above 0
  * adds no event type over the tier below. The last matters because the
  * recompute reads event types only: such a tier would be granted on the lower
@@ -50,6 +51,7 @@ import { computeContractDigest } from "../csd/capability-contract-identity.js";
 import type { AssuranceTier } from "../types/common.js";
 import { DEFAULT_TIER_REQUIREMENTS, EVIDENCE_EVENT_TYPES, type EvidenceEventType } from "../types/evidence.js";
 import { canonicalize, canonicalSnapshot } from "../util/canonical.js";
+import { getPrimitive } from "./primitives.js";
 
 export const TIER_LADDER_SCHEMA = "tier-ladder/v1" as const;
 
@@ -94,6 +96,7 @@ export type TierLadderErrorCode =
   | "malformed-tier"
   | "bind-not-required"
   | "primitive-bind-not-allowed"
+  | "primitive-params-not-allowed"
   | "tier-drops-requirement"
   | "tier-adds-no-event-type";
 
@@ -233,6 +236,20 @@ function compileTier(k: number, raw: unknown): { tier: TierLadderTier; required:
       );
     }
     const params = (p.params as Record<string, unknown> | undefined) ?? null;
+    // A closed-empty schema promises no configurable fields. Do not silently
+    // preserve params that a verifier cannot read; other schemas are unchanged.
+    const paramsSchema = getPrimitive(p.id)?.paramsSchema;
+    if (
+      paramsSchema?.additionalProperties === false &&
+      (paramsSchema.properties === undefined ||
+        (isPlainObject(paramsSchema.properties) && Object.keys(paramsSchema.properties).length === 0)) &&
+      params !== null && Object.keys(params).length !== 0
+    ) {
+      throw new TierLadderError(
+        "primitive-params-not-allowed",
+        `tier${k}: primitive "${p.id}" has a closed-empty paramsSchema and refuses non-empty params`,
+      );
+    }
     return { id: p.id, bind, supporting: params?.role === "supporting", params };
   });
 
