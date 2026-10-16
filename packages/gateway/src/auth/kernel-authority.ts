@@ -72,7 +72,7 @@ const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
 /** operatorAddress values that record no owner: the empty string and the legacy zero placeholder. */
 const UNOWNED = new Set(["", "0x0000000000000000000000000000000000000000"]);
 
-function ownerOf(operatorAddress: unknown): string | null {
+export function ownerOf(operatorAddress: unknown): string | null {
   if (typeof operatorAddress !== "string") return null;
   const owner = operatorAddress.trim().toLowerCase();
   return UNOWNED.has(owner) ? null : owner;
