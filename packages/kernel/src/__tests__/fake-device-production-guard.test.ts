@@ -133,6 +133,9 @@ describe("FakeDevice production isolation", () => {
     ["dynamic import", 'const module = import("vitest/node");', "conformance/index.ts", "vitest/node"],
     ["require", 'const module = require("@pcc/kernel/conformance/vitest");', "conformance/index.ts", "@pcc/kernel/conformance/vitest"],
     ["import equals", 'import module = require("vitest");', "conformance/report.ts", "vitest"],
+    ["root re-export", 'export * from "./conformance/vitest.js";', "index.ts", "./conformance/vitest.js"],
+    ["deeper relative path", 'import { wrapper } from "../conformance/vitest.js";', "adapters/anything.ts", "../conformance/vitest.js"],
+    ["package subpath", 'export * from "@pcc/kernel/conformance/vitest/extra";', "index.ts", "@pcc/kernel/conformance/vitest/extra"],
   ])("Vitest matcher catches %s", (_label, source, filename, specifier) => {
     expect(vitestSpecifiers(source, path.join(sourceRoot, filename))).toEqual([specifier]);
   });
@@ -151,6 +154,21 @@ describe("FakeDevice production isolation", () => {
     expect(scanned.map((filename) => path.basename(filename)).sort()).toEqual([
       "clauses.ts", "index.ts", "report.ts", "runner.ts",
     ]);
+    const violations = scanned.flatMap((filename) =>
+      vitestSpecifiers(readFileSync(filename, "utf8"), filename).map((specifier) => ({
+        file: path.relative(sourceRoot, filename), specifier,
+      })),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it("all production sources except the opt-in wrapper never import Vitest", () => {
+    const wrapper = path.join(sourceRoot, "conformance", "vitest.ts");
+    const scanned = productionSources(sourceRoot).filter((filename) => filename !== wrapper);
+    expect(scanned).toEqual(expect.arrayContaining([
+      path.join(sourceRoot, "index.ts"), path.join(sourceRoot, "conformance", "index.ts"),
+    ]));
+    expect(scanned).not.toContain(wrapper);
     const violations = scanned.flatMap((filename) =>
       vitestSpecifiers(readFileSync(filename, "utf8"), filename).map((specifier) => ({
         file: path.relative(sourceRoot, filename), specifier,
