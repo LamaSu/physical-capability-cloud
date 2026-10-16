@@ -178,14 +178,53 @@ class TestVerifyFailsClosed:
         assert verify_signature({"a": object()}, sig, pub) is False
 
 
-@needs_nacl
-class TestKeyFileLocation:
+class TestDefaultKeyPath:
     def test_default_path_is_under_home_not_the_checkout(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
         assert crypto_module.default_key_path() == str(tmp_path / ".pcc-node" / "keys.json")
         package_dir = Path(crypto_module.__file__).resolve().parents[1]
         assert not Path(crypto_module.default_key_path()).resolve().is_relative_to(package_dir)
 
+    @pytest.mark.parametrize("variable", ["PCC_NODE_KEY_PATH", "PCC_NODE_KEYS_FILE"])
+    @pytest.mark.parametrize("override", ["keys/node.json", "~/.pcc-node/keys.json"])
+    def test_relative_or_literal_tilde_override_is_refused(self, monkeypatch, variable, override):
+        monkeypatch.setenv(variable, override)
+        with pytest.raises(crypto_module.KeyFileError, match=variable + " must be an absolute path"):
+            crypto_module.default_key_path()
+
+    @pytest.mark.parametrize("variable", ["PCC_NODE_KEY_PATH", "PCC_NODE_KEYS_FILE"])
+    def test_absolute_override_is_returned_unchanged(self, monkeypatch, tmp_path, variable):
+        override = str(tmp_path) + "/keys/../node.json"
+        monkeypatch.setenv(variable, override)
+        assert crypto_module.default_key_path() == override
+
+    def test_primary_override_takes_precedence(self, monkeypatch, tmp_path):
+        override = str(tmp_path / "node.json")
+        monkeypatch.setenv("PCC_NODE_KEY_PATH", override)
+        monkeypatch.setenv("PCC_NODE_KEYS_FILE", "ignored-relative.json")
+        assert crypto_module.default_key_path() == override
+
+    def test_refused_primary_override_cannot_fall_back(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PCC_NODE_KEY_PATH", "keys/node.json")
+        monkeypatch.setenv("PCC_NODE_KEYS_FILE", str(tmp_path / "fallback.json"))
+        with pytest.raises(crypto_module.KeyFileError, match="PCC_NODE_KEY_PATH must be an absolute path"):
+            crypto_module.default_key_path()
+
+    def test_empty_primary_override_uses_the_fallback(self, monkeypatch, tmp_path):
+        override = str(tmp_path / "fallback.json")
+        monkeypatch.setenv("PCC_NODE_KEY_PATH", "")
+        monkeypatch.setenv("PCC_NODE_KEYS_FILE", override)
+        assert crypto_module.default_key_path() == override
+
+    def test_empty_overrides_use_the_default(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PCC_NODE_KEY_PATH", "")
+        monkeypatch.setenv("PCC_NODE_KEYS_FILE", "")
+        assert crypto_module.default_key_path() == str(tmp_path / ".pcc-node" / "keys.json")
+
+
+@needs_nacl
+class TestKeyFileLocation:
     def test_default_load_never_reads_the_working_directory(self, monkeypatch, tmp_path):
         home = tmp_path / "home"
         cwd = tmp_path / "checkout"

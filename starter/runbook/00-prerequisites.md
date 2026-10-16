@@ -43,18 +43,20 @@ python3 -c "import nacl.signing" && echo "signing OK"
 ## 3. The node's signing key, made here and never sent
 The node signs its evidence with an Ed25519 key. Make it now, on this machine, and give PCC only its public half so its signatures can be verified. Without `publicKey`, the API key has no signing key on file; the gateway never generates or returns a private signing key.
 
-Key persistence is supported on **Linux only**, where pcc-node can check the filesystem and its aliases. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` to a path outside every source checkout. Use the same location in this phase and phase 5; keep the override set for both if you need one. Your home and the key directory must be outside every source checkout. pcc-node checks the location, creates an owner-only directory and a `0600` key file, and refuses unsafe ownership, permissions or ancestry. Do not work around a refusal with `.gitignore` or by changing the key's permissions.
+Key persistence is supported on **Linux only**, where pcc-node can check the filesystem and its aliases. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` (or the fallback `PCC_NODE_KEYS_FILE`) to an absolute path outside this folder and every source checkout. Use the same location in this phase and phase 5; keep the override set for both if you need one. Your home and the key directory must be outside every source checkout. pcc-node checks the location, creates an owner-only directory and a `0600` key file, and refuses unsafe ownership, permissions or ancestry. Do not work around a refusal with `.gitignore` or by changing the key's permissions.
 
 The pcc-node 0.1.1 that step 2 installs does not run these checks or read `PCC_NODE_KEY_PATH`; the checks arrive with the first release that contains #374.
 
-Passing the path explicitly works across versions and skips #374's legacy-file check; this flow never creates `./pcc-keys.json`. A refused override can leave an empty `0700` directory.
+Passing the path explicitly works across versions and skips #374's legacy-file check; this flow never creates `./pcc-keys.json`. A refused location can leave an empty `0700` directory.
 ```bash
 umask 077
 python3 - <<'EOF' > .pcc/node-public-key
 import os
 import nacl.signing                                 # refuses here if the crypto extra is missing
 from pcc_node.crypto import load_or_create_keys
-key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.path.expanduser("~/.pcc-node/keys.json")
+key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.environ.get("PCC_NODE_KEYS_FILE") or os.path.expanduser("~/.pcc-node/keys.json")
+if not os.path.isabs(key_path) or os.path.realpath(key_path).startswith(os.path.realpath(".") + os.sep):
+    raise SystemExit("The node key location must be an absolute path outside this folder and every source checkout")
 os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # 0.1.1 r2 does not create it
 public_hex, _ = load_or_create_keys(key_path)        # explicit: 0.1.1 r2 would otherwise write ./pcc-keys.json
 print(public_hex, end="")
