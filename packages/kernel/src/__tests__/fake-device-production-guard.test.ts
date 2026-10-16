@@ -31,6 +31,9 @@ function testingSpecifiers(source: string, filename: string, root = sourceRoot):
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) inspect(node.moduleSpecifier);
     if (ts.isExportDeclaration(node)) inspect(node.moduleSpecifier);
+    if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+      inspect(node.argument.literal);
+    }
     if (ts.isCallExpression(node) && (
       node.expression.kind === ts.SyntaxKind.ImportKeyword ||
       (ts.isIdentifier(node.expression) && node.expression.text === "require")
@@ -99,6 +102,12 @@ describe("FakeDevice production isolation", () => {
     const root = path.join(fixtureRoot, "leaks");
     const filename = path.join(root, "entry.ts");
     expect(testingSpecifiers(readFileSync(filename, "utf8"), filename, root))
+      .toEqual(["./__tests__/helpers/device-faults.js"]);
+  });
+
+  it("specifier matcher catches a test-only import-type reference", () => {
+    const source = 'type Faults = typeof import("./__tests__/helpers/device-faults.js");';
+    expect(testingSpecifiers(source, path.join(sourceRoot, "index.ts")))
       .toEqual(["./__tests__/helpers/device-faults.js"]);
   });
 
