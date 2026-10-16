@@ -83,7 +83,7 @@ function capHarness() {
       // Also settle calls that reach the transport after a failed assertion, before reset.
       draining = true;
       held.forEach(call => call.resolve("0x01"));
-      await Promise.all(checks);
+      await Promise.allSettled(checks);
     },
   };
 }
@@ -258,6 +258,32 @@ describe("smart-account signature verifier", () => {
       const finalResults = await Promise.all(again.calls);
       expect(finalResults.filter(result => result.ok)).toEqual(Array.from({ length: 16 }, () => ({ ok: true, kind: "contract" })));
       expect(finalResults.filter(result => !result.ok)).toEqual([{ ok: false, reason: "unavailable" }]);
+    } finally {
+      await cap.drain();
+    }
+  });
+  it("cap holds on a warm chain cache, and every revert frees exactly one slot", async () => {
+    const signature = await smartSignature();
+    const cap = capHarness();
+    cap.install();
+    try {
+      const first = await cap.burst(signature);
+      first.held.forEach((call, index) => {
+        if (index < 8) call.resolve("0x01");
+        else call.reject(Object.assign(new Error("execution reverted"), { code: 3, data: "0x12345678" }));
+      });
+      const results = await Promise.all(first.calls);
+      expect(results.filter(result => result.ok)).toEqual(Array.from({ length: 8 }, () => ({ ok: true, kind: "contract" })));
+      expect(results.filter(result => !result.ok && result.reason === "invalid")).toHaveLength(8);
+
+      // Keep the successful chain check cached: install() would clear it.
+      const before = requests.length;
+      const warm = await cap.burst(signature);
+      expect(requests.slice(before).map(req => req.method)).toEqual(Array(16).fill("eth_call"));
+      warm.held.forEach(call => call.resolve("0x01"));
+      const warmResults = await Promise.all(warm.calls);
+      expect(warmResults.filter(result => result.ok)).toEqual(Array.from({ length: 16 }, () => ({ ok: true, kind: "contract" })));
+      expect(warmResults.filter(result => !result.ok)).toEqual([{ ok: false, reason: "unavailable" }]);
     } finally {
       await cap.drain();
     }
