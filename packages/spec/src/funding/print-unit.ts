@@ -108,7 +108,12 @@ export interface PrintUnitThursdayExpectationInput {
   /** Full subject block; hashes are canonical lowercase, settlement address accepts any hex casing. */
   subject: SubjectBlockFields;
   bindings: readonly SubjectBinding[];
-  /** Independently obtained latest chain-block timestamp; never a quote's reclaimAt. */
+  /**
+   * Independently obtained latest chain-block timestamp; never a quote's reclaimAt. Take it from the chain
+   * after the prepare payload arrives, and no more than RECLAIM_SKEW_SECONDS (600 s) before the host built
+   * the policy. A stale value refuses. A value ahead of the chain widens the reclaim ceiling one for one,
+   * bounded only by the live 365 d check.
+   */
   latestBlockTimestamp: bigint;
 }
 
