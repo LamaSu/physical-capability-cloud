@@ -170,6 +170,14 @@ describe("A legacy commands", () => {
     expect((await f.run()).success).toBe(true);
     expect(f.machine.commands.map((c) => c.type)).toEqual(["load_gcode", "start"]);
   });
+  it("X-1 legacy load_gcode never carries configured input bytes", async () => {
+    const f = legacy(); const inputData = new Uint8Array([1, 2, 3]); const gcodeHash = hash(inputData);
+    expect((await f.run({ inputData, gcodeHash })).success).toBe(true);
+    expect(f.machine.commands).toStrictEqual([
+      { type: "load_gcode", payload: { gcodeHash, jobId: f.config.jobId } },
+      { type: "start", payload: { jobId: f.config.jobId } },
+    ]);
+  });
 });
 
 describe("B synchronous refusals", () => {
@@ -261,6 +269,12 @@ describe("C exact data hashing", () => {
   });
   it.each(["🧪", "literal \uFFFD character"])("C5 well-formed unicode %s", async (inputData) => {
     expect((await setup().run({ inputData, inputHash: hash(inputData) })).success).toBe(true);
+  });
+  it.each([
+    ["X-14 leading f", `sha256:f${"a".repeat(63)}`],
+    ["X-15 trailing zero", `sha256:${"a".repeat(63)}0`],
+  ])("%s is a valid input hash", async (_name, inputHash) => {
+    expect((await setup().run({ inputHash: inputHash as SHA256 })).success).toBe(true);
   });
 });
 
