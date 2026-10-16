@@ -40,8 +40,11 @@ __pycache__/
 __pycache__/
 *.py[cod]
 *.egg-info/
-# pcc-node writes its Ed25519 node key pair (public + SECRET) to ./pcc-keys.json on
-# first run (packages/pcc-node/pcc_node/crypto.py load_or_create_keys). Never commit it.
+# Older pcc-node (0.1.0 and 0.1.1 r2) wrote its key pair to ./pcc-keys.json.
+# Current pcc-node refuses that file and never writes it. Never commit one.
 # Anchored, so a public .well-known/pcc-keys.json (gateway public key) is never hidden.
 /pcc-keys.json
 /packages/pcc-node/pcc-keys.json
+/pcc-keys.json.exposed
+/packages/pcc-node/pcc-keys.json.exposed
+/starter/pcc-keys.json
