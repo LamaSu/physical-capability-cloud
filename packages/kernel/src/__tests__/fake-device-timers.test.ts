@@ -1,9 +1,18 @@
 /** Module-load timer capture mirrors print-host/test/fake-silent-deadline.test.ts. */
-import { expect, it, vi } from "vitest";
+import { beforeAll, expect, it, vi } from "vitest";
 import type { EvidenceEvent } from "@pcc/spec";
 import type { FakeDevice } from "../testing/fake-device.js";
 
 type Emitted = Omit<EvidenceEvent, "id" | "hash">;
+let WarmedDevice: typeof FakeDevice;
+
+// Load transforms outside each test's budget; resetModules still re-evaluates
+// timer capture in tests that install fake timers before their fresh import.
+vi.setConfig({ testTimeout: 30_000 });
+beforeAll(async () => {
+  const module = await import("../testing/fake-device.js");
+  WarmedDevice = module.FakeDevice;
+}, 30_000);
 
 it("repeated silent cancels retain the first deadline", async () => {
   vi.resetModules();
@@ -124,6 +133,42 @@ it("faking timers after import does not take control of captured timers", async 
     expect(events).toHaveLength(1);
   } finally {
     await device.dispose();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  }
+});
+
+
+it("warm-up keeps real timer capture while resetModules re-evaluates under fake timers", async () => {
+  vi.resetModules();
+  vi.useFakeTimers();
+  const devices: FakeDevice[] = [];
+  try {
+    const { FakeDevice: FreshDevice } = await import("../testing/fake-device.js");
+    const warmed = new WarmedDevice("warmed-capture", "timer-kernel", { cancelBehavior: "silent", cancelConfirmMs: 1 });
+    const fresh = new FreshDevice("fresh-capture", "timer-kernel", { cancelBehavior: "silent", cancelConfirmMs: 100 });
+    devices.push(warmed, fresh);
+    const warmedEvents: Emitted[] = [];
+    const freshEvents: Emitted[] = [];
+    warmed.onEvidence((event) => warmedEvents.push(event));
+    fresh.onEvidence((event) => freshEvents.push(event));
+    for (const device of devices) {
+      device.scriptStart({ outcome: "accept", deviceJobId: "capture-job" });
+      await device.execute({ type: "start" });
+      await device.cancelJob("capture-job");
+    }
+    expect(vi.getTimerCount(), "only the freshly evaluated module belongs to fake timers").toBe(1);
+    await warmed.quiesceEvidence();
+    expect(warmedEvents).toHaveLength(1);
+    expect(freshEvents).toEqual([]);
+    expect(await fresh.getStatus()).toBe("busy");
+    await vi.advanceTimersByTimeAsync(100);
+    await fresh.quiesceEvidence();
+    expect(freshEvents).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    for (const device of devices) await device.dispose();
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.resetModules();
