@@ -177,7 +177,7 @@ describe("S2 historical vector A: #8144 example inputs (#8165 supersedes its ter
     expect(actual.acceptedPolicyDigest).toBe(VECTOR_A.acceptedPolicyDigest);
   });
 
-  it("pins economics' principal-id v1 word and rejects the left-padded address encoding (#8095)", () => {
+  it("pins economics' principal-id v1 word and differs from the left-padded address word (#8095)", () => {
     const address = "0x6463acd05141c1ef6583e4fd978fc61fff4045dc";
     const id = formatOperatorPrincipalId(84532, address);
     expect(id).toBe("eip155:84532:0x6463acd05141c1ef6583e4fd978fc61fff4045dc");

@@ -487,6 +487,10 @@ export const POLICY_VERSION = 1;
 /** One funded UnitConfig, in the position it occupies in the funded array. */
 export interface CanonicalMilestoneTermsV1 {
   milestoneIndex: UintInput;
+  /**
+   * lowercase only: 0x + lowercase hex. An EIP-55 (checksummed) or uppercase form is
+   * refused with AcceptedPolicyDigestInputError, so lowercase it first.
+   */
   stepId: Bytes32Hex;
   /** UnitConfig.g, already expressed in settlement-token base units (uint256). */
   amount: UintInput;
@@ -496,6 +500,10 @@ export interface CanonicalMilestoneTermsV1 {
 
 /** Ratified termsHash v2.1 inputs; milestones preserve the funded UnitConfig[] order. */
 export interface CanonicalJobTermsV1 {
+  /**
+   * lowercase only: 0x + lowercase hex. An EIP-55 (checksummed) or uppercase form is
+   * refused with AcceptedPolicyDigestInputError, so lowercase it first.
+   */
   token: AddressHex;
   assuranceTier: UintInput;
   milestones: readonly CanonicalMilestoneTermsV1[];
@@ -551,6 +559,8 @@ export function computeMilestonesRoot(milestones: readonly CanonicalMilestoneTer
  * Ratified termsHash v2.1 = keccak256(abi.encode(
  *   bytes32 TERMS_DOMAIN, address token, uint8 assuranceTier, bytes32 milestonesRoot)).
  * Pure and chain/factory/escrow-independent; assuranceTier is restricted to 0..3.
+ * token and each stepId are lowercase only: 0x + lowercase hex. An EIP-55 (checksummed)
+ * or uppercase form is refused with AcceptedPolicyDigestInputError, so lowercase it first.
  * The top-level terms, milestone list, and every milestone are admitted as snapshots;
  * hashing never re-reads the caller's objects or invokes their accessors or Proxy traps.
  *

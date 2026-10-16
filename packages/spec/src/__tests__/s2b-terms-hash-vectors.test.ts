@@ -7,6 +7,7 @@ import { keccak_256 } from "@noble/hashes/sha3";
 import { describe, expect, it } from "vitest";
 import {
   AcceptedPolicyDigestInputError,
+  POLICY_DOMAIN,
   TERMS_DOMAIN,
   computeAcceptedPolicyDigest,
   computeBindingsRoot,
@@ -166,6 +167,11 @@ describe("termsHash independent noble keccak + handwritten ABI mirror", () => {
         deadline: ((1n << 64n) - 1n).toString() }],
     };
     expect(computeTermsHash(sameIntegers)).toBe(computeTermsHash(terms));
+    for (const amount of [(1n << 256n) - 1n, (1n << 200n) + 12345n]) {
+      const wideAmountTerms = replaceFirst({ amount });
+      expect(computeMilestonesRoot(wideAmountTerms.milestones)).toBe(mirrorMilestonesRoot(wideAmountTerms.milestones));
+      expect(computeTermsHash(wideAmountTerms)).toBe(mirrorTermsHash(wideAmountTerms));
+    }
   });
 
   it("accepts a shared index or shared stepId when the (milestoneIndex, stepId) pairs differ", () => {
@@ -228,6 +234,20 @@ describe("termsHash fail-closed validation", () => {
     expect(() => computeTermsHash({ ...goldenTerms(), token: token as `0x${string}` })).toThrow(AcceptedPolicyDigestInputError);
   });
 
+  it("refuses an EIP-55 checksummed token with the terms.token field", () => {
+    const terms: CanonicalJobTermsV1 = {
+      ...goldenTerms(), token: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+    };
+    expect(() => computeTermsHash(terms)).toThrow(AcceptedPolicyDigestInputError);
+    expect(() => computeTermsHash(terms)).toThrow(expect.objectContaining({ field: "terms.token" }));
+  });
+
+  it("refuses a mixed-case stepId with the milestones[0].stepId field", () => {
+    const terms = replaceFirst({ stepId: `0x${"aB".repeat(32)}` });
+    expect(() => computeTermsHash(terms)).toThrow(AcceptedPolicyDigestInputError);
+    expect(() => computeTermsHash(terms)).toThrow(expect.objectContaining({ field: "milestones[0].stepId" }));
+  });
+
   it("refuses duplicate funded pairs, including equivalent uint spellings, without deduplicating", () => {
     const [first, second] = goldenTerms().milestones;
     expectMilestonesRefused([first, { ...first }]);
@@ -287,10 +307,55 @@ describe("termsHash fail-closed validation", () => {
   });
 });
 
-describe("Thursday-SHAPE EXAMPLE using the ratified termsHash producer", () => {
+describe("Thursday-shape oracle golden v2 (bus #8239)", () => {
+  it("pins the published v2 values through production exports and the in-test mirror", () => {
+    // Published VALUES only (bus #8239); the golden file's SHA-256 changes with label edits (bus #8684).
+    const expected = {
+      termsDomain: "0xaf4cf568beb02a9dca015909829c12f5eb22b355111bdf85603e98da8a43c141",
+      policyDomain: "0x8d536e66f7b4f5e2bc52f123fc7589f433a75b2bd4c278bd32651e17e2a8b0e0",
+      milestonesRoot: "0x16bb1546dd13804dd874e718b41d1375d606ca1ebe6650a5db23b09a682bedc2",
+      termsHash: "0x3f8dbb379a2ff55a557a24aba75661166d03898dec2b0745747b3755d69f64ae",
+      // Vector A's subject block is unchanged in v2.
+      subjectBlockHash: "0x4f166a59dc4e7f8f805ca04b62005a3aade04ae4202ac936c2749d6355830cdf",
+      bindingsRoot: "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd",
+      acceptedPolicyDigest: "0x6814b378016fd7f40c1e72aa98187b14656338f002ab2774fa86d9ed9361fe23",
+    } as const;
+    const terms: CanonicalJobTermsV1 = {
+      token: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+      assuranceTier: 1,
+      milestones: [{ milestoneIndex: 0, stepId: `0x${"51".repeat(32)}`, amount: 750000,
+        deadline: 1793836800 }], // reclaimAt = build time 1792022400 + 1814400.
+    };
+    expect(TERMS_DOMAIN).toBe(expected.termsDomain);
+    expect(TERMS_DOMAIN).toBe(mirrorUtf8("PCC:vnext:job-terms:v1"));
+    expect(POLICY_DOMAIN).toBe(expected.policyDomain);
+    expect(POLICY_DOMAIN).toBe(mirrorUtf8("PCC:vnext:accepted-job-policy:v1"));
+    const milestonesRoot = computeMilestonesRoot(terms.milestones);
+    expect(milestonesRoot).toBe(expected.milestonesRoot);
+    expect(milestonesRoot).toBe(mirrorMilestonesRoot(terms.milestones));
+    const termsHash = computeTermsHash(terms);
+    expect(termsHash).toBe(expected.termsHash);
+    expect(termsHash).toBe(mirrorTermsHash(terms));
+    const bindingsRoot = computeBindingsRoot([]);
+    expect(bindingsRoot).toBe(expected.bindingsRoot);
+    expect(bindingsRoot).toBe(mirrorHash(mirrorWords([mirrorUint(32), mirrorUint(0)])));
+    const { subjectBlockHash } = expected;
+    const acceptedPolicyDigest = computeAcceptedPolicyDigest({ termsHash, subjectBlockHash, bindingsRoot });
+    expect(acceptedPolicyDigest).toBe(expected.acceptedPolicyDigest);
+    expect(acceptedPolicyDigest).toBe(mirrorHash(mirrorWords([
+      mirrorHex(mirrorUtf8("PCC:vnext:accepted-job-policy:v1")), mirrorUint(1),
+      mirrorHex(mirrorTermsHash(terms)), mirrorHex(subjectBlockHash), mirrorHex(expected.bindingsRoot),
+    ])));
+    // #8144 digest, retired: its termsHash input was a file digest.
+    const retiredDigest = "0xd85ae6b3c2be54febf8a8297ed23f010019c1ba922f9784a8de24e3e59b6d7ae";
+    expect(acceptedPolicyDigest).not.toBe(retiredDigest);
+  });
+});
+
+describe("evidence-made EXAMPLE (not the oracle's vector) using the ratified termsHash producer", () => {
   it("pins the EXAMPLE termsHash and resulting acceptedPolicyDigest", () => {
-    // EXAMPLE only: the real stepId and reclaimAt are per policy. The oracle's
-    // re-issued Thursday vector will be cross-checked against this producer when posted.
+    // EXAMPLE only: the real stepId and reclaimAt are per policy. The published oracle
+    // golden v2 is pinned in the separate Thursday-shape block above (bus #8239).
     const terms: CanonicalJobTermsV1 = {
       token: "0x036cbd53842c5426634e7929541ec2318f3dcf7e", // Base Sepolia Circle USDC
       assuranceTier: 1,
