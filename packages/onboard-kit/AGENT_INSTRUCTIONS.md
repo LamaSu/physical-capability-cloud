@@ -226,8 +226,10 @@ The JobRunner refuses an adapter without it. It waits for it at the end of every
 ```typescript
 import { createHash } from "node:crypto";
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
-import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "@pcc/kernel";
+import type { MachineAdapter, MachineCommand, MachineCommandResult } from "@pcc/kernel";
 import { OutstandingWork } from "@pcc/kernel";
+
+type MachineStatus = "idle" | "busy" | "error" | "offline" | "maintenance";
 
 export class YourMachineAdapter implements MachineAdapter {
   readonly id: string;
@@ -310,7 +312,7 @@ export class YourMachineAdapter implements MachineAdapter {
           const response = await fetch(`${this.config.apiUrl}/programs/stage`, {
             method: "POST",
             headers: { "X-Job-Id": jobId, "X-Input-Hash": inputHash },
-            body: bytes, // exact bytes, without text normalization
+            body: new Uint8Array(bytes), // exact bytes, without text normalization
           });
           if (!response.ok) return { success: false, message: "Staging failed" };
           const staged = await response.json();
@@ -1343,7 +1345,7 @@ Each transfer pair tracks episode counts and success rates. When enough successf
 import { afterEach, describe, it, expect, vi } from "vitest";
 
 // Use mock mode and stub fetch: these tests never contact equipment.
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("YourMachineAdapter neutral command contract", () => {
   it("stages without actuating and binds start evidence to the staged job", async () => {
@@ -1399,7 +1401,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import { compileTierLadder } from "@pcc/spec";
 import { EvidenceEmitter, JobRunner } from "@pcc/kernel";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("Integration", () => {
   it("produces one kernel-recorded input proof for a prepare-path run", async () => {
@@ -1411,9 +1413,9 @@ describe("Integration", () => {
       resolveInput: async () => new Uint8Array(),
     });
     const emitter = new EvidenceEmitter("kernel-test");
-    const runner = new JobRunner(machine, [], undefined, emitter);
+    const runner = new JobRunner(machine, [], null, emitter);
     const inputData = new TextEncoder().encode("transfer 10 uL from A1 to B1");
-    const inputHash = "sha256:" + createHash("sha256").update(inputData).digest("hex");
+    const inputHash = `sha256:${createHash("sha256").update(inputData).digest("hex")}` as const;
     const tierLadder = await compileTierLadder(csd);
     const jobId = "test-job-001";
     let completedBundle: any = null;
