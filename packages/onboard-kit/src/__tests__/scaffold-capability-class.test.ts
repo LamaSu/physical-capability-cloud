@@ -9,7 +9,8 @@ import { compileTierLadder, type CSD } from "@pcc/spec";
 import type { OnboardConfig } from "../types.js";
 
 const jobId = "job-neutral-1";
-const inputHash = `sha256:${"ab".repeat(32)}`;
+const inputData = new Uint8Array([0, 255, 128, 13, 10, 239, 187, 191, 65]);
+const inputHash = `sha256:${createHash("sha256").update(inputData).digest("hex")}`;
 
 function machineConfig(type: OnboardConfig["capabilities"][number]["type"] = "liquid-handler"): OnboardConfig {
   return {
@@ -82,7 +83,7 @@ async function neutralAdapter(mockMode = true, config = machineConfig()): Promis
 }
 
 /** Execute the guide's actual example; PR-1a's new types are erased at runtime. */
-async function guideAdapter(resolveInput: (hash: string) => Promise<Uint8Array>, mockMode = false) {
+async function guideAdapter(mockMode = false) {
   const guide = readFileSync(new URL("../../AGENT_INSTRUCTIONS.md", import.meta.url), "utf8");
   const code = guide.match(/^### 2\.1\b[\s\S]*?(?=^### 2\.2\b)/m)?.[0]
     .match(/```typescript\n([\s\S]*?)```/)?.[1];
@@ -94,11 +95,11 @@ async function guideAdapter(resolveInput: (hash: string) => Promise<Uint8Array>,
   writeFileSync(path, code);
   const { YourMachineAdapter } = await import(path) as {
     YourMachineAdapter: new (id: string, kernelId: string, config: {
-      apiUrl: string; mockMode: boolean; resolveInput: typeof resolveInput;
+      apiUrl: string; mockMode: boolean;
     }) => AdapterLike;
   };
   const adapter = new YourMachineAdapter("guide-device", "guide-kernel", {
-    apiUrl: "http://device.test", mockMode, resolveInput,
+    apiUrl: "http://device.test", mockMode,
   });
   adapters.push(adapter);
   const events: Event[] = [];
@@ -140,7 +141,7 @@ describe("capability-class scaffolding", () => {
     expect(tests).toContain('it("should stage input without actuating and bind execution to the staged job", async () => {');
     expect(tests).toContain('expect(adapter.accepts).toEqual(["prepare", "start", "stop", "status"]);');
     expect(tests).toContain('expect((await adapter.execute({ type: "start", payload: { jobId: "test-job" } })).success).toBe(false);');
-    expect(tests).toContain('const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });');
+    expect(tests).toContain('const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });');
     expect(tests).toContain('expect(ack.success).toBe(true);');
     expect(tests).toContain('expect(ack.data).toEqual({ jobId, inputHash, deviceJobId: expect.any(String) });');
     expect(tests).toContain('expect((ack.data?.deviceJobId as string).length).toBeGreaterThan(0);');
@@ -152,7 +153,7 @@ describe("capability-class scaffolding", () => {
 
   it.each([true, false])("M1: generated and guide source mark only mockMode=%s as simulated", async mockMode => {
     const generatedMachine = (await neutralAdapter(mockMode)).adapter;
-    const guideMachine = (await guideAdapter(async () => new Uint8Array(), mockMode)).adapter;
+    const guideMachine = (await guideAdapter(mockMode)).adapter;
     for (const machine of [generatedMachine, guideMachine]) {
       if (mockMode) expect(machine.source.simulated).toBe(true);
       else expect(machine.source).not.toHaveProperty("simulated");
@@ -161,7 +162,7 @@ describe("capability-class scaffolding", () => {
 
   it("S2: mock prepare acknowledges exact input identity without evidence, fetch, or state change", async () => {
     const { adapter, events } = await neutralAdapter();
-    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     expect(result.success).toBe(true);
     expect(result.data).toEqual({ jobId, inputHash, deviceJobId: expect.any(String) });
     expect(result.data?.deviceJobId).not.toBe("");
@@ -171,10 +172,10 @@ describe("capability-class scaffolding", () => {
   });
 
   it.each([
-    ["missing jobId", { inputHash }],
-    ["empty jobId", { jobId: "", inputHash }],
-    ["short hash", { jobId, inputHash: "sha256:abc" }],
-    ["upper-case hex", { jobId, inputHash: `sha256:${"AB".repeat(32)}` }],
+    ["missing jobId", { inputHash, inputData }],
+    ["empty jobId", { jobId: "", inputHash, inputData }],
+    ["short hash", { jobId, inputHash: "sha256:abc", inputData }],
+    ["upper-case hex", { jobId, inputHash: `sha256:${"AB".repeat(32)}`, inputData }],
   ])("S3: refuses prepare with %s without evidence or fetch", async (_name, payload) => {
     const { adapter, events } = await neutralAdapter();
     expect((await adapter.execute({ type: "prepare", payload })).success).toBe(false);
@@ -191,7 +192,7 @@ describe("capability-class scaffolding", () => {
 
   it("S4: refuses start for another jobId without evidence or fetch", async () => {
     const { adapter, events } = await neutralAdapter();
-    await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     expect((await adapter.execute({ type: "start", payload: { jobId: "job-another" } })).success).toBe(false);
     expect(events).toEqual([]);
     expect(fetchStub).toHaveBeenCalledTimes(0);
@@ -199,7 +200,7 @@ describe("capability-class scaffolding", () => {
 
   it("S4: staged mock start binds execution_started to the acknowledged device job", async () => {
     const { adapter, events } = await neutralAdapter();
-    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     expect(ack.success).toBe(true);
     expect(typeof ack.data?.deviceJobId).toBe("string");
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
@@ -218,14 +219,16 @@ describe("capability-class scaffolding", () => {
 
   it("S6: real prepare posts only to staging and start subsequently posts to run", async () => {
     const { adapter, events } = await neutralAdapter(false);
-    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     expect(ack.success).toBe(true);
     expect(ack.data).toEqual({ jobId, inputHash, deviceJobId: "device-staged-777" });
     expect(fetchStub).toHaveBeenCalledTimes(1);
     const [stageUrl, stageRequest] = fetchStub.mock.calls[0]!;
     expect(stageUrl).toBe("http://device.test/stage");
     expect(stageRequest?.method).toBe("POST");
-    expect(JSON.parse(stageRequest?.body as string)).toEqual({ jobId, inputHash });
+    expect(JSON.parse(stageRequest?.body as string)).toEqual({
+      jobId, inputHash, inputBase64: Buffer.from(inputData).toString("base64"),
+    });
     expect(events).toEqual([]);
     // Only staging needs a JSON reply; the run endpoint may acknowledge with no content.
     fetchStub.mockResolvedValueOnce(new Response(null, { status: 204 }));
@@ -236,11 +239,30 @@ describe("capability-class scaffolding", () => {
     expect(JSON.parse(fetchStub.mock.calls[1]![1]!.body as string)).toEqual({ deviceJobId: "device-staged-777" });
   });
 
+  it.each([true, false])("S6: prepare without input data is refused with zero requests in mockMode=%s", async mockMode => {
+    const { adapter, events } = await neutralAdapter(mockMode);
+    expect(await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).toEqual({
+      success: false, message: "prepare: no input data",
+    });
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+  });
+
+  it("S6: real prepare forwards empty input bytes as an explicit base64 string", async () => {
+    const { adapter, events } = await neutralAdapter(false);
+    const inputData = new Uint8Array();
+    expect((await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } })).success).toBe(true);
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchStub.mock.calls[0]![1]!.body as string)).toEqual({ jobId, inputHash, inputBase64: "" });
+    expect(events).toEqual([]);
+  });
+
   it("M2: real prepare without a staging endpoint is refused with zero requests", async () => {
     const config = machineConfig();
     config.adapters[0]!.endpoints = config.adapters[0]!.endpoints!.filter(endpoint => endpoint.purpose !== "load_program");
     const { adapter, events } = await neutralAdapter(false, config);
-    expect(await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).toEqual({
+    expect(await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } })).toEqual({
       success: false, message: "prepare: staging is not implemented for this device",
     });
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
@@ -251,7 +273,7 @@ describe("capability-class scaffolding", () => {
   it.each([undefined, "", 42, null])("M2: real prepare refuses a device reply with invalid deviceJobId %s", async deviceJobId => {
     const { adapter, events } = await neutralAdapter(false);
     fetchStub.mockResolvedValueOnce({ ok: true, json: async () => ({ deviceJobId }) } as Response);
-    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     expect(result.success).toBe(false);
     expect(result.data).toBeUndefined();
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
@@ -286,9 +308,9 @@ describe("capability-class scaffolding", () => {
   it.each([true, false])("S3: prepare validates jobId and anchored hash in mockMode=%s", async mockMode => {
     const { adapter, events } = await neutralAdapter(mockMode);
     for (const payload of [
-      { inputHash }, { jobId: "", inputHash }, { jobId: 7, inputHash },
-      { jobId, inputHash: `sha256:${"ab".repeat(32)}a` },
-      { jobId, inputHash: ` ${inputHash}` },
+      { inputHash, inputData }, { jobId: "", inputHash, inputData }, { jobId: 7, inputHash, inputData },
+      { jobId, inputHash: `sha256:${"ab".repeat(32)}a`, inputData },
+      { jobId, inputHash: ` ${inputHash}`, inputData },
     ]) {
       expect((await adapter.execute({ type: "prepare", payload })).success).toBe(false);
       expect(events).toEqual([]);
@@ -300,7 +322,7 @@ describe("capability-class scaffolding", () => {
   it.each(["unstaged", "foreign"])("S4: real start refuses %s job with zero requests and no run", async state => {
     const { adapter, events } = await neutralAdapter(false);
     if (state === "foreign") {
-      expect((await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).success).toBe(true);
+      expect((await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } })).success).toBe(true);
       fetchStub.mockClear();
     }
     expect((await adapter.execute({ type: "start", payload: { jobId: state === "foreign" ? "other" : jobId } })).success).toBe(false);
@@ -311,7 +333,7 @@ describe("capability-class scaffolding", () => {
 
   it("S4: polling binds progress and completion to the acknowledged deviceJobId", async () => {
     const { adapter, events } = await neutralAdapter();
-    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     vi.spyOn(adapter, "getProgress").mockResolvedValueOnce(25).mockResolvedValue(100);
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
     await vi.advanceTimersByTimeAsync(4000);
@@ -326,7 +348,7 @@ describe("capability-class scaffolding", () => {
 
   it("S5: mock stop with a real endpoint makes no fetch", async () => {
     const { adapter, events } = await neutralAdapter();
-    await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
     await adapter.execute({ type: "start", payload: { jobId } });
     expect((await adapter.execute({ type: "stop" })).success).toBe(true);
     await vi.advanceTimersByTimeAsync(4000);
@@ -351,36 +373,44 @@ describe("capability-class scaffolding", () => {
     expect(comment).not.toContain("gcodeHash");
   });
 
-  it.each([true, false])("S9: guide refuses resolved bytes with a mismatched hash before ack in mockMode=%s", async mockMode => {
-    const resolveInput = vi.fn(async () => new Uint8Array([0, 255, 13, 10]));
-    const { adapter, events } = await guideAdapter(resolveInput, mockMode);
-    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+  it.each([true, false])("S9: guide refuses delivered bytes with a mismatched hash before ack in mockMode=%s", async mockMode => {
+    const { adapter, events } = await guideAdapter(mockMode);
+    const result = await adapter.execute({ type: "prepare", payload: {
+      jobId, inputHash, inputData: new Uint8Array([0, 255, 13, 10]),
+    } });
     expect(result.success).toBe(false);
     expect(result.data).toBeUndefined();
-    expect(resolveInput).toHaveBeenCalledWith(inputHash);
     expect(fetchStub).toHaveBeenCalledTimes(0);
     expect(events).toEqual([]);
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
   }, 15000);
 
-  it("S9: guide hash-only prepare verifies exact bytes and uploads them before acknowledging", async () => {
-    const bytes = new Uint8Array([0, 255, 13, 10, 239, 187, 191]);
-    const hash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
-    const { adapter, events } = await guideAdapter(async () => bytes);
+  it("S9: guide prepare verifies exact delivered bytes and uploads them before acknowledging", async () => {
+    const { adapter, events } = await guideAdapter();
     fetchStub.mockResolvedValueOnce({ ok: true, json: async () => ({ deviceJobId: "device-staged" }) } as Response);
-    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash: hash } });
-    expect(result).toEqual({ success: true, data: { jobId, inputHash: hash, deviceJobId: "device-staged" } });
+    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
+    expect(result).toEqual({ success: true, data: { jobId, inputHash, deviceJobId: "device-staged" } });
     expect(fetchStub).toHaveBeenCalledTimes(1);
-    expect(new Uint8Array(fetchStub.mock.calls[0]![1]!.body as Uint8Array)).toEqual(bytes);
+    expect(new Uint8Array(fetchStub.mock.calls[0]![1]!.body as Uint8Array)).toEqual(inputData);
     expect(events).toEqual([]);
+  }, 15000);
+
+  it.each([true, false])("S9: guide refuses missing input data in mockMode=%s before any request", async mockMode => {
+    const { adapter, events } = await guideAdapter(mockMode);
+    expect(await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).toEqual({
+      success: false, message: "prepare: no input data",
+    });
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
   }, 15000);
 
   it("S9: guide start refuses unstaged and foreign jobs before any request or evidence", async () => {
-    const { adapter, events } = await guideAdapter(async () => new Uint8Array(), true);
+    const { adapter, events } = await guideAdapter(true);
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
     expect(events).toEqual([]);
     expect(fetchStub).toHaveBeenCalledTimes(0);
-    await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData: new Uint8Array() } });
+    expect((await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } })).success).toBe(true);
     expect((await adapter.execute({ type: "start", payload: { jobId: "foreign" } })).success).toBe(false);
     expect(events).toEqual([]);
     expect(fetchStub).toHaveBeenCalledTimes(0);
@@ -428,6 +458,9 @@ describe("capability-class scaffolding", () => {
     for (const term of ["prepare", "accepts", "deviceJobId", "compileTierLadder", "method_loaded"]) {
       expect(guide).toContain(term);
     }
+    expect(guide).toContain('On the prepare path the kernel always sends the exact bytes it hashed as payload.inputData; a job without input data is refused by the kernel ("the prepare path needs input data"). Stage exactly those bytes and echo inputHash only for them.');
+    expect(guide).toContain("the kernel refuses an adapter method_loaded that carries inputHash on both JobRunner paths");
+    expect(guide).not.toMatch(/resolveInput|with (?:a hash only|only a hash)|hash-only|inputData\?/i);
     expect(guide).toMatch(/adapters never emit [`]*method_loaded[`]*/i);
     const section = guide.match(/^### 2\.1\b[\s\S]*?(?=^### 2\.2\b)/m)?.[0];
     expect(section).toBeDefined();
