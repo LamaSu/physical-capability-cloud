@@ -1019,6 +1019,23 @@ describe("the linked key's own SIWE principal cannot list or revoke its link", (
   });
 });
 
+describe("the linked key's own SIWE principal cannot list or revoke a key-approved agent link", () => {
+  it("the linked agent EOA signs in as itself (cookie and minted key) and gets [] and 404", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const { account, request } = await proved({ role: "agent" });
+    const approval = await approve(request, skA.headers);
+    expect(approval.statusCode).toBe(200);
+    const self = await signIn(account);
+    const skSelf = await mintSessionKey(self.headers);
+    for (const headers of [self.headers, skSelf.headers]) {
+      expect((await app.inject({ url: "/api/wallets", headers })).json()).toEqual({ links: [] });
+      expect((await revoke(approval.json().linkId, headers)).statusCode).toBe(404);
+    }
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toMatchObject({ linkId: approval.json().linkId, role: "agent" });
+  });
+});
+
 describe("SIWE principals: near-miss addresses and cookie-approved links", () => {
   it("near-miss addresses at every hex position and another account cannot list or revoke A's key- and cookie-approved links", async () => {
     const a = await signIn();
