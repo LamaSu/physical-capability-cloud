@@ -124,6 +124,69 @@ afterAll(async () => {
 });
 
 describe("wallet request values never reach gateway sinks", () => {
+  it("removes the wallet header attributes emitted by the real SDK while keeping the trace-id", () => {
+    const wallet = "0xabababababababababababababababababababab";
+    const data = Sentry.httpHeadersToSpanAttributes({ "x-pcc-wallet": wallet, "x-pcc-trace-id": "t" });
+    expect(data).toMatchObject({
+      "http.request.header.x_pcc_wallet": wallet,
+      "http.request.header.x_pcc_trace_id": "t",
+    });
+    const scrubbed = sinks.options!.beforeSendSpan!({ description: "GET /api/ordinary", data } as never);
+    expect(JSON.stringify(scrubbed)).not.toContain(wallet);
+    expect(scrubbed.data).toMatchObject({ "http.request.header.x_pcc_trace_id": "t" });
+  });
+
+  it("keeps an ordinary HTTP transaction with default integrations without the wallet header value", async () => {
+    const wallet = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    const client = Sentry.getClient()!;
+    for (const integration of ["RequestData", "Http", "Console"]) {
+      expect(client.getIntegrationByName(integration), integration).toBeDefined();
+    }
+    const http = await import("node:http");
+    const { Duplex } = await import("node:stream");
+    let response = "";
+    // Feed a complete HTTP request through Node's real server parser. An
+    // in-memory socket keeps this hermetic while the default Http integration
+    // observes the real IncomingMessage and adds its own header attributes.
+    const socket = Object.assign(new Duplex({
+      read() {},
+      write(chunk: Buffer, _encoding, callback) { response += chunk.toString(); callback(); },
+    }), {
+      remoteAddress: "127.0.0.1", remotePort: 12345,
+      localAddress: "127.0.0.1", localPort: 3200,
+      setTimeout() { return this; },
+      setNoDelay() { return this; },
+      setKeepAlive() { return this; },
+    });
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+    try {
+      sinks.sentry.length = 0;
+      const completed = new Promise<void>((resolve, reject) => {
+        socket.on("error", reject);
+        server.once("request", (_req, res) => res.once("close", resolve));
+      });
+      server.emit("connection", socket);
+      socket.push(`GET /api/ordinary/wallet-header HTTP/1.1\r\nHost: localhost\r\nX-PCC-Wallet: ${wallet}\r\nx-pcc-trace-id: t\r\nConnection: close\r\n\r\n`);
+      socket.push(null);
+      await completed;
+      expect(response).toMatch(/^HTTP\/1\.1 200 /);
+      await Sentry.flush(2000);
+      const items = (sinks.sentry as Array<[unknown, Array<[{ type: string }, Event]>]>)
+        .flatMap(([, items]) => items);
+      const transaction = items.find(([header, event]) => header.type === "transaction"
+        && event.transaction === "GET /api/ordinary/wallet-header")?.[1];
+      expect(transaction).toBeDefined();
+      expect(transaction!.contexts?.trace?.data).toMatchObject({ "http.request.header.x_pcc_trace_id": "t" });
+      expect(JSON.stringify(sinks.sentry)).not.toContain(wallet);
+    } finally {
+      socket.destroy();
+      server.close();
+    }
+  });
+
   it.each(["description", "url.full", "http.url", "http.target", "url.path", "http.route"])(
     "detects a wallet target in %s alone and removes every raw target field", attribute => {
       const raw = `/api/wallets/${MARKER}?query=${MARKER}#${MARKER}`;

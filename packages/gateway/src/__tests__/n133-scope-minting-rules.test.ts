@@ -160,8 +160,8 @@ describe("N133 rule 1: a paid job's buyer is the caller's proven identity, or th
 
   it("bindBuyer: the admin names any buyer; a proven wallet only itself, stored as proven; a claim never", () => {
     expect(bindBuyer({ admin: true, provenWallet: null }, OTHER)).toEqual({ ok: true, buyer: OTHER });
-    expect(bindBuyer({ admin: false, provenWallet: LETTERED }, LETTERED_MIXED)).toEqual({ ok: true, buyer: LETTERED });
-    expect(bindBuyer({ admin: false, provenWallet: BUYER }, OTHER)).toMatchObject({ ok: false, status: 403, body: { reason: "buyer_mismatch" } });
+    expect(bindBuyer({ admin: false, provenWallet: LETTERED, provenWalletVia: "siwe-session" }, LETTERED_MIXED)).toEqual({ ok: true, buyer: LETTERED });
+    expect(bindBuyer({ admin: false, provenWallet: BUYER, provenWalletVia: "siwe-session" }, OTHER)).toMatchObject({ ok: false, status: 403, body: { reason: "buyer_mismatch" } });
     expect(bindBuyer({ admin: false, provenWallet: null }, BUYER)).toMatchObject({ ok: false, status: 403, body: { reason: "buyer_proof_required" } });
     expect(bindBuyer({ admin: true, provenWallet: null }, "")).toMatchObject({ ok: false });
   });

@@ -15,6 +15,7 @@ import {
   getLinkRequest, listWalletLinks, lookupLinkRequestByCode, revokeWalletLink,
 } from "../services/wallet-links/repository.js";
 import { requesterIpClass, userCodesEqual, walletRequestLimits } from "../services/wallet-links/guards.js";
+import { proveSelfLinkedWallet } from "../services/wallet-links/proven-wallet.js";
 
 const label = z.string().regex(/^[A-Za-z0-9._@-]{1,64}$/).refine(value => value.trim() === value);
 const clientName = z.string().regex(/^[A-Za-z0-9._-]{1,32}$/).refine(value => value.trim() === value);
@@ -82,7 +83,7 @@ function checkApprovalOrigin(req: FastifyRequest, origin: string) {
   }
 }
 
-export async function walletsRoutes(app: FastifyInstance) {
+async function walletCeremonyRoutes(app: FastifyInstance) {
   const limits = walletRequestLimits();
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof WalletLinkError) return reply.code(error.status).send({ error: error.code });
@@ -196,3 +197,11 @@ export async function walletsRoutes(app: FastifyInstance) {
     return revokeWalletLink(req.params.linkId, accountPrincipal(req), revokeSchema.parse(req.body).reason, Date.now(), req.apiKeyId ?? null, siweProvenAddress(req));
   });
 }
+
+export async function walletsRoutes(app: FastifyInstance) {
+  app.addHook("preHandler", proveSelfLinkedWallet);
+  await app.register(walletCeremonyRoutes);
+}
+
+Object.defineProperty(walletsRoutes, Symbol.for("skip-override"), { value: true });
+Object.defineProperty(walletsRoutes, Symbol.for("fastify.display-name"), { value: "walletsRoutes" });

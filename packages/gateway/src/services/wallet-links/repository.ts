@@ -2,7 +2,7 @@ import { randomBytes, randomInt } from "node:crypto";
 import { sql } from "@pcc/store";
 import { getStore } from "../../db.js";
 import { composeProofMessage, type WalletLinkMessageRequest } from "./message.js";
-import type { WalletLinkConfig } from "./config.js";
+import { walletLinkConfig, type WalletLinkConfig } from "./config.js";
 import { CONSENT_SHA256, CONSENT_VERSION } from "./consent.js";
 
 // Internal persistence shapes; HTTP validation lives in the route plugin.
@@ -181,6 +181,20 @@ export function revokeWalletLink(id: string, accountId: string, reason: string |
       RETURNING revoked_at`);
   if (!row) throw new WalletLinkError(404, "not_found");
   return { status: "revoked", revokedAt: row.revoked_at };
+}
+
+export function findSelfLinkedWallet(input: { address: string; apiKeyId: string; operatorId: string; now: number }): "agent" | "device" | null {
+  const chains = walletLinkConfig().allowedChainIds;
+  if (chains.length === 0) return null;
+  const row = getStore().db.get<{ role: "agent" | "device" }>(sql`SELECT link.role FROM wallet_links AS link
+    JOIN wallet_link_requests AS request ON request.id = link.request_id
+    WHERE link.key_type = 'secp256k1' AND lower(link.address_or_pubkey) = ${input.address.toLowerCase()}
+      AND link.chain_id IN (${sql.join(chains.map(chain => sql`${chain}`), sql`, `)})
+      AND link.revoked_at IS NULL AND (link.expires_at IS NULL OR link.expires_at > ${new Date(input.now).toISOString()})
+      AND request.created_by_key_id = ${input.apiKeyId} AND request.approved_by_key_id = ${input.apiKeyId}
+      AND link.account_id = ${input.operatorId}
+    LIMIT 1`);
+  return row?.role ?? null;
 }
 
 /** Reads current database state for every payer-binding/faucet use; never cached. */
