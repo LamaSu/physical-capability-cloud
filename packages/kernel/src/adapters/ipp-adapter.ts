@@ -1,24 +1,18 @@
 /**
- * IPP (Internet Printing Protocol) adapter for standard 2D printers.
- *
- * Connects to any IPP-capable printer (Canon, HP, Brother, Epson) over the
- * network using the standard IPP protocol (RFC 8011).
- *
- * IPP URI format: ipp://192.168.1.50/ipp/print
- *
- * In production: set IPP_URI environment variable and install the `ipp` npm
- * package for real IPP communication.
- * In development: built-in mock mode simulating a Canon PIXMA TR8620a.
- *
- * IMPORTANT: The `ipp` package is an optional dependency. This adapter falls
- * back to mock mode automatically when the package is not available. It decides
- * only once the import has settled: until then every call waits for it, and the
- * adapter is marked simulated (see ippLoading).
+ * IPP/1.1 adapter for standard 2D printers, using a built-in RFC 8010 codec
+ * and bounded HTTP transport. Real mode never falls back to simulation.
+ * Mock mode is explicit; IPP over TLS is not supported yet.
  */
 
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
 import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "./types.js";
 import { OutstandingWork } from "./outstanding-work.js";
+
+import { Buffer } from "node:buffer";
+import { URL } from "node:url";
+import { IppClient, ippCompletionVerdict, sanitizeIppMessage, type IppClientFailure } from "./ipp-client.js";
+import { createHttpIppTransport, type IppTransport } from "./ipp-transport.js";
+import { IPP_TAG, readBoolean, readEnum, readInteger, readKeyword, readRange, readResolution, readText, singleAttribute, type IppGroup, type IppValue } from "./ipp-codec.js";
 
 export interface IppAdapterConfig {
   /** IPP printer URI (e.g., "ipp://192.168.1.50/ipp/print") */
@@ -31,6 +25,28 @@ export interface IppAdapterConfig {
   mockMode?: boolean;
   /** Poll interval in ms (default 2000) */
   pollIntervalMs?: number;
+  /** Terminal confirmation deadline (default 20000 ms). cancelConfirmMs + pollIntervalMs
+   * must stay under the kernel's cancelWindowMs (30000 ms by default). */
+  cancelConfirmMs?: number;
+  requestDeadlineMs?: number;
+  printJobDeadlineMs?: number;
+  maxResponseBytes?: number;
+  maxDocumentBytes?: number;
+  documentFormat?: string;
+  /** @internal Test seam; production code never sets this. */
+  transport?: IppTransport;
+}
+
+/** Operational diagnostics are never evidence. */
+export interface IppDiagnostic {
+  kind: "poll_failed" | "poll_recovered" | "job_unreadable";
+  adapterId: string;
+  ippJobId: number;
+  operation: "Get-Job-Attributes";
+  at: string;
+  consecutiveFailures: number;
+  failure?: { kind: string; httpStatus?: number; statusCode?: number };
+  message: string;
 }
 
 /** IPP printer state values (RFC 8011 §5.4.11) */
@@ -98,31 +114,27 @@ export class IppAdapter implements MachineAdapter {
   private mockCapabilities: IppCapabilities = { ...MOCK_CANON_PIXMA_TR8620A };
   private currentJobId = 1000;
 
-  // Real IPP client (loaded dynamically)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private ippClient: any = null;
+  private ippClient: IppClient | null = null;
   private ippAvailable = false;
-  /**
-   * The import of the optional `ipp` package, from construction until it settles; null once
-   * it has, and in declared mock mode, which imports nothing. Until it settles the adapter
-   * cannot tell real IPP from the mock fallback, so every call that routes on `ippAvailable`
-   * waits for it, and the source stays marked simulated (astra pack 467): no call takes the
-   * mock path unmarked, and nothing reads the adapter as real before `ipp` has loaded. The
-   * import is a local module load, so it settles.
-   */
-  private ippLoading: Promise<void> | null = null;
-  /**
-   * Set by dispose, and final: from then on execute and cancelJob send nothing, real or mock,
-   * including a call that was waiting for `ipp` to load (astra pack 201). Reads still answer.
-   */
+  /** Disposal is final: no new real request is allowed after this fence. */
   private disposed = false;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
   private activeRealJobId: number | null = null;
+  private realStartInFlight = false;
+  private pollGeneration = 0;
+  private pollAbort: AbortController | null = null;
+  private terminalTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastObservedState: IppJobState | null = null;
+  private lastObservedReasons: string[] = [];
+  private pollInFlight: Promise<void> | null = null;
+  private consecutiveFailures = 0;
+  private lastStoppedReasons: string | undefined;
+  private diagnosticListeners = new Set<(diagnostic: IppDiagnostic) => void>();
 
   /**
    * What can still emit: a mock print job (from its start until it completes or is
-   * cancelled; a paused one can be resumed), the real-mode poll loop, each poll and each
-   * real command in flight, and each command waiting for `ipp` to load.
+   * cancelled; a paused one can be resumed), the real poll chain and commands
+   * that can emit. Status, capabilities and progress queries never count as evidence work.
    */
   private readonly work = new OutstandingWork();
   private endMockJob: (() => void) | null = null;
@@ -130,43 +142,24 @@ export class IppAdapter implements MachineAdapter {
 
   constructor(id: string, config: IppAdapterConfig) {
     this.id = id;
-    this.config = config;
+    this.config = config.mockMode ? config : this.validateRealConfig(config);
     this.source = {
       deviceId: id,
       deviceType: "controller",
       kernelId: config.kernelId,
       firmwareVersion: "IPP-Adapter-1.0.0",
-      // Honesty marker: simulation until real IPP is proven. Declared mock mode is
-      // simulation. So is a real-configured adapter until its import of `ipp`
-      // succeeds, which alone sets simulated:false; an import that fails leaves it
-      // true (tryLoadIpp, noteMockRouting).
-      simulated: true,
+      simulated: !!config.mockMode,
     };
-
-    // Attempt to load real IPP library unless mockMode is forced
     if (!config.mockMode) {
-      this.ippLoading = this.tryLoadIpp();
+      this.ippClient = new IppClient({
+        printerUri: this.config.uri,
+        transport: this.config.transport ?? createHttpIppTransport(),
+        requestDeadlineMs: this.config.requestDeadlineMs,
+        printJobDeadlineMs: this.config.printJobDeadlineMs,
+        maxResponseBytes: this.config.maxResponseBytes,
+      });
+      this.ippAvailable = true;
     }
-  }
-
-  /**
-   * Surface the real->mock downgrade. An operator who set mockMode:false
-   * expects real IPP traffic; when the optional `ipp` package is missing every
-   * method routes to the mock branch. The events are payload-tagged mock:true,
-   * but the downgrade itself must be visible in logs and on the source marker —
-   * not discovered from bundles.
-   */
-  private warnedMockRouting = false;
-  private noteMockRouting(context: string): void {
-    this.source.simulated = true;
-    if (this.warnedMockRouting) return;
-    this.warnedMockRouting = true;
-    console.warn(
-      `[ipp-adapter] device "${this.id}" was configured mockMode:false but is serving MOCK ` +
-        `responses (${context}) — the optional 'ipp' npm package is not loaded/installed. ` +
-        `All emitted evidence is simulation (payload.mock:true, source.simulated:true). ` +
-        `Install the 'ipp' package for real printing to ${this.config.uri}.`,
-    );
   }
 
   // ---------------------------------------------------------------------------
@@ -174,7 +167,6 @@ export class IppAdapter implements MachineAdapter {
   // ---------------------------------------------------------------------------
 
   async getStatus(): Promise<MachineStatus> {
-    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return this.mockStatus;
     }
@@ -188,16 +180,15 @@ export class IppAdapter implements MachineAdapter {
   }
 
   async getProgress(): Promise<number> {
-    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return this.mockProgress;
     }
 
-    if (this.activeRealJobId === null) return 0;
+    if (this.disposed || this.activeRealJobId === null) return 0;
 
     try {
       const attrs = await this.realGetJobAttributes(this.activeRealJobId);
-      return attrs.completedSheets ?? 0;
+      return attrs.ok ? attrs.impressionsCompleted ?? 0 : 0;
     } catch {
       return 0;
     }
@@ -208,28 +199,15 @@ export class IppAdapter implements MachineAdapter {
     if (this.disposed) {
       return { success: false, message: `IPP adapter "${this.id}" is disposed: ${command.type} not run` };
     }
-    // While `ipp` loads the adapter cannot route: the command waits for the import, as
-    // outstanding work (it may still emit), then takes the real or the mock path. A
-    // dispose meanwhile ends it there: it was accepted before, but runs nothing after.
-    const loading = this.ippLoading;
-    if (loading) {
-      return this.work.track(
-        loading.then(() =>
-          this.disposed
-            ? { success: false, message: `IPP adapter "${this.id}" was disposed while the 'ipp' package loaded: ${command.type} not run` }
-            : this.route(command),
-        ),
-      );
-    }
     return this.route(command);
   }
 
-  /** Runs `command` on real IPP once `ipp` has loaded, or on the mock, marked simulated, otherwise. */
+  /** Routes commands to the built-in real client or to explicitly configured simulation. */
   private route(command: MachineCommand): MachineCommandResult | Promise<MachineCommandResult> {
     if (this.config.mockMode || !this.ippAvailable) {
       return this.executeMock(command);
     }
-    return this.work.track(this.executeReal(command));
+    return command.type === "status" ? this.executeReal(command) : this.work.track(this.executeReal(command));
   }
 
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void {
@@ -240,7 +218,7 @@ export class IppAdapter implements MachineAdapter {
    * Resolves once every print job has reported how it ended and nothing more can emit: a
    * mock job has emitted execution_completed or was cancelled; the real-mode poll loop has
    * reported execution_completed or execution_failed and stopped (or "stop" stopped it); and
-   * no poll or command is in flight, including one waiting for `ipp` to load. At once when
+   * no evidence-producing command or poll is in flight. Read-only queries do not hold it. At once when
    * none is. A paused mock job keeps it pending until it is resumed and completes, or is
    * cancelled.
    */
@@ -253,6 +231,7 @@ export class IppAdapter implements MachineAdapter {
     this.stopPolling();
     this.cancelMockJob();
     this.listeners = [];
+    this.diagnosticListeners.clear();
   }
 
   // ---------------------------------------------------------------------------
@@ -260,7 +239,6 @@ export class IppAdapter implements MachineAdapter {
   // ---------------------------------------------------------------------------
 
   async getCapabilities(): Promise<IppCapabilities> {
-    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return { ...this.mockCapabilities };
     }
@@ -275,18 +253,12 @@ export class IppAdapter implements MachineAdapter {
   }
 
   /**
-   * Cancels `jobId` on the printer, or the mock job. Refused once disposed, including a cancel
-   * that was waiting for `ipp` to load: a disposed adapter sends nothing (astra pack 201). Its
-   * owner cancels before it disposes.
+   * Cancels `jobId` on the printer, or the mock job. A real cancel arms a terminal-confirmation
+   * deadline and keeps polling for the printer's outcome. Refused once disposed: a disposed
+   * adapter sends nothing (astra pack 201). Its owner cancels before it disposes.
    */
   async cancelJob(jobId: number): Promise<void> {
     if (this.disposed) throw new Error(`IPP adapter "${this.id}" is disposed: cancel of job ${jobId} not sent`);
-    if (this.ippLoading) {
-      await this.ippLoading;
-      if (this.disposed) {
-        throw new Error(`IPP adapter "${this.id}" was disposed while the 'ipp' package loaded: cancel of job ${jobId} not sent`);
-      }
-    }
     if (this.config.mockMode || !this.ippAvailable) {
       const job = this.mockJobState;
       if (!job || job.jobId !== jobId) return;
@@ -496,43 +468,58 @@ export class IppAdapter implements MachineAdapter {
   }
 
   // ---------------------------------------------------------------------------
-  // Real IPP implementation (via optional `ipp` package)
+  // Real IPP implementation
   // ---------------------------------------------------------------------------
 
-  /** Loads the optional `ipp` package. Settles once it is decided; every call waits for that (see ippLoading). */
-  private tryLoadIpp(): Promise<void> {
-    return import("ipp")
-      .then(
-        (mod) => {
-          this.ippClient = mod;
-          this.ippAvailable = true;
-          // Real IPP from here on: the one place the marker says real.
-          this.source.simulated = false;
-        },
-        () => {
-          // ipp not available — fall back to mock, LOUDLY: the operator asked for
-          // real mode and is getting a simulator instead. The marker stays simulated.
-          this.ippAvailable = false;
-          this.noteMockRouting("optional 'ipp' package failed to import");
-        },
-      )
-      .finally(() => {
-        this.ippLoading = null;
-      });
+  onDiagnostic(listener: (diagnostic: IppDiagnostic) => void): () => void {
+    if (!this.disposed) this.diagnosticListeners.add(listener);
+    return () => { this.diagnosticListeners.delete(listener); };
   }
 
-  private async executeReal(command: MachineCommand): Promise<MachineCommandResult> {
+  private async executeReal(command: MachineCommand): Promise<MachineCommandResult & { busy?: true }> {
     switch (command.type) {
       case "start": {
-        const documentData = command.payload?.documentData as Buffer | string | undefined;
-        const jobName = (command.payload?.jobName as string | undefined) ?? "pcc-job";
-
+        const documentData = command.payload?.documentData;
+        const jobName = command.payload?.jobName === undefined ? "pcc-job" : command.payload.jobName;
         if (!documentData) {
           return { success: false, message: "No documentData provided for IPP print job" };
         }
-
+        if (typeof documentData !== "string" && !(documentData instanceof Uint8Array)) {
+          return { success: false, message: "documentData must be a string or byte array" };
+        }
+        const document = typeof documentData === "string" ? Buffer.from(documentData) : documentData;
+        if (document.byteLength === 0) {
+          return { success: false, message: "No documentData provided for IPP print job" };
+        }
+        if (document.byteLength > this.config.maxDocumentBytes!) {
+          return { success: false, message: "documentData exceeds maxDocumentBytes" };
+        }
+        if (typeof jobName !== "string" || !/^[\x20-\x7e]{1,255}$/.test(jobName)) {
+          return { success: false, message: "jobName must be 1-255 printable ASCII characters" };
+        }
+        if (command.payload && Object.prototype.hasOwnProperty.call(command.payload, "documentFormat")) {
+          return { success: false, message: "documentFormat belongs in the adapter config; per-start overrides are refused" };
+        }
+        if (this.realStartInFlight || this.activeRealJobId !== null) {
+          return { success: false, busy: true, message: "IPP adapter already has a job in flight", data: { busy: true } };
+        }
+        this.realStartInFlight = true;
         try {
-          const jobId = await this.realPrintJob(jobName, documentData);
+          const ready = await this.checkReadiness();
+          if (!ready.success) return ready;
+          if (this.disposed) return { success: false, message: "IPP adapter was disposed during readiness check; Print-Job not sent" };
+          const result = await this.realPrintJob(jobName, document);
+          if (!result.ok) {
+            if (result.kind === "ipp_status") {
+              return {
+                success: false,
+                message: result.message,
+                data: { ippStatusCode: result.statusCode, deviceStateUnknown: true },
+              };
+            }
+            return { success: false, message: result.message, ...(result.sent ? { data: { deviceStateUnknown: true } } : {}) };
+          }
+          const jobId = result.jobId;
           // Disposed while the printer answered: the printer accepted the job, so the start
           // succeeded, and a failure here would invite a retry that prints it twice (astra
           // pack 205). But a disposed adapter follows nothing (astra pack 203): it records no
@@ -546,296 +533,254 @@ export class IppAdapter implements MachineAdapter {
             };
           }
           this.activeRealJobId = jobId;
-
+          this.startPolling();
           this.emit({
             type: "execution_started",
             timestamp: new Date().toISOString(),
             source: this.source,
             payload: { ippJobId: jobId, jobName },
           });
-
-          this.startPolling();
-
           return { success: true, message: `IPP job ${jobId} submitted`, data: { jobId } };
-        } catch (err) {
-          return {
-            success: false,
-            message: `IPP print failed: ${err instanceof Error ? err.message : String(err)}`,
-          };
+        } finally {
+          this.realStartInFlight = false;
         }
       }
 
       case "stop": {
-        if (this.activeRealJobId !== null) {
-          await this.cancelJob(this.activeRealJobId);
-          this.activeRealJobId = null;
-          this.stopPolling();
+        const jobId = this.activeRealJobId;
+        if (jobId !== null) {
+          await this.cancelJob(jobId);
+          if (this.activeRealJobId === jobId) {
+            this.activeRealJobId = null;
+            this.stopPolling();
+          }
         }
         return { success: true, message: "IPP job cancelled" };
       }
 
+      case "pause":
+      case "resume": {
+        const result = await this.work.track(command.type === "pause" ? this.ippClient!.pausePrinter() : this.ippClient!.resumePrinter());
+        return {
+          success: result.ok,
+          message: result.ok ? `IPP printer ${command.type === "pause" ? "paused" : "resumed"}` : result.message,
+          data: { ippStatusCode: result.statusCode },
+        };
+      }
       case "status": {
         try {
           const caps = await this.realGetPrinterAttributes();
-          return {
-            success: true,
-            data: {
-              printerState: caps.printerState,
-              makeModel: caps.makeModel,
-              jobId: this.activeRealJobId,
-            },
-          };
+          return { success: true, data: { printerState: caps.printerState, makeModel: caps.makeModel, jobId: this.activeRealJobId } };
         } catch (err) {
-          return {
-            success: false,
-            message: `Status check failed: ${err instanceof Error ? err.message : String(err)}`,
-          };
+          return { success: false, message: `Status check failed: ${err instanceof Error ? err.message : "IPP query failed"}` };
         }
       }
-
       default:
         return { success: true, message: `${command.type} acknowledged` };
     }
   }
 
-  private async realPrintJob(
-    jobName: string,
-    data: Buffer | string,
-  ): Promise<number> {
-    if (!this.ippClient) throw new Error("IPP client not loaded");
+  private async checkReadiness(): Promise<MachineCommandResult & { busy?: true }> {
+    const group = await this.printerAttributes(["printer-state", "printer-state-reasons", "printer-is-accepting-jobs"]);
+    if (!group.ok) return { success: false, message: group.message };
+    const state = this.oneValue(group.value, "printer-state", readEnum);
+    const accepting = this.oneValue(group.value, "printer-is-accepting-jobs", readBoolean);
+    const reasons = this.keywordList(group.value, "printer-state-reasons");
+    if (state === undefined || accepting === undefined || reasons === null) return { success: false, message: "IPP readiness attributes are unreadable" };
+    if (!accepting) return { success: false, message: "IPP printer is not accepting jobs" };
+    if (state === 4) return { success: false, busy: true, message: "IPP printer is processing another job", data: { printerState: "processing" } };
+    if (state === 5) return { success: false, message: sanitizeIppMessage(`IPP printer is stopped: ${reasons.join(", ")}`) };
+    if (state !== 3) return { success: false, message: "IPP printer readiness state is unknown" };
+    return { success: true };
+  }
 
-    const printer = new this.ippClient.Printer(this.config.uri);
+  private realPrintJob(jobName: string, document: Uint8Array) {
+    return this.work.track(this.ippClient!.printJob({ jobName, documentFormat: this.config.documentFormat!, document }));
+  }
 
-    return new Promise<number>((resolve, reject) => {
-      const msg = {
-        "operation-attributes-tag": {
-          "requesting-user-name": "pcc-kernel",
-          "job-name": jobName,
-          "document-format": "application/pdf",
-        },
-      };
-
-      const documentBuffer = typeof data === "string" ? Buffer.from(data) : data;
-
-      printer.execute("Print-Job", msg, documentBuffer, (err: Error | null, res: Record<string, unknown>) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        // Extract job ID from response
-        const jobAttrs = res?.["job-attributes-tag"] as Record<string, unknown> | undefined;
-        const jobId = jobAttrs?.["job-id"] as number | undefined;
-        resolve(jobId ?? 0);
-      });
-    });
+  private async printerAttributes(requested: string[]): Promise<{ ok: true; value: IppGroup } | { ok: false; message: string }> {
+    if (this.disposed) return { ok: false, message: "IPP adapter is disposed; query not sent" };
+    const result = await this.ippClient!.getPrinterAttributes(requested);
+    if (!result.ok) return result;
+    const groups = result.message.groups.filter((group) => group.tag === IPP_TAG.PRINTER_ATTRIBUTES);
+    if (groups.length !== 1) return { ok: false, message: "IPP answer requires exactly one Printer Attributes group" };
+    return { ok: true, value: groups[0] };
   }
 
   private async realGetPrinterAttributes(): Promise<IppCapabilities> {
-    if (!this.ippClient) throw new Error("IPP client not loaded");
-
-    const printer = new this.ippClient.Printer(this.config.uri);
-
-    return new Promise<IppCapabilities>((resolve, reject) => {
-      const msg = {
-        "operation-attributes-tag": {
-          "requesting-user-name": "pcc-kernel",
-          "requested-attributes": [
-            "printer-state",
-            "printer-make-and-model",
-            "color-supported",
-            "sides-supported",
-            "media-supported",
-            "printer-resolution-supported",
-            "media-type-supported",
-            "copies-supported",
-            "pages-per-minute",
-            "pages-per-minute-color",
-          ],
-        },
-      };
-
-      printer.execute(
-        "Get-Printer-Attributes",
-        msg,
-        null,
-        (err: Error | null, res: Record<string, unknown>) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-
-          const attrs = res?.["printer-attributes-tag"] as Record<string, unknown> | undefined;
-          if (!attrs) {
-            reject(new Error("No printer-attributes-tag in response"));
-            return;
-          }
-
-          const stateValue = attrs["printer-state"] as number | undefined;
-          const printerState: IppPrinterState =
-            stateValue === 3 ? "idle" :
-            stateValue === 4 ? "processing" :
-            stateValue === 5 ? "stopped" :
-            "idle";
-
-          const sidesSupported = attrs["sides-supported"] as string | string[] | undefined;
-          const sidesArr = Array.isArray(sidesSupported) ? sidesSupported : [sidesSupported ?? ""];
-          const duplex = sidesArr.some((s) => s.includes("two-sided"));
-
-          const resolutions = attrs["printer-resolution-supported"] as Array<{ crossFeedRes: number; feedRes: number }> | undefined;
-          const resolutionDpis = resolutions
-            ? resolutions.map((r) => r.crossFeedRes ?? r.feedRes ?? 300)
-            : [300];
-
-          const copies = attrs["copies-supported"] as { lower?: number; upper?: number } | undefined;
-
-          resolve({
-            makeModel: (attrs["printer-make-and-model"] as string | undefined) ?? "Unknown Printer",
-            printerState,
-            color: (attrs["color-supported"] as boolean | undefined) ?? false,
-            duplex,
-            mediaSizes: (attrs["media-supported"] as string[] | undefined) ?? [],
-            resolutions: resolutionDpis,
-            mediaTypes: (attrs["media-type-supported"] as string[] | undefined) ?? [],
-            copiesSupported: { min: copies?.lower ?? 1, max: copies?.upper ?? 1 },
-            pagesPerMinute: (attrs["pages-per-minute"] as number | undefined) ?? 10,
-            pagesPerMinuteColor: attrs["pages-per-minute-color"] as number | undefined,
-          });
-        },
-      );
-    });
+    const result = await this.printerAttributes([
+      "printer-state", "printer-make-and-model", "color-supported", "sides-supported", "media-supported",
+      "printer-resolution-supported", "media-type-supported", "copies-supported", "pages-per-minute", "pages-per-minute-color",
+    ]);
+    if (!result.ok) throw new Error(result.message);
+    const group = result.value;
+    const state = this.oneValue(group, "printer-state", readEnum);
+    if (state !== 3 && state !== 4 && state !== 5) throw new Error("IPP printer-state is unreadable");
+    const resolutionAttr = singleAttribute(group, "printer-resolution-supported");
+    const resolutions = "value" in resolutionAttr ? resolutionAttr.value.values.flatMap((value) => {
+      const read = readResolution(value);
+      return "value" in read ? [read.value.units === 3 ? read.value.x : Math.round(read.value.x * 2.54)] : [];
+    }) : [300];
+    const copies = this.oneValue(group, "copies-supported", readRange);
+    return {
+      makeModel: this.oneValue(group, "printer-make-and-model", readText) ?? "Unknown Printer",
+      printerState: state === 3 ? "idle" : state === 4 ? "processing" : "stopped",
+      color: this.oneValue(group, "color-supported", readBoolean) ?? false,
+      duplex: (this.keywordList(group, "sides-supported") ?? []).some((side) => side.includes("two-sided")),
+      mediaSizes: this.keywordList(group, "media-supported") ?? [],
+      resolutions,
+      mediaTypes: this.keywordList(group, "media-type-supported") ?? [],
+      copiesSupported: { min: copies?.lower ?? 1, max: copies?.upper ?? 1 },
+      pagesPerMinute: this.oneValue(group, "pages-per-minute", readInteger) ?? 10,
+      pagesPerMinuteColor: this.oneValue(group, "pages-per-minute-color", readInteger),
+    };
   }
 
-  private async realGetJobAttributes(jobId: number): Promise<{ completedSheets?: number; jobState?: IppJobState }> {
-    if (!this.ippClient) throw new Error("IPP client not loaded");
-
-    const printer = new this.ippClient.Printer(this.config.uri);
-
-    return new Promise((resolve, reject) => {
-      const msg = {
-        "operation-attributes-tag": {
-          "requesting-user-name": "pcc-kernel",
-          "job-id": jobId,
-          "requested-attributes": ["job-state", "job-impressions-completed"],
-        },
-      };
-
-      printer.execute(
-        "Get-Job-Attributes",
-        msg,
-        null,
-        (err: Error | null, res: Record<string, unknown>) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-
-          const attrs = res?.["job-attributes-tag"] as Record<string, unknown> | undefined;
-          const stateMap: Record<number, IppJobState> = {
-            3: "pending",
-            4: "pending-held",
-            5: "processing",
-            6: "processing-stopped",
-            7: "canceled",
-            8: "aborted",
-            9: "completed",
-          };
-          const stateVal = attrs?.["job-state"] as number | undefined;
-
-          resolve({
-            completedSheets: attrs?.["job-impressions-completed"] as number | undefined,
-            jobState: stateVal ? stateMap[stateVal] : undefined,
-          });
-        },
-      );
-    });
+  private realGetJobAttributes(jobId: number, signal?: AbortSignal) {
+    return this.ippClient!.getJobAttributes(jobId, signal);
   }
 
   private async realCancelJob(jobId: number): Promise<void> {
-    if (!this.ippClient) throw new Error("IPP client not loaded");
-
-    const printer = new this.ippClient.Printer(this.config.uri);
-
-    return new Promise<void>((resolve, reject) => {
-      const msg = {
-        "operation-attributes-tag": {
-          "requesting-user-name": "pcc-kernel",
-          "job-id": jobId,
-        },
-      };
-
-      printer.execute("Cancel-Job", msg, null, (err: Error | null) => {
-        if (err) reject(err);
-        else resolve();
-      });
-    });
+    this.armTerminalDeadline(jobId, "cancel-unconfirmed");
+    const result = await this.work.track(this.ippClient!.cancelJob(jobId));
+    if (!result.ok) throw new Error(result.message);
   }
 
   // ---------------------------------------------------------------------------
-  // Polling (real mode)
+  // Polling: schedule only after the previous poll settles.
   // ---------------------------------------------------------------------------
 
   private startPolling(): void {
-    // A disposed adapter polls nothing, and creates no work that could hold quiesceEvidence().
     if (this.disposed) return;
     this.stopPolling();
-    const interval = this.config.pollIntervalMs ?? 2000;
-
+    this.consecutiveFailures = 0;
+    this.lastStoppedReasons = undefined;
+    this.lastObservedState = null;
+    this.lastObservedReasons = [];
     this.endPolling = this.work.begin();
-    this.pollTimer = setInterval(() => {
-      void this.work.track(this.poll());
-    }, interval);
+    this.schedulePoll(this.pollGeneration, this.activeRealJobId!);
   }
 
-  private async poll(): Promise<void> {
-    // The job this poll is about: a "stop" or a new start may replace it while it waits.
-    const jobId = this.activeRealJobId;
-    if (jobId === null) {
-      this.stopPolling();
+  private schedulePoll(generation: number, jobId: number): void {
+    if (this.disposed || generation !== this.pollGeneration || this.activeRealJobId !== jobId) return;
+    this.pollTimer = setTimeout(() => {
+      this.pollTimer = null;
+      // A start after stop also waits for the old job's pending poll to settle.
+      if (this.pollInFlight) {
+        void this.pollInFlight.then(() => this.schedulePoll(generation, jobId), () => this.schedulePoll(generation, jobId));
+        return;
+      }
+      const pending = this.work.track(this.poll(jobId, generation));
+      this.pollInFlight = pending;
+      const settled = () => {
+        if (this.pollInFlight === pending) this.pollInFlight = null;
+        this.schedulePoll(generation, jobId);
+      };
+      void pending.then(settled, settled);
+    }, this.config.pollIntervalMs);
+  }
+
+  private async poll(jobId: number, generation: number): Promise<void> {
+    if (this.disposed || generation !== this.pollGeneration || this.activeRealJobId !== jobId) return;
+    const abort = new AbortController();
+    this.pollAbort = abort;
+    let attrs;
+    try { attrs = await this.realGetJobAttributes(jobId, abort.signal); }
+    finally { if (this.pollAbort === abort) this.pollAbort = null; }
+    if (this.disposed || generation !== this.pollGeneration || this.activeRealJobId !== jobId) return;
+    if (!attrs.ok) {
+      if (attrs.kind === "ipp_status" && (attrs.statusCode === 0x0406 || attrs.statusCode === 0x0407)) this.armTerminalDeadline(jobId, "job-unobservable");
+      this.pollProblem(jobId, "poll_failed", attrs.message, attrs);
       return;
     }
-
-    try {
-      const attrs = await this.realGetJobAttributes(jobId);
-      if (this.activeRealJobId !== jobId) return; // stopped or replaced meanwhile: nothing to report for it
-
-      if (attrs.jobState === "completed") {
-        this.emit({
-          type: "execution_completed",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: { ippJobId: jobId },
-        });
-        this.activeRealJobId = null;
-        this.stopPolling();
-      } else if (attrs.jobState === "aborted" || attrs.jobState === "canceled") {
-        this.emit({
-          type: "execution_failed",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: { ippJobId: jobId, state: attrs.jobState },
-        });
-        this.activeRealJobId = null;
-        this.stopPolling();
-      } else if (attrs.completedSheets !== undefined) {
-        this.emit({
-          type: "execution_progress",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          // The printer's job number, as on every IPP event: payload.jobId is the PCC job's (LO-EV-9).
-          payload: {
-            ippJobId: jobId,
-            completedSheets: attrs.completedSheets,
-          },
-        });
+    const reasons = attrs.jobStateReasons !== null && attrs.jobStateReasons.length <= 32 ? attrs.jobStateReasons : null;
+    if (reasons !== null) this.lastObservedReasons = [...reasons];
+    if (attrs.jobState === null || attrs.jobState < 3 || attrs.jobState > 9) {
+      this.pollProblem(jobId, "job_unreadable", attrs.jobStateProblem ?? "IPP job-state is unknown");
+      return;
+    }
+    this.lastObservedState = (["pending", "pending-held", "processing", "processing-stopped", "canceled", "aborted", "completed"] as const)[attrs.jobState - 3];
+    const verdict = ippCompletionVerdict(attrs.jobState, reasons);
+    if (attrs.jobState >= 6 && (reasons === null || reasons.length === 0)) {
+      if (attrs.jobState >= 7) this.armTerminalDeadline(jobId, "job-unobservable");
+      this.pollProblem(jobId, "job_unreadable", attrs.reasonsProblem ?? verdict.problem ?? "IPP completion reasons are unreadable");
+      return;
+    }
+    if (this.consecutiveFailures) {
+      this.consecutiveFailures = 0;
+      this.diagnose(jobId, "poll_recovered", "IPP job polling recovered");
+    }
+    if (attrs.jobState === 7 || attrs.jobState === 8) {
+      this.emit({ type: "execution_failed", timestamp: new Date().toISOString(), source: this.source, payload: { ippJobId: jobId, state: attrs.jobState === 7 ? "canceled" : "aborted", origin: "device" } });
+    } else if (attrs.jobState === 9) {
+      if (verdict.verdict === "completed") {
+        this.emit({ type: "execution_completed", timestamp: new Date().toISOString(), source: this.source, payload: { ippJobId: jobId } });
+      } else {
+        this.emit({ type: "execution_failed", timestamp: new Date().toISOString(), source: this.source, payload: { ippJobId: jobId, state: "completed", completion: verdict.completion, jobStateReasons: reasons, origin: "device" } });
       }
-    } catch {
-      // Silently ignore transient poll failures
+    } else if (attrs.jobState === 6) {
+      const reasonsKey = JSON.stringify(reasons);
+      if (reasonsKey !== this.lastStoppedReasons) {
+        this.emit({ type: "execution_progress", timestamp: new Date().toISOString(), source: this.source, payload: { ippJobId: jobId, state: "processing-stopped", jobStateReasons: reasons } });
+      }
+      this.lastStoppedReasons = reasonsKey;
+      return;
+    } else {
+      this.lastStoppedReasons = undefined;
+      if (attrs.impressionsCompleted !== undefined) {
+        this.emit({ type: "execution_progress", timestamp: new Date().toISOString(), source: this.source, payload: { ippJobId: jobId, completedSheets: attrs.impressionsCompleted } });
+      }
+      return;
+    }
+    this.activeRealJobId = null;
+    this.stopPolling();
+  }
+
+  /** First loss of terminal observability owns one deadline; later answers cannot extend it. */
+  private armTerminalDeadline(jobId: number, reason: "cancel-unconfirmed" | "job-unobservable"): void {
+    if (this.disposed || this.activeRealJobId !== jobId || this.terminalTimer !== null) return;
+    const generation = this.pollGeneration;
+    this.terminalTimer = setTimeout(() => {
+      if (this.disposed || generation !== this.pollGeneration || this.activeRealJobId !== jobId) return;
+      const payload = { ippJobId: jobId, state: this.lastObservedState ?? "unobservable", reason,
+        jobStateReasons: [...this.lastObservedReasons], origin: "device" };
+      // Fence and abort before notifying observers, but end the job's evidence work after emission.
+      this.activeRealJobId = null;
+      const end = this.endPolling;
+      this.endPolling = null;
+      this.stopPolling();
+      this.emit({ type: "execution_failed", timestamp: new Date().toISOString(), source: this.source, payload });
+      end?.();
+    }, this.config.cancelConfirmMs);
+  }
+
+  private pollProblem(jobId: number, kind: "poll_failed" | "job_unreadable", message: string, failure?: IppClientFailure): void {
+    this.consecutiveFailures++;
+    this.diagnose(jobId, kind, message, failure);
+  }
+
+  private diagnose(jobId: number, kind: IppDiagnostic["kind"], message: string, failure?: IppClientFailure): void {
+    const diagnostic: IppDiagnostic = {
+      kind, adapterId: this.id, ippJobId: jobId, operation: "Get-Job-Attributes",
+      at: new Date().toISOString(), consecutiveFailures: this.consecutiveFailures,
+      message: sanitizeIppMessage(message),
+      ...(failure ? { failure: { kind: failure.kind, ...(failure.httpStatus !== undefined ? { httpStatus: failure.httpStatus } : {}), ...(failure.statusCode !== undefined ? { statusCode: failure.statusCode } : {}) } } : {}),
+    };
+    for (const listener of this.diagnosticListeners) {
+      try { listener(diagnostic); } catch { /* Diagnostics cannot interrupt polling. */ }
     }
   }
 
   private stopPolling(): void {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
+    this.pollGeneration++;
+    if (this.terminalTimer !== null) {
+      clearTimeout(this.terminalTimer);
+      this.terminalTimer = null;
+    }
+    this.pollAbort?.abort();
+    this.pollAbort = null;
+    if (this.pollTimer !== null) {
+      clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
     this.endPolling?.();
@@ -846,9 +791,63 @@ export class IppAdapter implements MachineAdapter {
   // Helpers
   // ---------------------------------------------------------------------------
 
+  /** Validate without reflecting an input URI, which may contain credentials. */
+  private validateRealConfig(config: IppAdapterConfig): IppAdapterConfig {
+    let uri: URL;
+    try { uri = new URL(config.uri); } catch { throw new Error("Invalid IPP printer URI"); }
+    if (uri.protocol === "ipps:") throw new Error("ipps:// (IPP over TLS) is not supported yet; no insecure TLS option is offered");
+    if (uri.protocol !== "ipp:") throw new Error("Printer URI must use ipp://");
+    if (uri.username || uri.password || /^ipp:\/\/[^/]*@/i.test(config.uri)) throw new Error("IPP printer URI must not contain userinfo");
+    if (uri.search || uri.hash || config.uri.includes("?") || config.uri.includes("#")) throw new Error("IPP printer URI must not contain a query or fragment");
+    if (!uri.hostname) throw new Error("IPP printer URI requires a host");
+    const port = uri.port === "" ? 631 : Number(uri.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("IPP printer port must be 1-65535");
+    if (!uri.pathname) uri.pathname = "/";
+    if (!/^[\x00-\x7f]+$/.test(uri.href) || Buffer.byteLength(uri.href) > 1023) throw new Error("Canonical printer-uri must be ASCII and at most 1023 octets");
+    const normalized = {
+      ...config,
+      uri: uri.href,
+      pollIntervalMs: config.pollIntervalMs === undefined ? 2000 : config.pollIntervalMs,
+      cancelConfirmMs: config.cancelConfirmMs === undefined ? 20000 : config.cancelConfirmMs,
+      requestDeadlineMs: config.requestDeadlineMs === undefined ? 15000 : config.requestDeadlineMs,
+      printJobDeadlineMs: config.printJobDeadlineMs === undefined ? 120000 : config.printJobDeadlineMs,
+      maxResponseBytes: config.maxResponseBytes === undefined ? 1048576 : config.maxResponseBytes,
+      maxDocumentBytes: config.maxDocumentBytes === undefined ? 33554432 : config.maxDocumentBytes,
+      documentFormat: config.documentFormat === undefined ? "application/pdf" : config.documentFormat,
+    };
+    for (const key of ["pollIntervalMs", "cancelConfirmMs", "requestDeadlineMs", "printJobDeadlineMs", "maxResponseBytes", "maxDocumentBytes"] as const) {
+      const value = normalized[key];
+      const min = key === "pollIntervalMs" ? 50 : 1;
+      const max = key === "pollIntervalMs" ? 600000 : key === "maxResponseBytes" ? 16 * 1024 * 1024 : 2147483647;
+      if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${key} must be an integer in ${min}-${max}`);
+    }
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(normalized.documentFormat) || normalized.documentFormat.length > 255 || /[^\x20-\x7e]/.test(normalized.documentFormat)) throw new Error("documentFormat must be a 1-255 character ASCII MIME type/subtype");
+    if (normalized.transport !== undefined && typeof normalized.transport !== "function") throw new Error("transport must be a function");
+    return normalized;
+  }
+
+  private oneValue<T>(group: IppGroup, name: string, reader: (value: IppValue) => { value: T } | { problem: string }): T | undefined {
+    const attribute = singleAttribute(group, name);
+    if ("problem" in attribute || attribute.value.values.length !== 1) return undefined;
+    const result = reader(attribute.value.values[0]);
+    return "value" in result ? result.value : undefined;
+  }
+
+  private keywordList(group: IppGroup, name: string): string[] | null {
+    const attribute = singleAttribute(group, name);
+    if ("problem" in attribute || attribute.value.values.length === 0 || (name.endsWith("-state-reasons") && attribute.value.values.length > 32)) return null;
+    const values: string[] = [];
+    for (const value of attribute.value.values) {
+      const result = readKeyword(value);
+      if ("problem" in result) return null;
+      values.push(result.value);
+    }
+    return values;
+  }
+
   private emit(event: Omit<EvidenceEvent, "id" | "hash">): void {
     for (const listener of this.listeners) {
-      listener(event);
+      try { listener(event); } catch { /* An observer cannot interrupt device monitoring. */ }
     }
   }
 
