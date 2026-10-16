@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -27,6 +29,7 @@ type Schema = {
 const SCHEMA_PATH = fileURLToPath(new URL("../../deployments/vnext/CANONICAL.schema.json", import.meta.url));
 const WRITER_PATH = fileURLToPath(new URL("../../script/DeployVNextSettlement.s.sol", import.meta.url));
 const FIXTURE_PATH = fileURLToPath(new URL("./fixtures/vnext-canonical-base-sepolia.json", import.meta.url));
+const RECORDS_ROOT = fileURLToPath(new URL("../../deployments/vnext", import.meta.url));
 const schema: Schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8"));
 
 /**
@@ -120,6 +123,22 @@ function baseSepoliaTestnetRecord(): Record<string, unknown> {
   return JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
 }
 
+function committedRecord(slug: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(RECORDS_ROOT, slug, "CANONICAL.json"), "utf8"));
+}
+
+/** The directory check needs the record path, which JSON Schema cannot inspect. */
+function validateCommittedRecord(slug: string, record: Record<string, unknown>): string[] {
+  const errors = validate(schema, record);
+  const namedChains = new Map([["base", 8453], ["base-sepolia", 84532], ["anvil", 31337]]);
+  const chainSlug = /^chain-([1-9][0-9]*)$/.exec(slug);
+  const expectedChainId = namedChains.get(slug) ?? (chainSlug ? Number(chainSlug[1]) : undefined);
+  if (expectedChainId === undefined || record.chainId !== expectedChainId) {
+    errors.push("$.chainId: directory mismatch");
+  }
+  return errors;
+}
+
 describe("V-next CANONICAL record schema", () => {
   it("describes every key serialized by the Solidity writer, and requires every property", () => {
     expect(schema.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
@@ -127,6 +146,69 @@ describe("V-next CANONICAL record schema", () => {
     const properties = Object.keys(schema.properties ?? {}).sort();
     expect(properties).toEqual(writerKeys(readFileSync(WRITER_PATH, "utf8")));
     expect([...(schema.required ?? [])].sort()).toEqual(properties);
+  });
+
+  it("bounds every hex-pattern string and non-const integer property", () => {
+    let hexProperties = 0;
+    let integerProperties = 0;
+    const check = (node: Schema, path: string): void => {
+      for (const [key, property] of Object.entries(node.properties ?? {})) {
+        const propertyPath = `${path}.${key}`;
+        if (property.pattern?.startsWith("^0x")) {
+          hexProperties++;
+          const hexPattern = /^\^0x\[0-9a-fA-F\]\{([0-9]+)\}\$$/.exec(property.pattern);
+          expect(hexPattern, propertyPath).not.toBeNull();
+          expect(hexPattern![0], propertyPath).toBe(property.pattern);
+          const length = Number(hexPattern![1]) + 2;
+          expect(property.minLength, propertyPath).toBe(length);
+          expect(property.maxLength, propertyPath).toBe(length);
+        }
+        if (property.type === "integer" && !Object.hasOwn(property, "const")) {
+          integerProperties++;
+          expect(property.minimum, propertyPath).toBeTypeOf("number");
+          expect(property.maximum, propertyPath).toBeTypeOf("number");
+          expect(property.maximum, propertyPath).toBeLessThanOrEqual(Number.MAX_SAFE_INTEGER);
+        }
+        check(property, propertyPath);
+      }
+      for (const keyword of ["allOf", "oneOf"] as const) {
+        node[keyword]?.forEach((branch, index) => check(branch, `${path}.${keyword}[${index}]`));
+      }
+      if (node.if) check(node.if, `${path}.if`);
+      if (node.then) check(node.then, `${path}.then`);
+    };
+    check(schema, "$");
+    expect(hexProperties).toBeGreaterThanOrEqual(12);
+    expect(integerProperties).toBeGreaterThanOrEqual(14);
+  });
+
+  it("validates every committed canonical record against its schema and directory", () => {
+    const slugs = readdirSync(RECORDS_ROOT, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && existsSync(join(RECORDS_ROOT, entry.name, "CANONICAL.json")))
+      .map((entry) => entry.name);
+    expect(slugs).toContain("base-sepolia");
+    for (const slug of slugs) {
+      const record = committedRecord(slug);
+      expect(validateCommittedRecord(slug, record), slug).toEqual([]);
+      expect(record.specVersion, slug).toBe(2);
+      if (record.scheduleTestnetOnly === true) expect([84532, 31337], slug).toContain(record.chainId);
+    }
+  });
+
+  it("pins the published Base Sepolia record bytes and factory", () => {
+    const bytes = readFileSync(join(RECORDS_ROOT, "base-sepolia", "CANONICAL.json"));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(
+      "f0fd711084755608ab6b96e499ff41049e401c342d4777e4d4dda343f3e3bd5c",
+    );
+    expect(committedRecord("base-sepolia").factory).toBe("0xA31938E1a57E569E1d34F55E7F7A92BE1467c6d7");
+  });
+
+  it.each([
+    ["a Base chainId in base-sepolia", { chainId: 8453 }, "directory mismatch"],
+    ["a factory with a trailing newline", { factory: `${committedRecord("base-sepolia").factory}\n` }, "maxLength"],
+  ] as const)("rejects a committed-record copy with %s", (_name, change, reason) => {
+    const record = { ...committedRecord("base-sepolia"), ...change };
+    expect(validateCommittedRecord("base-sepolia", record).some((error) => error.endsWith(`: ${reason}`))).toBe(true);
   });
 
   it("parses multiline calls and ignores commented calls", () => {
