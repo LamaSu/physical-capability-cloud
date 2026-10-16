@@ -120,9 +120,9 @@ async function signIn(account = privateKeyToAccount(generatePrivateKey())) {
   return { account, headers, token: response.json().token as string };
 }
 
-async function mintSessionKey(headers: Record<string, string>) {
+async function mintSessionKey(headers: Record<string, string>, context?: string) {
   const response = await app.inject({ method: "POST", url: "/api/auth/session-key", headers });
-  expect(response.statusCode).toBe(201);
+  expect(response.statusCode, context).toBe(201);
   return { headers: { authorization: `Bearer ${response.json().api_key}` }, id: response.json().key_id as string };
 }
 
@@ -1004,24 +1004,35 @@ describe("SIWE principals reach only their own address", () => {
 });
 
 describe("SIWE principals: near-miss addresses and cookie-approved links", () => {
-  it("a near-miss address and another account cannot list or revoke A's key- and cookie-approved links", async () => {
+  it("near-miss addresses at every hex position and another account cannot list or revoke A's key- and cookie-approved links", async () => {
     const a = await signIn();
     const skA = await mintSessionKey(a.headers);
     const viaKey = await approve((await proved({ role: "device" })).request, skA.headers);
     const viaCookie = await approve((await proved({ role: "device" })).request, a.headers);
     expect([viaKey.statusCode, viaCookie.statusCode]).toEqual([200, 200]);
     const linkIds = [viaKey.json().linkId, viaCookie.json().linkId];
-    // Same address as A except the last hex digit: kills prefix/partial-address widenings.
-    const nearMiss = a.account.address.slice(0, -1) + (a.account.address.endsWith("0") ? "1" : "0");
-    const near = sessionHeaders("near-miss-session", nearMiss as typeof a.account.address);
-    const nearKey = await mintSessionKey(near);
-    const b = await signIn();
-    for (const headers of [b.headers, near, nearKey.headers]) {
+    async function cannotAccess(headers: Record<string, string>, context: string) {
       const listed = await app.inject({ url: "/api/wallets", headers });
-      expect(listed.statusCode).toBe(200);
-      expect(listed.json()).toEqual({ links: [] });
-      for (const linkId of linkIds) expect((await revoke(linkId, headers)).statusCode).toBe(404);
+      expect(listed.statusCode, context).toBe(200);
+      expect(listed.json(), context).toEqual({ links: [] });
+      for (const [linkIndex, linkId] of linkIds.entries()) {
+        expect((await revoke(linkId, headers)).statusCode, `${context} on L${linkIndex + 1}`).toBe(404);
+      }
     }
+    // Every hex position must participate in ownership, for cookies and minted keys
+    // against both approval paths, even when a comparison skips just one position.
+    for (let index = 2; index < 42; index++) {
+      __resetRateLimitState();
+      const digit = a.account.address[index]!.toLowerCase() === "0" ? "1" : "0";
+      const nearMiss = `${a.account.address.slice(0, index)}${digit}${a.account.address.slice(index + 1)}`;
+      const near = sessionHeaders(`near-miss-${index}`, nearMiss as typeof a.account.address);
+      const nearKey = await mintSessionKey(near, `near miss at index ${index}, key mint`);
+      for (const [principal, headers] of [["cookie", near], ["key", nearKey.headers]] as const) {
+        await cannotAccess(headers, `near miss at index ${index}, ${principal}`);
+      }
+    }
+    const b = await signIn();
+    await cannotAccess(b.headers, "B cookie");
     expect((await app.inject({ url: "/api/wallets", headers: a.headers })).json().links).toHaveLength(2);
   });
 });

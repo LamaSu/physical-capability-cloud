@@ -23,7 +23,7 @@ What PCC stores: the address or public key, the label, these terms (wallet-link 
 Approve and link. Deny.`;
 
 const AGENT_PERMISSIONS = "sign in as your agent; ask for quotes; approve and fund jobs from this wallet's own balance; read the status of its own jobs. It cannot spend from your other wallets, change your account, or approve its own link.";
-const AGENT_FUNDING = "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees) and {testUsdc} test USDC.";
+const AGENT_FUNDING = "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees) and {testUsdc} test USDC. If the faucet's daily test-USDC allowance is used up, it sends the test ETH only.";
 const AGENT_DURATION = "30 days after approval, or until you unlink it.";
 
 export const CONSENT_TEMPLATES = Object.freeze({
@@ -37,7 +37,7 @@ export const CONSENT_TEMPLATES = Object.freeze({
     .replace("{who}", "{label} (a device{client}). Device {kernel} will sign evidence for jobs on this kernel. It cannot spend")
     .replace("{permissions}", "sign evidence for jobs on this kernel. It cannot spend from this wallet or your other wallets, change your account, or approve its own link.")
     .replace("{spendingLimit}", "this device cannot spend.")
-    .replace("{funding}", "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees).")
+    .replace("{funding}", "after you approve, PCC will ask Coinbase's test faucet to send this wallet {testEth} test ETH (for fees) if it is an EVM (secp256k1) key. Ed25519 device keys get no test funds.")
     .replace("{duration}", "until unlinked."),
   hosted: BASE_TEMPLATE
     .replace("{who}", "{label} (an agent{client}). Runs in {partner}'s sandbox. {partner} operates the machine that holds the key and could use it up to the limit below")
