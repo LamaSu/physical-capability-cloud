@@ -433,7 +433,7 @@ export class JobRunner {
               return refuse("the bundle would carry a method_loaded the kernel did not record");
             }
           }
-          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, undefined, { jobId });
+          const check = this.evidenceEmitter.checkTierRequirements(events, assuranceTier, requirements, { jobId });
           if (!check.met) {
             // For tier >= 2, unmet requirements are a hard failure
             if (assuranceTier >= 2) {
