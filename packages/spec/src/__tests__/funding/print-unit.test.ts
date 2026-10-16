@@ -6,7 +6,7 @@ import {
 } from "../../evidence/accepted-policy.js";
 import { formatOperatorPrincipalId, principalTupleWord } from "../../evidence/principal-id.js";
 import { prepareFunding, type FundingExpectations } from "../../funding/prepare.js";
-import type { FundingRefusalCode } from "../../funding/errors.js";
+import { FundingRefusal, type FundingRefusalCode } from "../../funding/errors.js";
 import { MIN_RECLAIM_DELAY, type UnitConfig } from "../../funding/vnext.js";
 import { computeTermsHashV21 } from "../../funding/terms-hash-v21.js";
 import { NOW, OTHER, buildFixture, makeChain, newAccount, testExpect, testPins, type FixtureOptions } from "./fixture.js";
@@ -205,6 +205,29 @@ describe("Thursday PRINT buyer expectation", () => {
     const { printUnitThursdayExpectation } = await api();
     expect(() => printUnitThursdayExpectation({ ...input, subject })).toThrow(expect.objectContaining({ code: "BAD_EXPECTATION" }));
     expect(reads).toBe(0);
+    expect(chain.state.log).toEqual([]);
+  });
+  it("BAD_EXPECTATION before any RPC: refuses a non-enumerable settlement address", async () => {
+    const { input, chain } = await setup();
+    const subject = { ...input.subject };
+    Object.defineProperty(subject, "operatorSettlementAddress", { value: input.host, enumerable: false });
+    const { printUnitThursdayExpectation } = await api();
+    const build = () => printUnitThursdayExpectation({ ...input, subject });
+    expect(build).toThrow(FundingRefusal);
+    expect(build).toThrow(expect.objectContaining({ code: "BAD_EXPECTATION",
+      message: expect.stringContaining("subject.operatorSettlementAddress: accessor or non-enumerable properties are not accepted; pass plain data") }));
+    expect(chain.state.log).toEqual([]);
+  });
+  it.each([
+    ["malformed element", [{}], "bindings[0]: expected exactly the keys [planUnitKey, requirementIdHash, sourceKind, propositionKind, valueRef]"],
+    ["null", null, "bindings: expected an array"],
+  ] as const)("BAD_EXPECTATION before any RPC: bindings %s", async (_name, bindings, detail) => {
+    const { input, chain } = await setup();
+    const { printUnitThursdayExpectation } = await api();
+    const build = () => printUnitThursdayExpectation({ ...input, bindings: bindings as unknown as readonly SubjectBinding[] });
+    expect(build).toThrow(FundingRefusal);
+    expect(build).toThrow(expect.objectContaining({ code: "BAD_EXPECTATION",
+      message: `BAD_EXPECTATION: acceptedPolicyDigest input ${detail}` }));
     expect(chain.state.log).toEqual([]);
   });
   it("INTENT_MISMATCH before any RPC: bindings must be empty", async () => {
