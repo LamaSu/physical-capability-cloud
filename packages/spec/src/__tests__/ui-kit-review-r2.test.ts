@@ -7,6 +7,7 @@ import { idText as specIdText, fmtUsd as specUsd, fmtUsdRaw as specUsdRaw, fmtTs
 
 const source = readFileSync(new NodeURL("../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js", import.meta.url), "utf8");
 const bootTail = /  if \(document\.readyState === 'loading'\) document\.addEventListener\('DOMContentLoaded', mount\);\n  else mount\(\);/;
+const labelSelectors = source.match(/'([^']*::before)\{content:"agent-authored"/)![1]!.split(",").map((selector) => selector.replace(/::before$/, ""));
 type Text = { t: string };
 type Kit = {
   fmtUsd(raw: unknown): Text; fmtUsdRaw(raw: unknown): string; fmtTs(raw: unknown): Text;
@@ -69,7 +70,7 @@ describe("review F3: identifiers follow the IR rule", () => {
   it("marks manifest chain ids, unknown kinds and list fallback as agent words, and attributes quoted request keys", async () => {
     const { k, count } = kit();
     const chain = k.renderChain(ctx(), { composeRef: { outcomeType: "fdm", steps: ["cnc"], optimizeFor: "speed" } });
-    for (const selector of [".pcc-chain-outcome", ".pcc-chain-step", ".pcc-chain-optimize"]) expect(chain.querySelector(selector)?.classList.contains("pcc-agent"), selector).toBe(true);
+    for (const selector of [".pcc-chain-outcome", ".pcc-chain-step", ".pcc-chain-optimize"]) expect(labelSelectors.some((labelSelector) => chain.querySelector(selector)!.matches(labelSelector)), selector + " draws agent-authored attribution").toBe(true);
     const unknown = k.renderWindow(ctx(), { kind: "future-kind" });
     expect(unknown.querySelector(".pcc-win-title")!.classList.contains("pcc-agent")).toBe(true);
     const request = k.realRequestNode({ ok: true, method: "PATCH", destination: "/api/feedback", body: { custom: "value" }, amounts: [["amount", 1], ["totalAmount", 2]], refs: [["jobId", "j1"], ["escrowId", "e1"]] });

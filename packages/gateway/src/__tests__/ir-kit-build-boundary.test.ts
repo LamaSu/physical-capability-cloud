@@ -132,3 +132,24 @@ describe("IR kit build reviewed input boundary", () => {
     } finally { f.close(); }
   });
 });
+
+// N9: independently pin full paths even when source-import verification is bypassed
+// by this test fixture, so a basename-only input mutant cannot hide behind another check.
+it("r2f N9 checks full metafile input paths independently of source imports", async () => {
+  const f = fixture((mcp) => {
+    const shadow = join(mcp, "../unreviewed");
+    mkdirSync(shadow);
+    copyFileSync(join(mcp, "dashboard-ir.ts"), join(shadow, "dashboard-ir.ts"));
+    for (const name of reviewed.slice(1)) {
+      const file = join(mcp, name);
+      writeFileSync(file, readFileSync(file, "utf8").replaceAll('"./dashboard-ir.js"', '"../unreviewed/dashboard-ir.js"'));
+    }
+  }, (script) => script
+    .replace("for (const path of expected) verifyReviewedSourceImports(path);", "// This fixture independently exercises full metafile input paths.")
+    .replace("for (const path of expected) {", "for (const path of []) {"));
+  try {
+    const result = await f.run();
+    expect(result.status, JSON.stringify(result)).toBe(3);
+    expect(existsSync(join(f.root, "apps/dashboard/public/ui-kit/v1/pcc-ir-kit.js"))).toBe(false);
+  } finally { f.close(); }
+});

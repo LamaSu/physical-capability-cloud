@@ -23,7 +23,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind, KitText, AgentText } from "./dashboard-ir.js";
-import { registerKitText, registerAgentText, readText, isKitText, kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES } from "./dashboard-ir.js";
+import { registerKitText, registerAgentText, readText, isKitText, kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES, listQueryLabel } from "./dashboard-ir.js";
 
 // Minimal structural DOM: the renderer reaches the DOM only through RDocument/RElement,
 // so tests can pass a plain-object fake. ir-kit-text-brand.test.ts fails if the renderer
@@ -160,7 +160,7 @@ const SETTLEMENT_NOTICE = Object.freeze({
 // exact spec enum (types/common.ts:27 `Currency`); its displayed words come from that vocabulary.
 const CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
-const CURRENCY_ENUM: ReadonlySet<string> = new Set(["USDC", "ETH", "DAI", "SOL"]);
+const CURRENCY_ENUM: readonly string[] = Object.freeze(["USDC", "ETH", "DAI", "SOL"]);
 type FieldRead = { ok: true; text: KitText } | { ok: false };
 
 /** Read + type-validate ONE fixed schema field from fetched data. `key` is a fixed own-property
@@ -203,10 +203,19 @@ function readField(data: unknown, f: SchemaField): FieldRead {
       if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: registerKitText(raw) };
       return { ok: false };
     case "currency":
-      return typeof raw === "string" && CURRENCY_ENUM.has(raw) ? { ok: true, text: registerKitText(raw) } : { ok: false };
-    case "tiers":
-      return Array.isArray(raw) && raw.every((x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3)
-        ? { ok: true, text: registerKitText(raw.join(", ")) } : { ok: false };
+      return typeof raw === "string" && CURRENCY_ENUM.includes(raw) ? { ok: true, text: registerKitText(raw) } : { ok: false };
+    case "tiers": {
+      if (!Array.isArray(raw)) return { ok: false };
+      const values: readonly unknown[] = raw;
+      const tiers: number[] = [];
+      const length = values.length;
+      for (let index = 0; index < length; index++) {
+        const value = values[index];
+        if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 3) return { ok: false };
+        tiers.push(value);
+      }
+      return { ok: true, text: registerKitText(tiers.join(", ")) };
+    }
     case "bool":
       return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No") } : { ok: false };
     case "percent":
@@ -445,7 +454,11 @@ function timeRoundTrips(s: string): boolean {
 // tag, because those admit words ("1.0.0-paymentreceived"), so a hostile version could carry a claim.
 // No leading zeros, at most 9 digits per part, so the value is contract-bounded. Real kernels report
 // "1.4.0", "1.3.2", "0.1.0" and "1.5.0" (packages/db/src/seed/kernels.ts), each a bare numeric triple.
-const LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+// Expose no mutable RegExp identity to the rest of the renderer (compile mutates even
+// a frozen RegExp). The fixed expression exists only for this one validation call.
+const LIST_VERSION_RE = Object.freeze({
+  test(value: string): boolean { return /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/.test(value); },
+});
 type ListFieldRead = { ok: true; text: KitText; raw: unknown } | { ok: false };
 
 /** Read + type-validate ONE list field from a fetched row, by its CLOSED kind (LIST_FIELD_KINDS,
@@ -499,11 +512,12 @@ const isSafeIntValue = (v: unknown): v is number => typeof v === "number" && Num
 
 /** One `key=value` filter term. A string outside the identifier grammar, a non-safe-integer
  *  number, or any other JS value (object, array, NaN, …) is never printed raw. */
-function filterTerm(key: string, v: unknown): KitText {
+function filterTerm(key: string, v: unknown, path?: string): KitText {
   // Re-check the bind selector grammar at the mint, including forbidden prototype segments.
-  const label = key;
-  if (typeof label !== "string" || label.length > 256 || !/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(label) ||
-      label.split(".").some((part) => part === "__proto__" || part === "prototype" || part === "constructor")) return readText(null);
+  if (typeof key !== "string" || key.length > 256 || !/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(key) ||
+      key.split(".").some((part) => part === "__proto__" || part === "prototype" || part === "constructor")) return readText(null);
+  const label = path === undefined ? undefined : listQueryLabel(path, key);
+  if (label === undefined) return readText(null);
   if (typeof v === "string" && WINDOW_FILTER_VALUE_RE.test(v)) return registerKitText(label + "=" + v);
   if (isSafeIntValue(v)) return registerKitText(label + "=" + String(v));
   if (typeof v === "boolean") return registerKitText(label + "=" + (v ? "true" : "false"));
@@ -576,7 +590,7 @@ export function listWindow(node: IrNode, data: unknown, returned: number): ListW
   const parts: KitText[] = [];
   if (filterKeys.length > 0) {
     const qq = q as Record<string, unknown>;
-    parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
+    parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k], path)))));
   }
   if (offset === "unknown") parts.push(kitText("offset not shown"));
   else if (offset > 0) parts.push(joinKitText(kitText("from row "), offset === Number.MAX_SAFE_INTEGER ? kitText("9007199254740992") : countText(offset + 1)));

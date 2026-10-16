@@ -393,6 +393,9 @@ describe("a helper deleted from a mapped sink", () => {
     expect(text(".pcc-receipt-rail")).toContain(" · reported: bad rail");
     expect(text(".pcc-receipt-tx")).toBe("unrecognised value");
     expect(text(".pcc-chain-outcome")).toBe("bad type");
+    const labelRule = document.getElementById("pcc-ui-styles")!.textContent!.match(/([^{}]+)\{content:"agent-authored"/)!;
+    const labelSelectors = labelRule[1]!.split(",").map((selector) => selector.replace(/::before$/, ""));
+    expect(labelSelectors.some((selector) => document.querySelector(".pcc-chain-outcome")!.matches(selector)), "chain outcome draws agent-authored attribution").toBe(true);
     const formWindow = document.querySelector(".pcc-form-fields")!.closest(".pcc-win")!;
     (formWindow.querySelector(".pcc-btn") as HTMLButtonElement).click();
     assertKitTextViolations();

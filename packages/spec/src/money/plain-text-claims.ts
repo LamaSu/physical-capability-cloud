@@ -35,7 +35,7 @@ const LOOKALIKE: Readonly<Record<string, string>> = {
   "\u0224": "Z", "\u024c": "R", "\u0246": "E", "\u023b": "C",
 };
 // Marks, format/bidi controls and invisible fillers vanish; a braille blank reads as a space.
-const INVISIBLE_RE = /[\p{M}\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
+const INVISIBLE_RE = /[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}\u115f\u1160\u3164\uffa0]/gu;
 const MONEY_EMOJI_RE = /[\u{1F4B0}-\u{1F4B8}\u{1F911}\u{1FA99}]/gu;
 /** The one fold every check uses: lowercase Latin skeleton of what a reader sees. Whitespace runs
  *  collapse to one space, as HTML renders them; that also keeps every match below linear-time. */
@@ -151,15 +151,31 @@ function wordsIn(f: string, checks: readonly WordCheck[]): boolean {
 }
 const scriptIn = (f: string): boolean => /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(f.replace(/ /g, ""));
 
-export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)); }
+/** Raw direction controls can reverse claims or PCC's own qualifier. Never strip them. */
+export function hasBidiControl(text: string): boolean { return /\p{Bidi_Control}/u.test(text) || text.includes(String.fromCodePoint(0x070f)); }
+// Unicode 17 DerivedBidiClass R/AL (including unassigned @missing defaults).
+// https://www.unicode.org/Public/17.0.0/ucd/extracted/DerivedBidiClass.txt
+// ECMAScript has no Bidi_Class property escape; keep this dependency-free mirror in both kits.
+const STRONG_RTL_RE = /[\u{5be}\u{5c0}\u{5c3}\u{5c6}\u{5d0}-\u{5ea}\u{5ef}-\u{5f4}\u{608}\u{60b}\u{60d}\u{61b}-\u{64a}\u{66d}-\u{66f}\u{671}-\u{6d5}\u{6e5}-\u{6e6}\u{6ee}-\u{6ef}\u{6fa}-\u{70d}\u{70f}-\u{710}\u{712}-\u{72f}\u{74d}-\u{7a5}\u{7b1}\u{7c0}-\u{7ea}\u{7f4}-\u{7f5}\u{7fa}\u{7fe}-\u{815}\u{81a}\u{824}\u{828}\u{830}-\u{83e}\u{840}-\u{858}\u{85e}\u{860}-\u{86a}\u{870}-\u{88f}\u{8a0}-\u{8c9}\u{200f}\u{fb1d}\u{fb1f}-\u{fb28}\u{fb2a}-\u{fb36}\u{fb38}-\u{fb3c}\u{fb3e}\u{fb40}-\u{fb41}\u{fb43}-\u{fb44}\u{fb46}-\u{fbc2}\u{fbd3}-\u{fd3d}\u{fd50}-\u{fd8f}\u{fd92}-\u{fdc7}\u{fdf0}-\u{fdfc}\u{fe70}-\u{fe74}\u{fe76}-\u{fefc}\u{10800}-\u{10805}\u{10808}\u{1080a}-\u{10835}\u{10837}-\u{10838}\u{1083c}\u{1083f}-\u{10855}\u{10857}-\u{1089e}\u{108a7}-\u{108af}\u{108e0}-\u{108f2}\u{108f4}-\u{108f5}\u{108fb}-\u{1091b}\u{10920}-\u{10939}\u{1093f}-\u{10959}\u{10980}-\u{109b7}\u{109bc}-\u{109cf}\u{109d2}-\u{10a00}\u{10a10}-\u{10a13}\u{10a15}-\u{10a17}\u{10a19}-\u{10a35}\u{10a40}-\u{10a48}\u{10a50}-\u{10a58}\u{10a60}-\u{10a9f}\u{10ac0}-\u{10ae4}\u{10aeb}-\u{10af6}\u{10b00}-\u{10b35}\u{10b40}-\u{10b55}\u{10b58}-\u{10b72}\u{10b78}-\u{10b91}\u{10b99}-\u{10b9c}\u{10ba9}-\u{10baf}\u{10c00}-\u{10c48}\u{10c80}-\u{10cb2}\u{10cc0}-\u{10cf2}\u{10cfa}-\u{10d23}\u{10d4a}-\u{10d65}\u{10d6f}-\u{10d85}\u{10d8e}-\u{10d8f}\u{10e80}-\u{10ea9}\u{10ead}\u{10eb0}-\u{10eb1}\u{10ec2}-\u{10ec7}\u{10f00}-\u{10f27}\u{10f30}-\u{10f45}\u{10f51}-\u{10f59}\u{10f70}-\u{10f81}\u{10f86}-\u{10f89}\u{10fb0}-\u{10fcb}\u{10fe0}-\u{10ff6}\u{1e800}-\u{1e8c4}\u{1e8c7}-\u{1e8cf}\u{1e900}-\u{1e943}\u{1e94b}\u{1e950}-\u{1e959}\u{1e95e}-\u{1e95f}\u{1ec71}-\u{1ecb4}\u{1ed01}-\u{1ed3d}\u{1ee00}-\u{1ee03}\u{1ee05}-\u{1ee1f}\u{1ee21}-\u{1ee22}\u{1ee24}\u{1ee27}\u{1ee29}-\u{1ee32}\u{1ee34}-\u{1ee37}\u{1ee39}\u{1ee3b}\u{1ee42}\u{1ee47}\u{1ee49}\u{1ee4b}\u{1ee4d}-\u{1ee4f}\u{1ee51}-\u{1ee52}\u{1ee54}\u{1ee57}\u{1ee59}\u{1ee5b}\u{1ee5d}\u{1ee5f}\u{1ee61}-\u{1ee62}\u{1ee64}\u{1ee67}-\u{1ee6a}\u{1ee6c}-\u{1ee72}\u{1ee74}-\u{1ee77}\u{1ee79}-\u{1ee7c}\u{1ee7e}\u{1ee80}-\u{1ee89}\u{1ee8b}-\u{1ee9b}\u{1eea1}-\u{1eea3}\u{1eea5}-\u{1eea9}\u{1eeab}-\u{1eebb}]|(?=\p{Cn})[\u{590}-\u{8ff}\u{fb1d}-\u{fdcf}\u{fdf0}-\u{fdff}\u{fe70}-\u{feff}\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/gu;
+function claimIn(text: string, checks: readonly WordCheck[]): boolean {
+  const f = foldForClaims(text);
+  if (AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, checks)) return true;
+  const stripped = text.replace(STRONG_RTL_RE, "");
+  if (stripped === text) return false;
+  const visual = foldForClaims(stripped);
+  return AMOUNT_RE.test(visual) || scriptIn(visual) || wordsIn(visual, checks);
+}
+export function statesAmount(text: string): boolean { return AMOUNT_RE.test(foldForClaims(text)) || AMOUNT_RE.test(foldForClaims(text.replace(STRONG_RTL_RE, ""))); }
 /** Does the text state an amount or a payment or verification status? */
-export function isMoneyClaim(text: string): boolean { const f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]); }
+export function isMoneyClaim(text: string): boolean { return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, PAIR_WORDS]); }
 /** Does the text mention PCC's withheld notice ("withheld", "withhold")? Only PCC may say that. */
-export function mentionsWithheld(text: string): boolean { return wordsIn(foldForClaims(text), [NOTICE_WORDS]); }
+export function mentionsWithheld(text: string): boolean {
+  const stripped = text.replace(STRONG_RTL_RE, "");
+  return wordsIn(foldForClaims(text), [NOTICE_WORDS]) || (stripped !== text && wordsIn(foldForClaims(stripped), [NOTICE_WORDS]));
+}
 /** Agent prose that may not be shown: a money claim, or a mention of PCC's notice (one fold). */
 export function isProseClaim(text: string): boolean {
-  const f = foldForClaims(text);
-  return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
+  return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
 }
 
 
@@ -168,5 +184,7 @@ const IDENT_NOUN_RE = new RegExp(`\\b${CLAIM_NOUN_GROUP}\\b`);
 const IDENT_GENERIC_RE = new RegExp(`\\b${GENERIC_GROUP}\\b`);
 export function isIdentifierClaim(value: string): boolean {
   if (isMoneyClaim(value) || mentionsWithheld(value)) return true;
-  return views(foldForClaims(value)).some((v) => IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v));
+  const stripped = value.replace(STRONG_RTL_RE, "");
+  return (stripped === value ? [value] : [value, stripped]).some((text) =>
+    views(foldForClaims(text)).some((v) => IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)));
 }

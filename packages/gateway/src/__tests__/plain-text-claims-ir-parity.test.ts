@@ -43,6 +43,9 @@ describe("IR and spec plain-text claim detector parity", () => {
 
   it.each(PLAIN_CLAIM_CASES)("keeps the shared prose-claim expectation for %j", (raw, expected) => {
     expect(irIsProseClaim(raw)).toBe(expected);
+  });
+
+  it.each(PLAIN_CLAIM_CASES)("spec shared prose-claim expectation for %j", (raw, expected) => {
     expect(isProseClaim(raw)).toBe(expected);
   });
 

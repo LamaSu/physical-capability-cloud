@@ -51,6 +51,14 @@ const CAPTURE_DECLARATIONS = new Map([
   ["TEXT_FREEZE", "TEXT_FREEZE = Object.freeze"],
   ["TEXT_APPLY", "TEXT_APPLY: <T, A extends unknown[], R>(target: (this: T, ...args: A) => R, receiver: T, args: A) => R = Reflect.apply"],
 ]);
+// Exact owner declarations close leaks from inside the already-confined brand internals.
+const BRAND_OWNER_DECLARATIONS = new Map<string, readonly string[]>([
+  ["registerKitText", ["export function registerKitText(t: string): KitText {\n  if (typeof t !== \"string\") { textViolation(); t = \"\u2014\"; }\n  const identity = { get t(): string { return TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [identity]) ?? \"\u2014\"; } };\n  const text = TEXT_FREEZE(identity) as KitText;\n  TEXT_APPLY(TEXT_STORE_SET, TEXT_BRANDS, [identity, t]);\n  return text;\n}"]],
+  ["registerAgentText", ["export function registerAgentText(t: string): AgentText {\n  if (typeof t !== \"string\") { textViolation(); t = \"\u2014\"; }\n  const identity = { get t(): string { return TEXT_APPLY(TEXT_STORE_GET, AGENT_TEXT_BRANDS, [identity]) ?? \"\u2014\"; } };\n  const text = TEXT_FREEZE(identity) as AgentText;\n  TEXT_APPLY(TEXT_STORE_SET, AGENT_TEXT_BRANDS, [identity, t]);\n  return text;\n}"]],
+  ["isKitText", ["export function isKitText(value: unknown): boolean {\n  return value !== null && typeof value === \"object\" && typeof TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [value]) === \"string\";\n}"]],
+  ["readText", ["export function readText(value: unknown, tier?: \"kit\"): KitText;", "export function readText(value: unknown, tier: \"agent\" | \"authored\"): KitText | AgentText;", "export function readText(value: unknown, tier: \"kit\" | \"agent\" | \"authored\" = \"kit\"): KitText | AgentText {\n  if (value !== null && typeof value === \"object\" &&\n      ((tier !== \"agent\" && typeof TEXT_APPLY(TEXT_STORE_GET, TEXT_BRANDS, [value]) === \"string\") ||\n       (tier !== \"kit\" && typeof TEXT_APPLY(TEXT_STORE_GET, AGENT_TEXT_BRANDS, [value]) === \"string\"))) {\n    return value as KitText | AgentText;\n  }\n  textViolation();\n  return INVALID_TEXT;\n}"]],
+  ["textViolation", ["function textViolation(): void {\n  textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ = (textDiagnostics.__PCC_UI_TEXT_VIOLATIONS__ ?? 0) + 1;\n}"]],
+]);
 // Only these exact top-level declarations can assert the opaque representation:
 // constructors freeze/register it; readText authenticates identity before returning it.
 
@@ -807,6 +815,11 @@ function audit(p: ts.Program, mints = MINTS, dom = DOM, bundled: readonly string
     const functions: ts.Node[] = [];
     const collect = (n: ts.Node): void => { if (ts.isFunctionLike(n)) functions.push(n); ts.forEachChild(n, collect); };
     collect(s);
+    if (file === "dashboard-ir.ts") for (const [name, expected] of BRAND_OWNER_DECLARATIONS) {
+      const owners = functions.filter((fn) => ts.isFunctionDeclaration(fn) && fn.name?.text === name && fn.parent === s);
+      if (owners.length !== expected.length) add("brand-confinement", owners[owners.length - 1] ?? s, `Runtime brand owner declarations are pinned exactly: ${name}`);
+      for (const [index, owner] of owners.entries()) if (owner.getText(s) !== expected[index]) add("brand-confinement", owner, `Runtime brand owner text is pinned exactly: ${name}`);
+    }
     const declarations = new Map<string, ts.Node>();
     const permittedNames = new Set(mints.map((entry) => entry.function));
     for (const entry of mints.filter((entry) => entry.file === file)) {
@@ -1349,6 +1362,20 @@ function overriddenProgram(overrides: Map<string, string>, parsed = config): ts.
 }
 
 const MUTATIONS = [
+  {"name": "r2f N9 exact capture initializer TEXT_STORE_GET", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= WeakMap.prototype.get;", "code": "= (WeakMap.prototype.get);"} ,
+  {"name": "r2f N9 exact capture initializer TEXT_STORE_SET", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= WeakMap.prototype.set;", "code": "= (WeakMap.prototype.set);"} ,
+  {"name": "r2f N9 exact capture initializer TEXT_FREEZE", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= Object.freeze;", "code": "= (Object.freeze);"} ,
+  {"name": "r2f N9 exact capture initializer TEXT_APPLY", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "= Reflect.apply;", "code": "= (Reflect.apply);"} ,
+  {"name": "r2f N9 diagnostic capture position", "file": "dashboard-ir.ts", "rule": "captures-first", "needle": "const textDiagnostics = globalThis", "code": "void 0;\nconst textDiagnostics = globalThis"} ,
+  {"name": "r2f N9 unknown-to-union assertion", "file": "dashboard-ir-renderer.ts", "rule": "assertion", "code": "function probeUnknownUnion(value: unknown): { a: string } | { b: string } { return value as { a: string } | { b: string }; }"} ,
+
+  {"name": "r2f O1 exact owner body registerKitText", "file": "dashboard-ir.ts", "rule": "brand-confinement", "needle": "export function registerKitText(t: string): KitText {", "code": "export function registerKitText(t: string): KitText { void 0;"} ,
+  {"name": "r2f O1 exact owner body registerAgentText", "file": "dashboard-ir.ts", "rule": "brand-confinement", "needle": "export function registerAgentText(t: string): AgentText {", "code": "export function registerAgentText(t: string): AgentText { void 0;"} ,
+  {"name": "r2f O1 exact owner body isKitText", "file": "dashboard-ir.ts", "rule": "brand-confinement", "needle": "export function isKitText(value: unknown): boolean {", "code": "export function isKitText(value: unknown): boolean { void 0;"} ,
+  {"name": "r2f O1 exact owner body readText", "file": "dashboard-ir.ts", "rule": "brand-confinement", "needle": "export function readText(value: unknown, tier: \"kit\" | \"agent\" | \"authored\" = \"kit\"): KitText | AgentText {", "code": "export function readText(value: unknown, tier: \"kit\" | \"agent\" | \"authored\" = \"kit\"): KitText | AgentText { void 0;"} ,
+  {"name": "r2f O1 exact owner body textViolation", "file": "dashboard-ir.ts", "rule": "brand-confinement", "needle": "function textViolation(): void {", "code": "function textViolation(): void { void 0;"} ,
+  {"name": "r2f O1 Y03 owner edit leaks TEXT_BRANDS", "file": "dashboard-ir.ts", "rule": "brand-confinement", "needle": "export function registerKitText(t: string): KitText {", "code": "let probeLeakY03: object = {};\nexport function registerKitText(t: string): KitText { probeLeakY03 = TEXT_BRANDS;", "lineOffset": 1} ,
+
   {"name": "r2e4 fresh F11 unresolved global constructor acquisition", "file": "dashboard-ir-browser-entry.ts", "rule": "intrinsic-escape", "code": "function probeDynamicGlobal(): object { const key = [\"Reg\", \"Exp\"].join(\"\"); return (window as Window & { [key: string]: object })[key]!; }"} ,
   {"name": "r2e4 destructured unresolved computed callable key union", "file": "dashboard-ir-renderer.ts", "rule": "builtin-write", "code": "function probeDestructuredComputed(p: { [key: string]: () => unknown }, key: \"safe\" | `com${string}`): unknown { const { [key]: fn } = p; return fn; }"} ,
   {"name": "r2e4 destructured compile name structural receiver", "file": "dashboard-ir-renderer.ts", "rule": "builtin-write", "code": "function probeDestructuredCompile(p: { compile: unknown }): unknown { const { compile: fn } = p; return fn; }"} ,

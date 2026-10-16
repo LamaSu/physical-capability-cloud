@@ -127,11 +127,13 @@ describe("plain typed-text helper grammars, kit == canonical spec", () => {
     }
   });
 
+  it.each(PLAIN_CLAIM_CASES)("spec prose-claim expectation for %j", (raw, expected) => {
+    expect(isProseClaim(raw)).toBe(expected);
+  });
+  it.each(PLAIN_CLAIM_CASES)("shipped kit prose-claim expectation for %j", (raw, expected) => {
+    expect(kit.isProseClaim(raw)).toBe(expected);
+  });
   it("the existing claim detector agrees, including reserved notices and folded spellings", () => {
-    for (const [raw, expected] of PLAIN_CLAIM_CASES) {
-      expect(isProseClaim(raw), raw).toBe(expected);
-      expect(kit.isProseClaim(raw), raw).toBe(expected);
-    }
     const inputs = new Set([
       ...PLAIN_CLAIM_CASES.map(([raw]) => raw),
       ...Object.values(PLAIN_TEXT_CASES).flatMap((cases) => cases.map(([raw]) => raw)),

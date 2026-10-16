@@ -239,7 +239,7 @@
     "\u0246": "E",
     "\u023B": "C"
   };
-  var INVISIBLE_RE = /[\p{M}\p{Cf}\u115f\u1160\u3164\uffa0]/gu;
+  var INVISIBLE_RE = /[\p{M}\p{Cf}\p{Default_Ignorable_Code_Point}\u115f\u1160\u3164\uffa0]/gu;
   var MONEY_EMOJI_RE = /[\u{1F4B0}-\u{1F4B8}\u{1F911}\u{1FA99}]/gu;
   function foldForClaims(text) {
     let t = text.normalize("NFKD").replace(INVISIBLE_RE, "").normalize("NFKC");
@@ -322,29 +322,43 @@
     if (text === "") return kitText("");
     const t = boundValueText(field, text);
     if (t === WITHHELD_FIELD) return t;
-    for (const v of views(foldForClaims(text))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+    const stripped = text.replace(STRONG_RTL_RE, "");
+    for (const candidate of stripped === text ? [text] : [text, stripped]) {
+      for (const v of views(foldForClaims(candidate))) if (IDENT_NOUN_RE.test(v) && IDENT_GENERIC_RE.test(v)) return WITHHELD_FIELD;
+    }
     return registerKitText(readText(REPORTED_PREFIX).t + text);
   }
+  function hasBidiControl(text) {
+    return /\p{Bidi_Control}/u.test(text) || text.includes(String.fromCodePoint(1807));
+  }
+  var STRONG_RTL_RE = /[\u{5be}\u{5c0}\u{5c3}\u{5c6}\u{5d0}-\u{5ea}\u{5ef}-\u{5f4}\u{608}\u{60b}\u{60d}\u{61b}-\u{64a}\u{66d}-\u{66f}\u{671}-\u{6d5}\u{6e5}-\u{6e6}\u{6ee}-\u{6ef}\u{6fa}-\u{70d}\u{70f}-\u{710}\u{712}-\u{72f}\u{74d}-\u{7a5}\u{7b1}\u{7c0}-\u{7ea}\u{7f4}-\u{7f5}\u{7fa}\u{7fe}-\u{815}\u{81a}\u{824}\u{828}\u{830}-\u{83e}\u{840}-\u{858}\u{85e}\u{860}-\u{86a}\u{870}-\u{88f}\u{8a0}-\u{8c9}\u{200f}\u{fb1d}\u{fb1f}-\u{fb28}\u{fb2a}-\u{fb36}\u{fb38}-\u{fb3c}\u{fb3e}\u{fb40}-\u{fb41}\u{fb43}-\u{fb44}\u{fb46}-\u{fbc2}\u{fbd3}-\u{fd3d}\u{fd50}-\u{fd8f}\u{fd92}-\u{fdc7}\u{fdf0}-\u{fdfc}\u{fe70}-\u{fe74}\u{fe76}-\u{fefc}\u{10800}-\u{10805}\u{10808}\u{1080a}-\u{10835}\u{10837}-\u{10838}\u{1083c}\u{1083f}-\u{10855}\u{10857}-\u{1089e}\u{108a7}-\u{108af}\u{108e0}-\u{108f2}\u{108f4}-\u{108f5}\u{108fb}-\u{1091b}\u{10920}-\u{10939}\u{1093f}-\u{10959}\u{10980}-\u{109b7}\u{109bc}-\u{109cf}\u{109d2}-\u{10a00}\u{10a10}-\u{10a13}\u{10a15}-\u{10a17}\u{10a19}-\u{10a35}\u{10a40}-\u{10a48}\u{10a50}-\u{10a58}\u{10a60}-\u{10a9f}\u{10ac0}-\u{10ae4}\u{10aeb}-\u{10af6}\u{10b00}-\u{10b35}\u{10b40}-\u{10b55}\u{10b58}-\u{10b72}\u{10b78}-\u{10b91}\u{10b99}-\u{10b9c}\u{10ba9}-\u{10baf}\u{10c00}-\u{10c48}\u{10c80}-\u{10cb2}\u{10cc0}-\u{10cf2}\u{10cfa}-\u{10d23}\u{10d4a}-\u{10d65}\u{10d6f}-\u{10d85}\u{10d8e}-\u{10d8f}\u{10e80}-\u{10ea9}\u{10ead}\u{10eb0}-\u{10eb1}\u{10ec2}-\u{10ec7}\u{10f00}-\u{10f27}\u{10f30}-\u{10f45}\u{10f51}-\u{10f59}\u{10f70}-\u{10f81}\u{10f86}-\u{10f89}\u{10fb0}-\u{10fcb}\u{10fe0}-\u{10ff6}\u{1e800}-\u{1e8c4}\u{1e8c7}-\u{1e8cf}\u{1e900}-\u{1e943}\u{1e94b}\u{1e950}-\u{1e959}\u{1e95e}-\u{1e95f}\u{1ec71}-\u{1ecb4}\u{1ed01}-\u{1ed3d}\u{1ee00}-\u{1ee03}\u{1ee05}-\u{1ee1f}\u{1ee21}-\u{1ee22}\u{1ee24}\u{1ee27}\u{1ee29}-\u{1ee32}\u{1ee34}-\u{1ee37}\u{1ee39}\u{1ee3b}\u{1ee42}\u{1ee47}\u{1ee49}\u{1ee4b}\u{1ee4d}-\u{1ee4f}\u{1ee51}-\u{1ee52}\u{1ee54}\u{1ee57}\u{1ee59}\u{1ee5b}\u{1ee5d}\u{1ee5f}\u{1ee61}-\u{1ee62}\u{1ee64}\u{1ee67}-\u{1ee6a}\u{1ee6c}-\u{1ee72}\u{1ee74}-\u{1ee77}\u{1ee79}-\u{1ee7c}\u{1ee7e}\u{1ee80}-\u{1ee89}\u{1ee8b}-\u{1ee9b}\u{1eea1}-\u{1eea3}\u{1eea5}-\u{1eea9}\u{1eeab}-\u{1eebb}]|(?=\p{Cn})[\u{590}-\u{8ff}\u{fb1d}-\u{fdcf}\u{fdf0}-\u{fdff}\u{fe70}-\u{feff}\u{10800}-\u{10fff}\u{1e800}-\u{1efff}]/gu;
+  function claimIn(text, checks) {
+    const f = foldForClaims(text);
+    if (AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, checks)) return true;
+    const stripped = text.replace(STRONG_RTL_RE, "");
+    if (stripped === text) return false;
+    const visual = foldForClaims(stripped);
+    return AMOUNT_RE.test(visual) || scriptIn(visual) || wordsIn(visual, checks);
+  }
   function statesAmount(text) {
-    return AMOUNT_RE.test(foldForClaims(text));
+    return AMOUNT_RE.test(foldForClaims(text)) || AMOUNT_RE.test(foldForClaims(text.replace(STRONG_RTL_RE, "")));
   }
   function isMoneyClaim(text) {
-    const f = foldForClaims(text);
-    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]);
+    return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, PAIR_WORDS]);
   }
   function mentionsWithheld(text) {
-    return wordsIn(foldForClaims(text), [NOTICE_WORDS]);
+    const stripped = text.replace(STRONG_RTL_RE, "");
+    return wordsIn(foldForClaims(text), [NOTICE_WORDS]) || stripped !== text && wordsIn(foldForClaims(stripped), [NOTICE_WORDS]);
   }
   function isProseClaim(text) {
-    const f = foldForClaims(text);
-    return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
+    return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
   }
   var RECORD_STATUS_NOTE = kitText(" - reported by the record, not confirmed by a settlement read");
   var MONEY_STATE_RE = /\b(?:settled|released|paid|unpaid|payout|payouts|refund|refunded|refunds|funded|unfunded|charged|credited|debited|deposited|withdrawn|escrowed)\b/;
   function isMoneyState(value) {
     return MONEY_STATE_RE.test(foldForClaims(value).replace(/[^a-z0-9]+/g, " "));
   }
-  var SAFE_STATUS_WORDS = /* @__PURE__ */ new Set([
+  var SAFE_STATUS_WORDS = Object.freeze([
     "RUNNING",
     "IN_PROGRESS",
     "PROGRESS",
@@ -412,7 +426,7 @@
     return foldForClaims(value).toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   }
   function isSafeStatusWord(value) {
-    return SAFE_STATUS_WORDS.has(normalizeStatusWord(value));
+    return SAFE_STATUS_WORDS.includes(normalizeStatusWord(value));
   }
   var RECORD_CLAIM_NOTE = kitText(" - reported by the record, not confirmed by PCC");
   var WITHHELD_FIELD = kitText("withheld: stated money or verification");
@@ -420,6 +434,8 @@
     if (typeof value !== "string") return readText(null);
     const text = value;
     if (text === "") return kitText("");
+    if (hasBidiControl(text)) return WITHHELD_FIELD;
+    if (/(?=\p{Cn})\p{Default_Ignorable_Code_Point}/u.test(text) && isProseClaim(text)) return WITHHELD_FIELD;
     if (statesAmount(text) || mentionsWithheld(text)) return WITHHELD_FIELD;
     if (isSafeStatusWord(text)) return registerKitText(text);
     if (isMoneyState(text)) return registerKitText(text + readText(RECORD_STATUS_NOTE).t);
@@ -573,6 +589,10 @@
     }
     // approval in B is a STATIC notice — no live bind (live approval state is C+D out-of-band).
   };
+  function listQueryLabel(path, key) {
+    const routes = BIND_POLICY.list.queryByRoute;
+    return routes && Object.prototype.hasOwnProperty.call(routes, path) ? routes[path]?.find((label) => label === key) : void 0;
+  }
   var PROTO_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
   function isPlain(v) {
     if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
@@ -1252,7 +1272,7 @@
   });
   var CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
   var AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
-  var CURRENCY_ENUM = /* @__PURE__ */ new Set(["USDC", "ETH", "DAI", "SOL"]);
+  var CURRENCY_ENUM = Object.freeze(["USDC", "ETH", "DAI", "SOL"]);
   function readField(data, f) {
     const keys = Array.isArray(f.key) ? f.key : [f.key];
     let raw;
@@ -1278,9 +1298,19 @@
         if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: registerKitText(raw) };
         return { ok: false };
       case "currency":
-        return typeof raw === "string" && CURRENCY_ENUM.has(raw) ? { ok: true, text: registerKitText(raw) } : { ok: false };
-      case "tiers":
-        return Array.isArray(raw) && raw.every((x) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3) ? { ok: true, text: registerKitText(raw.join(", ")) } : { ok: false };
+        return typeof raw === "string" && CURRENCY_ENUM.includes(raw) ? { ok: true, text: registerKitText(raw) } : { ok: false };
+      case "tiers": {
+        if (!Array.isArray(raw)) return { ok: false };
+        const values = raw;
+        const tiers = [];
+        const length = values.length;
+        for (let index = 0; index < length; index++) {
+          const value = values[index];
+          if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 3) return { ok: false };
+          tiers.push(value);
+        }
+        return { ok: true, text: registerKitText(tiers.join(", ")) };
+      }
       case "bool":
         return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No") } : { ok: false };
       case "percent":
@@ -1473,7 +1503,11 @@
     const d = new Date(Date.UTC(year, month - 1, day, hour, minute, second, ms));
     return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day && d.getUTCHours() === hour && d.getUTCMinutes() === minute && d.getUTCSeconds() === second && d.getUTCMilliseconds() === ms;
   }
-  var LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+  var LIST_VERSION_RE = Object.freeze({
+    test(value) {
+      return /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/.test(value);
+    }
+  });
   function readListField(row, field) {
     const raw = readOwnPath(row, field);
     if (raw === void 0 || raw === null) return { ok: true, text: kitText(""), raw };
@@ -1503,9 +1537,10 @@
   var WINDOW_OFFSET_STR_RE = /^(0|[1-9]\d{0,8})$/;
   var WINDOW_LIMIT_STR_RE = /^[1-9]\d{0,8}$/;
   var isSafeIntValue = (v) => typeof v === "number" && Number.isSafeInteger(v);
-  function filterTerm(key, v) {
-    const label = key;
-    if (typeof label !== "string" || label.length > 256 || !/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(label) || label.split(".").some((part) => part === "__proto__" || part === "prototype" || part === "constructor")) return readText(null);
+  function filterTerm(key, v, path) {
+    if (typeof key !== "string" || key.length > 256 || !/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(key) || key.split(".").some((part) => part === "__proto__" || part === "prototype" || part === "constructor")) return readText(null);
+    const label = path === void 0 ? void 0 : listQueryLabel(path, key);
+    if (label === void 0) return readText(null);
     if (typeof v === "string" && WINDOW_FILTER_VALUE_RE.test(v)) return registerKitText(label + "=" + v);
     if (isSafeIntValue(v)) return registerKitText(label + "=" + String(v));
     if (typeof v === "boolean") return registerKitText(label + "=" + (v ? "true" : "false"));
@@ -1549,7 +1584,7 @@
     const parts = [];
     if (filterKeys.length > 0) {
       const qq = q;
-      parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
+      parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k], path)))));
     }
     if (offset === "unknown") parts.push(kitText("offset not shown"));
     else if (offset > 0) parts.push(joinKitText(kitText("from row "), offset === Number.MAX_SAFE_INTEGER ? kitText("9007199254740992") : countText(offset + 1)));
