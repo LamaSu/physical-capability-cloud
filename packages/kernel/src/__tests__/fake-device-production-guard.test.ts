@@ -8,21 +8,25 @@ import { createMachineAdapter } from "../adapter-factory.js";
 import type { DeviceConfig } from "../kernel-config.js";
 
 const sourceRoot = fileURLToPath(new URL("..", import.meta.url));
-const testingRoot = path.join(sourceRoot, "testing");
+const fixtureRoot = fileURLToPath(new URL("fixtures/fake-device-production-guard/", import.meta.url));
 
 /** Parse module specifiers, so comments and ordinary string literals cannot trip the guard. */
-function testingSpecifiers(source: string, filename: string): string[] {
+function testingSpecifiers(source: string, filename: string, root = sourceRoot): string[] {
   const parsed = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
   const found: string[] = [];
+  const testingRoot = path.join(root, "testing");
+  const fromTesting = filename.startsWith(testingRoot + path.sep);
   const inspect = (specifier: ts.Expression | undefined): void => {
     if (!specifier || !ts.isStringLiteralLike(specifier)) return;
     const value = specifier.text;
     const relative = value.startsWith(".") || path.isAbsolute(value)
       ? path.resolve(path.dirname(filename), value) : undefined;
-    if (
+    const importsTesting =
       value === "@pcc/kernel/testing" || value.startsWith("@pcc/kernel/testing/") ||
-      relative === testingRoot || relative?.startsWith(testingRoot + path.sep)
-    ) found.push(value);
+      relative === testingRoot || relative?.startsWith(testingRoot + path.sep);
+    const importsTests = relative !== undefined &&
+      path.relative(root, relative).split(path.sep).includes("__tests__");
+    if (importsTests || (!fromTesting && importsTesting)) found.push(value);
   };
   const visit = (node: ts.Node): void => {
     if (ts.isImportDeclaration(node)) inspect(node.moduleSpecifier);
@@ -40,12 +44,12 @@ function testingSpecifiers(source: string, filename: string): string[] {
   return found;
 }
 
-function productionSources(directory: string): string[] {
+function productionSources(directory: string, root = sourceRoot): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const filename = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      return filename === testingRoot || filename === path.join(sourceRoot, "__tests__")
-        ? [] : productionSources(filename);
+      return filename === path.join(root, "__tests__")
+        ? [] : productionSources(filename, root);
     }
     return entry.name.endsWith(".ts") && !/\.(?:test|spec)\.ts$/.test(entry.name) ? [filename] : [];
   });
@@ -53,30 +57,71 @@ function productionSources(directory: string): string[] {
 
 describe("FakeDevice production isolation", () => {
   it("scans exactly the independently enumerated production sources", () => {
-    // Only the two top-level trees are excluded; nested __tests__ helpers stay scanned.
+    // Only the top-level test tree is excluded; nested __tests__ helpers stay scanned.
     const independent = readdirSync(sourceRoot, { recursive: true, encoding: "utf8" })
       .filter((relative) =>
         relative.endsWith(".ts") && !/\.(?:test|spec)\.ts$/.test(relative) &&
-        !relative.startsWith(`testing${path.sep}`) && !relative.startsWith(`__tests__${path.sep}`),
+        !relative.startsWith(`__tests__${path.sep}`),
       )
       .map((relative) => path.join(sourceRoot, relative))
       .filter((filename) => !lstatSync(filename).isDirectory());
     expect(productionSources(sourceRoot).sort()).toEqual(independent.sort());
   });
 
-  it("includes production sentinels and excludes testing trees and test files", () => {
+  it("includes shipped testing modules and excludes the top-level test tree and test files", () => {
     const scanned = productionSources(sourceRoot).map((filename) => path.relative(sourceRoot, filename));
     expect(scanned).toEqual(expect.arrayContaining([
       "index.ts", "server.ts", "adapter-factory.ts", "printer-job.ts", "job-runner.ts",
       path.join("adapters", "types.ts"), path.join("adapters", "ipp-adapter.ts"),
       path.join("adapters", "sila", "sila-adapter.ts"), path.join("digital", "accounting-kernel.ts"),
       path.join("opentrons", "adapter.ts"), path.join("safety", "governor.ts"),
+      path.join("testing", "index.ts"), path.join("testing", "fake-device.ts"),
     ]));
     for (const relative of scanned) {
       expect(relative).not.toMatch(/\.(?:test|spec)\.ts$/);
-      expect(relative.startsWith(`testing${path.sep}`)).toBe(false);
       expect(relative.startsWith(`__tests__${path.sep}`)).toBe(false);
     }
+  });
+
+  it("testing barrel exports only the audited FakeDevice", async () => {
+    expect(Object.keys(await import("../testing/index.js")).sort()).toEqual(["FakeDevice"]);
+  });
+
+  it("shipped-file fixture importing a sibling outside __tests__ stays clean", () => {
+    const root = path.join(fixtureRoot, "clean");
+    const violations = productionSources(root, root).flatMap((filename) =>
+      testingSpecifiers(readFileSync(filename, "utf8"), filename, root),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it("shipped entry fixture cannot import a __tests__ helper", () => {
+    const root = path.join(fixtureRoot, "leaks");
+    const filename = path.join(root, "entry.ts");
+    expect(testingSpecifiers(readFileSync(filename, "utf8"), filename, root))
+      .toEqual(["./__tests__/helpers/device-faults.js"]);
+  });
+
+  it("shipped testing barrel fixture cannot re-export test-only faults", () => {
+    const root = path.join(fixtureRoot, "leaks");
+    const filename = path.join(root, "testing", "index.ts");
+    const violations = productionSources(root, root).flatMap((shipped) =>
+      testingSpecifiers(readFileSync(shipped, "utf8"), shipped, root)
+        .map((specifier) => ({ file: path.relative(root, shipped), specifier })),
+    );
+    expect(violations).toContainEqual({
+      file: path.relative(root, filename), specifier: "../__tests__/helpers/device-faults.js",
+    });
+  });
+
+  it.each([
+    ["static import", 'import { withFault } from "./__tests__/helpers/device-faults.js";'],
+    ["export star", 'export * from "./__tests__/helpers/device-faults.js";'],
+    ["require", 'const faults = require("./__tests__/helpers/device-faults.js");'],
+    ["dynamic import", 'const faults = import("./__tests__/helpers/device-faults.js");'],
+  ])("specifier matcher catches a test-only %s", (_label, source) => {
+    expect(testingSpecifiers(source, path.join(sourceRoot, "index.ts")))
+      .toEqual(["./__tests__/helpers/device-faults.js"]);
   });
 
   it.each([
@@ -101,7 +146,7 @@ describe("FakeDevice production isolation", () => {
     expect(testingSpecifiers(source, path.join(sourceRoot, "index.ts"))).toEqual([]);
   });
 
-  it("production sources have no imports or re-exports of src/testing", () => {
+  it("shipped sources have no forbidden testing or __tests__ imports or re-exports", () => {
     const violations = productionSources(sourceRoot).flatMap((filename) =>
       testingSpecifiers(readFileSync(filename, "utf8"), filename).map((specifier) => ({
         file: path.relative(sourceRoot, filename), specifier,
