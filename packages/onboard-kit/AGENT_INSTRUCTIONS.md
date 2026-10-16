@@ -716,6 +716,8 @@ Use the reference adapters in `@pcc/kernel` as starting points. `OctoPrintAdapte
 | SiLA 2 (lab instruments) | `SiLAAdapter` | `@pcc/kernel` |
 | Custom protocol | Write from scratch using `MachineAdapter` interface | — |
 
+Legacy surfaces to convert in a follow-up are `packages/gateway/src/routes/sdk.ts`, `packages/gateway/src/services/wizard-prompt.ts`, `packages/agent-support/src/knowledge-base.ts`, `GenericHttpAdapter`, the `quickStart` bridge, and `packages/agent-kernel/src/kernel-agent.ts`.
+
 ---
 
 ## Step 3: Configure Your Shop Kernel
@@ -734,9 +736,16 @@ import { YourCameraAdapter } from "./adapters/your-camera-adapter.js";
 const KERNEL_ID = "kernel_your_shop_001";  // unique across the network
 
 // ── 1. Create your device adapters ────────────────────────────────
-const machine = new YourMachineAdapter("dev_haas_001", KERNEL_ID, {
+const machine = new YourMachineAdapter("dev_liquid_001", KERNEL_ID, {
   apiUrl: "http://192.168.1.100:8080",       // your machine's API
+  mockMode: false,
   pollIntervalMs: 2000,
+  resolveInput: async (inputHash) => {
+    // Adapt this lookup to your input store's retrieval API.
+    const response = await fetch(`http://192.168.1.100:8080/programs/by-hash/${encodeURIComponent(inputHash)}`);
+    if (!response.ok) throw new Error("Input lookup failed");
+    return new Uint8Array(await response.arrayBuffer());
+  },
 });
 
 const powerSensor = new YourSensorAdapter("dev_power_001", KERNEL_ID, {
@@ -1094,14 +1103,13 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
 2. processQueue() dequeues next job
    └→ Sets status: "executing"
    └→ Calls JobRunner.run({
-        jobId,
-        stepId,
-        inputHash,          // the SHA-256 of the exact input bytes
-        assuranceTier,      // 0, 1, 2, or 3
-        tierLadder,         // await compileTierLadder(csd)
+        jobId: job.jobId,
+        stepId: job.stepId,
+        gcodeHash: `sha256_mock_${job.jobId.slice(0, 8)}` as any,
+        assuranceTier: 1 as AssuranceTier,
       })
 
-3. JobRunner orchestrates:
+3. JobRunner orchestrates a valid run (legacy input or direct prepare-path call):
    a. EvidenceEmitter.registerStep(jobId, stepId, tier)
    b. Wire evidence listeners (machine → emitter, sensors → emitter, camera → emitter)
    c. Machine: execute("prepare", { jobId, inputHash, inputData? })
@@ -1128,6 +1136,8 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
 6. Send "job_completed" intent to broker
    └→ Includes evidenceBundleHash, summary
 ```
+
+KernelAgent does not yet pass inputHash, inputData or tierLadder, so a prepare-path adapter's jobs are refused under it; run prepare-path jobs through JobRunner directly (§3.2) until that follow-up lands.
 
 Before any command, the kernel refuses an `inputData` hash mismatch or an `accepts` list that lacks `start` or both input commands. It sends no undeclared command. On the prepare path only, it applies the strict `inputHash` format check (`sha256:` plus exactly 64 lowercase hex digits); the legacy `load_gcode` path passes the hash through unchanged. The prepare path also refuses a missing or malformed ladder, or a ladder missing the job's tier, at every tier from 0 to 3. A prepare ack that does not echo `jobId` and `inputHash` exactly with a non-empty `deviceJobId` fails before `start`.
 
