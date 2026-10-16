@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 import {
-  custom, decodeFunctionData, encodeAbiParameters, encodeErrorResult, encodeFunctionResult, getAddress, keccak256,
-  numberToHex, parseAbi, stringToHex, type Hex, type Transport,
+  custom, decodeFunctionData, encodeAbiParameters, encodeErrorResult, encodeFunctionData, encodeFunctionResult, getAddress, keccak256,
+  numberToHex, parseAbi, stringToHex, type Hex, type TransactionSerializableEIP1559, type Transport,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createEvidenceBroadcaster, EvidenceChainConfigError,
@@ -97,8 +98,16 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
     return { escrow, unitId, packageDigest, compositionSchemaVersion: fake.storedVersion ?? 0 };
   }
   const input = addUnit(3n);
-  const raw = `0x${randomBytes(128).toString("hex")}` as Hex;
-  const hash = keccak256(raw);
+  const account = privateKeyToAccount(bytes32());
+  async function signTx(value: SubmitEvidenceTxInput, changes: Partial<TransactionSerializableEIP1559> = {}) {
+    return account.signTransaction({ chainId: chain.chainId, type: "eip1559", to: value.escrow,
+      data: encodeFunctionData({ abi: functions, functionName: "submitEvidence", args: [value.unitId, value.packageDigest] }),
+      nonce: Number(value.nonce), gas: BigInt(value.gas), maxFeePerGas: BigInt(value.maxFeePerGas),
+      maxPriorityFeePerGas: BigInt(value.maxPriorityFeePerGas), value: 0n, ...changes });
+  }
+  let raw = await signTx({ ...input, nonce: 7, gas: fake.gas ?? 50_000n,
+    maxFeePerGas: 14n, maxPriorityFeePerGas: 2n });
+  let hash = keccak256(raw);
   const calls: { method: string; params: unknown }[] = [];
   let estimatedUnit = input.unitId;
   const sentUnits = new Set<Hex>();
@@ -107,9 +116,11 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
   const logs = ["log", "warn", "error", "debug", "info"].map((method) =>
     vi.spyOn(console, method as "log").mockImplementation(() => undefined));
   const serverText = `${rpcUrl} ${raw} ${randomBytes(24).toString("base64url")}`;
-  const signer = { address: getAddress(`0x${randomBytes(20).toString("hex")}`),
+  const signer = { address: account.address,
     signSubmitEvidenceTx: vi.fn(async (value: SubmitEvidenceTxInput) => {
       calls.push({ method: "signTransaction", params: value });
+      raw = await signTx(value);
+      hash = keccak256(raw);
       return raw;
     }) };
   function reject(errorName: typeof errorAbi[number]["name"]): never {
@@ -174,12 +185,12 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
         if (fake.sendRevert === "unknown_revert") throw { code: 3, message: serverText, data: "0xdeadbeef" };
         if (fake.sendRevert !== undefined) reject(fake.sendRevert);
         sentCount++;
-        return hash;
+        return keccak256((params as [Hex])[0]);
       }
       case "eth_getTransactionReceipt":
         if (fake.receiptStatus === "timeout") return null;
         minedCount = sentCount;
-        return { transactionHash: hash, blockHash: bytes32(), blockNumber: "0x1", transactionIndex: "0x0",
+        return { transactionHash: (params as [Hex])[0], blockHash: bytes32(), blockNumber: "0x1", transactionIndex: "0x0",
           from: signer.address, to: input.escrow, cumulativeGasUsed: "0xc350", gasUsed: "0xc350",
           contractAddress: null, logs: [], logsBloom: "0x", status: fake.receiptStatus === "reverted" ? "0x0" : "0x1",
           effectiveGasPrice: "0xe", type: "0x2" };
@@ -204,8 +215,8 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
     expect(reads).toHaveLength(2);
     expect(calls.indexOf(reads[1])).toBeGreaterThan(calls.findIndex(({ method }) => method === after));
   }
-  return { broadcaster, input, signer, chain, raw, hash, calls, rpcUrl, expectRedacted, fake, transport,
-    addUnit, contractReads, expectPostSendRead };
+  return { broadcaster, input, signer, chain, get raw() { return raw; }, get hash() { return hash; },
+    calls, rpcUrl, expectRedacted, fake, transport, account, signTx, addUnit, contractReads, expectPostSendRead };
 }
 
 afterEach(async () => {
@@ -309,6 +320,13 @@ describe("submitEvidence broadcaster", () => {
     expect((await setup.broadcaster.submit(setup.input)).code).toBe("submitted");
   });
 
+  it("accepts a valid zero priority fee encoded without an RLP value", async () => {
+    const setup = await fixture({}, { priorityFee: 0n });
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx.mock.calls[0][0].maxPriorityFeePerGas).toBe(0n);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
   it("a receipt timeout is indeterminate and never re-sends, including later and concurrent calls", async () => {
     const setup = await fixture({}, { receiptStatus: "timeout", afterSendCommitment: undefined });
     // Keep the read-back uncommitted even after the send. The transport returns
@@ -332,7 +350,7 @@ describe("submitEvidence broadcaster", () => {
     const subsequent = await Promise.all([broadcaster.submit(setup.input), broadcaster.submit(setup.input)]);
     expect(subsequent).toEqual([first, first]);
     expect(await broadcaster.readBack(setup.input)).toEqual({ code: "refused", reason: "EvidenceNotCommitted" });
-    expect(reads).toBeGreaterThanOrEqual(4);
+    expect(reads).toBe(2);
     expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
     expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
     setup.expectRedacted({ first, subsequent });
@@ -348,6 +366,32 @@ describe("submitEvidence broadcaster", () => {
     expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
     setup.expectRedacted({ first, second });
   });
+
+  it("a latched unit returns its original hash before checking a different package version", async () => {
+    const setup = await fixture({}, { receiptStatus: "timeout" });
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    const boundary = setup.calls.length;
+    const second = await setup.broadcaster.submit({ ...setup.input, compositionSchemaVersion: 1 });
+    expect(second).toEqual(first);
+    expect(setup.calls).toHaveLength(boundary);
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it.each(["chain", "terms", "connection"] as const)(
+    "a latched unit returns its original hash before a later %s failure", async (failure) => {
+      const setup = await fixture({}, { receiptStatus: "timeout" });
+      const first = await setup.broadcaster.submit(setup.input);
+      expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+      const boundary = setup.calls.length;
+      if (failure === "chain") setup.fake.chainId = 84532;
+      if (failure === "terms") setup.fake.termsRevert = "UnitNotFound";
+      if (failure === "connection") await chmod(setup.chain.rpcUrlFile, 0o644);
+      expect(await setup.broadcaster.submit(setup.input)).toEqual(first);
+      expect(setup.calls).toHaveLength(boundary);
+      expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    });
 
   it("matching read-back gives already_committed without signing or sending", async () => {
     const setup = await fixture();
@@ -492,7 +536,7 @@ describe("submitEvidence broadcaster", () => {
   it("a failed receipt gives refused and never claims submission", async () => {
     const setup = await fixture({}, { receiptStatus: "reverted" });
     const result = await setup.broadcaster.submit(setup.input);
-    expect(result).toEqual({ code: "refused", reason: "transaction_reverted" });
+    expect(result).toEqual({ code: "refused", reason: "transaction_reverted", transactionHash: setup.hash });
     setup.expectPostSendRead("eth_getTransactionReceipt");
     setup.expectRedacted(result);
   });
@@ -525,32 +569,48 @@ describe("submitEvidence broadcaster", () => {
       const result = await setup.broadcaster.submit(setup.input);
       expect(result).toEqual(state === "ours" ? { code: "already_committed" }
         : state === "different" ? { code: "conflict" }
-        : state === "uncommitted" ? { code: "refused", reason }
+        : state === "uncommitted" && reason !== "unknown_revert"
+          ? { code: "refused", reason, transactionHash: setup.hash }
         : { code: "indeterminate", transactionHash: setup.hash });
       setup.expectPostSendRead("eth_sendRawTransaction");
       setup.expectRedacted(result);
     });
 
-  it.each(["NotActive", "EvidenceAlreadyCommitted", "unknown_revert"] as const)(
-    "a send rejected with %s and uncommitted read-back releases both cross-unit nonce checks", async (reason) => {
-      const setup = await fixture({}, { sendRevert: reason });
+  it.each((["NotActive", "EvidenceAlreadyCommitted"] as const).flatMap((reason) =>
+    (["ours", "different", "uncommitted", "transport", "revert"] as const).map((state) => ({ reason, state }))))(
+    "a decoded send-time $reason releases its nonce for both rules after $state read-back and keeps its unit latched", async ({ reason, state }) => {
+      const setup = await fixture({}, { sendRevert: reason, postSendReadFailure: state === "transport",
+        postSendReadRevert: state === "revert" ? "UnitNotFound" : undefined });
+      setup.fake.afterSendCommitment = state === "ours" ? contractCommitment(setup.input)
+        : state === "different" ? bytes32() : null;
       const first = await setup.broadcaster.submit(setup.input);
-      expect(first).toEqual({ code: "refused", reason });
+      const firstHash = setup.hash;
+      expect(first).toEqual(state === "ours" ? { code: "already_committed" }
+        : state === "different" ? { code: "conflict" }
+        : state === "uncommitted" ? { code: "refused", reason, transactionHash: firstHash }
+        : { code: "indeterminate", transactionHash: firstHash });
       const boundary = setup.calls.length;
-      // An unconsumed nonce remains 7. Any latest read would fail and expose a hold.
+      expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "indeterminate", transactionHash: firstHash });
+      expect(setup.calls).toHaveLength(boundary);
+      setup.fake.sendRevert = undefined;
+      setup.fake.postSendReadFailure = false;
+      setup.fake.postSendReadRevert = undefined;
+      setup.fake.afterSendCommitment = undefined;
+      // The rejected send consumed no nonce. A released attempt must neither
+      // need a latest read nor forbid using this same pending nonce for unit B.
       setup.fake.latestFailure = true;
       setup.fake.pendingNonce = 7;
-      setup.fake.sendRevert = undefined;
       expect(await setup.broadcaster.submit(setup.addUnit(4n)))
         .toEqual({ code: "submitted", transactionHash: setup.hash });
       expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 7]);
       expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
-      expect(setup.calls.slice(boundary).filter(({ method, params }) => method === "eth_getTransactionCount")
+      expect(setup.calls.filter(({ method, params }) => method === "eth_getTransactionCount"
+        && (params as [Hex, string])[1] === "latest")).toHaveLength(0);
+      expect(setup.calls.slice(boundary).filter(({ method }) => method === "eth_getTransactionCount")
         .map(({ params }) => (params as [Hex, string])[1])).toEqual(["pending"]);
-      // Its own latch survives the released hold, even when its escrow is absent.
+      // The original unit stays latched even if its escrow is absent.
       setup.fake.afterSendCommitment = null;
-      expect(await setup.broadcaster.submit(setup.input))
-        .toEqual({ code: "indeterminate", transactionHash: setup.hash });
+      expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "indeterminate", transactionHash: firstHash });
       expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(2);
       expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(2);
       setup.expectRedacted(first);
@@ -565,6 +625,21 @@ describe("submitEvidence broadcaster", () => {
       .toEqual({ code: "refused", reason: "unreconciled_transaction" });
     expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
     expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it("an undecoded send-time revert remains indeterminate and retains its nonce hold", async () => {
+    const setup = await fixture({}, { sendRevert: "unknown_revert" });
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    expect(await setup.broadcaster.submit(setup.input)).toEqual(first);
+    setup.fake.sendRevert = undefined;
+    expect(await setup.broadcaster.submit(setup.addUnit(4n)))
+      .toEqual({ code: "refused", reason: "unreconciled_transaction" });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    expect(setup.calls.filter(({ method, params }) => method === "eth_getTransactionCount"
+      && (params as [Hex, string])[1] === "latest")).toHaveLength(1);
+    setup.expectRedacted(first);
   });
 
   it("a successful receipt with unavailable read-back remains indeterminate", async () => {
@@ -649,7 +724,7 @@ describe("submitEvidence broadcaster", () => {
   it("a reverted receipt settles its nonce so another unit proceeds without a latest read", async () => {
     const setup = await fixture({}, { receiptStatus: "reverted" });
     const first = await setup.broadcaster.submit(setup.input);
-    expect(first).toEqual({ code: "refused", reason: "transaction_reverted" });
+    expect(first).toEqual({ code: "refused", reason: "transaction_reverted", transactionHash: setup.hash });
     setup.fake.receiptStatus = "success";
     const result = await setup.broadcaster.submit(setup.addUnit(4n));
     expect(result).toEqual({ code: "submitted", transactionHash: setup.hash });
@@ -730,5 +805,54 @@ describe("submitEvidence broadcaster", () => {
     const invalid = await setup.broadcaster.submit({ ...setup.input, packageDigest: setup.rpcUrl as Hex });
     expect(invalid).toEqual({ code: "refused", reason: "bad_input" });
     setup.expectRedacted({ result, invalid });
+  });
+
+  it.each([
+    { field: "chainId", changes: { chainId: 84532 } },
+    { field: "to", changes: { to: getAddress("0x1111111111111111111111111111111111111111") } },
+    { field: "data", changes: { data: "0xdeadbeef" as Hex } },
+    { field: "nonce", changes: { nonce: 8 } },
+    { field: "gas", changes: { gas: 50_001n } },
+    { field: "maxFeePerGas", changes: { maxFeePerGas: 15n } },
+    { field: "maxPriorityFeePerGas", changes: { maxPriorityFeePerGas: 3n } },
+    { field: "value", changes: { value: 1n } },
+  ] satisfies { field: string; changes: Partial<TransactionSerializableEIP1559> }[])(
+    "rejects signed $field differing from the validated transaction without sending or latching", async ({ changes }) => {
+      const setup = await fixture();
+      setup.signer.signSubmitEvidenceTx.mockImplementationOnce((value) => setup.signTx(value, changes));
+      const refused = await setup.broadcaster.submit(setup.input);
+      expect(refused).toEqual({ code: "refused", reason: "signing_failed" });
+      expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+      expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+      // Correcting the signer can still send this unit: validation failed before
+      // the one-shot latch or any cross-unit nonce hold was created.
+      expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "submitted", transactionHash: setup.hash });
+      expect(setup.signer.signSubmitEvidenceTx.mock.calls.map(([input]) => input.nonce)).toEqual([7, 7]);
+      expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+      setup.expectRedacted(refused);
+    });
+
+  it("rejects a legacy signed transaction without sending or latching", async () => {
+    const setup = await fixture();
+    setup.signer.signSubmitEvidenceTx.mockImplementationOnce((value) => setup.account.signTransaction({
+      chainId: setup.chain.chainId, type: "legacy", to: value.escrow,
+      data: encodeFunctionData({ abi: functions, functionName: "submitEvidence", args: [value.unitId, value.packageDigest] }),
+      nonce: Number(value.nonce), gas: BigInt(value.gas), gasPrice: BigInt(value.maxFeePerGas), value: 0n,
+    }));
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "refused", reason: "signing_failed" });
+    expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(2);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it("rejects malformed signed bytes without sending or latching", async () => {
+    const setup = await fixture();
+    setup.signer.signSubmitEvidenceTx.mockResolvedValueOnce("0x01");
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "refused", reason: "signing_failed" });
+    expect(setup.calls.some(({ method }) => method === "eth_sendRawTransaction")).toBe(false);
+    expect(await setup.broadcaster.submit(setup.input)).toEqual({ code: "submitted", transactionHash: setup.hash });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(2);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
   });
 });

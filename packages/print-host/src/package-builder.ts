@@ -324,6 +324,9 @@ export async function signMilestonePackage(input: BuiltMilestonePackage, operato
   if (computeEvidenceBlockHash(block.unitContextDigest, block.kernelSignedEventsRoot, block.sessionKeyAuthDigest,
     { attestationSetRoot: block.attestationSetRoot, workProductRoot: block.workProductRoot, programHash: block.programHash }) !== built.evidenceBlockHash) fail("bad_body");
   const { unitBinding: u, producer } = built.body;
+  const expectedUnitId = guarded("bad_body", () => settlementUnitId({ chainId: BigInt(u.chainId), escrow: u.escrow,
+    jobIdHash: u.jobIdHash, milestoneIndex: BigInt(u.milestoneIndex), stepId: u.stepId }));
+  if (expectedUnitId !== u.settlementUnitId) fail("bad_body");
   const expectedContextDigest = guarded("bad_body", () => unitContextDigest({ chainId: BigInt(u.chainId), escrow: u.escrow,
     settlementUnitId: u.settlementUnitId, jobIdHash: u.jobIdHash, milestoneIndex: BigInt(u.milestoneIndex), stepId: u.stepId },
   built.body.challengeBinding.nonce));

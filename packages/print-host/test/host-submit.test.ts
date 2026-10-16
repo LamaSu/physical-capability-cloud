@@ -186,6 +186,9 @@ async function fixture(options: {
           unitId: decoded.args[0], packageDigest: decoded.args[1],
           compositionSchemaVersion: fake.storedVersion ?? 1 });
         if (fake.send === "reject_absent") throw { code: 3, message: serverText, data: encodeErrorResult({ abi: errors, errorName: "NotActive" }) };
+        // A crash also prevents F2's immediate read-back from observing the commit;
+        // the next process can reconcile it without sending again.
+        if (fake.send === "throw_after_commit") fake.failOnce = "eth_call:evidenceBundleHashOf";
         if (fake.send !== "ok") throw { code: -32603, message: serverText };
         return txHash;
       }

@@ -1,6 +1,6 @@
 import {
   createPublicClient, decodeErrorResult, defineChain, encodeFunctionData, getAddress,
-  http, keccak256, parseAbi, zeroAddress, zeroHash,
+  http, keccak256, parseAbi, parseTransaction, zeroAddress, zeroHash,
   type Address, type Hex, type Transport,
 } from "viem";
 import { evidenceCommitment, settlementUnitId } from "@pcc/contracts/vnext";
@@ -38,7 +38,7 @@ export type EvidenceBroadcastOutcome =
   | Readonly<{ code: "already_committed" }>
   | Readonly<{ code: "conflict" }>
   | Readonly<{ code: "indeterminate"; transactionHash?: Hex }>
-  | Readonly<{ code: "refused"; reason: EvidenceRefusalCode }>
+  | Readonly<{ code: "refused"; reason: EvidenceRefusalCode; transactionHash?: Hex }>
   | Readonly<{ code: "caps_exceeded"; cap: "maxFeePerGasCap" | "maxPriorityFeePerGasCap" | "gasCap" }>
   | Readonly<{ code: "rpc_unavailable" }>;
 
@@ -145,7 +145,7 @@ export function createEvidenceBroadcaster(
   const receiptTimeoutMs = settings.receiptTimeoutMs ?? 60_000;
   const confirmations = settings.confirmations ?? 1;
   const pollingInterval = settings.pollingIntervalMs ?? 1_000;
-  const attempted = new Map<string, { transactionHash: Hex; nonce: number; settled: boolean; holdsNonce: boolean }>();
+  const attempted = new Map<string, { transactionHash: Hex; nonce: number; settled: boolean; released: boolean }>();
   // One operator has one pending nonce stream, including across distinct units.
   let queue = Promise.resolve();
 
@@ -206,7 +206,7 @@ export function createEvidenceBroadcaster(
     transactionHash: Hex, reason: EvidenceRefusalCode): Promise<EvidenceBroadcastOutcome> {
     const reconciled = await read(client, input, expected);
     if (reconciled.code === "already_committed" || reconciled.code === "conflict") return reconciled;
-    return reconciled.code === "uncommitted" ? { code: "refused", reason }
+    return reconciled.code === "uncommitted" ? { code: "refused", reason, transactionHash }
       : { code: "indeterminate", transactionHash };
   }
 
@@ -225,6 +225,8 @@ export function createEvidenceBroadcaster(
 
   async function submit(input: EvidenceSubmission, key: string,
     options?: Parameters<EvidenceBroadcaster["submit"]>[1]): Promise<EvidenceBroadcastOutcome> {
+    const previous = attempted.get(key);
+    if (previous !== undefined) return { code: "indeterminate", transactionHash: previous.transactionHash };
     const client = await checkedClient();
     if ("code" in client) return client;
     const frozen = await frozenCommitment(client, input);
@@ -232,15 +234,13 @@ export function createEvidenceBroadcaster(
     const { expected } = frozen;
     const before = await read(client, input, expected);
     if (before.code !== "uncommitted") return before;
-    const previous = attempted.get(key);
-    if (previous !== undefined) return { code: "indeterminate", transactionHash: previous.transactionHash };
+    const data = encodeFunctionData({ abi: evidenceAbi, functionName: "submitEvidence", args: [input.unitId, input.packageDigest] });
     let nonce: number;
     let gas: bigint;
     let maxFeePerGas: bigint;
     let maxPriorityFeePerGas: bigint;
     try {
-      const unsettled = [...attempted.entries()].filter(([otherKey, attempt]) =>
-        otherKey !== key && attempt.holdsNonce && !attempt.settled);
+      const unsettled = [...attempted.entries()].filter(([otherKey, attempt]) => otherKey !== key && !attempt.settled && !attempt.released);
       if (unsettled.length > 0) {
         const latest = await client.getTransactionCount({ address, blockTag: "latest" });
         for (const [, attempt] of unsettled) if (attempt.nonce < latest) attempt.settled = true;
@@ -249,7 +249,7 @@ export function createEvidenceBroadcaster(
       nonce = await client.getTransactionCount({ address, blockTag: "pending" });
       // Even a settled transaction must not be replaced by a lagging pending view.
       for (const attempt of attempted.values()) {
-        if (attempt.holdsNonce && nonce <= attempt.nonce) return { code: "refused", reason: "unreconciled_transaction" };
+        if (!attempt.released && nonce <= attempt.nonce) return { code: "refused", reason: "unreconciled_transaction" };
       }
       const fees = await client.estimateFeesPerGas({ type: "eip1559" });
       maxFeePerGas = fees.maxFeePerGas;
@@ -257,7 +257,7 @@ export function createEvidenceBroadcaster(
       if (maxFeePerGas > maxFeePerGasCap) return { code: "caps_exceeded", cap: "maxFeePerGasCap" };
       if (maxPriorityFeePerGas > maxPriorityFeePerGasCap) return { code: "caps_exceeded", cap: "maxPriorityFeePerGasCap" };
       gas = await client.estimateGas({ account: address, to: input.escrow,
-        data: encodeFunctionData({ abi: evidenceAbi, functionName: "submitEvidence", args: [input.unitId, input.packageDigest] }),
+        data,
         value: 0n, nonce, maxFeePerGas, maxPriorityFeePerGas });
       if (gas > gasCap) return { code: "caps_exceeded", cap: "gasCap" };
     } catch (error) {
@@ -274,10 +274,15 @@ export function createEvidenceBroadcaster(
       serializedTransaction = await signTransaction.call(operator, { escrow: input.escrow, unitId: input.unitId,
         packageDigest: input.packageDigest, nonce, gas, maxFeePerGas, maxPriorityFeePerGas });
       if (!/^0x(?:[0-9a-fA-F]{2})+$/.test(serializedTransaction)) throw new Error("signing_failed");
+      const signed = parseTransaction(serializedTransaction);
+      if (signed.chainId !== settings.chainId || signed.to?.toLowerCase() !== input.escrow.toLowerCase()
+        || signed.data?.toLowerCase() !== data || signed.nonce !== nonce || (signed.gas ?? 0n) !== gas
+        || (signed.maxFeePerGas ?? 0n) !== maxFeePerGas || (signed.maxPriorityFeePerGas ?? 0n) !== maxPriorityFeePerGas
+        || signed.type !== "eip1559" || (signed.value ?? 0n) !== 0n) throw new Error("signing_failed");
       transactionHash = keccak256(serializedTransaction);
     } catch { return { code: "refused", reason: "signing_failed" }; }
     // Latch BEFORE sending: an RPC timeout may mean the node accepted the tx.
-    const attempt = { transactionHash, nonce, settled: false, holdsNonce: true };
+    const attempt = { transactionHash, nonce, settled: false, released: false };
     attempted.set(key, attempt);
     try {
       // The caller's durable boundary must complete before anything can be sent.
@@ -292,12 +297,14 @@ export function createEvidenceBroadcaster(
       if (sentHash.toLowerCase() !== transactionHash) return { code: "indeterminate", transactionHash };
     } catch (error) {
       const reason = revertCode(error);
-      if (reason === undefined) return { code: "indeterminate", transactionHash };
-      const reconciled = await reconcileRefusal(client, input, expected, transactionHash, reason);
-      // A decoded rejection plus an uncommitted read proves no pending nonce hold.
-      // Keep the same-unit latch, but let another unit use this unconsumed nonce.
-      if (reconciled.code === "refused") attempt.holdsNonce = false;
-      return reconciled;
+      if (reason !== undefined && knownReverts.has(reason)) {
+        // A decoded refusal releases the nonce, but the unit remains one-shot.
+        attempt.released = true;
+        return reconcileRefusal(client, input, expected, transactionHash, reason);
+      }
+      const reconciled = await read(client, input, expected);
+      if (reconciled.code === "already_committed" || reconciled.code === "conflict") return reconciled;
+      return { code: "indeterminate", transactionHash };
     }
     try {
       const receipt = await client.waitForTransactionReceipt({ hash: transactionHash, confirmations,
