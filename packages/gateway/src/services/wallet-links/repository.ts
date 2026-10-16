@@ -193,6 +193,7 @@ export function findSelfLinkedWallet(input: { address: string; apiKeyId: string;
       AND link.revoked_at IS NULL AND (link.expires_at IS NULL OR link.expires_at > ${new Date(input.now).toISOString()})
       AND request.created_by_key_id = ${input.apiKeyId} AND request.approved_by_key_id = ${input.apiKeyId}
       AND link.account_id = ${input.operatorId}
+    ORDER BY CASE link.role WHEN 'device' THEN 0 ELSE 1 END
     LIMIT 1`);
   return row?.role ?? null;
 }
