@@ -1,6 +1,9 @@
 /**
  * `@pcc/spec/funding`: the buyer-funding SDK for V-next escrows (buyer-funding plan S3.1), for a viem EOA. Author:
  * implementer-bravo (pcc-adk). Uses viem and @pcc/spec's public evidence producers.
+ * The PRINT builder and roots-form accepted-policy digest need Node's util.types.isProxy (Node >= 20.16 / 22.3).
+ * Without it, PRINT refuses BAD_EXPECTATION and roots-form preparation refuses INTENT_MISMATCH;
+ * both messages explicitly name the missing runtime requirement.
  * viem is an optional peer of `@pcc/spec`: install viem ^2 alongside it, or importing this subpath fails with
  * ERR_MODULE_NOT_FOUND.
  *
