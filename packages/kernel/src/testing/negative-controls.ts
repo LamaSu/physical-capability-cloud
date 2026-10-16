@@ -111,12 +111,10 @@ export function fakeDeviceConformanceFixture(
   };
   const ipp = deviceOptions.preset === "ipp";
   const devices = new WeakMap<MachineAdapter, FakeDevice>();
-  const made: Array<{ adapter: MachineAdapter; device: FakeDevice }> = [];
   const makeAdapter = (): MachineAdapter => {
     const device = new FakeDevice("conformance-device", "conformance-kernel", deviceOptions);
     const adapter = wrap?.(device) ?? device;
     devices.set(adapter, device);
-    made.push({ adapter, device });
     return adapter;
   };
   const profile: ConformanceProfile = {
@@ -143,7 +141,7 @@ export function fakeDeviceConformanceFixture(
       device.complete();
     },
   };
-  return { makeAdapter, profile, made };
+  return { makeAdapter, profile };
 }
 
 /**

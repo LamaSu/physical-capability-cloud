@@ -13,12 +13,20 @@ export function fakeConformanceFixture(options: {
   deviceOptions?: FakeDeviceOptions;
   wrap?: (device: FakeDevice) => MachineAdapter;
 } = {}) {
-  return fakeDeviceConformanceFixture({
+  // Test-only inspection history: one conformance run creates ten adapters.
+  // Each test owns its fixture; shipped controls retain devices only weakly.
+  const made: Array<{ adapter: MachineAdapter; device: FakeDevice }> = [];
+  const fixture = fakeDeviceConformanceFixture({
     preset: options.preset,
     deviceOptions: options.deviceOptions,
     // Preserve the existing report goldens and bounded-operation edge tests.
     timing: { cancelConfirmMs: 35, pollMs: 5, jobTimeoutMs: 100, quiesceTimeoutMs: 50, settleMs: 10 },
-  }, (device) => options.wrap?.(device) ?? (options.fault ? withFault(device, options.fault) : device));
+  }, (device) => {
+    const adapter = options.wrap?.(device) ?? (options.fault ? withFault(device, options.fault) : device);
+    made.push({ adapter, device });
+    return adapter;
+  });
+  return { ...fixture, made };
 }
 
 /** A forwarding adapter retains each device method's original receiver. */
