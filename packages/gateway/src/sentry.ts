@@ -11,6 +11,27 @@
  */
 
 import * as Sentry from "@sentry/node";
+import { isWalletRequest } from "./services/telemetry-privacy.js";
+
+/** Drop ceremony events before Sentry's transport receives request context. */
+export function walletSafeSentryEvent<T extends {
+  request?: { url?: string; query_string?: unknown };
+  extra?: Record<string, unknown>;
+  transaction?: string;
+}>(event: T): T | null {
+  const urls = [event.request?.url, event.extra?.url, event.transaction];
+  return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : event;
+}
+
+// OTel and Sentry integrations use different request-target attribute names.
+// Detect only on path-bearing fields, then discard the entire data bag (including headers
+// and bodies). Only registered templates are safe to retain as descriptions.
+const WALLET_TARGET_ATTRIBUTES = ["url.full", "http.url", "http.target", "url.path", "http.route"] as const;
+const WALLET_ROUTE_TEMPLATES = new Set([
+  "/api/wallets", "/api/wallets/link-requests", "/api/wallets/link-requests/lookup",
+  "/api/wallets/link-requests/:id", "/api/wallets/link-requests/:id/proof",
+  "/api/wallets/link-requests/:id/approve", "/api/wallets/:linkId/revoke",
+]);
 
 const SENTRY_DSN =
   process.env.SENTRY_DSN ||
@@ -37,6 +58,20 @@ export function initSentry(): void {
     // 100 % sample rate for the hackathon demo; reduce in production
     tracesSampleRate: 1.0,
     profilesSampleRate: 0.1,
+    beforeSend: walletSafeSentryEvent,
+    beforeSendTransaction: walletSafeSentryEvent,
+    beforeBreadcrumb(breadcrumb) {
+      const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message];
+      return urls.some((url) => typeof url === "string" && isWalletRequest(url)) ? null : breadcrumb;
+    },
+    beforeSendSpan(span) {
+      const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])];
+      const route = span.data["http.route"];
+      return urls.some((url) => typeof url === "string" && isWalletRequest(url))
+        ? { ...span, description: typeof route === "string" && WALLET_ROUTE_TEMPLATES.has(route)
+          ? route : "/api/wallets/<redacted>", data: {} }
+        : span;
+    },
     // Tag every event with the service name so Sentry dashboards can filter
     initialScope: {
       tags: { service: "pcc-gateway" },

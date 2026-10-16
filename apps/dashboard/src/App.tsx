@@ -76,6 +76,7 @@ const NegotiationPage = lazy(() => import("./pages/NegotiationPage.js").then(m =
 const OperatorMobilePage = lazy(() => import("./pages/OperatorMobilePage.js").then(m => ({ default: m.OperatorMobilePage })));
 const EconomicAgreementsPage = lazy(() => import("./pages/EconomicAgreementsPage.js").then(m => ({ default: m.EconomicAgreementsPage })));
 const WalletPage = lazy(() => import("./pages/WalletPage.js").then(m => ({ default: m.WalletPage })));
+const WalletLinkPage = lazy(() => import("./pages/WalletLinkPage.js").then(m => ({ default: m.WalletLinkPage })));
 const WhitepaperPage = lazy(() => import("./pages/WhitepaperPage.js").then(m => ({ default: m.WhitepaperPage })));
 const BatchBoardPage = lazy(() => import("./pages/BatchBoardPage.js").then(m => ({ default: m.BatchBoardPage })));
 const NegotiationSessionPage = lazy(() => import("./pages/NegotiationSessionPage.js").then(m => ({ default: m.NegotiationSessionPage })));
@@ -155,7 +156,7 @@ function AgentShell() {
 // ---------------------------------------------------------------------------
 
 function LogoutButton() {
-  const logout = useAuthStore((s) => s.logout);
+  const logout = useAuthStore((s) => s.signOutWallet);
   return (
     <button
       onClick={logout}
@@ -312,6 +313,13 @@ function Shell() {
     return <LoginPage />;
   }
 
+  if (location.pathname === "/link") {
+    return (
+      <Suspense fallback={<PageLoader />}>
+        <WalletLinkPage />
+      </Suspense>
+    );
+  }
   if (location.pathname === "/jobs/flow") {
     return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }
