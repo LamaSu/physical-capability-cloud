@@ -1,4 +1,5 @@
 import React from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   GlassPanel, GlowBadge, UtilizationGauge,
@@ -7,14 +8,106 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
+import { useAuthStore } from "../stores/auth-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { emergencyResume, emergencyStop, kernelsOf, machineLabel, type OperatorMachine } from "../lib/operator-api.js";
 import { InboxPanel } from "../components/inbox/InboxPanel.js";
 import {
   mockOperatorProfile, mockEarningsData, mockMaintenanceEvents, mockCertifications,
 } from "../api/mock-onboarding-data.js";
 
 const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
-const TARGET_KERNEL_ID = "kernel-nanoclaw";
+
+function EmergencyStopPanel({ kernels, loading }: { kernels: OperatorMachine[] | null; loading: boolean }) {
+  const [outcomes, setOutcomes] = React.useState<Record<string, {
+    stopped: boolean;
+    pending: "stop" | "resume" | null;
+    error: string | null;
+  }>>({});
+  const [busy, setBusy] = React.useState(false);
+  const inFlight = React.useRef(false);
+
+  async function stop(targets: OperatorMachine[]) {
+    if (inFlight.current) return;
+    const names = targets.map(machineLabel).join(", ");
+    if (!window.confirm(`EMERGENCY STOP for ${names}: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
+    inFlight.current = true;
+    setBusy(true);
+    setOutcomes((prev) => ({
+      ...prev,
+      ...Object.fromEntries(targets.map((machine) => [machine.id, { stopped: prev[machine.id]?.stopped === true, pending: "stop", error: null }])),
+    }));
+    await Promise.all(targets.map(async (machine) => {
+      const result = await emergencyStop(machine);
+      setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: result.ok || prev[machine.id]?.stopped === true, pending: null, error: result.error } }));
+    }));
+    inFlight.current = false;
+    setBusy(false);
+  }
+
+  async function resume(machine: OperatorMachine) {
+    if (inFlight.current || !window.confirm(`Resume operations on ${machineLabel(machine)}?`)) return;
+    inFlight.current = true;
+    setBusy(true);
+    setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: true, pending: "resume", error: null } }));
+    const result = await emergencyResume(machine);
+    setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: !result.ok, pending: null, error: result.error } }));
+    inFlight.current = false;
+    setBusy(false);
+  }
+
+  if (loading) {
+    return <p role="status" className="text-sm text-white/50">Loading your machines. Use each machine's physical emergency stop.</p>;
+  }
+  if (kernels === null) {
+    return <p role="alert" className="text-sm text-red-400">Your machines can't be read right now. Use each machine's physical emergency stop.</p>;
+  }
+  if (kernels.length === 0) {
+    return <p className="text-sm text-white/50">No machines are registered to this key yet.</p>;
+  }
+
+  return (
+    <div className="space-y-3">
+      {kernels.length > 1 && (
+        <button
+          onClick={() => void stop(kernels)}
+          disabled={busy}
+          className="w-full rounded-lg border border-red-400/40 px-4 py-3 text-sm font-medium text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+        >
+          EMERGENCY STOP: all of your machines
+        </button>
+      )}
+      {kernels.map((machine) => {
+        const label = machineLabel(machine);
+        const outcome = outcomes[machine.id];
+        return (
+          <section key={machine.id} aria-label={`Emergency controls for ${label}`} className="rounded-lg border border-red-400/30 px-4 py-3 space-y-2">
+            <div className="text-sm font-medium text-white/70">{label}</div>
+            {outcome?.stopped ? (
+              <span className="text-sm text-red-400 font-medium">
+                EMERGENCY STOP ACTIVE for {label}: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.
+              </span>
+            ) : (
+              <p className="text-xs text-white/50">
+                No stop confirmed for {label}. A confirmed stop makes PCC refuse new work and cancel queued commands. Work already running stops only with the machine's physical emergency stop.
+              </p>
+            )}
+            <button
+              onClick={() => void (outcome?.stopped ? resume(machine) : stop([machine]))}
+              disabled={busy}
+              className="rounded-lg border border-red-400/30 px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-400/10 disabled:opacity-40"
+            >
+              {outcome?.pending === "stop" ? `Stopping ${label}...`
+                : outcome?.pending === "resume" ? `Resuming ${label}...`
+                  : outcome?.stopped ? `Resume Operations: ${label}` : `EMERGENCY STOP: ${label}`}
+            </button>
+            {outcome?.error && <p role="alert" className="text-sm text-red-400">{outcome.error}</p>}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
 
 /* ---------- Approval types ---------- */
 interface Approval {
@@ -48,69 +141,22 @@ export function OperatorDashboardPage() {
 
   const totalEarnings = mockEarningsData[mockEarningsData.length - 1]?.cumulative ?? 0;
 
-  /* ---------- Emergency Stop state ---------- */
-  const [emergencyStopped, setEmergencyStopped] = React.useState(false);
-  const [estopLoading, setEstopLoading] = React.useState(false);
-  const [estopError, setEstopError] = React.useState<string | null>(null);
-
-  async function handleEmergencyStop() {
-    if (!window.confirm(`EMERGENCY STOP for ${TARGET_KERNEL_ID}: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
-    setEstopLoading(true);
-    setEstopError(null);
-    const failureMessage = `The stop didn't go through. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop, then try again.`;
-    try {
-      const res = await authorizedFetch("/api/operator/emergency-stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: TARGET_KERNEL_ID }),
-      });
-      const body = await res.json().catch(() => null);
-      if (res.ok && body?.stopped === true && body?.kernelId === TARGET_KERNEL_ID) {
-        setEmergencyStopped(true);
-      } else if (res.ok) {
-        setEstopError(`The server didn't confirm the stop for ${TARGET_KERNEL_ID}. The machine may still be running: use its physical emergency stop.`);
-      } else {
-        setEstopError(res.status === 401
-          ? `Sign in to stop ${TARGET_KERNEL_ID}. Until then, use the machine's physical emergency stop.`
-          : res.status === 403
-            ? `The stop was refused for this key. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop.`
-            : failureMessage);
-      }
-    } catch {
-      setEstopError(failureMessage);
-    } finally {
-      setEstopLoading(false);
-    }
-  }
-
-  async function handleEmergencyResume() {
-    if (!window.confirm(`Resume operations on ${TARGET_KERNEL_ID}?`)) return;
-    setEstopLoading(true);
-    setEstopError(null);
-    const failureMessage = "Resume didn't go through. The kernel is still stopped; try again.";
-    try {
-      const res = await authorizedFetch("/api/operator/emergency-resume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: TARGET_KERNEL_ID }),
-      });
-      if (res.ok) {
-        setEmergencyStopped(false);
-      } else {
-        setEstopError(res.status === 403
-          ? "Resume was refused for this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header)."
-          : res.status === 401
-            ? "Sign in to resume this kernel."
-            : res.status === 404
-              ? "This kernel or its policy wasn't found, so it can't be resumed here."
-              : failureMessage);
-      }
-    } catch {
-      setEstopError(failureMessage);
-    } finally {
-      setEstopLoading(false);
-    }
-  }
+  const keyEpoch = useAuthStore((state) => state.keyEpoch);
+  const sessionEpoch = useAuthStore((state) => state.sessionEpoch);
+  const address = useAuthStore((state) => state.address);
+  const identity = JSON.stringify([keyEpoch, sessionEpoch, address]);
+  const machines = useQuery({
+    queryKey: ["operator-machines", keyEpoch, sessionEpoch, address],
+    queryFn: async ({ signal }) => {
+      const res = await authorizedFetch("/api/agent/me", { cache: "no-store", signal });
+      if (!res.ok) throw new Error("Machines unavailable");
+      const kernels = kernelsOf(await res.json());
+      if (kernels === null) throw new Error("Machines unavailable");
+      return kernels;
+    },
+    enabled: activeTab === "overview",
+    retry: false,
+  });
 
   /* ---------- Approvals state ---------- */
   const [approvals, setApprovals] = React.useState<Approval[]>([]);
@@ -171,42 +217,14 @@ export function OperatorDashboardPage() {
 
       {activeTab === "inbox" && <InboxPanel />}
 
+      {/* Keep confirmed outcomes across tabs; a different identity gets a fresh panel. */}
+      <div hidden={activeTab !== "overview"}>
+        <EmergencyStopPanel key={identity} kernels={machines.isError ? null : machines.data ?? null} loading={machines.isPending} />
+      </div>
+
       {/* Overview Tab */}
       {activeTab === "overview" && (
         <div className="space-y-6">
-          {/* Emergency Stop */}
-          {emergencyStopped && (
-            <div
-              className="rounded-lg border border-red-400/40 px-4 py-3 flex items-center justify-between"
-              style={{ background: "rgba(248, 113, 113, 0.08)" }}
-            >
-              <div className="flex items-center gap-3">
-                <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />
-                <span className="text-sm text-red-400 font-medium">
-                  EMERGENCY STOP ACTIVE for {TARGET_KERNEL_ID}: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.
-                </span>
-              </div>
-              <button
-                onClick={handleEmergencyResume}
-                disabled={estopLoading}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium border border-green-400/30 text-green-400 hover:bg-green-400/10 transition-all disabled:opacity-40"
-              >
-                {estopLoading ? "Resuming..." : "Resume Operations"}
-              </button>
-            </div>
-          )}
-          {!emergencyStopped && (
-            <button
-              onClick={handleEmergencyStop}
-              disabled={estopLoading}
-              className="w-full rounded-lg border border-red-400/30 px-4 py-3 text-sm font-medium text-red-400 hover:bg-red-400/10 hover:border-red-400/50 transition-all disabled:opacity-40"
-              style={{ background: "rgba(248, 113, 113, 0.04)" }}
-            >
-              {estopLoading ? "Stopping..." : "EMERGENCY STOP"}
-            </button>
-          )}
-          {estopError && <p role="alert" className="text-sm text-red-400">{estopError}</p>}
-
           {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <GlassPanel padding="md" glow="green" className="text-center">
