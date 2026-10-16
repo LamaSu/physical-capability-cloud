@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
+import { schema } from "@pcc/store";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
-import { closeStore, getRepos, initStore } from "../db.js";
+import { closeStore, getRepos, getStore, initStore } from "../db.js";
 import { apiGate } from "../middleware/api-gate.js";
 import { agentIntrospectionRoutes } from "../routes/agent-introspection.js";
 import { provisionRoutes } from "../routes/provision.js";
@@ -19,6 +20,7 @@ vi.mock("../middleware/security-hardening.js", () => ({
 }));
 
 const OTHER = "0x1111111111111111111111111111111111111111";
+const ZERO = "0x0000000000000000000000000000000000000000";
 const ADMIN = "n171-agent-me-owner-admin";
 const HOUR_MS = 3_600_000;
 const KERNEL = "kernel-n171-owner";
@@ -43,7 +45,9 @@ beforeEach(() => {
   }
   closeStore();
   const { repos } = initStore({ seed: true });
-  wallet = privateKeyToAccount(generatePrivateKey());
+  do {
+    wallet = privateKeyToAccount(generatePrivateKey());
+  } while (wallet.address === wallet.address.toLowerCase());
   owner = wallet.address.toLowerCase();
   const kernel = repos.kernels.findAll()[0]!;
   const job = repos.jobs.findAll()[0]!;
@@ -149,9 +153,9 @@ async function selfLink(app: FastifyInstance, rawKey: string) {
 }
 
 describe("N171 /api/agent/me scopes operator sections to a proven owner", () => {
-  it("withholds victim sections from a publicly provisioned key claiming the victim wallet", async () => {
+  it("a key without owner proof gets operator sections withheld", async () => {
     const app = await buildApp();
-    key(); // A real victim key exists as well as its site, device and jobs.
+    key(); // A real owner key exists as well as its site, device and jobs.
     const issued = await app.inject({ method: "POST", url: "/api/auth/provision", payload: { walletAddress: owner } });
     expect(issued.statusCode).toBe(201);
     const caller = issued.json<{ api_key: string; key_id: string; operator_id: string; scopes: string[] }>();
@@ -170,17 +174,48 @@ describe("N171 /api/agent/me scopes operator sections to a proven owner", () => 
       vi.spyOn(repos.kernels, "findDevicesByKernel"), vi.spyOn(repos.apiKeys, "findByOperator"),
       vi.spyOn(repos.apiKeys, "listActive"),
     ];
+    // Authentication reads one key with .get(); operator key counts use .all().
+    const keyEnumeration = vi.fn();
+    const db = getStore().db;
+    const select = db.select.bind(db);
+    vi.spyOn(db, "select").mockImplementation((...args) => {
+      const builder = select(...args);
+      const from = builder.from.bind(builder);
+      vi.spyOn(builder, "from").mockImplementation(table => {
+        const query = from(table);
+        if (table === schema.apiKeys) {
+          const all = query.all.bind(query);
+          vi.spyOn(query, "all").mockImplementation((...placeholders) => {
+            keyEnumeration();
+            return all(...placeholders);
+          });
+        }
+        return query;
+      });
+      return builder;
+    });
     expectWithheld(await me(app, bearer(caller.raw)));
     for (const read of reads) expect(read).not.toHaveBeenCalled();
+    expect(keyEnumeration).not.toHaveBeenCalled();
   });
 
-  it("a signed SIWE cookie scopes to its proven address when the key claims another operator", async () => {
+  it("a matching signed SIWE cookie provides owner proof", async () => {
+    const app = await buildApp();
+    const caller = key();
+    const signedIn = session();
+    const body = await me(app, { ...bearer(caller.raw), cookie: `pcc_session=${app.signCookie(signedIn.token)}` });
+    expectOwner(body, 1);
+    expect(body.identity.key_id).toBe(caller.row.id);
+  });
+
+  it("a nonmatching signed SIWE cookie leaves operator sections withheld", async () => {
     const app = await buildApp();
     const caller = key(OTHER);
     key();
     const signedIn = session();
     const body = await me(app, { ...bearer(caller.raw), cookie: `pcc_session=${app.signCookie(signedIn.token)}` });
-    expectOwner(body, 1);
+    expectWithheld(body);
+    expect(body.identity.operator).toBe(OTHER);
     expect(body.identity.key_id).toBe(caller.row.id);
   });
 
@@ -204,6 +239,18 @@ describe("N171 /api/agent/me scopes operator sections to a proven owner", () => 
     expectOwner(await me(app, bearer(credential.api_key)), 2);
   });
 
+  it("a session key retains its owner sections with a nonmatching cookie", async () => {
+    const app = await buildApp();
+    key();
+    const minted = await app.inject({ method: "POST", url: "/api/auth/session-key", headers: bearer(session().token) });
+    expect(minted.statusCode).toBe(201);
+    const credential = minted.json<{ api_key: string; key_id: string }>();
+    const body = await me(app, { ...bearer(credential.api_key),
+      cookie: `pcc_session=${app.signCookie(session(OTHER).token)}` });
+    expectOwner(body, 2);
+    expect(body.identity.key_id).toBe(credential.key_id);
+  });
+
   it("a W1b agent self-link scopes to the linked wallet rather than the key's claim", async () => {
     const app = await buildApp();
     const caller = key(OTHER);
@@ -223,17 +270,46 @@ describe("N171 /api/agent/me scopes operator sections to a proven owner", () => 
 
   it("the gateway admin secret may read the key's claimed operator sections", async () => {
     const app = await buildApp();
-    const caller = key();
+    const caller = key(wallet.address);
     expectOwner(await me(app, { ...bearer(caller.raw), "x-admin-key": ADMIN }), 1);
     expectWithheld(await me(app, { ...bearer(caller.raw), "x-admin-key": "wrong-secret" }));
   });
 
   it("owner proof takes precedence over an admin key and a differing claimed operator", async () => {
-    const app = await buildApp();
+    const app = await buildApp({ wallet: owner, via: "self-link:agent" });
     const caller = key(OTHER);
     key();
-    expectOwner(await me(app, { ...bearer(caller.raw), "x-admin-key": ADMIN,
-      cookie: `pcc_session=${app.signCookie(session().token)}` }), 1);
+    expectOwner(await me(app, { ...bearer(caller.raw), "x-admin-key": ADMIN }), 1);
+  });
+
+  it.each(["", ZERO])("an unowned wallet provides no owner proof (%j)", async address => {
+    const app = await buildApp({ wallet: address, via: "self-link:agent" });
+    const repos = getRepos();
+    repos.kernels.insert({ ...repos.kernels.findAll()[0]!, id: "kernel-n171-unowned", operatorAddress: ZERO });
+    repos.jobs.insert({ ...repos.jobs.findAll()[0]!, id: "job-n171-unowned", kernelId: "kernel-n171-unowned",
+      status: "in_progress", evidenceBundleId: null });
+    const body = await me(app, bearer(key(ZERO).raw));
+    expectWithheld(body);
+    expect(JSON.stringify(body)).not.toContain("kernel-n171-unowned");
+    expect(JSON.stringify(body)).not.toContain("job-n171-unowned");
+  });
+
+  it("the admin view excludes unowned kernels and their jobs", async () => {
+    const app = await buildApp();
+    const repos = getRepos();
+    repos.kernels.insert({ ...repos.kernels.findAll()[0]!, id: "kernel-n171-unowned", operatorAddress: ZERO });
+    repos.jobs.insert({ ...repos.jobs.findAll()[0]!, id: "job-n171-unowned", kernelId: "kernel-n171-unowned",
+      status: "in_progress", evidenceBundleId: null });
+    const caller = key(ZERO);
+    const body = await me(app, { ...bearer(caller.raw), "x-admin-key": ADMIN });
+    expect(body.identity.operator).toBe(ZERO);
+    expect(body.kernels).toEqual({ count: 0, items: [] });
+    expect(body.devices).toEqual({ count: 0 });
+    expect(body.work).toEqual({ in_flight: 0, items: [] });
+    expect(body.keys.active).toBe(1);
+    expect(body.keys).not.toHaveProperty("unavailable");
+    expect(JSON.stringify(body)).not.toContain("kernel-n171-unowned");
+    expect(JSON.stringify(body)).not.toContain("job-n171-unowned");
   });
 
   it.each(["admin-mint", "self-link:device", "SIWE-session", "", undefined, null])(

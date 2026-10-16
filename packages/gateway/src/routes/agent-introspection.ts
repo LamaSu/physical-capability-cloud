@@ -33,7 +33,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { schema, sql } from "@pcc/store";
 
 import { resolveApiKey } from "../auth/api-key-auth.js";
-import { authorityOf } from "../auth/kernel-authority.js";
+import { authorityOf, ownerOf } from "../auth/kernel-authority.js";
 import { getRepos, getStore } from "../db.js";
 import { provenOwnerAddress } from "./provision.js";
 
@@ -205,14 +205,20 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
     const authority = authorityOf(req);
     // A provisioned key's operatorId is a claim. Only these proof sources
     // authorize operator reads; unknown future provenance labels grant nothing.
-    const proven = provenOwnerAddress(req) ?? (
+    // A cookie naming another account must not re-scope a presented key (N103).
+    const sessionOwner = provenOwnerAddress(req);
+    const ownerProof = key && sessionOwner !== null && sessionOwner !== key.operatorId.toLowerCase()
+      ? provenOwnerAddress(Object.assign(Object.create(req), { cookies: {} }) as FastifyRequest)
+      : sessionOwner;
+    const proven = ownerProof ?? (
       authority.provenWallet !== null &&
       (authority.provenWalletVia === "siwe-session" || authority.provenWalletVia === "self-link:agent")
         ? authority.provenWallet.toLowerCase()
         : null
     );
     const claimed = key?.operatorId ?? authority.claimed;
-    const operatorId = proven ?? (authority.admin ? claimed?.toLowerCase() ?? null : null);
+    const owner = ownerOf(proven);
+    const operatorId = owner ?? (authority.admin ? claimed?.toLowerCase() ?? null : null);
     if (!key && !operatorId) return unauthenticated(reply);
 
     const repos = getRepos();
@@ -237,7 +243,10 @@ export async function agentIntrospectionRoutes(app: FastifyInstance) {
     const kernels = section(() =>
       repos.kernels
         .findAll()
-        .filter((k: KernelRow) => k.operatorAddress?.toLowerCase() === operatorId),
+        .filter((k: KernelRow) => {
+          const kernelOwner = ownerOf(k.operatorAddress);
+          return kernelOwner !== null && kernelOwner === operatorId;
+        }),
     );
 
     const kernelIds = (kernels.value ?? []).map((k: KernelRow) => k.id);
