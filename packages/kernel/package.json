@@ -36,6 +36,11 @@
       "types": "./dist/conformance/index.d.ts",
       "import": "./dist/conformance/index.js",
       "default": "./dist/conformance/index.js"
+    },
+    "./conformance/vitest": {
+      "types": "./dist/conformance/vitest.d.ts",
+      "import": "./dist/conformance/vitest.js",
+      "default": "./dist/conformance/vitest.js"
     }
   },
   "scripts": {
