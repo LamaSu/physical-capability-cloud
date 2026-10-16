@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   canonicalize, hashBundle, hashEvent, isCompromisedDevicePublicKey, sessionKeyDelegationPreimage, signingPreimage,
@@ -11,7 +11,7 @@ import type { DeviceKey } from "./keys.js";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
 
 export type UnitSessionErrorCode = "bad_options" | "clock_skew" | "expired" |
-  "bad_event" | "event_binding" | "event_time" | "event_limit" | "empty_session" |
+  "bad_event" | "event_binding" | "event_fabricated" | "event_time" | "event_limit" | "empty_session" |
   "finalized" | "journal_exists" | "journal_io" | "journal_integrity" |
   "unit_mismatch" | "device_mismatch" | "compromised_device" | "signing_failed";
 
@@ -69,6 +69,7 @@ const bytes32 = (value: unknown): value is string => typeof value === "string" &
 const digest = (value: unknown) => createHash("sha256").update(canonicalize(value)).digest("hex");
 const clone = <T>(value: T): T => JSON.parse(canonicalize(value)) as T;
 const filename = (sequence: number) => `${String(sequence).padStart(8, "0")}.json`;
+const temporaryName = /^\.\d{8}\.json\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/;
 const genesis = (unit: string, key: string) => digest({ domain: "pcc-printhost.unit-session.v1", settlementUnitId: unit, devicePublicKey: key });
 
 function checkBinding(binding: Binding): void {
@@ -118,17 +119,27 @@ async function checkedEvent(input: EvidenceEvent, state: JournalState): Promise<
     typeof event.type !== "string" || event.type.length === 0 || typeof event.timestamp !== "string" ||
     !event.source || typeof event.source !== "object" || Array.isArray(event.source) ||
     !event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) throw new UnitSessionError("bad_event");
+  if ((Object.hasOwn(event.source, "simulated") && event.source.simulated !== false) ||
+    (Object.hasOwn(event.payload, "mock") && event.payload.mock !== false)) throw new UnitSessionError("event_fabricated");
   const { binding, events } = state;
   const kernelId = event.source.kernelId;
   if (event.payload.settlementUnitId !== binding.settlementUnitId || event.payload.challengeNonce !== binding.challengeNonce ||
     event.payload.jobId !== binding.jobId || typeof kernelId !== "string" ||
-    !/^[\x20-\x7e]{1,128}$/.test(kernelId) || /^(eip155:|ed25519:)/.test(kernelId) ||
+    !/^[\x20-\x7e]{1,128}$/.test(kernelId) || /^(eip155:|ed25519:)/i.test(kernelId) ||
     (events.length > 0 && kernelId !== events[0].source.kernelId) ||
     (event.payload.kernelId !== undefined && event.payload.kernelId !== kernelId)) throw new UnitSessionError("event_binding");
   const time = eventTime(event.timestamp);
   if (time < binding.fundedAt || time > binding.expiresAt) throw new UnitSessionError("event_time");
   event.hash = await hashEvent(event);
   return event;
+}
+
+function stampEvent(event: EvidenceEvent, binding: Binding): EvidenceEvent {
+  if (!event || !event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) throw new UnitSessionError("bad_event");
+  const { settlementUnitId, challengeNonce } = binding;
+  if ((event.payload.settlementUnitId !== undefined && event.payload.settlementUnitId !== settlementUnitId) ||
+    (event.payload.challengeNonce !== undefined && event.payload.challengeNonce !== challengeNonce)) throw new UnitSessionError("event_binding");
+  return { ...event, payload: { ...event.payload, settlementUnitId, challengeNonce } };
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -138,7 +149,8 @@ async function syncDirectory(directory: string): Promise<void> {
 
 async function privateDirectory(directory: string): Promise<void> {
   const info = await lstat(directory);
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700) throw new UnitSessionError("journal_io");
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o777) !== 0o700 ||
+    info.uid !== process.geteuid!()) throw new UnitSessionError("journal_io");
 }
 
 async function checkFinal(bundle: EvidenceBundle, state: JournalState): Promise<void> {
@@ -170,14 +182,17 @@ async function checkFinal(bundle: EvidenceBundle, state: JournalState): Promise<
 async function append(directory: string, state: JournalState, body: RecordBody): Promise<void> {
   const content = { sequence: state.count, previousHash: state.head, record: body };
   const record: JournalRecord = { ...content, hash: digest(content) };
-  // Exclusive creation prevents two resumed writers from overwriting each other.
-  // A torn record after a crash refuses on resume; no partial record is trusted.
-  const handle = await open(join(directory, filename(state.count)), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  // Publish only complete, durable bytes. link's EEXIST preserves exclusive
+  // creation across processes; failed writes/links leave ignorable orphan temps.
+  const temporary = join(directory, `.${filename(state.count)}.${randomUUID()}.tmp`);
+  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try {
     await handle.chmod(0o600);
     await handle.writeFile(canonicalize(record));
     await handle.sync();
   } finally { await handle.close(); }
+  await link(temporary, join(directory, filename(state.count)));
+  await unlink(temporary);
   await syncDirectory(directory);
   state.count++;
   state.head = record.hash;
@@ -186,7 +201,7 @@ async function append(directory: string, state: JournalState, body: RecordBody):
 async function readJournal(directory: string, unit: string, deviceKey: DeviceKey): Promise<JournalState> {
   try {
     await privateDirectory(directory);
-    const files = (await readdir(directory)).sort();
+    const files = (await readdir(directory)).filter((name) => !temporaryName.test(name)).sort();
     if (files.length === 0) throw new UnitSessionError("journal_integrity");
     let state: JournalState | undefined;
     for (let sequence = 0; sequence < files.length; sequence++) {
@@ -195,7 +210,7 @@ async function readJournal(directory: string, unit: string, deviceKey: DeviceKey
       let record: JournalRecord;
       try {
         const info = await handle.stat();
-        if (!info.isFile() || (info.mode & 0o777) !== 0o600) throw new UnitSessionError("journal_io");
+        if (!info.isFile() || (info.mode & 0o777) !== 0o600 || info.uid !== process.geteuid!()) throw new UnitSessionError("journal_io");
         record = JSON.parse(await handle.readFile("utf8")) as JournalRecord;
       } finally { await handle.close(); }
       if (sequence === 0) {
@@ -245,19 +260,30 @@ function session(directory: string, deviceKey: DeviceKey, initial: JournalState,
     void tail.then(() => { if (queues.get(directory) === tail) queues.delete(directory); });
     return pending;
   };
-  const add = async (input: EvidenceEvent): Promise<void> => {
+  const addEvents = async (inputs: EvidenceEvent[]): Promise<void> => {
     if (state.final) throw new UnitSessionError("finalized");
-    if (state.events.length >= 1000) throw new UnitSessionError("event_limit");
-    const event = await checkedEvent(input, state);
-    await append(directory, state, { kind: "event", event });
-    state.events.push(event);
+    if (state.events.length + inputs.length > 1000) throw new UnitSessionError("event_limit");
+    // Validate the whole batch against its preceding events before any write.
+    const checking = { ...state, events: [...state.events] };
+    const accepted: EvidenceEvent[] = [];
+    for (const input of inputs) {
+      const event = await checkedEvent(stampEvent(input, state.binding), checking);
+      // Receipt-time freshness is an ADD constraint, never a replay constraint.
+      if (eventTime(event.timestamp) > clock(now) + 300) throw new UnitSessionError("event_time");
+      checking.events.push(event);
+      accepted.push(event);
+    }
+    for (const event of accepted) {
+      await append(directory, state, { kind: "event", event });
+      state.events.push(event);
+    }
   };
   return {
     addEvent(input) {
       // Snapshot before queueing, so later caller mutations cannot change this call.
       let event: EvidenceEvent;
       try { event = clone(input); } catch { return Promise.reject(new UnitSessionError("bad_event")); }
-      return serial(() => add(event));
+      return serial(() => addEvents([event]));
     },
     addPrintResult(result) {
       let events: EvidenceEvent[];
@@ -265,12 +291,7 @@ function session(directory: string, deviceKey: DeviceKey, initial: JournalState,
       return serial(async () => {
         if (!Array.isArray(events)) throw new UnitSessionError("bad_event");
         // H3: consume the print events only, never its device-signed success bundle.
-        for (const event of events) {
-          const { settlementUnitId, challengeNonce } = state.binding;
-          if (!event.payload || (event.payload.settlementUnitId !== undefined && event.payload.settlementUnitId !== settlementUnitId) ||
-            (event.payload.challengeNonce !== undefined && event.payload.challengeNonce !== challengeNonce)) throw new UnitSessionError("event_binding");
-          await add({ ...event, payload: { ...event.payload, settlementUnitId, challengeNonce } });
-        }
+        await addEvents(events);
       });
     },
     finalize() {
@@ -338,8 +359,8 @@ export async function openUnitEvidenceSession(options: OpenUnitEvidenceSessionOp
     try { await mkdir(journalDir, { mode: 0o700 }); created = true; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     const info = await lstat(journalDir);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new UnitSessionError("journal_io");
-    if ((await readdir(journalDir)).length !== 0) throw new UnitSessionError("journal_exists");
+    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.geteuid!()) throw new UnitSessionError("journal_io");
+    if ((await readdir(journalDir)).some((name) => !temporaryName.test(name))) throw new UnitSessionError("journal_exists");
     await chmod(journalDir, 0o700);
     const state: JournalState = { binding, events: [], count: 0, head: genesis(settlementUnitId, deviceKey.publicKeyHex) };
     await append(journalDir, state, { kind: "open", binding });

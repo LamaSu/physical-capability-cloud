@@ -3,11 +3,11 @@ import type { MachineAdapter, PrintJobOptions, PrintJobResult } from "@pcc/kerne
 // as kernel-signer does, until the toolkit publishes a print-job subpath.
 import { runPrintJob } from "../../kernel/dist/printer-job.js";
 import { EvidenceEmitter } from "../../kernel/dist/evidence-emitter.js";
-import { formatOperatorPrincipalId, isCompromisedDevicePublicKey, type EvidenceBundle } from "@pcc/spec";
+import { formatOperatorPrincipalId, hashBundle, isCompromisedDevicePublicKey, type EvidenceBundle } from "@pcc/spec";
 import { getAddress, type Hex } from "viem";
 import type { EvidenceBroadcaster, EvidenceBroadcastOutcome, EvidenceSubmission } from "./chain.js";
 import type { HostConfig } from "./config.js";
-import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue, ReceiptEnvelope } from "./gateway-client.js";
+import type { EStopDecision, GatewayClient, GwCode, GwResult, PollJobsValue, ReceiptEnvelope, RelayEvidenceBundle } from "./gateway-client.js";
 import { hasPackageInputs, isUnitBinding, JOB_INPUT_CODES, type JobInputSource, type JobInputs } from "./job-inputs.js";
 import { JournalError, SUBMIT_CODES, type JobJournal, type JournalCode, type JournalState, type PackageHashes } from "./journal.js";
 import type { DeviceKey, OperatorKey } from "./keys.js";
@@ -558,18 +558,31 @@ export function createHost(deps: HostDeps): {
       await append("print_failed", "no_bundle");
       return done("print_failed");
     }
-    // Include the complete event sequence in either outcome, including the
-    // negative control's execution_failed evidence. Never use result.bundle.
-    for (const event of result.events) await pending.session.addEvent(event);
-    const bundle = await pending.session.finalize();
+    let bundle: EvidenceBundle | undefined;
+    let relayBundle: RelayEvidenceBundle;
+    const simulatedRehearsal = deps.realMode === false && result.events.some((event) =>
+      (Object.hasOwn(event.source, "simulated") && event.source.simulated !== false)
+      || (Object.hasOwn(event.payload, "mock") && event.payload.mock !== false));
+    if (simulatedRehearsal) {
+      // Rehearsals retain their simulation tags and have no delegated authority.
+      // This relay-only envelope is always terminal submit_disabled below.
+      const events = structuredClone(result.events);
+      relayBundle = { events, bundleHash: await hashBundle(events) };
+    } else {
+      // Include the complete event sequence in either outcome, including the
+      // negative control's execution_failed evidence. Never use result.bundle.
+      for (const event of result.events) await pending.session.addEvent(event);
+      bundle = await pending.session.finalize();
+      relayBundle = bundle;
+    }
     await append(result.success ? "printed" : "print_failed");
-    await journal.saveBundle(jobId, bundle);
+    await journal.saveBundle(jobId, relayBundle);
     await append("bundle_saved");
     let receipt;
-    try { receipt = await gateway.postRelayEvidence(jobId, bundle); }
+    try { receipt = await gateway.postRelayEvidence(jobId, relayBundle); }
     catch { receipt = { ok: false as const, code: "indeterminate" as const, status: null }; }
     if (receipt.ok) {
-      const skip = skipSubmission(pending.inputs);
+      const skip = bundle === undefined ? "submit_disabled" : skipSubmission(pending.inputs);
       await record(jobId, "evidence_stored", skip);
       return done(skip ? "evidence_stored" : await submitStored(jobId, pending.inputs, bundle));
     }

@@ -1,9 +1,10 @@
-import { createPrivateKey, createPublicKey, randomBytes, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID, verify } from "node:crypto";
+import * as fs from "node:fs/promises";
 import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAddress } from "viem";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EvidenceEmitter, makeKernelEd25519Signer, runPrintJob,
   type PrintJobOptions, type PrintJobResult } from "@pcc/kernel";
 import { verifyBundleSignature } from "@pcc/kernel-sdk";
@@ -13,6 +14,11 @@ import { FakeMachineAdapter } from "../src/index.js";
 import { loadDeviceKey, type DeviceKey } from "../src/keys.js";
 import * as sessionSigners from "../src/kernel-signer.js";
 import * as api from "../src/unit-session.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return { ...actual, open: vi.fn(actual.open), lstat: vi.fn(actual.lstat), stat: vi.fn(actual.stat), link: vi.fn(actual.link) };
+});
 
 const cleanups: Array<() => Promise<void>> = [];
 const realSetTimeout = setTimeout;
@@ -172,6 +178,33 @@ async function eventFor(setup: Fixture, patch: Partial<EvidenceEvent> = {}): Pro
   return { ...raw, id: `event-${randomBytes(8).toString("hex")}`, hash: await hashEvent(raw) };
 }
 
+function printResult(events: EvidenceEvent[]): PrintJobResult {
+  return { success: true, events } as PrintJobResult;
+}
+function resumeOptions(setup: Fixture) {
+  return { journalDir: setup.options.journalDir, settlementUnitId: setup.unit.settlementUnitId, deviceKey: setup.deviceKey };
+}
+async function committedFiles(directory: string): Promise<string[]> {
+  return (await readdir(directory)).filter((name) => /^\d{8}\.json$/.test(name)).sort();
+}
+async function orphanTemp(directory: string, sequence: number, contents: string) {
+  const name = `.${String(sequence).padStart(8, "0")}.json.${randomUUID()}.tmp`;
+  await writeFile(join(directory, name), contents, { mode: 0o600 });
+  return name;
+}
+async function expectSessionRefusal(pending: Promise<unknown>, code: string) {
+  await expect(pending).rejects.toBeInstanceOf(api.UnitSessionError);
+  await expect(pending).rejects.toMatchObject({ code, message: code });
+}
+
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof fs>("node:fs/promises");
+  vi.mocked(fs.open).mockReset().mockImplementation(actual.open);
+  vi.mocked(fs.lstat).mockReset().mockImplementation(actual.lstat);
+  vi.mocked(fs.stat).mockReset().mockImplementation(actual.stat);
+  vi.mocked(fs.link).mockReset().mockImplementation(actual.link);
+});
+
 afterEach(async () => {
   const failures: unknown[] = [];
   try {
@@ -252,6 +285,8 @@ describe("print-host per-unit evidence session", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-10-09T00:00:00.000Z"));
     const setup = harness("gap-7");
+    // Deliberate GAP-7 fixture difference: F4 requires real-source evidence.
+    setup.adapter.source.simulated = false;
     const keyed = await fixture("delegated-unit");
     const journalDir = keyed.options.journalDir;
     expect(typeof api.openUnitEvidenceSession, "missing toolkit API: openUnitEvidenceSession").toBe("function");
@@ -277,7 +312,7 @@ describe("print-host per-unit evidence session", () => {
         source: { deviceId: "easypost:n144-tracking", deviceType: "courier_api", kernelId: testIds("gap-7").kernelId, simulated: false },
         payload: {
           jobId: options.jobId, providerEventId, trackingCode: "n144-tracking",
-          provenance: "independent_carrier_scan", independentCarrierScan: true, ...unit,
+          provenance: "independent_carrier_scan", independentCarrierScan: true,
         },
       };
       return { ...event, id: providerEventId, hash: await hashEvent(event) };
@@ -429,7 +464,7 @@ describe("print-host per-unit evidence session", () => {
     expect(await publicKeysFromSeedsOnDisk(directory), "random bytes must not identify a held key").not.toContain(signer.publicKeyHex);
   });
 
-  it.each(["settlementUnitId", "challengeNonce", "jobId", "kernelId"] as const)("refuses an event missing %s", async (field) => {
+  it.each(["jobId", "kernelId"] as const)("refuses an event missing %s", async (field) => {
     const setup = await fixture(`missing-${field}`);
     const session = await api.openUnitEvidenceSession(setup.options);
     const event = await eventFor(setup);
@@ -653,4 +688,464 @@ describe("print-host per-unit evidence session", () => {
     expect(secrets).toHaveLength(1);
     expect(secrets[0]!.some((byte) => byte !== 0), "a rejected delegation still erases the session secret").toBe(false);
   });
+
+  it("finalize at exactly expiresAt is refused before any key is minted or delegated", async () => {
+    const setup = await fixture("expired-before-mint");
+    let t = setup.options.fundedAt + 60;
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, signDelegation,
+    }) as DeviceKey;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey, now: () => t });
+    await session.addEvent(await eventFor(setup));
+    const recordsBefore = (await journalPaths(setup.options.journalDir)).files.length;
+    for (const expiredAt of [setup.options.expiresAt, setup.options.expiresAt + 1]) {
+      t = expiredAt;
+      const refused = session.finalize();
+      await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+      await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+      expect(mint).not.toHaveBeenCalled();
+      expect(signDelegation).not.toHaveBeenCalled();
+      expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+    }
+  });
+
+  it("finalize at expiresAt minus one succeeds with a verified bundle created at that second", async () => {
+    const setup = await fixture("before-expiry-boundary");
+    let t = setup.options.fundedAt + 60;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, now: () => t });
+    await session.addEvent(await eventFor(setup));
+    t = setup.options.expiresAt - 1;
+    const bundle = await session.finalize();
+    expect(verifyBundleSignature(bundle,
+      Buffer.from(bundle.sessionKeyAuthorization!.publicKey.replace(/^0x/, ""), "hex"))).toBe(true);
+    expect(bundle.createdAt).toBe(new Date((setup.options.expiresAt - 1) * 1_000).toISOString());
+  });
+
+  it("the clock crossing expiresAt during device delegation refuses before the session key signs", async () => {
+    const setup = await fixture("expired-during-delegation");
+    let t = setup.options.fundedAt + 60;
+    const original = sessionSigners.makeKernelEd25519Signer;
+    const secrets: Uint8Array[] = [];
+    const sessionSigns: Array<ReturnType<typeof original>["signFn"]> = [];
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer").mockImplementation((seed) => {
+      const signer = original(seed);
+      const signFn = vi.fn(signer.signFn);
+      secrets.push(signer.secretKey);
+      sessionSigns.push(signFn);
+      return { ...signer, signFn };
+    });
+    const signDelegation = vi.fn(async (input: Parameters<DeviceKey["signDelegation"]>[0]) => {
+      const signature = await setup.deviceKey.signDelegation(input);
+      t = setup.options.expiresAt;
+      return signature;
+    });
+    const deviceKey = Object.assign(Object.create(Object.getPrototypeOf(setup.deviceKey)), {
+      ...setup.deviceKey, signDelegation,
+    }) as DeviceKey;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey, now: () => t });
+    await session.addEvent(await eventFor(setup));
+    const recordsBefore = (await journalPaths(setup.options.journalDir)).files.length;
+    const refused = session.finalize();
+    await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(sessionSigns).toHaveLength(1);
+    expect(sessionSigns[0]!).not.toHaveBeenCalled();
+    expect(secrets).toHaveLength(1);
+    expect(secrets[0]!.every((byte) => byte === 0), "expiry after delegation erases the session secret").toBe(true);
+    expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+    const later = session.finalize();
+    await expect(later).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(later).rejects.toMatchObject({ code: "expired", message: "expired" });
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(sessionSigns[0]!).not.toHaveBeenCalled();
+    expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+  });
+
+  it("a resumed unfinalized journal refuses finalize at expiresAt without minting a key", async () => {
+    const setup = await fixture("expired-unfinalized-resume");
+    const session = await api.openUnitEvidenceSession(setup.options);
+    await session.addEvent(await eventFor(setup));
+    const recordsBefore = (await journalPaths(setup.options.journalDir)).files.length;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(setup.options.expiresAt * 1_000));
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    const resumed = await api.resumeUnitEvidenceSession({
+      journalDir: setup.options.journalDir, settlementUnitId: setup.unit.settlementUnitId, deviceKey: setup.deviceKey,
+    });
+    const refused = resumed.finalize();
+    await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+    expect(mint).not.toHaveBeenCalled();
+    expect((await journalPaths(setup.options.journalDir)).files).toHaveLength(recordsBefore);
+  });
+
+  it("open at exactly expiresAt is refused and creates no journal directory", async () => {
+    const setup = await fixture("expired-open");
+    const refused = api.openUnitEvidenceSession({ ...setup.options, now: () => setup.options.expiresAt });
+    await expect(refused).rejects.toBeInstanceOf(api.UnitSessionError);
+    await expect(refused).rejects.toMatchObject({ code: "expired", message: "expired" });
+    await expect(stat(setup.options.journalDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["after open", "after events", "before final"] as const)("ignores empty and partial orphan temps %s", async (stage) => {
+    const setup = await fixture(`orphan-${stage.replaceAll(" ", "-")}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    if (stage !== "after open") await session.addEvent(await eventFor(setup));
+    const count = (await committedFiles(setup.options.journalDir)).length;
+    await orphanTemp(setup.options.journalDir, count, "");
+    await orphanTemp(setup.options.journalDir, count, '{"sequence":');
+    const resumed = await api.resumeUnitEvidenceSession(resumeOptions(setup));
+    if (stage === "after open") await resumed.addEvent(await eventFor(setup));
+    const bundle = await resumed.finalize();
+    expect(bundle.events).toHaveLength(1);
+    const recovered = await api.resumeUnitEvidenceSession(resumeOptions(setup));
+    expect(JSON.stringify(await recovered.finalize())).toBe(JSON.stringify(bundle));
+  });
+
+  it("a failure before the final link leaves complete temp bytes and retry signs once", async () => {
+    const setup = await fixture("crash-final-link");
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = { publicKeyHex: setup.deviceKey.publicKeyHex,
+      delegationParent: setup.deviceKey.delegationParent, signDelegation } as unknown as DeviceKey;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey });
+    await session.addEvent(await eventFor(setup));
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    vi.mocked(fs.link).mockImplementationOnce(async (temp, final) => {
+      expect(String(temp)).toMatch(/\.00000002\.json\.[0-9a-f-]+\.tmp$/);
+      expect(String(final)).toBe(join(setup.options.journalDir, "00000002.json"));
+      expect(JSON.parse(await readFile(temp, "utf8")).record.kind).toBe("final");
+      throw new Error("interrupted before final link");
+    });
+    await expectSessionRefusal(session.finalize(), "journal_io");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json", "00000001.json"]);
+    expect((await readdir(setup.options.journalDir)).filter((name) => name.startsWith("."))).toHaveLength(1);
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    mint.mockClear(); signDelegation.mockClear();
+    const resumed = await api.resumeUnitEvidenceSession({ ...resumeOptions(setup), deviceKey });
+    const bundle = await resumed.finalize();
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(JSON.stringify(await resumed.finalize())).toBe(JSON.stringify(bundle));
+    expect(mint).toHaveBeenCalledOnce();
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(verifyBundleSignature(bundle, Buffer.from(bundle.sessionKeyAuthorization!.publicKey, "hex"))).toBe(true);
+  });
+
+  it("a crash inside open leaves only an orphan temp and the directory is re-openable", async () => {
+    const setup = await fixture("crash-open-link");
+    vi.mocked(fs.link).mockRejectedValueOnce(new Error("interrupted before open link"));
+    await expectSessionRefusal(api.openUnitEvidenceSession(setup.options), "journal_io");
+    expect(await committedFiles(setup.options.journalDir)).toEqual([]);
+    expect((await readdir(setup.options.journalDir)).filter((name) => name.startsWith("."))).toHaveLength(1);
+    const reopened = await api.openUnitEvidenceSession(setup.options);
+    await reopened.addEvent(await eventFor(setup));
+    expect((await reopened.finalize()).events).toHaveLength(1);
+  });
+
+  it("open accepts a directory containing only empty and partial orphan temps", async () => {
+    const setup = await fixture("orphan-only-open");
+    await mkdir(setup.options.journalDir, { mode: 0o700 });
+    await orphanTemp(setup.options.journalDir, 0, "");
+    await orphanTemp(setup.options.journalDir, 0, '{"sequence":');
+    const session = await api.openUnitEvidenceSession(setup.options);
+    await session.addEvent(await eventFor(setup));
+    expect((await session.finalize()).events).toHaveLength(1);
+  });
+
+  it("resume stays strict about unexpected dot-prefixed journal entries", async () => {
+    const setup = await fixture("unexpected-dot-file");
+    await api.openUnitEvidenceSession(setup.options);
+    await writeFile(join(setup.options.journalDir, ".00000001.json.not-a-uuid.tmp"), "", { mode: 0o600 });
+    await expectSessionRefusal(api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_integrity");
+  });
+
+  it("a byte flip in a committed record still refuses resume", async () => {
+    const setup = await fixture("committed-byte-flip");
+    const session = await api.openUnitEvidenceSession(setup.options);
+    await session.addEvent(await eventFor(setup));
+    const path = join(setup.options.journalDir, "00000001.json");
+    const bytes = await readFile(path);
+    bytes[Math.floor(bytes.length / 2)]! ^= 1;
+    await writeFile(path, bytes);
+    await expectSessionRefusal(api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_integrity");
+  });
+
+  it.each(["settlementUnitId", "challengeNonce", "both"] as const)("addEvent stamps missing %s and recomputes its hash", async (field) => {
+    const setup = await fixture(`stamp-${field}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    if (field === "both") { delete event.payload.settlementUnitId; delete event.payload.challengeNonce; }
+    else delete event.payload[field];
+    const original = structuredClone(event);
+    await session.addEvent(event);
+    const bundle = await session.finalize();
+    expect(event).toEqual(original);
+    expect(bundle.events[0]!.payload).toMatchObject(setup.unit);
+    const { id: _id, hash, ...raw } = bundle.events[0]!;
+    expect(hash).toBe(await hashEvent(raw));
+  });
+
+  it.each(["settlementUnitId", "challengeNonce"] as const)("addEvent refuses conflicting %s without journaling", async (field) => {
+    const setup = await fixture(`conflicting-add-${field}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    event.payload[field] = bytes32();
+    await expectSessionRefusal(session.addEvent(event), "event_binding");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it.each(["settlementUnitId", "challengeNonce"] as const)("a print result naming another %s refuses without journaling", async (field) => {
+    const setup = await fixture(`conflicting-print-${field}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    event.payload[field] = bytes32();
+    await expectSessionRefusal(session.addPrintResult(printResult([event])), "event_binding");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it.each([
+    ["source.simulated", true], ["source.simulated", null], ["source.simulated", "true"], ["source.simulated", 1],
+    ["payload.mock", true], ["payload.mock", null], ["payload.mock", "true"], ["payload.mock", 1],
+  ] as const)("refuses fabricated %s=%j without journaling", async (tag, value) => {
+    const setup = await fixture(`fabricated-${tag}-${String(value)}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    if (tag === "source.simulated") Reflect.set(event.source, "simulated", value);
+    else event.payload.mock = value;
+    await expectSessionRefusal(session.addEvent(event), "event_fabricated");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it.each(["absent", "false"] as const)("accepts fabricated-event tags when %s", async (tags) => {
+    const setup = await fixture(`accepted-tags-${tags}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    if (tags === "false") { event.source.simulated = false; event.payload.mock = false; }
+    await session.addEvent(event);
+    expect((await session.finalize()).events).toHaveLength(1);
+  });
+
+  it("GAP-7 frozen simulated print result is refused without journaling", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-09T00:00:00.000Z"));
+    const setup = harness("gap-7-simulated");
+    const keyed = await fixture("gap-7-simulated");
+    const session = await api.openUnitEvidenceSession(keyed.options);
+    const result = await completingPrint(setup, job(keyed.options.jobId), 107);
+    expect(result.success).toBe(true);
+    expect(result.events.some((event) => event.source.simulated === true)).toBe(true);
+    await expectSessionRefusal(session.addPrintResult(result), "event_fabricated");
+    expect(await committedFiles(keyed.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it.each([-1, 1] as const)("refuses an event outside the funded interval at boundary offset %s", async (offset) => {
+    const setup = await fixture(`funded-interval-${offset}`);
+    const time = offset === -1 ? setup.options.fundedAt - 1 : setup.options.expiresAt + 1;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, now: () => time < setup.options.fundedAt ? setup.options.fundedAt : time - 2 });
+    const event = await eventFor(setup, { timestamp: new Date(time * 1_000).toISOString() });
+    await expectSessionRefusal(session.addEvent(event), "event_time");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it.each(["fundedAt", "expiresAt"] as const)("accepts an event exactly at %s and never reapplies future limits on replay", async (boundary) => {
+    const setup = await fixture(`funded-boundary-${boundary}`);
+    let now = setup.options.fundedAt + 60;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, now: () => now });
+    now = setup.options[boundary];
+    await session.addEvent(await eventFor(setup, { timestamp: new Date(now * 1_000).toISOString() }));
+    now = setup.options.fundedAt + 60;
+    const resumed = await api.resumeUnitEvidenceSession(resumeOptions(setup));
+    expect((await resumed.finalize()).events).toHaveLength(1);
+    expect((await session.finalize()).events).toHaveLength(1);
+  });
+
+  it("finalize below fundedAt refuses before minting or delegating", async () => {
+    const setup = await fixture("finalize-before-funding");
+    let now = setup.options.fundedAt + 60;
+    const signDelegation = vi.fn(setup.deviceKey.signDelegation);
+    const deviceKey = { publicKeyHex: setup.deviceKey.publicKeyHex,
+      delegationParent: setup.deviceKey.delegationParent, signDelegation } as unknown as DeviceKey;
+    const mint = vi.spyOn(sessionSigners, "makeKernelEd25519Signer");
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey, now: () => now });
+    await session.addEvent(await eventFor(setup));
+    now = setup.options.fundedAt - 1;
+    await expectSessionRefusal(session.finalize(), "clock_skew");
+    expect(mint).not.toHaveBeenCalled();
+    expect(signDelegation).not.toHaveBeenCalled();
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json", "00000001.json"]);
+  });
+
+  it("a clock drop below fundedAt during delegation refuses before signing and zeroizes", async () => {
+    const setup = await fixture("clock-drop-during-delegation");
+    let now = setup.options.fundedAt + 60;
+    const original = sessionSigners.makeKernelEd25519Signer;
+    const secrets: Uint8Array[] = [];
+    const sessionSigns: Array<ReturnType<typeof original>["signFn"]> = [];
+    vi.spyOn(sessionSigners, "makeKernelEd25519Signer").mockImplementation((seed) => {
+      const signer = original(seed);
+      const signFn = vi.fn(signer.signFn);
+      secrets.push(signer.secretKey); sessionSigns.push(signFn);
+      return { ...signer, signFn };
+    });
+    const signDelegation = vi.fn(async (input: Parameters<DeviceKey["signDelegation"]>[0]) => {
+      const signature = await setup.deviceKey.signDelegation(input);
+      now = setup.options.fundedAt - 1;
+      return signature;
+    });
+    const deviceKey = { publicKeyHex: setup.deviceKey.publicKeyHex,
+      delegationParent: setup.deviceKey.delegationParent, signDelegation } as unknown as DeviceKey;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, deviceKey, now: () => now });
+    await session.addEvent(await eventFor(setup));
+    await expectSessionRefusal(session.finalize(), "clock_skew");
+    expect(signDelegation).toHaveBeenCalledOnce();
+    expect(sessionSigns).toHaveLength(1);
+    expect(sessionSigns[0]!).not.toHaveBeenCalled();
+    expect(secrets[0]!.every((byte) => byte === 0)).toBe(true);
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json", "00000001.json"]);
+  });
+
+  it("resume refuses a journal directory chmodded 0755", async () => {
+    const setup = await fixture("directory-mode");
+    await api.openUnitEvidenceSession(setup.options);
+    await chmod(setup.options.journalDir, 0o755);
+    await expectSessionRefusal(api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_io");
+  });
+
+  it("resume refuses a committed record chmodded 0644", async () => {
+    const setup = await fixture("record-mode");
+    await api.openUnitEvidenceSession(setup.options);
+    await chmod(join(setup.options.journalDir, "00000000.json"), 0o644);
+    await expectSessionRefusal(api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_io");
+  });
+
+  it.each(["eip155:x", "ed25519:x", "ED25519:kernel", "Eip155:kernel"])("refuses identity-prefixed kernelId %s", async (kernelId) => {
+    const setup = await fixture("kernel-prefix");
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    event.source.kernelId = kernelId;
+    await expectSessionRefusal(session.addEvent(event), "event_binding");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it("refuses payload.kernelId differing from source.kernelId", async () => {
+    const setup = await fixture("payload-kernel");
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const event = await eventFor(setup);
+    event.payload.kernelId = "another-kernel";
+    await expectSessionRefusal(session.addEvent(event), "event_binding");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+  });
+
+  it("accepts the 1000th event, refuses the 1001st, and checks the whole batch cap first", async () => {
+    const setup = await fixture("event-limit");
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const template = await eventFor(setup);
+    const events = Array.from({ length: 999 }, (_, index) => ({ ...template, id: `cheap-${index}` }));
+    // Build committed fixture records directly: the cap test measures the last
+    // two ADD operations, while the crash tests exercise fsync and atomic links.
+    let head = JSON.parse(await readFile(join(setup.options.journalDir, "00000000.json"), "utf8")).hash as string;
+    const records = events.map((event, index) => {
+      const body = { sequence: index + 1, previousHash: head, record: { kind: "event", event } };
+      head = createHash("sha256").update(canonicalize(body)).digest("hex");
+      return { path: join(setup.options.journalDir, `${String(index + 1).padStart(8, "0")}.json`), bytes: canonicalize({ ...body, hash: head }) };
+    });
+    await Promise.all(records.map(({ path, bytes }) => writeFile(path, bytes, { mode: 0o600 })));
+    expect(await committedFiles(setup.options.journalDir)).toHaveLength(1000);
+    const thousandth = { ...template, id: "cheap-999" };
+    const thousandAndFirst = { ...template, id: "cheap-1000" };
+    await expectSessionRefusal(session.addPrintResult(printResult([thousandth, thousandAndFirst])), "event_limit");
+    expect(await committedFiles(setup.options.journalDir)).toHaveLength(1000);
+    await session.addEvent(thousandth);
+    await expectSessionRefusal(session.addEvent(thousandAndFirst), "event_limit");
+    const bundle = await session.finalize();
+    expect(bundle.events).toHaveLength(1000);
+    expect(new Set(bundle.events.map((event) => event.id)).size).toBe(1000);
+  }, 10_000);
+
+  it.each(["kernelSignature", "parentSignature"] as const)("resume refuses a rewritten final %s after recomputing the hash chain", async (signature) => {
+    const setup = await fixture(`tampered-${signature}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    await session.addEvent(await eventFor(setup));
+    await session.finalize();
+    const path = join(setup.options.journalDir, "00000002.json");
+    const record = JSON.parse(await readFile(path, "utf8"));
+    if (signature === "kernelSignature") record.record.bundle.kernelSignature.value = "00".repeat(64);
+    else record.record.bundle.sessionKeyAuthorization.parentSignature = "00".repeat(64);
+    const { hash: _hash, ...body } = record;
+    record.hash = createHash("sha256").update(canonicalize(body)).digest("hex");
+    await writeFile(path, canonicalize(record));
+    await expectSessionRefusal(api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_integrity");
+  });
+
+  it("accepts exactly clock plus 300 seconds and refuses plus 301 on add only", async () => {
+    const setup = await fixture("future-bound");
+    const now = setup.options.fundedAt + 60;
+    const session = await api.openUnitEvidenceSession({ ...setup.options, now: () => now });
+    await session.addEvent(await eventFor(setup, { timestamp: new Date((now + 300) * 1_000).toISOString() }));
+    await expectSessionRefusal(session.addEvent(await eventFor(setup, {
+      timestamp: new Date((now + 301) * 1_000).toISOString(),
+    })), "event_time");
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json", "00000001.json"]);
+    expect((await session.finalize()).events).toHaveLength(1);
+  });
+
+  it.each(["open", "resume"] as const)("%s refuses a journal directory owned by another uid", async (operation) => {
+    const setup = await fixture(`directory-owner-${operation}`);
+    if (operation === "resume") await api.openUnitEvidenceSession(setup.options);
+    const actual = await vi.importActual<typeof fs>("node:fs/promises");
+    vi.mocked(fs.lstat).mockImplementation(async (...args) => {
+      const info = await actual.lstat(...args);
+      return String(args[0]) === setup.options.journalDir
+        ? Object.assign(Object.create(Object.getPrototypeOf(info)), info, { uid: process.geteuid!() + 1 }) : info;
+    });
+    await expectSessionRefusal(operation === "open" ? api.openUnitEvidenceSession(setup.options)
+      : api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_io");
+  });
+
+  it("resume refuses a committed record owned by another uid", async () => {
+    const setup = await fixture("record-owner");
+    await api.openUnitEvidenceSession(setup.options);
+    const path = join(setup.options.journalDir, "00000000.json");
+    const actual = await vi.importActual<typeof fs>("node:fs/promises");
+    vi.mocked(fs.stat).mockImplementation(async (...args) => {
+      const info = await actual.stat(...args);
+      return String(args[0]) === path
+        ? Object.assign(Object.create(Object.getPrototypeOf(info)), info, { uid: process.geteuid!() + 1 }) : info;
+    });
+    vi.mocked(fs.open).mockImplementation(async (...args) => {
+      const handle = await actual.open(...args);
+      if (String(args[0]) === path) {
+        const info = await fs.stat(path);
+        vi.spyOn(handle, "stat").mockResolvedValue(info as Awaited<ReturnType<typeof handle.stat>>);
+      }
+      return handle;
+    });
+    await expectSessionRefusal(api.resumeUnitEvidenceSession(resumeOptions(setup)), "journal_io");
+  });
+
+  it.each(["binding", "kernel", "time", "fabricated"] as const)("an invalid LAST print event (%s) journals nothing and valid retry journals each once", async (invalid) => {
+    const setup = await fixture(`atomic-print-${invalid}`);
+    const session = await api.openUnitEvidenceSession(setup.options);
+    const first = await eventFor(setup);
+    const last = await eventFor(setup);
+    const badLast = structuredClone(last);
+    let code = "event_binding";
+    if (invalid === "binding") badLast.payload.challengeNonce = bytes32();
+    if (invalid === "kernel") badLast.source.kernelId = "another-kernel";
+    if (invalid === "time") { badLast.timestamp = "invalid"; code = "event_time"; }
+    if (invalid === "fabricated") { badLast.payload.mock = true; code = "event_fabricated"; }
+    await expectSessionRefusal(session.addPrintResult(printResult([first, badLast])), code);
+    expect(await committedFiles(setup.options.journalDir)).toEqual(["00000000.json"]);
+    await session.addPrintResult(printResult([first, last]));
+    const bundle = await session.finalize();
+    expect(bundle.events.map((event) => event.id)).toEqual([first.id, last.id]);
+    expect(await committedFiles(setup.options.journalDir)).toHaveLength(4);
+  });
+
 });
