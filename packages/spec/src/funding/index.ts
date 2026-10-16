@@ -20,7 +20,8 @@
  * PCC MVP units bind all three commitments exactly (termsHash, acceptedPolicyDigest and compositionRoots);
  * bind jobPolicyHash as well when you hold it. An MVP integration never passes allowUnchecked.
  * Values come from the caller's own pins;
- * Thursday PRINT uses printUnitThursdayExpectation and economics' PRINT_UNIT_THURSDAY_V1 pins. Its termsHash is
+ * Thursday PRINT uses printUnitThursdayExpectation and economics' PRINT_UNIT_THURSDAY_V1 pins.
+ * Its exact payer expectation binds fundingWallet to the wallet passed to prepareFunding. Its termsHash is
  * derived from the funded configs as v2.1 (#8165), carried privately until evidence's public producer (#8168). Never copy
  * values from a payload or gateway response. Outside the MVP, exact-literal "unchecked" waivers require allowUnchecked: true; each is
  * exposed in prepared.unchecked and leaves the terms, evidence policy or composition to the payload's author.

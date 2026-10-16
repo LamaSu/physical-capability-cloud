@@ -103,6 +103,8 @@ export interface FundingExpectations {
   compositionSchemaVersion?: number;
   /** Exact chain id; never waivable. */
   chainId?: bigint;
+  /** Exact funding wallet address; never waivable. Absent leaves the existing wallet/policy payer check unchanged. */
+  payer?: Address;
   /** Exact number of settlement units. */
   unitCount?: number;
   /** Exact gross USDC base units for every settlement unit. */
@@ -207,7 +209,7 @@ function copyExpectations(raw: unknown): FundingExpectations {
   }
   const e = raw as Record<string, unknown>;
   const required = ["jobId", "operator", "payees", "maxFeeBps", "feeRecipients", "tiers", "latestReclaimAt", "termsHash", "acceptedPolicyDigest", "compositionRoots"];
-  const optional = ["jobPolicyHash", "compositionSchemaVersion", "chainId", "unitCount", "unitGross", "unitPayouts", "earliestReclaimAt"];
+  const optional = ["jobPolicyHash", "compositionSchemaVersion", "chainId", "payer", "unitCount", "unitGross", "unitPayouts", "earliestReclaimAt"];
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(e, key)) ||
       Object.keys(e).some((key) => !required.includes(key) && !optional.includes(key))) {
     refuse("BAD_EXPECTATION", `expect must contain ${required.join(", ")}, with only ${optional.join(", ")} optional`);
@@ -283,6 +285,7 @@ function copyExpectations(raw: unknown): FundingExpectations {
     refuse("BAD_EXPECTATION", "expect.compositionSchemaVersion must be an integer in [0, 65535]");
   }
   const chainId = e.chainId === undefined ? undefined : uint256(e.chainId, "chainId");
+  const payer = e.payer === undefined ? undefined : address(e.payer, "payer");
   if (chainId === 0n) refuse("BAD_EXPECTATION", "expect.chainId must be a positive uint256 bigint");
   const unitCount = e.unitCount;
   if (unitCount !== undefined && (typeof unitCount !== "number" || !Number.isInteger(unitCount) || unitCount < 1 || unitCount > MAX_UNITS)) {
@@ -316,6 +319,7 @@ function copyExpectations(raw: unknown): FundingExpectations {
     latestReclaimAt: e.latestReclaimAt, termsHash, acceptedPolicyDigest, compositionRoots,
     ...(compositionSchemaVersion === undefined ? {} : { compositionSchemaVersion }),
     ...(chainId === undefined ? {} : { chainId }),
+    ...(payer === undefined ? {} : { payer }),
     ...(unitCount === undefined ? {} : { unitCount }),
     ...(unitGross === undefined ? {} : { unitGross }),
     ...(unitPayouts === undefined ? {} : { unitPayouts }),
@@ -330,6 +334,7 @@ function checkIntent(p: PreparePayload, e: FundingExpectations, structHash: Hex)
     refuse("INTENT_MISMATCH", `${field} is ${display(got)}; the buyer expects ${display(want)}`);
   const expectedJob = jobIdHashOf(e.jobId);
   if (e.chainId !== undefined && p.chainId !== e.chainId) mismatch("chainId", p.chainId, e.chainId);
+  if (e.payer !== undefined && !same(m.payer, e.payer)) mismatch("payer", m.payer, e.payer);
   if (!same(m.jobIdHash, expectedJob)) mismatch("jobId (message.jobIdHash)", m.jobIdHash, expectedJob);
   if (!same(m.operator, e.operator)) mismatch("operator", m.operator, e.operator);
   let checkedTermsHash: Hex | undefined;

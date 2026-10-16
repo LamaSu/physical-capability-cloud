@@ -99,6 +99,7 @@ export function printUnitPrincipalWord(address: Address): Hex {
 export interface PrintUnitThursdayExpectationInput {
   jobId: string;
   host: Address;
+  /** Must be the address of the wallet passed to prepareFunding; the returned `payer` expectation enforces it. */
   fundingWallet: Address;
   /** Full subject block; hashes are canonical lowercase, settlement address accepts any hex casing. */
   subject: SubjectBlockFields;
@@ -152,7 +153,7 @@ export function printUnitThursdayExpectation(input: PrintUnitThursdayExpectation
     const bindingsRoot = computeBindingsRoot(bindings);
     if (bindings.length !== 0) refuse("INTENT_MISMATCH", "PRINT bindings must be exactly []; this unit admits no subject bindings");
     return {
-      jobId, operator: host, payees: [host, p.passThroughRecipient], maxFeeBps: p.feeBps,
+      jobId, operator: host, payer: fundingWallet, payees: [host, p.passThroughRecipient], maxFeeBps: p.feeBps,
       feeRecipients: [p.feeRecipient], tiers: [p.requestedTier],
       termsHash: { derive: "v2.1", token: p.usdc, assuranceTier: p.requiredTier },
       acceptedPolicyDigest: { subjectBlockHash, bindingsRoot }, compositionRoots: [p.compositionRoot],

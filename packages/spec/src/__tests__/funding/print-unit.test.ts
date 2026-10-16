@@ -16,6 +16,7 @@ const api = () => import("../../funding/print-unit.js");
 const FILE_VERSION_DIGEST = "0xf037904088f851954883103836132ab016be7a8b0ff4867a4b7b6463a5e4f6b7";
 const PROGRAM = "0x56c1897725442876a5b7adfde81b81c83b9ef09aade75aa3a81a911856330e4a";
 const POSTAGE: Address = "0x6463ACd05141c1EF6583E4Fd978FC61Fff4045DC";
+const BAD_CHECKSUM: Address = "0x6463aCd05141c1EF6583E4Fd978FC61Fff4045DC";
 const WORD = "0x5c7d94f41618b47baed85a60abea9904c04ffafe43edf75dad2739b3a760ac35";
 const EMPTY_ROOT = "0x569e75fc77c1a856f6daaf9e69d8a9566ca34aa47f9133711ce065a571af0cfd";
 const TOKEN: Address = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
@@ -142,7 +143,7 @@ describe("Thursday PRINT pins and public producers", () => {
 describe("Thursday PRINT buyer expectation", () => {
   it("prepares one exact PRINT unit with no unchecked commitments", async () => {
     const { prepare, own, input, fx } = await setup();
-    expect(own).toMatchObject({ jobId: input.jobId, operator: input.host, payees: [input.host, POSTAGE],
+    expect(own).toMatchObject({ jobId: input.jobId, operator: input.host, payer: input.fundingWallet, payees: [input.host, POSTAGE],
       maxFeeBps: 0, feeRecipients: [zeroAddress], tiers: [1],
       termsHash: { derive: "v2.1", token: TOKEN, assuranceTier: 1 },
       acceptedPolicyDigest: { subjectBlockHash: computeSubjectBlockHash(input.subject), bindingsRoot: computeBindingsRoot([]) },
@@ -150,6 +151,7 @@ describe("Thursday PRINT buyer expectation", () => {
       unitCount: 1, unitGross: 750_000n, unitPayouts: fx.configs[0]!.payouts, chainId: 84532n,
       earliestReclaimAt: NOW + MIN_RECLAIM_DELAY, latestReclaimAt: NOW + 1_814_400n + 600n });
     const prepared = await prepare();
+    expect(prepared.expect.payer).toBe(input.fundingWallet);
     expect(prepared.unchecked).toEqual([]);
     expect(prepared.configs).toEqual(fx.configs);
     expect(prepared.totalGross).toBe(750_000n);
@@ -319,6 +321,31 @@ describe("Thursday PRINT buyer expectation", () => {
 });
 
 describe("optional exact funding expectations", () => {
+  it("INTENT_MISMATCH before any RPC: PRINT subject payer names another funding wallet", async () => {
+    const { input, fx, buildConfigured } = await setup();
+    const subject = { ...input.subject, payer: publicWord(OTHER) };
+    const own = (await api()).printUnitThursdayExpectation({ ...input, fundingWallet: OTHER, subject });
+    const changed = await buildConfigured({ acceptedPolicyDigest: digestFor(subject, fx.message.termsHash) });
+    const chain = makeChain(changed);
+    expect(changed.payer.address.toLowerCase()).not.toBe(OTHER.toLowerCase());
+    await expect(prepareFunding({ payload: changed.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: changed.totalGross }, expect: own, pins: testPins(changed) })).rejects.toMatchObject({
+      code: "INTENT_MISMATCH", message: expect.stringContaining("payer"),
+    });
+    expect(chain.state.log).toEqual([]);
+  });
+  it("accepts an exact payer expectation in the other hex casing", async () => {
+    let account = newAccount();
+    while (account.address === account.address.toLowerCase()) account = newAccount();
+    const fx = await buildFixture({}, { payer: account, operator: newAccount() });
+    const chain = makeChain(fx);
+    const payer = fx.payer.address.toLowerCase() as Address;
+    expect(payer).not.toBe(fx.payer.address);
+    const prepared = await prepareFunding({ payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, expect: { ...testExpect(fx), payer }, pins: testPins(fx) });
+    expect(prepared.expect.payer).toBe(payer);
+    expect(prepared.unchecked).toEqual([]);
+  });
   it.each(["unitGross", "payout length", "payout recipient", "maxFeeBps"])("independently checks %s before any RPC", async (field) => {
     const fx = await buildFixture({ reclaimAt: [NOW + 30n * 86_400n] });
     const chain = makeChain(fx);
@@ -363,6 +390,7 @@ describe("optional exact funding expectations", () => {
     expect(chain.state.log).toEqual([]);
   });
   const malformed = [
+    ["payer", "unchecked"], ["payer", "0x1234"], ["payer", 42], ["payer", null], ["payer", BAD_CHECKSUM],
     ["compositionSchemaVersion", "unchecked"], ["compositionSchemaVersion", -1], ["compositionSchemaVersion", 65536],
     ["compositionSchemaVersion", 0.5], ["compositionSchemaVersion", NaN],
     ["unitCount", 0], ["unitCount", 17], ["unitCount", 1.5], ["unitCount", "1"],
