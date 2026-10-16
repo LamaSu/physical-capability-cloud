@@ -478,6 +478,27 @@ describe("pcc-wallet ceremony", () => {
     expect((await stored()).link).toMatchObject({ status: "expired" });
   }, 120_000);
 
+  it("caps a one-hour polling sleep at the signed expiry when the gateway expiry is later", async () => {
+    const gateway = await new Gateway({ interval: 3600, statuses: ["authorization_pending"], mutateCreated: (created) => {
+      created.expiresAt = new Date(BASE_TIME + 365 * 86_400_000).toISOString();
+    } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toMatch(/^expired\n/);
+    expect(sleeps).toEqual([600_000]);
+    expect(clock).toBe(BASE_TIME + 600_000);
+    expect(gateway.pollIndex).toBe(0);
+    expect((await stored()).link).toMatchObject({ status: "expired" });
+  });
+
+  it("caps the last seven-second polling sleep at the signed expiry when the gateway expiry is later", async () => {
+    const gateway = await new Gateway({ interval: 7, statuses: ["authorization_pending"], mutateCreated: (created) => {
+      created.expiresAt = new Date(BASE_TIME + 365 * 86_400_000).toISOString();
+    } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(clock).toBe(BASE_TIME + 600_000);
+    expect(gateway.pollIndex).toBe(85);
+  }, 120_000);
+
   it("stops polling at the gateway expiry when the signed message expiry is later", async () => {
     const gateway = await new Gateway({ statuses: ["authorization_pending"], mutateCreated: (created) => {
       created.expiresAt = new Date(BASE_TIME + 12_000).toISOString();
