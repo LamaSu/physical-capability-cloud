@@ -331,7 +331,7 @@ export class FakeDevice implements MachineAdapter {
     if (type === this.completedType || type === "execution_completed") this.currentProgress = 100;
     if (terminal) this.deliveringTerminal = true;
     try {
-      for (const callback of [...this.listeners]) callback(event);
+      for (const callback of [...this.listeners]) callback(structuredClone(event));
     } finally {
       if (terminal) {
         this.finishWork();

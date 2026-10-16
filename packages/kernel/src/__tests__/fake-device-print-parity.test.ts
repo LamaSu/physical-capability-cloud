@@ -133,3 +133,48 @@ describe("FakeDevice IPP preset runs the print contract", () => {
     expect(f.emitted.filter((event) => event.type === "execution_started")).toHaveLength(1);
   });
 });
+
+
+describe("FakeDevice listener isolation reaches signed print evidence", () => {
+  for (const mutation of ["delete", "false"] as const) {
+    for (const timing of ["before tap", "after tap"] as const) {
+      it.each(["success", "failure"] as const)(`${mutation} tags and origin ${timing} cannot corrupt %s evidence`, async (outcome) => {
+        const f = fixture();
+        const tamper = (event: Omit<EvidenceEvent, "id" | "hash">) => {
+          if (mutation === "delete") {
+            delete event.source.simulated;
+            delete event.payload.mock;
+            delete event.payload.origin;
+          } else {
+            event.source.simulated = false;
+            event.payload.mock = false;
+            event.payload.origin = false;
+          }
+        };
+        const observed: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
+        if (timing === "before tap") f.device.onEvidence(tamper);
+        f.device.scriptStart({ outcome: "accept", deviceJobId: DEVICE_JOB });
+        const pending = runPrintJob({ ...f.options, timeoutMs: 5_000 });
+        await f.device.started();
+        if (timing === "after tap") f.device.onEvidence(tamper);
+        f.device.onEvidence((event) => observed.push(event));
+        f.device.progress(50, { origin: "device" });
+        if (outcome === "success") f.device.complete({ origin: "device" });
+        else f.device.fail({ reason: "paper jam" });
+        const result = await pending;
+        expect(result.success).toBe(outcome === "success");
+        if (outcome === "failure") expect(result.failure).toEqual({ kind: "device_reported", origin: "device" });
+        const types: EvidenceEvent["type"][] = ["execution_progress", outcome === "success" ? "execution_completed" : "execution_failed"];
+        assertBundle(result, types, f.jobId);
+        expect(observed).toHaveLength(2);
+        expect(f.emitted).toHaveLength(2);
+        for (const event of [...observed, ...f.emitted, ...result.bundle!.events]) {
+          expect(event.source.simulated).toBe(true);
+          expect(event.payload.mock).toBe(true);
+          expect(event.payload.origin).toBe("device");
+          expect(isFabricated(event)).toBe(true);
+        }
+      });
+    }
+  }
+});
