@@ -205,6 +205,15 @@ const capabilities: Capability[] = [
 
 Adapters wrap your device's API into PCC's standard interface. You implement **three adapter types** depending on your equipment:
 
+Machine commands follow this contract:
+
+- Declare `accepts` as the complete list of commands your adapter implements. The kernel sends nothing outside it, uses `prepare` when the list includes it, and refuses before any command unless it includes `start` and either `prepare` or `load_gcode`. Without `accepts`, the adapter uses the legacy `load_gcode`, then `start` path.
+- `prepare` is **NON-ACTUATING**: stage and validate input only; no motion, heat, dispense, or device-state change beyond staging.
+- A successful prepare returns `{ success: true, data: { jobId, inputHash, deviceJobId } }`. Echo `jobId` and `inputHash` exactly; `deviceJobId` must be the device's own non-empty staged-job id. Any other ack fails the job before `start`.
+- Adapters never emit method_loaded. The kernel records `method_loaded { jobId, deviceJobId, inputHash }` from the ack as its signed input proof; an adapter-emitted `method_loaded` fails a prepare-path job.
+- Every evidence event of the device job carries `payload.deviceJobId`.
+- Don't set `payload.jobId`: the kernel commits that binding.
+
 **Every adapter must implement `quiesceEvidence()`, the evidence handshake.** The kernel records an evidence event under whichever job is recording when the event arrives. So it hands your device to the next job only once your adapter says it is done:
 - It resolves once your adapter has emitted every evidence event of the work it was given, and it emits nothing for that work afterwards.
 - It must NOT resolve while that work can still emit: a poll loop that may still report the completion or a failure, a sampling timer, a command or callback in flight.
@@ -216,14 +225,18 @@ The JobRunner refuses an adapter without it. It waits for it at the end of every
 
 ```typescript
 import type { EvidenceEvent, EvidenceSource } from "@pcc/spec";
-import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "@pcc/kernel/adapters";
+import type { MachineAdapter, MachineCommand, MachineCommandResult, MachineStatus } from "@pcc/kernel";
 import { OutstandingWork } from "@pcc/kernel";
 
 export class YourMachineAdapter implements MachineAdapter {
   readonly id: string;
-  readonly type = "cnc-3axis" as const;  // your capability type
+  readonly type = "liquid-handler" as const;  // your capability type
+  readonly accepts = ["prepare", "start", "stop", "status"] as const; // all implemented commands
   readonly source: EvidenceSource;
 
+  private staged: { jobId: string; deviceJobId: string; inputData: Uint8Array } | null = null;
+  private mockJobSequence = 0;
+  private mockProgress = 0;
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   /** What can still emit: the progress loop, each poll and each command in flight. */
   private readonly work = new OutstandingWork();
@@ -240,6 +253,7 @@ export class YourMachineAdapter implements MachineAdapter {
 
   /** Map your device's status to PCC status */
   async getStatus(): Promise<MachineStatus> {
+    if (this.config.mockMode) return this.pollTimer && this.mockProgress < 100 ? "busy" : "idle";
     // Call YOUR device's API to get current state
     const response = await fetch(`${this.config.apiUrl}/status`);
     const data = await response.json();
@@ -257,6 +271,7 @@ export class YourMachineAdapter implements MachineAdapter {
 
   /** Get job progress 0-100 */
   async getProgress(): Promise<number> {
+    if (this.config.mockMode) return this.mockProgress = Math.min(100, this.mockProgress + 25);
     const response = await fetch(`${this.config.apiUrl}/job/progress`);
     const data = await response.json();
     return data.percentComplete ?? 0;
@@ -269,57 +284,68 @@ export class YourMachineAdapter implements MachineAdapter {
 
   private async runCommand(command: MachineCommand): Promise<MachineCommandResult> {
     switch (command.type) {
-      case "load_gcode": {
-        // Upload the file/program to your machine
-        const result = await fetch(`${this.config.apiUrl}/programs/upload`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            filename: command.payload?.filename,
-            gcodeHash: command.payload?.gcodeHash,
-          }),
-        });
+      case "prepare": {
+        const { jobId, inputHash, inputData } = command.payload ?? {};
+        if (typeof jobId !== "string" || jobId.length === 0 ||
+            typeof inputHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(inputHash)) {
+          return { success: false, message: "Invalid input binding" };
+        }
+        if (inputData !== undefined && !(inputData instanceof Uint8Array)) {
+          return { success: false, message: "Expected exact input bytes" };
+        }
 
-        // IMPORTANT: Emit evidence event when G-code is loaded
-        this.emit({
-          type: "gcode_received",
-          timestamp: new Date().toISOString(),
-          source: this.source,
-          payload: {
-            filename: command.payload?.filename,
-            gcodeHash: command.payload?.gcodeHash,
-          },
-        });
-
-        return { success: result.ok, message: "Program loaded" };
+        // NON-ACTUATING: stage exactly these bytes; never move, heat, or dispense.
+        // JobRunner supplies a fresh Uint8Array when JobConfig has inputData.
+        // With only inputHash, resolve the input by that hash in your integration.
+        const bytes = inputData ?? await this.config.resolveInput(inputHash);
+        let deviceJobId: string;
+        if (this.config.mockMode) {
+          deviceJobId = `mock-${++this.mockJobSequence}`; // no network or actuation
+        } else {
+          const response = await fetch(`${this.config.apiUrl}/programs/stage`, {
+            method: "POST",
+            headers: { "X-Job-Id": jobId, "X-Input-Hash": inputHash },
+            body: bytes, // exact bytes, without text normalization
+          });
+          if (!response.ok) return { success: false, message: "Staging failed" };
+          const staged = await response.json();
+          if (typeof staged.deviceJobId !== "string" || staged.deviceJobId.length === 0) {
+            return { success: false, message: "Device returned no staged-job id" };
+          }
+          deviceJobId = staged.deviceJobId;
+        }
+        this.staged = { jobId, deviceJobId, inputData: new Uint8Array(bytes) };
+        // The kernel records method_loaded from this ack; never emit method_loaded.
+        return { success: true, data: { jobId, inputHash, deviceJobId } };
       }
 
       case "start": {
-        await fetch(`${this.config.apiUrl}/job/start`, { method: "POST" });
-
+        if (!this.staged || command.payload?.jobId !== this.staged.jobId) {
+          return { success: false, message: "No matching staged job" };
+        }
+        if (!this.config.mockMode) {
+          const response = await fetch(`${this.config.apiUrl}/job/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ deviceJobId: this.staged.deviceJobId }),
+          });
+          if (!response.ok) return { success: false, message: "Start failed" };
+        }
+        this.mockProgress = 0;
         this.emit({
           type: "execution_started",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: {},
+          payload: { deviceJobId: this.staged.deviceJobId },
         });
-
-        // Start polling for progress updates
         this.startProgressPolling();
-
         return { success: true, message: "Job started" };
       }
 
-      case "pause":
-        await fetch(`${this.config.apiUrl}/job/pause`, { method: "POST" });
-        return { success: true, message: "Paused" };
-
-      case "resume":
-        await fetch(`${this.config.apiUrl}/job/resume`, { method: "POST" });
-        return { success: true, message: "Resumed" };
-
       case "stop":
-        await fetch(`${this.config.apiUrl}/job/stop`, { method: "POST" });
+        if (!this.config.mockMode) {
+          await fetch(`${this.config.apiUrl}/job/stop`, { method: "POST" });
+        }
         this.stopProgressPolling();
         return { success: true, message: "Stopped" };
 
@@ -359,6 +385,7 @@ export class YourMachineAdapter implements MachineAdapter {
 
   private startProgressPolling(): void {
     this.stopProgressPolling();
+    this.lastProgress = 0;
     this.endPolling = this.work.begin(); // the loop is outstanding until it stops
     this.pollTimer = setInterval(() => {
       void this.work.track(this.pollProgress()); // so is each poll in flight
@@ -366,6 +393,8 @@ export class YourMachineAdapter implements MachineAdapter {
   }
 
   private async pollProgress(): Promise<void> {
+    const staged = this.staged;
+    if (!staged) return;
     try {
       const progress = await this.getProgress();
       const status = await this.getStatus();
@@ -376,7 +405,7 @@ export class YourMachineAdapter implements MachineAdapter {
           type: "execution_progress",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { progress },
+          payload: { progress, deviceJobId: staged.deviceJobId },
         });
       }
 
@@ -386,7 +415,7 @@ export class YourMachineAdapter implements MachineAdapter {
           type: "execution_completed",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { progress: 100 },
+          payload: { progress: 100, deviceJobId: staged.deviceJobId },
         });
         this.stopProgressPolling();
       } else if (status === "error") {
@@ -395,7 +424,7 @@ export class YourMachineAdapter implements MachineAdapter {
           type: "execution_failed",
           timestamp: new Date().toISOString(),
           source: this.source,
-          payload: { progress },
+          payload: { progress, deviceJobId: staged.deviceJobId },
         });
         this.stopProgressPolling();
       }
@@ -423,7 +452,11 @@ export class YourMachineAdapter implements MachineAdapter {
 }
 ```
 
-### 2.2 SensorAdapter (required for Assurance Tier >= 1)
+In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, an optional `pollIntervalMs`, and `resolveInput(inputHash): Promise<Uint8Array>` for hash-only jobs. When `payload.inputData` is present, stage those exact bytes; do not replace them with data fetched by hash.
+
+An FDM (G-code) machine may implement `load_gcode` instead: that is the legacy path, with the FDM default ladder when no ladder is provided. Declare `accepts` with `load_gcode` and the other commands it implements.
+
+### 2.2 SensorAdapter (when your capability's tier ladder needs sensor events)
 
 If your device has sensors (power, temperature, vibration, etc.), or if you have external monitoring equipment:
 
@@ -547,7 +580,7 @@ export class YourSensorAdapter implements SensorAdapter {
 }
 ```
 
-### 2.3 CameraAdapter (required for Assurance Tier >= 2)
+### 2.3 CameraAdapter (when your capability's tier ladder needs camera events)
 
 If you have cameras for QC inspection:
 
@@ -661,14 +694,14 @@ export class YourCameraAdapter implements CameraAdapter {
 
 ### 2.4 Adapter selection by protocol
 
-Use the reference adapters in `@pcc/kernel` as starting points:
+Use the reference adapters in `@pcc/kernel` as starting points. `OctoPrintAdapter`, `OPCUAAdapter`, and the onboard-kit's `GenericHttpAdapter` speak the legacy `load_gcode` path. For a non-G-code device, follow §2.1 and build a staging template for its own input format:
 
 | Your Device Protocol | Base Adapter | Import |
 |---------------------|-------------|--------|
-| HTTP/REST API | `OctoPrintAdapter` | `@pcc/kernel/adapters` |
-| OPC-UA (CNC, PLC) | `OPCUAAdapter` | `@pcc/kernel/adapters` |
-| Modbus TCP (sensors) | `ModbusSensorAdapter` | `@pcc/kernel/adapters` |
-| SiLA 2 (lab instruments) | `SiLAAdapter` | `@pcc/kernel/adapters` |
+| HTTP/REST API | `OctoPrintAdapter` | `@pcc/kernel` |
+| OPC-UA (CNC, PLC) | `OPCUAAdapter` | `@pcc/kernel` |
+| Modbus TCP (sensors) | `ModbusSensorAdapter` | `@pcc/kernel` |
+| SiLA 2 (lab instruments) | `SiLAAdapter` | `@pcc/kernel` |
 | Custom protocol | Write from scratch using `MachineAdapter` interface | — |
 
 ---
@@ -733,10 +766,14 @@ evidenceEmitter.onBundle((bundle) => {
 
 ### 3.2 Kernel HTTP server (optional standalone mode)
 
-If running standalone (not embedded in a kernel agent), expose an HTTP API:
+If running standalone (not embedded in a kernel agent), expose an HTTP API. Keep the resolved capability CSDs in `capabilityCsds`. `/execute` takes `inputHash` and optional `inputData`:
+
+- `inputHash` is `"sha256:"` followed by 64 lowercase hex digits: SHA-256 of the exact input bytes, with no text normalization. `gcodeHash` is its legacy alias; give exactly one.
+- `inputData` is a string (its UTF-8 bytes) or a `Uint8Array`; `gcodeData` is its alias. The kernel hashes the bytes and refuses a mismatch. On prepare, it supplies those exact bytes as a fresh `Uint8Array` in `{ jobId, inputHash, inputData }`. With only a hash, prepare receives `{ jobId, inputHash }` and the adapter resolves the input by hash.
 
 ```typescript
 import Fastify from "fastify";
+import { compileTierLadder } from "@pcc/spec";
 
 const app = Fastify();
 
@@ -770,10 +807,13 @@ app.post("/quote", async (req) => {
 
 // Execute a job
 app.post("/execute", async (req) => {
-  const { capabilityId, jobId, stepId, gcodeHash, assuranceTier } = req.body as any;
+  const { capabilityId, jobId, stepId, inputHash, inputData, assuranceTier } = req.body as any;
+  const csd = capabilityCsds.get(capabilityId); // your capability's resolved CSD
+  if (!csd) return { error: "Capability CSD not found" };
+  const tierLadder = await compileTierLadder(csd);
 
   // Run asynchronously
-  jobRunner.run({ jobId, stepId, gcodeHash, assuranceTier })
+  jobRunner.run({ jobId, stepId, inputHash, inputData, assuranceTier, tierLadder })
     .then(result => console.log("Job completed:", result))
     .catch(err => console.error("Job failed:", err));
 
@@ -1042,17 +1082,20 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
    └→ Calls JobRunner.run({
         jobId,
         stepId,
-        gcodeHash,          // content hash of the program/file
+        inputHash,          // exact input bytes; gcodeHash is its legacy alias
         assuranceTier,      // 0, 1, 2, or 3
+        tierLadder,         // await compileTierLadder(csd)
       })
 
 3. JobRunner orchestrates:
    a. EvidenceEmitter.registerStep(jobId, stepId, tier)
    b. Wire evidence listeners (machine → emitter, sensors → emitter, camera → emitter)
-   c. Machine: execute("load_gcode", { filename, gcodeHash })
+   c. Machine: execute("prepare", { jobId, inputHash, inputData? })
+      Kernel checks the ack and records method_loaded { jobId, deviceJobId, inputHash }.
+      Legacy G-code adapter: execute("load_gcode", ...) instead.
    d. If tier >= 1: sensors.startRecording(jobId)
    e. If tier >= 2: camera.captureSnapshot()  // "before" image
-   f. Machine: execute("start")
+   f. Machine: execute("start", { jobId })
    g. Poll machine until progress >= 100 or status == "error"
    h. If tier >= 1: sensors.stopRecording()
    i. If tier >= 2: camera.runInspection()    // QC check
@@ -1071,6 +1114,8 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
 6. Send "job_completed" intent to broker
    └→ Includes evidenceBundleHash, summary
 ```
+
+Before any command, the kernel refuses malformed `inputHash`, an `inputData` hash mismatch, or an `accepts` list that lacks `start` or both input commands. It sends no undeclared command. On the prepare path, it also refuses a missing or malformed ladder, or a ladder missing the job's tier, at every tier from 0 to 3. A prepare ack that does not echo `jobId` and `inputHash` exactly with a non-empty `deviceJobId` fails before `start`.
 
 ### 7.2 Custom job execution
 
@@ -1109,22 +1154,26 @@ Evidence is the core of PCC's trust model. Every job produces a cryptographic **
 
 ### 8.1 Assurance tiers
 
+Evidence requirements come from the capability's tier ladder; see §8.4.
+
 | Tier | Evidence Required | Use Case | Bond | Challenge Window |
 |------|------------------|----------|------|-----------------|
-| **0** | None | Quick prototypes, low-value jobs | 0% | 1 hour |
-| **1** | Sensor data (power, temperature) | Standard manufacturing | 5% | 4 hours |
-| **2** | Tier 1 + camera snapshots + CV inspection | Production quality | 15% | 24 hours |
-| **3** | Tier 2 + encryption + ZK proofs + Bittensor consensus | Regulatory compliance | 25% | 72 hours |
+| **0** | Capability ladder, tier 0 | Quick prototypes, low-value jobs | 0% | 1 hour |
+| **1** | Capability ladder, tier 1 | Standard manufacturing | 5% | 4 hours |
+| **2** | Capability ladder, tier 2 | Production quality | 15% | 24 hours |
+| **3** | Capability ladder, tier 3 | Regulatory compliance | 25% | 72 hours |
 
 ### 8.2 Evidence events your adapters should emit
 
 **From MachineAdapter:**
-- `gcode_received` — when a program file is loaded
-- `gcode_hash_verified` — when file integrity is confirmed
+Every `execution_*` event of the device job carries `payload.deviceJobId`. Let the kernel set `payload.jobId`.
+
 - `execution_started` — when the machine starts
 - `execution_progress` — at 25% intervals
 - `execution_completed` — when the job finishes
 - `execution_failed` — if it fails or is cancelled (then stop your loop: see `quiesceEvidence()` in Step 2)
+
+`gcode_received` and `gcode_hash_verified` apply only to the FDM legacy path. `method_loaded` is recorded by the kernel from the prepare ack; adapters never emit it.
 
 **From SensorAdapter:**
 - `sensor_reading` — each data sample during the job
@@ -1158,21 +1207,19 @@ interface EvidenceBundle {
 
 ### 8.4 Tier requirements (what verifiers check)
 
-**Tier 0**: Nothing required
-**Tier 1**: Must include at least:
-- 1 execution event (started + completed)
-- 1 sensor event (power OR temperature OR vibration)
+The operator or orchestrator builds the capability's CSD and names the required event types in its evidence tiers. Build the adapter and evidence collection template to meet those requirements, then compile the ladder:
 
-**Tier 2**: Must include at least:
-- All Tier 1 requirements
-- 1 camera snapshot
-- 1 CV inspection result
+```typescript
+import { compileTierLadder } from "@pcc/spec";
 
-**Tier 3**: Must include:
-- All Tier 2 requirements
-- Encrypted evidence bundle (AES-256-GCM + Lit Protocol)
-- Merkle commitment on-chain
-- ZK proof of evidence inclusion
+const tierLadder = await compileTierLadder(csd);
+```
+
+Legacy CSDs (`fdm`, `sla`, `cnc-3axis`, `laser-cut`) are refused with `TierLadderError` code `"tier-adds-no-event-type"`: their tiers do not add the event types needed to distinguish the tiers. Update the CSD's evidence tiers to name event types before compiling.
+
+On the prepare path, the kernel refuses a missing or malformed ladder, or one that lacks the job's tier, **before any command at every tier, 0 to 3**. After the run, unmet ladder requirements fail the job at tier >= 2 and warn at tiers 0–1. The oracle recomputes the tier from the signed bundle under the funded capability's pinned ladder.
+
+`DEFAULT_TIER_REQUIREMENTS` is the FDM default (`gcode_hash_verified`, `execution_completed`, `power_profile_summary`, camera). It applies only to the legacy G-code path with no ladder.
 
 ---
 
@@ -1288,65 +1335,107 @@ Each transfer pair tracks episode counts and success rates. When enough successf
 ### 11.1 Unit test your adapter
 
 ```typescript
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 
-describe("YourMachineAdapter", () => {
-  it("should report idle status when machine is ready", async () => {
+// Use mock mode and stub fetch: these tests never contact equipment.
+afterEach(() => vi.unstubAllGlobals());
+
+describe("YourMachineAdapter neutral command contract", () => {
+  it("stages without actuating and binds start evidence to the staged job", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
     const adapter = new YourMachineAdapter("test-01", "kernel-test", {
       apiUrl: "http://mock:8080",
       mockMode: true,
+      resolveInput: async () => new Uint8Array(),
     });
-    const status = await adapter.getStatus();
-    expect(status).toBe("idle");
-  });
-
-  it("should emit evidence events during execution", async () => {
-    const adapter = new YourMachineAdapter("test-01", "kernel-test", {
-      apiUrl: "http://mock:8080",
-      mockMode: true,
-    });
-
     const events: any[] = [];
-    adapter.onEvidence((event) => events.push(event));
+    adapter.onEvidence(event => events.push(event));
+    const jobId = "test-job";
+    const inputHash = "sha256:" + "ab".repeat(32);
+    const inputData = new TextEncoder().encode("test method");
 
-    await adapter.execute({ type: "load_gcode", payload: { filename: "test.nc" } });
-    expect(events).toHaveLength(1);
-    expect(events[0].type).toBe("gcode_received");
+    try {
+      expect(adapter.accepts).toEqual(["prepare", "start", "stop", "status"]);
+      expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+      const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
+      expect(ack).toEqual({
+        success: true,
+        data: { jobId, inputHash, deviceJobId: expect.any(String) },
+      });
+      expect(ack.data!.deviceJobId).not.toBe("");
+      expect(events).toEqual([]);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await adapter.getStatus()).toBe("idle");
+      expect((await adapter.execute({ type: "start", payload: { jobId: "other" } })).success).toBe(false);
+      expect((await adapter.execute({ type: "pause" })).success).toBe(false);
+      expect(events).toEqual([]);
 
-    await adapter.execute({ type: "start" });
-    expect(events.some(e => e.type === "execution_started")).toBe(true);
+      expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "execution_started",
+        payload: { deviceJobId: ack.data!.deviceJobId },
+      }));
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await adapter.dispose();
+    }
   });
 });
 ```
 
 ### 11.2 Integration test with JobRunner
 
+Here `csd` is your resolved liquid-handler CSD with event types in its evidence tiers, including the tier used by this test. Use your adapter's mock execution to report completion, and stub every network call.
+
 ```typescript
+import { createHash } from "node:crypto";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { compileTierLadder } from "@pcc/spec";
 import { EvidenceEmitter, JobRunner } from "@pcc/kernel";
 
+afterEach(() => vi.unstubAllGlobals());
+
 describe("Integration", () => {
-  it("should produce a valid evidence bundle", async () => {
-    const machine = new YourMachineAdapter("dev-01", "kernel-test", { mockMode: true });
-    const sensor = new YourSensorAdapter("sensor-01", "kernel-test", { mockMode: true });
-    const camera = new YourCameraAdapter("cam-01", "kernel-test", { mockMode: true });
-    const emitter = new EvidenceEmitter("kernel-test");
-
-    const runner = new JobRunner(machine, [sensor], camera, emitter);
-
-    let completedBundle: any = null;
-    emitter.onBundle((bundle) => { completedBundle = bundle; });
-
-    const result = await runner.run({
-      jobId: "test-job-001",
-      stepId: "step-1",
-      gcodeHash: "sha256:abc123",
-      assuranceTier: 1,
+  it("produces one kernel-recorded input proof for a prepare-path run", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const machine = new YourMachineAdapter("dev-01", "kernel-test", {
+      apiUrl: "http://mock:8080",
+      mockMode: true,
+      pollIntervalMs: 10,
+      resolveInput: async () => new Uint8Array(),
     });
+    const emitter = new EvidenceEmitter("kernel-test");
+    const runner = new JobRunner(machine, [], undefined, emitter);
+    const inputData = new TextEncoder().encode("transfer 10 uL from A1 to B1");
+    const inputHash = "sha256:" + createHash("sha256").update(inputData).digest("hex");
+    const tierLadder = await compileTierLadder(csd);
+    const jobId = "test-job-001";
+    let completedBundle: any = null;
+    emitter.onBundle(bundle => { completedBundle = bundle; });
 
-    expect(result.success).toBe(true);
-    expect(result.bundleHash).toBeDefined();
-    expect(completedBundle).toBeDefined();
-    expect(completedBundle.events.length).toBeGreaterThan(0);
+    try {
+      const result = await runner.run({
+        jobId,
+        stepId: "step-1",
+        inputHash,
+        inputData,
+        assuranceTier: 0,
+        tierLadder,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.bundleHash).toBeDefined();
+      expect(completedBundle).toBeDefined();
+      const inputProofs = completedBundle.events.filter((event: any) => event.type === "method_loaded");
+      expect(inputProofs).toHaveLength(1);
+      expect(inputProofs[0].payload).toEqual({
+        jobId, inputHash, deviceJobId: expect.any(String),
+      });
+      expect(inputProofs[0].payload.deviceJobId).not.toBe("");
+    } finally {
+      await machine.dispose();
+    }
   });
 });
 ```
@@ -1563,7 +1652,9 @@ interface A2AMessage {
 
 60+ event types organized by category:
 
-**G-code lifecycle**: `gcode_received`, `gcode_hash_verified`, `gcode_validated`, `gcode_simulation_complete`
+**G-code lifecycle — FDM (legacy load_gcode path) only**: `gcode_received`, `gcode_hash_verified`, `gcode_validated`, `gcode_simulation_complete`
+
+**Input proof**: `method_loaded` (recorded by the kernel; adapters never emit it)
 
 **Execution**: `execution_started`, `execution_progress`, `execution_paused`, `execution_resumed`, `execution_completed`, `execution_error`, `execution_aborted`
 
