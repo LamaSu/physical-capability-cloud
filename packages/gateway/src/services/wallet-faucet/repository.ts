@@ -12,7 +12,7 @@ type FundingLink = {
 type Claim = {
   link_id: string; token: "eth" | "usdc"; seq: number; amount: "0.0001" | "1";
   status: "pending" | "succeeded" | "failed"; tx_hash: string | null; error_class: string | null;
-  attempts: number; lease_until: string | null; last_attempt_at: string | null;
+  attempts: number; lease_until: string | null; last_attempt_at: string | null; created_at: string;
 };
 export class FaucetError extends WalletLinkError {
   constructor(status: number, code: string, readonly cap?: "address" | "account" | "global") { super(status, code); }
@@ -56,7 +56,7 @@ export function currentFundingLink(id: string, now: number): FundingLink {
 
 export function fundingClaims(id: string): Claim[] {
   return getStore().db.all<Claim>(sql`SELECT link_id, token, seq, amount, status, tx_hash, error_class,
-    attempts, lease_until, last_attempt_at FROM faucet_claims WHERE link_id = ${id}
+    attempts, lease_until, last_attempt_at, created_at FROM faucet_claims WHERE link_id = ${id}
     ORDER BY CASE token WHEN 'eth' THEN 0 ELSE 1 END, seq`);
 }
 
@@ -105,6 +105,7 @@ export function liveLease(claim: Claim, now: number): boolean {
 export function attemptableClaim(claim: Claim, now: number): boolean {
   if (liveLease(claim, now)) return false;
   return claim.status === "pending" || (claim.status === "failed" && claim.attempts < 5 &&
+    Date.parse(claim.created_at) > now - 86400000 &&
     claim.last_attempt_at !== null && Date.parse(claim.last_attempt_at) <= now - 30000);
 }
 
@@ -122,7 +123,7 @@ export function leaseFundingClaim(claim: Claim, now: number): Claim | undefined 
         AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ${timestamp}))
       AND NOT EXISTS (SELECT 1 FROM faucet_claims AS prior WHERE prior.link_id = faucet_claims.link_id
         AND prior.lease_until > ${timestamp})
-    RETURNING link_id, token, seq, amount, status, tx_hash, error_class, attempts, lease_until, last_attempt_at`);
+    RETURNING link_id, token, seq, amount, status, tx_hash, error_class, attempts, lease_until, last_attempt_at, created_at`);
 }
 
 export function validTransactionHash(value: unknown): value is string {

@@ -317,6 +317,52 @@ describe("W2 wallet faucet", () => {
       expect(counted).toBe(GLOBAL_ETH_CLAIM_CAP);
     }
   });
+  it("R2e an expired failed claim does not stall the pending claims behind it", async () => {
+    const result = await linked("device");
+    const createdAt = now;
+    behavior = async () => {
+      now += 5000;
+      throw { errorType: "faucet_limit_exceeded" };
+    };
+    const first = await fund(result);
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toEqual({
+      status: "pending",
+      claims: [
+        { token: "eth", amount: "0.0001", status: "failed" },
+        ...Array.from({ length: 4 }, () => ({ token: "eth", amount: "0.0001", status: "pending" })),
+      ],
+    });
+    expect(calls).toHaveLength(1);
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 1], ...Array.from({ length: 4 }, () => ["pending", 0]),
+    ]);
+
+    now = createdAt + 86_400_001;
+    behavior = async () => ({ transactionHash: hash() });
+    const n = calls.length;
+    const completed = await fund(result, "owner");
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json().status, `new CDP calls: ${calls.length - n}`).toBe("partial");
+    expect(calls.slice(n)).toEqual(Array.from({ length: 4 }, () => ({ address: result.account.address, token: "eth" })));
+    expect(calls).toHaveLength(n + 4);
+    expect(completed.json()).toEqual({
+      status: "partial",
+      claims: [
+        { token: "eth", amount: "0.0001", status: "failed" },
+        ...Array.from({ length: 4 }, () => ({ token: "eth", amount: "0.0001", status: "succeeded", txHash: expect.any(String) })),
+      ],
+    });
+    expect(rows(result.linkId).map(row => [row.status, row.attempts])).toEqual([
+      ["failed", 1], ...Array.from({ length: 4 }, () => ["succeeded", 1]),
+    ]);
+    const before = rows(result.linkId);
+    const repeat = await fund(result, "owner");
+    expect(repeat.statusCode).toBe(200);
+    expect(repeat.json()).toEqual(completed.json());
+    expect(calls).toHaveLength(n + 4);
+    expect(rows(result.linkId)).toEqual(before);
+  });
   it("5 retry waits 30 seconds and only retries failed ETH 2 and USDC", async () => {
     const result = await linked();
     behavior = async (_address, token) => {

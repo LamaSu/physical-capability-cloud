@@ -7,7 +7,7 @@ import {
 } from "../wallet-links/repository.js";
 import { verifyProofMessage } from "../wallet-links/message.js";
 import {
-  ensureFundingGrant, finishFundingClaim, fundingClaims, leaseFundingClaim,
+  attemptableClaim, ensureFundingGrant, finishFundingClaim, fundingClaims, leaseFundingClaim,
 } from "./repository.js";
 
 const now = Date.parse("2026-10-15T12:00:00.000Z");
@@ -62,6 +62,20 @@ async function failedClaim(createdAt: number) {
 }
 
 describe("wallet faucet repository lease guards", () => {
+  it.each([
+    { age: day + 1, allowed: false, label: "24 h + 1 ms" },
+    { age: day, allowed: false, label: "exactly 24 h" },
+    { age: day - 1, allowed: true, label: "24 h - 1 ms" },
+  ])("R2e JS failed retry at $label has attempt eligibility $allowed", async ({ age, allowed }) => {
+    const result = await failedClaim(now - age);
+    expect(attemptableClaim(result.claim, now)).toBe(allowed);
+  });
+
+  it("R2e JS keeps a pending claim older than 24 h attemptable", async () => {
+    const result = await grant(now - day - 1);
+    expect(attemptableClaim(result.claim, now)).toBe(true);
+  });
+
   it("F3 SQL enforces 30 s backoff after every failure and a maximum of five attempts", async () => {
     const result = await grant();
     let claim = result.claim;
