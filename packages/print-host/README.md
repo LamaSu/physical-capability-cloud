@@ -303,6 +303,14 @@ group/other writes. `checkHostConfig` checks both keys, the credential files, an
 the private data directory, then returns only the public identity. It can throw
 `HostConfigError`, `KeyFileError`, or `SecretFileError`.
 
+The printer uses the kernel's built-in IPP client from #640; no npm `ipp`
+package is required. Only `ipp://` URIs are supported; `ipps://` is refused
+because the client does not support TLS yet. Credentials, queries and fragments
+in the URI are refused. The defaults are a 2000 ms poll interval, a 20000 ms
+cancel-confirm deadline, a 15000 ms request timeout, a 120000 ms Print-Job
+timeout, a 32 MiB maximum document and the `application/pdf` document format.
+Printer initialization errors exit with the closed code `adapter_init_failed`.
+
 Testnet-only is a policy enforced on the configuration's `chainId`. The operator
 EOA has the same address on every chain: never fund it on mainnet. The evidence
 broadcaster checks `eth_chainId` against the configuration before transaction signing.
@@ -353,11 +361,35 @@ Real mode requires positive `maxFeePerGasCap`, `maxPriorityFeePerGasCap`, and
 `gasCap` before startup. Use `--no-submit` explicitly to print and relay without
 package submission. A unit first processed with sending disabled (`--no-submit`,
 missing caps, `realMode: false`, or no broadcaster or keys) ends
-`evidence_stored` / `submit_disabled`; a later sending run never settles it.
+`evidence_stored` with `submit_disabled` (or `package_inputs_missing` for an
+incomplete manifest); a later sending run never settles it.
 All run logs contain closed codes only.
 
-A sending run never settles units that an earlier `--no-submit` (or capless) run left as `evidence_stored`/`submit_disabled` in the same data directory: they stay forfeited.
-Run `--no-submit` rehearsals in their own data directory, and use a fresh data directory for sending runs.
+A sending run never settles units that an earlier `--no-submit` (or capless)
+run left as `evidence_stored` with `submit_disabled` or
+`package_inputs_missing` in the same data directory: they stay forfeited.
+Run `--no-submit` rehearsals in their own data directory. Before the first
+sending run, point the config's `dataDir` at a directory that no `--no-submit`
+run has used, then keep that SAME directory for every later sending run and
+every restart. Crash recovery (`submit_attempted` read-back and its nonce
+priority, saved packages and receipts) and the one-print-per-unit markers live
+there; a new directory forgets them. Never point a sending host at a funded
+unit or job that a rehearsal directory already printed.
+
+Before a sending run, check:
+- the data directory follows the rule above: never used by a `--no-submit`
+  run, and the same one for every later sending run and restart;
+- the run is supervised and covers one unit. PR #624's next round, r5d (the
+  r5b review's R2-R4 and A3), must merge before any unattended or multi-unit
+  sending run. Until then a torn first session record halts the host (R2), the
+  gateway's 503 `wallet_link_unavailable` forfeits a unit's evidence (R3), and
+  receipt refusals can retry without end and block polling (R4, A3). Only a
+  watching operator sees these.
+
+A real-mode adapter must report `source.simulated` as exactly `false`.
+Otherwise the host halts with `adapter_simulated` before polling, claiming or
+printing, logs that code once, and the CLI exits non-zero. Poll-only operation
+without an adapter is unaffected.
 
 The CLI uses the **STRICT e-stop reader by default**. Execution requires a parsed
 poll with an own `emergencyStop: "clear"` field and an own `jobs` array.
@@ -445,10 +477,10 @@ and produce no bundle; empty-event jobs end with `no_bundle`, and simulated
 evidence ends with `simulated_refused`. None submits. An explicit `realMode: false`
 library rehearsal may relay simulated evidence as an unsigned `{events, bundleHash}`
 envelope that retains its simulation tags, without adding it to the strict unit
-session or granting it delegated authority. It ends
-`evidence_stored` / `submit_disabled` and never packages or submits it, including
-on a later sending run. An ambiguous relay post
-ends with `evidence_indeterminate`; a refusal ends with `evidence_refused`.
+session or granting it delegated authority. It always ends `evidence_stored`
+with `submit_disabled`, even for an incomplete manifest, and never packages or
+submits it, including on a later sending run. An ambiguous relay post ends with
+`evidence_indeterminate`; a refusal ends with `evidence_refused`.
 Neither reaches package submission.
 
 Only after durable `evidence_stored` does the host build and sign D1 and D2.
@@ -504,8 +536,9 @@ If it is not mined, the host keeps reading back. This round adds no resend tool.
 The host never
 automatically resends and exposes no resubmit flag. Interrupted printing or
 partial session work is journaled `interrupted` and never reprinted or reposted.
-Recovery covers only crash-window records: `evidence_stored` with no code,
-`package_built`, `receipt_stored`, `submit_attempted` and `submit_indeterminate`.
+Recovery covers only unfinished-settlement records: `evidence_stored` with no
+code, `package_built`, `receipt_stored`, `submit_attempted` and
+`submit_indeterminate`.
 Only `evidence_stored` with no code can resume package construction.
 `package_built` without `receipt_stored` re-POSTs the persisted package; the route
 is idempotent per digest. `receipt_stored` reloads and validates its artifact and

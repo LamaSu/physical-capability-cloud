@@ -97,6 +97,40 @@ afterEach(async () => {
 });
 
 describe("host configuration", () => {
+  it.each([
+    ["TLS", "ipps://printer.example.test/ipp/print"],
+    ["query", "ipp://printer.example.test/ipp/print?private=query-value"],
+    ["empty query", "ipp://printer.example.test/ipp/print?"],
+    ["fragment", "ipp://printer.example.test/ipp/print#private-fragment"],
+    ["empty fragment", "ipp://printer.example.test/ipp/print#"],
+    ["port zero", "ipp://printer.example.test:0/ipp/print"],
+    ["port over 65535", "ipp://printer.example.test:65536/ipp/print"],
+    ["canonical href over 1023 octets", `ipp://printer.example.test/${"a".repeat(1000)}`],
+    ["encoded path over 1023 octets", `ipp://printer.example.test/${"\u00e9".repeat(167)}`],
+    ["userinfo", "ipp://private-user:private-password@printer.example.test/ipp/print"],
+    ["empty userinfo", "ipp://@printer.example.test/ipp/print"],
+    ["no host", "ipp:///ipp/print"],
+    ["non-IPP protocol", "http://printer.example.test/ipp/print"],
+  ])("refuses a printer URI unsupported by the real IPP client: %s", async (_name, uri) => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, printer: { uri } });
+    const error = await expectConfigFailure(() => loadHostConfig(setup.path), "bad_schema", [uri]);
+    expect(error.field).toBe("printer.uri");
+    expect(error.message).toBe(`bad_schema: ${setup.path} (printer.uri)`);
+  });
+
+  it.each([
+    "ipp://printer.example.test/ipp/print", "ipp://printer.example.test:1/ipp/print",
+    "ipp://printer.example.test:65535/ipp/print", "ipp://printer.example.test",
+    "ipp://[::1]:631/ipp/print", "ipp://printer.example.test/print-\u00e9",
+    "ipp://pr\u00e9nter.example.test/ipp/print",
+    `ipp://printer.example.test/${"a".repeat(996)}`,
+  ])("accepts printer URIs within the real IPP client limits (%#)", async (uri) => {
+    const setup = await fixture();
+    await setup.save({ ...setup.config, printer: { uri } });
+    expect((await loadHostConfig(setup.path)).printer.uri).toBe(uri);
+  });
+
   it("requires every transaction cap to be positive for a submitting real run", async () => {
     const setup = await fixture();
     const complete = { ...setup.config.chain, maxFeePerGasCap: "100", maxPriorityFeePerGasCap: "10", gasCap: "250000" };

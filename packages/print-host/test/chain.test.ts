@@ -65,6 +65,7 @@ type FakeOptions = {
   afterSendCommitment?: Hex | null;
   estimateRevert?: "NotActive" | "OnlyOperator" | "TooLateForEvidence" | "EvidenceAlreadyCommitted";
   sendRevert?: "NotActive" | "EvidenceAlreadyCommitted" | "unknown_revert";
+  sendTransportError?: boolean;
   readRevert?: "UnitNotFound";
   postSendReadRevert?: "UnitNotFound";
   receiptStatus?: "success" | "reverted" | "timeout";
@@ -185,6 +186,8 @@ async function fixture(overrides: Partial<HostConfig["chain"]> = {}, fake: FakeO
         if (fake.sendRevert === "unknown_revert") throw { code: 3, message: serverText, data: "0xdeadbeef" };
         if (fake.sendRevert !== undefined) reject(fake.sendRevert);
         sentCount++;
+        // The node accepted the transaction before its response was lost.
+        if (fake.sendTransportError) throw new Error(serverText);
         return keccak256((params as [Hex])[0]);
       }
       case "eth_getTransactionReceipt":
@@ -364,6 +367,35 @@ describe("submitEvidence broadcaster", () => {
     expect(second).toEqual(first);
     expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
     expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    setup.expectRedacted({ first, second });
+  });
+
+  it.each(["ours", "different"] as const)(
+    "a plain transport error after acceptance reconciles the %s commitment", async (state) => {
+      const setup = await fixture({}, { sendTransportError: true });
+      setup.fake.afterSendCommitment = state === "ours" ? contractCommitment(setup.input) : bytes32();
+      const result = await setup.broadcaster.submit(setup.input);
+      expect(result).toEqual({ code: state === "ours" ? "already_committed" : "conflict" });
+      setup.expectPostSendRead("eth_sendRawTransaction");
+      expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+      expect(setup.calls.some(({ method }) => method === "eth_getTransactionReceipt")).toBe(false);
+      setup.expectRedacted(result);
+    });
+
+  it("a plain transport error after acceptance with uncommitted read-back retains the hash and blocks another unit", async () => {
+    const setup = await fixture({}, { sendTransportError: true, afterSendCommitment: null });
+    const first = await setup.broadcaster.submit(setup.input);
+    expect(first).toEqual({ code: "indeterminate", transactionHash: setup.hash });
+    setup.expectPostSendRead("eth_sendRawTransaction");
+    setup.fake.sendTransportError = false;
+    const boundary = setup.calls.length;
+    const second = await setup.broadcaster.submit(setup.addUnit(4n));
+    expect(second).toEqual({ code: "refused", reason: "unreconciled_transaction" });
+    expect(setup.signer.signSubmitEvidenceTx).toHaveBeenCalledTimes(1);
+    expect(setup.calls.filter(({ method }) => method === "eth_sendRawTransaction")).toHaveLength(1);
+    expect(setup.calls.slice(boundary).filter(({ method }) => method === "eth_getTransactionCount")
+      .map(({ params }) => params)).toEqual([[setup.signer.address, "latest"]]);
+    expect(setup.calls.some(({ method }) => method === "eth_getTransactionReceipt")).toBe(false);
     setup.expectRedacted({ first, second });
   });
 

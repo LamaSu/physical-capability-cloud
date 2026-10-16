@@ -12,6 +12,17 @@ import { createJobJournal } from "../src/journal.js";
 import { FakeMachineAdapter } from "../src/testing/fake-machine-adapter.js";
 import type { createEvidenceBroadcaster, EvidenceBroadcaster } from "../src/chain.js";
 
+const printerMocks = vi.hoisted(() => ({ constructorError: undefined as unknown }));
+vi.mock("../../kernel/dist/adapters/ipp-adapter.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../kernel/dist/adapters/ipp-adapter.js")>();
+  return { ...actual, IppAdapter: class extends actual.IppAdapter {
+    constructor(...args: ConstructorParameters<typeof actual.IppAdapter>) {
+      if (printerMocks.constructorError !== undefined) throw printerMocks.constructorError;
+      super(...args);
+    }
+  } };
+});
+
 vi.mock("../src/keygen.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/keygen.js")>();
   return { ...actual, generateHostKeys: vi.fn(actual.generateHostKeys) };
@@ -19,6 +30,7 @@ vi.mock("../src/keygen.js", async (importOriginal) => {
 
 const dirs: string[] = [];
 afterEach(async () => {
+  printerMocks.constructorError = undefined;
   vi.mocked(generateHostKeys).mockClear();
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -111,6 +123,33 @@ function assertRunOutput(captured: ReturnType<typeof capture>, secrets: string[]
 }
 
 describe("print-host CLI", () => {
+  it.each(["error", "text"])("run closes an adapter constructor %s without leaking its message", async (kind) => {
+    const fixture = await runFixture();
+    const message = randomBytes(32).toString("hex");
+    printerMocks.constructorError = kind === "error" ? new Error(message) : message;
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--no-submit"], captured.io, {
+      createGateway: config => createGatewayClient({ ...config, fetchImpl: fixture.fetchImpl }),
+    })).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "", stderr: "adapter_init_failed\n" });
+    expect(fixture.calls).toEqual([]);
+    expect(fixture.adapter.commands).toEqual([]);
+  });
+
+  it("run refuses a simulated adapter before polling and exits with its closed code", async () => {
+    const fixture = await runFixture();
+    fixture.adapter.source.simulated = true;
+    const captured = capture();
+    expect(await main(["run", "--config", fixture.configFile, "--once", "--no-submit"], captured.io, {
+      createGateway: config => createGatewayClient({ ...config, fetchImpl: fixture.fetchImpl }),
+      createPrinter: fixture.createPrinter,
+    })).toBe(1);
+    expect(captured.output()).toEqual({ stdout: "adapter_simulated\n", stderr: "adapter_simulated\n" });
+    expect(fixture.calls).toEqual([]);
+    expect(fixture.adapter.commands).toEqual([]);
+    expect(fixture.dispose).toHaveBeenCalledOnce();
+  });
+
   it("keygen prints only the public identity and paths", async () => {
     const root = await temporaryDirectory();
     const outDir = join(root, "keys");

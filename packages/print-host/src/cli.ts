@@ -9,7 +9,7 @@ import { checkHostConfig, HostConfigError, loadHostConfig, requireSubmissionCaps
 import type { HostConfig } from "./config.js";
 import { createGatewayClient, GatewayClientError, strictEmergencyStopReader } from "./gateway-client.js";
 import type { GatewayClient, GatewayClientConfig } from "./gateway-client.js";
-import { createHost, HOST_LOG_CODES, HostIdentityError } from "./host.js";
+import { createHost, HOST_LOG_CODES, HostAdapterError, HostIdentityError } from "./host.js";
 import { createJobJournal, JournalError } from "./journal.js";
 import { defaultJobInputSource, fileJobInputSource } from "./job-inputs.js";
 import { generateHostKeys, KeyGenerationError } from "./keygen.js";
@@ -74,11 +74,18 @@ function parseRunOptions(argv: string[]): RunOptions | undefined {
   return configPath ? { configPath, once, pollOnly, noSubmit, inputsDir } : undefined;
 }
 
+class PrinterInitializationError extends Error {
+  readonly code = "adapter_init_failed";
+  constructor() { super("adapter_init_failed"); this.name = "PrinterInitializationError"; }
+}
+
 function createPrinter(config: HostConfig): CliPrintComponents {
-  const adapter = new IppAdapter(config.deviceId, {
-    uri: config.printer.uri, kernelId: config.kernelId, mockMode: false,
-  });
-  return { adapter, dispose: () => adapter.dispose() };
+  try {
+    const adapter = new IppAdapter(config.deviceId, {
+      uri: config.printer.uri, kernelId: config.kernelId, mockMode: false,
+    });
+    return { adapter, dispose: () => adapter.dispose() };
+  } catch { throw new PrinterInitializationError(); }
 }
 
 async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime): Promise<void> {
@@ -132,6 +139,7 @@ async function runCommand(options: RunOptions, io: CliIo, runtime: CliRunRuntime
       const tick = await host.runOnce();
       if (tick.kind === "halted") {
         if (tick.code === "device_identity_mismatch" || tick.code === "compromised_device") throw new HostIdentityError(tick.code);
+        if (tick.code === "adapter_simulated") throw new HostAdapterError();
         throw new JournalError(tick.code === "data_dir_locked" ? "data_dir_locked" : "journal_write_failed");
       }
     }
@@ -254,6 +262,7 @@ export async function main(argv: string[], io: CliIo, runtime: CliRunRuntime = {
       || error instanceof HostConfigError || error instanceof KeyGenerationError) {
       io.stderr.write(`${argv[0] === "run" ? error.code : error.message}\n`);
     } else if (error instanceof GatewayClientError || error instanceof JournalError || error instanceof HostIdentityError
+      || error instanceof HostAdapterError || error instanceof PrinterInitializationError
       || error instanceof EvidenceChainConfigError || error instanceof OperatorSigningError) {
       io.stderr.write(`${error.code}\n`);
     } else {

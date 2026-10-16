@@ -54,6 +54,18 @@ export function isGatewayBaseUrl(value: string): boolean {
     && (url.protocol === "https:" || (url.protocol === "http:" && isLoopback(url)));
 }
 
+/** Match the kernel's built-in real IPP client before opening any devices. */
+function isPrinterUri(value: string): boolean {
+  const url = parseUrl(value);
+  if (!url || url.protocol !== "ipp:" || !url.hostname) return false;
+  if (url.username || url.password || hasUserInfo(value)) return false;
+  if (value.includes("?") || value.includes("#")) return false;
+  const port = url.port === "" ? 631 : Number(url.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+  if (!url.pathname) url.pathname = "/";
+  return /^[\x00-\x7f]+$/.test(url.href) && Buffer.byteLength(url.href) <= 1023;
+}
+
 const absolutePath = z.string().refine(isAbsolute, "must be an absolute path");
 const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 // JSON-safe quantities in wei (fees) or gas units. Omission keeps legacy
@@ -78,11 +90,7 @@ const hostConfigSchema = z.object({
   kernelId: id,
   deviceId: id,
   printer: z.object({
-    uri: z.string().refine((value) => {
-      const url = parseUrl(value);
-      return !!url?.hostname && !url.username && !url.password && !hasUserInfo(value)
-        && (url.protocol === "ipp:" || url.protocol === "ipps:");
-    }, "must be an IPP URL with a host"),
+    uri: z.string().refine(isPrinterUri, "must be a supported real IPP printer URI"),
   }).strict(),
   chain: chainConfigSchema,
   gateway: z.object({

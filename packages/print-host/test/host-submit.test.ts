@@ -482,9 +482,48 @@ describe("host package and crash-safe submitEvidence", () => {
     expect((await recovered.journal.read(newJob)).map((record) => record.state)).toContain("claimed");
   });
 
+  it("T3: a sending restart keeps a package_inputs_missing unit forfeited and claims a new job", async () => {
+    const setup = await fixture({ missingInputs: true });
+    expect(await finish(setup)).toMatchObject({ state: "evidence_stored" });
+    const before = await setup.journal.read(jobId);
+    expect(before.at(-1)).toMatchObject({ state: "evidence_stored", code: "package_inputs_missing" });
+    const newJob = "job:after-missing-inputs";
+    const newInputs: JobInputs = { ...setup.inputs, documentData: Buffer.from("%PDF-1.7\nnew queued job"),
+      unit: { ...setup.inputs.unit, settlementUnitId: word(), challengeNonce: word() } };
+    const inputSource = vi.fn<Parameters<HostDeps["inputSource"]>, ReturnType<HostDeps["inputSource"]>>(async (id) => {
+      if (id === jobId) return { ok: true, value: setup.inputs };
+      if (id === newJob) return { ok: true, value: newInputs };
+      return { ok: false, code: "job_inputs_not_found" };
+    });
+    setup.gateway.pollJobs.mockClear();
+    setup.gateway.pollJobs.mockResolvedValue({ ok: true, value: { stop: { proceed: true },
+      jobs: [{ jobId, status: "queued" }, { jobId: newJob, status: "queued" }], foreignJobsDropped: 0, truncated: false } });
+    // Hold the new job before printing so only the old unit could reach settlement.
+    const recovered = await restart(setup, { inputSource,
+      gateway: { ...setup.gateway, reportInProgress: async () => ({ ok: false, code: "network", status: null }) } });
+    for (let tick = 0; tick < 5; tick++) {
+      setup.advance();
+      await recovered.host.runOnce();
+    }
+    expect(await recovered.journal.read(jobId)).toEqual(before);
+    expect(setup.gateway.pollJobs.mock.calls.length).toBeGreaterThan(0);
+    expect(inputSource).not.toHaveBeenCalledWith(jobId);
+    expect((await recovered.journal.read(newJob)).map((record) => record.state)).toContain("claimed");
+    expect(setup.gateway.postReceipt).not.toHaveBeenCalled();
+    expect(recovered.broadcaster.submit).not.toHaveBeenCalled();
+  });
+
   it("simulated evidence in real mode never posts, builds, signs or submits", async () => {
-    const setup = await fixture({ simulated: true });
-    await finish(setup);
+    const setup = await fixture();
+    setup.adapter.scriptStart({ outcome: "success", jobId: 101 });
+    const started = setup.adapter.started();
+    const tick = setup.host.runOnce();
+    await started;
+    // Start as a genuine adapter, then emit fabricated events after startup.
+    setup.adapter.source.simulated = true;
+    setup.adapter.emit("execution_started", { ippJobId: 101 });
+    setup.adapter.emit("execution_completed", { ippJobId: 101, totalPages: 2 });
+    await tick;
     expect((await states(setup)).at(-1)).toBe("simulated_refused");
     expect(setup.gateway.postRelayEvidence).not.toHaveBeenCalled();
     noSubmitSignatures(setup);

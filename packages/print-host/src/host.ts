@@ -33,7 +33,7 @@ export const HOST_LOG_CODES = [
   "interrupted", "simulated_refused", "no_bundle", "journal_failed", "host_shutdown",
   "reader_unavailable", "stopped", "absent", "malformed", "poll_failed", "session_failed",
   "package_built", "receipt_stored", "data_dir_locked", "receipt_exists", "receipt_signer_unavailable", "submit_attempted", "submitted", "already_committed", "conflict", "refused", "submit_indeterminate",
-  "device_identity_mismatch", "compromised_device", "unit_already_used",
+  "device_identity_mismatch", "compromised_device", "adapter_simulated", "unit_already_used",
   ...gatewayCodes, ...JOB_INPUT_CODES, ...SUBMIT_CODES,
 ] as const;
 export type HostLogCode = typeof HOST_LOG_CODES[number];
@@ -41,6 +41,10 @@ export type HostPrintOptions = PrintJobOptions;
 export type HostIdentityCode = "device_identity_mismatch" | "compromised_device";
 export class HostIdentityError extends Error {
   constructor(readonly code: HostIdentityCode) { super(code); this.name = "HostIdentityError"; }
+}
+export class HostAdapterError extends Error {
+  readonly code = "adapter_simulated";
+  constructor() { super("adapter_simulated"); this.name = "HostAdapterError"; }
 }
 export interface HostTimers {
   setTimeout(callback: () => void, ms: number): unknown;
@@ -75,7 +79,7 @@ export interface HostTickResult {
   waitMs: number;
   jobId?: string;
   state?: JournalState;
-  code?: "data_dir_locked" | "journal_failed" | HostIdentityCode;
+  code?: "data_dir_locked" | "journal_failed" | HostIdentityCode | HostAdapterError["code"];
 }
 
 const terminalReportCodes = new Set<GwCode>([
@@ -112,6 +116,7 @@ export function createHost(deps: HostDeps): {
   let halted = false;
   let haltCode: NonNullable<HostTickResult["code"]> = "journal_failed";
   let parentAgentId: string | undefined;
+  const adapterSimulated = deps.realMode !== false && deps.adapter !== undefined && deps.adapter.source?.simulated !== false;
   let identityFailure: HostIdentityCode | undefined;
   if (deps.deviceKey) {
     try {
@@ -347,6 +352,12 @@ export function createHost(deps: HostDeps): {
       log(identityFailure);
       return { kind: "halted", waitMs: 5_000, code: identityFailure };
     }
+    if (adapterSimulated) {
+      halted = true;
+      haltCode = "adapter_simulated";
+      log(haltCode);
+      return { kind: "halted", waitMs: 5_000, code: haltCode };
+    }
     if (!initialized) {
       await journal.initialize();
       initialized = true;
@@ -542,7 +553,8 @@ export function createHost(deps: HostDeps): {
       activePrint = undefined;
     }
     if (deps.realMode !== false && [...result.events, ...(result.bundle?.events ?? [])]
-      .some((event) => event.source.simulated === true)) {
+      .some((event) => (Object.hasOwn(event.source, "simulated") && event.source.simulated !== false)
+        || (Object.hasOwn(event.payload, "mock") && event.payload.mock !== false))) {
       await append("simulated_refused");
       return done("simulated_refused");
     }
@@ -638,6 +650,7 @@ export function createHost(deps: HostDeps): {
           if (result.kind === "halted") {
             if (haltCode === "data_dir_locked") throw new JournalError("data_dir_locked");
             if (haltCode === "device_identity_mismatch" || haltCode === "compromised_device") throw new HostIdentityError(haltCode);
+            if (haltCode === "adapter_simulated") throw new HostAdapterError();
             throw new Error(haltCode);
           }
           // Backoff delays job polling, while heartbeat attempts retain their

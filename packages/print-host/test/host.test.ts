@@ -240,6 +240,94 @@ afterEach(async () => {
 });
 
 describe("print-host run loop", () => {
+  it.each([true, undefined, "false", 1, null])(
+    "T1/T2: startup halts an adapter with simulated=%s before any side effect", async (simulated) => {
+      const setup = await fixture();
+      if (simulated === undefined) delete setup.adapter.source.simulated;
+      else Object.assign(setup.adapter.source, { simulated });
+      const initialize = vi.spyOn(setup.journal, "initialize");
+      const execute = vi.spyOn(setup.adapter, "execute");
+      const print = vi.fn(async (): Promise<PrintJobResult> => ({ success: false, events: [], durationMs: 0 }));
+      const host = createHost({ ...setup.deps, print });
+      const halted = { kind: "halted", waitMs: 5_000, code: "adapter_simulated" };
+      expect(await host.runOnce()).toEqual(halted);
+      expect(await host.runOnce()).toEqual(halted);
+      expect(setup.logs).toEqual(["adapter_simulated"]);
+      expect(initialize).not.toHaveBeenCalled();
+      expect(setup.gw.heartbeat).not.toHaveBeenCalled();
+      expect(setup.gw.pollJobs).not.toHaveBeenCalled();
+      expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+      expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
+      expect(setup.gw.postReceipt).not.toHaveBeenCalled();
+      expect(setup.inputSource).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(print).not.toHaveBeenCalled();
+    },
+  );
+
+  it("T1: continuous run propagates adapter_simulated as a closed error", async () => {
+    const setup = await fixture({ simulated: true });
+    await expect(setup.host.run(AbortSignal.timeout(200))).rejects.toMatchObject({ message: "adapter_simulated", code: "adapter_simulated" });
+    expect(setup.gw.pollJobs).not.toHaveBeenCalled();
+    expect(setup.adapter.commands).toEqual([]);
+    expect(setup.logs.filter((code) => String(code) === "adapter_simulated")).toHaveLength(1);
+  });
+
+  it("T2: poll-only without an adapter still heartbeats and polls", async () => {
+    const setup = await fixture();
+    const host = createHost({ ...setup.deps, adapter: undefined, pollOnly: true });
+    expect(await host.runOnce()).toMatchObject({ kind: "idle" });
+    expect(setup.gw.heartbeat).toHaveBeenCalledTimes(1);
+    expect(setup.gw.pollJobs).toHaveBeenCalledTimes(1);
+    expect(setup.gw.reportInProgress).not.toHaveBeenCalled();
+    expect(setup.inputSource).not.toHaveBeenCalled();
+  });
+
+  it.each((["events", "bundle"] as const).flatMap((location) =>
+    [{ mock: true }, { simulated: 1 }, { mock: "false" }, { simulated: "false" }].map((tag) => ({ location, tag }))))(
+    "T3: refuses fabricated $tag in result.$location before any session event or finalization", async ({ location, tag }) => {
+      const print = vi.fn(async (options: PrintJobOptions): Promise<PrintJobResult> => {
+        const raw: Omit<EvidenceEvent, "id" | "hash"> = {
+          type: "execution_completed", timestamp: new Date().toISOString(),
+          source: { deviceId: "device:test", deviceType: "controller", kernelId: "kernel:test", simulated: false },
+          payload: { jobId: options.jobId, settlementUnitId: options.settlementUnitId, challengeNonce: options.challengeNonce },
+        };
+        const genuine = { ...raw, id: "event:genuine", hash: await hashEvent(raw) };
+        const event = structuredClone(genuine);
+        if ("simulated" in tag) Object.assign(event.source, tag);
+        else Object.assign(event.payload, tag);
+        const bundle: EvidenceBundle = {
+          id: "bundle:fabricated", jobId, stepId: jobId, kernelId: "kernel:test", assuranceTier: 0,
+          createdAt: raw.timestamp, events: location === "bundle" ? [event] : [],
+          bundleHash: `sha256:${"b".repeat(64)}`,
+          kernelSignature: { algorithm: "ed25519", signer: `0x${"a".repeat(40)}`, value: "b".repeat(128) },
+        };
+        return { success: true, events: location === "events" ? [event] : [genuine], bundle, durationMs: 0 };
+      });
+      const setup = await fixture({ print });
+      const original = unitSessions.openUnitEvidenceSession;
+      const addEvent = vi.fn();
+      const finalize = vi.fn();
+      const spy = vi.spyOn(unitSessions, "openUnitEvidenceSession").mockImplementation(async (options) => {
+        const session = await original(options);
+        addEvent.mockImplementation((event) => session.addEvent(event));
+        finalize.mockImplementation(() => session.finalize());
+        return { ...session, addEvent, finalize };
+      });
+      try {
+        expect(await setup.host.runOnce()).toMatchObject({ state: "simulated_refused" });
+        expect(await states(setup)).toEqual(["claimed", "in_progress_reported", "printing", "simulated_refused"]);
+        expect(setup.gw.postRelayEvidence).not.toHaveBeenCalled();
+        expect(addEvent).not.toHaveBeenCalled();
+        expect(finalize).not.toHaveBeenCalled();
+        expect(setup.deviceKey.signDelegation).not.toHaveBeenCalled();
+        const records = await Promise.all((await readdir(setup.journal.sessionDirectory(jobId)))
+          .map(async (name) => JSON.parse(await readFile(join(setup.journal.sessionDirectory(jobId), name), "utf8"))));
+        expect(records.map((record) => record.record.kind)).toEqual(["open"]);
+      } finally { spy.mockRestore(); }
+    },
+  );
+
   it.each(["missing", "other_operator", "other_chain", "compromised"] as const)(
     "startup refuses %s device identity with a closed code before any side effect", async (identity) => {
       const setup = await fixture();
@@ -921,7 +1009,11 @@ describe("print-host run loop", () => {
   });
 
   it("simulated device events in real mode are refused and never posted", async () => {
-    const setup = await fixture({ simulated: true });
+    const setup = await fixture({ print: async (options) => {
+      const result = await runPrintJob(options);
+      for (const event of result.events) event.source.simulated = true;
+      return result;
+    } });
     const finalize = vi.fn();
     const original = unitSessions.openUnitEvidenceSession;
     vi.spyOn(unitSessions, "openUnitEvidenceSession").mockImplementation(async (options) => {
