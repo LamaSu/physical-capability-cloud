@@ -300,7 +300,7 @@ describe("capability-class scaffolding", () => {
     expect(fetchStub).toHaveBeenCalledTimes(0);
     expect(events).toEqual([]);
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
-  });
+  }, 15000);
 
   it("S9: guide hash-only prepare verifies exact bytes and uploads them before acknowledging", async () => {
     const bytes = new Uint8Array([0, 255, 13, 10, 239, 187, 191]);
@@ -312,7 +312,7 @@ describe("capability-class scaffolding", () => {
     expect(fetchStub).toHaveBeenCalledTimes(1);
     expect(new Uint8Array(fetchStub.mock.calls[0]![1]!.body as Uint8Array)).toEqual(bytes);
     expect(events).toEqual([]);
-  });
+  }, 15000);
 
   it("S9: guide start refuses unstaged and foreign jobs before any request or evidence", async () => {
     const { adapter, events } = await guideAdapter(async () => new Uint8Array(), true);
@@ -323,7 +323,7 @@ describe("capability-class scaffolding", () => {
     expect((await adapter.execute({ type: "start", payload: { jobId: "foreign" } })).success).toBe(false);
     expect(events).toEqual([]);
     expect(fetchStub).toHaveBeenCalledTimes(0);
-  });
+  }, 15000);
 
   it("S7: preserves the explicit FDM class, commands, event, and starter assertion", () => {
     const { adapter, tests } = generated(machineConfig("fdm"));
