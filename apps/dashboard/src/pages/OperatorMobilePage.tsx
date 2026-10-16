@@ -69,40 +69,34 @@ function statusColor(status: Job["status"]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Mock API fetchers (real calls would hit /api/*)
+// API fetchers
 // ---------------------------------------------------------------------------
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isScore(value: unknown, max = 1): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= max;
+}
+
 async function fetchActiveJobs(): Promise<Job[]> {
-  try {
-    const res = await authorizedFetch("/api/jobs?status=active");
-    if (res.ok) return res.json() as Promise<Job[]>;
-  } catch {
-    // fall through to mock
+  const res = await authorizedFetch("/api/jobs?status=active");
+  if (!res.ok) throw new Error("Active jobs couldn't be loaded.");
+  const jobs: unknown = await res.json();
+  if (!Array.isArray(jobs) || !jobs.every((job: unknown): job is Job =>
+    isRecord(job) && isNonEmptyString(job.id) && isNonEmptyString(job.title) &&
+    ["active", "pending", "completed", "failed"].includes(job.status as string) &&
+    isScore(job.progress, 100) && isNonEmptyString(job.startedAt) &&
+    Number.isFinite(Date.parse(job.startedAt))
+  )) {
+    throw new Error("Active jobs couldn't be loaded.");
   }
-  // Mock fallback
-  return [
-    {
-      id: "job-001",
-      title: "FDM Print — Bracket v3",
-      status: "active",
-      progress: 62,
-      startedAt: new Date(Date.now() - 1_800_000).toISOString(),
-    },
-    {
-      id: "job-002",
-      title: "CNC Mill — Plate A",
-      status: "active",
-      progress: 88,
-      startedAt: new Date(Date.now() - 3_600_000).toISOString(),
-    },
-    {
-      id: "job-003",
-      title: "Laser Engrave — Logo Run",
-      status: "pending",
-      progress: 0,
-      startedAt: new Date(Date.now() - 120_000).toISOString(),
-    },
-  ];
+  return jobs;
 }
 
 async function uploadPhoto(
@@ -110,37 +104,31 @@ async function uploadPhoto(
   hash: string,
   notes: string
 ): Promise<UploadResult> {
-  try {
-    const res = await authorizedFetch("/api/photo/upload", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, sha256: hash, notes }),
-    });
-    if (res.ok) return res.json() as Promise<UploadResult>;
-  } catch {
-    // fall through to mock
+  const res = await authorizedFetch("/api/photo/upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64, sha256: hash, notes }),
+  });
+  if (!res.ok) throw new Error("The photo wasn't stored.");
+  const result: unknown = await res.json();
+  if (!isRecord(result) || !isNonEmptyString(result.cid) || !isScore(result.antiSpoofScore)) {
+    throw new Error("The photo wasn't stored.");
   }
-  // Mock response
-  await new Promise((r) => setTimeout(r, 600));
-  return {
-    cid: `bafybei${hash.slice(0, 36)}`,
-    antiSpoofScore: 0.94,
-  };
+  return { cid: result.cid, antiSpoofScore: result.antiSpoofScore };
 }
 
 async function comparePhoto(base64: string, jobId: string): Promise<CompareResult> {
-  try {
-    const res = await authorizedFetch("/api/photo/compare", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, jobId }),
-    });
-    if (res.ok) return res.json() as Promise<CompareResult>;
-  } catch {
-    // fall through to mock
+  const res = await authorizedFetch("/api/photo/compare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64, jobId }),
+  });
+  if (!res.ok) throw new Error("The comparison didn't run.");
+  const result: unknown = await res.json();
+  if (!isRecord(result) || typeof result.match !== "boolean" || !isScore(result.similarity)) {
+    throw new Error("The comparison didn't run.");
   }
-  await new Promise((r) => setTimeout(r, 800));
-  return { match: true, similarity: 0.91 };
+  return { match: result.match, similarity: result.similarity };
 }
 
 async function reportIssue(
@@ -148,18 +136,17 @@ async function reportIssue(
   text: string,
   jobId: string | null
 ): Promise<{ issueId: string }> {
-  try {
-    const res = await authorizedFetch("/api/issues", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: base64, text, jobId }),
-    });
-    if (res.ok) return res.json() as Promise<{ issueId: string }>;
-  } catch {
-    // fall through
+  const res = await authorizedFetch("/api/issues", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image: base64, text, jobId }),
+  });
+  if (!res.ok) throw new Error("The issue wasn't submitted.");
+  const result: unknown = await res.json();
+  if (!isRecord(result) || !isNonEmptyString(result.issueId)) {
+    throw new Error("The issue wasn't submitted.");
   }
-  await new Promise((r) => setTimeout(r, 400));
-  return { issueId: `issue-${Date.now()}` };
+  return { issueId: result.issueId };
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +165,7 @@ function CameraTab() {
   const [compareResult, setCompareResult] = useState<CompareResult | null>(null);
   const [issueText, setIssueText] = useState("");
   const [issueJobId, setIssueJobId] = useState("");
-  const [issueSent, setIssueSent] = useState(false);
+  const [issueId, setIssueId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionMode, setActionMode] = useState<"upload" | "compare" | "issue">("upload");
 
@@ -196,7 +183,7 @@ function CameraTab() {
         setMode("preview");
         setUploadResult(null);
         setCompareResult(null);
-        setIssueSent(false);
+        setIssueId(null);
       };
       reader.readAsDataURL(file);
     },
@@ -205,39 +192,45 @@ function CameraTab() {
 
   const handleUpload = useCallback(async () => {
     if (!preview) return;
+    setError(null);
+    setUploadResult(null);
     setMode("uploading");
     try {
       const result = await uploadPhoto(preview, hash, notes);
       setUploadResult(result);
       setMode("result");
-    } catch (err) {
-      setError("Upload failed. Please try again.");
+    } catch {
+      setError("The photo wasn't stored.");
       setMode("preview");
     }
   }, [preview, hash, notes]);
 
   const handleCompare = useCallback(async () => {
     if (!preview) return;
+    setError(null);
+    setCompareResult(null);
     setMode("uploading");
     try {
       const result = await comparePhoto(preview, issueJobId || "default-job");
       setCompareResult(result);
       setMode("result");
-    } catch (err) {
-      setError("Compare failed.");
+    } catch {
+      setError("The comparison didn't run.");
       setMode("preview");
     }
   }, [preview, issueJobId]);
 
   const handleReportIssue = useCallback(async () => {
     if (!issueText.trim()) return;
+    setError(null);
+    setIssueId(null);
     setMode("uploading");
     try {
-      await reportIssue(preview, issueText, issueJobId || null);
-      setIssueSent(true);
+      const result = await reportIssue(preview, issueText, issueJobId || null);
+      setIssueId(result.issueId);
       setMode("result");
-    } catch (err) {
-      setError("Failed to send report.");
+    } catch {
+      setError("The issue wasn't submitted.");
       setMode("preview");
     }
   }, [preview, issueText, issueJobId]);
@@ -249,7 +242,7 @@ function CameraTab() {
     setNotes("");
     setUploadResult(null);
     setCompareResult(null);
-    setIssueSent(false);
+    setIssueId(null);
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
@@ -485,7 +478,7 @@ function CameraTab() {
           )}
 
           {/* Issue sent */}
-          {issueSent && (
+          {issueId && (
             <div className="rounded-2xl bg-amber-500/10 border border-amber-500/30 p-4">
               <div className="flex items-center gap-2">
                 <div className="w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center text-black text-xs font-bold">
@@ -496,6 +489,7 @@ function CameraTab() {
               <p className="text-xs text-white/40 mt-2">
                 Your report has been sent to the agent.
               </p>
+              <div className="text-xs font-mono text-white/60 break-all">{issueId}</div>
             </div>
           )}
 
@@ -552,7 +546,7 @@ function JobCard({ job, onTap }: { job: Job; onTap: (id: string) => void }) {
 
 function JobsTab() {
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
-  const { data: jobs, isLoading, error } = useQuery({
+  const { data: jobs, isLoading, error, refetch } = useQuery({
     queryKey: ["mobile-active-jobs"],
     queryFn: fetchActiveJobs,
     refetchInterval: 15_000,
@@ -570,7 +564,10 @@ function JobsTab() {
     return (
       <div className="px-4 py-4">
         <div className="rounded-xl bg-red-500/10 border border-red-500/30 px-4 py-3 text-sm text-red-400">
-          Failed to load jobs.
+          Active jobs couldn't be loaded.
+          <button onClick={() => { void refetch(); }} className="block mt-2 underline">
+            Retry
+          </button>
         </div>
       </div>
     );
