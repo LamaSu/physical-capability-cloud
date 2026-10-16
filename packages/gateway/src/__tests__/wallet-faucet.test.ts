@@ -439,11 +439,16 @@ describe("W2 wallet faucet", () => {
   });
   it("12 rows older than 24h do not count toward any cap", async () => {
     const result = await linked();
+    const namespace = getStore().db.get<{ account_proof: string; approved_by_key_id: string | null }>(sql`
+      SELECT account_proof, approved_by_key_id FROM wallet_links WHERE id = ${result.linkId}`)!;
     for (let i = 0; i < 12; i++) {
-      oldClaim(`old-${i}`, "eth", 1, result.account.address.toLowerCase(), "account-a", 86400001);
-      oldClaim(`old-${i}`, "usdc", 1, result.account.address.toLowerCase(), "account-a", 86400001);
+      oldClaim(`old-${i}`, "eth", 1, result.account.address.toLowerCase(), "account-a", 86400001, "failed", namespace.account_proof, namespace.approved_by_key_id);
+      oldClaim(`old-${i}`, "usdc", 1, result.account.address.toLowerCase(), "account-a", 86400001, "failed", namespace.account_proof, namespace.approved_by_key_id);
     }
-    expect((await fund(result)).json().status).toBe("funded");
+    const response = await fund(result);
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().status).toBe("funded");
+    expect(response.json().claims.map((claim: { token: string }) => claim.token)).toEqual([...Array(5).fill("eth"), "usdc"]);
   });
   it.each([{ PCC_NETWORK: "base" }, { CDP_NETWORK: "base" }, { PCC_X402_CHAIN: "base-mainnet" }, { PCC_NETWORK: "unknown-net" }])("13 mainnet hides both routes; W1 still creates %j", async (settings) => {
     const result = await linked();

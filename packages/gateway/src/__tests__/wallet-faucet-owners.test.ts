@@ -117,7 +117,7 @@ async function linked(headers: Headers) {
 }
 type Linked = Awaited<ReturnType<typeof linked>>;
 
-// As in W1, raw session insertion is confined to the one near-miss/lowercase session in a test.
+// As in W1, raw session insertion is confined to near-miss and lowercase fixtures.
 function sessionHeaders(token: string, accountId: string = privateKeyToAccount(generatePrivateKey()).address) {
   getRepos().sessions.insert({ id: token, token, walletAddress: accountId,
     createdAt: new Date(now).toISOString(), lastActiveAt: new Date(now).toISOString(),
@@ -159,11 +159,11 @@ function rows(linkId?: string) {
     : sql`SELECT * FROM faucet_claims`);
 }
 
-async function refused(result: Linked, headers: Headers, code = 404, body: object = { error: "link_not_found" }) {
+async function refused(result: Linked, headers: Headers, code = 404, body: object = { error: "link_not_found" }, context?: string) {
   const before = rows();
   const n = calls.length;
   const response = await app.inject({ method: "POST", url: `/api/wallets/${result.linkId}/fund`, headers, payload: {} });
-  expect(response.statusCode).toBe(code);
+  expect(response.statusCode, context).toBe(code);
   expect(response.json()).toEqual(body);
   expect(rows()).toEqual(before);
   expect(calls).toHaveLength(n);
@@ -211,12 +211,22 @@ describe("W2 owner faucet principals", () => {
     const a = await signIn();
     const skA = await mintSessionKey(a.headers);
     const results = [await linked(skA.headers), await linked(a.headers)];
-    const nearMiss = a.account.address.slice(0, -1) + (a.account.address.endsWith("0") ? "1" : "0");
-    const near = sessionHeaders("near-miss-session", nearMiss);
-    const nearKey = await mintSessionKey(near);
     const b = await signIn();
-    for (const headers of [b.headers, near, nearKey.headers]) {
-      for (const result of results) await refused(result, headers);
+    for (const [linkIndex, result] of results.entries()) {
+      await refused(result, b.headers, 404, { error: "link_not_found" }, `B cookie on L${linkIndex + 1}`);
+    }
+    // A last-digit near miss catches prefix matches; first and middle digits also catch
+    // suffix and shortened-display ("0x1234…abcd") partial-address matches.
+    for (const index of [2, 21, 41]) {
+      const digit = a.account.address[index]!.toLowerCase() === "0" ? "1" : "0";
+      const nearMiss = `${a.account.address.slice(0, index)}${digit}${a.account.address.slice(index + 1)}`;
+      const near = sessionHeaders(`near-miss-${index}`, nearMiss);
+      const nearKey = await mintSessionKey(near);
+      for (const [principal, headers] of [["cookie", near], ["key", nearKey.headers]] as const) {
+        for (const [linkIndex, result] of results.entries()) {
+          await refused(result, headers, 404, { error: "link_not_found" }, `near miss at index ${index}, ${principal} on L${linkIndex + 1}`);
+        }
+      }
     }
     for (const result of results) await fund(result, a.headers);
     expect(calls).toHaveLength(10);
