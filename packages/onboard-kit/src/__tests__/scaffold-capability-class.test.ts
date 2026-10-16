@@ -272,6 +272,22 @@ describe("capability-class scaffolding", () => {
     expect(fetchStub).toHaveBeenCalledTimes(0);
   });
 
+  it("M2: mock prepare without a staging endpoint acknowledges and starts with zero requests", async () => {
+    const config = machineConfig();
+    config.adapters[0]!.endpoints = config.adapters[0]!.endpoints!.filter(endpoint => endpoint.purpose !== "load_program");
+    const { adapter, events } = await neutralAdapter(true, config);
+    const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
+    expect(ack).toEqual({ success: true, data: { jobId, inputHash, deviceJobId: expect.any(String) } });
+    expect((ack.data?.deviceJobId as string).length).toBeGreaterThan(0);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+    expect(events).toEqual([]);
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
+    expect(events).toEqual([expect.objectContaining({
+      type: "execution_started", payload: { deviceJobId: ack.data?.deviceJobId },
+    })]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+  });
+
   it.each([undefined, "", 42, null])("M2: real prepare refuses a device reply with invalid deviceJobId %s", async deviceJobId => {
     const { adapter, events } = await neutralAdapter(false);
     fetchStub.mockResolvedValueOnce({ ok: true, json: async () => ({ deviceJobId }) } as Response);
