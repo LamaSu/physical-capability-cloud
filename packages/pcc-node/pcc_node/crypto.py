@@ -215,14 +215,21 @@ _MOUNT_REFUSAL = (
 def default_key_path():
     """Where a node keeps its key pair: ``$PCC_NODE_KEY_PATH`` when set,
     else master's ``$PCC_NODE_KEYS_FILE``, else ``~/.pcc-node/keys.json``.
-    Either override receives the same location and file checks when
+    Either override must be absolute, without expanding a literal ``~``.
+    Both receive the same location and file checks when
     the key is loaded or created (see :func:`load_or_create_keys`), and the file
     must then lie outside every source checkout. The old default,
     ``./pcc-keys.json``, resolved to a key file committed to the repository
     whenever the node ran from the package directory."""
-    override = os.environ.get(KEY_PATH_ENV) or os.environ.get("PCC_NODE_KEYS_FILE")
-    if override:
-        return override
+    for variable in (KEY_PATH_ENV, "PCC_NODE_KEYS_FILE"):
+        override = os.environ.get(variable)
+        if override:
+            if not os.path.isabs(override):
+                raise KeyFileError(
+                    "%s must be an absolute path; relative paths and literal '~' paths "
+                    "are not allowed." % variable
+                )
+            return override
     return os.path.join(os.path.expanduser("~"), ".pcc-node", "keys.json")
 
 
