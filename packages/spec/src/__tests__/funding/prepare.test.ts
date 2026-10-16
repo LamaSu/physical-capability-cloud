@@ -767,7 +767,7 @@ describe("v2.1 derived buyer commitments", () => {
     expect(prepared.unchecked).toEqual([]);
   });
   const OTHER_HASH: Hex = `0x${"11".repeat(32)}`;
-  const mismatches: Array<[string, DerivedOptions, string]> = [
+  const mismatches: Array<[string, DerivedOptions, string, string?]> = [
     ["old terms file hash", { policyTermsHash: fileDigest }, "termsHash"],
     ["different reclaimAt with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1] = { ...ms[1]!, deadline: ms[1]!.deadline + 1n }; } }, "termsHash"],
     ["different stepId with coherent prePolicyRoot", { hashMilestones: (ms) => { ms[1] = { ...ms[1]!, stepId: OTHER_HASH }; } }, "termsHash"],
@@ -778,13 +778,16 @@ describe("v2.1 derived buyer commitments", () => {
     ["requiredTier allowed by tiers but not assuranceTier", { configure: (cs) => { cs[1]!.requiredTier = 1; } }, "requiredTier"],
     ["duplicate milestone pair maps helper error", { configure: (cs) => {
       cs[1]!.milestoneIndex = cs[0]!.milestoneIndex; cs[1]!.stepId = cs[0]!.stepId;
-    }, policyTermsHash: OTHER_HASH }, "termsHash"],
-    ["deadline 2^64 maps helper error", { configure: (cs) => { cs[1]!.reclaimAt = 1n << 64n; }, policyTermsHash: OTHER_HASH }, "termsHash"],
+    }, policyTermsHash: OTHER_HASH }, "termsHash", "duplicate milestone (milestoneIndex, stepId) at 1"],
+    ["deadline 2^64 maps helper error", { configure: (cs) => { cs[1]!.reclaimAt = 1n << 64n; }, policyTermsHash: OTHER_HASH },
+      "termsHash", "milestones[1].deadline must be a bigint in 0..18446744073709551615"],
   ];
-  it.each(mismatches)("INTENT_MISMATCH before any RPC: %s", async (_name, options, field) => {
+  it.each(mismatches)("INTENT_MISMATCH before any RPC: %s", async (_name, options, field, helperError) => {
     const { fx, chain, prepare } = await derivedSetup(options);
     expect(prePolicyRoot(fx.configs)).toBe(fx.message.prePolicyRoot);
-    await expect(prepare()).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining(field) });
+    const pending = prepare();
+    await expect(pending).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining(field) });
+    if (helperError !== undefined) await expect(pending).rejects.toMatchObject({ detail: `termsHash: ${helperError}` });
     expect(chain.state.log).toEqual([]);
   });
   it("supports accepted digest roots with a pinned Hex, including uppercase checked hash and roots", async () => {
