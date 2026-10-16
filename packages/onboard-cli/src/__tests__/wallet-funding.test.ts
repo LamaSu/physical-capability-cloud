@@ -708,7 +708,7 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each([-32005, -32603])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
+  it.each([-32005, -32603, -1])("transient JSON-RPC %s inside HTTP 200 is retried then succeeds", async code => {
     vi.useFakeTimers();
     const started = Date.now();
     const attempts: number[] = [];
@@ -812,7 +812,19 @@ describe("bounded receipt polling and RPC retries", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each([-32005, -32603, 408])("persistent transient RPC %s exhausts the receipt budget without later polling", async failure => {
+  it.each([-2, 1, "-1"])("JSON-RPC near miss %j stays permanent", async code => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => typeof code === "number"
+      ? rpcError(code)
+      : new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code, message: "test RPC error" } })));
+    const result = observedReceipt();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(await result).toBe("funding_rpc_unavailable");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([-32005, -32603, -1, 408])("persistent transient RPC %s exhausts the receipt budget without later polling", async failure => {
     vi.useFakeTimers();
     const started = Date.now();
     const attempts: number[] = [];

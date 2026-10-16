@@ -244,11 +244,11 @@ export async function waitForFundingReceipt(
           const data = await json(response, true);
           if (!object(data)) throw new WalletError("funding_rpc_unavailable");
           if (Object.hasOwn(data, "error") && data.error !== null) {
-            // Limit-exceeded, internal and geth's exact indexing-in-progress
-            // error are transient; indexing can continue after a node restart.
+            // Limit-exceeded, internal, viem's -1 and geth's exact indexing-in-progress
+            // errors are transient; indexing can continue after a node restart.
             // Share the polling interval and deadline with HTTP 408, 429 and 5xx.
-            if (!object(data.error) || (data.error.code !== -32005 && data.error.code !== -32603
-              && !(data.error.code === -32000 && data.error.message === "transaction indexing is in progress"))) {
+            if (!object(data.error) || !(data.error.code === -32005 || data.error.code === -32603 || data.error.code === -1
+              || (data.error.code === -32000 && data.error.message === "transaction indexing is in progress"))) {
               throw new WalletError("funding_rpc_unavailable");
             }
           } else if (!Object.hasOwn(data, "result")) {
