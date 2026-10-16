@@ -114,7 +114,8 @@ export function useJobs(params?: { kernelId?: string; status?: string }) {
  * because finishing the work never makes the money final. A 404, 401 or 403 is final (no
  * retry), and the page then shows only that refusal, never data cached from an earlier read;
  * any other failure is retried once and then surfaces as an error. It never falls back to
- * fixtures. The cache is cleared when the signed-in identity changes (onIdentityChange).
+ * fixtures. Polling pauses while the tab is hidden. The cache is cleared when the signed-in
+ * identity changes (onIdentityChange).
  */
 export function useJobExecution(jobId: string | undefined) {
   return useQuery<JobExecutionDTO>({

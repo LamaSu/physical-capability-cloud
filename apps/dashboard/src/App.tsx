@@ -33,6 +33,7 @@ const BuilderPage = lazy(() => import("./pages/BuilderPage.js").then(m => ({ def
 const WorkflowPage = lazy(() => import("./pages/WorkflowPage.js").then(m => ({ default: m.WorkflowPage })));
 const JobsPage = lazy(() => import("./pages/JobsPage.js").then(m => ({ default: m.JobsPage })));
 const JobDetailPage = lazy(() => import("./pages/JobDetailPage.js").then(m => ({ default: m.JobDetailPage })));
+const JobFlowPage = lazy(() => import("./pages/JobFlowPage.js").then(m => ({ default: m.JobFlowPage })));
 const KernelsPage = lazy(() => import("./pages/KernelsPage.js").then(m => ({ default: m.KernelsPage })));
 const KernelDetailPage = lazy(() => import("./pages/KernelDetailPage.js").then(m => ({ default: m.KernelDetailPage })));
 const EscrowPage = lazy(() => import("./pages/EscrowPage.js").then(m => ({ default: m.EscrowPage })));
@@ -318,6 +319,9 @@ function Shell() {
         <WalletLinkPage />
       </Suspense>
     );
+  }
+  if (location.pathname === "/jobs/flow") {
+    return <Suspense fallback={<PageLoader />}><JobFlowPage /></Suspense>;
   }
 
   // Landing page — agent-first (root)
