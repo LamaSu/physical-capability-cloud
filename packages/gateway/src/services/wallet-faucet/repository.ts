@@ -117,7 +117,7 @@ export function leaseFundingClaim(claim: Claim, now: number): Claim | undefined 
       last_attempt_at = ${timestamp}, updated_at = ${timestamp}
     WHERE link_id = ${claim.link_id} AND token = ${claim.token} AND seq = ${claim.seq}
       AND (lease_until IS NULL OR lease_until <= ${timestamp})
-      AND (status = 'pending' OR (status = 'failed' AND attempts < 5 AND last_attempt_at <= ${retryCutoff}))
+      AND (status = 'pending' OR (status = 'failed' AND attempts < 5 AND last_attempt_at <= ${retryCutoff} AND created_at > ${new Date(now - 86400000).toISOString()}))
       AND EXISTS (SELECT 1 FROM wallet_links WHERE id = faucet_claims.link_id
         AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ${timestamp}))
       AND NOT EXISTS (SELECT 1 FROM faucet_claims AS prior WHERE prior.link_id = faucet_claims.link_id

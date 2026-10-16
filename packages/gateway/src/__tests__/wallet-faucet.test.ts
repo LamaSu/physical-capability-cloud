@@ -233,6 +233,90 @@ describe("W2 wallet faucet", () => {
     expect(calls).toHaveLength(6);
     expect(rows(result.linkId).map(row => row.attempts)).toEqual(Array(6).fill(1));
   });
+  it("P2 a held CDP call keeps its lease for 59,999 ms without a concurrent send", async () => {
+    const result = await linked("device");
+    const held = holdFaucetCalls(1);
+    const first = fund(result).then(response => response);
+    try {
+      await held.allStarted;
+      now += 59_999;
+      held.allowNewCalls();
+      const concurrent = await fund(result, "owner");
+      expect(concurrent.statusCode).toBe(200);
+      expect(concurrent.json().status).toBe("pending");
+      expect(calls).toHaveLength(1);
+    } finally {
+      held.release();
+      await first;
+    }
+    // The clock advance spent the first request's budget; finish via a new POST.
+    expect((await first).statusCode).toBe(200);
+    expect((await first).json().status).toBe("pending");
+    const completed = await fund(result);
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json().status).toBe("funded");
+    expect(calls).toHaveLength(5);
+    expect(rows(result.linkId).map(row => row.attempts)).toEqual(Array(5).fill(1));
+  });
+  it("P3 the address cap permits two funded grants after revocation and re-linking", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    for (let grant = 0; grant < 2; grant++) {
+      const result = await linked("device", account);
+      const response = await fund(result);
+      expect(response.statusCode).toBe(200);
+      expect(response.json().status).toBe("funded");
+      await revoke(result);
+    }
+    expect(calls).toHaveLength(10);
+    const third = await linked("device", account);
+    await refused(`${path}/${third.request.requestId}/fund`, 409, { error: "cap_reached", cap: "address" });
+  });
+  it.each([
+    { age: 23 * 60 * 60 * 1000, retry: true },
+    { age: 86_400_001, retry: false },
+  ])("P1 failed device claims at age $age ms retry only inside their grant window", async ({ age, retry }) => {
+    const banked = await linked("device");
+    behavior = async () => { throw { errorType: "faucet_limit_exceeded" }; };
+    const failed = await fund(banked);
+    expect(failed.statusCode).toBe(502);
+    expect(failed.json()).toEqual({ error: "faucet_error", errorClass: "faucet_limit_exceeded" });
+    expect(calls).toHaveLength(5);
+    expect(rows(banked.linkId).map(row => [row.status, row.attempts])).toEqual(
+      Array.from({ length: 5 }, () => ["failed", 1]),
+    );
+
+    now += age;
+    behavior = async () => ({ transactionHash: hash() });
+    if (!retry) {
+      // Synthetic history fills the new window without consuming live-link caps.
+      const address = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+      for (let i = 0; i < GLOBAL_ETH_CLAIM_CAP - 5; i++)
+        oldClaim(`ge-${Math.floor(i / 5)}`, "eth", i % 5 + 1, address);
+      const fresh = await fund(await linked("device"));
+      expect(fresh.statusCode).toBe(200);
+      expect(fresh.json().status).toBe("funded");
+      const blocked = await linked("device");
+      await refused(`${path}/${blocked.request.requestId}/fund`, 409, { error: "cap_reached", cap: "global" });
+    }
+    const before = rows(banked.linkId);
+    const n = calls.length;
+    const response = await fund(banked, "owner");
+    expect(calls).toHaveLength(n + (retry ? 5 : 0));
+    if (retry) {
+      expect(response.statusCode).toBe(200);
+      expect(response.json().status).toBe("funded");
+      expect(rows(banked.linkId).map(row => [row.status, row.attempts])).toEqual(
+        Array.from({ length: 5 }, () => ["succeeded", 2]),
+      );
+    } else {
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual(failed.json());
+      expect(rows(banked.linkId)).toEqual(before);
+      const counted = getStore().db.get<{ n: number }>(sql`SELECT count(*) AS n FROM faucet_claims
+        WHERE token = 'eth' AND created_at > ${new Date(now - 86_400_000).toISOString()}`)!.n;
+      expect(counted).toBe(GLOBAL_ETH_CLAIM_CAP);
+    }
+  });
   it("5 retry waits 30 seconds and only retries failed ETH 2 and USDC", async () => {
     const result = await linked();
     behavior = async (_address, token) => {
@@ -710,6 +794,7 @@ describe("W2 wallet faucet", () => {
     const address = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
     for (let i = 0; i < GLOBAL_ETH_CLAIM_CAP - 5; i++)
       oldClaim(`ge-${Math.floor(i / 5)}`, "eth", i % 5 + 1, address);
+    oldClaim("global-usdc", "usdc", 1, address);
     const first = await fund(await linked("device"));
     expect(first.statusCode).toBe(200);
     expect(first.json().status).toBe("funded");
