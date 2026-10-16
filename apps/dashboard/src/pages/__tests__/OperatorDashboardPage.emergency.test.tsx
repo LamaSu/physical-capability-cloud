@@ -16,7 +16,10 @@ import { useUIStore } from "../../stores/ui-store.js";
 
 const RESUME_REFUSED = "Resume was refused for this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header).";
 const RESUME_FAILED = "Resume didn't go through. The kernel is still stopped; try again.";
-const STOP_FAILED = "The stop didn't go through. The kernel may still be running; try again.";
+const STOP_FAILED = "The stop didn't go through. kernel-nanoclaw may still be running: use the machine's physical emergency stop, then try again.";
+const STOP_UNCONFIRMED = "The server didn't confirm the stop for kernel-nanoclaw. The machine may still be running: use its physical emergency stop.";
+const STOP_CONFIRMATION = "EMERGENCY STOP for kernel-nanoclaw: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?";
+const STOP_ACTIVE = "EMERGENCY STOP ACTIVE for kernel-nanoclaw: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.";
 const SERVER_TEXT = "<strong>Untrusted server or network details</strong>";
 const STOPPED = "EMERGENCY STOP ACTIVE";
 
@@ -49,6 +52,10 @@ function response(status: number): Response {
   return new Response(status === 204 ? null : JSON.stringify({ error: SERVER_TEXT, message: SERVER_TEXT }), { status });
 }
 
+function confirmedStop(status = 200): Response {
+  return new Response(JSON.stringify({ stopped: true, kernelId: "kernel-nanoclaw", reason: SERVER_TEXT }), { status });
+}
+
 function button(label: string): HTMLButtonElement {
   const found = [...container.querySelectorAll("button")].find((element) => element.textContent === label);
   expect(found, `button ${label}`).toBeDefined();
@@ -63,7 +70,7 @@ async function click(label: string) {
 async function renderPage(stopped = false) {
   await act(async () => root.render(<MemoryRouter><OperatorDashboardPage /></MemoryRouter>));
   if (stopped) {
-    authorizedFetch.mockResolvedValueOnce(response(200));
+    authorizedFetch.mockResolvedValueOnce(confirmedStop());
     await click("EMERGENCY STOP");
     expectState(true);
     authorizedFetch.mockClear();
@@ -111,8 +118,8 @@ describe("OperatorDashboardPage emergency controls", () => {
   });
 
   it.each([
-    [401, "Sign in to stop this kernel."],
-    [403, "The stop was refused for this key. The kernel may still be running."],
+    [401, "Sign in to stop kernel-nanoclaw. Until then, use the machine's physical emergency stop."],
+    [403, "The stop was refused for this key. kernel-nanoclaw may still be running: use the machine's physical emergency stop."],
     [500, STOP_FAILED],
     ["network failure", STOP_FAILED],
   ] as const)("stop %s keeps running and shows its exact message", async (status, message) => {
@@ -121,6 +128,7 @@ describe("OperatorDashboardPage emergency controls", () => {
     await click("EMERGENCY STOP");
     expectState(false);
     expectAlert(message);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("physical emergency stop");
     expect(authorizedFetch).toHaveBeenCalledTimes(1);
     expect(authorizedFetch).toHaveBeenCalledWith("/api/operator/emergency-stop", {
       method: "POST",
@@ -163,8 +171,59 @@ describe("OperatorDashboardPage emergency controls", () => {
     expect(button("Stopping...").disabled).toBe(true);
     expect(container.textContent).not.toContain(STOPPED);
 
-    await act(async () => resolve(response(200)));
+    await act(async () => resolve(confirmedStop()));
     expectState(true);
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it.each([
+    ["200 with no body", () => new Response(null, { status: 200 })],
+    ["200 non-JSON", () => new Response(SERVER_TEXT, { status: 200 })],
+    ["204", () => response(204)],
+    ["200 stopped false", () => new Response(JSON.stringify({ stopped: false, kernelId: "kernel-nanoclaw" }), { status: 200 })],
+    ["200 stopped string true", () => new Response(JSON.stringify({ stopped: "true", kernelId: "kernel-nanoclaw" }), { status: 200 })],
+    ["200 stopped true for other kernel", () => new Response(JSON.stringify({ stopped: true, kernelId: "other" }), { status: 200 })],
+  ] as const)("stop %s keeps running and shows unconfirmed copy", async (_label, reply) => {
+    await renderPage();
+    authorizedFetch.mockResolvedValueOnce(reply());
+    await click("EMERGENCY STOP");
+    expectState(false);
+    expectAlert(STOP_UNCONFIRMED);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("physical emergency stop");
+  });
+
+  it("stop 200 with matching true confirmation shows stopped and the exact banner", async () => {
+    await renderPage();
+    authorizedFetch.mockResolvedValueOnce(confirmedStop());
+    await click("EMERGENCY STOP");
+    expectState(true);
+    expect([...container.querySelectorAll("span")].find((element) => element.textContent?.startsWith(STOPPED))?.textContent).toBe(STOP_ACTIVE);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("stop 500 with matching true confirmation keeps running and shows failure copy", async () => {
+    await renderPage();
+    authorizedFetch.mockResolvedValueOnce(confirmedStop(500));
+    await click("EMERGENCY STOP");
+    expectState(false);
+    expectAlert(STOP_FAILED);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("physical emergency stop");
+  });
+
+  it("stop confirmation dialog uses the exact server scope copy", async () => {
+    await renderPage();
+    authorizedFetch.mockResolvedValueOnce(confirmedStop());
+    await click("EMERGENCY STOP");
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(window.confirm).toHaveBeenCalledWith(STOP_CONFIRMATION);
+  });
+
+  it("rendered emergency states never claim active jobs halted", async () => {
+    await renderPage();
+    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted/);
+    authorizedFetch.mockResolvedValueOnce(confirmedStop());
+    await click("EMERGENCY STOP");
+    expectState(true);
+    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted/);
   });
 });

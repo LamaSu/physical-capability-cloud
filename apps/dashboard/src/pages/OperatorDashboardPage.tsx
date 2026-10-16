@@ -14,6 +14,7 @@ import {
 } from "../api/mock-onboarding-data.js";
 
 const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
+const TARGET_KERNEL_ID = "kernel-nanoclaw";
 
 /* ---------- Approval types ---------- */
 interface Approval {
@@ -53,23 +54,26 @@ export function OperatorDashboardPage() {
   const [estopError, setEstopError] = React.useState<string | null>(null);
 
   async function handleEmergencyStop() {
-    if (!window.confirm("EMERGENCY STOP: This will immediately halt all active jobs on kernel-nanoclaw. Continue?")) return;
+    if (!window.confirm(`EMERGENCY STOP for ${TARGET_KERNEL_ID}: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
     setEstopLoading(true);
     setEstopError(null);
-    const failureMessage = "The stop didn't go through. The kernel may still be running; try again.";
+    const failureMessage = `The stop didn't go through. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop, then try again.`;
     try {
       const res = await authorizedFetch("/api/operator/emergency-stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
+        body: JSON.stringify({ kernelId: TARGET_KERNEL_ID }),
       });
-      if (res.ok) {
+      const body = await res.json().catch(() => null);
+      if (res.ok && body?.stopped === true && body?.kernelId === TARGET_KERNEL_ID) {
         setEmergencyStopped(true);
+      } else if (res.ok) {
+        setEstopError(`The server didn't confirm the stop for ${TARGET_KERNEL_ID}. The machine may still be running: use its physical emergency stop.`);
       } else {
         setEstopError(res.status === 401
-          ? "Sign in to stop this kernel."
+          ? `Sign in to stop ${TARGET_KERNEL_ID}. Until then, use the machine's physical emergency stop.`
           : res.status === 403
-            ? "The stop was refused for this key. The kernel may still be running."
+            ? `The stop was refused for this key. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop.`
             : failureMessage);
       }
     } catch {
@@ -80,7 +84,7 @@ export function OperatorDashboardPage() {
   }
 
   async function handleEmergencyResume() {
-    if (!window.confirm("Resume operations on kernel-nanoclaw?")) return;
+    if (!window.confirm(`Resume operations on ${TARGET_KERNEL_ID}?`)) return;
     setEstopLoading(true);
     setEstopError(null);
     const failureMessage = "Resume didn't go through. The kernel is still stopped; try again.";
@@ -88,7 +92,7 @@ export function OperatorDashboardPage() {
       const res = await authorizedFetch("/api/operator/emergency-resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
+        body: JSON.stringify({ kernelId: TARGET_KERNEL_ID }),
       });
       if (res.ok) {
         setEmergencyStopped(false);
@@ -179,7 +183,7 @@ export function OperatorDashboardPage() {
               <div className="flex items-center gap-3">
                 <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />
                 <span className="text-sm text-red-400 font-medium">
-                  EMERGENCY STOP ACTIVE — All jobs halted on kernel-nanoclaw
+                  EMERGENCY STOP ACTIVE for {TARGET_KERNEL_ID}: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.
                 </span>
               </div>
               <button
