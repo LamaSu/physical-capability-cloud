@@ -320,6 +320,21 @@ describe("D neutral prepare", () => {
     expect(inputData).toStrictEqual(new Uint8Array([3, 2, 1]));
     expect(method(f.bundles[0]!)[0]!.payload.inputHash).toBe(inputHash);
   });
+  it("D1 preflight snapshots shared bytes before step registration", async () => {
+    const f = setup(); const inputData = new Uint8Array(new SharedArrayBuffer(3));
+    inputData.set([3, 2, 1]); const inputHash = hash(inputData);
+    f.register.mockImplementationOnce((...args) => {
+      // Model a concurrent writer after hashing, before the prepare command is built.
+      inputData.fill(99);
+      EvidenceEmitter.prototype.registerStep.call(f.emitter, ...args);
+    });
+    expect((await f.run({ inputData, inputHash })).success).toBe(true);
+    const received = f.machine.commands[0]!.payload!.inputData as Uint8Array;
+    expect(received).toStrictEqual(new Uint8Array([3, 2, 1]));
+    expect(received.buffer).not.toBeInstanceOf(SharedArrayBuffer);
+    expect(hash(received)).toBe(inputHash);
+    expect(inputData).toStrictEqual(new Uint8Array([99, 99, 99]));
+  });
   it("D2 prefers prepare when both inputs are listed", async () => {
     const f = setup(); Object.assign(f.machine, { accepts: ["load_gcode", "prepare", "start"] });
     expect((await f.run()).success).toBe(true);
