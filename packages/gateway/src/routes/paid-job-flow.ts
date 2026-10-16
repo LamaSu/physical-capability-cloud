@@ -82,6 +82,7 @@ import {
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
 import { emergencyStopState } from "./device-relay.js";
+import { canDispatchJobLocally } from "../services/local-job-dispatch.js";
 import { authorityOf } from "../auth/kernel-authority.js";
 import { bindBuyer } from "../auth/buyer-identity.js";
 import { isMockSettlement } from "../services/settlement-mode.js";
@@ -634,8 +635,8 @@ export async function createJobFromSession(
   // kernel, or for a remote operator node that polls
   // GET /api/operator/jobs?status=queued and executes it out-of-process?
   //
-  // isExternal is a best-effort routing hint (queued vs active/pending), never
-  // a correctness gate — so a missing/uninitialised kernel-service must NOT
+  // This is status routing only; this function never starts a local runner.
+  // A missing/uninitialised kernel-service must NOT
   // abort escrow+job creation. Both callers wrap createJobFromSession (the
   // negotiate commit handler swallows throws as "best-effort"; the fast-track
   // route turns them into a 500), so an unguarded getKernelService() throw here
@@ -651,11 +652,11 @@ export async function createJobFromSession(
   // stranger's paid job forever. Treat "not our own kernel" as external.
   let localKernelId: string | undefined;
   try {
-    localKernelId = (getKernelService() as any).config?.kernelId;
+    localKernelId = getKernelService().kernelId;
   } catch {
     localKernelId = undefined;
   }
-  const isExternal = !(localKernelId && session.kernelId === localKernelId);
+  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId);
 
   repos.jobs.insert({
     id: jobId,

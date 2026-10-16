@@ -339,6 +339,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
 
     await svc.submitJob({
       jobId: "job-tracing-ks-001",
+      kernelId: mockKernelConfig.kernelId,
       stepId: "step-ks-tracing",
       assuranceTier: 0,
     });
@@ -359,6 +360,7 @@ describe("KernelService.submitJob — Sentry spans", () => {
 
     await svc.submitJob({
       jobId: "job-tracing-ks-002",
+      kernelId: mockKernelConfig.kernelId,
       stepId: "step-ks-attrs",
       assuranceTier: 1,
     });

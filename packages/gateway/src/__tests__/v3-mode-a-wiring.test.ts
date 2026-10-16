@@ -274,7 +274,7 @@ describe("createJobFromSession V3 Mode-A on-chain wiring (mocked wallet, real st
     });
 
     vi.doMock("../services/kernel-service.js", () => ({
-      getKernelService: vi.fn().mockReturnValue({ config: { kernelId: "kernel-test-v3" } }),
+      getKernelService: vi.fn().mockReturnValue({ kernelId: "kernel-test-v3" }),
       initKernelService: vi.fn(),
       resetKernelService: vi.fn(),
     }));

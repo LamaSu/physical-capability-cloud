@@ -19,6 +19,7 @@ import { getSettlementService } from "./settlement-service.js";
 import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
+import { canDispatchJobLocally } from "./local-job-dispatch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -26,6 +27,7 @@ import { pipelineTelemetry } from "../telemetry.js";
 
 export interface SubmitJobParams {
   jobId: string;
+  kernelId: string;
   stepId: string;
   deviceId?: string;
   gcodeHash?: string;
@@ -111,6 +113,8 @@ const JOB_ADAPTER_MEMORY = 1000;
 export class KernelService {
   private runners: Map<string, JobRunner> = new Map();
   private machines: Map<string, MachineAdapter> = new Map();
+  /** Metadata captured when the runtime adapter is installed, including DB devices. */
+  private runnerDevices = new Map<string, { id: string; type: string; adapterType: string }>();
   private emitter: EvidenceEmitter;
   private config: KernelConfig;
   private runningJobs: Map<string, RunningJob> = new Map();
@@ -169,6 +173,8 @@ export class KernelService {
         this.emitter,
       );
       this.runners.set(machine.id, runner);
+      const device = this.config.devices.find((d) => d.id === machine.id)!;
+      this.runnerDevices.set(machine.id, { id: machine.id, type: "machine", adapterType: device.adapterType });
     }
   }
 
@@ -227,6 +233,7 @@ export class KernelService {
           this.emitter,
         );
         this.runners.set(m.id, runner);
+        this.runnerDevices.set(m.id, { id: m.id, type: "machine", adapterType: row.adapterType });
       }
       return { installed: true };
     } catch (err) {
@@ -306,8 +313,15 @@ export class KernelService {
    * recordDeviceSuccess()/recordDeviceFailure() — so a device that keeps failing
    * actually trips the breaker and blocks subsequent jobs.
    */
-  async submitJob(params: SubmitJobParams): Promise<{ jobId: string; deviceId: string; status: "accepted" }> {
+  async submitJob(params: SubmitJobParams): Promise<
+    { jobId: string; deviceId: string; status: "accepted" } |
+    { jobId: string; deviceId: null; status: "queued" }
+  > {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
+    const queued = { jobId, deviceId: null, status: "queued" as const };
+    // A route cannot bypass local identity, the operator's queue-only switch,
+    // or the kernel's stop by calling the service directly.
+    if (!canDispatchJobLocally(this.config.kernelId, params.kernelId)) return queued;
 
     const deviceId = this.selectDevice(params.deviceId);
     if (!deviceId) {
@@ -346,6 +360,8 @@ export class KernelService {
     // to validateAndRelay, which recorded a phantom success on every job and
     // prevented the breaker from ever tripping on real device failures.)
     const preflight = await gateway.validateOnly(preflightCmd);
+    // The asynchronous governor may yield while an operator engages the stop.
+    if (!canDispatchJobLocally(this.config.kernelId, params.kernelId)) return queued;
     if (!preflight.allowed) {
       throw new Error(
         `[safety-gateway] Job ${jobId} denied: ${preflight.verdict?.reason ?? preflight.reason ?? "unknown"}`,
@@ -384,6 +400,19 @@ export class KernelService {
 
     // Fire-and-forget execution — wrapped in a Sentry lifecycle span so the
     // async chain is visible as a waterfall in the Sentry trace view.
+    let dispatched = false;
+    let dispatchBlocked = false;
+    const blockDispatch = () => {
+      dispatchBlocked = true;
+      this.runningJobs.delete(jobId);
+      this.jobAdapters.delete(jobId);
+      try {
+        getRepos().jobs.updateStatus(jobId, "queued", 0);
+      } catch {
+        // The caller may not have inserted the job yet.
+      }
+      endTrace(traceId, lifecycleLocalSpanId, "error");
+    };
     try {
       Sentry.startSpanManual(
         {
@@ -396,8 +425,14 @@ export class KernelService {
           },
         },
         (lifecycleSpan) => {
-          // Telemetry: job execution starting
+          if (!canDispatchJobLocally(this.config.kernelId, params.kernelId)) {
+            blockDispatch();
+            lifecycleSpan.end();
+            return;
+          }
+          // Telemetry: job execution starting only after the final dispatch guard.
           pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
+          dispatched = true;
           runner
             .run({
               jobId,
@@ -486,6 +521,14 @@ export class KernelService {
       );
     } catch {
       // Sentry not initialised — fall back to plain fire-and-forget
+      // Never let a stopped callback or a span error after dispatch start a
+      // second runner through the fallback.
+      if (dispatchBlocked) return queued;
+      if (dispatched) return { jobId, deviceId, status: "accepted" };
+      if (!canDispatchJobLocally(this.config.kernelId, params.kernelId)) {
+        blockDispatch();
+        return queued;
+      }
       // Telemetry: job execution starting (fallback path)
       pipelineTelemetry.emit(jobId, "job_started", "completed", { metadata: { deviceId } });
       runner
@@ -563,7 +606,7 @@ export class KernelService {
         });
     }
 
-    return { jobId, deviceId, status: "accepted" };
+    return dispatchBlocked ? queued : { jobId, deviceId, status: "accepted" };
   }
 
   /**
@@ -596,7 +639,7 @@ export class KernelService {
   }
 
   /**
-   * List all devices from the kernel config with their REAL health status.
+   * List configured devices and every runnable DB device with real health.
    *
    * Health is derived from the live machine adapter (getStatus()) and the
    * safety circuit-breaker state — never hardcoded. See deriveHealthStatus.
@@ -614,8 +657,15 @@ export class KernelService {
       circuits = null;
     }
 
+    const devices = new Map<string, { id: string; type: string; adapterType: string }>(
+      this.config.devices.map((d) => [d.id, d]),
+    );
+    for (const id of this.runners.keys()) {
+      // Runtime metadata wins if a DB registration replaced a config adapter.
+      devices.set(id, this.runnerDevices.get(id)!);
+    }
     return Promise.all(
-      this.config.devices.map(async (d) => ({
+      [...devices.values()].map(async (d) => ({
         id: d.id,
         type: d.type,
         adapterType: d.adapterType,

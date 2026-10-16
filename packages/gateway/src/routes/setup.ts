@@ -14,6 +14,7 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { canDispatchJobLocally } from "../services/local-job-dispatch.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
@@ -917,10 +918,23 @@ export async function setupRoutes(app: FastifyInstance) {
     // it for real; there is no self-attest fallback.
 
     // Submit the job
-    let submitResult: { jobId: string; deviceId: string; status: string };
+    const queuedResponse = () => ({
+      jobId,
+      deviceId: null,
+      status: "queued",
+      ran: false,
+      passed: false,
+      duration: Date.now() - startTime,
+    });
+    // A setup test is also a physical job: queue-only mode and the kernel's
+    // emergency stop apply before entering the in-process runtime.
+    if (!canDispatchJobLocally(svc.kernelId, kernelId)) return queuedResponse();
+
+    let submitResult: Awaited<ReturnType<typeof svc.submitJob>>;
     try {
       submitResult = await svc.submitJob({
         jobId,
+        kernelId,
         stepId,
         deviceId,
         assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
@@ -935,13 +949,15 @@ export async function setupRoutes(app: FastifyInstance) {
         duration: Date.now() - startTime,
       });
     }
+    // The runtime repeats the guard after its asynchronous admission check.
+    if (submitResult.status === "queued") return queuedResponse();
 
     // Poll for completion (up to 10 seconds)
     const POLL_INTERVAL_MS = 250;
     const MAX_WAIT_MS = 10_000;
     const deadline = Date.now() + MAX_WAIT_MS;
 
-    let finalStatus = submitResult.status;
+    let finalStatus: string = submitResult.status;
     let evidenceBundleId: string | undefined;
     let consecutiveUnknown = 0;
 
