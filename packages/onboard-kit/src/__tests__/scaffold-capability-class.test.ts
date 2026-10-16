@@ -227,6 +227,8 @@ describe("capability-class scaffolding", () => {
     expect(stageRequest?.method).toBe("POST");
     expect(JSON.parse(stageRequest?.body as string)).toEqual({ jobId, inputHash });
     expect(events).toEqual([]);
+    // Only staging needs a JSON reply; the run endpoint may acknowledge with no content.
+    fetchStub.mockResolvedValueOnce(new Response(null, { status: 204 }));
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);
     expect(fetchStub).toHaveBeenCalledTimes(2);
     expect(fetchStub.mock.calls[1]?.[0]).toBe("http://device.test/run");

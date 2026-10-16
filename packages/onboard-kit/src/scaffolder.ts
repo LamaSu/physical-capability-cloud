@@ -321,8 +321,9 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
           deviceJobId = \`mock-\${++this.stagedCount}\`;
         } else {
           ${loadEndpoint
-    ? `const staged = await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
+    ? `const response = await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
             ...(inputData instanceof Uint8Array ? { inputBase64: Buffer.from(inputData).toString("base64") } : {}) }); // Staging only.
+          const staged = await response.json();
           if (typeof staged.deviceJobId !== "string" || staged.deviceJobId.length === 0) return { success: false };
           deviceJobId = staged.deviceJobId;`
     : '// TODO: Stage the input through your device API without actuating.\n          return { success: false, message: "prepare: staging is not implemented for this device" };'}
@@ -424,7 +425,7 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
     return res.json();
   }
 
-  private async apiPost(path: string, body: Record<string, unknown>): Promise<${legacy ? "void" : "Record<string, unknown>"}> {
+  private async apiPost(path: string, body: Record<string, unknown>): Promise<${legacy ? "void" : "Response"}> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.config.apiKey) headers["X-Api-Key"] = this.config.apiKey;
 
@@ -434,7 +435,7 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(\`POST \${path}: \${res.status}\`);
-    ${legacy ? "" : "return res.json();"}
+    ${legacy ? "" : "return res;"}
   }
 
   // ── Polling ─────────────────────────────────────────────────────
