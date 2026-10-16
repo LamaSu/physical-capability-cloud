@@ -1,4 +1,5 @@
 import ts from "typescript";
+import { fileURLToPath } from "node:url";
 
 export interface TextSinkIssue {
   file: string;
@@ -43,6 +44,8 @@ export interface TextComputedWriteAllowance {
 export interface TextComputedReadAllowance extends TextComputedWriteAllowance {
   /** Optional parameter key for one read guarded by propertyIsEnumerable; otherwise require a fresh local. */
   ownKey?: string;
+  /** Tighten the existing guard to a single read followed immediately by callable rejection. */
+  nonCallable?: boolean;
 }
 
 export interface AgentTextConfig {
@@ -62,6 +65,8 @@ export interface TextSinkConfig {
   allowedAttributes?: readonly string[];
   allowedNodeCalls?: readonly TextSinkCallAllowance[];
   allowedNameArguments?: readonly TextSinkArgumentAllowance[];
+  /** Additional confinement: callers must be the unique declaration node, never a matching name. */
+  pinnedCallers?: readonly { callee: string; caller: string }[];
   /** JS runtime brands use separate syntactic mint checks. */
   textMints?: TextMintConfig;
   agentText?: AgentTextConfig;
@@ -70,18 +75,26 @@ export interface TextSinkConfig {
   allowedComputedReads?: readonly TextComputedReadAllowance[];
 }
 
-const TEXT_PROPERTIES = new Set(["text", "textContent", "innerText", "outerText", "nodeValue", "data", "innerHTML", "outerHTML", "srcdoc", "value", "defaultValue", "label"]);
+const TEXT_PROPERTIES = new Set(["text", "textContent", "innerText", "outerText", "nodeValue", "data", "innerHTML", "outerHTML", "srcdoc", "value", "defaultValue", "label", "content", "cssText", "selectorText", "src"]);
 const NODE_OR_TEXT_METHODS = new Set(["append", "prepend", "before", "after", "replaceWith", "replaceChildren"]);
 const TEXT_INSERTION_METHODS = new Set(["createTextNode", "insertAdjacentText", "appendData", "insertData", "replaceData", "replaceWholeText"]);
 const HTML_METHODS = new Set(["insertAdjacentHTML", "write", "writeln", "setHTMLUnsafe", "setHTML"]);
 const PARSER_METHODS = new Set(["createContextualFragment", "parseFromString", "parseHTMLUnsafe"]);
-const NAMED_TEXT_METHODS = new Set(["setRangeText", "setCustomValidity", "insertRule", "replaceSync", "fillText", "strokeText", "execCommand", "setNamedItem"]);
-const FORBIDDEN_METHODS = new Set([...NODE_OR_TEXT_METHODS, ...TEXT_INSERTION_METHODS, ...HTML_METHODS, ...PARSER_METHODS, ...NAMED_TEXT_METHODS, "replace", "setAttribute", "setAttributeNS", "setAttributeNode"]);
+const NAMED_TEXT_METHODS = new Set(["setRangeText", "setCustomValidity", "insertRule", "replaceSync", "fillText", "strokeText", "execCommand", "setNamedItem", "setProperty", "addRule", "replaceState", "pushState", "deleteRule", "removeRule"]);
+const FORBIDDEN_METHODS = new Set([...NODE_OR_TEXT_METHODS, ...TEXT_INSERTION_METHODS, ...HTML_METHODS, ...PARSER_METHODS, ...NAMED_TEXT_METHODS, "replace", "setAttribute", "setAttributeNS", "setAttributeNode", "remove"]);
 const OBJECT_REFLECTION_METHODS = new Set(["defineProperty", "defineProperties", "setPrototypeOf", "getOwnPropertyDescriptor", "getOwnPropertyDescriptors"]);
 const SETTER_METHODS = new Set(["__defineSetter__", "__lookupSetter__"]);
 const TEXT_CONSTRUCTORS = new Set(["Text", "Option", "DOMParser", "Notification"]);
 const DIALOGS = new Set(["alert", "confirm", "prompt"]);
+const GLOBAL_CALL_MEMBER_NAMES = new Set([...DIALOGS, "print", "setTimeout", "setInterval"]);
 const REFLECTION_REFERENCES = new Set(["Reflect", "Proxy", "eval", "Function", "Object"]);
+
+// Decision 12's sole navigation exception: exact shipped statement AND owner.
+// This is deliberately not a configurable navigation allowance.
+const CREDENTIAL_SCRUB_FILE = fileURLToPath(new URL("../../../../apps/dashboard/public/ui-kit/v1/pcc-ui.js", import.meta.url));
+const CREDENTIAL_SCRUB_STATEMENT = "history.replaceState(null, '', location.pathname + location.search);";
+const CREDENTIAL_SCRUB_OWNER = "function bootKey() {\n    // Host lockdown (D14): in an MCP-App/host view never read a fragment key or\n    // touch storage — a hosted view holds no browser-persisted PCC credential.\n    if (isHostEmbed()) return;\n    // 1. #pcc_key=… in the URL fragment: how an LLM hands its OWN person a\n    // private live link. Fragments never reach servers/logs. Strip immediately\n    // so it cannot be read back off `location` and cannot leak into history.\n    try {\n      var h = location.hash || '';\n      var m = h.match(/[#&]pcc_key=([^&]+)/);\n      if (m && m[1]) {\n        var k = decodeURIComponent(m[1]);\n        try { sessionStorage.setItem(KEY_STORE, k); } catch (e) {}\n        try {\n          history.replaceState(null, '', location.pathname + location.search);\n        } catch (e2) {}\n      }\n    } catch (e) {}\n  }";
+const NAVIGATION_METHODS = new Set(["replaceState", "pushState"]);
 
 function unwrap(node: ts.Node): ts.Node {
   while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) node = node.expression;
@@ -364,7 +377,60 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     if (!config.sinks.includes(agentConfig.sink)) report(file, `agent text sink must be a designated sink: ${agentConfig.sink}`);
     for (const [name, nodes] of agentDefinitions) if (nodes.length !== 1) report(nodes[1] ?? file, `agent text function ${name} must have exactly one definition (found ${nodes.length})`);
   }
+  const callerPins = new Map((config.pinnedCallers ?? []).map((pin) => [pin.callee, pin.caller]));
+  const pinnedDeclarations = new Map<string, ts.Node>();
+  const moduleBodies = file.statements.flatMap((statement) => {
+    if (!ts.isExpressionStatement(statement)) return [];
+    const invocation = unwrap(statement.expression);
+    if (!ts.isCallExpression(invocation)) return [];
+    const closure = unwrap(invocation.expression);
+    return ts.isFunctionExpression(closure) ? [closure.body] : [];
+  });
+  const moduleBody = moduleBodies.length === 1 ? moduleBodies[0] : undefined;
+  for (const caller of new Set(callerPins.values())) {
+    const declarations = allFunctions.get(caller) ?? [];
+    if (declarations.length === 1 && ts.isFunctionDeclaration(declarations[0])) {
+      const declaration = declarations[0];
+      const sameBody = (config.pinnedCallers ?? []).filter((pin) => pin.caller === caller).every((pin) => {
+        const callees = allFunctions.get(pin.callee) ?? [];
+        return callees.length === 1 && ts.isFunctionDeclaration(callees[0]) && callees[0].parent === declaration.parent;
+      });
+      const atModuleLevel = ts.isSourceFile(declaration.parent) || declaration.parent === moduleBody;
+      if (!atModuleLevel) report(declaration, `pinned caller must be a top-level module declaration: ${caller}`);
+      if (sameBody && atModuleLevel) pinnedDeclarations.set(caller, declaration);
+      else if (!sameBody) report(declaration, `pinned caller must share the module body: ${caller}`);
+    } else report(declarations[1] ?? file, `pinned caller must have exactly one declaration: ${caller}`);
+  }
   const resolveBinding = bindingResolver(file);
+  const credentialOwners = allFunctions.get("bootKey") ?? [];
+  const credentialOwner = credentialOwners.length === 1 && ts.isFunctionDeclaration(credentialOwners[0]) && credentialOwners[0].parent === moduleBody ? credentialOwners[0] : undefined;
+  const isCredentialScrub = (call: ts.CallExpression): boolean => {
+    const statement = call.parent;
+    if (config.file !== CREDENTIAL_SCRUB_FILE || !credentialOwner || nearestFunction(call) !== credentialOwner || !ts.isExpressionStatement(statement) || statement.expression !== call) return false;
+    if (resolveBinding(call, "history") || resolveBinding(call, "location")) return false;
+    if (statement.getText(file) !== CREDENTIAL_SCRUB_STATEMENT || credentialOwner.getText(file) !== CREDENTIAL_SCRUB_OWNER) return false;
+    return true;
+  };
+  const checkNavigationTarget = (target: ts.Node): void => {
+    target = unwrap(target);
+    if (ts.isObjectLiteralExpression(target)) {
+      for (const property of target.properties) {
+        if (ts.isPropertyAssignment(property)) checkNavigationTarget(property.initializer);
+        else if (ts.isShorthandPropertyAssignment(property)) checkNavigationTarget(property.name);
+        else if (ts.isSpreadAssignment(property)) checkNavigationTarget(property.expression);
+      }
+    } else if (ts.isArrayLiteralExpression(target)) {
+      for (const element of target.elements) checkNavigationTarget(ts.isSpreadElement(element) ? element.expression : element);
+    } else if (ts.isBinaryExpression(target) && target.operatorToken.kind === ts.SyntaxKind.EqualsToken) checkNavigationTarget(target.left);
+    else {
+      let receiver = target;
+      for (;;) {
+        if (isBuiltinReference(receiver, "location")) { report(target, "navigation location write"); break; }
+        if (!(ts.isPropertyAccessExpression(receiver) || ts.isElementAccessExpression(receiver))) break;
+        receiver = unwrap(receiver.expression);
+      }
+    }
+  };
   function isFreshObject(node: ts.Node | undefined): boolean {
     if (!node) return false;
     node = unwrap(node);
@@ -426,12 +492,37 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
       const enumerable = member && ts.isPropertyAccessExpression(member) && member.name.text === "propertyIsEnumerable" && isMember(member.expression, "Object", "prototype") && !resolveBinding(member, "Object");
       const keyDeclarations = key && ts.isIdentifier(key) ? resolveBinding(key, key.text) : undefined;
       const parameters = ts.isFunctionDeclaration(owner) ? owner.parameters : undefined;
+      let guardedResult = ts.isReturnStatement(conditional.parent);
+      if (allowance.nonCallable) {
+        guardedResult = false;
+        const declaration = conditional.parent;
+        if (ts.isVariableDeclaration(declaration) && declaration.initializer === conditional && ts.isIdentifier(declaration.name) &&
+            ts.isVariableDeclarationList(declaration.parent) && declaration.parent.declarations.length === 1 &&
+            ts.isVariableStatement(declaration.parent.parent) && ts.isBlock(declaration.parent.parent.parent) &&
+            ts.isFunctionDeclaration(owner) && owner.body === declaration.parent.parent.parent) {
+          const statement = declaration.parent.parent;
+          const statements = declaration.parent.parent.parent.statements;
+          const following = statements[statements.indexOf(statement) + 1];
+          const returned = following && ts.isReturnStatement(following) ? following.expression : undefined;
+          const filtered = returned && ts.isConditionalExpression(returned) ? returned : undefined;
+          const comparison = filtered && ts.isBinaryExpression(filtered.condition) ? filtered.condition : undefined;
+          const type = comparison && ts.isTypeOfExpression(comparison.left) ? comparison.left : undefined;
+          const singleBinding = (reference: ts.Node) => {
+            const bindings = resolveBinding(reference, declaration.name.getText(file));
+            return isIdentifier(reference, declaration.name.getText(file)) && bindings?.length === 1 && bindings[0] === declaration;
+          };
+          guardedResult = !!filtered && !!comparison && !!type && comparison.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+            ts.isStringLiteral(comparison.right) && comparison.right.text === "function" && singleBinding(type.expression) &&
+            isIdentifier(filtered.whenTrue, "undefined") && !resolveBinding(filtered.whenTrue, "undefined") && singleBinding(filtered.whenFalse) &&
+            !reassignedBindings.has(declaration);
+        }
+      }
       if (allFunctions.get(allowance.function)?.length !== 1 || parameters?.length !== 2 ||
           !isIdentifier(parameters[0].name, allowance.target) || !isIdentifier(parameters[1].name, allowance.ownKey) ||
           declarations?.length !== 1 || declarations[0] !== parameters[0] ||
           keyDeclarations?.length !== 1 || keyDeclarations[0] !== parameters[1] ||
           reassignedBindings.has(parameters[0]) || reassignedBindings.has(parameters[1]) ||
-          !ts.isReturnStatement(conditional.parent) || !enumerable || !call || call.arguments.length !== 2 ||
+          !guardedResult || !enumerable || !call || call.arguments.length !== 2 ||
           !isIdentifier(call.arguments[0], allowance.target) || !isIdentifier(call.arguments[1], allowance.ownKey) ||
           !isIdentifier(key, allowance.ownKey) || !ts.isConditionalExpression(conditional) ||
           resolveBinding(conditional.whenFalse, "undefined")) {
@@ -458,6 +549,20 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
     if (ts.isElementAccessExpression(node) && isAllowedComputedWrite(node)) return;
     if (ts.isElementAccessExpression(node) && !isLiteralKey(node.argumentExpression)) report(node, "dynamic computed property write");
     else if (isTextProperty(memberName(node))) report(node, `text property write: ${memberName(node)}`);
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      let receiver: ts.Node = node;
+      while (ts.isPropertyAccessExpression(receiver) || ts.isElementAccessExpression(receiver)) {
+        if (memberName(receiver) === "style") {
+          let rule: ts.Node = receiver.expression;
+          while (ts.isPropertyAccessExpression(rule) || ts.isElementAccessExpression(rule)) {
+            if (memberName(rule) === "cssRules") { report(node, "CSS rule style write"); break; }
+            rule = unwrap(rule.expression);
+          }
+          break;
+        }
+        receiver = unwrap(receiver.expression);
+      }
+    }
     else if (ts.isObjectLiteralExpression(node)) {
       for (const property of node.properties) {
         const name = "name" in property ? literalName(property.name) : undefined;
@@ -519,6 +624,34 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         }
       }
     }
+    if (ts.isIdentifier(node) && callerPins.has(node.text) && isValueIdentifier(node)) {
+      const caller = callerPins.get(node.text)!;
+      if (!isDirectCallTarget(node) || nearestFunction(node) !== pinnedDeclarations.get(caller)) report(node, `${node.text} caller must be the pinned declaration: ${caller}`);
+    }
+    // Navigation has no sink-body exemption. Only the exact reviewed scrub passes.
+    if (ts.isCallExpression(node)) {
+      const method = calledName(node.expression);
+      if (method && NAVIGATION_METHODS.has(method) && !isCredentialScrub(node)) report(node, `named text API call: ${method}`);
+    }
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const method = memberName(node);
+      if (method && NAVIGATION_METHODS.has(method) && !isDirectCallTarget(node)) report(node, `forbidden method read: ${method}`);
+      if (method === "history" && !isMemberReceiver(node)) report(node, "history reference must be a direct member receiver");
+    }
+    if (ts.isIdentifier(node) && node.text === "history" && isValueIdentifier(node) && !isMemberReceiver(node)) report(node, "history reference must be a direct member receiver");
+    if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
+      const name = literalName(node.propertyName ?? node.name);
+      if (name === "history") report(node, "history alias destructuring");
+      if (name && NAVIGATION_METHODS.has(name)) report(node, `forbidden method destructuring: ${name}`);
+    }
+    if (ts.isPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent) && ts.isBinaryExpression(node.parent.parent) && node.parent.parent.left === node.parent) {
+      const name = literalName(node.name);
+      if (name === "history") report(node, "history alias destructuring");
+      if (name && NAVIGATION_METHODS.has(name)) report(node, `forbidden method destructuring: ${name}`);
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) checkNavigationTarget(node.left);
+    if ((ts.isForInStatement(node) || ts.isForOfStatement(node)) && !ts.isVariableDeclarationList(node.initializer)) checkNavigationTarget(node.initializer);
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) checkNavigationTarget(node.operand);
     // A nested callback in a sink is not the sink itself and receives no exemption.
     if (!sinks.has(nearestFunction(node) as ts.Node)) {
       if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) checkTarget(node.left);
@@ -537,7 +670,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         const writeTarget = ts.isBinaryExpression(node.parent) && node.parent.left === node && node.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
         if (config.scriptKind === ts.ScriptKind.JS && ts.isElementAccessExpression(node) && !isLiteralKey(node.argumentExpression) && !writeTarget && !isAllowedComputedRead(node)) report(node, "dynamic computed property read");
         if (method === "constructor" && !writeTarget) report(node, "forbidden .constructor read");
-        if (method && forbiddenMethods.has(method) && !isDirectCallTarget(node)) report(node, `forbidden method read: ${method}`);
+        if (method && forbiddenMethods.has(method) && !NAVIGATION_METHODS.has(method) && !isDirectCallTarget(node)) report(node, `forbidden method read: ${method}`);
         if (method && SETTER_METHODS.has(method)) report(node, `forbidden setter reflection: ${method}`);
         if (isBuiltinReference(node.expression, "Reflect") && !isAllowedOwnKeys(node)) report(node, "forbidden Reflect access");
         if (method === "Reflect" && !isAllowedOwnKeys(node)) report(node, "forbidden Reflect reference");
@@ -548,6 +681,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         if (isBuiltinReference(node.expression, "Object")) {
           if (method === undefined || (method && OBJECT_REFLECTION_METHODS.has(method))) report(node, `forbidden Object reflection: ${method ?? "dynamic member"}`);
           if (method === "assign" && !isDirectCallTarget(node)) report(node, "Object.assign used as a value may write text properties");
+          if ((method === "values" || method === "entries") && !isDirectCallTarget(node)) report(node, `Object.${method} used as a value may expose global callables`);
         }
       }
       if (ts.isIdentifier(node) && isValueIdentifier(node)) {
@@ -567,7 +701,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         if (method && TEXT_INSERTION_METHODS.has(method)) report(node, `text insertion call: ${method}`);
         if (method && HTML_METHODS.has(method)) report(node, `HTML insertion call: ${method}`);
         if (method && PARSER_METHODS.has(method)) report(node, `text parser call: ${method}`);
-        if (method && NAMED_TEXT_METHODS.has(method)) report(node, `named text API call: ${method}`);
+        if (method && NAMED_TEXT_METHODS.has(method) && !NAVIGATION_METHODS.has(method)) report(node, `named text API call: ${method}`);
         // Only an explicit String(...) or literal receiver distinguishes string data
         // manipulation from CSSStyleSheet.replace; extra arguments do not do so.
         const receiver = (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) ? unwrap(node.expression.expression) : undefined;
@@ -575,6 +709,7 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
           || (ts.isCallExpression(receiver) && isIdentifier(receiver.expression, "String") && !resolveBinding(receiver.expression, "String") && receiver.arguments.length === 1));
         if (method === "replace" && !stringReceiver) report(node, "stylesheet text call: replace");
         if (method === "setAttributeNode") report(node, "attribute node insertion call: setAttributeNode");
+        if (method === "remove" && receiver && ts.isCallExpression(receiver) && memberName(receiver.expression) === "getElementById" && receiver.arguments.some((argument) => ts.isStringLiteral(argument) && argument.text === "pcc-ui-styles")) report(node, "stylesheet node removal call: remove");
         if (method && DIALOGS.has(method)) report(node, `text dialog call: ${method}`);
         if (method && NODE_OR_TEXT_METHODS.has(method) && !(config.allowedNodeCalls ?? []).some((allowance) => allowance.reason.trim() && allowance.matches(node))) report(node, `string-capable insertion call: ${method}`);
         if (method && attributeMethods.has(method)) {
@@ -585,12 +720,19 @@ export function lintTextSinks(source: string, config: TextSinkConfig): TextSinkI
         }
         for (const argument of node.arguments) {
           const literal = unwrap(argument);
-          if ((ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) && isForbiddenName(literal.text) && !(config.allowedNameArguments ?? []).some((allowance) => allowance.reason.trim() && allowance.matches(node, argument))) report(argument, `forbidden member name argument: ${literal.text}`);
+          // dataAt's second argument names a member; a copy mint such as kitText('confirm') does not.
+          const globalMemberSlot = method === "dataAt" && node.arguments[1] === argument;
+          if ((ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) && (isForbiddenName(literal.text) || (globalMemberSlot && GLOBAL_CALL_MEMBER_NAMES.has(literal.text))) && !(config.allowedNameArguments ?? []).some((allowance) => allowance.reason.trim() && allowance.matches(node, argument))) report(argument, `forbidden member name argument: ${literal.text}`);
         }
         const called = calledExpression(node.expression);
         const direct = unwrap(node.expression);
         const isObjectAssign = (expression: ts.Node) => (ts.isPropertyAccessExpression(expression) || ts.isElementAccessExpression(expression)) && isBuiltinReference(expression.expression, "Object") && memberName(expression) === "assign";
         if (isObjectAssign(called) && !isObjectAssign(direct)) report(node, "indirect Object.assign may write text properties");
+        const objectMethod = (ts.isPropertyAccessExpression(called) || ts.isElementAccessExpression(called)) && isBuiltinReference(called.expression, "Object") ? memberName(called) : undefined;
+        if (objectMethod === "assign" || objectMethod === "values" || objectMethod === "entries") {
+          const sources = objectMethod === "assign" ? node.arguments.slice(1) : node.arguments;
+          if (sources.some((argument) => ["window", "globalThis", "self"].some((name) => isIdentifier(argument, name)))) report(node, `Object.${objectMethod} cannot read a global source`);
+        }
         if (isObjectAssign(direct)) {
           // The first argument is the sole write target. An inline object literal
           // is fresh and cannot be a DOM node; every other target fails closed.

@@ -34,7 +34,7 @@ function checkTextTypes(doc: RDocument, node: RElement, ir: IrNode, raw: string,
   el(doc, "pcc-value", raw);
   // @ts-expect-error A raw string must not reach a slot-write sink.
   setText(node, raw);
-  const widened: string = kitText("PCC copy");
+  const widened: string = kitText("PCC copy").t;
   // @ts-expect-error Widening loses the brand; a sink cannot silently regain it.
   setText(node, widened);
   // @ts-expect-error Schema staging retains the helper's brand when its text is read back.

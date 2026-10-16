@@ -103,3 +103,10 @@ describe("plain kit ES5 syntax and ES2015 runtime floor", () => {
     expect(lintUiKitSyntaxFloor('var t = "\\u2800"; var pattern = "\\\\u{1F4B0}";')).toEqual([]);
   });
 });
+
+
+describe("review A-5: global enumeration APIs are outside the ES2015 floor", () => {
+  it.each(["values", "entries"])("rejects Object.%s outside the guarded init", (method) => {
+    expect(lintUiKitSyntaxFloor(`Object.${method}(window);`)).toContainEqual(expect.objectContaining({ rule: "post-ES2015 API outside guarded detector init: " + method }));
+  });
+});

@@ -9,7 +9,7 @@ const gatewayMcp = new URL("../../../gateway/src/mcp/", import.meta.url);
 const browserConfig: TextSinkConfig = {
   file: fileURLToPath(new URL("dashboard-ir-browser-entry.ts", gatewayMcp)),
   scriptKind: ts.ScriptKind.TS,
-  sinks: ["setText"],
+  sinks: ["setText", "setAuthoredText"],
   attributeMethods: ["setAttribute", "setAttr"],
   allowedAttributes: ["data-tone", "data-source", "data-as-of"],
   allowedNodeCalls: [
@@ -50,6 +50,7 @@ const plainConfig: TextSinkConfig = {
     "data-theme", // Selects the closed dark/light theme.
     "data-mode", // Records the kit's transport mode for styling.
   ],
+  pinnedCallers: [{ callee: "requestValueText", caller: "realRequestNode" }],
   // appendChild is Node-only; this kit has no string-capable insertion allowance.
   allowedNodeCalls: [],
   allowedComputedWrites: [
@@ -58,7 +59,7 @@ const plainConfig: TextSinkConfig = {
     { function: "intentState", target: "INTENT_STATE", reason: "Stores per-request state in the module's fresh null-prototype dictionary; no DOM receiver is reachable" },
   ],
   allowedComputedReads: [
-    { function: "dataAt", target: "raw", ownKey: "key", reason: "One exact propertyIsEnumerable-guarded read admits only own enumerable fields without per-read copies; numeric array/NodeList reads use slice" },
+    { function: "dataAt", target: "raw", ownKey: "key", nonCallable: true, reason: "dataAt rejects keyed receivers other than plain objects or arrays; one exact propertyIsEnumerable-guarded read admits own enumerable fields without per-read copies; numeric array/NodeList reads use slice" },
   ],
   agentText: { mint: "agentText", sink: "agentEl", reason: "One claim-checking agent mint and one sink that adds the IR's agent and untrusted classes; agent brands cannot enter kit sinks" },
   allowedNameArguments: [
@@ -304,6 +305,16 @@ describe.each(kits)("text sinks in $file", (config) => {
     const line = prefix.split("\n").length;
     const issues = lintTextSinks(prefix + "  " + bypass + "\n}\n", config);
     expect(issues.some((issue) => issue.line === line && issue.column > 0), JSON.stringify(issues)).toBe(true);
+  });
+});
+
+describe("review N4: hidden global calls through dataAt", () => {
+  it.each(["alert", "confirm", "prompt", "print", "setTimeout", "setInterval"])("reports the injected literal member name %s in the shipped kit", (name) => {
+    const source = readFileSync(plainConfig.file, "utf8");
+    const prefix = source + "\nfunction injectedJ3(raw) {\n";
+    const line = prefix.split("\n").length;
+    const issues = lintTextSinks(prefix + `  dataAt(window, '${name}')(raw);\n}\n`, plainConfig);
+    expect(issues).toContainEqual(expect.objectContaining({ line, rule: `forbidden member name argument: ${name}` }));
   });
 });
 
@@ -641,5 +652,170 @@ describe("review F11: CI type-checks the kit tests", () => {
     expect(pkg.scripts["typecheck:browser"].split("&&").map((step) => step.trim())).toEqual([
       "tsc -p tsconfig.browser.json", "tsc -p tsconfig.kit-tests.json",
     ]);
+  });
+});
+
+
+// Round 2f constraints narrow the trusted request and stylesheet boundaries.
+describe("review A-2: request text callers are declaration identities", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  const pin = plainConfig;
+  it("rejects a same-named nested request renderer Program", () => {
+    const prefix = source + "\nfunction showPlan(raw) {\n";
+    const code = 'function realRequestNode(v) { return requestValueText(v); } return realRequestNode(raw);';
+    expect(lintTextSinks(prefix + code + "\n}", pin)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule: "pinned caller must have exactly one declaration: realRequestNode" }));
+  });
+  it("rejects an anonymous callback inside the real request renderer Program", () => {
+    const marker = "function realRequestNode(desc) {";
+    expect(source).toContain(marker);
+    const mutated = source.replace(marker, marker + "\n[desc].map(function (v) { return requestValueText(v); });");
+    expect(lintTextSinks(mutated, pin)).toContainEqual(expect.objectContaining({ rule: "requestValueText caller must be the pinned declaration: realRequestNode" }));
+  });
+});
+
+describe("review A-4: CSSOM, stylesheet removal and navigation Programs", () => {
+  it.each([
+    ["CSS property setter", "n.style.setProperty('content', raw);", "named text API call: setProperty"],
+    ["CSS content", "n.style.content = raw;", "text property write: content"],
+    ["CSS whole text", "n.style.cssText = raw;", "text property write: cssText"],
+    ["legacy CSS rule", "sheet.addRule('.pcc-agent::before', raw);", "named text API call: addRule"],
+    ["CSS rule", "sheet.insertRule(raw, 0);", "named text API call: insertRule"],
+    ["CSS rule deletion", "sheet.deleteRule(0);", "named text API call: deleteRule"],
+    ["legacy CSS rule deletion", "sheet.removeRule(0);", "named text API call: removeRule"],
+    ["CSS selector", "sheet.cssRules[0].selectorText = raw;", "text property write: selectorText"],
+    ["CSS rule style object", "sheet.cssRules[0].style = raw;", "CSS rule style write"],
+    ["CSS rule style member", "sheet.cssRules[0].style.color = raw;", "CSS rule style write"],
+    ["style node removal", "document.getElementById('pcc-ui-styles').remove();", "stylesheet node removal call: remove"],
+    ["data document", "n.src = 'data:text/html,' + raw;", "text property write: src"],
+    ["replace navigation", "history.replaceState({}, '', raw);", "named text API call: replaceState"],
+    ["push navigation", "history.pushState({}, '', raw);", "named text API call: pushState"],
+  ])("rejects %s on its own Program line", (_name, code, rule) => {
+    const prefix = readFileSync(plainConfig.file, "utf8") + "\nfunction cssAndNavigationProgram(n, raw, sheet) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  });
+});
+
+describe("review A-5: global-object copy and enumeration Programs", () => {
+  const cases = ["window", "globalThis", "self"].flatMap((globalName) => ["assign", "values", "entries"].map((method) => ({ method, globalName })));
+  it.each(cases)("rejects Object.$method from $globalName", ({ method, globalName }) => {
+    const prefix = readFileSync(plainConfig.file, "utf8") + "\nfunction globalCopyProgram(raw) {\n";
+    const code = method === "assign" ? `dataAt(Object.assign({}, ${globalName}), 'al' + 'ert')(raw);`
+      : method === "values" ? `Object.values(${globalName}).filter(function (v) { return typeof v === 'function'; })[0](raw);`
+      : `Object.entries(${globalName}).filter(function (v) { return v[0] === 'alert'; })[0][1](raw);`;
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule: `Object.${method} cannot read a global source` }));
+  });
+});
+
+
+describe("review A-5: callable-filtered own-read confinement", () => {
+  const ownRead = 'function dataAt(raw, key) { var value = Object.prototype.propertyIsEnumerable.call(raw, key) ? raw[key] : undefined; return typeof value === "function" ? undefined : value; }';
+  const config: TextSinkConfig = { file: "own-read.js", scriptKind: ts.ScriptKind.JS, sinks: [],
+    allowedComputedReads: [{ function: "dataAt", target: "raw", ownKey: "key", nonCallable: true, reason: "One enumerable own-data read followed by callable rejection" }] };
+  it("accepts only the read-once callable-filtered return shape", () => {
+    expect(lintTextSinks(ownRead, config)).toEqual([]);
+  });
+  it.each([
+    ownRead.replace('var value = ', 'return ').replace(' return typeof value === "function" ? undefined : value;', ''),
+    ownRead.replace('typeof value === "function"', 'false'),
+    ownRead.replace('? undefined : value;', '? value : undefined;'),
+    ownRead.replace('return typeof value', 'value = raw; return typeof value'),
+    ownRead.replace('return typeof value', 'raw.other(); return typeof value'),
+    ownRead.replace('return typeof value', 'return (() => typeof value').replace('undefined : value;', 'undefined : value)();'),
+  ])("rejects unfiltered, reassigned and deferred reads: %s", (source) => {
+    expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ rule: "computed read requires the exact enumerable own-data guard: dataAt.raw" }));
+  });
+});
+
+
+describe("review A-2: request caller stays at the module declaration level", () => {
+  it("rejects a sole request renderer moved under a nested function Program", () => {
+    const config: TextSinkConfig = { file: "caller-pin.js", scriptKind: ts.ScriptKind.JS, sinks: [],
+      pinnedCallers: [{ callee: "requestValueText", caller: "realRequestNode" }] };
+    const source = "function requestValueText(v) { return v; } function showPlan(v) { function realRequestNode(x) { return requestValueText(x); } return realRequestNode(v); }";
+    expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ rule: "pinned caller must share the module body: realRequestNode" }));
+  });
+});
+
+
+describe("review A-4: stylesheet removal method aliases", () => {
+  it.each([
+    "var remove = document.getElementById('pcc-ui-styles').remove; remove.call(n);",
+    "document.getElementById('pcc-ui-styles').remove.call(n);",
+    "var { remove: drop } = n; drop.call(n);",
+  ])("rejects removal alias Program: %s", (code) => {
+    const prefix = readFileSync(plainConfig.file, "utf8") + "\nfunction stylesheetRemovalAlias(n) {\n";
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig).some((issue) => issue.line === prefix.split("\n").length && issue.rule.includes("remove"))).toBe(true);
+  });
+});
+
+describe("review A-5: Object enumeration method aliases", () => {
+  it.each(["values", "entries"])("rejects Object.%s alias Program", (method) => {
+    const prefix = readFileSync(plainConfig.file, "utf8") + "\nfunction enumerationAlias(raw) {\n";
+    const code = `var enumerate = Object.${method}; enumerate(window).filter(function (v) { return typeof v === 'function'; })[0](raw);`;
+    expect(lintTextSinks(prefix + code + "\n}", plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule: `Object.${method} used as a value may expose global callables` }));
+  });
+});
+
+
+describe("review A-2: both pinned declarations remain at module level", () => {
+  it("rejects moving both unique request declarations together under showPlan", () => {
+    const config: TextSinkConfig = { file: "caller-pin.js", scriptKind: ts.ScriptKind.JS, sinks: [],
+      pinnedCallers: [{ callee: "requestValueText", caller: "realRequestNode" }] };
+    const source = "function showPlan(v) { function requestValueText(x) { return x; } function realRequestNode(x) { return requestValueText(x); } return realRequestNode(v); }";
+    expect(lintTextSinks(source, config)).toContainEqual(expect.objectContaining({ rule: "pinned caller must be a top-level module declaration: realRequestNode" }));
+  });
+});
+
+// Round 2f-b amends only bootKey's reviewed credential scrub.
+describe("round 2f-b: exact credential scrub navigation pin", () => {
+  const source = readFileSync(plainConfig.file, "utf8");
+  const scrub = "history.replaceState(null, '', location.pathname + location.search);";
+  const finding = (code: string, rule: string) => {
+    const prefix = source + "\n";
+    expect(lintTextSinks(prefix + code, plainConfig)).toContainEqual(expect.objectContaining({ line: prefix.split("\n").length, rule }));
+  };
+  it("accepts the single byte-exact scrub in the reviewed bootKey declaration", () => {
+    expect(source.split(scrub)).toHaveLength(2);
+    expect(lintTextSinks(source, plainConfig)).toEqual([]);
+  });
+  it.each([
+    ["second replaceState", "history.replaceState(null, '', raw);", "named text API call: replaceState"],
+    ["pushState", "history.pushState(null, '', raw);", "named text API call: pushState"],
+    ["history alias", "var h = history;", "history reference must be a direct member receiver"],
+    ["window history alias", "var h = window.history;", "history reference must be a direct member receiver"],
+    ["history destructuring", "var { history: h } = window;", "history alias destructuring"],
+    ["history assignment destructuring", "({ history: h } = window);", "history alias destructuring"],
+    ["replaceState alias", "var replace = history.replaceState;", "forbidden method read: replaceState"],
+    ["pushState alias", "var push = history.pushState;", "forbidden method read: pushState"],
+    ["location assignment", "location = raw;", "navigation location write"],
+    ["location hash assignment", "location.hash = raw;", "navigation location write"],
+    ["window location assignment", "window.location = raw;", "navigation location write"],
+    ["window location href assignment", "window.location.href = raw;", "navigation location write"],
+    ["exact statement outside bootKey", scrub, "named text API call: replaceState"],
+    ["replaceState in a text sink", "function setText(n, text) { history.replaceState(null, '', raw); }", "named text API call: replaceState"],
+    ["location assignment in a text sink", "function setText(n, text) { location.hash = raw; }", "navigation location write"],
+  ])("rejects %s with its own finding", (_name, code, rule) => finding(code, rule));
+  it("rejects a changed scrub argument with its own finding", () => {
+    expect(source).toContain(scrub);
+    const changed = "history.replaceState(null, '', raw);";
+    const mutated = source.replace(scrub, changed);
+    const line = mutated.slice(0, mutated.indexOf(changed)).split("\n").length;
+    expect(lintTextSinks(mutated, plainConfig)).toContainEqual(expect.objectContaining({ line, rule: "named text API call: replaceState" }));
+  });
+  it.each([
+    ["second exact scrub inside bootKey", (code: string) => code.replace(scrub, scrub + "\n          " + scrub)],
+    ["nested bootKey", (code: string) => code + "\nfunction other() { function bootKey() { " + scrub + " } }"],
+    ["anonymous callback", (code: string) => code.replace(scrub, "(function () { " + scrub + " })();")],
+    ["renamed owner", (code: string) => code.replace("function bootKey() {", "function otherBootKey() {")],
+    ["history shadow", (code: string) => code.replace("function bootKey() {", "function bootKey(history) {")],
+    ["location shadow", (code: string) => code.replace("function bootKey() {", "function bootKey(location) {")],
+    ["module history shadow", (code: string) => code.replace("  function bootKey() {", "  var history = raw;\n  function bootKey() {")],
+    ["module location shadow", (code: string) => code.replace("  function bootKey() {", "  var location = raw;\n  function bootKey() {")],
+    ["changed owner body", (code: string) => code.replace("function bootKey() {", "function bootKey() { raw();")],
+  ])("rejects %s without borrowing the pin", (_name, mutate) => {
+    expect(lintTextSinks(mutate(source), plainConfig)).toContainEqual(expect.objectContaining({ rule: "named text API call: replaceState" }));
+  });
+  it("does not admit the same declaration in another file", () => {
+    expect(lintTextSinks(source, { ...plainConfig, file: "other-kit.js" })).toContainEqual(expect.objectContaining({ rule: "named text API call: replaceState" }));
   });
 });

@@ -23,7 +23,7 @@
  * HTML via `.toString()` — the tested definition and the browser code are one source.
  */
 import type { IrDoc, IrNode, IrNodeType, BindSchema, ListFieldKind, MetricFieldKind, KitText, AgentText } from "./dashboard-ir.js";
-import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES } from "./dashboard-ir.js";
+import { registerKitText, registerAgentText, readText, isKitText, kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClassOf, LIST_ROW_CAP, WITHHELD_PROSE, WITHHELD_FIELD, boundStatusText, identifierText, isMoneyClaim, LIST_FIELD_KINDS, reportedFieldText, metricKindForSource, LIST_PROFILES, listQueryLabel } from "./dashboard-ir.js";
 
 // Minimal structural DOM: the renderer reaches the DOM only through RDocument/RElement,
 // so tests can pass a plain-object fake. ir-kit-text-brand.test.ts fails if the renderer
@@ -31,7 +31,7 @@ import { kitText, joinKitText, APPROVAL_NOTICE, metricLabelForSource, sourceClas
 // NOTE: intentionally NO innerHTML/insertAdjacentHTML member — a painter cannot set one.
 export interface RElement {
   get textContent(): string;
-  set textContent(v: KitText);
+  set textContent(v: KitText | AgentText);
   className: string;
   readonly children: RElement[];
   setAttr(name: string, value: string): void;
@@ -61,7 +61,7 @@ function withState(host: RElement, cls: string | null): void {
 /** "2026-09-24 10:12:33Z" from a normalized ISO string (date included: a time alone is ambiguous). */
 function stamp(iso: string): KitText {
   const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(iso);
-  return m ? (m[1] + " " + m[2] + "Z") as KitText : kitText("unknown time");
+  return m ? registerKitText(m[1] + " " + m[2] + "Z") : kitText("unknown time");
 }
 
 /** own-property read via a dotted selector (NO prototype traversal, NO traversal THROUGH
@@ -80,8 +80,8 @@ function readOwnPath(obj: unknown, sel: string): unknown {
 }
 
 /** PCC text slot sink; callers must supply a typed helper's result. */
-export function setText(node: { textContent: string }, text: KitText): void {
-  node.textContent = text;
+export function setText(node: { get textContent(): string | KitText; set textContent(value: KitText); }, text: KitText): void {
+  node.textContent = readText(text);
 }
 
 export function el(doc: RDocument, cls: string, text?: KitText, untrusted?: boolean): RElement {
@@ -95,8 +95,8 @@ export function el(doc: RDocument, cls: string, text?: KitText, untrusted?: bool
 export function agentEl(doc: RDocument, cls: string, text: AgentText): RElement {
   const n = doc.createElement("div");
   n.className = cls + " " + CLS.agent + " " + CLS.untrusted;
-  const agentSlot: { textContent: string } = n;
-  agentSlot.textContent = text;
+  const agentSlot: { get textContent(): string; set textContent(value: KitText | AgentText); } = n;
+  agentSlot.textContent = readText(text, "agent");
   return n;
 }
 
@@ -107,7 +107,7 @@ export function agentEl(doc: RDocument, cls: string, text: AgentText): RElement 
 // never (a) relabel a field, (b) surface an off-schema response field (paid/verified/…),
 // or (c) mint a privileged-looking "receipt" — the settlement record is always framed
 // read-only with an explicit "not proof of payment" warning.
-export const UNAVAILABLE = kitText("—"); // em dash — honest "not available", never a partial fake
+export const UNAVAILABLE: KitText = kitText("—"); // em dash — honest "not available", never a partial fake
 // Every field has a `kind`: a closed, typed grammar (astra r3 M3 / #348 r2b F1). `money` STAYS only
 // as documentation that a price field shows money as the card's own — it is no longer consulted to
 // skip validation: the "amount"/"currency" kinds admit no prose at all, so the withheld notice can
@@ -160,7 +160,7 @@ const SETTLEMENT_NOTICE = Object.freeze({
 // exact spec enum (types/common.ts:27 `Currency`); its displayed words come from that vocabulary.
 const CAP_TYPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const AMOUNT_STR_RE = /^\d{1,15}(\.\d{1,18})?$/;
-const CURRENCY_ENUM: ReadonlySet<string> = new Set(["USDC", "ETH", "DAI", "SOL"]);
+const CURRENCY_ENUM: readonly string[] = Object.freeze(["USDC", "ETH", "DAI", "SOL"]);
 type FieldRead = { ok: true; text: KitText } | { ok: false };
 
 /** Read + type-validate ONE fixed schema field from fetched data. `key` is a fixed own-property
@@ -199,20 +199,29 @@ function readField(data: unknown, f: SchemaField): FieldRead {
       // its String() form is one PCC itself could have produced. 1e100 stringifies to "1e+100",
       // which AMOUNT_STR_RE refuses — the whole card fails closed, never an off-contract value
       // displayed in a PCC-owned money card. Strings are unchanged (same grammar, directly).
-      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && AMOUNT_STR_RE.test(String(raw))) return { ok: true, text: String(raw) as KitText };
-      if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: raw as KitText };
+      if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && AMOUNT_STR_RE.test(String(raw))) return { ok: true, text: registerKitText(String(raw)) };
+      if (typeof raw === "string" && AMOUNT_STR_RE.test(raw)) return { ok: true, text: registerKitText(raw) };
       return { ok: false };
     case "currency":
-      return typeof raw === "string" && CURRENCY_ENUM.has(raw) ? { ok: true, text: raw as KitText } : { ok: false };
-    case "tiers":
-      return Array.isArray(raw) && raw.every((x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 3)
-        ? { ok: true, text: raw.join(", ") as KitText } : { ok: false };
+      return typeof raw === "string" && CURRENCY_ENUM.includes(raw) ? { ok: true, text: registerKitText(raw) } : { ok: false };
+    case "tiers": {
+      if (!Array.isArray(raw)) return { ok: false };
+      const values: readonly unknown[] = raw;
+      const tiers: number[] = [];
+      const length = values.length;
+      for (let index = 0; index < length; index++) {
+        const value = values[index];
+        if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 3) return { ok: false };
+        tiers.push(value);
+      }
+      return { ok: true, text: registerKitText(tiers.join(", ")) };
+    }
     case "bool":
       return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No") } : { ok: false };
     case "percent":
       // An integer 0..100 (astra r6 on #344): progress is the DB's integer column, uptime is 0/50/100.
       return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100
-        ? { ok: true, text: String(raw) as KitText } : { ok: false };
+        ? { ok: true, text: registerKitText(String(raw)) } : { ok: false };
     default:
       return { ok: false };
   }
@@ -299,7 +308,7 @@ function paintSchemaCard(doc: RDocument, rootCls: string, schema: BindSchema): R
 function manifestProseText(n: IrNode, key: "text" | "label"): AgentText {
   // The validated IR has already withheld claims. The caller preserves the agent/untrusted
   // attribution instead of presenting these unchanged words as a PCC-authored constant.
-  return String(n.props?.[key] ?? "") as AgentText;
+  return registerAgentText(String(n.props?.[key] ?? ""));
 }
 function paintProse(doc: RDocument, cls: string, n: IrNode, key: "text" | "label"): RElement {
   if (n.props?.withheld === true) return el(doc, cls + " " + CLS.withheld, WITHHELD_PROSE);
@@ -445,7 +454,11 @@ function timeRoundTrips(s: string): boolean {
 // tag, because those admit words ("1.0.0-paymentreceived"), so a hostile version could carry a claim.
 // No leading zeros, at most 9 digits per part, so the value is contract-bounded. Real kernels report
 // "1.4.0", "1.3.2", "0.1.0" and "1.5.0" (packages/db/src/seed/kernels.ts), each a bare numeric triple.
-const LIST_VERSION_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
+// Expose no mutable RegExp identity to the rest of the renderer (compile mutates even
+// a frozen RegExp). The fixed expression exists only for this one validation call.
+const LIST_VERSION_RE = Object.freeze({
+  test(value: string): boolean { return /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/.test(value); },
+});
 type ListFieldRead = { ok: true; text: KitText; raw: unknown } | { ok: false };
 
 /** Read + type-validate ONE list field from a fetched row, by its CLOSED kind (LIST_FIELD_KINDS,
@@ -473,11 +486,11 @@ function readListField(row: unknown, field: string): ListFieldRead {
     case "bool":
       return typeof raw === "boolean" ? { ok: true, text: kitText(raw ? "Yes" : "No"), raw } : { ok: false };
     case "time":
-      return typeof raw === "string" && timeRoundTrips(raw) ? { ok: true, text: raw as KitText, raw } : { ok: false };
+      return typeof raw === "string" && timeRoundTrips(raw) ? { ok: true, text: registerKitText(raw), raw } : { ok: false };
     case "version":
-      return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: raw as KitText, raw } : { ok: false };
+      return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? { ok: true, text: registerKitText(raw), raw } : { ok: false };
     case "count":
-      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1_000_000 ? { ok: true, text: String(raw) as KitText, raw } : { ok: false };
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 1_000_000 ? { ok: true, text: registerKitText(String(raw)), raw } : { ok: false };
     case "capType":
       return typeof raw === "string" && CAP_TYPE_RE.test(raw) ? { ok: true, text: identifierText(field, raw), raw } : { ok: false };
     default:
@@ -499,19 +512,24 @@ const isSafeIntValue = (v: unknown): v is number => typeof v === "number" && Num
 
 /** One `key=value` filter term. A string outside the identifier grammar, a non-safe-integer
  *  number, or any other JS value (object, array, NaN, …) is never printed raw. */
-function filterTerm(key: string, v: unknown): KitText {
-  // `key` passed validateIr's bind policy: the selector grammar AND the route's PCC-owned query allowlist.
-  if (typeof v === "string" && WINDOW_FILTER_VALUE_RE.test(v)) return (key + "=" + v) as KitText;
-  if (isSafeIntValue(v)) return (key + "=" + String(v)) as KitText;
-  if (typeof v === "boolean") return (key + "=" + (v ? "true" : "false")) as KitText;
-  return (key + "=(value not shown)") as KitText;
+function filterTerm(key: string, v: unknown, path?: string): KitText {
+  // Re-check the bind selector grammar at the mint, including forbidden prototype segments.
+  if (typeof key !== "string" || key.length > 256 || !/^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)*$/.test(key) ||
+      key.split(".").some((part) => part === "__proto__" || part === "prototype" || part === "constructor")) return readText(null);
+  const label = path === undefined ? undefined : listQueryLabel(path, key);
+  if (label === undefined) return readText(null);
+  if (typeof v === "string" && WINDOW_FILTER_VALUE_RE.test(v)) return registerKitText(label + "=" + v);
+  if (isSafeIntValue(v)) return registerKitText(label + "=" + String(v));
+  if (typeof v === "boolean") return registerKitText(label + "=" + (v ? "true" : "false"));
+  return registerKitText(label + "=(value not shown)");
 }
 /** A count or row position: the decimal digits of a non-negative safe integer, else UNAVAILABLE. */
 function countText(n: number): KitText {
-  return Number.isSafeInteger(n) && n >= 0 ? String(n) as KitText : UNAVAILABLE;
+  return Number.isSafeInteger(n) && n >= 0 ? registerKitText(String(n)) : UNAVAILABLE;
 }
 /** KitText parts joined by a KitText separator; composition only, so no brand is minted here. */
 function joinKitTextWith(sep: KitText, parts: readonly KitText[]): KitText {
+  for (const part of [sep, ...parts]) if (!isKitText(part)) return readText(part);
   return parts.reduce<KitText | null>((acc, part) => (acc === null ? part : joinKitText(acc, sep, part)), null) ?? kitText("");
 }
 /** The offset a manifest query states: absent is 0; a safe non-negative integer or its canonical
@@ -572,7 +590,7 @@ export function listWindow(node: IrNode, data: unknown, returned: number): ListW
   const parts: KitText[] = [];
   if (filterKeys.length > 0) {
     const qq = q as Record<string, unknown>;
-    parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k])))));
+    parts.push(joinKitText(kitText("filtered by this view: "), joinKitTextWith(kitText(", "), filterKeys.map((k) => filterTerm(k, qq[k], path)))));
   }
   if (offset === "unknown") parts.push(kitText("offset not shown"));
   else if (offset > 0) parts.push(joinKitText(kitText("from row "), offset === Number.MAX_SAFE_INTEGER ? kitText("9007199254740992") : countText(offset + 1)));
@@ -643,12 +661,12 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
     if (row === null || typeof row !== "object") continue;
 
     const titleRead = readListField(row, rowTitle);
-    if (titleRead.ok && titleRead.text === "") continue; // drop row: title ABSENT (never a mistyped one)
+    if (titleRead.ok && readText(titleRead.text).t === "") continue; // drop row: title ABSENT (never a mistyped one)
 
     // A selected field the row lacks is shown as explicitly ABSENT ("not reported"), never silently
     // omitted (#348 PX-4 review #2524: absence is not evidence). The marker is PCC's own text, so an
     // absent cell never joins the backstop below.
-    const isAbsent = (c: Cell): boolean => c.read.ok && c.read.text === "";
+    const isAbsent = (c: Cell): boolean => c.read.ok && readText(c.read.text).t === "";
     const metaCells: Cell[] = rowMeta.map((field) => ({ field, read: readListField(row, field) }));
     const statusReadRaw = statusFrom ? readListField(row, statusFrom) : null;
     const statusCell: Cell | null = statusReadRaw ? { field: statusFrom, read: statusReadRaw } : null;
@@ -687,7 +705,7 @@ export function bindListRows(doc: RDocument, listEl: RElement, node: IrNode, row
       // Every ATTRIBUTED kind (text, id, capType) joins by its RAW value, never the "reported: " display,
       // so the inserted word cannot widen the pair window and hide a claim split across fields.
       const isAttributedKind = (field: string): boolean => { const k = LIST_FIELD_KINDS[field]; return k === "text" || k === "id" || k === "capType"; };
-      const joinTextOf = (c: Cell): string => (isAttributedKind(c.field) ? rawOf(c) ?? cellText(c) : cellText(c));
+      const joinTextOf = (c: Cell): string => (isAttributedKind(c.field) ? rawOf(c) ?? readText(cellText(c)).t : readText(cellText(c)).t);
       const joined = [...nonStatusDisplayed.map(joinTextOf), ...statusRaw];
       const nonStatusClaim = nonStatusDisplayed.length > 1 && isMoneyClaim(nonStatusDisplayed.map(joinTextOf).join(" "));
       const crossClaim = statusRaw.length > 0 && isMoneyClaim(joined.join(" ")) && !isMoneyClaim(statusRaw.join(" "));
@@ -722,7 +740,7 @@ export function listRowsReadable(node: IrNode, rows: unknown[]): boolean {
     // By the title field's CLOSED KIND (readListField), not a bare scalar coercion: a present
     // but MISTYPED title is just as "not readable" as an absent one (#344's typed row reader).
     const read = readListField(row, rowTitle);
-    if (!read.ok || read.text === "") return false;
+    if (!read.ok || readText(read.text).t === "") return false;
   }
   return true;
 }
@@ -753,15 +771,15 @@ export function bindScalar(node: IrNode, data: unknown): KitText {
       return typeof raw === "boolean" ? kitText(raw ? "Yes" : "No") : UNAVAILABLE;
     case "percent":
       // An integer 0..100 (astra r6 on #344): progress is the DB's integer column, uptime is 0/50/100.
-      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? String(raw) as KitText : UNAVAILABLE;
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 && raw <= 100 ? registerKitText(String(raw)) : UNAVAILABLE;
     case "count":
-      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? String(raw) as KitText : UNAVAILABLE;
+      return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? registerKitText(String(raw)) : UNAVAILABLE;
     case "id":
       return typeof raw === "string" && LIST_ID_RE.test(raw) ? identifierText(sel, raw) : UNAVAILABLE;
     case "time":
-      return typeof raw === "string" && timeRoundTrips(raw) ? raw as KitText : UNAVAILABLE;
+      return typeof raw === "string" && timeRoundTrips(raw) ? registerKitText(raw) : UNAVAILABLE;
     case "version":
-      return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? raw as KitText : UNAVAILABLE;
+      return typeof raw === "string" && LIST_VERSION_RE.test(raw) ? registerKitText(raw) : UNAVAILABLE;
     default:
       return UNAVAILABLE; // exhaustive over MetricFieldKind; defensive fallback mirrors readField's
   }
@@ -773,7 +791,7 @@ export function bindScalar(node: IrNode, data: unknown): KitText {
  * stop — never partial-render an unvalidated tree.
  */
 export function bootIrView(doc: RDocument, mount: RElement, rawDoc: unknown, validate: (d: unknown) => { ok: boolean }): boolean {
-  if (!validate(rawDoc).ok) {
+  if (rawDoc === null || typeof rawDoc !== "object" || !validate(rawDoc).ok) {
     while (mount.children.length) mount.children.pop();
     mount.appendChild(el(doc, CLS.invalid, kitText("This dashboard could not be verified and was not rendered.")));
     return false;

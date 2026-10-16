@@ -40,7 +40,7 @@
 
 import type { EscrowStatus } from "../types/common.js";
 import type { Escrow } from "../types/settlement.js";
-import { isProseClaim, isIdentifierClaim, WITHHELD_FIELD } from "./plain-text-claims.js";
+import { hasBidiControl, isProseClaim, isIdentifierClaim, WITHHELD_FIELD } from "./plain-text-claims.js";
 
 /** Semantic tone. Presentation maps tone -> color; tone never comes from a manifest. */
 export type MoneyTone = "settled" | "refunded" | "waiting" | "running" | "failed" | "unknown";
@@ -265,7 +265,16 @@ export function classifySettlementRecord(record: unknown): MoneyStatusClassifica
 }
 
 /** The only routes whose LIVE reads may present a FINAL settlement state (settlement-read.ts UNIT_ID_RE). */
-export const SETTLEMENT_READ_ROUTE = /^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/;
+// Export a frozen matcher facade rather than a RegExp identity: compile() changes a
+// frozen RegExp's internal pattern before throwing on its non-writable lastIndex.
+function immutableMatcher(pattern: RegExp) {
+  return Object.freeze({
+    source: pattern.source,
+    test: (text: string): boolean => pattern.test(text),
+    exec: (text: string): RegExpExecArray | null => pattern.exec(text),
+  });
+}
+export const SETTLEMENT_READ_ROUTE = immutableMatcher(/^\/api\/settlement\/units\/0x[0-9a-fA-F]{64}\/(receipt|lifecycle)$/);
 
 /**
  * Display classification of a settlement record, given WHERE it came from (astra r2 on #313, F1: field
@@ -341,6 +350,7 @@ export const UNVERIFIED_SUFFIX = " - status unverified";
  */
 export function statusPillText(raw: unknown, verified: boolean, money: boolean): string {
   const t = raw == null ? "" : String(raw);
+  if (hasBidiControl(t)) return WITHHELD_FIELD;
   if (verified || t === "") return t;
   const k = normalizeMoneyStatus(t);
   const safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
@@ -358,16 +368,17 @@ export function statusPillText(raw: unknown, verified: boolean, money: boolean):
  */
 export function reportedText(raw: unknown, verified: boolean, money: boolean): string {
   const t = raw == null ? "" : String(raw);
+  if (hasBidiControl(t)) return WITHHELD_FIELD;
   if (verified || t === "") return t;
   return "reported: " + t + (money ? UNCONFIRMED_SUFFIX : "");
 }
 
 // These closed grammars are mirrored by the dependency-free plain browser kit.
 // Conformance compares accepted and rejected inputs against the real shipped bytes.
-export const PLAIN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-export const PLAIN_HEX_RE = /^0x(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/;
-export const PLAIN_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
-export const PLAIN_TRACE_RE = /^[A-Za-z0-9_-]{8,64}$/;
+export const PLAIN_ID_RE = immutableMatcher(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+export const PLAIN_HEX_RE = immutableMatcher(/^0x(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/);
+export const PLAIN_TIME_RE = immutableMatcher(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/);
+export const PLAIN_TRACE_RE = immutableMatcher(/^[A-Za-z0-9_-]{8,64}$/);
 
 /** Identifiers can spell prose: withhold claims and attribute all remaining values, as in the IR. */
 export function idText(raw: unknown): string {
@@ -426,6 +437,7 @@ export function traceText(raw: unknown): string {
 /** Operator-chosen names are visibly framed; claims use PCC's withheld notice. */
 export function nameText(raw: unknown): string {
   if (typeof raw !== "string") return reportedText(raw, false, false);
+  if (hasBidiControl(raw)) return WITHHELD_FIELD;
   return isProseClaim(raw) ? "name withheld: stated money or verification" : "name: " + raw;
 }
 

@@ -23,8 +23,8 @@
  * Exposes NO host-call interface; contains NONE of tools/call, __PCC_HOST_BRIDGE__,
  * __PCC_HOST_OPERATIONS__, capability registration, or a write transport.
  */
-import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf, kitText } from "./dashboard-ir.js";
-import type { IrDoc, IrNode, KitText } from "./dashboard-ir.js";
+import { dashboardManifestToIr, listRowsOf, validateIr, provenanceOf, readText, kitText } from "./dashboard-ir.js";
+import type { IrDoc, IrNode, KitText, AgentText } from "./dashboard-ir.js";
 import { bootIrView, bindScalar, bindListRows, listRowsReadable, bindSchemaCard, schemaCardFailure, applyFreshness, applyUnavailable, applyUnknownTime, UNAVAILABLE } from "./dashboard-ir-renderer.js";
 import type { RDocument, RElement } from "./dashboard-ir-renderer.js";
 import { startBind, sourceAsOf, isStale, acceptsNewer, httpStatusText } from "./dashboard-ir-binder.js";
@@ -48,13 +48,15 @@ const MOUNT_ID = "pcc-ir-root";
  * derived from the manifest / parent / runtime document origin (which may be the app
  * domain, a host origin, or "null"). Returns null if absent/invalid ⇒ no binding. */
 function pccApiOrigin(): string | null {
-  const o = (window as unknown as { __PCC_IR_ORIGIN__?: unknown }).__PCC_IR_ORIGIN__;
+  const o = "__PCC_IR_ORIGIN__" in window ? window.__PCC_IR_ORIGIN__ : undefined;
   return typeof o === "string" && /^https:\/\/[a-z0-9.-]+$/i.test(o) ? o : null;
 }
 
 // ── real DOM wrapped in the renderer's minimal RElement (fresh detached container per render) ──
 /** Browser text sink: all actual DOM text writes receive already-typed display text. */
-export function setText(node: { textContent: string | null }, text: KitText): void { node.textContent = text; }
+export function setText(node: { textContent: string | null }, text: KitText): void { node.textContent = readText(text).t; }
+/** Physical writer for already-authored renderer text; raw strings are excluded. */
+export function setAuthoredText(node: { textContent: string | null }, text: KitText | AgentText): void { node.textContent = readText(text, "authored").t; }
 const realElements = new WeakMap<RElement, HTMLElement>();
 function realEl(wrapped: RElement): HTMLElement {
   const real = realElements.get(wrapped);
@@ -66,7 +68,7 @@ function wrapEl(real: HTMLElement): RElement {
   const w = {
     children,
     get textContent(): string { return real.textContent ?? ""; },
-    set textContent(v: KitText) { setText(real, v); },
+    set textContent(v: KitText | AgentText) { setAuthoredText(real, v); },
     get className() { return real.className; },
     set className(v: string) { real.className = v; },
     setAttr(n: string, v: string) {
@@ -259,7 +261,7 @@ interface ProvState { meta: HTMLElement; watermark: string | null; fingerprint: 
 const provStates = new Map<string, ProvState>();
 function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src: string | null) => KitText | (() => void), clear: () => void, fingerprint: (data: unknown) => string | null): { onData: (d: unknown) => void; onStale: (why: KitText) => void; onEnded: (why: KitText) => void } {
   const prov = provenanceOf(node);
-  const host = wrapEl(el) as unknown as RElement;
+  const host = wrapEl(el);
   let st = provStates.get(node.id);
   if (!st) {
     const metaReal = document.createElement("div");
@@ -268,7 +270,7 @@ function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src
     provStates.set(node.id, st);
   }
   const state = st;
-  const meta = wrapEl(state.meta) as unknown as RElement;
+  const meta = wrapEl(state.meta);
   const disarm = (): void => { if (state.expiry !== null) { clearTimeout(state.expiry); state.expiry = null; } };
   const markFresh = (): void => { // (re)evaluate freshness now and arm the expiry for later
     disarm();
@@ -296,7 +298,7 @@ function provenanced(node: IrNode, el: HTMLElement, prepare: (data: unknown, src
       // failed read whatever its timestamp: it CLEARS the view and says why. Ordering (no
       // regression, untimed-after-timed, equal-time fingerprints) applies ONLY to valid data.
       const prepared = prepare(data, src);
-      if (typeof prepared === "string") { failed(prepared); return; } // not data for this route
+      if (typeof prepared !== "function") { failed(prepared); return; } // not data for this route
       const incomingFingerprint = fingerprint(data);
       // Never roll back; an equal-timestamp duplicate whose payload differs from what is
       // shown is ALSO rejected — see acceptsNewer (M3: undecidable by time alone).
@@ -329,6 +331,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // The signal is the GENERATION signal; per request we add a timeout + gen-link on a
     // fresh controller and clean BOTH up when the request settles (no leaked timer/listener).
     getJson: async (url: string, sig: unknown) => {
+      if (sig === null || typeof sig !== "object") return { status: 0, redirected: false, bytesOver: false, json: null, ok: false };
       const s = sig as AbortSignal;
       await acquire(s); // rejects if the generation already aborted / aborts while queued
       const ctrl = new AbortController();
@@ -408,7 +411,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     // empty set; an empty result without a source time is not evidence of absence.
     if (rows.length === 0 && src === null) return kitText("empty result without a source time");
     const staging = document.createElement("div"); // stage off-DOM: committed only after ordering also accepts it (astra 28f H1)
-    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, data);
+    bindListRows(rdoc, wrapEl(staging), node, rows, data);
     return () => el.replaceChildren(...Array.from(staging.childNodes));
   }, () => { el.replaceChildren(); }, (data) => {
     // M3 fingerprint: shapeOf(staging) — a framed structural shape of the same rows, staged
@@ -422,7 +425,7 @@ function startBinds(doc: IrDoc, root: HTMLElement): void {
     if (rows === null) return null;
     if (!listRowsReadable(node, rows)) return null;
     const staging = document.createElement("div");
-    bindListRows(rdoc, wrapEl(staging) as unknown as RElement, node, rows, data);
+    bindListRows(rdoc, wrapEl(staging), node, rows, data);
     return JSON.stringify(shapeOf(staging));
   }); push(startBind(node, deps, pv.onData, pv.onStale, pv.onEnded)); });
 }
@@ -439,12 +442,12 @@ function renderManifest(manifest: unknown): void {
   if (tooLarge(manifest)) { rendered = true; inert(mount, kitText("This dashboard is too large and was not rendered.")); return; }
   // Any exception while adapting or validating is the same inert failure, never a partial render.
   let r: ReturnType<typeof dashboardManifestToIr>;
-  try { r = dashboardManifestToIr(manifest as Parameters<typeof dashboardManifestToIr>[0]); } catch { r = { ok: false, reason: "adapter threw" }; }
+  try { r = manifest !== null && typeof manifest === "object" ? dashboardManifestToIr(manifest as Parameters<typeof dashboardManifestToIr>[0]) : { ok: false, reason: "manifest shape" }; } catch { r = { ok: false, reason: "adapter threw" }; }
   if (!r.ok) { rendered = true; inert(mount, kitText("This dashboard could not be verified and was not rendered.")); return; }
   rendered = true;
   const container = wrapEl(document.createElement("div"));
   let painted = false;
-  try { painted = bootIrView(rdoc, container as unknown as RElement, r.doc, validateIr); } // in-browser re-validate + paint
+  try { painted = bootIrView(rdoc, container, r.doc, validateIr); } // in-browser re-validate + paint
   catch { inert(mount, kitText("This dashboard could not be verified and was not rendered.")); return; }
   mount.replaceChildren(realEl(container));
   if (painted) { liveDoc = r.doc; liveRoot = realEl(container); startBinds(r.doc, realEl(container)); }
@@ -456,7 +459,9 @@ function boot(): void {
   let state: "init" | "ready" = "init";
   window.addEventListener("message", (ev: MessageEvent<unknown>) => {
     if (ev.source !== parent) return; // host parent only
-    const d = ev.data as Record<string, unknown> | null;
+    const data = ev.data;
+    if (data === null || typeof data !== "object") return;
+    const d = data as Record<string, unknown> | null;
     if (!d || typeof d !== "object" || (d as { jsonrpc?: unknown }).jsonrpc !== "2.0") return;
     // graceful teardown (a request with an id) — LATCH terminal, then stop + ack.
     if ((d as { method?: unknown }).method === "ui/resource-teardown" && "id" in d) {

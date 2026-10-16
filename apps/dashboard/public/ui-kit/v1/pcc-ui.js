@@ -198,6 +198,7 @@
   var WITHHELD_FIELD = kitText('withheld: stated money or verification');
   function agentText(raw, prose) {
     var t = String(raw);
+    if (CLAIM_DETECTOR && hasBidiControl(t)) return WITHHELD_PROSE;
     if (isProseClaim(t)) return prose ? WITHHELD_PROSE : WITHHELD_FIELD;
     var text = Object.freeze({ t: t });
     AGENT_TEXT_BRANDS.add(text);
@@ -333,10 +334,9 @@
       if (m && m[1]) {
         var k = decodeURIComponent(m[1]);
         try { sessionStorage.setItem(KEY_STORE, k); } catch (e) {}
-        var cleaned = String(String(h).replace(/([#&])pcc_key=[^&]*/, '$1')).replace(/[#&]+$/, '');
         try {
-          history.replaceState(null, '', location.pathname + location.search + (cleaned && cleaned !== '#' ? cleaned : ''));
-        } catch (e2) { try { location.hash = ''; } catch (e3) {} }
+          history.replaceState(null, '', location.pathname + location.search);
+        } catch (e2) {}
       }
     } catch (e) {}
   }
@@ -549,17 +549,27 @@
   // Formatting + dot-path pluck (no eval; a manual split/reduce)
   // ═══════════════════════════════════════════════════════════════════════
 
-  // Dynamic data reads admit only enumerable own fields, as a fresh JSON copy
-  // would. Read the requested field once; copying the object per read makes
-  // loops quadratic in its width. The lint reviews this exact guarded read.
+  // Keyed data reads admit only enumerable own fields of plain objects or arrays.
+  // Read the requested field once; copying the object per read makes loops
+  // quadratic in its width. The lint reviews this exact guarded read.
   // Numeric array/arguments/NodeList positions retain their requested-index semantics.
   function dataAt(raw, key) {
     if (raw == null) throw new TypeError('Cannot read absent data');
     if (typeof key === 'number' && key >= 0 && key % 1 === 0 && typeof raw.length === 'number') {
-      return Array.prototype.slice.call(raw, key, key + 1)[0];
+      var indexedValue = Array.prototype.slice.call(raw, key, key + 1)[0];
+      return typeof indexedValue === 'function' ? undefined : indexedValue;
     }
-    if (key === 'length' && typeof raw.length === 'number') return raw.length;
-    return Object.prototype.propertyIsEnumerable.call(raw, key) ? raw[key] : undefined;
+    if (key === 'length') {
+      var lengthValue = raw.length;
+      if (typeof lengthValue === 'number') return lengthValue;
+    }
+    if (!Array.isArray(raw)) {
+      if (typeof raw !== 'object') return undefined;
+      var proto = Object.getPrototypeOf(raw);
+      if (proto !== Object.prototype && proto !== null) return undefined;
+    }
+    var value = Object.prototype.propertyIsEnumerable.call(raw, key) ? raw[key] : undefined;
+    return typeof value === 'function' ? undefined : value;
   }
   function dot(obj, path) {
     if (path == null || path === '') return obj;
@@ -596,6 +606,11 @@
   function fmtUsd(v) {
     var text = fmtUsdRaw(v);
     return text === 'amount not reported' ? kitText('amount not reported') : mintText(text);
+  }
+  function fmtUsdWithUnit(v, currency) {
+    var amount = fmtUsd(v);
+    if (fmtUsdRaw(v) === 'amount not reported' && (currency === 'USDC' || currency === 'ETH' || currency === 'DAI')) return amount;
+    return joinText(amount, kitText(' '), currencyText(currency));
   }
   function fmtTs(v) {
     if (!(canonicalPlainTime(v) || (typeof v === 'number' && isFinite(v)))) return kitText('time not reported');
@@ -845,6 +860,7 @@
   var UNVERIFIED_SUFFIX = ' - status unverified';
   function statusPillText(raw, verified, money) {
     var t = raw == null ? '' : String(raw);
+    if (hasBidiControl(t)) return WITHHELD_FIELD;
     if (verified || t === '') return mintText(t);
     var k = normStatus(t);
     var safe = money ? SAFE_MONEY_STATUS_WORDS : SAFE_STATUS_WORDS;
@@ -856,6 +872,7 @@
   // for a VERIFIED PAYEE PAYMENT, never a verified refund (astra r6 F10). Mirrors the spec's reportedText.
   function reportedText(raw, verified, money) {
     var t = raw == null ? '' : String(raw);
+    if (hasBidiControl(t)) return WITHHELD_FIELD;
     if (verified || t === '') return mintText(t);
     return mintText('reported: ' + t + (money ? UNCONFIRMED_SUFFIX : ''));
   }
@@ -908,7 +925,7 @@
             "\u0224": "Z", "\u024c": "R", "\u0246": "E", "\u023b": "C",
         };
         // Marks, format/bidi controls and invisible fillers vanish; a braille blank reads as a space.
-        var INVISIBLE_RE = new RegExp("[\\p{M}\\p{Cf}\\u115f\\u1160\\u3164\\uffa0]", "gu");
+        var INVISIBLE_RE = new RegExp("[\\p{M}\\p{Cf}\\p{Default_Ignorable_Code_Point}\\u115f\\u1160\\u3164\\uffa0]", "gu");
         var MONEY_EMOJI_RE = new RegExp("[\\u{1F4B0}-\\u{1F4B8}\\u{1F911}\\u{1FA99}]", "gu");
         var CAMEL_RE = new RegExp("(?<![A-Z])([a-z])([A-Z])", "g");
         /** The one fold every check uses: lowercase Latin skeleton of what a reader sees. Whitespace runs
@@ -1032,15 +1049,29 @@
             return false;
         }
         var scriptIn = function (f) { return /[^\x00-\x7f]/.test(f) && SCRIPT_CLAIM_RE.test(String(f).replace(/ /g, "")); };
-        function statesAmount(text) { return AMOUNT_RE.test(foldForClaims(text)); }
+        var BIDI_CONTROL_RE = new RegExp("[\\p{Bidi_Control}\\u070f]", "u");
+        function hasBidiControl(text) { return BIDI_CONTROL_RE.test(text); }
+        // Unicode 17 DerivedBidiClass R/AL, mirrored from the canonical spec.
+        var STRONG_RTL_RE = new RegExp("[\\u{5be}\\u{5c0}\\u{5c3}\\u{5c6}\\u{5d0}-\\u{5ea}\\u{5ef}-\\u{5f4}\\u{608}\\u{60b}\\u{60d}\\u{61b}-\\u{64a}\\u{66d}-\\u{66f}\\u{671}-\\u{6d5}\\u{6e5}-\\u{6e6}\\u{6ee}-\\u{6ef}\\u{6fa}-\\u{70d}\\u{70f}-\\u{710}\\u{712}-\\u{72f}\\u{74d}-\\u{7a5}\\u{7b1}\\u{7c0}-\\u{7ea}\\u{7f4}-\\u{7f5}\\u{7fa}\\u{7fe}-\\u{815}\\u{81a}\\u{824}\\u{828}\\u{830}-\\u{83e}\\u{840}-\\u{858}\\u{85e}\\u{860}-\\u{86a}\\u{870}-\\u{88f}\\u{8a0}-\\u{8c9}\\u{200f}\\u{fb1d}\\u{fb1f}-\\u{fb28}\\u{fb2a}-\\u{fb36}\\u{fb38}-\\u{fb3c}\\u{fb3e}\\u{fb40}-\\u{fb41}\\u{fb43}-\\u{fb44}\\u{fb46}-\\u{fbc2}\\u{fbd3}-\\u{fd3d}\\u{fd50}-\\u{fd8f}\\u{fd92}-\\u{fdc7}\\u{fdf0}-\\u{fdfc}\\u{fe70}-\\u{fe74}\\u{fe76}-\\u{fefc}\\u{10800}-\\u{10805}\\u{10808}\\u{1080a}-\\u{10835}\\u{10837}-\\u{10838}\\u{1083c}\\u{1083f}-\\u{10855}\\u{10857}-\\u{1089e}\\u{108a7}-\\u{108af}\\u{108e0}-\\u{108f2}\\u{108f4}-\\u{108f5}\\u{108fb}-\\u{1091b}\\u{10920}-\\u{10939}\\u{1093f}-\\u{10959}\\u{10980}-\\u{109b7}\\u{109bc}-\\u{109cf}\\u{109d2}-\\u{10a00}\\u{10a10}-\\u{10a13}\\u{10a15}-\\u{10a17}\\u{10a19}-\\u{10a35}\\u{10a40}-\\u{10a48}\\u{10a50}-\\u{10a58}\\u{10a60}-\\u{10a9f}\\u{10ac0}-\\u{10ae4}\\u{10aeb}-\\u{10af6}\\u{10b00}-\\u{10b35}\\u{10b40}-\\u{10b55}\\u{10b58}-\\u{10b72}\\u{10b78}-\\u{10b91}\\u{10b99}-\\u{10b9c}\\u{10ba9}-\\u{10baf}\\u{10c00}-\\u{10c48}\\u{10c80}-\\u{10cb2}\\u{10cc0}-\\u{10cf2}\\u{10cfa}-\\u{10d23}\\u{10d4a}-\\u{10d65}\\u{10d6f}-\\u{10d85}\\u{10d8e}-\\u{10d8f}\\u{10e80}-\\u{10ea9}\\u{10ead}\\u{10eb0}-\\u{10eb1}\\u{10ec2}-\\u{10ec7}\\u{10f00}-\\u{10f27}\\u{10f30}-\\u{10f45}\\u{10f51}-\\u{10f59}\\u{10f70}-\\u{10f81}\\u{10f86}-\\u{10f89}\\u{10fb0}-\\u{10fcb}\\u{10fe0}-\\u{10ff6}\\u{1e800}-\\u{1e8c4}\\u{1e8c7}-\\u{1e8cf}\\u{1e900}-\\u{1e943}\\u{1e94b}\\u{1e950}-\\u{1e959}\\u{1e95e}-\\u{1e95f}\\u{1ec71}-\\u{1ecb4}\\u{1ed01}-\\u{1ed3d}\\u{1ee00}-\\u{1ee03}\\u{1ee05}-\\u{1ee1f}\\u{1ee21}-\\u{1ee22}\\u{1ee24}\\u{1ee27}\\u{1ee29}-\\u{1ee32}\\u{1ee34}-\\u{1ee37}\\u{1ee39}\\u{1ee3b}\\u{1ee42}\\u{1ee47}\\u{1ee49}\\u{1ee4b}\\u{1ee4d}-\\u{1ee4f}\\u{1ee51}-\\u{1ee52}\\u{1ee54}\\u{1ee57}\\u{1ee59}\\u{1ee5b}\\u{1ee5d}\\u{1ee5f}\\u{1ee61}-\\u{1ee62}\\u{1ee64}\\u{1ee67}-\\u{1ee6a}\\u{1ee6c}-\\u{1ee72}\\u{1ee74}-\\u{1ee77}\\u{1ee79}-\\u{1ee7c}\\u{1ee7e}\\u{1ee80}-\\u{1ee89}\\u{1ee8b}-\\u{1ee9b}\\u{1eea1}-\\u{1eea3}\\u{1eea5}-\\u{1eea9}\\u{1eeab}-\\u{1eebb}]|(?=\\p{Cn})[\\u{590}-\\u{8ff}\\u{fb1d}-\\u{fdcf}\\u{fdf0}-\\u{fdff}\\u{fe70}-\\u{feff}\\u{10800}-\\u{10fff}\\u{1e800}-\\u{1efff}]", "gu");
+        function claimIn(text, checks) {
+          var f = foldForClaims(text);
+          if (AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, checks)) return true;
+          var stripped = String(text).replace(STRONG_RTL_RE, "");
+          if (stripped === text) return false;
+          var visual = foldForClaims(stripped);
+          return AMOUNT_RE.test(visual) || scriptIn(visual) || wordsIn(visual, checks);
+        }
+        function statesAmount(text) { return AMOUNT_RE.test(foldForClaims(text)) || AMOUNT_RE.test(foldForClaims(String(text).replace(STRONG_RTL_RE, ""))); }
         /** Does the text state an amount or a payment or verification status? */
-        function isMoneyClaim(text) { var f = foldForClaims(text); return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, PAIR_WORDS]); }
+        function isMoneyClaim(text) { return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, PAIR_WORDS]); }
         /** Does the text mention PCC's withheld notice ("withheld", "withhold")? Only PCC may say that. */
-        function mentionsWithheld(text) { return wordsIn(foldForClaims(text), [NOTICE_WORDS]); }
+        function mentionsWithheld(text) {
+          var stripped = String(text).replace(STRONG_RTL_RE, "");
+          return wordsIn(foldForClaims(text), [NOTICE_WORDS]) || (stripped !== text && wordsIn(foldForClaims(stripped), [NOTICE_WORDS]));
+        }
         /** Agent prose that may not be shown: a money claim, or a mention of PCC's notice (one fold). */
         function isProseClaim(text) {
-            var f = foldForClaims(text);
-            return AMOUNT_RE.test(f) || scriptIn(f) || wordsIn(f, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
+            return hasBidiControl(text) || claimIn(text, [MONEY_WORDS, NOTICE_WORDS, PAIR_WORDS]);
         }
 
         var IDENT_NOUN_RE = new RegExp("\\b" + CLAIM_NOUN_GROUP + "\\b");
@@ -1048,13 +1079,16 @@
         function isIdentifierClaim(value) {
           if (isMoneyClaim(value) || mentionsWithheld(value)) return true;
           var variants = views(foldForClaims(value));
+          var stripped = String(value).replace(STRONG_RTL_RE, "");
+          if (stripped !== value) variants = variants.concat(views(foldForClaims(stripped)));
           for (var i = 0; i < variants.length; i++) if (IDENT_NOUN_RE.test(dataAt(variants, i)) && IDENT_GENERIC_RE.test(dataAt(variants, i))) return true;
           return false;
         }
-        return { identifier: isIdentifierClaim, fold: foldForClaims, amount: statesAmount, money: isMoneyClaim, notice: mentionsWithheld, prose: isProseClaim };
+        return { bidi: hasBidiControl, identifier: isIdentifierClaim, fold: foldForClaims, amount: statesAmount, money: isMoneyClaim, notice: mentionsWithheld, prose: isProseClaim };
       })();
     } catch (e) { return null; }
   }
+  function hasBidiControl(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.bidi(text); }
   function foldForClaims(text) { return CLAIM_DETECTOR ? CLAIM_DETECTOR.fold(text) : ''; }
   function statesAmount(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.amount(text); }
   function isMoneyClaim(text) { return !CLAIM_DETECTOR || CLAIM_DETECTOR.money(text); }
@@ -1105,6 +1139,7 @@
   function nameText(raw) {
       if (typeof raw !== "string")
           return reportedText(raw, false, false);
+      if (CLAIM_DETECTOR && hasBidiControl(raw)) return WITHHELD_FIELD;
       return mintText(isProseClaim(raw) ? "name withheld: stated money or verification" : "name: " + raw);
   }
   /** Editable defaults admit only the field kind's wire value, without coercion. */
@@ -1371,7 +1406,7 @@
   function winShell(title, statusText, statusCls) {
     var wrap = el('article', 'pcc-win');
     var head = el('div', 'pcc-win-head');
-    head.appendChild((title && typeof title === 'object' && AGENT_TEXT_BRANDS.has(title)) || title === WITHHELD_FIELD ?
+    head.appendChild((title && typeof title === 'object' && AGENT_TEXT_BRANDS.has(title)) || title === WITHHELD_FIELD || title === WITHHELD_PROSE ?
       agentEl('span', 'pcc-win-title pcc-text', title) : el('span', 'pcc-win-title', title));
     if (statusText != null) head.appendChild(el('span', 'pcc-pill ' + (statusCls || ''), statusText));
     wrap.appendChild(head);
@@ -1503,7 +1538,7 @@
       titleRow.appendChild(el('span', 'pcc-cap-name', c.name ? nameText(c.name) : c.id ? idText(c.id) : kitText('Capability')));
       var price = c.pricing && (c.pricing.baseCost != null ? c.pricing.baseCost : c.pricing.minimum);
       var currency = (c.pricing && c.pricing.currency) || 'USDC';
-      if (price != null) titleRow.appendChild(el('span', 'pcc-price-chip pcc-tnum', joinText(fmtUsd(price), kitText(' '), currencyText(currency))));
+      if (price != null) titleRow.appendChild(el('span', 'pcc-price-chip pcc-tnum', fmtUsdWithUnit(price, currency)));
       wrap._body.appendChild(titleRow);
       var meta = el('div', 'pcc-cap-meta');
       if (c.kernelName || c.kernelId) meta.appendChild(el('span', 'pcc-mono', c.kernelName ? nameText(c.kernelName) : idText(c.kernelId)));
@@ -1957,7 +1992,9 @@
       var econText = (amount == null || amount === '') && econ.amount != null ? baseUnitsText(econ.amount, econ.tokenDecimals) : null;
       if (amount != null && amount !== '') {
         amtRow.appendChild(el('span', 'pcc-receipt-num', fmtUsd(amount)));
-        amtRow.appendChild(el('span', 'pcc-receipt-cur', joinText(kitText(' '), currencyText(e.currency))));
+        if (fmtUsdRaw(amount) !== 'amount not reported' || (e.currency !== 'USDC' && e.currency !== 'ETH' && e.currency !== 'DAI')) {
+          amtRow.appendChild(el('span', 'pcc-receipt-cur', joinText(kitText(' '), currencyText(e.currency))));
+        }
       } else if (econText !== null) {
         // economics.amount is in the token's BASE units: never through fmtUsd, never with an invented currency.
         amtRow.appendChild(el('span', 'pcc-receipt-num', econText));
@@ -2021,7 +2058,7 @@
     var cr = w.composeRef || {};
     var head = el('div', 'pcc-chain-head');
     head.appendChild(cr.outcomeType ? agentEl('span', 'pcc-chain-outcome', agentText(cr.outcomeType, false)) : el('span', 'pcc-chain-outcome', kitText('outcome')));
-    if (cr.budgetUSD != null) head.appendChild(el('span', 'pcc-chain-budget pcc-tnum', joinText(kitText('budget '), fmtUsd(cr.budgetUSD), kitText(' USDC'))));
+    if (cr.budgetUSD != null) head.appendChild(el('span', 'pcc-chain-budget pcc-tnum', joinText(kitText('budget '), fmtUsdWithUnit(cr.budgetUSD, 'USDC'))));
     wrap._body.appendChild(head);
     var seq = (cr.outcomeChain && cr.outcomeChain.length) ? cr.outcomeChain : (cr.steps || [cr.outcomeType]);
     var stepsRow = el('div', 'pcc-chain-steps');
@@ -2049,11 +2086,11 @@
         var s = dataAt(steps, i);
         var li = el('li', 'pcc-plan-row');
         li.appendChild(el('span', 'pcc-plan-type', s.capabilityType || s.outcomeType ? idText(s.capabilityType || s.outcomeType) : joinText(kitText('step '), numberText(i + 1))));
-        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', joinText(fmtUsd(s.estimatedPriceUSD), kitText(' USDC'))));
+        if (s.estimatedPriceUSD != null) li.appendChild(el('span', 'pcc-mono pcc-tnum', fmtUsdWithUnit(s.estimatedPriceUSD, 'USDC')));
         box.appendChild(li);
       }
       result.appendChild(box);
-      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', joinText(kitText('total '), fmtUsd(body.totalPriceUSD), kitText(' USDC'))));
+      if (body.totalPriceUSD != null) result.appendChild(el('div', 'pcc-plan-total pcc-tnum', joinText(kitText('total '), fmtUsdWithUnit(body.totalPriceUSD, 'USDC'))));
       if (w.execute) {
         var execBtn = writeButton(ctx, w.execute, requestDescriptor(w.execute, w.execute.body || {}, ctx.mode === 'host', ctx.apiBase), 'Execute');
         execBtn.onclick = function () { dispatchAction(ctx, w.execute, { status: status }); };
@@ -2493,17 +2530,23 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // Renderer dispatch table
+  // Closed renderer dispatch; dataAt never returns callable values.
   // ═══════════════════════════════════════════════════════════════════════
 
-  var RENDERERS = {
-    note: renderNote, metric: renderMetric, capability: renderCapability,
-    list: renderList, form: renderForm, run: renderRun, approval: renderApproval,
-    receipt: renderReceipt, chain: renderChain, actions: renderActions
-  };
-
   function renderWindow(ctx, w) {
-    var fn = dataAt(RENDERERS, w.kind);
+    var fn;
+    switch (w.kind) {
+      case 'note': fn = renderNote; break;
+      case 'metric': fn = renderMetric; break;
+      case 'capability': fn = renderCapability; break;
+      case 'list': fn = renderList; break;
+      case 'form': fn = renderForm; break;
+      case 'run': fn = renderRun; break;
+      case 'approval': fn = renderApproval; break;
+      case 'receipt': fn = renderReceipt; break;
+      case 'chain': fn = renderChain; break;
+      case 'actions': fn = renderActions; break;
+    }
     if (!fn) { // unknown kind (a newer manifest against an older kit): honest, never throws.
       var stub = winShell(w.kind ? agentText(w.kind, false) : kitText('window'), kitText('unsupported'), 'st-waiting');
       stub._body.appendChild(el('p', 'pcc-muted', kitText('This dashboard uses a window type this kit version does not render.')));
@@ -2749,7 +2792,8 @@
       '.pcc-untrusted-label{margin:0;font:400 13px/18px var(--font);color:var(--ink-3);}',
       '.pcc-untrusted-v{color:var(--ink-2);}',
       '.pcc-agent{border-left:2px dashed currentColor;padding-left:6px}',
-      '.pcc-text.pcc-agent::before,.pcc-heading.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}',
+      '.pcc-agent::before{content:"agent-authored";display:block;font-size:10px;letter-spacing:.06em;text-transform:uppercase;opacity:.6}',
+      '.pcc-chain-step.pcc-agent::before{display:inline;margin-right:5px}',
       '.pcc-withheld{font-style:italic}',
       '.pcc-confirm-q{color:var(--ink-2);}',
       /* run */

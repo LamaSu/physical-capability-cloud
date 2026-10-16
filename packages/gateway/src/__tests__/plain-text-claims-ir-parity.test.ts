@@ -1,3 +1,4 @@
+import { readText } from "../mcp/dashboard-ir.js";
 /** Keep the IR kit's lexical detector equal to the canonical plain-text detector. */
 import { describe, expect, it } from "vitest";
 import {
@@ -42,14 +43,17 @@ describe("IR and spec plain-text claim detector parity", () => {
 
   it.each(PLAIN_CLAIM_CASES)("keeps the shared prose-claim expectation for %j", (raw, expected) => {
     expect(irIsProseClaim(raw)).toBe(expected);
+  });
+
+  it.each(PLAIN_CLAIM_CASES)("spec shared prose-claim expectation for %j", (raw, expected) => {
     expect(isProseClaim(raw)).toBe(expected);
   });
 
   it("keeps the prose withholding notice identical", () => {
-    expect(IR_WITHHELD_PROSE).toBe(WITHHELD_PROSE);
+    expect(readText(IR_WITHHELD_PROSE).t).toBe(WITHHELD_PROSE);
   });
 
   it("keeps the field withholding notice identical", () => {
-    expect(IR_WITHHELD_FIELD).toBe(WITHHELD_FIELD);
+    expect(readText(IR_WITHHELD_FIELD).t).toBe(WITHHELD_FIELD);
   });
 });

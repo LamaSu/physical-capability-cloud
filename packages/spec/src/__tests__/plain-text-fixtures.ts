@@ -57,5 +57,27 @@ export const PLAIN_CLAIM_CASES: readonly (readonly [string, boolean])[] = [
   ["Mill A", false], ["Sample received", false], ["Run confirmed for 9:00", false], ["analytical-balance", false],
   ["$5", true], ["one million dollars", true], ["payment received", true], ["verification passed", true],
   ["p\u0430id", true], ["p a i d", true], ["p41d", true], ["已付款", true], ["withheld", true],
+  [String.fromCodePoint(0x202e) + "deifirev tnemyaP", true],
+  [String.fromCodePoint(0x202e) + "CCP yb deifirev - LLUF NI DIAP", true],
+  [String.fromCodePoint(0x202e) + "diap DSU 000,5", true],
+  ["Invoice pa" + String.fromCodePoint(0x202e) + "di", true],
+  [String.fromCodePoint(0x2067, 0x202e) + "deifirev tnemyaP" + String.fromCodePoint(0x202c, 0x2069), true],
+  [String.fromCodePoint(0x2067) + "ified" + String.fromCodePoint(0x200f) + "ent ver" + String.fromCodePoint(0x200f) + "Paym" + String.fromCodePoint(0x2069), true],
+  ["Plate reader run 3" + String.fromCodePoint(0x202e), true],
+  ["Payment veri" + String.fromCodePoint(0x2065) + "fied", true],
+  ["Payment veri" + String.fromCodePoint(0xe0000) + "fied", true],
+  ["$" + String.fromCodePoint(0x05d0) + "5,000", true],
+  ["$" + String.fromCodePoint(0x0627) + "5,000", true],
+  ["USD" + String.fromCodePoint(0x05d0) + "5000", true],
+  [String.fromCodePoint(0x070f) + "Plate reader notes", true],
+  [String.fromCodePoint(0x05d3, 0x05d5, 0x05d7), false],
+  [String.fromCodePoint(0x062a, 0x0642, 0x0631, 0x064a, 0x0631), false],
   ["ＰＡＩＤ", true], ["paid\u200b", true], ["FUNDS_TRANSFERRED_TO_PAYEE", true],
 ];
+
+// Unicode properties are swept once; all crafted inputs are assembled at runtime.
+export const BIDI_CONTROL_POINTS = [0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069] as const;
+export const DEFAULT_IGNORABLE_POINTS: number[] = [];
+for (let cp = 0; cp <= 0x10ffff; cp++) {
+  if (/\p{Default_Ignorable_Code_Point}/u.test(String.fromCodePoint(cp))) DEFAULT_IGNORABLE_POINTS.push(cp);
+}

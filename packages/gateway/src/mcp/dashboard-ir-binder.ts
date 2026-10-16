@@ -22,7 +22,7 @@
  * and self-contained for `.toString()` inlining next to the renderer.
  */
 import type { IrBind, IrNode, KitText } from "./dashboard-ir.js";
-import { kitText } from "./dashboard-ir.js";
+import { registerKitText, kitText, readText } from "./dashboard-ir.js";
 
 export const BINDER_LIM = { maxBytes: 512 * 1024, maxRows: 200, minPollMs: 5000, maxPollMs: 3_600_000, defaultPollMs: 30_000, sessionMs: 30 * 60 * 1000 } as const;
 
@@ -84,7 +84,11 @@ export interface BinderDeps {
 }
 
 /** Transport-owned HTTP status copy, never a server response body. */
-export function httpStatusText(status: number): KitText { return ("HTTP " + status) as KitText; }
+export function httpStatusText(status: number): KitText {
+  const value = status;
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599
+    ? registerKitText("HTTP " + value) : readText(null);
+}
 
 // ── Provenance freshness (PX-4) ──────────────────────────────────────────────
 /** Max future skew tolerated on a source `asOf`. A timestamp further ahead than this is
