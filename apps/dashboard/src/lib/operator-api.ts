@@ -1,5 +1,6 @@
 import type { ShopKernel } from "@pcc/spec";
 import { authorizedFetch } from "./authorized-fetch.js";
+import { OPERATOR_SIGN_IN_NOTICE, requiresOperatorSignIn } from "./auth-notices.js";
 
 // The controls only need these fields from a validated /api/agent/me answer.
 export type OperatorMachine = Pick<ShopKernel, "id" | "name">;
@@ -80,6 +81,7 @@ export async function emergencyResume(machine: OperatorMachine): Promise<Emergen
       body: JSON.stringify({ kernelId: machine.id }),
     });
     if (res.ok) return { ok: true, error: null };
+    if (await requiresOperatorSignIn(res)) return { ok: false, error: OPERATOR_SIGN_IN_NOTICE };
     return { ok: false, error: res.status === 403
       ? `Resume was refused for this key. Resuming needs a PCC admin, or proof that you control ${label}'s operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate ${label}, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).`
       : res.status === 401

@@ -10,6 +10,7 @@ import { useUIStore } from "../stores/ui-store.js";
 import { useOperatorStore } from "../stores/operator-store.js";
 import { useAuthStore } from "../stores/auth-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { OPERATOR_SIGN_IN_NOTICE, requiresOperatorSignIn } from "../lib/auth-notices.js";
 import { emergencyResume, emergencyStop, kernelsOf, machineLabel, type OperatorMachine } from "../lib/operator-api.js";
 import { InboxPanel } from "../components/inbox/InboxPanel.js";
 import {
@@ -193,9 +194,13 @@ export function OperatorDashboardPage() {
 
   async function handleApprovalAction(id: string, action: "approve" | "reject") {
     try {
-      await authorizedFetch(`/api/operator/approvals/${id}/${action}`, {
+      const res = await authorizedFetch(`/api/operator/approvals/${id}/${action}`, {
         method: "POST",
       });
+      if (await requiresOperatorSignIn(res)) {
+        setApprovalsError(OPERATOR_SIGN_IN_NOTICE);
+        return;
+      }
       setApprovals((prev) => prev.filter((a) => a.id !== id));
     } catch {
       // silently fail — next auto-refresh will reconcile
