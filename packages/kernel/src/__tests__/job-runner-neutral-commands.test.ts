@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as Sentry from "@sentry/node";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import nacl from "tweetnacl";
 import {
@@ -110,12 +111,12 @@ function legacy() {
   f.config.tierLadder = undefined;
   return f;
 }
-async function refusal(overrides: Record<string, unknown>, fragment: string, accepts?: unknown) {
-  const f = setup();
+async function refusal(overrides: Record<string, unknown>, error: string, accepts?: unknown, machine: LegacyStub = new NeutralStub()) {
+  const f = setup(machine);
   if (accepts !== undefined) Object.assign(f.machine, { accepts });
   const result = await f.run(overrides as Partial<Config>);
   expect(result.success).toBe(false);
-  expect(result.error).toContain(fragment);
+  expect(result.error).toBe(error);
   expect(result.busy).toBeUndefined();
   expect(result.bundleId).toBeUndefined();
   expect(f.machine.commands).toEqual([]);
@@ -147,8 +148,7 @@ describe("A legacy commands", () => {
     const f = legacy();
     const result = await f.run({ assuranceTier: 2 });
     expect(result.success).toBe(false);
-    expect(result.error).toContain("Tier 2 requirements not met");
-    expect(result.error).toContain("gcode_hash_verified");
+    expect(result.error).toBe("Tier 2 requirements not met: Missing one of: gcode_hash_verified, Missing one of: power_profile_summary, Missing one of: cv_inspection_result | camera_snapshot, Need at least 4 events, have 1");
     expect(f.bundles).toEqual([]);
   });
   it("A5 still records legacy adapter method_loaded without inputHash unchanged", async () => {
@@ -174,24 +174,24 @@ describe("A legacy commands", () => {
 
 describe("B synchronous refusals", () => {
   it.each([
-    ["B1 neither hash", { inputHash: undefined }, "exactly one of inputHash and gcodeHash"],
-    ["B2 different hashes", { gcodeHash: OTHER_H }, "exactly one of inputHash and gcodeHash"],
-    ["B3 equal hashes", { gcodeHash: H }, "exactly one of inputHash and gcodeHash"],
-    ["B4 both data fields", { inputData: "x", gcodeData: "x" }, "at most one of inputData and gcodeData"],
+    ["B1 neither hash", { inputHash: undefined }, "give exactly one of inputHash and gcodeHash"],
+    ["B2 different hashes", { gcodeHash: OTHER_H }, "give exactly one of inputHash and gcodeHash"],
+    ["B3 equal hashes", { gcodeHash: H }, "give exactly one of inputHash and gcodeHash"],
+    ["B4 both data fields", { inputData: "x", gcodeData: "x" }, "give at most one of inputData and gcodeData"],
     ["B5 numeric data", { inputData: 7 }, "input data must be a string or bytes"],
     ["B6 lone surrogate", { inputData: "\uD800", inputHash: hash("\uD800") }, "input data is not well-formed text"],
     ["B7 prepare data mismatch", { inputData: "wrong" }, "input data does not match its hash"],
   ] as const)("%s", async (_name, overrides, error) => { await refusal(overrides, error); });
   it("B7b legacy data mismatch", async () => {
     const f = legacy(); const result = await f.run({ gcodeData: "wrong" });
-    expect(result.success).toBe(false); expect(result.error).toContain("input data does not match its hash");
+    expect(result.success).toBe(false); expect(result.error).toBe("input data does not match its hash");
     expect(result.busy).toBeUndefined(); expect(result.bundleId).toBeUndefined();
     expect(f.machine.commands).toEqual([]); expect(f.register).not.toHaveBeenCalled();
     expect(f.onPhase).not.toHaveBeenCalled(); expect(f.bundles).toEqual([]);
   });
   it.each([
     ["B8 string accepts", "prepare start", "accepts must be a list of command types"],
-    ["B9 missing start", ["prepare"], "does not accept start"],
+    ["B9 missing start", ["prepare"], "adapter does not accept start"],
     ["B10 missing input command", ["stop", "start"], "accepts neither prepare nor load_gcode"],
     ["B11 non-string entry", [1, "prepare", "start"], "accepts must be a list of command types"],
   ])("%s", async (_name, accepts, error) => { await refusal({}, error as string, accepts); });
@@ -245,6 +245,18 @@ describe("C exact data hashing", () => {
 });
 
 describe("D neutral prepare", () => {
+  it("X-4 job.prepare span carries only the job id", async () => {
+    const f = setup(); vi.mocked(Sentry.startSpan).mockClear();
+    expect((await f.run()).success).toBe(true);
+    const spans = vi.mocked(Sentry.startSpan).mock.calls.map(([options]) => options);
+    expect(spans.filter((options) => options.name === "job.prepare")).toStrictEqual([
+      { name: "job.prepare", op: "job.phase", attributes: { "job.id": f.config.jobId } },
+    ]);
+    for (const options of spans) {
+      expect(JSON.stringify(options.attributes)).not.toContain(H);
+      expect(JSON.stringify(options.attributes)).not.toContain(f.machine.deviceJobId);
+    }
+  });
   it("D1 hash only uses exactly prepare then start", async () => {
     const f = setup(); expect((await f.run()).success).toBe(true);
     expect(f.machine.commands).toStrictEqual([
@@ -318,7 +330,7 @@ describe("E prepare ack fails closed", () => {
   const faults: [string, (data: Record<string, unknown>) => unknown, string][] = [
     ["bare success", () => ({ success: true }), "the prepare ack carries no data"],
     ["false success", (data) => ({ success: false, message: "refused", data }), "Failed to prepare the input: refused"],
-    ["string success", (data) => ({ success: "true", data }), "Failed to prepare the input:"],
+    ["string success", (data) => ({ success: "true", data }), "Failed to prepare the input: undefined"],
     ["null data", () => ({ success: true, data: null }), "the prepare ack carries no data"],
     ["array data", () => ({ success: true, data: [] }), "the prepare ack carries no data"],
     ["other job", (data) => ({ success: true, data: { ...data, jobId: "another-job" } }), "the prepare ack did not echo jobId"],
@@ -331,7 +343,7 @@ describe("E prepare ack fails closed", () => {
   ];
   it.each(faults)("E %s", async (_name, ack, error) => {
     const f = setup(); f.machine.prepareAck = () => ack({ jobId: f.config.jobId, inputHash: H, deviceJobId: f.machine.deviceJobId });
-    const result = await f.run(); expect(result.success).toBe(false); expect(result.error).toContain(error);
+    const result = await f.run(); expect(result.success).toBe(false); expect(result.error).toBe(error);
     expect(f.machine.actuations).toEqual([]); expect(f.machine.commands.map((c) => c.type)).toEqual(["prepare"]);
     expect(f.bundles).toEqual([]); expect(result.bundleId).toBeUndefined();
     expect(f.add.mock.calls.filter((c) => c[2].type === "method_loaded")).toEqual([]);
@@ -344,20 +356,20 @@ describe("F only the kernel writes method_loaded", () => {
       f.machine.emit("method_loaded");
       return { success: true, data: { ...command.payload, deviceJobId: f.machine.deviceJobId } };
     };
-    const result = await f.run(); expect(result.success).toBe(false); expect(result.error).toContain("an adapter emitted method_loaded");
+    const result = await f.run(); expect(result.success).toBe(false); expect(result.error).toBe("an adapter emitted method_loaded");
     expect(f.machine.commands.map((c) => c.type)).toEqual(["prepare"]); expect(f.bundles).toEqual([]);
     expect(f.add.mock.calls.filter((c) => c[2].type === "method_loaded")).toEqual([]);
   });
   it("F2 refuses adapter method_loaded during start", async () => {
     const f = setup(); f.machine.events.unshift("method_loaded");
-    const result = await f.run(); expect(result.success).toBe(false); expect(result.error).toContain("an adapter emitted method_loaded");
+    const result = await f.run(); expect(result.success).toBe(false); expect(result.error).toBe("an adapter emitted method_loaded");
     expect(f.bundles).toEqual([]);
   });
   it("F3 refuses an event mutated into method_loaded after emission", async () => {
     const f = setup(); f.machine.events.unshift("instrument_result");
     f.machine.afterEmit = (event) => { if (event.type === "instrument_result") event.type = "method_loaded"; };
     const result = await f.run(); expect(result.success).toBe(false);
-    expect(result.error).toContain("the bundle would carry a method_loaded the kernel did not record"); expect(f.bundles).toEqual([]);
+    expect(result.error).toBe("the bundle would carry a method_loaded the kernel did not record"); expect(f.bundles).toEqual([]);
   });
   const hashValues = [
     ["equal", H], ["different", OTHER_H], ["undefined", undefined], ["null", null], ["empty", ""], ["number", 7],
@@ -417,12 +429,12 @@ describe("G capability ladders", () => {
   it("G2 tier 2 requires calibration_record", async () => {
     const f = setup(); f.machine.events = ["instrument_result", "execution_completed"];
     const result = await f.run({ assuranceTier: 2 }); expect(result.success).toBe(false);
-    expect(result.error).toContain("Tier 2 requirements not met"); expect(result.error).toContain("calibration_record");
+    expect(result.error).toBe("Tier 2 requirements not met: Missing one of: calibration_record, Need at least 4 events, have 3");
   });
   it("G3 fabricated events never count toward the ladder", async () => {
     const f = setup(); f.machine.events = [...events]; f.machine.source.simulated = true;
     const result = await f.run({ assuranceTier: 2 }); expect(result.success).toBe(false);
-    expect(result.error).toContain("Tier 2 requirements not met"); expect(f.bundles).toEqual([]);
+    expect(result.error).toBe("Tier 2 requirements not met: Missing one of: calibration_record, Missing one of: execution_completed, Missing one of: instrument_result, Missing one of: method_loaded, Need at least 4 events, have 0"); expect(f.bundles).toEqual([]);
   });
   it("G4 legacy uses a supplied capability ladder", async () => {
     const f = legacy(); f.machine.events = ["method_loaded", ...events];
