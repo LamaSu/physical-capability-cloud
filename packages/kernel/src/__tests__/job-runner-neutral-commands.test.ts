@@ -192,6 +192,7 @@ describe("B synchronous refusals", () => {
   it.each([
     ["B8 string accepts", "prepare start", "accepts must be a list of command types"],
     ["B9 missing start", ["prepare"], "adapter does not accept start"],
+    ["X-16 legacy list missing start", ["load_gcode"], "adapter does not accept start"],
     ["B10 missing input command", ["stop", "start"], "accepts neither prepare nor load_gcode"],
     ["B11 non-string entry", [1, "prepare", "start"], "accepts must be a list of command types"],
   ])("%s", async (_name, accepts, error) => { await refusal({}, error as string, accepts); });
