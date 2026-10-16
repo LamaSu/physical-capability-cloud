@@ -12,12 +12,7 @@ export type GwCode =
   | "job_not_found" | "settlement_owned_status" | "job_kernel_changed" | "invalid_status"
   | "payload_too_large" | "bad_bundle" | "stored_mismatch" | "not_stored"
   | "evidence_refused" | "indeterminate"
-  | "receipt_exists" | "receipt_signer_unavailable" | "kernel_emergency_stopped"
-  | "spend_not_approved" | "idempotency_conflict" | "reconciliation_required"
-  | "kernel_unowned" | "kernel_mismatch" | "job_not_active"
-  | "carrier_record_ownership_mismatch" | "carrier_not_configured"
-  | "missing_fields" | "invalid_parcel" | "invalid_document_hash"
-  | "provider_mode_not_production" | "weight_exceeds_ceiling" | "rate_exceeds_ceiling";
+  | "receipt_exists" | "receipt_signer_unavailable" | "kernel_emergency_stopped";
 
 export type GwSubCode =
   | "job_not_found" | "storage_failed" | "kernel_mismatch" | "job_mismatch"

@@ -33,15 +33,10 @@ export { createJobJournal, JournalError, JOURNAL_STATES, SUBMIT_CODES } from "./
 export type { JobJournal, JournalRecord, JournalState, JournalCode, JournalErrorCode, PackageHashes, SignedMilestonePackage } from "./journal.js";
 export { defaultJobInputSource, fileJobInputSource, JOB_INPUT_CODES, hasPackageInputs } from "./job-inputs.js";
 export type { JobInputs, JobInputSource, JobInputResult, JobInputCode, PackageJobInputs, PackageUnitInputs } from "./job-inputs.js";
-export { createCarrierClient } from "./carrier-client.js";
 export { openUnitEvidenceSession, resumeUnitEvidenceSession, UnitSessionError } from "./unit-session.js";
 export type {
   UnitEvidenceSession, OpenUnitEvidenceSessionOptions, ResumeUnitEvidenceSessionOptions, UnitSessionErrorCode,
 } from "./unit-session.js";
-export type {
-  CarrierClient, CarrierClientConfig, BuyLabelInput, LabelReceipt,
-  CarrierEvent, CarrierShipmentValue, CarrierEventsValue,
-} from "./carrier-client.js";
 export {
   PackageBuilderError, validateUnitContext, validateProgramContext, computeUnitContextDigest,
   computeSessionKeyAuthDigest, computeEvidenceBlockHash, buildMilestonePackage,
