@@ -109,15 +109,23 @@ describe("N109 a standing migration gate tolerates an inactive kept key on every
     return currentApp.inject({ method: "GET", url: "/api/auth/validate", headers: { authorization: `Bearer ${rawKey}` } });
   }
 
-  it("the reviewer's outsider provision/list/revoke repro survives three reboots with counts-only logs", async () => {
+  it("an outsider claiming the owner's identity can neither list nor revoke the kept key, and a self-revoked kept key survives three reboots with counts-only logs", async () => {
     const currentApp = await firstBoot();
     const provision = await currentApp.inject({ method: "POST", url: "/api/auth/provision", payload: { email: owner } });
     expect(provision.statusCode).toBe(201);
     const headers = { authorization: `Bearer ${provision.json().api_key}` };
     const listed = await currentApp.inject({ method: "GET", url: "/api/auth/keys", headers });
     expect(listed.statusCode).toBe(200);
-    expect(listed.json().keys.map((key: { id: string }) => key.id)).toContain(kept.record.id);
-    const revoked = await currentApp.inject({ method: "DELETE", url: `/api/auth/keys/${kept.record.id}`, headers });
+    const listedIds = listed.json().keys.map((key: { id: string }) => key.id);
+    expect(listedIds).not.toContain(kept.record.id);
+    expect(listedIds).toEqual([provision.json().key_id]);
+    const refused = await currentApp.inject({ method: "DELETE", url: `/api/auth/keys/${kept.record.id}`, headers });
+    expect(refused.statusCode).toBe(404);
+    expect(getStore().repos.apiKeys.findById(kept.record.id)!.revokedAt).toBeNull();
+    const revoked = await currentApp.inject({
+      method: "DELETE", url: `/api/auth/keys/${kept.record.id}`,
+      headers: { authorization: `Bearer ${kept.rawKey}` },
+    });
     expect(revoked.statusCode).toBe(200);
     expect(getStore().repos.apiKeys.findById(kept.record.id)!.revokedAt).not.toBeNull();
     const before = allBytes(getStore());
