@@ -192,18 +192,18 @@ async function linkWallet(wallet: WalletRecord, io: WalletRuntime, kernelId?: st
   const expiresAt = Date.parse(created.expiresAt);
   if (!Number.isFinite(expiresAt) || expiresAt <= io.now()) invalidResponse();
   wallet = updateLink(wallet, { requestId: created.requestId, status: "pending_proof" });
-  validateProofMessage(created.message, wallet, created.requestId, io.now(), kernelId, publicOrigin);
+  const pollExpiresAt = Math.min(expiresAt, validateProofMessage(created.message, wallet, created.requestId, io.now(), kernelId, publicOrigin));
   const signature = await signWalletMessage(wallet, created.message);
   const proof = await walletRequest(wallet.gatewayOrigin, `${requestPath(created.requestId)}/proof`, "POST", { signature });
   if (proof.status !== "awaiting_approval") invalidResponse();
   wallet = updateLink(wallet, { requestId: created.requestId, status: "awaiting_approval" });
   io.stdout(`Code: ${created.userCode}\nOpen: ${created.verificationUri}\nYour PCC account owner must approve this link in the browser.\n`);
   let intervalMs = (created.interval as number) * 1000;
-  while (io.now() < expiresAt) {
-    await io.sleep(Math.min(intervalMs, expiresAt - io.now()));
-    if (io.now() >= expiresAt) break;
+  while (io.now() < pollExpiresAt) {
+    await io.sleep(Math.min(intervalMs, pollExpiresAt - io.now()));
+    if (io.now() >= pollExpiresAt) break;
     const data = await walletRequest(wallet.gatewayOrigin, requestPath(created.requestId), "GET");
-    if (io.now() >= expiresAt) break;
+    if (io.now() >= pollExpiresAt) break;
     wallet = saveState(wallet, data);
     if (data.status === "approved") { io.stdout("linked\n"); return wallet; }
     if (data.status === "denied" || data.status === "expired" || data.status === "failed") {

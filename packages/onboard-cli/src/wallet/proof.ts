@@ -54,12 +54,13 @@ function canonicalTimestamp(value: unknown, field: string): number {
   return timestamp;
 }
 
-function checkTimes(issuedAt: unknown, expirationTime: unknown, nowMs: number): void {
+function checkTimes(issuedAt: unknown, expirationTime: unknown, nowMs: number): number {
   const issuedMs = canonicalTimestamp(issuedAt, "issuedAt");
   const expirationMs = canonicalTimestamp(expirationTime, "expirationTime");
   if (!Number.isFinite(issuedMs) || issuedMs < nowMs - 600_000 || issuedMs > nowMs + 300_000) mismatch("issuedAt");
   // W1 requests last ten minutes; retain five minutes of allowed clock skew.
   if (expirationMs <= nowMs || expirationMs <= issuedMs || expirationMs - issuedMs > 900_000) mismatch("expirationTime");
+  return expirationMs;
 }
 
 function gatewayHost(origin: string): string {
@@ -70,7 +71,7 @@ function gatewayHost(origin: string): string {
   }
 }
 
-function validateSecpMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, publicOrigin: string): void {
+function validateSecpMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, publicOrigin: string): number {
   let parsed: ReturnType<typeof parseSiweMessage>;
   try {
     parsed = parseSiweMessage(message);
@@ -102,7 +103,7 @@ function validateSecpMessage(message: string, wallet: WalletRecord, requestId: s
   if (resources.length !== expectedResources.length || resources.some((resource, index) => resource !== expectedResources[index])) mismatch("resources");
   // Read the timestamp bytes too: parseSiweMessage converts them to Dates and
   // would otherwise hide a non-ISO representation before the template rebuild.
-  checkTimes(/^Issued At: (.*)$/m.exec(message)?.[1], /^Expiration Time: (.*)$/m.exec(message)?.[1], nowMs);
+  const expirationMs = checkTimes(/^Issued At: (.*)$/m.exec(message)?.[1], /^Expiration Time: (.*)$/m.exec(message)?.[1], nowMs);
   if (typeof parsed.nonce !== "string" || !/^[A-Za-z0-9]{16,64}$/.test(parsed.nonce)) mismatch("nonce");
   // The SIWE parser ignores lines outside its known fields. Rebuilding W1's
   // exact template prevents signing any extra content hidden from these checks.
@@ -118,9 +119,10 @@ function validateSecpMessage(message: string, wallet: WalletRecord, requestId: s
   } catch {
     mismatch("message");
   }
+  return expirationMs;
 }
 
-function validateEdMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId: string | undefined, publicOrigin: string): void {
+function validateEdMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId: string | undefined, publicOrigin: string): number {
   const prefix = "PCC-LINK-V1\n";
   if (!message.startsWith(prefix)) mismatch("prefix");
   const json = message.slice(prefix.length);
@@ -151,14 +153,14 @@ function validateEdMessage(message: string, wallet: WalletRecord, requestId: str
   if (typeof parsed.consent !== "string" || !/^wallet-link-v1:sha256:[a-f0-9]{64}$/.test(parsed.consent)) mismatch("consent");
   if (typeof parsed.env !== "string" || !/^[a-z0-9-]{1,32}$/.test(parsed.env)) mismatch("env");
   if (typeof parsed.nonce !== "string" || !/^[A-Za-z0-9]{16,64}$/.test(parsed.nonce)) mismatch("nonce");
-  checkTimes(parsed.issuedAt, parsed.expirationTime, nowMs);
+  return checkTimes(parsed.issuedAt, parsed.expirationTime, nowMs);
 }
 
 /** Check the gateway's message before either key type signs any bytes. */
-export function validateProofMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string, publicOrigin = wallet.gatewayOrigin): void {
+export function validateProofMessage(message: string, wallet: WalletRecord, requestId: string, nowMs: number, expectedKernelId?: string, publicOrigin = wallet.gatewayOrigin): number {
   try {
-    if (wallet.keyType === "secp256k1") validateSecpMessage(message, wallet, requestId, nowMs, publicOrigin);
-    else validateEdMessage(message, wallet, requestId, nowMs, expectedKernelId, publicOrigin);
+    if (wallet.keyType === "secp256k1") return validateSecpMessage(message, wallet, requestId, nowMs, publicOrigin);
+    return validateEdMessage(message, wallet, requestId, nowMs, expectedKernelId, publicOrigin);
   } catch (error) {
     if (error instanceof WalletError) throw error;
     mismatch("message");

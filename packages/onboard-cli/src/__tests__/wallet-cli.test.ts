@@ -453,6 +453,29 @@ describe("pcc-wallet ceremony", () => {
     expect(stderr.join("")).toContain("The request expired, or the owner's page said it was already linked; start again with a new key.");
   });
 
+  it("stops polling at the signed message expiry when the gateway expiry is later", async () => {
+    const statuses = Array.from({ length: 125 }, () => "authorization_pending").concat(["denied"]);
+    const gateway = await new Gateway({ statuses, mutateCreated: (created) => {
+      created.expiresAt = new Date(BASE_TIME + 365 * 86_400_000).toISOString();
+    } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toMatch(/^expired\n/);
+    expect(clock).toBe(BASE_TIME + 600_000);
+    expect(gateway.pollIndex).toBe(119);
+    expect((await stored()).link).toMatchObject({ status: "expired" });
+  }, 120_000);
+
+  it("stops polling at the gateway expiry when the signed message expiry is later", async () => {
+    const gateway = await new Gateway({ statuses: ["authorization_pending"], mutateCreated: (created) => {
+      created.expiresAt = new Date(BASE_TIME + 12_000).toISOString();
+    } }).start();
+    expect(await run(gateway, "init", ["--yes"])).not.toBe(0);
+    expect(stderr.join("")).toMatch(/^expired\n/);
+    expect(clock).toBeLessThanOrEqual(BASE_TIME + 12_000);
+    expect(gateway.pollIndex).toBe(2);
+    expect((await stored()).link).toMatchObject({ status: "expired" });
+  });
+
   it("honours the server polling interval", async () => {
     const gateway = await new Gateway({ interval: 7 }).start();
     expect(await run(gateway, "init", ["--yes"])).toBe(0);

@@ -71,6 +71,12 @@ describe("wallet secp256k1 proof checks", () => {
     expect(() => validateProofMessage(siwe(), secpWallet, requestId, now)).not.toThrow();
   });
 
+  it("returns the validated SIWE expiration time in milliseconds", () => {
+    const expirationTime = new Date(now + 600_000);
+    expect(validateProofMessage(siwe({ expirationTime }), secpWallet, requestId, now))
+      .toBe(Date.parse(expirationTime.toISOString()));
+  });
+
   it.each([
     ["domain", { domain: "evil.example" }],
     ["uri", { uri: "https://evil.example/link" }],
@@ -122,6 +128,12 @@ describe("wallet secp256k1 proof checks", () => {
 describe("wallet ed25519 proof checks", () => {
   it("accepts canonical W1 bytes with the configured wallet fields", () => {
     expect(() => validateProofMessage(edMessage(), edWallet, requestId, now)).not.toThrow();
+  });
+
+  it("returns the validated ed25519 expiration time in milliseconds", () => {
+    const expirationTime = new Date(now + 600_000).toISOString();
+    expect(validateProofMessage(edMessage({ expirationTime }), edWallet, requestId, now))
+      .toBe(Date.parse(expirationTime));
   });
 
   it.each([
