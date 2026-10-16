@@ -210,7 +210,7 @@ Machine commands follow this contract:
 - Declare `accepts` as the complete list of commands your adapter implements. The kernel sends nothing outside it, uses `prepare` when the list includes it, and refuses before any command unless it includes `start` and either `prepare` or `load_gcode`. Without `accepts`, the adapter uses the legacy `load_gcode`, then `start` path.
 - `prepare` is **NON-ACTUATING**: stage and validate input only; no motion, heat, dispense, or device-state change beyond staging.
 - A successful prepare returns `{ success: true, data: { jobId, inputHash, deviceJobId } }`. Echo `jobId` and `inputHash` exactly; `deviceJobId` must be the device's own non-empty staged-job id. Any other ack fails the job before `start`.
-- Adapters never emit method_loaded. The kernel records `method_loaded { jobId, deviceJobId, inputHash }` from the ack as its signed input proof; an adapter-emitted `method_loaded` fails a prepare-path job.
+- Adapters never emit method_loaded. The kernel records `method_loaded { jobId, deviceJobId, inputHash }` from the ack as its signed input proof; an adapter-emitted `method_loaded` fails a prepare-path job. In addition, the kernel refuses an adapter method_loaded that carries inputHash on both JobRunner paths.
 - Every evidence event of the device job carries `payload.deviceJobId`.
 - Don't set `payload.jobId`: the kernel commits that binding.
 
@@ -294,17 +294,19 @@ export class YourMachineAdapter implements MachineAdapter {
             typeof inputHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(inputHash)) {
           return { success: false, message: "Invalid input binding" };
         }
-        if (inputData !== undefined && !(inputData instanceof Uint8Array)) {
+        if (inputData === undefined) {
+          return { success: false, message: "prepare: no input data" };
+        }
+        if (!(inputData instanceof Uint8Array)) {
           return { success: false, message: "Expected exact input bytes" };
         }
 
         // NON-ACTUATING: stage exactly these bytes; never move, heat, or dispense.
-        // JobRunner supplies a fresh Uint8Array when JobConfig has inputData.
-        // With only inputHash, resolve the input by that hash in your integration.
-        const bytes = inputData ?? await this.config.resolveInput(inputHash);
-        if (inputData === undefined &&
-            `sha256:${createHash("sha256").update(bytes).digest("hex")}` !== inputHash) {
-          return { success: false, message: "Resolved input hash mismatch" };
+        // JobRunner supplies the exact bytes it hashed as a fresh Uint8Array.
+        // Check the staged bytes before echoing the kernel's signed input proof.
+        const bytes = new Uint8Array(inputData);
+        if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== inputHash) {
+          return { success: false, message: "Input hash mismatch" };
         }
         let deviceJobId: string;
         if (this.config.mockMode) {
@@ -462,9 +464,11 @@ export class YourMachineAdapter implements MachineAdapter {
 
 Mock mode marks its source simulated, so neither its events nor the kernel's `method_loaded` (which copies the source) count toward a tier or settlement.
 
-In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, an optional `pollIntervalMs`, and `resolveInput(inputHash): Promise<Uint8Array>` for hash-only jobs. When `payload.inputData` is present, stage those exact bytes; do not replace them with data fetched by hash. When resolving input yourself, compute SHA-256 of the resolved bytes and refuse prepare without an ack unless it equals `inputHash` exactly: the kernel signs `method_loaded` as the input proof from that ack.
+In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, and an optional `pollIntervalMs`.
 
-The generated HTTP adapter's real-mode prepare refuses with `{ success: false, message: "prepare: staging is not implemented for this device" }` when no `load_program` endpoint is configured. With that endpoint, it sends JSON `{ jobId, inputHash, inputBase64 }` when `payload.inputData` is present, with `inputBase64` encoding the exact bytes. With no input bytes, it sends `{ jobId, inputHash }` so the device resolves the input by hash and verifies those bytes before accepting the stage. It takes `deviceJobId` from the staging call's parsed reply and refuses a missing, empty or non-string id; `start` sends `{ deviceJobId }` to identify that staged job. Adapt the staging call to your device's real upload API; the example above uses a raw-byte upload.
+On the prepare path the kernel always sends the exact bytes it hashed as payload.inputData; a job without input data is refused by the kernel ("the prepare path needs input data"). Stage exactly those bytes and echo inputHash only for them. The example also checks that the staged bytes hash to `inputHash` before acknowledging: the kernel signs `method_loaded` as the input proof from that ack.
+
+The generated HTTP adapter's real-mode prepare refuses with `{ success: false, message: "prepare: staging is not implemented for this device" }` when no `load_program` endpoint is configured. A prepare without `payload.inputData` returns `{ success: false, message: "prepare: no input data" }` with zero requests. With that endpoint and input data, it always sends JSON `{ jobId, inputHash, inputBase64 }`, with `inputBase64` encoding the exact bytes. It takes `deviceJobId` from the staging call's parsed reply and refuses a missing, empty or non-string id; `start` sends `{ deviceJobId }` to identify that staged job. Adapt the staging call to your device's real upload API; the example above uses a raw-byte upload.
 
 An FDM (G-code) machine may implement `load_gcode` instead: that is the legacy path, with the FDM default ladder when no ladder is provided. Declare `accepts` with `load_gcode` and the other commands it implements.
 
@@ -740,12 +744,6 @@ const machine = new YourMachineAdapter("dev_liquid_001", KERNEL_ID, {
   apiUrl: "http://192.168.1.100:8080",       // your machine's API
   mockMode: false,
   pollIntervalMs: 2000,
-  resolveInput: async (inputHash) => {
-    // Adapt this lookup to your input store's retrieval API.
-    const response = await fetch(`http://192.168.1.100:8080/programs/by-hash/${encodeURIComponent(inputHash)}`);
-    if (!response.ok) throw new Error("Input lookup failed");
-    return new Uint8Array(await response.arrayBuffer());
-  },
 });
 
 const powerSensor = new YourSensorAdapter("dev_power_001", KERNEL_ID, {
@@ -787,10 +785,10 @@ evidenceEmitter.onBundle((bundle) => {
 
 ### 3.2 Kernel HTTP server (optional standalone mode)
 
-If running standalone (not embedded in a kernel agent), expose an HTTP API. Keep the resolved capability CSDs in `capabilityCsds`. `/execute` takes `inputHash` and optional `inputData`:
+If running standalone (not embedded in a kernel agent), expose an HTTP API. Keep the resolved capability CSDs in `capabilityCsds`. `/execute` takes `inputHash` and `inputData` for prepare-path jobs:
 
 - `inputHash` is `"sha256:"` followed by 64 lowercase hex digits: SHA-256 of the exact input bytes, with no text normalization. `gcodeHash` is its legacy alias; give exactly one.
-- `inputData` is a string (its UTF-8 bytes) or a `Uint8Array`; `gcodeData` is its alias. The kernel hashes the bytes and refuses a mismatch. On prepare, it supplies those exact bytes as a fresh `Uint8Array` in `{ jobId, inputHash, inputData }`. With only a hash, prepare receives `{ jobId, inputHash }` and the adapter resolves the input by hash.
+- `inputData` is a string (its UTF-8 bytes) or a `Uint8Array`; `gcodeData` is its alias. The kernel hashes the bytes and refuses a mismatch. On prepare, it always supplies those exact bytes as a fresh `Uint8Array` in `{ jobId, inputHash, inputData }`; a job without input data is refused with "the prepare path needs input data". Stage those bytes and echo `inputHash` only for them.
 
 The handler below uses the prepare path. A legacy `load_gcode` adapter passes no `tierLadder`, so the FDM default applies. Omit the `compileTierLadder` call and `tierLadder` argument for that path: the compiler refuses every current built-in CSD, including `fdm`, except `document-print-leg` and `document-print-and-mail`. See §8.4 before authoring a custom ladder.
 
@@ -1112,7 +1110,7 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
 3. JobRunner orchestrates a valid run (legacy input or direct prepare-path call):
    a. EvidenceEmitter.registerStep(jobId, stepId, tier)
    b. Wire evidence listeners (machine → emitter, sensors → emitter, camera → emitter)
-   c. Machine: execute("prepare", { jobId, inputHash, inputData? })
+   c. Machine: execute("prepare", { jobId, inputHash, inputData })
       Kernel checks the ack and records method_loaded { jobId, deviceJobId, inputHash }.
       Legacy G-code adapter: execute("load_gcode", ...) instead.
    d. If tier >= 1: sensors.startRecording(jobId)
@@ -1139,7 +1137,7 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
 
 KernelAgent does not yet pass inputHash, inputData or tierLadder, so a prepare-path adapter's jobs are refused under it; run prepare-path jobs through JobRunner directly (§3.2) until that follow-up lands.
 
-Before any command, the kernel refuses an `inputData` hash mismatch or an `accepts` list that lacks `start` or both input commands. It sends no undeclared command. On the prepare path only, it applies the strict `inputHash` format check (`sha256:` plus exactly 64 lowercase hex digits); the legacy `load_gcode` path passes the hash through unchanged. The prepare path also refuses a missing or malformed ladder, or a ladder missing the job's tier, at every tier from 0 to 3. A prepare ack that does not echo `jobId` and `inputHash` exactly with a non-empty `deviceJobId` fails before `start`.
+Before any command, the kernel refuses an `inputData` hash mismatch or an `accepts` list that lacks `start` or both input commands. It sends no undeclared command. On the prepare path only, it applies the strict `inputHash` format check (`sha256:` plus exactly 64 lowercase hex digits); the legacy `load_gcode` path passes the hash through unchanged. The prepare path refuses a job without input data ("the prepare path needs input data"); it always sends the exact bytes it hashed as `payload.inputData`. Stage those bytes and echo `inputHash` only for them. It also refuses a missing or malformed ladder, or a ladder missing the job's tier, at every tier from 0 to 3. A prepare ack that does not echo `jobId` and `inputHash` exactly with a non-empty `deviceJobId` fails before `start`.
 
 ### 7.2 Custom job execution
 
@@ -1252,7 +1250,7 @@ const tierLadder = await compileTierLadder({ ...csd, evidence });
 
 Legacy CSDs (for example, `fdm`, `sla`, `cnc-3axis`, and `laser-cut`) are refused with `TierLadderError` code `"tier-adds-no-event-type"`: their tiers do not add the event types needed to distinguish the tiers. This currently includes every built-in CSD except `document-print-leg` and `document-print-and-mail`. Update the CSD's evidence tiers to name event types before compiling.
 
-On the prepare path, the kernel refuses a missing or malformed ladder, or one that lacks the job's tier, **before any command at every tier, 0 to 3**. After the run, unmet ladder requirements fail the job at tier >= 2 and warn at tiers 0–1. The oracle recomputes the tier from the signed bundle under the funded capability's pinned ladder.
+On the prepare path, input data is required: the kernel sends the exact bytes it hashed as `payload.inputData` and refuses a job without them ("the prepare path needs input data"). Stage those bytes and echo `inputHash` only for them. The kernel also refuses a missing or malformed ladder, or one that lacks the job's tier, **before any command at every tier, 0 to 3**. After the run, unmet ladder requirements fail the job at tier >= 2 and warn at tiers 0–1. The oracle recomputes the tier from the signed bundle under the funded capability's pinned ladder.
 
 Only pinned ladders (today `document-print-leg` and `document-print-and-mail`) are recomputed for settlement, so the network must pin a new class's ladder.
 
@@ -1372,6 +1370,7 @@ Each transfer pair tracks episode counts and success rates. When enough successf
 ### 11.1 Unit test your adapter
 
 ```typescript
+import { createHash } from "node:crypto";
 import { afterEach, describe, it, expect, vi } from "vitest";
 
 // Use mock mode and stub fetch: these tests never contact equipment.
@@ -1384,13 +1383,12 @@ describe("YourMachineAdapter neutral command contract", () => {
     const adapter = new YourMachineAdapter("test-01", "kernel-test", {
       apiUrl: "http://mock:8080",
       mockMode: true,
-      resolveInput: async () => new Uint8Array(),
     });
     const events: any[] = [];
     adapter.onEvidence(event => events.push(event));
     const jobId = "test-job";
-    const inputHash = "sha256:" + "ab".repeat(32);
     const inputData = new TextEncoder().encode("test method");
+    const inputHash = `sha256:${createHash("sha256").update(inputData).digest("hex")}`;
 
     try {
       expect(adapter.accepts).toEqual(["prepare", "start", "stop", "status"]);
@@ -1440,7 +1438,6 @@ describe("Integration", () => {
       apiUrl: "http://mock:8080",
       mockMode: true,
       pollIntervalMs: 10,
-      resolveInput: async () => new Uint8Array(),
     });
     const emitter = new EvidenceEmitter("kernel-test");
     const runner = new JobRunner(machine, [], null, emitter);
