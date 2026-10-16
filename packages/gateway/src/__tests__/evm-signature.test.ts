@@ -193,7 +193,7 @@ describe("smart-account signature verifier", () => {
       expect(held).toHaveLength(31);
     } finally {
       held.forEach(call => call.resolve("0x01"));
-      await Promise.all(checks);
+      await Promise.allSettled(checks);
     }
   });
   it("cap burst admits exactly sixteen simultaneous checks and refuses one immediately", async () => {
@@ -265,6 +265,7 @@ describe("smart-account signature verifier", () => {
   it("cap holds on a warm chain cache, and every revert frees exactly one slot", async () => {
     const signature = await smartSignature();
     const cap = capHarness();
+    const extra: Promise<unknown>[] = [];
     cap.install();
     try {
       const first = await cap.burst(signature);
@@ -280,12 +281,40 @@ describe("smart-account signature verifier", () => {
       const before = requests.length;
       const warm = await cap.burst(signature);
       expect(requests.slice(before).map(req => req.method)).toEqual(Array(16).fill("eth_call"));
-      warm.held.forEach(call => call.resolve("0x01"));
+      // A check made while sixteen warm eth_calls are held is refused without a request.
+      // Not awaited directly: an admitted check would be held until the drain.
+      const full = requests.length;
+      const late = check(signature);
+      extra.push(late);
+      let lateResult: unknown = "pending";
+      void late.then(result => { lateResult = result; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(lateResult).toEqual({ ok: false, reason: "unavailable" });
+      expect(requests).toHaveLength(full);
+
+      // Release the warm calls through every exit.
+      warm.held.forEach((call, index) => {
+        if (index < 4) call.resolve("0x01");
+        else if (index < 8) call.resolve("0x00");
+        else if (index < 12) call.reject(Object.assign(new Error("execution reverted"), { code: 3, data: "0x12345678" }));
+        else call.reject(new HttpRequestError({ url: "https://sigverify.invalid", details: "offline" }));
+      });
       const warmResults = await Promise.all(warm.calls);
-      expect(warmResults.filter(result => result.ok)).toEqual(Array.from({ length: 16 }, () => ({ ok: true, kind: "contract" })));
-      expect(warmResults.filter(result => !result.ok)).toEqual([{ ok: false, reason: "unavailable" }]);
+      expect(warmResults.filter(result => result.ok)).toEqual(Array.from({ length: 4 }, () => ({ ok: true, kind: "contract" })));
+      expect(warmResults.filter(result => !result.ok && result.reason === "invalid")).toHaveLength(8);
+      expect(warmResults.filter(result => !result.ok && result.reason === "unavailable")).toHaveLength(5);
+
+      // A third burst, still warm, must hold sixteen again.
+      const again = requests.length;
+      const third = await cap.burst(signature);
+      expect(requests.slice(again).map(req => req.method)).toEqual(Array(16).fill("eth_call"));
+      third.held.forEach(call => call.resolve("0x01"));
+      const thirdResults = await Promise.all(third.calls);
+      expect(thirdResults.filter(result => result.ok)).toEqual(Array.from({ length: 16 }, () => ({ ok: true, kind: "contract" })));
+      expect(thirdResults.filter(result => !result.ok)).toEqual([{ ok: false, reason: "unavailable" }]);
     } finally {
       await cap.drain();
+      await Promise.allSettled(extra);
     }
   });
   it("rejects a one-byte tamper and a different message using the exact personal-sign hash", async () => {
