@@ -2,6 +2,7 @@ import { inspect } from "node:util";
 import { createPrivateKey, sign } from "node:crypto";
 import { makeKernelEd25519Signer } from "./kernel-signer.js";
 import { getAddress, type Address, type Hex, type LocalAccount } from "viem";
+import type { SessionKey } from "@pcc/spec";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   DeviceSigningError, delegationParent, prepareDelegation, prepareD2,
@@ -58,7 +59,7 @@ export interface OperatorKeyLoadOptions extends KeyLoadOptions {
   terms?: HostTerms;
 }
 
-/** Public identity and exactly two protocol signers; private material stays in closures. */
+/** Public identity, delegation signing and guarded raw32 signing; private material stays in closures. */
 export interface DeviceKey {
   readonly publicKeyHex: string;
   readonly signingPublicKey: string;
@@ -78,8 +79,7 @@ const deviceKeyPrototype = Object.freeze(Object.assign(Object.create(null), {
 }));
 
 function deviceKey(seed: Buffer, publicKeyHex: string, signingPublicKey: string,
-  binding: DeviceDelegationBinding | undefined): DeviceKey {
-  const parent = delegationParent(binding);
+  parent: SessionKey["parentAgentId"] | undefined): DeviceKey {
   // RFC 8410 PKCS#8 prefix for a raw Ed25519 seed; this temporary copy is erased.
   const encoded = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]);
   let privateKey;
@@ -185,6 +185,7 @@ async function keyBytes(path: string, options: KeyLoadOptions): Promise<Buffer> 
 }
 
 export async function loadDeviceKey(path: string, options: DeviceKeyLoadOptions = {}): Promise<DeviceKey> {
+  const parent = delegationParent(options.delegationBinding);
   const bytes = await keyBytes(path, options);
   let seed: Buffer | undefined;
   try {
@@ -197,7 +198,7 @@ export async function loadDeviceKey(path: string, options: DeviceKeyLoadOptions 
     const { publicKeyHex, signingPublicKey, secretKey } = makeKernelEd25519Signer(seed);
     try {
       if (signingPublicKey !== record.publicKey) throw new KeyFileError("public_mismatch", path);
-      return deviceKey(seed, publicKeyHex, signingPublicKey, options.delegationBinding);
+      return deviceKey(seed, publicKeyHex, signingPublicKey, parent);
     } finally { secretKey.fill(0); }
   } catch (error) {
     if (error instanceof KeyFileError) throw error;

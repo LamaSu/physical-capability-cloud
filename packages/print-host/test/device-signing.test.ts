@@ -1,8 +1,9 @@
-import { createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, randomBytes, sign, verify } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
+import { kernelSigningProofMessage } from "@pcc/kernel";
 import { DEFAULT_SESSION_KEY_CONFIG, sessionKeyDelegationPreimage, signingPreimage } from "@pcc/spec";
 import { getAddress, type Hex } from "viem";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -112,7 +113,7 @@ describe("narrow device signing", () => {
   });
 
   it("signD2 signs exactly raw32 for byte and lowercase hex inputs", async () => {
-    const hash = randomBytes(32);
+    const hash = createHash("sha256").update(randomBytes(32)).digest();
     const before = Buffer.from(hash);
     const signature = signatureBytes(await key.signD2(hash));
     expect(verify(null, hash, devicePublicKey(), signature)).toBe(true);
@@ -142,6 +143,39 @@ describe("narrow device signing", () => {
     expect(verify(null, preimage, session.publicKey, bundle)).toBe(false);
     await closedRefusal(() => key.signD2(preimage), "bad_bytes32");
     await closedRefusal(() => key.signD2(bundlePreimage), "bad_bytes32");
+    const registration = Buffer.from(kernelSigningProofMessage("kernel_01"), "utf8");
+    expect(registration.length).toBe(32);
+    await closedRefusal(() => key.signD2(registration), "forbidden_protocol");
+    await closedRefusal(() => key.signD2(`0x${registration.toString("hex")}`), "forbidden_protocol");
+    const longerRegistration = Buffer.from(kernelSigningProofMessage("kernel_010"), "utf8");
+    expect(longerRegistration.length).toBe(33);
+    await closedRefusal(() => key.signD2(longerRegistration), "bad_bytes32");
+    await closedRefusal(() => key.signD2(`0x${longerRegistration.toString("hex")}`), "bad_bytes32");
+    const entryHash = Buffer.from(`sha256:${randomBytes(13).toString("hex").slice(0, 25)}`, "utf8");
+    expect(entryHash.length).toBe(32);
+    await closedRefusal(() => key.signD2(entryHash), "forbidden_protocol");
+    await closedRefusal(() => key.signD2(`0x${entryHash.toString("hex")}`), "forbidden_protocol");
+    const shorterEntryHash = entryHash.subarray(0, 31);
+    expect(shorterEntryHash.length).toBe(31);
+    await closedRefusal(() => key.signD2(shorterEntryHash), "bad_bytes32");
+    await closedRefusal(() => key.signD2(`0x${shorterEntryHash.toString("hex")}`), "bad_bytes32");
+  });
+
+  it.each([8453, 1, 11155111])("loadDeviceKey refuses delegation binding chainId %i", async (chainId) => {
+    const invalidBinding = { ...binding, chainId } as DeviceDelegationBinding;
+    await closedRefusal(() => loadDeviceKey(keyPath, { now, delegationBinding: invalidBinding }), "bad_binding");
+  });
+
+  it("loadDeviceKey refuses an extra key in the delegation binding", async () => {
+    const invalidBinding = { ...binding, extra: 1 };
+    await closedRefusal(() => loadDeviceKey(keyPath, { now, delegationBinding: invalidBinding }), "bad_binding");
+  });
+
+  it.each(["unsupported chain", "malformed operator"] as const)("loadDeviceKey validates %s before reading the key file", async (label) => {
+    const invalidBinding = (label === "unsupported chain" ? { ...binding, chainId: 1 }
+      : { ...binding, operator: "0x1234" }) as DeviceDelegationBinding;
+    await closedRefusal(() => loadDeviceKey(keyPath, { now, delegationBinding: invalidBinding }), "bad_binding");
+    await closedRefusal(() => loadDeviceKey(join(directory, "missing-device.json"), { now, delegationBinding: invalidBinding }), "bad_binding");
   });
 
   it("delegation signing requires a load-time operator binding and snapshots its identity", async () => {
@@ -210,6 +244,44 @@ describe("narrow device signing", () => {
       spec.DEFAULT_SESSION_KEY_CONFIG.defaultAllowedActions = original;
       vi.resetModules();
     }
+  });
+
+  it.each(["fundedAt", "issuedAt", "expiresAt", "reclaimAt", "firstEventAt"] as const)("signDelegation refuses milliseconds in %s with otherwise consistent timing", async (field) => {
+    const input = delegation();
+    const milliseconds = now.getTime();
+    if (field === "fundedAt" || field === "issuedAt") {
+      if (field === "fundedAt") input.fundedAt = milliseconds;
+      input.issuedAt = milliseconds;
+      input.firstEventAt = milliseconds + 1.25;
+      input.expiresAt = input.reclaimAt = milliseconds + 86400;
+    } else if (field === "expiresAt" || field === "reclaimAt") {
+      input.expiresAt = input.reclaimAt = milliseconds;
+    } else {
+      input.firstEventAt = milliseconds;
+    }
+    expect(input[field]).toBe(milliseconds);
+    expect(input.fundedAt <= input.issuedAt && input.issuedAt <= input.firstEventAt).toBe(true);
+    expect(input.expiresAt === input.reclaimAt && input.expiresAt > input.issuedAt).toBe(true);
+    await closedRefusal(() => key.signDelegation(input), "bad_time");
+  });
+
+  it("signDelegation accepts the lower seconds boundary and refuses an earlier fundedAt", async () => {
+    const input = delegation();
+    input.fundedAt = input.issuedAt = input.firstEventAt = 1_600_000_000;
+    input.expiresAt = input.reclaimAt = 1_600_000_001;
+    expect(verify(null, sessionKeyDelegationPreimage(input), devicePublicKey(), signatureBytes(await key.signDelegation(input)))).toBe(true);
+    input.fundedAt--;
+    await closedRefusal(() => key.signDelegation(input), "bad_time");
+  });
+
+  it("signDelegation accepts timestamps below 2^32 and refuses firstEventAt at that boundary", async () => {
+    const input = delegation();
+    input.fundedAt = input.issuedAt = 2 ** 32 - 2;
+    input.firstEventAt = 2 ** 32 - 1.25;
+    input.expiresAt = input.reclaimAt = 2 ** 32 - 1;
+    expect(verify(null, sessionKeyDelegationPreimage(input), devicePublicKey(), signatureBytes(await key.signDelegation(input)))).toBe(true);
+    input.firstEventAt = 2 ** 32;
+    await closedRefusal(() => key.signDelegation(input), "bad_time");
   });
 
   const invalid: Array<[string, string, (input: DelegationInput) => void]> = [

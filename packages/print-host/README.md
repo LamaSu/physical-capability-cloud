@@ -21,7 +21,9 @@ existing files and writes the device and operator keys at 0600 inside a private
 directory. An optional `--not-after` must be later than the current time and the
 keys' `createdAt`. Keep the funded Ed25519 device principal separate from the secp256k1
 operator EOA. The per-unit SESSION key signs the bundle (H1(b)). The device key
-signs ONLY LO-EV-1 delegations and D2, through `signDelegation` and `signD2`.
+signs LO-EV-1 delegations through `signDelegation`; `signD2` signs the 32 bytes
+the caller supplies, behind a guard that refuses bytes beginning with the UTF-8
+prefixes `pcc-kernel-signing-key:` and `sha256:` in either raw or hex form.
 Load it with `delegationBinding: { chainId, operator }` from the host's configured
 chain and operator identity; loading without that binding permits public identity
 checks and D2, but refuses delegation signing. Delegations name one bounded job id
@@ -29,9 +31,22 @@ checks and D2, but refuses delegation signing. Delegations name one bounded job 
 the spec's exact MVP action set, and a distinct 32-byte session public key. Their
 whole-second issuance lies between funding and the first event, expiry equals
 reclaimAt, and maxSignatures equals the finalized event count (1–1000).
+Delegation input must be a plain object with exactly these 11 own enumerable data
+properties: `sessionId`, `parentAgentId`, `publicKey`, `issuedAt`, `expiresAt`,
+`scope`, `jobId`, `fundedAt`, `reclaimAt`, `firstEventAt`, and `eventCount`. Extra
+properties are refused even when their value is `undefined`, and accessors are
+refused. `sessionId` must match `/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/`.
+`fundedAt`, `issuedAt`, `expiresAt`, and `reclaimAt` must be integer Unix seconds
+in the range `1_600_000_000 <= t < 2^32`. `firstEventAt` uses the same range and
+may include a fractional second for event timing.
 `signD2` accepts exactly 32 raw bytes or their `0x`-prefixed lowercase hex encoding.
+Both UTF-8 prefixes, `pcc-kernel-signing-key:` and `sha256:`, are refused after decoding.
+An honest D2 input is a SHA-256 output, so the `sha256:` guard's false refusal has
+probability 2^-56 per unit; grinding a package body to force a single-unit refusal
+costs about 2^56 SHA-256 evaluations, acceptable for the MVP. The durable fix is a
+typed package body hashed inside the key module.
 The local unit session supplies the delegated bundle while the toolkit's GAP-7
-remains open.
+unit session and bundle builders remain open.
 
 The operator key has
 three scoped uses: D1 `FinalMilestonePackageV2` signatures, zero-value EIP-1559
@@ -40,7 +55,7 @@ acceptance signatures. V-next `fund()` always requires the operator acceptance:
 the operator never sends the funding transaction
 (`packages/contracts/src/VNextSettlementEscrow.sol:346`). The WP-A wallet proof
 remains open. Loading the key binds all three signing methods to the configured
-chain. D1 uses the fixed domain name
+chain. JobPolicy acceptance was added by #620. D1 uses the fixed domain name
 `PCC FinalMilestonePackage`, version `2`, and the supplied escrow address for both
 the message and verifying contract. The escrow address is supplied per signing
 call until canonical deployment binding is added; no escrow configuration field

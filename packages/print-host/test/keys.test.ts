@@ -17,7 +17,22 @@ const mocks = vi.hoisted(() => ({
   captureDeviceBuffers: false,
   deviceSeeds: [] as Uint8Array[],
   deviceSecretKeys: [] as Uint8Array[],
+  captureDevicePkcs8: false,
+  devicePkcs8Buffers: [] as Buffer[],
+  pkcs8SeedPresent: false,
 }));
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, createPrivateKey: vi.fn((...args: Parameters<typeof actual.createPrivateKey>) => {
+    const options = args[0];
+    if (mocks.captureDevicePkcs8 && typeof options === "object" && options !== null &&
+      "key" in options && Buffer.isBuffer(options.key)) {
+      mocks.devicePkcs8Buffers.push(options.key);
+      mocks.pkcs8SeedPresent = options.key.subarray(16).some((byte) => byte !== 0);
+    }
+    return actual.createPrivateKey(...args);
+  }) };
+});
 vi.mock("../src/kernel-signer.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/kernel-signer.js")>();
   return { ...actual, makeKernelEd25519Signer: vi.fn((...args: Parameters<typeof actual.makeKernelEd25519Signer>) => {
@@ -54,6 +69,9 @@ beforeEach(async () => {
   mocks.captureDeviceBuffers = false;
   mocks.deviceSeeds = [];
   mocks.deviceSecretKeys = [];
+  mocks.captureDevicePkcs8 = false;
+  mocks.devicePkcs8Buffers = [];
+  mocks.pkcs8SeedPresent = false;
   vi.mocked(privateKeyToAccount).mockClear();
   directory = await mkdtemp(join(tmpdir(), "ph2-keys-"));
   await chmod(directory, 0o700);
@@ -182,6 +200,16 @@ describe("host key loading and redaction", () => {
       expect(mocks.deviceSecretKeys[0].every((byte) => byte === 0), "derived secretKey was retained").toBe(true);
     });
   }
+
+  it("device zeroes all 48 bytes of the PKCS#8 seed copy after loadDeviceKey", async () => {
+    const path = await writeDocument(deviceDocument());
+    mocks.captureDevicePkcs8 = true;
+    await loadDeviceKey(path, { now });
+    expect(mocks.devicePkcs8Buffers.length).toBe(1);
+    expect(mocks.devicePkcs8Buffers[0].length).toBe(48);
+    expect(mocks.pkcs8SeedPresent, "the captured PKCS#8 buffer contained the runtime seed").toBe(true);
+    expect(mocks.devicePkcs8Buffers[0].every((byte) => byte === 0), "PKCS#8 seed copy was retained").toBe(true);
+  });
 
   it("operator exposes only its public address and narrow signing closures", async () => {
     const document = operatorDocument();
