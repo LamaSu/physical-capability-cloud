@@ -312,6 +312,14 @@ describe("W2 CLI funding", () => {
     expect(errors.join("")).toContain("funding_pending");
     expect(output.join("")).not.toContain("funded");
   });
+  it("permanent pending agent five-ETH-only grant prints skipped and exits with funding_pending", async () => {
+    const claims = realFundingClaims("agent", false).map(({ txHash: _hash, ...claim }) => ({ ...claim, status: "pending" }));
+    store(); gateway({ status: "pending", claims, skipped: SKIPPED });
+    expect(await fund()).toBe(1);
+    expect(output.join("")).toBe("eth 0.0001 pending\n".repeat(5) + "usdc 1 skipped: cap_reached (global)\n");
+    expect(output.join("")).not.toContain("funded");
+    expect(errors.join("")).toBe("funding_pending\n");
+  });
   it.each([[404, "not_found"]] as const)("%s/%s is linked (unfunded), exit zero", async (status, error) => {
     store(); gateway({ error }, status);
     expect(await fund()).toBe(0);

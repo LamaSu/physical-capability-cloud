@@ -802,6 +802,16 @@ describe("wallet create metadata and options", () => {
 });
 
 describe("W2 init funding outcome", () => {
+  it("init accepts an agent five-ETH-only grant and prints skipped before funded and ready", async () => {
+    const claims = realFundingClaims("agent", false);
+    const gateway = await new Gateway({ statuses: ["approved"], fundBody: {
+      status: "funded", claims, skipped: [{ token: "usdc", amount: "1", reason: "cap_reached", cap: "global" }],
+    } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(0);
+    expect(stdout.join("")).toContain("linked\n" + claims.map(claim => `eth 0.0001 succeeded ${claim.txHash}\n`).join("")
+      + "usdc 1 skipped: cap_reached (global)\nfunded\nready\n");
+    expect(gateway.requests.filter(request => request.path.endsWith("/fund"))).toHaveLength(1);
+  });
   it("init partial prints each failed claim and never ready", async () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundBody: { status: "partial", claims: [{ token: "eth", amount: "0.0001", status: "failed" }, ...realFundingClaims().slice(1)] } }).start();
     expect(await run(gateway, "init", ["--yes"])).toBe(1);
