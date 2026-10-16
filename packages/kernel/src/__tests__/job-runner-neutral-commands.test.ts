@@ -211,11 +211,20 @@ describe("B synchronous refusals", () => {
     await refusal({ tierLadder: undefined, assuranceTier }, "the prepare path needs a tier ladder");
   });
   it("B14 ladder lacks tier 3", async () => { await refusal({ assuranceTier: 3 }, "tier ladder has no tier 3"); });
+  it("X-10 legacy ladder lacks tier 3 before commands or registerStep", async () => {
+    await refusal({ assuranceTier: 3 }, "tier ladder has no tier 3", undefined, new LegacyStub());
+  });
   it.each(["schema", "minimumEvents"])("B15 malformed ladder %s", async (fault) => {
     const bad = structuredClone(ladder);
     if (fault === "schema") Object.assign(bad, { schemaHash: "x" });
     else bad.tiers[0]!.minimumEvents++;
     await refusal({ tierLadder: bad }, "tier ladder is malformed: malformed-ladder");
+  });
+  it.each(["schema", "minimumEvents"])("X-11 malformed legacy ladder %s before commands or registerStep", async (fault) => {
+    const bad = structuredClone(ladder);
+    if (fault === "schema") Object.assign(bad, { schemaHash: "x" });
+    else bad.tiers[0]!.minimumEvents++;
+    await refusal({ tierLadder: bad }, "tier ladder is malformed: malformed-ladder", undefined, new LegacyStub());
   });
 });
 
