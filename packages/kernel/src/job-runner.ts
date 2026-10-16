@@ -433,6 +433,7 @@ export class JobRunner {
             // Adapter events retain their references until recording. A type changed
             // after emission must not introduce another input proof into the bundle.
             const payload = methods[0]?.payload;
+            // TODO PR-2a: allow the emitter's unit binding fields once JobRunner registers a unit.
             if (methods.length !== 1 || payload === null || typeof payload !== "object" ||
                 Array.isArray(payload) || Reflect.ownKeys(payload).length !== 3 ||
                 !["jobId", "deviceJobId", "inputHash"].every((key) => Object.hasOwn(payload, key)) ||
