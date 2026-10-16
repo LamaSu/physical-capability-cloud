@@ -45,6 +45,24 @@ const neutralDeviceKeys = new Set([
   "clock", "cancelEventOrder", "cancelConfirmMs",
 ]);
 
+// Payload fields written by FakeDevice/faults or inspected by the runner must
+// never double as job bindings, including the unreachable silent-cancel fields.
+// Keep FakeDevice's own jobId/mock/origin restrictions independently enforced.
+const payloadKeys = new Set([
+  "progress", "state", "reason", "jobStateReasons", "jobId", "mock", "origin",
+  "settlementUnitId", "challengeNonce",
+]);
+
+function validateBindingKey(bindingKey: unknown): void {
+  if (bindingKey === undefined) return;
+  if (typeof bindingKey !== "string" || bindingKey.trim().length === 0) {
+    throw new TypeError("Invalid negative control bindingKey: must be a nonempty string");
+  }
+  if (payloadKeys.has(bindingKey)) {
+    throw new TypeError(`Invalid negative control bindingKey: ${bindingKey} collides with a payload field`);
+  }
+}
+
 function validateDeviceOptions(options: NegativeControlOptions): void {
   const device = options.deviceOptions;
   if (device === undefined) return;
@@ -150,6 +168,7 @@ function fakeDeviceConformanceFixture(
  * No control removes either fabrication signal or certifies physical equipment.
  */
 export function generateNegativeControls(options: NegativeControlOptions = {}): NegativeControls {
+  validateBindingKey(options.bindingKey);
   validateDeviceOptions(options);
   const baseline = fakeDeviceConformanceFixture(options);
   const honest: NegativeControl = {

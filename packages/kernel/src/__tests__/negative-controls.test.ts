@@ -103,6 +103,51 @@ async function captureWholeRun(entry: NegativeControl) {
 
 describe("generated adapter conformance negative controls", () => {
   it.each([
+    "progress", "state", "reason", "jobStateReasons", "jobId", "mock", "origin",
+    "settlementUnitId", "challengeNonce",
+  ])("refuses payload collision bindingKey %s at generation", (bindingKey) => {
+    expect(() => generateNegativeControls({ bindingKey })).toThrow(new TypeError(
+      `Invalid negative control bindingKey: ${bindingKey} collides with a payload field`,
+    ));
+  });
+
+  it.each(["", "   ", null, 0, true, {}, []])("refuses invalid bindingKey %j at generation", (bindingKey) => {
+    expect(() => generateNegativeControls({ bindingKey } as NegativeControlOptions)).toThrow(new TypeError(
+      "Invalid negative control bindingKey: must be a nonempty string",
+    ));
+  });
+
+  it("refuses every delivered payload key except the binding across the whole control set", async () => {
+    const entries = generatedEntries();
+    const runs = await Promise.all(entries.map(captureWholeRun));
+    const deliveredKeys = new Set(runs.flatMap(({ captured }) => captured.flatMap(({ deliveries }) =>
+      deliveries.flatMap(({ event }) => Object.keys(event.payload)),
+    )));
+    const bindingKey = entries[0].profile.bindingKey;
+    const otherKeys = [...deliveredKeys].filter((key) => key !== bindingKey);
+    // Pin the number of refusal assertions too: skipping a delivered key must fail.
+    expect.assertions(otherKeys.length + 2);
+    expect(deliveredKeys.has(bindingKey)).toBe(true);
+    expect(otherKeys.length).toBeGreaterThan(0);
+    for (const key of otherKeys) {
+      expect(() => generateNegativeControls({ bindingKey: key })).toThrow(new TypeError(
+        `Invalid negative control bindingKey: ${key} collides with a payload field`,
+      ));
+    }
+  });
+
+  it("bindingKey runId preserves the whole control set including honest", async () => {
+    const { honest, controls } = generateNegativeControls({ bindingKey: "runId" });
+    await Promise.all([honest, ...controls].map(async (entry) => {
+      expect(entry.profile.bindingKey).toBe("runId");
+      const report = await runAdapterConformance(entry.makeAdapter, entry.profile);
+      expect(Object.fromEntries(report.clauses.map(({ id, status }) => [id, status])), entry.id)
+        .toEqual(entry.expected);
+      expect(entry.expected, entry.id).toEqual(contractVector(entry.fault));
+    }));
+  });
+
+  it.each([
     ["preset", "ipp"],
     ["bindingKey", "runId"],
     ["declaredCommands", ["load_gcode", "start", "pause", "resume", "stop", "status"]],
