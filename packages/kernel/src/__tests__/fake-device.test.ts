@@ -1,5 +1,6 @@
 /** FakeDevice's public contract: adapters/types.ts, outstanding-work.ts and spec/evidence/is-fabricated.ts. */
 import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, isFabricated, type EvidenceEvent } from "@pcc/spec";
 import type { MachineCommand, MachineCommandResult } from "../adapters/types.js";
 import { FakeDevice, type FakeDeviceOptions, type FakeDeviceStartOutcome } from "../testing/fake-device.js";
@@ -169,6 +170,86 @@ describe("FakeDevice scripted commands", () => {
 });
 
 describe("FakeDevice evidence honesty", () => {
+  it.each(["id", "bindingKey"] as const)("keeps private emission identity after a cast write to public %s", async (field) => {
+    const device = await accepted({ bindingKey: "runId" });
+    (device as unknown as Record<string, unknown>)[field] = field === "id" ? "foreign-device" : "jobId";
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    device.progress(1);
+    device.complete();
+    expect(events).toHaveLength(2);
+    for (const event of events) {
+      expect(event.source.deviceId).toBe("generic-device");
+      expect(event.source).toEqual(device.source);
+      expect(event.payload.runId).toBe("device-42");
+      expect(Object.hasOwn(event.payload, "jobId")).toBe(false);
+      tagged(event);
+    }
+  });
+
+  it.each(["jobId", "settlementUnitId", "challengeNonce", "mock"])("a getter cannot hide cloned reserved field %s by deleting the caller's copy", async (key) => {
+    const device = await accepted();
+    const payload: Record<string, unknown> = { [key]: "reserved" };
+    Object.defineProperty(payload, "detail", { enumerable: true, get: () => { delete payload[key]; return "detail"; } });
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    expect(() => device.emit("execution_progress", payload)).toThrow();
+    expect(events).toEqual([]);
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+  });
+
+  it("refuses job re-entry from a payload getter while cloning", async () => {
+    const device = await accepted();
+    device.scriptStart({ outcome: "accept", deviceJobId: "getter-B" });
+    let error: unknown;
+    let next: Promise<MachineCommandResult> | undefined;
+    const payload = { get detail() {
+      try { device.fail(); } catch (caught) { error = caught; }
+      next = device.execute({ type: "start" });
+      return "detail";
+    } };
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    device.emit("execution_progress", payload);
+    expect(error).toMatchObject({ message: expect.stringContaining("no active job") });
+    await expect(next).resolves.toMatchObject({ success: false, busy: true });
+    expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([["execution_progress", "device-42"]]);
+    device.complete();
+    expect(await device.execute({ type: "start" })).toEqual({ success: true, data: { jobId: "getter-B" } });
+    device.complete();
+  });
+
+  it("checks origin on the cloned payload and reads a caller getter only once", async () => {
+    const device = await accepted();
+    let reads = 0;
+    const payload = { get origin() { return ++reads === 1 ? "device" : "kernel"; } };
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    // progress() would spread the getter before emit sees it; failures overwrite
+    // origin. A direct nonterminal emit uniquely exercises this clone boundary.
+    device.emit("execution_progress", payload);
+    expect(reads).toBe(1);
+    expect(events[0].payload.origin).toBe("device");
+    tagged(events[0]);
+    device.complete();
+  });
+
+  it("documents and emits the deliberate device-origin stop failure", async () => {
+    // The parity exception must stay explicit for consumers of this test fake.
+    const source = readFileSync(new URL("../testing/fake-device.ts", import.meta.url), "utf8");
+    expect(source).toMatch(/Real adapters end a stopped job silently\.\s*\* FakeDevice deliberately emits a device-origin failure/);
+    const device = await accepted();
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    await device.execute({ type: "stop" });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "execution_failed", payload: { state: "stopped", origin: "device" } });
+    tagged(events[0]);
+    expect(await device.getStatus()).toBe("idle");
+    await device.quiesceEvidence();
+  });
+
   it("terminal listener errors reach the caller after releasing the job", async () => {
     const device = await accepted();
     const quiescent = device.quiesceEvidence();
@@ -265,12 +346,14 @@ describe("FakeDevice evidence honesty", () => {
   });
 
   it.each([
-    { jobId: "pcc-job" }, { jobId: undefined }, { mock: true }, { mock: false }, { origin: "kernel" }, { deviceJobId: "foreign" },
+    { jobId: "pcc-job" }, { jobId: undefined },
+    { settlementUnitId: "unit" }, { settlementUnitId: undefined }, { challengeNonce: "nonce" }, { challengeNonce: undefined }, { mock: true }, { mock: false }, { origin: "kernel" }, { deviceJobId: "foreign" },
   ])("rejects dishonest caller payload %j without changing the job", async (payload) => {
     const device = await accepted();
     const events: Emitted[] = [];
     device.onEvidence((event) => events.push(event));
     expect(() => device.emit("execution_progress", payload)).toThrow();
+    expect(() => device.complete(payload)).toThrow();
     expect(events).toEqual([]);
     expect(await device.getStatus()).toBe("busy");
     device.complete({ deviceJobId: "device-42", origin: "device" });
@@ -310,6 +393,8 @@ describe("FakeDevice quiescence and cancellation", () => {
     const first: Emitted[] = [];
     const second: Emitted[] = [];
     const errors: Array<[string, unknown]> = [];
+    let delivered!: () => void;
+    const terminalDelivered = new Promise<void>((resolve) => { delivered = resolve; });
     let reentrantStop: Promise<unknown> | undefined;
     let reentrantStart: Promise<MachineCommandResult> | undefined;
     device.scriptStart({ outcome: "accept", deviceJobId: "next-terminal-job" });
@@ -329,11 +414,11 @@ describe("FakeDevice quiescence and cancellation", () => {
       reentrantStop = device.execute({ type: "stop" }).catch((error: unknown) => error);
       reentrantStart = device.execute({ type: "start" });
     });
-    device.onEvidence((event) => second.push(event));
+    device.onEvidence((event) => { second.push(event); delivered(); });
     if (terminal === "complete" || terminal === "fail") device[terminal]();
     else if (terminal === "stop") await device.execute({ type: "stop" });
     else await device.cancelJob("device-42");
-    await expect(device.quiesceEvidence()).resolves.toBeUndefined();
+    await terminalDelivered;
     expect(errors.map(([api]) => api)).toEqual(["emit", "progress", "complete", "fail"]);
     for (const [api, error] of errors) {
       expect(error, api).toBeInstanceOf(Error);
@@ -345,6 +430,7 @@ describe("FakeDevice quiescence and cancellation", () => {
     expect(first.map((event) => event.type)).toEqual([expectedType]);
     expect(second.map((event) => event.type)).toEqual([expectedType]);
     expect(await device.getStatus()).toBe("idle");
+    await expect(device.quiesceEvidence()).resolves.toBeUndefined();
     expect(await device.execute({ type: "start" })).toEqual({ success: true, data: { jobId: "next-terminal-job" } });
     device.complete();
   });

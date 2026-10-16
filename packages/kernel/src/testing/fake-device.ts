@@ -72,6 +72,8 @@ function oneOf<T extends string>(value: unknown, values: readonly T[], name: str
  * it ends only AFTER terminal listeners have received their evidence. Native
  * execution_completed/execution_failed remain terminal (types.ts:73-77), in
  * addition to the configured terminal roles. Cancellation follows types.ts:57-68.
+ * Real adapters end a stopped job silently.
+ * FakeDevice deliberately emits a device-origin failure so stopped work has terminal evidence.
  *
  * Both fabrication tags are always constructed here, independently: the detector
  * in spec/src/evidence/is-fabricated.ts:32 accepts EITHER tag. Runtime vocabulary
@@ -94,6 +96,8 @@ export class FakeDevice implements MachineAdapter {
   readonly cancels: DeviceJobId[] = [];
 
   private readonly kernelId: string;
+  private readonly emissionId: string;
+  private readonly emissionBindingKey: string;
   private readonly deviceType: EvidenceDeviceType;
   private readonly ipp: boolean;
   private readonly declaredCommands: ReadonlySet<MachineCommand["type"]>;
@@ -148,6 +152,8 @@ export class FakeDevice implements MachineAdapter {
     if (["jobId", "mock", "origin", "progress", "state", "reason", "jobStateReasons"].includes(this.bindingKey)) {
       throw new Error(`reserved bindingKey: ${this.bindingKey}`);
     }
+    this.emissionBindingKey = this.bindingKey;
+    this.emissionId = id;
     this.type = options.type ?? (this.ipp ? "ipp-2d" : "fake-device");
     nonemptyString(this.type, "type");
     this.deviceType = options.deviceType ?? "controller";
@@ -310,23 +316,28 @@ export class FakeDevice implements MachineAdapter {
     if (this.disposed || !job || this.delivering) throw new Error("fake device has no active job");
     if (!eventTypes.has(type)) throw new Error("invalid event type");
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("payload must be an object");
-    if (Object.hasOwn(payload, "jobId")) throw new Error("payload.jobId is reserved for the PCC job (LO-EV-9)");
-    if (Object.hasOwn(payload, "mock")) throw new Error("payload.mock is reserved for fabrication tagging");
-    if (Object.hasOwn(payload, "origin") && payload.origin !== "device") throw new Error("payload.origin must be device");
-    if (Object.hasOwn(payload, this.bindingKey) && payload[this.bindingKey] !== job.id) {
-      throw new Error("payload names a different device job");
-    }
     const failed = type === this.failedType || type === "execution_failed";
-    const terminal = failed || type === this.completedType || type === "execution_completed";
+    let terminal = false;
     this.delivering = true;
     try {
+      const clonedPayload = structuredClone(payload);
+      if (Object.hasOwn(payload, "jobId") || Object.hasOwn(clonedPayload, "jobId")) throw new Error("payload.jobId is reserved for the PCC job (LO-EV-9)");
+      for (const key of ["settlementUnitId", "challengeNonce"]) {
+        if (Object.hasOwn(payload, key) || Object.hasOwn(clonedPayload, key)) throw new Error(`payload.${key} is reserved for the evidence binding`);
+      }
+      if (Object.hasOwn(payload, "mock") || Object.hasOwn(clonedPayload, "mock")) throw new Error("payload.mock is reserved for fabrication tagging");
+      if (Object.hasOwn(clonedPayload, "origin") && clonedPayload.origin !== "device") throw new Error("payload.origin must be device");
+      if (Object.hasOwn(clonedPayload, this.emissionBindingKey) && clonedPayload[this.emissionBindingKey] !== job.id) {
+        throw new Error("payload names a different device job");
+      }
+      terminal = failed || type === this.completedType || type === "execution_completed";
       const timestamp = this.clock ? this.clock() : new Date(deterministicBase + this.eventNumber);
       if (!(timestamp instanceof Date) || !Number.isFinite(timestamp.getTime())) throw new Error("clock must return a valid Date");
       const event: DeviceEvent = {
         type,
         timestamp: timestamp.toISOString(),
-        source: { deviceId: this.id, deviceType: this.deviceType, kernelId: this.kernelId, simulated: true },
-        payload: { ...structuredClone(payload), [this.bindingKey]: job.id, mock: true, ...(failed ? { origin: "device" } : {}) },
+        source: { deviceId: this.emissionId, deviceType: this.deviceType, kernelId: this.kernelId, simulated: true },
+        payload: { ...clonedPayload, [this.emissionBindingKey]: job.id, mock: true, ...(failed ? { origin: "device" } : {}) },
       };
       this.eventNumber += 1;
       if (typeof event.payload.progress === "number") this.currentProgress = event.payload.progress;

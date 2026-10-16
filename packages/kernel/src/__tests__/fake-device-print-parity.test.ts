@@ -172,7 +172,7 @@ describe("FakeDevice listener isolation reaches signed print evidence", () => {
           expect(event.source.simulated).toBe(true);
           expect(event.payload.mock).toBe(true);
           expect(event.payload.origin).toBe("device");
-          expect(isFabricated(event)).toBe(true);
+          expect(isFabricated({ ...event, id: "listener-event", hash: "sha256:test" })).toBe(true);
         }
       });
     }
