@@ -138,6 +138,24 @@ describe("self-link role limits buyer binding while retaining DECIDE", () => {
     expect(buyerSessionSnapshot(id)).toEqual(before);
   });
 
+  it.each(["device", "agent"] as const)("runs buyer binding before retry-settlement's recorded-escrow resume branch for a %s self-link", async role => {
+    vi.stubEnv("MOCK_SETTLEMENT", "true");
+    await selfLink(role);
+    const id = seedBuyerSession("settlement_failed");
+    getStore().db.update(schema.negotiationSessions).set({ escrowAddress: `0x${"12".repeat(20)}` })
+      .where(eq(schema.negotiationSessions.id, id)).run();
+    const before = buyerSessionSnapshot(id);
+    const response = await app.inject({ method: "POST", url: `/api/negotiate/session/${id}/retry-settlement`, headers: headers() });
+    if (role === "device") {
+      expect(buyerSessionSnapshot(id)).toEqual(before);
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual(BUYER_PROOF_REQUIRED);
+    } else {
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ resumed: true, sessionId: id });
+    }
+  });
+
   it("agent self-link passes retry-settlement binding on the same failed fixture in offline mock settlement", async () => {
     vi.stubEnv("MOCK_SETTLEMENT", "true");
     await selfLink("device");

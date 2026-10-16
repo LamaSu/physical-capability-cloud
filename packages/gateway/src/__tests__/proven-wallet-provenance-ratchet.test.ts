@@ -10,12 +10,18 @@ import { describe, expect, it } from "vitest";
 
 const SRC_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const FIELD = "provenWalletVia";
+const WRITER_REVIEW_MESSAGE = "EXPECTED_WRITES: a new provenWalletVia writer needs its own review; add it to the pinned list in the same PR";
+const COMMENT_FREE_PRINTER = ts.createPrinter({ removeComments: true });
 const WRITER_FILES = [
   "auth/kernel-authority.ts",
   "routes/a2a-tasks.ts",
   "services/wallet-links/proven-wallet.ts",
 ];
 const BOUNDARY_NAMES = ["authorityOf", "bindProof", "proveSelfLinkedWallet"];
+// Adding a member to this closed allow-list needs review. Admin headers use the exact shape below.
+const AUTHORITY_OF_ALLOWED_MEMBERS = new Set([
+  "provenWallet", "provenWalletVia", "operatorId", "userId", "trim", "length",
+]);
 
 interface Write {
   file: string;
@@ -101,6 +107,52 @@ function roleSourceViolations(fn: ts.FunctionDeclaration, file: ts.SourceFile): 
   return [];
 }
 
+function authoritySourceViolations(fn: ts.FunctionDeclaration, file: ts.SourceFile): string[] {
+  const checker = checkerFor(file);
+  const parameter = fn.parameters[0];
+  const violations = new Set<string>();
+  visit(fn.body!, (node) => {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== FIELD) return;
+    const receiver = node.expression;
+    const declaration = ts.isIdentifier(receiver)
+      ? checker.getSymbolAtLocation(receiver)?.valueDeclaration : undefined;
+    if (!declaration || !ts.isVariableDeclaration(declaration)
+      || !ts.isVariableDeclarationList(declaration.parent)
+      || !(declaration.parent.flags & ts.NodeFlags.Const)
+      || !ts.isVariableStatement(declaration.parent.parent)
+      || declaration.parent.parent.parent !== fn.body || !declaration.initializer) {
+      violations.add(`authorityOf: provenance receiver ${receiver.getText(file)} must resolve to a const declared directly in its body`);
+      return;
+    }
+    let source = declaration.initializer;
+    let assertions = 0;
+    while (ts.isParenthesizedExpression(source) || ts.isAsExpression(source)) {
+      if (ts.isAsExpression(source)) assertions++;
+      source = source.expression;
+    }
+    if (assertions === 0 || !ts.isIdentifier(source) || !parameter || !ts.isIdentifier(parameter.name)
+      || checker.getSymbolAtLocation(source)?.valueDeclaration !== parameter) {
+      violations.add(`authorityOf: provenance receiver ${receiver.getText(file)} must be an as chain over its own first parameter`);
+    }
+  });
+  return [...violations];
+}
+
+function reviewedAdminHeaderAccess(access: ts.Node, name: string, file: ts.SourceFile): boolean {
+  const member = memberName(access);
+  // authorityOf already authenticates the admin using this one header.
+  // Keep that existing access exact; it cannot supply buyer provenance.
+  const parent = access.parent;
+  const call = parent.parent;
+  const adminHeader = name === "authorityOf" && member === "headers"
+    && access.getText(file) === "req.headers"
+    && ts.isElementAccessExpression(parent) && parent.expression === access
+    && memberName(parent) === "x-admin-key"
+    && ts.isCallExpression(call) && call.arguments.length === 1 && call.arguments[0] === parent
+    && ts.isIdentifier(call.expression) && call.expression.text === "hasAdminSecret";
+  return adminHeader;
+}
+
 function boundaryViolations(file: ts.SourceFile): string[] {
   const violations: string[] = [];
   visit(file, (node) => {
@@ -108,23 +160,27 @@ function boundaryViolations(file: ts.SourceFile): string[] {
     const name = node.name.text;
     if (!BOUNDARY_NAMES.includes(name)) return;
     if (name === "bindProof") violations.push(...roleSourceViolations(node, file));
-    const forbidden = new Set(name === "authorityOf"
-      ? ["headers", "query", "body", "params", "raw", "cookies"]
-      : ["body", "query", "params", "cookies"]);
+    if (name === "authorityOf") violations.push(...authoritySourceViolations(node, file));
+    const forbidden = new Set(["body", "query", "params", "cookies"]);
     visit(node.body, (access) => {
+      if (name === "authorityOf" && (
+        (ts.isElementAccessExpression(access)
+          && !(ts.isStringLiteral(access.argumentExpression) || ts.isNoSubstitutionTemplateLiteral(access.argumentExpression)))
+        || (ts.isBindingElement(access) && access.propertyName && ts.isComputedPropertyName(access.propertyName)
+          && !(ts.isStringLiteral(access.propertyName.expression) || ts.isNoSubstitutionTemplateLiteral(access.propertyName.expression)))
+      )) {
+        violations.push(`authorityOf: unreviewed computed member access ${access.getText(file)}`);
+        return;
+      }
       const member = memberName(access);
-      if (member && forbidden.has(member)) {
-        // authorityOf already authenticates the admin using this one header.
-        // Keep that existing access exact; it cannot supply buyer provenance.
-        const parent = access.parent;
-        const call = parent.parent;
-        const adminHeader = name === "authorityOf" && member === "headers"
-          && access.getText(file) === "req.headers"
-          && ts.isElementAccessExpression(parent) && parent.expression === access
-          && memberName(parent) === "x-admin-key"
-          && ts.isCallExpression(call) && call.arguments.length === 1 && call.arguments[0] === parent
-          && ts.isIdentifier(call.expression) && call.expression.text === "hasAdminSecret";
-        if (!adminHeader) violations.push(`${name}: forbidden client access ${access.getText(file)}`);
+      if (name === "authorityOf" && member && !AUTHORITY_OF_ALLOWED_MEMBERS.has(member)) {
+        const adminKey = member === "x-admin-key" && ts.isElementAccessExpression(access)
+          && reviewedAdminHeaderAccess(access.expression, name, file);
+        if (!adminKey && !reviewedAdminHeaderAccess(access, name, file)) {
+          violations.push(`authorityOf: unreviewed member access ${access.getText(file)}`);
+        }
+      } else if (name !== "authorityOf" && member && forbidden.has(member)) {
+        violations.push(`${name}: forbidden client access ${access.getText(file)}`);
       }
       if (name !== "authorityOf" && member === "headers") {
         const parent = access.parent;
@@ -143,6 +199,7 @@ function scan(source: string, filename: string) {
   const occurrences: Array<{ kind: string; text: string }> = [];
   const writes: Write[] = [];
   const boundaries: string[] = [];
+  const valueLiterals: string[] = [];
   const seenWrites = new Set<ts.Node>();
   function addWrite(node: ts.Node, kind: string, value: string): void {
     if (seenWrites.has(node)) return;
@@ -159,6 +216,13 @@ function scan(source: string, filename: string) {
       || node.text !== FIELD) return;
     const parent = node.parent;
     occurrences.push({ kind: ts.SyntaxKind[parent.kind], text: parent.getText(file) });
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+      let inType = false;
+      for (let ancestor: ts.Node | undefined = node.parent; ancestor; ancestor = ancestor.parent) {
+        if (ts.isTypeNode(ancestor)) { inType = true; break; }
+      }
+      if (!inType) valueLiterals.push(parent.getText(file));
+    }
     for (let child: ts.Node = node, ancestor = node.parent; ancestor; child = ancestor, ancestor = ancestor.parent) {
       if (ts.isBinaryExpression(ancestor)
         && ancestor.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
@@ -194,7 +258,8 @@ function scan(source: string, filename: string) {
       addWrite(parent, "member-function", parent.body?.getText(file) ?? "");
     }
   });
-  return { occurrences, writes, boundaries, violations: boundaryViolations(file) };
+  return { occurrences, writes, boundaries, valueLiterals,
+    commentFreeSource: COMMENT_FREE_PRINTER.printFile(file), violations: boundaryViolations(file) };
 }
 
 const EXPECTED_WRITES: Write[] = [
@@ -219,30 +284,40 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
   const files = sourceFiles(SRC_ROOT).map((filename) => {
     const relative = path.relative(SRC_ROOT, filename).split(path.sep).join("/");
     const source = readFileSync(filename, "utf8");
-    return { file: relative, source, scanned: scan(source, relative) };
+    return { file: relative, scanned: scan(source, relative) };
   });
 
   it("covers every non-test gateway source and every textual provenance occurrence", () => {
-    expect(files.length).toBeGreaterThan(100);
-    expect(WRITER_FILES.every((writer) => files.some(({ file }) => file === writer))).toBe(true);
-    expect(files.filter(({ source }) => source.includes(FIELD)).map(({ file }) => file))
+    expect(files.length, WRITER_REVIEW_MESSAGE).toBeGreaterThan(100);
+    expect(WRITER_FILES.every((writer) => files.some(({ file }) => file === writer)), `WRITER_FILES; ${WRITER_REVIEW_MESSAGE}`).toBe(true);
+    expect(files.filter(({ scanned }) => scanned.commentFreeSource.includes(FIELD)).map(({ file }) => file), WRITER_REVIEW_MESSAGE)
       .toEqual(files.filter(({ scanned }) => scanned.occurrences.length > 0).map(({ file }) => file));
   });
 
   it("pins the exact set of provenance writes, including each value expression", () => {
-    expect(files.flatMap(({ scanned }) => scanned.writes)).toEqual(EXPECTED_WRITES);
+    const writes = files.flatMap(({ scanned }) => scanned.writes);
+    const unreviewed = writes.filter((write) => !EXPECTED_WRITES.some((expected) =>
+      expected.file === write.file && expected.kind === write.kind && expected.value === write.value));
+    const message = `${WRITER_REVIEW_MESSAGE}; unreviewed writers: ${unreviewed.map((write) =>
+      `${write.file} (${write.kind}: ${write.value})`).join(", ") || "none"}`;
+    expect(writes, message).toEqual(EXPECTED_WRITES);
+  });
+
+  it("rejects provenance string literals outside type nodes", () => {
+    expect(files.flatMap(({ file, scanned }) => scanned.valueLiterals.map((literal) => `${file}: ${literal}`)),
+      WRITER_REVIEW_MESSAGE).toEqual([]);
   });
 
   it("resolves the self-link role to its database binding and refuses client input at the boundaries", () => {
     // Fail closed if a rename or another declaration form would stop the
     // boundary scanner from visiting one of the three reviewed functions.
-    expect(files.flatMap(({ file, scanned }) => scanned.boundaries.map((name) => ({ file, name }))))
+    expect(files.flatMap(({ file, scanned }) => scanned.boundaries.map((name) => ({ file, name }))), `BOUNDARY_NAMES; ${WRITER_REVIEW_MESSAGE}`)
       .toEqual([
         { file: "auth/kernel-authority.ts", name: "authorityOf" },
         { file: "services/wallet-links/proven-wallet.ts", name: "bindProof" },
         { file: "services/wallet-links/proven-wallet.ts", name: "proveSelfLinkedWallet" },
       ]);
-    expect(files.flatMap(({ file, scanned }) => scanned.violations.map((violation) => `${file}: ${violation}`)))
+    expect(files.flatMap(({ file, scanned }) => scanned.violations.map((violation) => `${file}: ${violation}`)), WRITER_REVIEW_MESSAGE)
       .toEqual([]);
   });
 
@@ -252,15 +327,18 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
     ["const value = { provenWalletVia }", "shorthand-property"],
   ])("the same scanner flags an unreviewed writer: %s", (source, kind) => {
     const scanned = scan(source, "sentinel.ts");
-    expect(scanned.occurrences).toHaveLength(1);
-    expect(scanned.writes).toHaveLength(1);
-    expect(scanned.writes[0].kind).toBe(kind);
-    expect(scanned.writes).not.toEqual(EXPECTED_WRITES);
+    expect(scanned.occurrences, WRITER_REVIEW_MESSAGE).toHaveLength(1);
+    expect(scanned.writes, WRITER_REVIEW_MESSAGE).toHaveLength(1);
+    expect(scanned.writes[0].kind, WRITER_REVIEW_MESSAGE).toBe(kind);
+    expect(scanned.writes, WRITER_REVIEW_MESSAGE).not.toEqual(EXPECTED_WRITES);
   });
 
   it("the same scanner rejects authorityOf reading a client header", () => {
     const scanned = scan('function authorityOf(req) { return req.headers["x-pcc-proof-via"]; }', "sentinel.ts");
-    expect(scanned.violations).toEqual(["authorityOf: forbidden client access req.headers"]);
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([
+      'authorityOf: unreviewed member access req.headers["x-pcc-proof-via"]',
+      "authorityOf: unreviewed member access req.headers",
+    ]);
   });
 
   it("rejects a client header read through a computed destructuring key", () => {
@@ -270,7 +348,10 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
         return h["x-pcc-proof-via"];
       }
     `, "sentinel.ts");
-    expect(scanned.violations).toEqual(['authorityOf: forbidden client access ["headers"]: h']);
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([
+      'authorityOf: unreviewed member access ["headers"]: h',
+      'authorityOf: unreviewed member access h["x-pcc-proof-via"]',
+    ]);
   });
 
   it("recognizes destructuring and type members without treating declarations as provenance writes", () => {
@@ -279,9 +360,93 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
       interface Authority { provenWalletVia?: string }
       const value: { ["provenWalletVia"]: string } = source;
     `, "sentinel.ts");
-    expect(scanned.occurrences.map(({ kind }) => kind))
+    expect(scanned.occurrences.map(({ kind }) => kind), WRITER_REVIEW_MESSAGE)
       .toEqual(["BindingElement", "PropertySignature", "ComputedPropertyName"]);
-    expect(scanned.writes).toEqual([]);
+    expect(scanned.writes, WRITER_REVIEW_MESSAGE).toEqual([]);
+    expect(scanned.valueLiterals, WRITER_REVIEW_MESSAGE).toEqual([]);
+  });
+
+  it.each([
+    'Reflect.set(req, "provenWalletVia", value)',
+    'const VIA_KEY = "provenWalletVia"; req[VIA_KEY] = value',
+    'const VIA_KEY = `provenWalletVia`; req[VIA_KEY] = value',
+  ])("rejects a value-position provenance literal: %s", (source) => {
+    expect(scan(source, "sentinel.ts").valueLiterals, WRITER_REVIEW_MESSAGE).toHaveLength(1);
+  });
+
+  it("allows provenance literals inside type nodes", () => {
+    const scanned = scan('type Buyer = Pick<Authority, "provenWalletVia">;', "sentinel.ts");
+    expect(scanned.occurrences, WRITER_REVIEW_MESSAGE).toHaveLength(1);
+    expect(scanned.valueLiterals, WRITER_REVIEW_MESSAGE).toEqual([]);
+  });
+
+  it("resolves a parenthesized as chain to authorityOf's own first parameter", () => {
+    const scanned = scan(`
+      function authorityOf(incoming) {
+        const r = (((incoming) as unknown) as { provenWalletVia?: string });
+        return { provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null };
+      }
+    `, "sentinel.ts");
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([]);
+  });
+
+  it.each([
+    "let r = req as unknown; return r.provenWalletVia;",
+    "const r = req; return r.provenWalletVia;",
+    "const alias = req; const r = alias as unknown; return r.provenWalletVia;",
+    "const r = other as unknown; return r.provenWalletVia;",
+    "const r = Object.assign({}, req) as unknown; return r.provenWalletVia;",
+    "{ const r = req as unknown; return r.provenWalletVia; }",
+    "function nested(req) { const r = req as unknown; return r.provenWalletVia; }",
+  ])("rejects an authorityOf provenance receiver outside the reviewed request cast: %s", (body) => {
+    const scanned = scan(`function authorityOf(req, other) { ${body} }`, "sentinel.ts");
+    expect(scanned.violations.filter((violation) => violation.startsWith("authorityOf: provenance receiver ")),
+      WRITER_REVIEW_MESSAGE).toHaveLength(1);
+  });
+
+  it.each(["url", "originalUrl", "hostname", "ip", "ips", "protocol", "host", "id", "socket", "raw"])(
+    "rejects authorityOf reading unreviewed member %s", (member) => {
+      for (const access of [`req.${member}`, `req["${member}"]`]) {
+        const scanned = scan(`function authorityOf(req) { return ${access}; }`, "sentinel.ts");
+        expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([`authorityOf: unreviewed member access ${access}`]);
+      }
+    });
+
+  it("rejects authorityOf reading an unreviewed member through an alias", () => {
+    const scanned = scan(`
+      function authorityOf(req) {
+        const q = req as unknown as { protocol: string };
+        return q.protocol;
+      }
+    `, "sentinel.ts");
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual(["authorityOf: unreviewed member access q.protocol"]);
+  });
+
+  it.each([
+    ['const k = "protocol"; return req[k];', "req[k]"],
+    ['return req["pro" + "tocol"];', 'req["pro" + "tocol"]'],
+    ['return req[`${"protocol"}`];', 'req[`${"protocol"}`]'],
+    ['const trim = "protocol"; return req[trim];', "req[trim]"],
+    ['const trim = "protocol"; const { [trim]: v } = req; return v;', "[trim]: v"],
+  ])("rejects authorityOf reading a non-literal computed member: %s", (body, access) => {
+    const scanned = scan(`function authorityOf(req) { ${body} }`, "sentinel.ts");
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([`authorityOf: unreviewed computed member access ${access}`]);
+  });
+
+  it("allows authorityOf's reviewed request cast, text helper, and admin header member shape", () => {
+    const scanned = scan(`
+      function authorityOf(req) {
+        const r = req as unknown as { provenWallet?: unknown; provenWalletVia?: unknown; operatorId?: unknown; userId?: unknown };
+        const text = (v: unknown) => (typeof v === "string" && v.trim().length > 0 ? v.trim() : null);
+        return {
+          admin: hasAdminSecret(req.headers["x-admin-key"]),
+          provenWallet: text(r.provenWallet),
+          provenWalletVia: typeof r.provenWalletVia === "string" ? r.provenWalletVia : null,
+          claimed: text(r.operatorId) ?? text(r.userId),
+        };
+      }
+    `, "sentinel.ts");
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual([]);
   });
 
   it("rejects a body-sourced role even when its local name stays role", () => {
@@ -291,8 +456,8 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
         req.provenWalletVia = \`self-link:\${role}\`;
       }
     `, "sentinel.ts");
-    expect(scanned.violations).toContain("bindProof role must be a const database lookup in the same function");
-    expect(scanned.violations).toContain("bindProof: forbidden client access req.body");
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toContain("bindProof role must be a const database lookup in the same function");
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toContain("bindProof: forbidden client access req.body");
   });
 
   it("rejects a role shadowed inside a nested function despite the same lookup text", () => {
@@ -306,7 +471,7 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
         }
       }
     `, "sentinel.ts");
-    expect(scanned.violations).toEqual(["bindProof role must be a const database lookup in the same function"]);
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual(["bindProof role must be a const database lookup in the same function"]);
   });
 
   it("rejects an unrelated local lookup even when it is named findSelfLinkedWallet", () => {
@@ -317,6 +482,6 @@ describe("buyer provenance source ratchet (W1b r4 F-b)", () => {
         req.provenWalletVia = \`self-link:\${role}\`;
       }
     `, "sentinel.ts");
-    expect(scanned.violations).toEqual(["bindProof role must call the imported findSelfLinkedWallet"]);
+    expect(scanned.violations, WRITER_REVIEW_MESSAGE).toEqual(["bindProof role must call the imported findSelfLinkedWallet"]);
   });
 });
