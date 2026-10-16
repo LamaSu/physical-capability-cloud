@@ -333,9 +333,9 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
       case "start": {
         ${legacy ? "" : `if (!this.staged || command.payload?.jobId !== this.staged.jobId) return { success: false };
         if (!this.config.mockMode) {`}
-        ${startEndpoint
+        ${legacy ? "" : "  "}${startEndpoint
     ? `await this.apiPost("${startEndpoint.path}", {});`
-    : '// TODO: Start your device\n        // await this.apiPost("/api/job/start", {});'}
+    : `// TODO: Start your device\n        ${legacy ? "" : "  "}// await this.apiPost("/api/job/start", {});`}
         ${legacy ? "" : "}"}
 
         this.emit({
@@ -350,9 +350,9 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
 
       case "stop": {
         ${legacy ? "" : "if (!this.config.mockMode) {"}
-        ${stopEndpoint
+        ${legacy ? "" : "  "}${stopEndpoint
     ? `await this.apiPost("${stopEndpoint.path}", {});`
-    : '// TODO: Stop your device\n        // await this.apiPost("/api/job/stop", {});'}
+    : `// TODO: Stop your device\n        ${legacy ? "" : "  "}// await this.apiPost("/api/job/stop", {});`}
         ${legacy ? "" : "}"}
         this.stopPolling();
         return { success: true, message: "Stopped" };
@@ -435,6 +435,7 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
   // ── Polling ─────────────────────────────────────────────────────
 
   // The loop is outstanding work until it reports how the job ended and stops.
+  // This poll loop relies on the kernel serializing jobs per device.
   private startPolling(): void {
     this.stopPolling();
     this.endPolling = this.begin();
