@@ -455,11 +455,15 @@ describe("CHAIN_MISMATCH", () => {
     const { chain, expectRefusal } = await setup();
     chain.state.walletChainId = 1;
     await expectRefusal("CHAIN_MISMATCH", () => {});
+    expect(chain.state.log.length).toBeGreaterThan(0);
+    expect(chain.state.log.every(({ method }) => method === "eth_chainId")).toBe(true);
   });
   it("the read client is on another chain", async () => {
     const { chain, expectRefusal } = await setup();
     chain.state.chainId = 1;
     await expectRefusal("CHAIN_MISMATCH", () => {});
+    expect(chain.state.log.length).toBeGreaterThan(0);
+    expect(chain.state.log.every(({ method }) => method === "eth_chainId")).toBe(true);
   });
   // reviewer-charlie L2 (implementer-delta): the reference is the policy's chain, not the other client's.
   it("the wallet and the read client agree with each other, on a chain that is not the policy's", async () => {
@@ -467,6 +471,8 @@ describe("CHAIN_MISMATCH", () => {
     chain.state.chainId = 1;
     chain.state.walletChainId = 1;
     await expectRefusal("CHAIN_MISMATCH", () => {});
+    expect(chain.state.log.length).toBeGreaterThan(0);
+    expect(chain.state.log.every(({ method }) => method === "eth_chainId")).toBe(true);
   });
 });
 
