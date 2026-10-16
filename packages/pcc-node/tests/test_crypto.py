@@ -429,6 +429,25 @@ class TestWithoutPyNaClNoKeyIsUsed:
             sign_announcement({"kernelId": "k"}, "bb" * 32)
         assert verify_signature({"kernelId": "k"}, "00" * 64, "aa" * 32) is False
 
+    def test_pynacl_is_required_before_a_legacy_file_is_touched(self, monkeypatch, tmp_path):
+        home = _private_dir(tmp_path / "home")
+        work = _private_dir(tmp_path / "work")
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(work)
+        legacy = work / "pcc-keys.json"
+        legacy.write_text("{}")
+        os.chmod(legacy, 0o644)
+        before = legacy.stat()
+        monkeypatch.setattr(crypto_module, "_HAS_NACL", False)
+
+        with pytest.raises(crypto_module.CryptoUnavailableError):
+            load_or_create_keys(None)
+
+        after = legacy.stat()
+        assert stat.S_IMODE(after.st_mode) == stat.S_IMODE(before.st_mode) == 0o644
+        assert after.st_size == before.st_size == 2
+        assert list(home.iterdir()) == [], "missing PyNaCl must not create a key directory"
+
 
 # ---------------------------------------------------------------------------
 # N35b round 4 (cross-family A02b, astra at 258166a5): the checkout check is
@@ -491,14 +510,18 @@ def _open_descriptors():
 
 
 def _loader(monkeypatch, path, via_env):
-    """``load_or_create_keys`` aimed at *path*, by argument or through PCC_NODE_KEY_PATH."""
+    """``load_or_create_keys`` aimed at *path*, by argument or either environment override."""
     if via_env:
-        monkeypatch.setenv("PCC_NODE_KEY_PATH", str(path))
+        variable = "PCC_NODE_KEY_PATH" if via_env is True else via_env
+        monkeypatch.setenv(variable, str(path))
         return load_or_create_keys
     return lambda: load_or_create_keys(str(path))
 
 
-BY_ARGUMENT_OR_ENV = pytest.mark.parametrize("via_env", [False, True], ids=["path-argument", "PCC_NODE_KEY_PATH"])
+BY_ARGUMENT_OR_ENV = pytest.mark.parametrize(
+    "via_env", [False, True, "PCC_NODE_KEYS_FILE"],
+    ids=["path-argument", "PCC_NODE_KEY_PATH", "PCC_NODE_KEYS_FILE"],
+)
 
 
 @needs_nacl
@@ -561,8 +584,9 @@ class TestKeyLocationIsBoundToTheDirectoryOpened:
         assert by_pathname == [], "opened by pathname, not through a verified directory: %r" % by_pathname
         assert any(c[2] is not None for c in calls)
 
+    @BY_ARGUMENT_OR_ENV
     @pytest.mark.parametrize("form", ["directory", "file", "dangling-symlink", "symlink-to-directory"])
-    def test_a_git_entry_of_any_form_in_an_ancestor_counts_as_a_checkout(self, tmp_path, form):
+    def test_a_git_entry_of_any_form_in_an_ancestor_counts_as_a_checkout(self, monkeypatch, tmp_path, form, via_env):
         work = _private_dir(tmp_path / "work")
         git = work / ".git"
         if form == "directory":
@@ -575,8 +599,9 @@ class TestKeyLocationIsBoundToTheDirectoryOpened:
             (tmp_path / "gitdir").mkdir()
             git.symlink_to(tmp_path / "gitdir", target_is_directory=True)
         for target in (work / "keys.json", work / "a" / "b" / "keys.json"):
+            load = _loader(monkeypatch, target, via_env)
             with pytest.raises(crypto_module.KeyFileError, match="inside a source checkout"):
-                load_or_create_keys(str(target))
+                load()
         assert os.listdir(work) == [".git"], "something was created inside the checkout"
 
     def test_a_checkout_several_levels_above_an_existing_key_directory_is_found(self, tmp_path):
@@ -686,7 +711,7 @@ class TestKeyLocationIsBoundToTheDirectoryOpened:
     @pytest.mark.parametrize(
         "missing",
         [
-            "dir_fd:open", "dir_fd:stat", "dir_fd:mkdir", "dir_fd:unlink",
+            "dir_fd:open", "dir_fd:stat", "dir_fd:mkdir", "dir_fd:unlink", "dir_fd:link",
             "follow_symlinks:stat", "O_DIRECTORY", "O_NOFOLLOW",
         ],
     )
@@ -794,6 +819,47 @@ class TestTheLocationIsCheckedAgainBeforeTheKeyIsUsed:
         assert os.listdir(keys) == [], "a new secret was left inside the checkout"
 
 
+def _trace_refused_new_key_cleanup(monkeypatch, tmp_path, refused_name):
+    """Select the failed unlink and record which refusal/cleanup path runs."""
+    keys = _private_dir(tmp_path / "home" / "keys")
+    real_judge = crypto_module._judge_key_file
+    real_terminal = crypto_module._check_key_location
+    real_scrub = crypto_module._scrub_and_remove
+    real_unlink = os.unlink
+    trace = []
+
+    def judge(fd, key_path):
+        real_judge(fd, key_path)
+        if not (tmp_path / "home" / ".git").exists():
+            (tmp_path / "home" / ".git").mkdir()
+
+    def terminal(*args, **kwargs):
+        trace.append("terminal")
+        return real_terminal(*args, **kwargs)
+
+    def scrub(dir_fd, name, *args, **kwargs):
+        trace.append("scrub:final" if name == "keys.json" else "scrub:temp")
+        return real_scrub(dir_fd, name, *args, **kwargs)
+
+    def unlink(name, *args, **kwargs):
+        is_final = name == "keys.json"
+        if is_final == (refused_name == "final"):
+            raise PermissionError("unlink refused for the test")
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+    monkeypatch.setattr(crypto_module, "_check_key_location", terminal)
+    monkeypatch.setattr(crypto_module, "_scrub_and_remove", scrub)
+    monkeypatch.setattr(crypto_module.os, "unlink", unlink)
+    return keys, trace
+
+
+def _assert_refused_new_key_cleanup_trace(trace, refused_name):
+    expected = (["terminal", "scrub:final"] if refused_name == "final"
+                else ["scrub:temp", "scrub:final"])
+    assert trace == expected, "the intended refusal and cleanup path was not exercised"
+
+
 @needs_nacl
 class TestA02cTheLastCheckAndTheWalksEnd:
     """A02c: the walk's root test, a terminal check of the directory AND the open key file, and a scrubbed cleanup."""
@@ -854,27 +920,16 @@ class TestA02cTheLastCheckAndTheWalksEnd:
         with pytest.raises(crypto_module.KeyFileError):
             load_or_create_keys(str(keys / "keys.json"))
 
-    def test_a_refused_new_key_is_scrubbed_even_when_it_cannot_be_removed(self, monkeypatch, tmp_path):
-        keys = _private_dir(tmp_path / "home" / "keys")
-        real = crypto_module._judge_key_file
-
-        def judge(fd, key_path):
-            real(fd, key_path)
-            if not (tmp_path / "home" / ".git").exists():
-                (tmp_path / "home" / ".git").mkdir()
-
-        def unlink(*args, **kwargs):
-            raise PermissionError("unlink refused for the test")
-
-        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
-        monkeypatch.setattr(crypto_module.os, "unlink", unlink)
+    @pytest.mark.parametrize("refused_name", ["final", "temp"], ids=["final-name", "temp-name"])
+    def test_a_refused_new_key_is_scrubbed_even_when_it_cannot_be_removed(self, monkeypatch, tmp_path, refused_name):
+        keys, trace = _trace_refused_new_key_cleanup(monkeypatch, tmp_path, refused_name)
         with pytest.raises(crypto_module.KeyFileError) as refused:
             load_or_create_keys(str(keys / "keys.json"))
-        # Atomic publication may leave the generated temporary name rather
-        # than the final name when unlink is refused. Every survivor is empty.
+        _assert_refused_new_key_cleanup_trace(trace, refused_name)
         left = list(keys.iterdir())
-        assert left, "the cleanup failure did not leave a file to inspect"
-        assert all(path.stat().st_size == 0 for path in left), "a written secret was left inside the checkout"
+        assert len(left) == 1, "the cleanup failure did not leave exactly the refused name"
+        assert (left[0].name == "keys.json") == (refused_name == "final")
+        assert left[0].stat().st_size == 0, "a written secret was left inside the checkout"
         assert "could not be removed" in str(refused.value)
 
 
@@ -955,33 +1010,36 @@ class TestA02dMountsAndScrubbing:
             load_or_create_keys(str(keys / "keys.json"))
 
     @pytest.mark.parametrize("pwrite_fails", [False, True], ids=["overwritten", "nothing-works"])
-    def test_scrubbing_is_honest_when_truncation_fails(self, monkeypatch, tmp_path, pwrite_fails):
-        keys = _private_dir(tmp_path / "home" / "keys")
-        real = crypto_module._judge_key_file
+    @pytest.mark.parametrize("refused_name", ["final", "temp"], ids=["final-name", "temp-name"])
+    def test_scrubbing_is_honest_when_truncation_fails(self, monkeypatch, tmp_path, pwrite_fails, refused_name):
+        keys, trace = _trace_refused_new_key_cleanup(monkeypatch, tmp_path, refused_name)
+        real_pwrite = os.pwrite
+        writes = []
 
-        def judge(fd, key_path):
-            real(fd, key_path)
-            if not (tmp_path / "home" / ".git").exists():
-                (tmp_path / "home" / ".git").mkdir()
+        def pwrite(fd, data, offset):
+            assert data == b"\0" * len(data), "the scrub write did not contain only zeros"
+            written = real_pwrite(fd, data, offset)
+            writes.append((offset, written, os.fstat(fd).st_size))
+            return written
 
         def refuse(*args, **kwargs):
             raise PermissionError("refused for the test")
 
-        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
-        monkeypatch.setattr(crypto_module.os, "unlink", refuse)
         monkeypatch.setattr(crypto_module.os, "ftruncate", refuse)
-        if pwrite_fails:
-            monkeypatch.setattr(crypto_module.os, "pwrite", refuse)
+        monkeypatch.setattr(crypto_module.os, "pwrite", refuse if pwrite_fails else pwrite)
         with pytest.raises(crypto_module.KeyFileError) as refused:
             load_or_create_keys(str(keys / "keys.json"))
-        # The refused write may still have its unpublished temporary name.
-        left = [path.read_bytes() for path in keys.iterdir()]
-        assert left, "the cleanup failure did not leave a file to inspect"
+        _assert_refused_new_key_cleanup_trace(trace, refused_name)
+        left = list(keys.iterdir())
+        assert len(left) == 1, "the cleanup failure did not leave exactly the refused name"
+        assert (left[0].name == "keys.json") == (refused_name == "final")
+        assert left[0].stat().st_size > 0
         if pwrite_fails:
             assert "SECRET MAY REMAIN" in str(refused.value)
-            assert "emptied first" not in str(refused.value)
+            assert "it was emptied first: no secret" not in str(refused.value)
         else:
-            assert all(data.strip(b"\0") == b"" for data in left), "the secret was not overwritten"
+            # Observe only write offsets/lengths and file metadata, never read a key.
+            assert writes and all(offset == 0 and written == size for offset, written, size in writes)
             assert "emptied first" in str(refused.value)
 
 
@@ -1039,24 +1097,26 @@ class TestA02eAliasesUnionsAndCleanup:
             load_or_create_keys(str(keys / "keys.json"))
         assert os.listdir(keys) == []
 
-    def test_cleanup_ends_and_tells_the_truth_when_pwrite_makes_no_progress(self, monkeypatch, tmp_path):
-        keys = _private_dir(tmp_path / "home" / "keys")
-        real = crypto_module._judge_key_file
-
-        def judge(fd, key_path):
-            real(fd, key_path)
-            if not (tmp_path / "home" / ".git").exists():
-                (tmp_path / "home" / ".git").mkdir()
+    @pytest.mark.parametrize("refused_name", ["final", "temp"], ids=["final-name", "temp-name"])
+    def test_cleanup_ends_and_tells_the_truth_when_pwrite_makes_no_progress(self, monkeypatch, tmp_path, refused_name):
+        keys, trace = _trace_refused_new_key_cleanup(monkeypatch, tmp_path, refused_name)
+        writes = []
 
         def refuse(*args, **kwargs):
             raise PermissionError("refused for the test")
 
-        monkeypatch.setattr(crypto_module, "_judge_key_file", judge)
+        def no_progress(fd, data, offset):
+            assert data == b"\0" * len(data), "the scrub write did not contain only zeros"
+            writes.append((offset, len(data)))
+            return 0
+
         monkeypatch.setattr(crypto_module.os, "ftruncate", refuse)
-        monkeypatch.setattr(crypto_module.os, "unlink", refuse)
-        monkeypatch.setattr(crypto_module.os, "pwrite", lambda fd, data, offset: 0)
+        monkeypatch.setattr(crypto_module.os, "pwrite", no_progress)
         with pytest.raises(crypto_module.KeyFileError, match="SECRET MAY REMAIN"):
             load_or_create_keys(str(keys / "keys.json"))
+        _assert_refused_new_key_cleanup_trace(trace, refused_name)
+        expected_calls = 1 if refused_name == "final" else 2
+        assert len(writes) == expected_calls, "each scrub must stop after its first failed write"
 
 
 @needs_nacl
@@ -1125,7 +1185,7 @@ def _write_pair(path, public_hex, secret_hex, mode=0o600):
 
 
 # Without PyNaCl, every key operation is refused first (#374; see
-# TestWithoutPyNaClNoKeyIsUsed). Guarded file refusals need PyNaCl;
+# TestWithoutPyNaClNoKeyIsUsed). Guarded tests create or load a key, which needs PyNaCl.
 # CI step 3 runs them with nothing skipped.
 class TestKeyFileSafety:
     @needs_nacl
@@ -1215,10 +1275,25 @@ class TestKeyFileSafety:
     @needs_nacl
     def test_a_file_created_by_another_process_first_is_used(self, tmp_path, monkeypatch):
         path = str(tmp_path / "keys.json")
-        theirs = load_or_create_keys(path)
-        real_lexists = os.path.lexists
-        monkeypatch.setattr(crypto.os.path, "lexists", lambda p: False if p == path else real_lexists(p))
-        assert load_or_create_keys(path) == theirs
+        theirs = generate_node_keys()
+        real_link = os.link
+        published = []
+
+        def link(src, dst, **kwargs):
+            assert dst == "keys.json" and kwargs.get("dst_dir_fd") is not None
+            assert not published, "the competing identity was already published"
+            _write_pair(path, *theirs)
+            st = os.stat(path)
+            published.append((st.st_ino, st.st_size))
+            return real_link(src, dst, **kwargs)
+
+        monkeypatch.setattr(crypto.os, "link", link)
+        loaded_theirs = load_or_create_keys(path) == theirs
+        assert loaded_theirs, "the losing publisher did not load the competing identity"
+        assert len(published) == 1, "the exclusive-publication race was not exercised"
+        st = os.stat(path)
+        assert (st.st_ino, st.st_size) == published[0], "the winning file changed"
+        assert os.listdir(tmp_path) == ["keys.json"], "the losing publisher left a temporary file"
 
     @pytest.mark.skipif(not _HAS_NACL, reason="pynacl not installed")
     def test_a_pre_pynacl_key_file_is_refused_once_pynacl_is_installed(self, tmp_path):
@@ -1228,7 +1303,7 @@ class TestKeyFileSafety:
         with pytest.raises(KeyFileError, match="register the node again"):
             load_or_create_keys(path)
 
-    def test_a_pre_pynacl_key_file_still_loads_without_pynacl(self, tmp_path, monkeypatch):
+    def test_a_pre_pynacl_key_file_is_refused_without_pynacl(self, tmp_path, monkeypatch):
         monkeypatch.setattr(crypto, "_HAS_NACL", False)
         secret = os.urandom(32)
         path = str(tmp_path / "keys.json")
@@ -1253,7 +1328,7 @@ class TestVerifyFailsClosedWithoutPynacl:
 
 
 # Without PyNaCl, every key operation is refused first (#374; see
-# TestWithoutPyNaClNoKeyIsUsed). Guarded file refusals need PyNaCl;
+# TestWithoutPyNaClNoKeyIsUsed). Guarded tests create or load a key, which needs PyNaCl.
 # CI step 3 runs them with nothing skipped.
 @posix_only
 class TestKeyFileTrust:
@@ -1505,6 +1580,20 @@ def _e17b_directory_metadata(monkeypatch, directory, *, owner, mode):
 
 @needs_nacl
 class TestE17bSecureAncestorChain:
+    @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
+    def test_an_unsafe_root_at_the_top_of_the_walk_is_refused(
+        self, monkeypatch, tmp_path, _e17b_checked_test_namespace, existing
+    ):
+        target = _private_dir(tmp_path / "private") / "keys.json"
+        if existing:
+            load_or_create_keys(str(target))
+        inspected = _e17b_directory_metadata(monkeypatch, Path("/"), owner=0, mode=0o777)
+        with pytest.raises(crypto_module.KeyFileError) as refused:
+            load_or_create_keys(str(target))
+        assert str(refused.value).startswith("/ is writable by other users (mode 777)")
+        assert inspected, "the root's held descriptor was not inspected"
+        assert target.exists() == existing
+
     @pytest.mark.parametrize("depth", [1, 2, 3], ids=["depth-1", "depth-2", "depth-3"])
     @pytest.mark.parametrize("existing", [False, True], ids=["create", "load"])
     def test_a_foreign_owned_0755_ancestor_is_refused(
@@ -2188,7 +2277,7 @@ class TestE17bCleanupWarning:
         monkeypatch.setattr(crypto_module.os, "fstat", fstat)
         try:
             with pytest.raises(KeyFileError, match="THE SECRET MAY REMAIN.*unknown"):
-                crypto_module._scrub_and_remove(dir_fd, target.name, fd, str(target), None)
+                crypto_module._scrub_and_remove(dir_fd, target.name, fd, str(target), str(target), None)
             assert unlinked
             assert not target.exists()
         finally:
