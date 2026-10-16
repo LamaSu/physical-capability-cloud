@@ -461,6 +461,8 @@ export class YourMachineAdapter implements MachineAdapter {
 
 In your `YourDeviceConfig`, supply `apiUrl`, `mockMode`, an optional `pollIntervalMs`, and `resolveInput(inputHash): Promise<Uint8Array>` for hash-only jobs. When `payload.inputData` is present, stage those exact bytes; do not replace them with data fetched by hash. When resolving input yourself, compute SHA-256 of the resolved bytes and refuse prepare without an ack unless it equals `inputHash` exactly: the kernel signs `method_loaded` as the input proof from that ack.
 
+The generated HTTP adapter's real-mode prepare sends JSON `{ jobId, inputHash, inputBase64 }` when `payload.inputData` is present, with `inputBase64` encoding the exact bytes. With no input bytes, it sends `{ jobId, inputHash }` so the device resolves the input by hash and verifies those bytes before accepting the stage. Adapt that staging call to your device's real upload API; the example above uses a raw-byte upload.
+
 An FDM (G-code) machine may implement `load_gcode` instead: that is the legacy path, with the FDM default ladder when no ladder is provided. Declare `accepts` with `load_gcode` and the other commands it implements.
 
 ### 2.2 SensorAdapter (when your capability's tier ladder needs sensor events)
