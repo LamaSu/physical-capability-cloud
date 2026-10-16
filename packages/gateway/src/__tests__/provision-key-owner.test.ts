@@ -43,6 +43,7 @@ afterEach(async () => {
 async function buildApp(opts: {
   authenticatedKeyId?: string;
   provenWallet?: string;
+  provisionBeforeGate?: boolean;
 } = {}) {
   const app = Fastify({ logger: false });
   apps.push(app);
@@ -50,6 +51,11 @@ async function buildApp(opts: {
   app.decorateRequest("apiKeyId", null);
   app.decorateRequest("operatorId", null);
   await app.register(cookie, { secret: "provision-key-owner-cookie-secret" });
+  if (opts.provisionBeforeGate) {
+    // Match server.ts: SIWE and provision routes precede the root API gate.
+    await app.register(siweAuthPlugin);
+    await app.register(provisionRoutes);
+  }
   if (opts.authenticatedKeyId) {
     app.addHook("onRequest", async (req) => {
       const key = getRepos().apiKeys.findById(opts.authenticatedKeyId!)!;
@@ -66,8 +72,10 @@ async function buildApp(opts: {
       (req as FastifyRequest & { provenWallet: string }).provenWallet = opts.provenWallet!;
     });
   }
-  await app.register(siweAuthPlugin);
-  await app.register(provisionRoutes);
+  if (!opts.provisionBeforeGate) {
+    await app.register(siweAuthPlugin);
+    await app.register(provisionRoutes);
+  }
   await app.ready();
   return app;
 }
@@ -151,6 +159,26 @@ describe("API key management requires a proven owner for other keys", () => {
     expect(getRepos().apiKeys.findActiveByHash(row.keyHash)?.id).toBe(victim.row.id);
   });
 
+  it("production registration order keeps plain-key listing and revocation scoped to itself", async () => {
+    const app = await buildApp({ provisionBeforeGate: true });
+    const caller = insertKey();
+    const peer = insertKey();
+    const headers = bearer(caller.rawKey);
+
+    await expectKeys(app, headers, [caller.row.id]);
+    const denied = await revoke(app, headers, peer.row.id);
+    expect(denied.statusCode).toBe(404);
+    expect(denied.json()).toEqual({ error: "Key not found" });
+    expect(getRepos().apiKeys.findById(peer.row.id)!.revokedAt).toBeNull();
+    expect(getRepos().apiKeys.findActiveByHash(peer.row.keyHash)?.id).toBe(peer.row.id);
+
+    const response = await revoke(app, headers, caller.row.id);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, key_id: caller.row.id, revoked_at: expect.any(String) });
+    expect(getRepos().apiKeys.findById(caller.row.id)!.revokedAt).not.toBeNull();
+    expect(getRepos().apiKeys.findActiveByHash(peer.row.keyHash)?.id).toBe(peer.row.id);
+  });
+
   it("a key lists itself and self revocation retains the 200 and 409 responses", async () => {
     const caller = insertKey();
     const peer = insertKey();
@@ -188,6 +216,18 @@ describe("API key management requires a proven owner for other keys", () => {
     expect(getRepos().apiKeys.findById(target.row.id)!.revokedAt).not.toBeNull();
     expect(getRepos().apiKeys.findById(peer.row.id)!.revokedAt).toBeNull();
     expect(getRepos().apiKeys.findById(other.row.id)!.revokedAt).toBeNull();
+  });
+
+  it("a verified cookie SIWE session with another address's bearer key lists the union of owner keys and its own key", async () => {
+    const app = await buildApp();
+    const session = issueSession();
+    const target = insertKey();
+    const peer = insertKey();
+    const caller = insertKey(OTHER_ADDRESS);
+    insertKey(OTHER_ADDRESS);
+    const headers = { ...sessionHeaders(app, session.token, "cookie"), ...bearer(caller.rawKey) };
+
+    await expectKeys(app, headers, [target.row.id, peer.row.id, caller.row.id]);
   });
 
   it.each(["cookie", "bearer"] as const)("a session key minted from a %s session lists all address keys and revokes another key", async (path) => {
