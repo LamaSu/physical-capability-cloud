@@ -312,10 +312,12 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
           return { success: false };
         }
         const inputData = command.payload?.inputData;
-        // Stage exactly these bytes when present. With a hash only, TODO: resolve input by inputHash.
+        // Forward exact input bytes as base64 when present; otherwise the device resolves inputHash.
+        // Adapt this staging call to your device's real upload API without actuating.
         if (!this.config.mockMode) {
           ${loadEndpoint
-    ? `await this.apiPost("${loadEndpoint.path}", { jobId, inputHash }); // Staging only.`
+    ? `await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
+            ...(inputData instanceof Uint8Array ? { inputBase64: Buffer.from(inputData).toString("base64") } : {}) }); // Staging only.`
     : '// TODO: Stage the input through your device API without actuating.'}
         }
         // TODO (real mode): use the device's own id for the staged job.
