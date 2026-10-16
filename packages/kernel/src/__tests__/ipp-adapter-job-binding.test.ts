@@ -6,8 +6,8 @@
  * emitter refused it, and a real print that reported progress failed (found merging #336
  * into #502).
  *
- * Real mode runs against a fake IPP client on the fake clock, as in
- * adapter-quiesce-evidence.test.ts: the client answers on microtasks, so the clock alone
+ * Real mode exercises the built-in IPP/1.1 client through its transport seam on the fake clock,
+ * as in adapter-quiesce-evidence.test.ts: the transport answers on microtasks, so the clock alone
  * decides when a poll lands.
  */
 

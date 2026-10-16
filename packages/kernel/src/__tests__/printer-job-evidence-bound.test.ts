@@ -882,8 +882,8 @@ describe("astra pack 192 HIGH 2: only events bound to the print's device job are
 });
 
 /**
- * An IppAdapter in real mode over a fake IPP transport (the optional `ipp` package is not installed
- * here). Print-Job names device job `job`; each Get-Job-Attributes poll answers the next of `polls`
+ * An IppAdapter in real mode exercises its built-in IPP/1.1 client through the injected transport
+ * seam. Print-Job names device job `job`; each Get-Job-Attributes poll answers the next of `polls`
  * (RFC 8011 job-state: 5 processing, 8 aborted, 9 completed).
  */
 function realModeIpp(id: string, job: number, polls: Array<{ state: number; sheets?: number }>): IppAdapter {

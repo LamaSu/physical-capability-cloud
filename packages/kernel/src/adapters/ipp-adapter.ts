@@ -115,10 +115,7 @@ export class IppAdapter implements MachineAdapter {
   private currentJobId = 1000;
 
   private ippClient: IppClient | null = null;
-  // Retained for PR1's routing hunks: real construction sets availability true;
-  // loading is always null. Remove both after the parallel changes merge.
   private ippAvailable = false;
-  private ippLoading: Promise<void> | null = null;
   /** Disposal is final: no new real request is allowed after this fence. */
   private disposed = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -170,7 +167,6 @@ export class IppAdapter implements MachineAdapter {
   // ---------------------------------------------------------------------------
 
   async getStatus(): Promise<MachineStatus> {
-    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return this.mockStatus;
     }
@@ -184,7 +180,6 @@ export class IppAdapter implements MachineAdapter {
   }
 
   async getProgress(): Promise<number> {
-    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return this.mockProgress;
     }
@@ -203,18 +198,6 @@ export class IppAdapter implements MachineAdapter {
     // Disposed is final: a command runs nothing, real or mock (astra pack 201).
     if (this.disposed) {
       return { success: false, message: `IPP adapter "${this.id}" is disposed: ${command.type} not run` };
-    }
-    // Legacy routing fence retained for PR1 compatibility. Construction uses the built-in
-    // client synchronously, so ippLoading stays null in both real and mock mode.
-    const loading = this.ippLoading;
-    if (loading) {
-      return this.work.track(
-        loading.then(() =>
-          this.disposed
-            ? { success: false, message: `IPP adapter "${this.id}" was disposed while the 'ipp' package loaded: ${command.type} not run` }
-            : this.route(command),
-        ),
-      );
     }
     return this.route(command);
   }
@@ -256,7 +239,6 @@ export class IppAdapter implements MachineAdapter {
   // ---------------------------------------------------------------------------
 
   async getCapabilities(): Promise<IppCapabilities> {
-    if (this.ippLoading) await this.ippLoading;
     if (this.config.mockMode || !this.ippAvailable) {
       return { ...this.mockCapabilities };
     }
@@ -277,12 +259,6 @@ export class IppAdapter implements MachineAdapter {
    */
   async cancelJob(jobId: number): Promise<void> {
     if (this.disposed) throw new Error(`IPP adapter "${this.id}" is disposed: cancel of job ${jobId} not sent`);
-    if (this.ippLoading) {
-      await this.ippLoading;
-      if (this.disposed) {
-        throw new Error(`IPP adapter "${this.id}" was disposed while the 'ipp' package loaded: cancel of job ${jobId} not sent`);
-      }
-    }
     if (this.config.mockMode || !this.ippAvailable) {
       const job = this.mockJobState;
       if (!job || job.jobId !== jobId) return;
