@@ -590,7 +590,7 @@ describe("PlanPresentation: the product read model, built only from server truth
     expect(() => {
       p = presentPlan({ submission: junk as unknown as ExternalPlanSubmission, asOf: ASOF });
     }).not.toThrow();
-    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [] });
+    expect(p).toEqual({ schema: "pcc.plan-presentation.v1", layer: "C", state: "invalid", invalid: { reason: "malformed-submission" }, requestId: null, reservationId: null, asOf: ASOF, nodes: [], edges: [], unknowns: ["time-estimate"] });
   });
 });
 
@@ -1155,10 +1155,20 @@ describe("PlanPresentation and N25: what each unit runs on is shown only from th
       }).not.toThrow();
       expect(p?.state).toBe("invalid");
       expect(p?.nodes).toEqual([]);
-      // Resealed, so integrity alone would pass: only the JSON check refuses it.
+      // Resealed, so integrity alone would pass: only the JSON check refuses it. Content with no canonical
+      // form (NaN, a Date) can't be resealed once canonicalize refuses it (D5, #359): the sealing refuses,
+      // which is stronger. Either way nothing non-JSON is ever shown.
       const { acceptedDealDigest: _d, ...rest } = plan as unknown as CompiledAcceptedPlan;
-      const resealed = presentPlan({ submission: s, outcome: { ...outcome, plan: reseal(rest) } as unknown as SeamResult, asOf: ASOF });
-      expect(resealed.invalid).toEqual({ reason: "malformed-outcome" });
+      let resealedPlan: CompiledAcceptedPlan | undefined;
+      try {
+        resealedPlan = reseal(rest);
+      } catch (err) {
+        expect((err as Error).name).toBe("NonCanonicalValueError");
+      }
+      if (resealedPlan) {
+        const resealed = presentPlan({ submission: s, outcome: { ...outcome, plan: resealedPlan } as unknown as SeamResult, asOf: ASOF });
+        expect(resealed.invalid).toEqual({ reason: "malformed-outcome" });
+      }
     }
   });
 

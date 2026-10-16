@@ -60,6 +60,12 @@ async function convertCelsiusToFahrenheit(input: Record<string, unknown>) {
 }
 ```
 
+`input` is a snapshot of exactly the JSON the evidence hashes, and every object in it, at every depth, has no prototype.
+A key the caller did not send reads as `undefined`, whatever `Object.prototype` has been polluted with, but the
+`Object.prototype` methods are not there either: use `Object.keys`, `in`, `Object.hasOwn` and `JSON.stringify`, not
+`input.hasOwnProperty(k)` or `input.toString()`. Return JSON: an output with no JSON form (`NaN`, a function, a `Date`,
+a getter, ...) is refused with a `NonCanonicalValueError`, just as an input with none is.
+
 ### 2. Build a manifest
 
 ```typescript
@@ -120,10 +126,10 @@ fastify.post("/run", async (req) => handler(req.body));
 The handler:
 1. Verifies the inbound sessionKey signature (if `auth` is provided).
 2. Mints a kernel session key (signed by your principalKey).
-3. Calls `execute(input)` and times it.
+3. Snapshots the input (canonical JSON, parsed once), calls `execute(snapshot)` on it and times it.
 4. Builds an `EvidenceBundle` with `execution_started`, one `workflow_step_completed` per manifest step, and `execution_completed` events.
 5. Signs the bundle hash with the kernel session key.
-6. Returns `{ evidenceBundle, output, kernelSessionPublicKey }`.
+6. Returns `{ evidenceBundle, output, kernelSessionPublicKey }`, where `output` is the snapshot of what `execute` returned that the `execution_completed` event commits to (not the builder's own object).
 
 ### 4. Register with a gateway
 

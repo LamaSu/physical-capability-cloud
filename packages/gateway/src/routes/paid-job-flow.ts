@@ -9,8 +9,13 @@
  *   PUT  /api/jobs/:jobId/complete        — Job completion -> evidence -> settlement
  *   GET  /api/jobs/:jobId/settlement      — Settlement status for a job
  *
- * For testnet/demo: mock escrow (no real on-chain funding required).
- * Set MOCK_SETTLEMENT=false to require real escrow interactions.
+ * Mock escrow (no real on-chain funding) only when MOCK_SETTLEMENT=true, and never in production;
+ * otherwise real escrow interactions (N133: mock settlement is off by default; a mock escrow funds
+ * a write scope only in a test process; services/settlement-mode.ts).
+ *
+ * N133 (the steward's DECISIONS 01:01): a paid job's buyer is the caller's proven identity (or the
+ * admin acts for it), and the write scope createJobFromSession mints goes live only on the kernel
+ * operator's acceptance and the buyer's own, real funding (services/scope-acceptance.ts).
  */
 
 import crypto from "node:crypto";
@@ -32,11 +37,19 @@ function sendResult<T>(reply: FastifyReply, result: Result<T>): unknown {
   });
 }
 import { schema, eq, and, sql } from "@pcc/store";
-import { getTemplate } from "@pcc/contract-builder";
 import { TemplateResolver } from "@pcc/contract-builder";
 import { PricingCalculator } from "@pcc/contract-builder";
-import { applyPricingRules, sanitizeText } from "@pcc/kernel";
+import { sanitizeText } from "@pcc/kernel";
 import { pipelineTelemetry } from "../telemetry.js";
+import {
+  SETTLEMENT_CURRENCY,
+  MAX_QUOTE_QUANTITY,
+  centsToDecimal,
+  registeredQuotePrice,
+  validatePricingRules,
+  pricingRulesThatApply,
+  exactQuoteTotal,
+} from "../services/quote-pricing.js";
 import { getSettlementService } from "../services/settlement-service.js";
 import { buildCanonicalEvidenceEnvelope } from "../services/evidence-envelope.js";
 import { getKernelService } from "../services/kernel-service.js";
@@ -59,6 +72,7 @@ import { JOB_READ_REFUSAL } from "../readmodels/job-execution.js";
 import {
   deviceEvidenceSettlementEnabled,
   resolveSettlementEvidence,
+  receivedAtSeconds,
   isDeviceSignedSignature,
   verifyPinnedSettlementEvidence,
   registeredSignerInputFromColumns,
@@ -67,6 +81,19 @@ import {
   type SettlementEvidenceSlot,
 } from "../services/device-evidence-settlement.js";
 import { withSignerLock } from "../contracts/signer-lock.js";
+import { emergencyStopState } from "./device-relay.js";
+import { canDispatchJobLocally } from "../services/local-job-dispatch.js";
+import { authorityOf } from "../auth/kernel-authority.js";
+import { bindBuyer } from "../auth/buyer-identity.js";
+import { isMockSettlement } from "../services/settlement-mode.js";
+import {
+  acceptanceFor,
+  buyerFundingRefusal,
+  PAID_SCOPE_TTL_MS,
+  SCOPE_AWAITING_ACCEPTANCE,
+  SCOPE_AWAITING_FUNDING,
+  SCOPE_REJECTED,
+} from "../services/scope-acceptance.js";
 import type {
   OperatorPolicy,
   NegotiationSession,
@@ -84,13 +111,10 @@ const resolver = new TemplateResolver();
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Whether mock settlement is active (default: true for testnet).
- *  Exported so the negotiation /commit handler makes its "did real settlement
- *  actually wire an escrow?" decision from the SAME source of truth this module
- *  uses to pick the mock-vs-real escrow branch — the two must never disagree. */
-export function isMockSettlement(): boolean {
-  return process.env.MOCK_SETTLEMENT !== "false";
-}
+/** Whether mock settlement is active: only when MOCK_SETTLEMENT=true (N133). Re-exported so the
+ *  negotiation /commit handler makes its "did real settlement actually wire an escrow?" decision
+ *  from the SAME source of truth this module uses to pick the mock-vs-real escrow branch. */
+export { isMockSettlement };
 
 /** Coerce a possibly-loose value to a valid on-chain AssuranceTier (0-3).
  *  Never over-reports an SLA: NaN / out-of-range → 0. */
@@ -218,31 +242,34 @@ function extractEscrowCreatedAddress(
  * This is the core wiring logic shared by the commit handler and the fast-track endpoint.
  */
 /**
- * Resolve the per-operator payout address for a kernel (option A revenue routing).
- * Looks up the kernel's operator, then finds the api_keys row with the operator's
- * per-operator EOA (set by /api/auth/provision + best-effort setAgentWallet). If
- * none found, returns null so callers can fall back to the gateway signer
- * (preserves existing behavior for legacy operators not yet migrated).
- *
- * Cf. coord bulletin 235: without this, V3 releases route funds to the gateway
- * signer (self-pay). With this, funds route to the operator's operational EOA.
+ * N133: the status createJobFromSession mints a paid job's write scope with (exported for its
+ * tests). Its caller inserts the
+ * scope with no await after this call, so the policy and the stop are read as they are at the mint;
+ * a block, a switch to manual or a stop that lands while the escrow is created is honoured.
+ *   - The buyer is on the kernel's block list: rejected (dead).
+ *   - The kernel's operator has not accepted this buyer per its policy (manual, the default; policy
+ *     mode and not trusted; a block list that is present but not an array of strings, whatever the
+ *     mode; a policy that is missing, garbled or cannot be read): awaiting_acceptance.
+ *   - The stop is engaged or cannot be read: awaiting_acceptance too, even for an auto policy. The
+ *     relay's POST /scope mints nothing then, and the accept route refuses then.
+ *   - Accepted: active on the buyer's own, real funding, else awaiting_funding. At the mint that
+ *     can only be a test's mock escrow: no verification record can name a scope that does not
+ *     exist yet, so a real escrow's scope goes live later, through reconcilePaidScope.
  */
-function resolveOperatorPayoutAddress(kernelId: string): `0x${string}` | null {
+export function mintedScopeStatus(kernelId: string, buyer: string, escrowId: string): string {
+  let policy: unknown;
   try {
-    const repos = getRepos();
-    const kernel = repos.kernels.findById(kernelId);
-    if (!kernel?.operatorAddress) return null;
-    const keys = repos.apiKeys.findByOperator(kernel.operatorAddress);
-    for (const k of keys) {
-      const addr = (k as { operatorWalletAddress?: string | null }).operatorWalletAddress;
-      if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) {
-        return addr as `0x${string}`;
-      }
-    }
-    return null;
+    const row = getStore().db.select().from(operatorPolicies).where(eq(operatorPolicies.kernelId, kernelId)).get();
+    policy = row ? row.policy : DEFAULT_OPERATOR_POLICY;
   } catch {
-    return null;
+    // Unreadable: acceptanceFor accepts nothing for the operator. (emergencyStopState below reads
+    // the same row and answers "unavailable" for it too: defence in depth.)
+    policy = undefined;
   }
+  const acceptance = acceptanceFor(policy, buyer);
+  if (acceptance === "refused") return SCOPE_REJECTED;
+  if (acceptance === "awaiting_operator" || emergencyStopState(kernelId) !== "clear") return SCOPE_AWAITING_ACCEPTANCE;
+  return buyerFundingRefusal(getRepos().escrows.findById(escrowId), buyer) === null ? "active" : SCOPE_AWAITING_FUNDING;
 }
 
 export async function createJobFromSession(
@@ -253,10 +280,14 @@ export async function createJobFromSession(
   escrowId: string;
   escrowAddress: string;
   escrowStatus: string;
+  /** N133: "active" only when the kernel's operator accepted and the buyer funded it. */
+  scopeStatus: string;
 }> {
   const repos = getRepos();
   const { db } = getStore();
   const now = new Date().toISOString();
+
+  const buyer = session.userAgentId;
 
   const quote = session.quote as Record<string, unknown> | null;
   const contractTerms = session.contractTerms as Record<string, unknown> | null;
@@ -370,13 +401,8 @@ export async function createJobFromSession(
           `[paid-job] Created on-chain V3 (Mode A) escrow: ${addr} (token: ${tokenAddr})`,
         );
 
-        // Add each milestone (V2 ABI is byte-identical on V3). Operator payout
-        // address prefers the per-operator EOA from option A (revenue routes to
-        // the operator's own wallet, not the gateway signer). Falls back to
-        // account.address for legacy operators that haven't been minted A yet.
+        // Every milestone pays the gateway signer.
         // requiredTier is carried for parity; Mode A ignores it at release.
-        const v3OperatorPayout =
-          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
           const addTx = await walletClient.writeContract({
@@ -385,7 +411,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              v3OperatorPayout,
+              account.address,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -492,11 +518,7 @@ export async function createJobFromSession(
 
         // createEscrowV2 mints an EMPTY escrow; without >=1 milestone fund() reverts.
         // Add each milestone in sequence on the same (locked) signer, BEFORE fund().
-        // Operator payout prefers the per-operator EOA from option A (revenue
-        // routes to the operator, not the gateway); falls back to account.address
-        // for legacy operators. Cf. coord bulletin 235.
-        const v2OperatorPayout =
-          resolveOperatorPayoutAddress(session.kernelId) ?? account.address;
+        // Every milestone pays the gateway signer.
         let dropped = false;
         for (const ms of normalizedMilestones) {
           const stepIdBytes = keccak256(toBytes(ms.stepId));
@@ -506,7 +528,7 @@ export async function createJobFromSession(
             functionName: "addMilestone",
             args: [
               stepIdBytes,
-              v2OperatorPayout,
+              account.address,
               parseUnits(ms.amount, 6),
               parseUnits(ms.bondAmount ?? "0.00", 6),
               BigInt(ms.challengeWindowSeconds ?? 0),
@@ -613,8 +635,8 @@ export async function createJobFromSession(
   // kernel, or for a remote operator node that polls
   // GET /api/operator/jobs?status=queued and executes it out-of-process?
   //
-  // isExternal is a best-effort routing hint (queued vs active/pending), never
-  // a correctness gate — so a missing/uninitialised kernel-service must NOT
+  // This is status routing only; this function never starts a local runner.
+  // A missing/uninitialised kernel-service must NOT
   // abort escrow+job creation. Both callers wrap createJobFromSession (the
   // negotiate commit handler swallows throws as "best-effort"; the fast-track
   // route turns them into a 500), so an unguarded getKernelService() throw here
@@ -629,12 +651,15 @@ export async function createJobFromSession(
   // operator daemon (which polls status=queued) never sees, stranding a
   // stranger's paid job forever. Treat "not our own kernel" as external.
   let localKernelId: string | undefined;
+  let hasExplicitConfig = false;
   try {
-    localKernelId = (getKernelService() as any).config?.kernelId;
+    const service = getKernelService();
+    localKernelId = service.kernelId;
+    hasExplicitConfig = service.hasExplicitConfig;
   } catch {
     localKernelId = undefined;
   }
-  const isExternal = !(localKernelId && session.kernelId === localKernelId);
+  const isExternal = !canDispatchJobLocally(localKernelId, session.kernelId, hasExplicitConfig);
 
   repos.jobs.insert({
     id: jobId,
@@ -652,16 +677,24 @@ export async function createJobFromSession(
   });
 
   // ── 3. Create execution scope ──────────────────────────────────────
+  // N133: the buyer's write scope goes live ("active", the only status the relay admits) only
+  // when the kernel's operator accepted it (rule 2) AND the escrow is the buyer's own, real
+  // funding (rule 3). Otherwise it waits: for the operator's decision (POST
+  // /api/operator/scopes/:scopeId/accept, or a revoke), or for the buyer's funding. A blocked
+  // buyer's is dead. mintedScopeStatus reads the policy and the stop with no await between it and
+  // the insert below.
   const scopeId = `scope_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const allowedTools = getWriteToolsForDeviceType(session.capabilityType);
-  const expiry = new Date(Date.now() + 60 * 60_000).toISOString(); // 1 hour
+  // The scope's lifetime; for a scope that is not live yet, its window to be accepted and funded.
+  const expiry = new Date(Date.now() + PAID_SCOPE_TTL_MS).toISOString(); // 1 hour
 
+  const scopeStatus = mintedScopeStatus(session.kernelId, buyer, escrowId);
   db.insert(executionScopes).values({
     id: scopeId,
     kernelId: session.kernelId,
     jobId,
-    createdBy: session.userAgentId,
-    status: "active",
+    createdBy: buyer,
+    status: scopeStatus,
     allowedTools,
     maxCommands: 200,
     commandCount: 0,
@@ -688,6 +721,7 @@ export async function createJobFromSession(
       kernelId: session.kernelId,
       capabilityType: session.capabilityType,
       mockSettlement: isMockSettlement(),
+      scopeStatus,
     },
   });
 
@@ -697,6 +731,7 @@ export async function createJobFromSession(
     escrowId,
     escrowAddress,
     escrowStatus,
+    scopeStatus,
   };
 }
 
@@ -724,13 +759,20 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "Request body is required" });
     }
 
-    const { kernelId, capabilityType, parameters, paymentMethod, userAgentId } = body as any;
+    const { kernelId, capabilityType, parameters, paymentMethod, userAgentId: namedBuyer } = body as any;
 
-    if (!kernelId || !capabilityType || !userAgentId) {
+    if (!kernelId || !capabilityType || !namedBuyer) {
       return reply.status(400).send({
         error: "kernelId, capabilityType, and userAgentId are required",
       });
     }
+
+    // N133 rule 1: the buyer is the caller's proven identity, or the admin acts for it. The buyer
+    // holds the write scope minted below, so a claim or a mismatch is refused before anything
+    // (session, escrow, job, scope) is created.
+    const binding = bindBuyer(authorityOf(req), namedBuyer);
+    if (!binding.ok) return reply.status(binding.status).send(binding.body);
+    const userAgentId = binding.buyer;
 
     try {
       const { db } = getStore();
@@ -765,26 +807,61 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sanitizedSelections[key] = typeof value === "string" ? sanitizeText(value) : value;
       }
 
-      // Auto-compute quote
-      const template = getTemplate(capabilityType);
-      const basePrice = template?.basePricingHints?.basePrice
-        ? parseFloat(template.basePricingHints.basePrice)
-        : 10;
-      const quantity = (sanitizedSelections.quantity as number) ?? 1;
-      const { adjustedPrice, adjustments } = applyPricingRules(
-        basePrice * quantity,
-        policy.pricingRules.filter((r) => r.enabled),
-      );
+      // The quote is the operator's REGISTERED price for the selected capability (N98): never a
+      // template hint, never a default. Exactly one capability of this type on this kernel; job
+      // creation (createJobFromSession) then resolves the same one.
+      const candidates = getRepos().capabilities.findByKernel(kernelId).filter((c) => c.type === capabilityType);
+      if (candidates.length === 0) {
+        return reply.status(404).send({ error: "capability_not_found", message: `No ${capabilityType} capability is registered on this kernel.` });
+      }
+      if (candidates.length > 1) {
+        return reply.status(409).send({ error: "capability_ambiguous", message: `This kernel registers more than one ${capabilityType} capability, so no single price applies.` });
+      }
+      const registered = registeredQuotePrice(candidates[0]!.pricing);
+      if (!registered.ok) {
+        if (registered.reason === "unsupported-currency") {
+          return reply.status(422).send({
+            error: "capability_price_unsupported_currency",
+            currency: registered.currency,
+            settlementCurrency: SETTLEMENT_CURRENCY,
+            message: `This capability is registered in ${registered.currency}, but this gateway settles only in ${SETTLEMENT_CURRENCY}. There is no conversion.`,
+          });
+        }
+        return reply.status(422).send({ error: "capability_price_undeclared", reason: registered.reason, message: "This capability declares no usable price, so it cannot be quoted." });
+      }
+      const quantityRaw = sanitizedSelections.quantity;
+      const quantity = quantityRaw === undefined ? 1 : quantityRaw;
+      if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > MAX_QUOTE_QUANTITY) {
+        return reply.status(400).send({ error: "invalid_quantity", message: `quantity must be a whole number from 1 to ${MAX_QUOTE_QUANTITY}.` });
+      }
+      // F4: every rule is validated BEFORE any rule is applied, whether enabled or not — a malformed
+      // policy must never reach quoting, let alone money. All before any side effect (no session row
+      // exists yet).
+      const rulesValidation = validatePricingRules(policy.pricingRules);
+      if (!rulesValidation.ok) {
+        return reply.status(422).send({
+          error: "operator_pricing_policy_invalid",
+          ruleIndex: rulesValidation.ruleIndex,
+          ...(rulesValidation.ruleId !== undefined ? { ruleId: rulesValidation.ruleId } : {}),
+          reason: rulesValidation.reason,
+        });
+      }
+      // Exact arithmetic in cents up to the rules: the registered price times the quantity, never
+      // below the operator's declared minimum. exactQuoteTotal works entirely in bigint (F1): no
+      // money value ever passes through `Number`.
+      let subtotalCents = registered.cents * BigInt(quantity);
+      if (registered.minimumCents !== null && subtotalCents < registered.minimumCents) subtotalCents = registered.minimumCents;
+      const applicableRules = pricingRulesThatApply(rulesValidation.rules, { quantity, material: sanitizedSelections.material });
+      const { totalCents, adjustments } = exactQuoteTotal(subtotalCents, applicableRules);
 
       const quote = {
-        basePrice: basePrice.toFixed(2),
-        adjustments: adjustments.map((a) => ({
-          ruleId: a.ruleId,
-          label: a.label,
-          impact: a.amount.toFixed(2),
-        })),
-        totalPrice: adjustedPrice.toFixed(2),
-        currency: template?.basePricingHints?.currency ?? "USDC",
+        basePrice: centsToDecimal(registered.cents),
+        adjustments,
+        totalPrice: centsToDecimal(totalCents),
+        currency: registered.currency,
+        // Rates the registered pricing declares per unit of usage, which a discovery quote cannot
+        // measure: shown so the buyer sees them, and not charged by this quote.
+        ...(Object.keys(registered.usage).length > 0 ? { unquotedUsage: registered.usage } : {}),
         bondAmount: "0.00",
         challengeWindowSeconds: 0,
         validUntil: new Date(Date.now() + 30 * 60_000).toISOString(),
@@ -871,12 +948,20 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
         sessionId,
         jobId: result.jobId,
         scopeId: result.scopeId,
+        scopeStatus: result.scopeStatus,
         escrowId: result.escrowId,
         escrowAddress: result.escrowAddress,
         escrowStatus: result.escrowStatus,
         quote,
         contractTerms,
-        message: "Fast-track job created. Scope is active — executor can start making tool calls.",
+        message:
+          result.scopeStatus === "active"
+            ? "Fast-track job created. Scope is active — executor can start making tool calls."
+            : result.scopeStatus === "awaiting_acceptance"
+              ? "Fast-track job created. Its scope waits for the kernel operator's acceptance (POST /api/operator/scopes/:scopeId/accept)."
+              : result.scopeStatus === "awaiting_funding"
+                ? "Fast-track job created. Its scope waits for the buyer's own funding of the escrow."
+                : "Fast-track job created. The kernel's operator does not accept this buyer: its scope is not live.",
       });
     } catch (err) {
       return reply.status(500).send({
@@ -1124,10 +1209,15 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
             // per-job escrow, which has no unit id. LO-EV-9 then refuses evidence that commits
             // either (E11 F1), so evidence signed for a V-next milestone cannot anchor it.
             subject: { jobId, kernelId: job.kernelId },
+            // When the gateway received the bundle: the relay row's createdAt.
+            ...(receivedAtSeconds(r.createdAt) !== undefined ? { receivedAt: receivedAtSeconds(r.createdAt) } : {}),
           }));
         const kernelRow = repos.kernels.findById(job.kernelId);
         seam2RegisteredSigner = registeredSignerInputFromColumns(kernelRow ?? null);
       }
+      // No operatorPrincipalId: the gateway has no authoritative funded operator
+      // (kernel.operatorAddress is self-registered; the funded operator J1 is the
+      // oracle's, at /settle), so session-signed evidence never anchors here.
       const settlementEvidence = await resolveSettlementEvidence({
         deviceBundles: seam2DeviceBundles,
         registeredSigner: seam2RegisteredSigner,
@@ -1919,8 +2009,8 @@ export async function paidJobFlowRoutes(app: FastifyInstance) {
 
   app.get<{ Params: { jobId: string } }>("/api/jobs/:jobId/settlement", async (req, reply) => {
     const loaded = loadLegacySettlement(req, req.params.jobId, { sessions: true });
-    if (loaded.kind === "refused") {
-      const refusal = JOB_READ_REFUSAL[loaded.reason];
+    if (loaded.kind === "unauthenticated" || loaded.kind === "identity_unverified") {
+      const refusal = JOB_READ_REFUSAL[loaded.kind];
       return reply.status(refusal.status).send(refusal.body);
     }
     if (loaded.kind === "unavailable") {

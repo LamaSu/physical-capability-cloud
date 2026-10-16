@@ -39,6 +39,7 @@ import { schema, eq, and } from "@pcc/store";
 import type { JobOffer, JobOfferEvent } from "../services/job-offers-store.js";
 import { extractRequirementsCoords } from "../services/job-offers-store.js";
 import {
+  MILESTONE_WORDS,
   buildSettlementAxis,
   resolveSettlement,
   type JobExecutionDb,
@@ -258,13 +259,13 @@ function kernelSite(kernel: KernelLite | undefined, kernelId: string): OperatorW
  * funds, uncontested, with nothing yet returned to the payer or paid out. RELEASE_ALLOCATED (the
  * release is decided, the payout outstanding) still holds the funds.
  */
-const ESCROW_HOLDS = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "RELEASE_ALLOCATED"]);
+export const ESCROW_HOLDS: ReadonlySet<string> = new Set(["FUNDED", "ACTIVE", "COMPLETING", "LOCKED", "RELEASING", "MILESTONE_MET", "FUNDED_ACTIVE", "RELEASE_ALLOCATED"]);
 /**
  * Escrow-record words under which the escrow still holds the funds while the outcome is contested
  * (review r2 of #389, HIGH): the V-next contest and escalation states (canonical phases `contest`
  * and `escalation`), and a disputed escrow.
  */
-const ESCROW_CONTESTED = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
+export const ESCROW_CONTESTED: ReadonlySet<string> = new Set(["PRIMARY_ASSERTED", "CHALLENGED", "BACKUP_PENDING", "BACKUP_ASSERTED", "DISPUTED"]);
 /** Milestone words (escrow_milestones.status) under which this job's milestone is funded and still open. */
 const MILESTONE_HOLDS = new Set(["FUNDED", "LOCKED", "RELEASING"]);
 /** Milestone words under which this job's milestone is held but contested. */
@@ -297,6 +298,8 @@ export interface FundingContest {
  * reconciliation, and from every other record that can contest the money: the job's own status
  * and the disputes on its milestone.
  *   the payout is unknown (conflicting, unrecognized or ambiguous records)    -> unknown
+ *   the milestone's word is not a milestone status (MILESTONE_WORDS, shared
+ *   with the payout rule in job-execution.ts; review r3 of #389, MEDIUM)      -> unknown
  *   either word says never funded, refunded or released                       -> not_held
  *   a refund to the payer is decided but not made                             -> refund_pending
  *   the words do not say the escrow holds the funds and the milestone is open -> unknown
@@ -312,6 +315,7 @@ function recordFunding(s: SettlementAxis, contest: FundingContest): OperatorWork
   if (s.payout === "unknown" || !record.escrow.known || !ms.status.known) return "unknown";
   const e = normalizeMoneyStatus(record.escrow.sourceStatus);
   const m = normalizeMoneyStatus(ms.status.sourceStatus);
+  if (!MILESTONE_WORDS.has(m)) return "unknown";
   if (NOT_HELD.has(e) || NOT_HELD.has(m)) return "not_held";
   if (REFUND_PENDING.has(e) || REFUND_PENDING.has(m)) return "refund_pending";
   const held = (ESCROW_HOLDS.has(e) || ESCROW_CONTESTED.has(e)) && (MILESTONE_HOLDS.has(m) || MILESTONE_CONTESTED.has(m));

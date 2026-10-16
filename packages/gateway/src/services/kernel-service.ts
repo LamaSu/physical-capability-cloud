@@ -20,6 +20,7 @@ import { Sentry } from "../sentry.js";
 import { startTrace, endTrace } from "../tracing.js";
 import { pipelineTelemetry } from "../telemetry.js";
 import { knownErrorClassName, logSafeId, logSafeSmallInt } from "../redaction.js";
+import { localJobDispatchDecision, type LocalJobDispatchReason } from "./local-job-dispatch.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -27,6 +28,7 @@ import { knownErrorClassName, logSafeId, logSafeSmallInt } from "../redaction.js
 
 export interface SubmitJobParams {
   jobId: string;
+  kernelId: string;
   stepId: string;
   deviceId?: string;
   gcodeHash?: string;
@@ -74,8 +76,9 @@ interface RunningJob {
  * driving its real transport. Any other adapter counts as real only when its
  * source says `simulated: false`: an extension registered at runtime, a
  * subclass, Hamilton (@pcc/kernel does not export it), and IPP. A real-mode
- * IppAdapter serves mock answers while its optional `ipp` import is still
- * pending, before any marker is set, so an unmarked IPP counts as simulated.
+ * IppAdapter is marked `simulated: false` from construction; declared mock mode
+ * is `simulated: true`. Counting an unmarked IPP as simulated remains defence
+ * in depth.
  */
 const MARKS_ITS_OWN_SIMULATION: ReadonlySet<object> = new Set<object>([
   OctoPrintAdapter.prototype,
@@ -107,12 +110,18 @@ export function adapterIsSimulated(machine: MachineAdapter | undefined): boolean
 
 /** How many finished jobs keep the adapter that ran them; an evicted one reads as simulated. */
 const JOB_ADAPTER_MEMORY = 1000;
+/** Bound inventory reads even when an adapter never answers its health check. */
+const DEVICE_HEALTH_TIMEOUT_MS = 2_000;
 
 export class KernelService {
   private runners: Map<string, JobRunner> = new Map();
   private machines: Map<string, MachineAdapter> = new Map();
+  /** Metadata captured when the runtime adapter is installed, including DB devices. */
+  private runnerDevices = new Map<string, { id: string; type: string; adapterType: string }>();
   private emitter: EvidenceEmitter;
   private config: KernelConfig;
+  /** A generated dev config never authorizes this process to run local jobs. */
+  readonly hasExplicitConfig: boolean;
   private runningJobs: Map<string, RunningJob> = new Map();
   /** The adapter each dispatched job ran on, for jobRanSimulated (the newest JOB_ADAPTER_MEMORY jobs). */
   private jobAdapters: Map<string, MachineAdapter | undefined> = new Map();
@@ -125,6 +134,8 @@ export class KernelService {
   private cameras: ReturnType<typeof createAdaptersFromConfig>["cameras"] = [];
 
   constructor(config?: KernelConfig) {
+    this.hasExplicitConfig = config !== undefined
+      || Boolean(process.env.KERNEL_CONFIG || process.env.KERNEL_CONFIG_FILE);
     this.config = config ?? loadKernelConfig();
     this.emitter = new EvidenceEmitter(this.config.kernelId);
     // Initialize the safety gateway before any adapters or runners are created.
@@ -169,6 +180,8 @@ export class KernelService {
         this.emitter,
       );
       this.runners.set(machine.id, runner);
+      const device = this.config.devices.find((d) => d.id === machine.id);
+      this.runnerDevices.set(machine.id, { id: machine.id, type: "machine", adapterType: device?.adapterType ?? "unknown" });
     }
   }
 
@@ -227,6 +240,7 @@ export class KernelService {
           this.emitter,
         );
         this.runners.set(m.id, runner);
+        this.runnerDevices.set(m.id, { id: m.id, type: "machine", adapterType: row.adapterType });
       }
       return { installed: true };
     } catch (err) {
@@ -239,7 +253,10 @@ export class KernelService {
    * Load every DB-registered device for this kernel into the running
    * runtime. Called once during construction; safe to re-call.
    */
-  private loadDbDevicesIntoRuntime(): void {
+  private loadDbDevicesIntoRuntime(): { installed: boolean; reason?: string } {
+    if (!this.hasExplicitConfig || this.config.kernelId === "kernel_dev_001") {
+      return { installed: false, reason: "no_configured_local_kernel" };
+    }
     try {
       const rows = getRepos().kernels.findDevicesByKernel(this.config.kernelId);
       for (const row of rows) {
@@ -248,6 +265,7 @@ export class KernelService {
     } catch {
       // DB may not be initialized in test paths; ignore.
     }
+    return { installed: true };
   }
 
   /**
@@ -256,6 +274,9 @@ export class KernelService {
    * the very next test-job uses the real device.
    */
   refreshDeviceFromDb(deviceId: string): { installed: boolean; reason?: string } {
+    if (!this.hasExplicitConfig || this.config.kernelId === "kernel_dev_001") {
+      return { installed: false, reason: "no_configured_local_kernel" };
+    }
     const row = getRepos().kernels.findDeviceById(deviceId);
     if (!row) return { installed: false, reason: "row_not_found" };
     // N59 F1: never load a device from another kernel into this service's
@@ -306,8 +327,23 @@ export class KernelService {
    * recordDeviceSuccess()/recordDeviceFailure() — so a device that keeps failing
    * actually trips the breaker and blocks subsequent jobs.
    */
-  async submitJob(params: SubmitJobParams): Promise<{ jobId: string; deviceId: string; status: "accepted" }> {
+  async submitJob(params: SubmitJobParams): Promise<
+    { jobId: string; deviceId: string; status: "accepted" } |
+    { jobId: string; deviceId: null; status: "queued"; reason: LocalJobDispatchReason }
+  > {
     const { jobId, stepId, gcodeHash, assuranceTier = 0 } = params;
+    let decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
+    const queued = () => {
+      if (decision.ok) throw new Error("local_dispatch_not_blocked");
+      return { jobId, deviceId: null, status: "queued" as const, reason: decision.reason };
+    };
+    const refreshDecision = () => {
+      decision = localJobDispatchDecision(this.config.kernelId, params.kernelId, this.hasExplicitConfig);
+      return decision.ok;
+    };
+    // A route cannot bypass local identity, the operator's queue-only switch,
+    // or the kernel's stop by calling the service directly.
+    if (!decision.ok) return queued();
 
     const deviceId = this.selectDevice(params.deviceId);
     if (!deviceId) {
@@ -346,6 +382,8 @@ export class KernelService {
     // to validateAndRelay, which recorded a phantom success on every job and
     // prevented the breaker from ever tripping on real device failures.)
     const preflight = await gateway.validateOnly(preflightCmd);
+    // The asynchronous governor may yield while an operator engages the stop.
+    if (!refreshDecision()) return queued();
     if (!preflight.allowed) {
       throw new Error(
         `[safety-gateway] Job ${jobId} denied: ${preflight.verdict?.reason ?? preflight.reason ?? "unknown"}`,
@@ -406,6 +444,19 @@ export class KernelService {
 
     // Fire-and-forget execution — wrapped in a Sentry lifecycle span so the
     // async chain is visible as a waterfall in the Sentry trace view.
+    let dispatched = false;
+    let dispatchBlocked = false;
+    const blockDispatch = () => {
+      dispatchBlocked = true;
+      this.runningJobs.delete(jobId);
+      this.jobAdapters.delete(jobId);
+      try {
+        getRepos().jobs.updateStatus(jobId, "queued", 0);
+      } catch {
+        // The caller may not have inserted the job yet.
+      }
+      endTrace(traceId, lifecycleLocalSpanId, "error");
+    };
     try {
       Sentry.startSpanManual(
         {
@@ -420,9 +471,14 @@ export class KernelService {
           },
         },
         (lifecycleSpan) => {
-          // Telemetry: job execution starting. N71 round 6: validated echo, see
-          // job_accepted above.
+          if (!refreshDecision()) {
+            blockDispatch();
+            lifecycleSpan.end();
+            return;
+          }
+          // Emit only after the final dispatch guard, with N71's validated ids.
           pipelineTelemetry.emit(logSafeId(jobId), "job_started", "completed", { metadata: { deviceId: logSafeId(deviceId) } });
+          dispatched = true;
           runner
             .run({
               jobId,
@@ -541,8 +597,15 @@ export class KernelService {
       );
     } catch {
       // Sentry not initialised — fall back to plain fire-and-forget
-      // Telemetry: job execution starting (fallback path). N71 round 6: validated
-      // echo, see job_accepted above.
+      // Never let a stopped callback or a span error after dispatch start a
+      // second runner through the fallback.
+      if (dispatchBlocked) return queued();
+      if (dispatched) return { jobId, deviceId, status: "accepted" };
+      if (!refreshDecision()) {
+        blockDispatch();
+        return queued();
+      }
+      // Emit only after the final dispatch guard, with N71's validated ids.
       pipelineTelemetry.emit(logSafeId(jobId), "job_started", "completed", { metadata: { deviceId: logSafeId(deviceId) } });
       runner
         .run({
@@ -629,7 +692,7 @@ export class KernelService {
         });
     }
 
-    return { jobId, deviceId, status: "accepted" };
+    return dispatchBlocked ? queued() : { jobId, deviceId, status: "accepted" };
   }
 
   /**
@@ -662,7 +725,7 @@ export class KernelService {
   }
 
   /**
-   * List all devices from the kernel config with their REAL health status.
+   * List configured devices and every runnable DB device with real health.
    *
    * Health is derived from the live machine adapter (getStatus()) and the
    * safety circuit-breaker state — never hardcoded. See deriveHealthStatus.
@@ -680,14 +743,36 @@ export class KernelService {
       circuits = null;
     }
 
+    const devices = new Map<string, { id: string; type: string; adapterType: string }>(
+      this.config.devices.map((d) => [d.id, d]),
+    );
+    for (const id of this.runners.keys()) {
+      // Runtime metadata wins if a DB registration replaced a config adapter.
+      devices.set(id, this.runnerDevices.get(id)!);
+    }
     return Promise.all(
-      this.config.devices.map(async (d) => ({
+      [...devices.values()].map(async (d) => ({
         id: d.id,
         type: d.type,
         adapterType: d.adapterType,
         healthStatus: await this.deriveHealthStatus(d, circuits),
       })),
     );
+  }
+
+  /** A stalled adapter must not hold either inventory or direct health reads. */
+  private async readMachineStatus(machine: MachineAdapter): Promise<Awaited<ReturnType<MachineAdapter["getStatus"]>> | undefined> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        machine.getStatus(),
+        new Promise<undefined>((resolve) => {
+          timeout = setTimeout(() => resolve(undefined), DEVICE_HEALTH_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
   }
 
   /**
@@ -697,7 +782,7 @@ export class KernelService {
    *
    * - Machine with a running adapter: map its getStatus() (offline→offline,
    *   error/maintenance→degraded, idle/busy→healthy; a thrown/unreachable
-   *   adapter→offline).
+   *   adapter→offline; a health timeout→unknown).
    * - Sensor/camera: "healthy" if a live adapter was constructed for the id,
    *   else "unknown".
    * - Configured machine with no running adapter: "unknown".
@@ -714,13 +799,15 @@ export class KernelService {
     const machine = this.machines.get(device.id);
     if (machine) {
       try {
-        const status = await machine.getStatus();
+        const status = await this.readMachineStatus(machine);
         adapterHealth =
-          status === "offline"
-            ? "offline"
-            : status === "error" || status === "maintenance"
-              ? "degraded"
-              : "healthy"; // idle | busy
+          status === undefined
+            ? "unknown"
+            : status === "offline"
+              ? "offline"
+              : status === "error" || status === "maintenance"
+                ? "degraded"
+                : "healthy"; // idle | busy
       } catch {
         adapterHealth = "offline"; // adapter unreachable
       }
@@ -773,7 +860,8 @@ export class KernelService {
       return { healthy: false, details: "device_not_found" };
     }
     try {
-      const status = await machine.getStatus();
+      const status = await this.readMachineStatus(machine);
+      if (status === undefined) return { healthy: false, details: "adapter_error" };
       const healthy = status !== "error" && status !== "offline";
       return { healthy, details: status };
     } catch (err) {

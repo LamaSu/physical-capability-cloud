@@ -21,6 +21,7 @@ import hotFoodPrepCsd from "../csds/hot-food-prep.csd.json" with { type: "json" 
 // The reference vertical's workflow CSD (print + hand-off + mail). It was added on 8/27, after this list
 // was written, and was never registered, so production could not resolve its print leg (#433, board N64).
 import documentPrintAndMailCsd from "../csds/document-print-and-mail.csd.json" with { type: "json" };
+import documentPrintLegCsd from "../csds/document-print-leg.csd.json" with { type: "json" };
 
 /**
  * Per-CSD usage attribution.
@@ -408,6 +409,8 @@ export function loadBuiltinCsds(usageRepo?: CsdUsageRepository): CsdRegistry {
     courierRouteCsd,
     hotFoodPrepCsd,
     documentPrintAndMailCsd,
+    // The Thursday PRINT unit's print-leg CSD (per-leg model).
+    documentPrintLegCsd,
   ];
   for (const raw of builtins) {
     // Use validate first to get a clear error message, then register

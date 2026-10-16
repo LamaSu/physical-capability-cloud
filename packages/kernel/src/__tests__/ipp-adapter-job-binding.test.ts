@@ -6,8 +6,8 @@
  * emitter refused it, and a real print that reported progress failed (found merging #336
  * into #502).
  *
- * Real mode runs against a fake IPP client on the fake clock, as in
- * adapter-quiesce-evidence.test.ts: the client answers on microtasks, so the clock alone
+ * Real mode exercises the built-in IPP/1.1 client through its transport seam on the fake clock,
+ * as in adapter-quiesce-evidence.test.ts: the transport answers on microtasks, so the clock alone
  * decides when a poll lands.
  */
 
@@ -36,48 +36,27 @@ afterEach(() => {
  * it was submitted, then reports `endState` (9 completed, 8 aborted) with all 3.
  */
 async function realModePrinter(id: string, endState: 8 | 9 = 9): Promise<IppAdapter> {
-  const ipp = new IppAdapter(id, { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 2_000 });
-  await vi.dynamicImportSettled(); // the optional 'ipp' package is not installed: it routes to mock, then we inject a client
+  const { FakeIppPrinter, jobResponse, printerResponse } = await import("./helpers/fake-ipp-printer.js");
+  const { IPP_OPERATION } = await import("../adapters/ipp-codec.js");
   let jobDoneAt = Number.POSITIVE_INFINITY;
-  class Printer {
-    execute(op: string, _msg: unknown, _data: unknown, cb: (err: Error | null, res: Record<string, unknown>) => void) {
-      if (op === "Print-Job") {
-        jobDoneAt = Date.now() + 5_000;
-        queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-id": 77 } }));
-      } else if (op === "Get-Job-Attributes") {
-        const done = Date.now() >= jobDoneAt;
-        queueMicrotask(() => cb(null, { "job-attributes-tag": { "job-state": done ? endState : 5, "job-impressions-completed": done ? 3 : 1 } }));
-      } else queueMicrotask(() => cb(null, {}));
+  const printer = new FakeIppPrinter((request) => {
+    if (request.code === IPP_OPERATION.PRINT_JOB) {
+      jobDoneAt = Date.now() + 5_000;
+      return jobResponse(request, { jobId: 77 });
     }
-  }
-  Object.assign(ipp, { ippClient: { Printer }, ippAvailable: true });
-  return ipp;
-}
-
-/**
- * An EvidenceEmitter that records events in the order addEvent is CALLED, which is the order
- * the adapter emitted them. A plain emitter stores an event once its async hash completes, so
- * concurrent addEvent calls can store out of emission order: master's runPrintJob makes such
- * calls, and a slow hash of execution_started reordered its bundle in CI (#474's run). The
- * printer line (#521) records on one ordered chain. These tests check the emission order, so
- * their emitter serializes the calls; a refused event still rejects its own call.
- */
-function orderedEmitter(): EvidenceEmitter {
-  const emitter = new EvidenceEmitter(KERNEL_ID);
-  const add = emitter.addEvent.bind(emitter);
-  let chain: Promise<unknown> = Promise.resolve();
-  emitter.addEvent = ((jobId, stepId, event) => {
-    const recorded = chain.then(() => add(jobId, stepId, event));
-    chain = recorded.catch(() => undefined);
-    return recorded;
-  }) as typeof emitter.addEvent;
-  return emitter;
+    if (request.code === IPP_OPERATION.GET_JOB_ATTRIBUTES) {
+      const done = Date.now() >= jobDoneAt;
+      return jobResponse(request, { jobId: 77, jobState: done ? endState : 5, impressionsCompleted: done ? 3 : 1, jobStateReasons: ["job-completed-successfully"] });
+    }
+    return printerResponse(request);
+  });
+  return new IppAdapter(id, { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: false, pollIntervalMs: 2_000, transport: printer.transport });
 }
 
 describe("IppAdapter events record under the PCC job; the printer's job number is ippJobId (LO-EV-9)", () => {
   it("(real mode) every event of a print records under the PCC job", async () => {
     const ipp = await realModePrinter("ipp-bind-real");
-    const emitter = orderedEmitter();
+    const emitter = new EvidenceEmitter(KERNEL_ID);
     emitter.registerStep("job-ipp-1", STEP, 0);
     const adds: Array<Promise<unknown>> = [];
     ipp.onEvidence((event) => adds.push(emitter.addEvent("job-ipp-1", STEP, event)));
@@ -94,7 +73,7 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
 
   it("(real mode) runPrintJob completes a print that reports progress, naming the printer's job", async () => {
     const ipp = await realModePrinter("ipp-bind-print");
-    const emitter = orderedEmitter();
+    const emitter = new EvidenceEmitter(KERNEL_ID);
     // Settled into a value at once, so a rejection is reported here rather than as unhandled.
     const outcome = runPrintJob({ adapter: ipp, emitter, jobId: "job-ipp-2", jobName: "doc", totalPages: 3, documentData: "%PDF-1.4" }).then(
       (result) => ({ result, rejected: undefined }),
@@ -109,9 +88,9 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
     expect(result?.events.map((e) => e.type)).toEqual(PRINTED);
   });
 
-  it("(real mode) a print the printer aborts fails with the printer's reason, its events under the PCC job", async () => {
+  it("(real mode) a print the printer aborts fails on its own device job's execution_failed, with the printer's reason", async () => {
     const ipp = await realModePrinter("ipp-bind-abort", 8);
-    const emitter = orderedEmitter();
+    const emitter = new EvidenceEmitter(KERNEL_ID);
     const outcome = runPrintJob({ adapter: ipp, emitter, jobId: "job-ipp-4", jobName: "doc", totalPages: 3, documentData: "%PDF-1.4" }).then(
       (result) => ({ result, rejected: undefined }),
       (err: unknown) => ({ result: undefined, rejected: String(err) }),
@@ -120,14 +99,25 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
 
     const { result, rejected } = await outcome;
     expect(rejected, "runPrintJob rejected").toBeUndefined();
-    expect(result).toMatchObject({ success: false, error: expect.stringContaining("printer reported failure") });
-    expect(result?.events.map((e) => e.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_failed"]);
-    for (const event of result?.events ?? []) expect(event.payload, event.type).toMatchObject({ jobId: "job-ipp-4", ippJobId: 77 });
+    // Its own device job's failure is retained in the bundle even after its step is detached.
+    expect(result?.bundle).toBeDefined();
+    if (!result?.bundle) throw new Error("the device-reported failure must have a bundle");
+    expect(result).toEqual({
+      success: false,
+      bundle: expect.any(Object),
+      events: result.bundle.events,
+      error: 'printer reported failure: {"ippJobId":77,"state":"aborted","origin":"device"}',
+      failure: { kind: "device_reported", origin: "device" },
+      durationMs: expect.any(Number),
+    });
+    expect(result?.events.map((event) => event.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_failed"]);
+    expect(emitter.getEvents("job-ipp-4", "job-ipp-4")).toEqual([]);
+    expect(console.warn, "an event excluded as naming no device job").not.toHaveBeenCalledWith(expect.stringContaining("names no device job"));
   });
 
   it("(mock mode) every event of a print records under the PCC job", async () => {
     const ipp = new IppAdapter("ipp-bind-mock", { uri: "ipp://printer.test/ipp/print", kernelId: KERNEL_ID, mockMode: true });
-    const emitter = orderedEmitter();
+    const emitter = new EvidenceEmitter(KERNEL_ID);
     emitter.registerStep("job-ipp-3", STEP, 0);
     const adds: Array<Promise<unknown>> = [];
     ipp.onEvidence((event) => adds.push(emitter.addEvent("job-ipp-3", STEP, event)));
@@ -140,5 +130,30 @@ describe("IppAdapter events record under the PCC job; the printer's job number i
     const recorded = emitter.getEvents("job-ipp-3", STEP);
     expect(recorded.map((e) => e.type)).toEqual(["execution_started", "execution_progress", "execution_progress", "execution_completed"]);
     for (const event of recorded) expect(event.payload, event.type).toMatchObject({ jobId: "job-ipp-3", ippJobId: expect.any(Number) });
+  });
+
+  it("(real mode) a slow digest of execution_started still leaves the print's events in the order the printer reported them (N123)", async () => {
+    // runPrintJob calls addEvent as each event arrives, without waiting for the one before to be
+    // stored. execution_started's digest is held 3 s of the fake clock, past the 2 s poll's
+    // progress event: the emitter still stores it first, in the signed bundle too.
+    const subtle = globalThis.crypto.subtle;
+    const real = subtle.digest.bind(subtle);
+    vi.spyOn(subtle, "digest").mockImplementation(((algorithm: Parameters<typeof real>[0], data: Parameters<typeof real>[1]) => {
+      const started = new TextDecoder().decode(data as Uint8Array).includes('"type":"execution_started"');
+      return started ? new Promise((resolve) => setTimeout(resolve, 3_000)).then(() => real(algorithm, data)) : real(algorithm, data);
+    }) as typeof subtle.digest);
+    const ipp = await realModePrinter("ipp-bind-slow-start");
+    const emitter = new EvidenceEmitter(KERNEL_ID);
+    const outcome = runPrintJob({ adapter: ipp, emitter, jobId: "job-ipp-5", jobName: "doc", totalPages: 3, documentData: "%PDF-1.4" }).then(
+      (result) => ({ result, rejected: undefined }),
+      (err: unknown) => ({ result: undefined, rejected: String(err) }),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    const { result, rejected } = await outcome;
+    expect(rejected, "runPrintJob rejected").toBeUndefined();
+    expect(result).toMatchObject({ success: true });
+    expect(result?.events.map((e) => e.type)).toEqual(PRINTED);
+    expect(result?.bundle?.events.map((e) => e.type)).toEqual(PRINTED);
   });
 });

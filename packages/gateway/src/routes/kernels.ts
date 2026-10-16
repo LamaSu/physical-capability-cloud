@@ -2,9 +2,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Result } from "@pcc/spec";
 import { getKernelFacade } from "../facades/index.js";
+import { jobReadScopeOf, refuseJobRead, scopeAllows } from "../readmodels/job-read-gate.js";
 import type { CreateKernelInput, HeartbeatInput, CapabilityAnnouncementInput } from "../facades/index.js";
 import type { LocationOptInAuthority } from "../facades/kernel.facade.js";
 import { recordOperatorStage } from "../services/funnel-tracker.js";
+import { AUTHENTICATION_REQUIRED, authorityOf, isAnonymous, refuseKernelAction } from "../auth/kernel-authority.js";
 
 // ── Result→HTTP helper ────────────────────────────────────────────────────────
 
@@ -76,6 +78,16 @@ function locationOptInAuthority(req: FastifyRequest): LocationOptInAuthority {
   };
 }
 
+/**
+ * N31: the refusal for a write that runs the kernel ("operate" in auth/kernel-authority.ts), or
+ * null when the caller is the kernel's own principal, its proven operator wallet or the admin.
+ */
+function refuseOperate(req: FastifyRequest, kernelId: string): { status: number; body: Record<string, string> } | null {
+  const authority = authorityOf(req);
+  if (isAnonymous(authority)) return { status: 401, body: AUTHENTICATION_REQUIRED };
+  return refuseKernelAction(req, authority, kernelId, "operate");
+}
+
 export async function kernelRoutes(app: FastifyInstance) {
   const facade = getKernelFacade();
 
@@ -112,8 +124,19 @@ export async function kernelRoutes(app: FastifyInstance) {
     // `capabilityTypes`; expose both shapes for callers that haven't
     // migrated yet. Purely additive — KernelHealthSnapshot fields are
     // preserved.
+    // A kernel's detail is public, but its recent jobs are job records (F3 round 3): the list holds
+    // only the jobs this caller may read (jobReadScopeOf). recentJobsScope says what the list
+    // covers, so an empty list never reads as "this kernel has no jobs": "all" for an admin
+    // without a tenant, "readable_by_caller" for everyone else (none without a proven wallet),
+    // "unavailable" when the records the rule needs could not be read.
+    const scope = jobReadScopeOf(req);
+    const recentJobs = scope.ok ? (snapshot.recentJobs ?? []).filter((job) => scopeAllows(scope, job.id)) : [];
+    const recentJobsScope =
+      scope.ok && scope.jobIds === null ? "all" : !scope.ok && scope.kind === "unavailable" ? "unavailable" : "readable_by_caller";
     const responseKernel: Record<string, unknown> = {
       ...snapshot,
+      recentJobs,
+      recentJobsScope,
       capabilities: snapshot.capabilityTypes ?? [],
       discoveryStatus,
     };
@@ -138,13 +161,17 @@ export async function kernelRoutes(app: FastifyInstance) {
 
   /**
    * Get jobs for a kernel.
-   * Returns { jobs: JobDTO[] }.
+   * Returns { jobs: JobDTO[] }: only the jobs the caller may read (F3 round 3). Identity first,
+   * before the jobs are read: no credential is 401, an unproven one 403. A proven wallet gets the
+   * jobs it operates or bought; an admin all of them (within its tenant under TENANT_ENFORCE).
    */
   app.get<{ Params: { kernelId: string } }>(
     "/api/kernels/:kernelId/jobs",
     async (req, reply) => {
+      const scope = jobReadScopeOf(req);
+      if (!scope.ok) return refuseJobRead(reply, scope);
       const result = await facade.getJobs(req.params.kernelId);
-      if (result.success) return { jobs: result.data };
+      if (result.success) return { jobs: result.data.filter((job) => scopeAllows(scope, job.id)) };
       return sendResult(reply, result);
     },
   );
@@ -200,6 +227,10 @@ export async function kernelRoutes(app: FastifyInstance) {
     Params: { kernelId: string };
     Body: HeartbeatInput;
   }>("/api/kernels/:kernelId/heartbeat", async (req, reply) => {
+    // N31 (#575 r2; bus #6505): a heartbeat sets the kernel's status and upserts its
+    // capabilities, so only the kernel's own principal, its proven wallet or the admin may send it.
+    const refusal = refuseOperate(req, req.params.kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const result = await facade.heartbeat(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
   });
@@ -213,6 +244,9 @@ export async function kernelRoutes(app: FastifyInstance) {
     Params: { kernelId: string };
     Body: CapabilityAnnouncementInput;
   }>("/api/kernels/:kernelId/capabilities", async (req, reply) => {
+    // N31 (#575 r2): announcing capabilities writes them onto the kernel; same rule as heartbeat.
+    const refusal = refuseOperate(req, req.params.kernelId);
+    if (refusal) return reply.code(refusal.status).send(refusal.body);
     const result = await facade.announceCapabilities(req.params.kernelId, req.body ?? {});
     return sendResult(reply, result);
   });

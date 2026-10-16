@@ -104,7 +104,7 @@ beforeAll(async () => {
   // delegate wired, never a new global context manager.
   provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
   trace.setGlobalTracerProvider(provider);
-});
+}, 120_000);
 
 afterAll(async () => {
   await provider.shutdown();

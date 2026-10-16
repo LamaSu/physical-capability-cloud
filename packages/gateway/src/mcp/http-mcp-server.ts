@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { dirname, resolve as resolvePath } from "node:path";
@@ -125,11 +126,16 @@ function resolveAgentPackagePath(): string {
   return found;
 }
 
-/** Load the canonical pack on every request so discovery follows pack updates. */
-export function loadAgentPackage(): AgentPackage {
-  const raw = JSON.parse(
-    readFileSync(resolveAgentPackagePath(), "utf8"),
-  ) as Partial<AgentPackage>;
+/**
+ * Load the canonical pack on every request so discovery follows pack updates,
+ * together with the sha256 of the EXACT bytes it was parsed from (one read: the
+ * digest and the parsed pack can never describe two different files, and it is
+ * never a hash of a re-serialization).
+ */
+export function loadAgentPackageWithDigest(): { pack: AgentPackage; sha256: string } {
+  const bytes = readFileSync(resolveAgentPackagePath());
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const raw = JSON.parse(bytes.toString("utf8")) as Partial<AgentPackage>;
 
   if (
     typeof raw.name !== "string" ||
@@ -140,7 +146,12 @@ export function loadAgentPackage(): AgentPackage {
     throw new Error("agent-package.json does not have the expected package shape");
   }
 
-  return raw as AgentPackage;
+  return { pack: raw as AgentPackage, sha256 };
+}
+
+/** Load the canonical pack on every request so discovery follows pack updates. */
+export function loadAgentPackage(): AgentPackage {
+  return loadAgentPackageWithDigest().pack;
 }
 
 function toolDescription(tool: AgentPackageTool): string {
@@ -573,7 +584,7 @@ function assertMcpApiBaseAvailable(): void {
   if (message) throw new McpError(ErrorCode.InvalidRequest, message);
 }
 
-function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
+function createMcpServer(pack: AgentPackage, surface: McpSurface, packSha256: string): McpServer {
   const toolsByName = new Map(pack.tools.map((tool) => [tool.name, tool]));
   const server = new McpServer(
     {
@@ -584,7 +595,12 @@ function createMcpServer(pack: AgentPackage, surface: McpSurface): McpServer {
       // live `initialize` handshake sees name+icon+description without
       // needing a second request to server-card.json.
       title: "Physical Capability Cloud",
-      version: pack.version,
+      // The pack this session EXECUTES: its version plus the sha256 of the exact
+      // bytes it was read from, as SemVer build metadata (legal, and ignored for
+      // precedence). A client that pinned a package by version and digest compares
+      // this to its pin before it trusts a tool name: names resolve through THIS
+      // pack, so a matching name proves nothing about what a call would do.
+      version: `${pack.version}+sha256.${packSha256}`,
       description: pack.description,
       icons: [{ src: PCC_MCP_ICON_URL, mimeType: "image/svg+xml" }],
     },
@@ -789,8 +805,8 @@ async function registerStreamableMcpSurface(
 
     if (!session && !sessionId && isInitializeRequest(request.body)) {
       await reserveSessionSlot();
-      const pack = loadAgentPackage();
-      const server = createMcpServer(pack, surface);
+      const { pack, sha256 } = loadAgentPackageWithDigest();
+      const server = createMcpServer(pack, surface, sha256);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         enableJsonResponse: true,

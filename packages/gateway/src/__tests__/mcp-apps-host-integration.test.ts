@@ -454,13 +454,19 @@ describe("R4 PR1 — full pcc-ui boot: host mode read-only, non-host unchanged",
     expect(headers.Authorization).toBeUndefined(); // host mode holds no key
   });
 
-  it("non-host mode: the SAME mutating action is enabled and DOES issue a request (unchanged)", () => {
+  it("non-host mode: the SAME mutating action is enabled and DOES issue a request (through the Approval gate)", () => {
     const calls = bootRealKit(false, actionsManifest);
     const btn = buttonByText("Cancel job");
     expect(btn, "action button rendered").toBeDefined();
     expect(btn?.disabled).toBe(false);
     expect(document.querySelector(".pcc-host-note")).toBeNull();
     (btn as unknown as { onclick?: () => void })?.onclick?.();
+    // A write that is not on the kit's short non-money allowlist is money until proven otherwise
+    // (cancelling a paid job can refund): it opens the Approval gate, and nothing is sent yet.
+    expect(calls).toHaveLength(0);
+    const approve = Array.from(document.querySelectorAll(".pcc-overlay .pcc-btn")).find((b) => b.textContent === "Approve") as unknown as { onclick?: () => void } | undefined;
+    expect(approve, "approval gate opened").toBeDefined();
+    approve?.onclick?.();
     expect(calls).toHaveLength(1);
     expect(calls[0].url.endsWith("/api/jobs/j1/cancel")).toBe(true);
     expect(calls[0].init?.method).toBe("POST");

@@ -341,7 +341,9 @@ describe("PX-4 review #2524, absence: every failed, off-schema, partial or empty
   });
 
   it("empty-read policy: 'none' only when the source vouches for its read time", async () => {
-    const withTime = scene([{ status: 200, json: { items: [], asOf: iso(T0 - 1_000) } }], T0);
+    // The real capabilities producer always reports its total (capability.facade.ts:253). Since N110
+    // (astra n110 r1), "none" also needs that paging evidence: a valid total of 0.
+    const withTime = scene([{ status: 200, json: { items: [], total: 0, asOf: iso(T0 - 1_000) } }], T0);
     withTime.deliver(listManifest); await withTime.settle();
     expect(withTime.q(".pcc-list .pcc-empty").textContent).toBe("none");
     expect(withTime.lineOf(withTime.q(".pcc-list")).textContent).toBe("source read 2026-09-24 11:59:59Z");

@@ -18,6 +18,7 @@ import { join } from "node:path";
 let tmpDir: string;
 let feedbackFile: string;
 let adminObservabilityRoutes: typeof import("../routes/admin-observability.js").adminObservabilityRoutes;
+let attemptScanBytes: typeof import("../routes/admin-observability.js").attemptScanBytes;
 
 const ADMIN = "op-admin";
 const SID_A = "aa000000-0000-4000-8000-00000000000a";
@@ -29,7 +30,7 @@ beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "pcc-attempts-view-"));
   feedbackFile = join(tmpDir, "feedback.jsonl");
   process.env.PCC_DB_PATH = join(tmpDir, "pcc.sqlite");
-  ({ adminObservabilityRoutes } = await import("../routes/admin-observability.js"));
+  ({ adminObservabilityRoutes, attemptScanBytes } = await import("../routes/admin-observability.js"));
 });
 
 async function buildApp(operatorId: string | null): Promise<FastifyInstance> {
@@ -195,6 +196,47 @@ describe("GET /api/admin/observability/attempts: analysis", () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe("GET /api/admin/observability/attempts: F2 proposal examples redaction", () => {
+  it("omits proposal examples (verbatim public report text) from the JSON view", async () => {
+    writeSink([
+      attempt(SID_A, 0, "register", "failed", {
+        proposal: { target: "code", path: "x.ts", text: "Patient Alice has condition X" },
+      }),
+    ]);
+    const app = await buildApp(ADMIN);
+    try {
+      const body = (await get(app)).json();
+      expect(body.proposals.length).toBeGreaterThan(0);
+      for (const group of body.proposals) {
+        expect(group).not.toHaveProperty("examples");
+        expect(Object.keys(group).sort()).toEqual(["count", "routeTo", "sessions", "target"]);
+      }
+      expect(JSON.stringify(body.proposals)).not.toContain("Patient Alice");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("attemptScanBytes: F5 ceiling", () => {
+  it("clamps an oversized configured value to 200 MB (209715200)", () => {
+    process.env.PCC_ATTEMPT_SCAN_MAX_BYTES = String(500 * 1024 * 1024); // 500MB misconfiguration
+    expect(attemptScanBytes()).toBe(209715200);
+  });
+
+  it("still honors a value within the ceiling", () => {
+    process.env.PCC_ATTEMPT_SCAN_MAX_BYTES = "1000";
+    expect(attemptScanBytes()).toBe(1000);
+  });
+
+  it("falls back to the 20MB default when unset or invalid", () => {
+    delete process.env.PCC_ATTEMPT_SCAN_MAX_BYTES;
+    expect(attemptScanBytes()).toBe(20 * 1024 * 1024);
+    process.env.PCC_ATTEMPT_SCAN_MAX_BYTES = "-5";
+    expect(attemptScanBytes()).toBe(20 * 1024 * 1024);
   });
 });
 

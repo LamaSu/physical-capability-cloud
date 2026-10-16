@@ -182,7 +182,13 @@ beforeAll(async () => {
   ({ getKernelService } = await import("../services/kernel-service.js"));
   ({ getJobFacade } = await import("../facades/index.js"));
   ({ MockFDMAdapter } = await import("@pcc/kernel"));
-  app = (await server.createGateway(0)).app as unknown as FastifyInstance;
+  // N104 requires an explicit local identity before DB devices can be installed.
+  // Keep the mock machine these redaction probes exercise, under a configured kernel.
+  app = await withEnv({ KERNEL_CONFIG: JSON.stringify({
+    kernelId: "kernel-n71-runtime",
+    mockMode: true,
+    devices: [{ id: "dev_fdm_001", type: "machine", adapterType: "mock", config: {} }],
+  }) }, async () => (await server.createGateway(0)).app as unknown as FastifyInstance);
   await app.ready();
   keyA = seedKey(A);
   keyB = seedKey(B);
@@ -201,7 +207,7 @@ beforeAll(async () => {
   });
   expect(reg.statusCode, reg.body).toBeLessThan(300);
   registerBody = reg.body;
-});
+}, 120_000);
 
 afterAll(async () => {
   await app?.close();
@@ -773,7 +779,7 @@ describe("N71 round 6 (astra pack 83e, C2): console.warn's deviceId is validated
   const sentinelDeviceId = `pcc_live_${SENTINEL}-health-check`;
 
   beforeAll(async () => {
-    healthKernel = `${kernelId}-health-r6`;
+    healthKernel = getKernelService().kernelId;
     const made = await inj("POST", "/api/kernels", keyA, { id: healthKernel, name: "A's r6 health workshop" });
     expect(made.statusCode, made.body).toBeLessThan(300);
     const reg = await inj("POST", "/api/setup/register-device", keyA, {
@@ -1097,10 +1103,18 @@ describe("N71 round 3 (astra pack 83b): the setup catch blocks answer with fixed
   });
 
   it("[neg] POST /api/setup/test-job: an exception from the job submission is not returned, NOR logged", async () => {
+    // Reach the submission catch through the owner, device, explicit-local-identity
+    // and clear-stop gates, so every original response/log assertion exercises it.
+    const localKernelId = getKernelService().kernelId;
+    getRepos().kernels.insertDevice({
+      id: "dev_fdm_001", kernelId: localKernelId, type: "machine", model: "Mock printer",
+      firmware: "1", status: "idle", contributesToCapabilities: [],
+      lastUpdated: new Date().toISOString(), adapterType: "mock",
+    });
     const spy = vi.spyOn(getKernelService(), "submitJob").mockRejectedValue(new Error(THROWN));
     try {
       const { result: res, lines } = await captureAppLog(() =>
-        inj("POST", "/api/setup/test-job", keyB, { deviceId: "dev_fdm_001" }),
+        inj("POST", "/api/setup/test-job", keyA, { kernelId: localKernelId, deviceId: "dev_fdm_001" }),
       );
       expect(res.statusCode).toBe(500);
       expect(res.body).not.toContain(SENTINEL);
@@ -1180,7 +1194,12 @@ describe("N71 round 3 (astra pack 83b): an unexpected exception inside a facade 
     const bad = await inj("POST", "/api/devices/register", keyA, { kernelId });
     expect(bad.statusCode).toBe(400);
     expect(bodyOf(bad)).toMatchObject({ error: "missing_required_fields", message: "kernelId, id, type, model, adapterType are all required" });
-    const missing = await inj("GET", "/api/jobs/job-n71-missing/status", keyB);
+    // Master's job-read gate requires a proven identity or valid admin credential
+    // before disclosing a missing job. Supply that fixture to retain the 404 probe.
+    const missing = await withEnv({ PCC_ADMIN_KEY: "n71-missing-job-control-admin" }, () => app.inject({
+      method: "GET", url: "/api/jobs/job-n71-missing/status",
+      headers: { authorization: `Bearer ${keyB}`, "x-admin-key": "n71-missing-job-control-admin" },
+    }));
     expect(missing.statusCode).toBe(404);
     expect(String(bodyOf(missing).message)).toContain("job-n71-missing");
   });

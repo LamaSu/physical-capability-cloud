@@ -148,6 +148,7 @@ describe("N71 round 7 finding 2 (CRITICAL): startTrace and Sentry.startSpanManua
 
     await svc.submitJob({
       jobId: `pcc_live_${SENTINEL}`,
+      kernelId: svc.kernelId,
       stepId: `step_${SENTINEL}`,
       assuranceTier: 0,
       deviceId: "dev-r7-f2",
@@ -173,7 +174,7 @@ describe("N71 round 7 finding 3 (CRITICAL): this.config.kernelId must never reac
       devices: [{ id: "dev-r7-f3", type: "machine", adapterType: "mock", config: {} }],
     });
 
-    await svc.submitJob({ jobId: "job-r7-f3", stepId: "s", assuranceTier: 0, deviceId: "dev-r7-f3" });
+    await svc.submitJob({ jobId: "job-r7-f3", kernelId: svc.kernelId, stepId: "s", assuranceTier: 0, deviceId: "dev-r7-f3" });
 
     const emitMock = pipelineTelemetry.emit as unknown as ReturnType<typeof vi.fn>;
     expect(emitMock).toHaveBeenCalled();

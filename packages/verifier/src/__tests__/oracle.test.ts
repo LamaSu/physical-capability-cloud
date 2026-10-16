@@ -11,6 +11,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import type { EvidenceBundle, SHA256, Address, Signature } from "@pcc/spec";
+import { hashBundle, hashEvent } from "@pcc/spec";
 import { UMAOracleAdapter } from "../oracle/uma-adapter.js";
 import { ChainlinkOracleAdapter } from "../oracle/chainlink-adapter.js";
 import { EigenLayerOracleAdapter } from "../oracle/eigenlayer-adapter.js";
@@ -85,6 +86,14 @@ function serializeBundle(bundle: EvidenceBundle): string {
 const VALID_BUNDLE = makeBundle();
 const VALID_HASH = VALID_BUNDLE.bundleHash;
 const VALID_DATA = serializeBundle(VALID_BUNDLE);
+
+/** The same bundle sealed as a kernel seals one: each event hash and the bundle hash computed (E11f). */
+async function sealBundle(bundle: EvidenceBundle): Promise<EvidenceBundle> {
+  const events = await Promise.all(bundle.events.map(async (e) => ({ ...e, hash: (await hashEvent(e)) as SHA256 })));
+  return { ...bundle, events, bundleHash: (await hashBundle(events)) as SHA256 };
+}
+/** The TMP bridge verifies a bundle before any oracle sees it, so its tests need a sealed one (E11f). */
+const SEALED_BUNDLE = await sealBundle(makeBundle());
 
 // ── Evidence Evaluator Tests ──────────────────────────────────────────
 
@@ -470,6 +479,11 @@ describe("OracleVerificationBridge: all oracles fail", () => {
 
 // ── Backward Compatibility: TMPValidatorBridge ────────────────────────
 
+/** The task's accepted tier, as a caller passes it from its own record (N118); the envelopes name 2. */
+const ACCEPTED_TIER_2 = { acceptedTier: 2 as const };
+/** The task's own record for an envelope: its pipeline (here the envelope's) and tier 2 (E11e). */
+const taskCtx2 = (envelope: { proofType: BenchmarkProofEnvelope["proofType"] }) => ({ proofType: envelope.proofType, acceptedTier: 2 as const });
+
 describe("TMPValidatorBridge backward compat", () => {
   let bridge: OracleVerificationBridge;
   let validatorBridge: TMPValidatorBridge;
@@ -494,9 +508,8 @@ describe("TMPValidatorBridge backward compat", () => {
       metricTarget: "accuracy >= 0.95",
       proofType,
       proof: {
-        bundleHash: VALID_HASH,
-        bundleData: VALID_DATA,
-        requiredTier: 2,
+        bundleHash: SEALED_BUNDLE.bundleHash,
+        bundleData: serializeBundle(SEALED_BUNDLE),
       },
       submittedAt: new Date().toISOString() as Timestamp,
     };
@@ -504,7 +517,7 @@ describe("TMPValidatorBridge backward compat", () => {
 
   it("routes oracle_verification proof type through oracle bridge", async () => {
     const envelope = makeOracleEnvelope("oracle_verification");
-    const result = await validatorBridge.validate(envelope);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(true);
     expect(result.confidence).toBeGreaterThanOrEqual(0.6);
     expect(result.findings[0].check).toBe("oracle_verification");
@@ -512,7 +525,7 @@ describe("TMPValidatorBridge backward compat", () => {
 
   it("routes bittensor_verification proof type through oracle bridge (backward compat)", async () => {
     const envelope = makeOracleEnvelope("bittensor_verification");
-    const result = await validatorBridge.validate(envelope);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(true);
     expect(result.confidence).toBeGreaterThanOrEqual(0.6);
     // The check name uses oracle_consensus for new bridge
@@ -526,7 +539,7 @@ describe("TMPValidatorBridge backward compat", () => {
       new ZKProofService(),
     );
     const envelope = makeOracleEnvelope("bittensor_verification");
-    const result = await bridgeLessValidator.validate(envelope);
+    const result = await bridgeLessValidator.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(false);
     expect(result.confidence).toBe(0);
   });
@@ -534,7 +547,7 @@ describe("TMPValidatorBridge backward compat", () => {
   it("returns invalid for missing bundleHash in oracle_verification", async () => {
     const envelope = makeOracleEnvelope("oracle_verification");
     envelope.proof = {}; // missing bundleHash and bundleData
-    const result = await validatorBridge.validate(envelope);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(false);
     expect(result.findings[0].check).toBe("oracle_input");
   });
@@ -542,14 +555,32 @@ describe("TMPValidatorBridge backward compat", () => {
   it("returns invalid for missing bundleHash in bittensor_verification", async () => {
     const envelope = makeOracleEnvelope("bittensor_verification");
     envelope.proof = {};
-    const result = await validatorBridge.validate(envelope);
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
     expect(result.valid).toBe(false);
     expect(result.findings[0].check).toBe("bittensor_input");
   });
 
+  it("an unsealed bundle (event hashes that aren't its own) is refused before any oracle is asked (E11f)", async () => {
+    for (const proofType of ["oracle_verification", "bittensor_verification"] as const) {
+      const envelope = makeOracleEnvelope(proofType);
+      envelope.proof = { bundleHash: VALID_HASH, bundleData: VALID_DATA };
+      const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
+      expect(result.valid, proofType).toBe(false);
+      expect(result.findings[0].check, proofType).toBe(proofType === "oracle_verification" ? "oracle_bundle" : "bittensor_bundle");
+    }
+  });
+
+  it("a bundleHash other than the verified bundle's own is refused (E11f)", async () => {
+    const envelope = makeOracleEnvelope("oracle_verification");
+    envelope.proof = { bundleHash: "sha256:" + "ef".repeat(32), bundleData: serializeBundle(SEALED_BUNDLE) };
+    const result = await validatorBridge.validate(envelope, taskCtx2(envelope));
+    expect(result.valid).toBe(false);
+    expect(result.findings[0].details).toMatch(/not the hash of the verified bundle/);
+  });
+
   it("validateViaOracle is callable directly", async () => {
     const envelope = makeOracleEnvelope("oracle_verification");
-    const result = await validatorBridge.validateViaOracle(envelope);
+    const result = await validatorBridge.validateViaOracle(envelope, ACCEPTED_TIER_2);
     expect(result.valid).toBe(true);
   });
 });

@@ -3,6 +3,7 @@ and with the truths the agent pack enforces. Standard library only:
 python3 -m unittest discover -s starter/bin -p 'test_*.py'
 """
 
+import ast
 import json
 import pathlib
 import re
@@ -119,7 +120,7 @@ class TestTruths(unittest.TestCase):
                 self.assertRegex(window, r"> \.pcc/", f"{path.name}: provision output must be written under .pcc/")
 
     def test_every_provisioning_call_sends_its_own_public_key(self):
-        # Rehearsal R0's P9: without publicKey, the response carries a server-made private key.
+        # Without publicKey, the API key has no signing key on file.
         # A body is either inline JSON, or a private file built just before the call (115c F5).
         calls = 0
         for path, text in text_files():
@@ -134,6 +135,88 @@ class TestTruths(unittest.TestCase):
                 else:
                     self.assertIn('\\"publicKey\\"', after, f"{path.name}: provision without publicKey")
         self.assertEqual(calls, 1)  # the operator's own; phase 6's buyer key went with its submission (115e)
+
+    def test_no_text_claims_a_server_made_or_returned_private_key(self):
+        # E17e NC2: provisioning binds our public key; it never supplies a private one.
+        verbs = r"(?:generat\w*|creat\w*|return\w*|contain\w*|send\w*|provid\w*|receiv\w*)"
+        private_key = r"\bprivate(?:\s+signing)?\s+key\b"
+        negated = re.compile(
+            rf"(?i)\b(?:never|does not|doesn't|will not|won't)\s+(?:{verbs}\s+(?:or|and)\s+)*"
+            rf"{verbs}\s+(?:(?:a|the|your|its|any)\s+)?{private_key}"
+        )
+        claim = re.compile(
+            rf"(?i)\bserver[- ](?:made|generated|created)\s+{private_key}|"
+            rf"\b(?:server|gateway|api|response)\b[^.!?\n]*\b{verbs}\b[^.!?\n]*{private_key}|"
+            rf"\b(?:return\w*|receiv\w*)\b[^.!?\n]*{private_key}|"
+            rf"{private_key}[^.!?\n]*\b(?:returned|received)\b"
+        )
+        for path, text in text_files():
+            for sentence in re.split(r"(?<=[.!?])\s+|\n", text):
+                self.assertNotRegex(negated.sub("", sentence), claim, f"{path.name}: {sentence}")
+
+    def test_every_node_key_call_uses_the_selected_external_path(self):
+        # R2, NC3 and NC5: older releases default to a key inside the onboarding folder.
+        expected = ast.parse(
+            'os.environ.get("PCC_NODE_KEY_PATH") or os.path.expanduser("~/.pcc-node/keys.json")',
+            mode="eval",
+        ).body
+        sources = list(text_files())
+        sources.extend(
+            (path, path.read_text(encoding="utf-8"))
+            for path in sorted(STARTER.rglob("*"))
+            if path.is_file() and (path.suffix == ".py" or path.name == "pcc-report")
+            and ".pcc" not in path.parts
+        )
+        phase_locations = {}
+        for path, text in sources:
+            if path.suffix in (".md", ".json"):
+                # Check the count too, so an added call outside an example cannot escape the test.
+                documented_calls = len(re.findall(r"\bload_or_create_keys\s*\(", text))
+                examples = []
+                for language, code in re.findall(r"(?ms)^```([^\n]*)\n(.*?)^```", text):
+                    if language.strip() == "python":
+                        examples.append(code)
+                    else:
+                        examples.extend(re.findall(r"(?ms)^python3 - <<'EOF'[^\n]*\n(.*?)^EOF$", code))
+            else:
+                documented_calls = None
+                examples = [text]
+            found = 0
+            for code in examples:
+                tree = ast.parse(code)
+                for call in ast.walk(tree):
+                    if not (isinstance(call, ast.Call) and (
+                        isinstance(call.func, ast.Name) and call.func.id == "load_or_create_keys"
+                        or isinstance(call.func, ast.Attribute) and call.func.attr == "load_or_create_keys"
+                    )):
+                        continue
+                    found += 1
+                    self.assertEqual(len(call.args), 1, f"{path.name}: pass the selected key path explicitly")
+                    self.assertFalse(call.keywords, f"{path.name}: use the same explicit path argument")
+                    location = call.args[0]
+                    if isinstance(location, ast.Name):
+                        bindings = [
+                            node.value for node in tree.body
+                            if isinstance(node, ast.Assign) and node.lineno < call.lineno
+                            and any(isinstance(target, ast.Name) and target.id == location.id for target in node.targets)
+                        ]
+                        self.assertTrue(bindings, f"{path.name}: key path must be built here")
+                        location = bindings[-1]
+                    self.assertEqual(ast.dump(location), ast.dump(expected), f"{path.name}: key path must select PCC_NODE_KEY_PATH or ~/.pcc-node/keys.json")
+                    phase_locations.setdefault(path.name, []).append(ast.dump(location))
+            if documented_calls is not None:
+                self.assertEqual(found, documented_calls, f"{path.name}: every key call must be in a checked Python example")
+        # L3: phase 5 must reopen exactly the location chosen in phase 0.
+        self.assertEqual(phase_locations["00-prerequisites.md"], [ast.dump(expected)])
+        self.assertEqual(phase_locations["05-register.md"], phase_locations["00-prerequisites.md"])
+
+    def test_node_key_location_guidance_requires_linux_and_an_external_home(self):
+        # E17e NC4: retain the location constraints even when an older release cannot enforce them.
+        signing = between(phase_text("00-prerequisites.md"), "## 3.", "## 4.")
+        self.assertRegex(signing, r"(?i)Linux only")
+        self.assertIn("PCC_NODE_KEY_PATH", signing)
+        self.assertIn("~/.pcc-node/keys.json", signing)
+        self.assertIn("Your home and the key directory must be outside every source checkout", signing)
 
     def test_no_key_is_expanded_onto_a_command_line(self):
         # A key in argv is readable by every user of the machine (ps, /proc/<pid>/cmdline).

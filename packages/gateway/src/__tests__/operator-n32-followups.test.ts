@@ -21,6 +21,18 @@ import { schema, eq } from "@pcc/store";
 import { operatorRoutes } from "../routes/operator.js";
 import { initStore, closeStore, getStore, getRepos } from "../db.js";
 
+// N31 (#6278): the operator write routes now need operator authority. These tests check body
+// validation, read honesty and decision semantics, not authority (n31-operator-route-ownership
+// does that), so the gateway admin secret stands in for the operator here.
+const N31_ADMIN = "n31-test-admin-secret";
+const ADMIN_HEADERS = { "x-admin-key": N31_ADMIN };
+const PREV_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_ADMIN_KEY;
+});
+
 describe("N32 follow-up M1: GET /api/operator/approvals empty named filters", () => {
   let app: FastifyInstance;
 
@@ -40,6 +52,7 @@ describe("N32 follow-up M1: GET /api/operator/approvals empty named filters", ()
   async function submit(kernelId: string, agentId: string) {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId, agentId, capabilityType: "fdm", autoApprove: true },
     });
@@ -159,6 +172,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
   it("reproduction (verdict's cheapest repro): a non-string capabilityType is accepted as 200 instead of rejected as 400", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-m3-captype", capabilityType: { unexpected: true } },
     });
@@ -169,6 +183,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
     const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-m3-captype-null", capabilityType: null },
     });
@@ -181,6 +196,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
     const before = (await app.inject({ method: "GET", url: `/api/operator/approvals?kernelId=${KERNEL}` })).json().approvals.length;
     const create = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-m3-captype-2", capabilityType: { unexpected: true } },
     });
@@ -194,6 +210,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
   it("reproduction: a non-string agentId is accepted instead of rejected as 400 (same check as kernelId)", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: 12345, capabilityType: "fdm" },
     });
@@ -203,6 +220,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
   it("reproduction: a parameters array is accepted instead of rejected as 400", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-m3-params-arr", capabilityType: "fdm", parameters: ["a", "b"] },
     });
@@ -212,6 +230,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
   it("reproduction: an explicit null parameters is silently substituted with {} instead of rejected as 400", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-m3-params-null", capabilityType: "fdm", parameters: null },
     });
@@ -221,6 +240,7 @@ describe("N32 follow-up M3: POST /api/operator/approvals body type validation", 
   it("keeps accepting a valid body unchanged (positive control)", async () => {
     const res = await app.inject({
       method: "POST",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/approvals",
       payload: { kernelId: KERNEL, agentId: "agent-m3-valid", capabilityType: "fdm", parameters: { a: 1 } },
     });

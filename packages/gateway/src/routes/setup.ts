@@ -14,6 +14,8 @@ import { v4 as uuidv4 } from "uuid";
 import { getRepos } from "../db.js";
 import { getKernelFacade, getJobFacade } from "../facades/index.js";
 import { getKernelService } from "../services/kernel-service.js";
+import { jobSubmitQueueOnly, localJobDispatchDecision, type LocalJobDispatchReason } from "../services/local-job-dispatch.js";
+import { emergencyStopState } from "./device-relay.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { auditService } from "../services/audit-service.js";
 import {
@@ -178,6 +180,7 @@ interface TestJobBody {
   kernelId?: string;
   deviceId?: string;
   assuranceTier?: number;
+  queueOnly?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -386,11 +389,14 @@ export async function setupRoutes(app: FastifyInstance) {
 
     // Check KernelService
     let kernelServiceReady = false;
+    let localDispatch = false;
     let kernelServiceDevices: Array<{ id: string; type: string; adapterType: string; healthy: boolean }> = [];
     try {
       const svc = getKernelService();
       kernelServiceReady = true;
       const devices = await svc.listDevices();
+      localDispatch = localJobDispatchDecision(svc.kernelId, svc.kernelId, svc.hasExplicitConfig).ok
+        && devices.some((d) => d.type === "machine" && svc.hasRunner(d.id));
       // N71 round 4 (astra pack 83c, CRITICAL #2): a live device's id/type/adapterType
       // come from the runtime KernelService, not from a fixed server-side allow-list —
       // shape-check each before projecting it, the same way /setup/validate already
@@ -431,6 +437,7 @@ export async function setupRoutes(app: FastifyInstance) {
         ready: kernelServiceReady,
         devices: kernelServiceDevices,
       },
+      jobs: { queueOnly: jobSubmitQueueOnly(), localDispatch },
       chain: {
         connected: chainConfigured,
         // N71 round 3 (astra pack 83b): shown only when it is one of the networks
@@ -872,7 +879,7 @@ export async function setupRoutes(app: FastifyInstance) {
 
   app.post<{ Body: TestJobBody }>("/api/setup/test-job", async (req, reply) => {
    try {
-    const { kernelId, deviceId, assuranceTier = 0 } = req.body ?? {};
+    const { kernelId, deviceId, assuranceTier = 0, queueOnly } = req.body ?? {};
 
     // N59 (board) / ADK item 8: a test job must exercise the OPERATOR's own
     // machine, or say plainly that it did not. So it is owner-gated and honest:
@@ -970,7 +977,7 @@ export async function setupRoutes(app: FastifyInstance) {
       return reply.code(409).send({
         error: "gateway_does_not_run_this_kernel",
         message:
-          `This gateway runs kernel "${svc.kernelId}", not "${kernelId}". Run the test job on ` +
+          "This gateway does not run the requested kernel. Run the test job on " +
           "the node that operates this kernel (for example `pcc-node`), which submits real " +
           "evidence back to the gateway.",
         kernelId,
@@ -1010,6 +1017,20 @@ export async function setupRoutes(app: FastifyInstance) {
     const stepId = `setup-test-${Date.now()}`;
     const resolvedKernelId = kernelId;
     const startTime = Date.now();
+    const queuedResponse = (reason: LocalJobDispatchReason) => ({
+      jobId,
+      deviceId: null,
+      status: "queued",
+      reason,
+      ran: false,
+      passed: false,
+      duration: Date.now() - startTime,
+    });
+    // A stopped or unreadable test must leave no claimable job to run on resume.
+    const stopState = emergencyStopState(kernelId);
+    if (stopState !== "clear") {
+      return queuedResponse(stopState === "stopped" ? "emergency_stop" : "policy_unavailable");
+    }
 
     // Insert a job record into the DB so status polling works
     try {
@@ -1045,10 +1066,16 @@ export async function setupRoutes(app: FastifyInstance) {
     // it for real; there is no self-attest fallback.
 
     // Submit the job
-    let submitResult: { jobId: string; deviceId: string; status: string };
+    // A setup test is also a physical job: queue-only mode and the kernel's
+    // emergency stop apply before entering the in-process runtime.
+    const dispatch = localJobDispatchDecision(svc.kernelId, kernelId, svc.hasExplicitConfig, queueOnly);
+    if (!dispatch.ok) return queuedResponse(dispatch.reason);
+
+    let submitResult: Awaited<ReturnType<typeof svc.submitJob>>;
     try {
       submitResult = await svc.submitJob({
         jobId,
+        kernelId,
         stepId,
         deviceId,
         assuranceTier: assuranceTier as 0 | 1 | 2 | 3,
@@ -1077,13 +1104,15 @@ export async function setupRoutes(app: FastifyInstance) {
         duration: Date.now() - startTime,
       });
     }
+    // The runtime repeats the guard after its asynchronous admission check.
+    if (submitResult.status === "queued") return queuedResponse(submitResult.reason);
 
     // Poll for completion (up to 10 seconds)
     const POLL_INTERVAL_MS = 250;
     const MAX_WAIT_MS = 10_000;
     const deadline = Date.now() + MAX_WAIT_MS;
 
-    let finalStatus = submitResult.status;
+    let finalStatus: string = submitResult.status;
     let evidenceBundleId: string | undefined;
     let consecutiveUnknown = 0;
 

@@ -19,26 +19,29 @@ python3 -c "import json; print(json.load(open('.pcc/kernel.json'))['kernel']['id
 **Check:** HTTP 201, and `.pcc/kernel-id` holds an id such as `kernel_…`. The location comes from intake, as coarse as the human chose. The gateway reads only `lat` and `lng` from `location`, so a text address goes in `physicalAddress`.
 
 ## 2. The kernel's signing key
-Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves `.pcc/node-keys.json`.
+Register the node key you made in phase 0 (step 3) as the kernel's signing key. The node signs its evidence with it, so its work can be checked against the kernel. pcc-node proves possession by signing a challenge; the private half never leaves the selected key file. Use the default `~/.pcc-node/keys.json`, or set `PCC_NODE_KEY_PATH` to a path outside every source checkout. Use the same location as phase 0, keeping any override set. Keep this owner-only location outside every source checkout. Key persistence requires Linux; the location checks arrive with the first release containing #374 (see phase 0 step 3).
 
 **First, GET `$BASE/api/kernels/<id>`** and check it is the kernel you just created, with no signing key yet. A mistyped id would sign, and create, a different kernel.
 ```bash
 curl -s "$BASE/api/kernels/$(cat .pcc/kernel-id)" -H @.pcc/auth.header | python3 -c "import json,sys; k=json.load(sys.stdin)['kernel']; assert k['id'] == open('.pcc/kernel-id').read().strip() and not k.get('signingKey'), k.get('id'); print('kernel', k['id'], 'ready for its key')"
 python3 - <<'EOF'
+import os
+import nacl.signing                                 # refuses here if the crypto extra is missing
 from pcc_node.crypto import load_or_create_keys
 from pcc_node.register import register_signing_key
 read = lambda name: open(".pcc/" + name).read().strip()
-pub, sec = load_or_create_keys(".pcc/node-keys.json")
+key_path = os.environ.get("PCC_NODE_KEY_PATH") or os.path.expanduser("~/.pcc-node/keys.json")
+os.makedirs(os.path.dirname(key_path), mode=0o700, exist_ok=True)  # 0.1.1 r2 does not create it
+pub, sec = load_or_create_keys(key_path)              # explicit: 0.1.1 r2 would otherwise write ./pcc-keys.json
 status, _ = register_signing_key(read("base"), read("api-key"), read("kernel-id"), pub, sec)
 print("signing key:", status)
 EOF
-chmod 600 .pcc/node-keys.json
 ```
 **Check:** status 200 or 201. `GET $BASE/api/kernels/$(cat .pcc/kernel-id)` then shows a non-null `signingKey`.
 
 If it refuses with "pynacl" or `LogSigningRefused`:
 1. Install the crypto extra (phase 0 step 2).
-2. Delete `.pcc/node-keys.json` and `.pcc/node-public-key`. Made without pynacl, the key file holds a placeholder that can never sign, and it was never registered.
+2. If an older pcc-node made an unregistered placeholder without pynacl, retire the selected key file and delete `.pcc/node-public-key`. The placeholder can never sign. Current pcc-node refuses to create a key without pynacl.
 3. Run phase 0 step 3 again for a real key, then this step.
 
 ## 3. The capability (what buyers can order)

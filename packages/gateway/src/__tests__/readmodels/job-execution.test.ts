@@ -241,12 +241,13 @@ describe("settlement axis", () => {
     const ok = (payout: string) => ({ payout, unknownReason: null });
     const conflict = { payout: "unknown", unknownReason: "records_conflict" };
     expect(reconcilePayout(released, active)).toEqual(ok("reported_released"));
-    expect(reconcilePayout(settledReleased, active)).toEqual(ok("reported_released"));
+    // An escrow-only word in the milestone field is not a milestone status (review r1 of #515).
+    expect(reconcilePayout(settledReleased, active)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
     expect(reconcilePayout(released, completed)).toEqual(ok("reported_released"));
     expect(reconcilePayout(released, refundedE)).toEqual(conflict);
     expect(reconcilePayout(released, disputed)).toEqual(conflict);
     expect(reconcilePayout(refundedM, active)).toEqual(ok("refunded"));
-    expect(reconcilePayout(v("SETTLED_REFUNDED", "escrow_milestone"), active)).toEqual(ok("refunded"));
+    expect(reconcilePayout(v("SETTLED_REFUNDED", "escrow_milestone"), active)).toEqual({ payout: "unknown", unknownReason: "status_unrecognized" });
     expect(reconcilePayout(released, v("SETTLED_REFUNDED", "escrow_record"))).toEqual(conflict);
     expect(reconcilePayout(released, v("slashed", "escrow_record"))).toEqual(conflict);
     expect(reconcilePayout(released, v("expired", "escrow_record"))).toEqual(conflict);
@@ -298,9 +299,10 @@ describe("settlement axis", () => {
     expect(alone.settlement.payoutUnknownReason).toBeNull();
   });
 
-  it("a V-next word on the milestone record is read the same way: settled_released is reported_released", () => {
+  it("an escrow-only word on the milestone record decides nothing: settled_released is unknown (review r1 of #515)", () => {
     const dto = build({ settlement: { ok: true, value: linked(escrow({ status: "active" }), [milestone({ status: "SETTLED_RELEASED" })]) } });
-    expect(dto.settlement.payout).toBe("reported_released");
+    expect(dto.settlement.payout).toBe("unknown");
+    expect(dto.settlement.payoutUnknownReason).toBe("status_unrecognized");
   });
 
   it("NEGATIVE: a refund is refunded (or unknown), never paid", () => {
@@ -572,7 +574,12 @@ describe("GET /api/jobs/:jobId/execution", () => {
   };
 
   it("GET /api/jobs keeps { jobs } and adds collection-v1 items, the true total and asOf", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/jobs?limit=2" });
+    // The list is the caller's jobs (F3 round 2): here, kernel-nyc's operator's.
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/jobs?limit=2",
+      headers: { "x-test-principal": OPERATOR_NYC, "x-test-proven-wallet": OPERATOR_NYC },
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(Array.isArray(body.jobs)).toBe(true);
@@ -605,7 +612,10 @@ describe("GET /api/jobs/:jobId/execution", () => {
     expect(dto.settlement.linkMatches).toEqual(["job_cwm"]);
     expect(dto.settlement.record?.escrowId).toBe("esc-001");
     expect(dto.settlement.record?.milestoneMatch).toBe("step_not_in_escrow");
-    expect(dto.settlement.payout).toBe("unknown");
+    // The seed's esc-001 sits at 0xESCROW_CONTRACT_001, no real contract address: it is mock data,
+    // so the record is simulated and its payout is simulated, never a real unknown (#409 r1 MEDIUM 1).
+    expect(dto.settlement.record?.simulated).toBe(true);
+    expect(dto.settlement.payout).toBe("simulated");
   });
 
   it("links a paid-job-flow job through its session; completed + funded is not_paid", async () => {
@@ -832,7 +842,7 @@ describe("GET /api/jobs/:jobId/execution", () => {
       insertJob("job-label-buyer", "s-l", "cwm-label");
       await insertSession("neg-label", "job-label-buyer", { userAgentId: "agent-buyer-1" });
       const job = getStore().repos.jobs.findById("job-label-buyer") as any;
-      const repos = { kernels: { findById: () => ({ operatorAddress: "ops@example.invalid" }) } };
+      const repos = { kernels: { findAll: () => [{ id: job.kernelId, operatorAddress: "ops@example.invalid" }] } };
       expect(authorizeJobRead(job, BUYER, repos as any, getStore().db)).toEqual({ allow: false, reason: "not_a_party" });
       expect((await get("job-label-buyer", BUYER)).statusCode).toBe(404);
     });

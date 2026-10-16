@@ -10,6 +10,8 @@ import { SensorPipeline, BatchTracker, EncryptionService, createLitEncryptionSer
 import { CommitmentService, NoirProofService } from "@pcc/verifier";
 import type { SensorChannelDescriptor } from "@pcc/spec";
 import { streamHub } from "./sse/stream-hub.js";
+import { batchOwnershipOf, registerBatchOwnership } from "./readmodels/batch-ownership.js";
+import { shouldSeedDemoData } from "./config/seed-policy.js";
 
 // ── Sensor Pipeline ─────────────────────────────────────────────────
 
@@ -112,6 +114,10 @@ sensorPipeline.onAnomaly((anomaly) => {
 
 export const batchTracker = new BatchTracker();
 
+// Who owns a batch-tied record (a slot, a sample's reading, a batch event) is what this tracker
+// holds, never what the record's payload says (cross-family review r5 of #403).
+registerBatchOwnership(batchOwnershipOf(batchTracker));
+
 // Forward batch events to StreamHub
 batchTracker.onBatchEvent((event) => {
   streamHub.publish(
@@ -126,44 +132,46 @@ batchTracker.onBatchEvent((event) => {
   );
 });
 
-// Seed demo batch
-const demoBatch = batchTracker.createBatch("kernel-sf", "dev-hplc-01", "cap-hplc", {
-  method: "HPLC_RP_C18_gradient_30min",
-  columnTemp: 25,
-});
-batchTracker.addSample(demoBatch.id, {
-  position: "A1",
-  jobId: "job-010",
-  stepId: "step-1",
-  userId: "0x1234567890abcdef1234567890abcdef12345678",
-  sampleLabel: "Sample Alpha",
-  sampleType: "sample",
-});
-batchTracker.addSample(demoBatch.id, {
-  position: "A2",
-  jobId: "job-011",
-  stepId: "step-1",
-  userId: "0xabcdef1234567890abcdef1234567890abcdef12",
-  sampleLabel: "Sample Beta",
-  sampleType: "sample",
-});
-batchTracker.addSample(demoBatch.id, {
-  position: "A3",
-  jobId: "job-012",
-  stepId: "step-1",
-  userId: "0x9876543210fedcba9876543210fedcba98765432",
-  sampleLabel: "Sample Gamma",
-  sampleType: "sample",
-});
-batchTracker.seal(demoBatch.id);
-batchTracker.start(demoBatch.id);
-// Complete first slot
-const firstSlot = batchTracker.getBatch(demoBatch.id)!.slots[0];
-batchTracker.updateSlotStatus(demoBatch.id, firstSlot.id, "acquiring");
-batchTracker.completeSlot(demoBatch.id, firstSlot.id, "sha256:abc123def456" as any, "results/batch/A1.json");
-// Second slot acquiring
-const secondSlot = batchTracker.getBatch(demoBatch.id)!.slots[1];
-batchTracker.updateSlotStatus(demoBatch.id, secondSlot.id, "acquiring");
+// Preserve this demo's existing always-on default; explicit false opts out.
+if (shouldSeedDemoData(process.env.PCC_SEED_DATA, process.env.NODE_ENV, true)) {
+  const demoBatch = batchTracker.createBatch("kernel-sf", "dev-hplc-01", "cap-hplc", {
+    method: "HPLC_RP_C18_gradient_30min",
+    columnTemp: 25,
+  });
+  batchTracker.addSample(demoBatch.id, {
+    position: "A1",
+    jobId: "job-010",
+    stepId: "step-1",
+    userId: "0x1234567890abcdef1234567890abcdef12345678",
+    sampleLabel: "Sample Alpha",
+    sampleType: "sample",
+  });
+  batchTracker.addSample(demoBatch.id, {
+    position: "A2",
+    jobId: "job-011",
+    stepId: "step-1",
+    userId: "0xabcdef1234567890abcdef1234567890abcdef12",
+    sampleLabel: "Sample Beta",
+    sampleType: "sample",
+  });
+  batchTracker.addSample(demoBatch.id, {
+    position: "A3",
+    jobId: "job-012",
+    stepId: "step-1",
+    userId: "0x9876543210fedcba9876543210fedcba98765432",
+    sampleLabel: "Sample Gamma",
+    sampleType: "sample",
+  });
+  batchTracker.seal(demoBatch.id);
+  batchTracker.start(demoBatch.id);
+  // Complete first slot
+  const firstSlot = batchTracker.getBatch(demoBatch.id)!.slots[0];
+  batchTracker.updateSlotStatus(demoBatch.id, firstSlot.id, "acquiring");
+  batchTracker.completeSlot(demoBatch.id, firstSlot.id, "sha256:abc123def456" as any, "results/batch/A1.json");
+  // Second slot acquiring
+  const secondSlot = batchTracker.getBatch(demoBatch.id)!.slots[1];
+  batchTracker.updateSlotStatus(demoBatch.id, secondSlot.id, "acquiring");
+}
 
 // ── Encryption Service ──────────────────────────────────────────────
 

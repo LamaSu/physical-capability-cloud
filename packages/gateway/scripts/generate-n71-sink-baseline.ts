@@ -1,18 +1,23 @@
 /**
  * N71 round 7 sink-scanner baseline generator.
  *
- * SHRINK-ONLY: when n71-sink-baseline.json already exists, the file this script
+ * DEFAULT SHRINK-ONLY: when n71-sink-baseline.json already exists, the file this script
  * writes is the INTERSECTION of the existing baseline and the violations the
  * scanner currently finds (outside N71's own 12-file scope) — a row drops out
  * once its violation is fixed, and NO row this script did not already know about
- * can ever be added. A genuinely NEW violation never becomes a passing test by
- * running this script: the only way to make n71-sink-scanner.test.ts pass again
- * after a new violation appears is to fix the underlying code. The very first
+ * can be added by the default mode. A genuinely NEW violation never becomes a
+ * passing test by the default command: fix a real leak; only reviewed non-leaks
+ * from a merge qualify for the explicit mode documented below. The very first
  * run, with no baseline file yet, bootstraps from the full current set (every
  * pre-existing violation elsewhere in the gateway package, as of round 7).
  *
  * Run it:
  *   pnpm --dir packages/gateway exec tsx scripts/generate-n71-sink-baseline.ts
+ *
+ * A merge may introduce reviewed false positives from upstream. The explicit
+ * --reviewed-additions <json> mode accepts only exact, currently NEW rows outside
+ * N71's scope, each with classification "not_a_leak" and a review reason. The
+ * default remains shrink-only; scanner rules and test assertions never change.
  *
  * Then run the test suite to confirm it's in sync:
  *   pnpm --dir packages/gateway exec vitest run src/__tests__/n71-sink-scanner.test.ts
@@ -23,8 +28,39 @@ import {
   regenerateBaseline,
   N71_SCOPE_FILES,
   BASELINE_PATH,
+  loadBaseline,
+  newViolations,
   type Violation,
 } from "../src/__tests__/n71-sink-scanner-engine.js";
+import { readFileSync, writeFileSync } from "node:fs";
+
+function reviewedAdditions(current: Violation[]): Violation[] {
+  const args = process.argv.slice(2);
+  if (args.length === 0) return [];
+  if (args.length !== 2 || args[0] !== "--reviewed-additions") {
+    throw new Error("Usage: generate-n71-sink-baseline.ts [--reviewed-additions <json>]");
+  }
+  const entries: unknown = JSON.parse(readFileSync(args[1], "utf8"));
+  if (!Array.isArray(entries)) throw new Error("Reviewed additions must be an array");
+  const key = (v: Violation) => JSON.stringify([v.file, v.sink, v.argText]);
+  const available = new Set(newViolations(current, loadBaseline()).map(key));
+  const seen = new Set<string>();
+  return entries.map((entry: unknown) => {
+    if (!entry || typeof entry !== "object") throw new Error("Invalid reviewed addition");
+    const row = entry as Record<string, unknown>;
+    if (typeof row.file !== "string" || typeof row.sink !== "string" || typeof row.argText !== "string"
+      || row.classification !== "not_a_leak" || typeof row.reason !== "string" || !row.reason.trim()) {
+      throw new Error("Each reviewed addition needs file, sink, argText, not_a_leak classification and reason");
+    }
+    const violation: Violation = { file: row.file, sink: row.sink, argText: row.argText };
+    const fingerprint = key(violation);
+    if (N71_SCOPE_FILES.includes(row.file) || !available.has(fingerprint) || seen.has(fingerprint)) {
+      throw new Error("Reviewed additions must be distinct, currently new rows outside N71's scope");
+    }
+    seen.add(fingerprint);
+    return violation;
+  });
+}
 
 function main(): void {
   const scanner = getScanner();
@@ -49,7 +85,19 @@ function main(): void {
     .map((v) => ({ file: v.file, sink: "<unresolved-callee>", argText: v.argText }));
   const combined = [...otherViolations, ...otherUnresolved];
 
-  const { removed, bootstrapped } = regenerateBaseline(combined);
+  // Validate the review before making any baseline changes.
+  const additions = reviewedAdditions(combined);
+  const { baseline, removed, bootstrapped } = regenerateBaseline(combined);
+  for (const row of additions) {
+    const sinks = baseline[row.file] ??= {};
+    const args = sinks[row.sink] ??= [];
+    args.push(row.argText);
+    args.sort();
+  }
+  if (additions.length > 0) {
+    writeFileSync(BASELINE_PATH, JSON.stringify(baseline, null, 2) + "\n", "utf8");
+    console.log(`[generate-n71-sink-baseline] Added ${additions.length} explicitly reviewed non-leak row(s).`);
+  }
 
   console.log(`[generate-n71-sink-baseline] Program build: ${scanner.buildMs.toFixed(1)}ms; scan: ${result.scanMs.toFixed(1)}ms`);
   console.log(`[generate-n71-sink-baseline] ${bootstrapped ? "Bootstrapped" : "Regenerated"} ${BASELINE_PATH}`);

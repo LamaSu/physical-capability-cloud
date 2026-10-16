@@ -20,9 +20,13 @@ import { getJobFacade } from "../facades/index.js";
  */
 
 const TARGET_TOTAL = 70;
+/** GET /api/jobs lists only what the caller may read (#403, F3): this test pages as an admin. */
+const ADMIN = "n111-paging-admin";
+const ADMIN_H = { "x-admin-key": ADMIN };
 
 async function buildApp(): Promise<{ app: FastifyInstance; total: number }> {
   process.env.PCC_DB_PATH = ":memory:";
+  process.env.PCC_ADMIN_KEY = ADMIN;
   initStore({ seed: true });
 
   const repos = getRepos();
@@ -65,10 +69,11 @@ describe("N111 — GET /api/jobs paging", () => {
   afterAll(async () => {
     await app.close();
     closeStore();
+    delete process.env.PCC_ADMIN_KEY;
   });
 
   it("?offset=10&limit=50 returns at most 50 rows, with correct total and hasMore", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/jobs?offset=10&limit=50" });
+    const res = await app.inject({ method: "GET", url: "/api/jobs?offset=10&limit=50", headers: ADMIN_H });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.total).toBe(total);
@@ -78,7 +83,7 @@ describe("N111 — GET /api/jobs paging", () => {
 
   it("the last page has hasMore false", async () => {
     const lastOffset = Math.max(total - 10, 0);
-    const res = await app.inject({ method: "GET", url: `/api/jobs?offset=${lastOffset}&limit=50` });
+    const res = await app.inject({ method: "GET", headers: ADMIN_H, url: `/api/jobs?offset=${lastOffset}&limit=50` });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.offset + body.items.length).toBe(total);
@@ -92,12 +97,12 @@ describe("N111 — GET /api/jobs paging", () => {
     ["zero limit", "/api/jobs?limit=0"],
     ["limit over the 200 bound", "/api/jobs?limit=201"],
   ])("rejects %s with 400", async (_label, url) => {
-    const res = await app.inject({ method: "GET", url });
+    const res = await app.inject({ method: "GET", url, headers: ADMIN_H });
     expect(res.statusCode).toBe(400);
   });
 
   it("with no query, the route's default still holds (offset=0, limit=50)", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/jobs" });
+    const res = await app.inject({ method: "GET", url: "/api/jobs", headers: ADMIN_H });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.offset).toBe(0);

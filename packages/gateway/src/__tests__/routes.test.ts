@@ -10,6 +10,7 @@ import { healthRoutes } from "../routes/health.js";
 import { siweAuthPlugin } from "../auth/siwe-auth.js";
 import { initStore, closeStore } from "../db.js";
 import cookie from "@fastify/cookie";
+import { actAsJobParty } from "./helpers/job-read-party.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,6 +26,8 @@ async function buildApp(): Promise<FastifyInstance> {
   initStore({ seed: true });
 
   const app = Fastify({ logger: false });
+
+  actAsJobParty(app); // job reads are object-authorized (F3)
 
   // Cookie support (needed by siweAuthPlugin for session cookies)
   await app.register(cookie);

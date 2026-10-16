@@ -147,14 +147,21 @@ describe("#344 catalog: row cap, malformed input, query keys", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: [] } } as unknown as IrNode;
     const rows = Array.from({ length: 5 * LIST_ROW_CAP }, (_, i) => ({ name: "k" + i }));
     bindListRows(fdoc, listEl, node, rows);
-    expect(listEl.children.length).toBe(LIST_ROW_CAP);
+    const rowEls = (listEl.children as RElement[]).filter((c) => c.className === "pcc-row");
+    expect(rowEls.length).toBe(LIST_ROW_CAP);
+    // N110: the client cap this test proves (never more than LIST_ROW_CAP ROWS) is unchanged;
+    // the one extra sibling is the window's own "showing first N of M returned" disclosure,
+    // never an extra row.
+    expect(listEl.children.length).toBe(LIST_ROW_CAP + 1);
   });
 
   it("a manifest `limit` above the cap cannot lift it either", () => {
     const listEl = fdoc.createElement("div");
     const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: [], limit: 10 * LIST_ROW_CAP } } as unknown as IrNode;
     bindListRows(fdoc, listEl, node, Array.from({ length: 3 * LIST_ROW_CAP }, (_, i) => ({ name: "k" + i })));
-    expect(listEl.children.length).toBe(LIST_ROW_CAP);
+    const rowEls = (listEl.children as RElement[]).filter((c) => c.className === "pcc-row");
+    expect(rowEls.length).toBe(LIST_ROW_CAP);
+    expect(listEl.children.length).toBe(LIST_ROW_CAP + 1); // N110: + the window's cap disclosure
   });
 
   it("a field type whose toString is null is refused, not thrown", () => {
@@ -706,7 +713,10 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
   it("a mistyped id ('Your payment', not a valid id shape) fails the WHOLE row: every value UNAVAILABLE, labels kept", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["kernelId"], statusFrom: "status" }, bind: { path: "/api/jobs" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
-    bindListRows(fdoc, listEl, node, [{ id: "Your payment", kernelId: "k-1", status: "completed" }]);
+    // The jobs route's own envelope: jobs declare their total (the N110 follow-up), and a window
+    // holding the whole collection adds no note, so the row is the only child.
+    const rows = [{ id: "Your payment", kernelId: "k-1", status: "completed" }];
+    bindListRows(fdoc, listEl, node, rows, { jobs: rows, total: rows.length });
     expect(listEl.children.length).toBe(1); // the row is NOT dropped (title was PRESENT, just mistyped)
     const texts = (listEl.children[0] as RElement).children as RElement[];
     expect(texts.map((c) => c.textContent)).toEqual(["ID:", UNAVAILABLE, "Kernel:", UNAVAILABLE, "Status:", UNAVAILABLE]);
@@ -715,7 +725,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
   it("'status' in META uses the closed vocabulary (boundStatusText applies by KIND, not just as statusFrom)", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["status"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
-    bindListRows(fdoc, listEl, node, [{ id: "j-1", status: "settled" }, { id: "j-2", status: "weirdWord" }]);
+    const rows = [{ id: "j-1", status: "settled" }, { id: "j-2", status: "weirdWord" }];
+    bindListRows(fdoc, listEl, node, rows, { jobs: rows, total: rows.length }); // the route's own envelope: no window note
     const texts = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(texts).toEqual([
       ["ID:", REPORTED_PREFIX + "j-1", "Status:", "settled" + RECORD_STATUS_NOTE], // ids are attributed (steward #5149)
@@ -768,8 +779,15 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
     const node = { type: "list", id: "n1", props: { rowTitle: "name", rowMeta: ["id"] }, bind: { path: "/api/capabilities" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
     bindListRows(fdoc, listEl, node, [{ name: "", id: "cap-1" }]);
-    expect(listEl.children.length).toBe(1);
-    const texts = (listEl.children[0] as RElement).children as RElement[];
+    // N110: a 4-argument call on a `paged.total` route (capabilities) with no `data` discloses
+    // "total not shown" as an extra sibling — the row-closed guarantee this test proves is about
+    // the ROW itself, so select it by class rather than assuming it's the only child.
+    const rowEls = (listEl.children as RElement[]).filter((c) => c.className === "pcc-row");
+    expect(rowEls.length).toBe(1);
+    // ...and nothing else but the one window note: no phantom output (the exact child count kept).
+    expect(listEl.children.length).toBe(2);
+    expect((listEl.children[1] as RElement).className).toBe("pcc-window");
+    const texts = (rowEls[0] as RElement).children as RElement[];
     expect(texts.map((c) => c.textContent)).toEqual(["Name:", UNAVAILABLE, "ID:", UNAVAILABLE]);
   });
 
@@ -784,7 +802,8 @@ describe("astra r4 (#344 @6773e870): the fix — a closed type for every list fi
   it("mutation survivor — time kind: a valid timestamp is shown as-is; a non-timestamp string fails the row closed", () => {
     const node = { type: "list", id: "n1", props: { rowTitle: "id", rowMeta: ["createdAt"] }, bind: { path: "/api/jobs" } } as unknown as IrNode;
     const listEl = fdoc.createElement("div");
-    bindListRows(fdoc, listEl, node, [{ id: "j-1", createdAt: "2026-09-24T10:00:00Z" }, { id: "j-2", createdAt: "yesterday" }]);
+    const jobs = [{ id: "j-1", createdAt: "2026-09-24T10:00:00Z" }, { id: "j-2", createdAt: "yesterday" }];
+    bindListRows(fdoc, listEl, node, jobs, { jobs, total: jobs.length }); // the route's own envelope: no window note
     const rows = (listEl.children as RElement[]).map((r) => (r.children as RElement[]).map((c) => c.textContent));
     expect(rows).toEqual([
       ["ID:", REPORTED_PREFIX + "j-1", "Created:", "2026-09-24T10:00:00Z"], // ids are attributed (steward #5149)

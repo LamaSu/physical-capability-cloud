@@ -32,10 +32,29 @@
   "sentry.ts": {
     "Sentry.init": [
       "SENTRY_DSN",
-      "process.env.NODE_ENV"
+      "beforeBreadcrumb(breadcrumb) { const urls = [breadcrumb.data?.url, breadcrumb.data?.request_url, breadcrumb.message]; return urls.some((url) => typeof url === \"string\" && isWalletRequest(url)) ? null ",
+      "beforeSendSpan(span) { const urls = [span.description, ...WALLET_TARGET_ATTRIBUTES.map(key => span.data[key])]; const route = span.data[\"http.route\"]; return urls.some((url) => typeof url === \"string\"",
+      "process.env.NODE_ENV",
+      "walletSafeSentryEvent"
     ],
     "console.log": [
       "\"[sentry] Distributed tracing initialised (dsn=…\" + SENTRY_DSN.slice(-12) + \")\""
+    ],
+    "Sentry.get": [
+      "value"
+    ],
+    "Sentry.set": [
+      "value"
+    ],
+    "Sentry.withoutWalletHeader": [
+      "breadcrumb",
+      "event",
+      "item",
+      "seen",
+      "span"
+    ],
+    "Sentry.has": [
+      "route"
     ]
   },
   "server.ts": {
@@ -48,6 +67,7 @@
       "request.url"
     ],
     "log.info": [
+      "jobSubmitQueueOnly()",
       "m",
       "msg"
     ],
@@ -172,10 +192,6 @@
     ]
   },
   "readmodels/legacy-settlement.ts": {
-    "log.error": [
-      "error",
-      "jobId"
-    ],
     "log.warn": [
       "error",
       "jobId",
@@ -370,10 +386,6 @@
     ]
   },
   "routes/jobs.ts": {
-    "log.error": [
-      "error",
-      "req.params.jobId"
-    ],
     "log.warn": [
       "error",
       "req.params.jobId",
@@ -527,6 +539,7 @@
       "proof.id",
       "result.jobId",
       "scopeId",
+      "scopeStatus",
       "session.capabilityType",
       "session.id",
       "session.kernelId",
@@ -545,26 +558,9 @@
       "err"
     ]
   },
-  "routes/pgtr-relay.ts": {
-    "log.info": [
-      "amount",
-      "payer",
-      "target",
-      "txHash"
-    ],
-    "log.error": [
-      "err",
-      "payer",
-      "target"
-    ]
-  },
   "routes/provision.ts": {
     "log.warn": [
-      "String(opWalletErr)",
-      "errMsg",
-      "opWalletErr.message",
-      "record.id",
-      "walletErrMsg"
+      "record.id"
     ]
   },
   "routes/requests.ts": {
@@ -674,7 +670,7 @@
       "m"
     ],
     "console.warn": [
-      "m"
+      "message"
     ]
   },
   "services/event-bus-otel-bridge.ts": {
@@ -782,6 +778,12 @@
       "db .select() .from(negotiationSessions) .where( cwm ? or(eq(negotiationSessions.escrowAddress, escrow.contractAddress), eq(negotiationSessions.cwmId, cwm)) : eq(negotiationSessions.escrowAddress, escr",
       "db .select() .from(negotiationSessions) .where(eq(negotiationSessions.jobId, job.id))",
       "db .select() .from(negotiationSessions) .where(eq(negotiationSessions.jobId, job.id)) .all()",
+      "db .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` }) .from(negotiationSessions)",
+      "db .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` }) .from(negotiationSessions) .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId))))",
+      "db .select({ jobId: negotiationSessions.jobId, sessions: sql<number>`count(*)` }) .from(negotiationSessions) .where(or(...candidates.map((jobId) => eq(negotiationSessions.jobId, jobId)))) .groupBy(neg",
+      "db .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId }) .from(negotiationSessions)",
+      "db .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId }) .from(negotiationSessions) .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`)",
+      "db .select({ jobId: negotiationSessions.jobId, userAgentId: negotiationSessions.userAgentId }) .from(negotiationSessions) .where(sql`lower(trim(${negotiationSessions.userAgentId})) = ${wallet}`) .all(",
       "db.select().from(escrows)",
       "db.select().from(escrows).where(eq(escrows.contractAddress, address))",
       "db.select().from(escrows).where(eq(escrows.contractAddress, address)).all()",
@@ -806,6 +808,30 @@
       "posthog.capture({ distinctId: distinctId || \"pcc-gateway\", event, properties: { ...properties, source: \"gateway\", environment: process.env.NODE_ENV, }, })",
       "posthog.identify({ distinctId, properties: { ...properties, kind: \"agent_journey\", source: \"gateway\", environment: process.env.NODE_ENV, }, })",
       "posthog?.shutdown?.()"
+    ]
+  },
+  "config/seed-policy.ts": {
+    "console.warn": [
+      "shouldSeedDemoData(undefined, nodeEnv)"
+    ]
+  },
+  "routes/product-home.ts": {
+    "log.warn": [
+      "source"
+    ]
+  },
+  "services/wildcard-key-migration.ts": {
+    "console.log": [
+      "counts.alreadyRevoked",
+      "counts.kept",
+      "counts.keptInactive",
+      "counts.narrowed",
+      "counts.revoked"
+    ]
+  },
+  "services/wallet-links/guards.ts": {
+    "<unresolved-callee>": [
+      "word.padStart(4, \"0\")"
     ]
   }
 }

@@ -77,7 +77,6 @@ import {
   getQueueStatus,
   getEpochHistory,
 } from "../contracts/batch-settlement.js";
-import { swfAccrue } from "../routes/swf.js";
 import { logSafeSmallInt, logSafeAddress, logSafeInt } from "../redaction.js";
 
 /**

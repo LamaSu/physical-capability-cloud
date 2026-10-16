@@ -39,6 +39,7 @@ const ip = () => `10.68.${Math.floor(++ipSeq / 250)}.${(ipSeq % 250) + 1}`;
 let canaryCapId = "";
 let operatorId = "";
 let strangerKey = "";
+const previousRelayGate = process.env.PCC_RELAY_GATE;
 
 async function provision(email: string): Promise<{ key: string; operatorId: string }> {
   const r = await app.inject({ method: "POST", url: "/api/auth/provision", headers: { "x-forwarded-for": ip() }, payload: { email, name: email } });
@@ -48,6 +49,7 @@ async function provision(email: string): Promise<{ key: string; operatorId: stri
 }
 
 beforeAll(async () => {
+  process.env.PCC_RELAY_GATE = "open";
   process.env.PCC_DB_PATH = ":memory:";
   process.env.PCC_SEED_DATA = "true";
   const { createGateway } = await import("../server.js");
@@ -74,7 +76,12 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await app?.close();
+  try {
+    await app?.close();
+  } finally {
+    if (previousRelayGate === undefined) delete process.env.PCC_RELAY_GATE;
+    else process.env.PCC_RELAY_GATE = previousRelayGate;
+  }
 });
 
 function variants(url: string): string[] {

@@ -86,6 +86,7 @@ export async function irCorsReadProjection(
   const path = (req as unknown as Record<symbol, unknown>)[IR_CORS_READ];
   if (typeof path !== "string" || req.method !== "GET") return payload;
   reply.header("content-type", "application/json; charset=utf-8");
+  if (reply.statusCode === 503 && payload === '{"error":"wallet_link_unavailable"}') return payload;
   if (reply.statusCode !== 200) return "{}";
   let body: unknown;
   try {

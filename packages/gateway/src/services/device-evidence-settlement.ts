@@ -48,6 +48,7 @@ import {
   parseEd25519SignatureHex,
   signingPreimage,
   verifyEvidenceSubjectBinding,
+  checkDelegationScope,
   type EvidenceEvent,
   type EvidenceSubject,
   type RegisteredSigner,
@@ -61,6 +62,139 @@ import {
   buildCanonicalEvidenceEnvelope,
   type EvidenceEnvelopeEvent,
 } from "./evidence-envelope.js";
+
+// ── Reading evidence once (cross-family review E3b, finding H1) ──────────────
+//
+// What a verification judges (the slot, the session authorization, the receipt
+// time) comes from objects the verifier does not control. An object whose
+// answer changes between reads (a getter, a proxy) could pass a check on one
+// read and be used differently on the next: skip the event window, widen it, or
+// swap the parent label the principal signed for the funded operator. So every
+// field is read ONCE, into a local, at the top of the function that consumes
+// it, and only the locals are used after that; the session authorization is read
+// through `snapshotSessionKeyAuthorization` into an immutable plain copy.
+
+// Captured when this module loads, so that code run later (a patched `Object`, a
+// polluted prototype) cannot change how the money path reads its input.
+const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+const objectHasOwnProperty = Object.prototype.hasOwnProperty;
+const freeze = Object.freeze;
+const isArray = Array.isArray;
+const isSafeInteger = Number.isSafeInteger;
+
+/** What `ownData` answers for a property that is not an own data property. */
+const NOT_OWN_DATA = Symbol("not-own-data");
+
+/**
+ * The value of an OWN DATA property of `holder`, read once through its descriptor;
+ * `NOT_OWN_DATA` when `holder` is not an object or the property is missing,
+ * inherited from a prototype, or an accessor. A getter is never called.
+ */
+function ownData(holder: unknown, key: string | number): unknown {
+  if (typeof holder !== "object" || holder === null) return NOT_OWN_DATA;
+  const descriptor = getOwnPropertyDescriptor(holder, key);
+  return descriptor !== undefined && objectHasOwnProperty.call(descriptor, "value") ? descriptor.value : NOT_OWN_DATA;
+}
+
+/** A dense array of own string elements, copied index by index into a frozen array; null otherwise. */
+function snapshotStrings(value: unknown): string[] | null {
+  if (!isArray(value)) return null;
+  const length = ownData(value, "length");
+  if (typeof length !== "number" || !isSafeInteger(length) || length < 0) return null;
+  const copy: string[] = [];
+  for (let i = 0; i < length; i++) {
+    const element = ownData(value, i);
+    if (typeof element !== "string") return null; // a hole, an inherited index, an accessor, a non-string
+    copy.push(element);
+  }
+  return freeze(copy) as string[];
+}
+
+/**
+ * The session authorization, read ONCE into an immutable plain copy, or null.
+ *
+ * Every field is read through a descriptor captured at module load and accepted
+ * only as an OWN DATA property of the right type: no accessor (its getter is never
+ * called), nothing inherited, no missing required field. `sessionId`,
+ * `parentAgentId`, `publicKey` and `parentSignature` are strings; `issuedAt` and
+ * `expiresAt` are safe integers (the delegation preimage signs them as JSON
+ * integers); `scope` is an own data object whose `allowedActions` and
+ * `contractIds` are dense arrays of own strings, copied index by index, and whose
+ * `maxSignatures` is a safe integer; `derivationPath`, when present, is an own
+ * data string. The copy and its `scope` and arrays are deeply frozen, so the
+ * window, the scope rule, the signature preimage and the session-validity check
+ * all judge the one value. Idempotent: a snapshot snapshots to an equal copy. The
+ * input is never frozen or changed. A value that cannot be read this way
+ * (including a hostile proxy) is null.
+ *
+ * Range rules (a non-empty contract list, `maxSignatures >= 1`) are NOT checked
+ * here: they stay with `checkDelegationScope`, with their own reasons.
+ */
+export function snapshotSessionKeyAuthorization(raw: unknown): SessionKeyAuthorization | null {
+  try {
+    const sessionId = ownData(raw, "sessionId");
+    const parentAgentId = ownData(raw, "parentAgentId");
+    const publicKey = ownData(raw, "publicKey");
+    const parentSignature = ownData(raw, "parentSignature");
+    const issuedAt = ownData(raw, "issuedAt");
+    const expiresAt = ownData(raw, "expiresAt");
+    const scope = ownData(raw, "scope");
+    if (
+      typeof sessionId !== "string" ||
+      typeof parentAgentId !== "string" ||
+      typeof publicKey !== "string" ||
+      typeof parentSignature !== "string" ||
+      typeof issuedAt !== "number" ||
+      !isSafeInteger(issuedAt) ||
+      typeof expiresAt !== "number" ||
+      !isSafeInteger(expiresAt)
+    ) {
+      return null;
+    }
+    const allowedActions = snapshotStrings(ownData(scope, "allowedActions"));
+    const contractIds = snapshotStrings(ownData(scope, "contractIds"));
+    const maxSignatures = ownData(scope, "maxSignatures");
+    if (allowedActions === null || contractIds === null || typeof maxSignatures !== "number" || !isSafeInteger(maxSignatures)) {
+      return null;
+    }
+    // Optional. An own accessor is refused like any other; an inherited one is
+    // never read (it is not the delegation's); `undefined` means absent.
+    let derivationPath: string | undefined;
+    const pathDescriptor = getOwnPropertyDescriptor(raw as object, "derivationPath");
+    if (pathDescriptor !== undefined) {
+      if (!objectHasOwnProperty.call(pathDescriptor, "value")) return null;
+      const path: unknown = pathDescriptor.value;
+      if (path !== undefined) {
+        if (typeof path !== "string") return null;
+        derivationPath = path;
+      }
+    }
+    return freeze({
+      sessionId,
+      parentAgentId,
+      publicKey,
+      issuedAt,
+      expiresAt,
+      scope: freeze({ allowedActions, contractIds, maxSignatures }),
+      parentSignature,
+      ...(derivationPath !== undefined ? { derivationPath } : {}),
+    }) as SessionKeyAuthorization;
+  } catch {
+    return null;
+  }
+}
+
+/** Stands for a session authorization that was present but could not be decoded:
+ *  `verifyDeviceSignedEvidence` refuses it as malformed, where it always did,
+ *  and nobody reads the raw object a second time. */
+const UNDECODABLE_AUTHORIZATION = freeze({}) as unknown as SessionKeyAuthorization;
+
+/** A plain copy of a signature, each field read once. Anything that is not an
+ *  object is returned as is, for `isDeviceSignedSignature` to refuse. */
+function copySignature(raw: StoredSignature): StoredSignature {
+  if (typeof raw !== "object" || raw === null) return raw;
+  return { signer: raw.signer, algorithm: raw.algorithm, value: raw.value };
+}
 
 // ── The signature shape stored on / carried by an evidence bundle ────────────
 
@@ -286,10 +420,23 @@ export interface DeviceEvidenceVerifyInput {
    *  `normalizeRegisteredSigner`-acceptable input). Verification is against THIS,
    *  not the self-declared `signature.signer`. */
   registeredSigner: unknown;
-  /** Delegation required when the bundle was signed by an ephemeral session key. */
+  /** Delegation required when the bundle was signed by an ephemeral session key.
+   *  Read once, as own data, into an immutable snapshot (`snapshotSessionKeyAuthorization`):
+   *  an accessor, an inherited field or a missing one is refused as
+   *  `malformed-session-authorization`. */
   sessionKeyAuthorization?: SessionKeyAuthorization;
   /** Job/contract id the session scope must explicitly contain. */
   contractId?: string;
+  /** How many events the delegated session vouches for (the bundle's verified
+   *  events). No more than the delegation's maxSignatures, as at /settle. */
+  sessionSignedEventCount?: number;
+  /** The funded operator's principal id, from an AUTHORITATIVE source (the funded
+   *  deal), never from the evidence. A delegation's parentAgentId must equal it. */
+  operatorPrincipalId?: string;
+  /** When the gateway received this bundle (Unix seconds, the gateway's own clock:
+   *  the stored row's createdAt). The session must be valid then, whatever the
+   *  wall clock says at verification (recovery re-verifies later). */
+  receivedAt?: number;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
   verifyEd25519?: VerifyEd25519;
 }
@@ -306,67 +453,111 @@ export interface DeviceEvidenceVerifyResult {
  * Fails CLOSED: any missing/malformed input, an unregistered or non-ed25519
  * signer, or an invalid signature → `ok:false`. This is the registered-signer →
  * verify leg that gates whether device evidence may anchor settlement.
+ *
+ * Every field of `input` is read ONCE, at the top, and only those locals are used
+ * after (cross-family review E3b, finding H1); the session authorization is read
+ * into one immutable snapshot that the scope rule, the signature preimage and the
+ * session-validity check all use.
  */
 export async function verifyDeviceSignedEvidence(
   input: DeviceEvidenceVerifyInput,
 ): Promise<DeviceEvidenceVerifyResult> {
-  const verifyEd25519 = input.verifyEd25519 ?? naclEd25519Verify;
+  const {
+    signature: rawSignature,
+    bundleHash,
+    registeredSigner,
+    sessionKeyAuthorization: rawAuthorization,
+    contractId,
+    sessionSignedEventCount,
+    operatorPrincipalId,
+    receivedAt,
+    verifyEd25519: injectedVerify,
+  } = input;
+  const verifyEd25519 = injectedVerify ?? naclEd25519Verify;
+  const signature = copySignature(rawSignature);
+  // undefined: no authorization was given. null: one was given and cannot be
+  // decoded (refused below as malformed, after the checks that always came first).
+  const authorization =
+    rawAuthorization === undefined || rawAuthorization === null
+      ? undefined
+      : snapshotSessionKeyAuthorization(rawAuthorization);
 
-  if (!isDeviceSignedSignature(input.signature)) {
+  if (!signature || !isDeviceSignedSignature(signature)) {
     return { ok: false, reason: "not-device-signed" };
   }
-  if (typeof input.bundleHash !== "string" || input.bundleHash.length === 0) {
+  if (typeof bundleHash !== "string" || bundleHash.length === 0) {
     return { ok: false, reason: "missing-bundle-hash" };
   }
   // The signature must cover a real evidence digest. Without this, a valid
   // signature over any other string the same key signs (e.g. the registration
   // challenge "pcc-kernel-signing-key:<id>") would pass as device evidence.
-  if (!isTaggedDigest(input.bundleHash)) {
+  if (!isTaggedDigest(bundleHash)) {
     return { ok: false, reason: "malformed-bundle-hash" };
   }
-  const signer = normalizeRegisteredSigner(input.registeredSigner);
+  const signer = normalizeRegisteredSigner(registeredSigner);
   if (!signer) return { ok: false, reason: "unregistered-signer" };
   if (signer.algorithm !== "ed25519") return { ok: false, reason: "signer-not-ed25519" };
 
-  if (input.sessionKeyAuthorization) {
-    if (!input.contractId) return { ok: false, reason: "missing-contract-id" };
-    const auth = input.sessionKeyAuthorization;
+  if (authorization !== undefined) {
+    if (!contractId) return { ok: false, reason: "missing-contract-id" };
+    // Session evidence is only as good as the context it is checked in (cross-family
+    // review E3): the funded operator binds parentAgentId, and the receipt time closes
+    // the event window and judges expiry. The gateway holds no authoritative funded
+    // operator today (the oracle's /settle does, J1), so without both it never treats
+    // session evidence as a verified device anchor.
+    if (typeof operatorPrincipalId !== "string" || typeof receivedAt !== "number" || !isSafeInteger(receivedAt)) {
+      return { ok: false, reason: "session-evidence-needs-trusted-context" };
+    }
+    if (authorization === null) return { ok: false, reason: "malformed-session-authorization" };
     try {
       const sessionKey: SessionKey = {
-        sessionId: auth.sessionId,
-        parentAgentId: auth.parentAgentId as SessionKey["parentAgentId"],
-        publicKey: parseEd25519PublicKeyHex(auth.publicKey),
-        issuedAt: auth.issuedAt,
-        expiresAt: auth.expiresAt,
+        sessionId: authorization.sessionId,
+        parentAgentId: authorization.parentAgentId as SessionKey["parentAgentId"],
+        publicKey: parseEd25519PublicKeyHex(authorization.publicKey),
+        issuedAt: authorization.issuedAt,
+        expiresAt: authorization.expiresAt,
         scope: {
-          allowedActions: auth.scope.allowedActions as SessionKey["scope"]["allowedActions"],
-          contractIds: auth.scope.contractIds,
-          maxSignatures: auth.scope.maxSignatures,
+          allowedActions: authorization.scope.allowedActions as SessionKey["scope"]["allowedActions"],
+          contractIds: authorization.scope.contractIds,
+          maxSignatures: authorization.scope.maxSignatures,
         },
-        parentSignature: parseEd25519SignatureHex(auth.parentSignature),
+        parentSignature: parseEd25519SignatureHex(authorization.parentSignature),
         // `!== undefined`, not truthiness: a defined path is reproduced as the
         // principal signed it. An empty path is refused by the LO-EV-1 contract
         // before any signature check (a labelled tightening, R20 round 2).
-        ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
+        ...(authorization.derivationPath !== undefined ? { derivationPath: authorization.derivationPath } : {}),
       };
       if (sessionKey.publicKey.length !== 32 || sessionKey.parentSignature.length !== 64) {
         return { ok: false, reason: "malformed-session-authorization" };
       }
-      if (!sessionKey.scope.contractIds.includes(input.contractId)) {
-        return { ok: false, reason: "contract_not_allowed" };
+      // One scope rule with the oracle's /settle (checkDelegationScope): the
+      // contract list is non-empty and names this job, maxSignatures is a safe
+      // integer >= 1, and it covers the events the session vouches for. It judges
+      // the SAME snapshot the signature check above was built from, so the parent
+      // label the principal signed is the one compared with the funded operator.
+      const scoped = checkDelegationScope(authorization, {
+        settlingJobId: contractId,
+        operatorPrincipalId,
+        ...(sessionSignedEventCount !== undefined ? { sessionSignedEventCount } : {}),
+      });
+      if (!scoped.ok) {
+        const contract = scoped.reason === "contract-ids-empty" || scoped.reason === "contract-not-allowed";
+        return { ok: false, reason: contract ? "contract_not_allowed" : scoped.reason };
       }
       const event: SessionSignedEvent = {
-        eventData: signingPreimage(input.bundleHash),
-        sessionSignature: parseEd25519SignatureHex(input.signature.value),
+        eventData: signingPreimage(bundleHash),
+        sessionSignature: parseEd25519SignatureHex(signature.value),
         proof: {
           sessionKey,
           parentPublicKey: parseEd25519PublicKeyHex(signer.publicKey),
-          ...(auth.derivationPath !== undefined ? { derivationPath: auth.derivationPath } : {}),
+          ...(authorization.derivationPath !== undefined ? { derivationPath: authorization.derivationPath } : {}),
         },
       };
       const result = new SessionKeyService().verifySessionSignedEvent({
         event,
         action: "evidence_submit",
+        // Valid when the gateway received it, not "valid now" (review E3 finding 3).
+        currentTimestamp: receivedAt,
       });
       if (!result.valid) return { ok: false, reason: result.failures[0] ?? "delegation-invalid" };
       return { ok: true, signer };
@@ -377,7 +568,7 @@ export async function verifyDeviceSignedEvidence(
 
   let valid: boolean;
   try {
-    valid = await verifyEd25519(input.bundleHash, input.signature.value, signer.publicKey);
+    valid = await verifyEd25519(bundleHash, signature.value, signer.publicKey);
   } catch {
     return { ok: false, reason: "verify-threw" };
   }
@@ -436,6 +627,9 @@ export interface SettlementEvidenceSlot {
   /** The stored evidence row this slot came from, so a device decision can pin
    *  that exact row (events + delegation) as the job's settlement anchor. */
   bundleId?: string;
+  /** When the gateway received this bundle (Unix seconds; the stored row's
+   *  createdAt). Session evidence needs it: see DeviceEvidenceVerifyInput. */
+  receivedAt?: number;
 }
 
 export interface SettlementEvidenceInput {
@@ -448,6 +642,9 @@ export interface SettlementEvidenceInput {
   deviceBundles?: readonly SettlementEvidenceSlot[];
   /** The device's registered signer (from the kernel registry). */
   registeredSigner: unknown;
+  /** The funded operator's principal id, from an authoritative source. Without it,
+   *  session-signed evidence never anchors (see DeviceEvidenceVerifyInput). */
+  operatorPrincipalId?: string;
   /** The gateway's own rebuilt anchor (today's behavior). */
   fallback: SettlementEvidenceSlot;
   /** Injected Ed25519 verify (default `naclEd25519Verify`). */
@@ -470,6 +667,12 @@ export interface SettlementEvidenceDecision extends SettlementEvidenceSlot {
  * signature verifies against the registered signer, anchors settlement on the
  * DEVICE's real hash + signature. Fails closed to the fallback otherwise,
  * reporting the first candidate's failure.
+ *
+ * The decision is built ONLY from what `verifyDeviceAnchor` verified: the digest,
+ * the signature, the events and the authorization it judged, never a fresh read of
+ * the candidate (cross-family review E3b, finding H1). The input's own fields are
+ * read once, before the loop, so every candidate is judged with the same signer,
+ * operator and verifier.
  */
 export async function resolveSettlementEvidence(
   input: SettlementEvidenceInput,
@@ -478,31 +681,45 @@ export async function resolveSettlementEvidence(
   if (!gateOpen) {
     return { ...input.fallback, source: "gateway-fallback", reason: "gate-closed" };
   }
-  const candidates = input.deviceBundles ?? (input.deviceBundle ? [input.deviceBundle] : []);
+  const { deviceBundles, deviceBundle, registeredSigner, operatorPrincipalId, verifyEd25519 } = input;
+  const candidates = deviceBundles ?? (deviceBundle ? [deviceBundle] : []);
   if (candidates.length === 0) {
     return { ...input.fallback, source: "gateway-fallback", reason: "no-device-bundle" };
   }
+  const context = { registeredSigner, operatorPrincipalId, verifyEd25519 };
   let firstFailure: string | undefined;
   for (const candidate of candidates) {
-    const anchor = await verifyDeviceAnchor(candidate, input);
+    const anchor = await verifyDeviceAnchor(candidate, context);
     if (anchor.ok) {
       return {
         source: "device",
-        bundleHash: candidate.bundleHash,
-        kernelSignature: candidate.kernelSignature,
-        assuranceTier: candidate.assuranceTier,
-        ...(candidate.bundleId !== undefined ? { bundleId: candidate.bundleId } : {}),
+        bundleHash: anchor.bundleHash,
+        kernelSignature: anchor.kernelSignature,
+        assuranceTier: anchor.assuranceTier,
+        ...(anchor.bundleId !== undefined ? { bundleId: anchor.bundleId } : {}),
         // The binding's canonical snapshots, never the caller's objects: whatever
         // is evaluated or archived downstream is exactly what was hashed.
         events: anchor.events,
-        ...(candidate.sessionKeyAuthorization
-          ? { sessionKeyAuthorization: candidate.sessionKeyAuthorization }
-          : {}),
+        // The frozen snapshot that was judged, never the candidate's own object.
+        ...(anchor.sessionKeyAuthorization ? { sessionKeyAuthorization: anchor.sessionKeyAuthorization } : {}),
       };
     }
     if (firstFailure === undefined) firstFailure = anchor.reason;
   }
   return { ...input.fallback, source: "gateway-fallback", reason: firstFailure };
+}
+
+/** What `verifyDeviceAnchor` verified, on success: the values it judged, as plain copies. */
+interface VerifiedDeviceAnchor {
+  ok: true;
+  bundleHash: string;
+  kernelSignature: StoredSignature;
+  assuranceTier: number;
+  bundleId?: string;
+  /** The binding's canonical event snapshots. */
+  events: EvidenceEvent[];
+  /** The frozen snapshot of the session authorization that was judged, when there was one. */
+  sessionKeyAuthorization?: SessionKeyAuthorization;
 }
 
 /**
@@ -511,35 +728,84 @@ export async function resolveSettlementEvidence(
  * accepted it (LO-EV-9), and the signature over that digest verifies against
  * the kernel's registered signer. The delegation scope is checked against the
  * subject's job, never a separately supplied id. On success it returns the
- * binding's canonical event snapshots.
+ * binding's canonical event snapshots and the other values it verified.
+ *
+ * Every field of the slot and of the input is read ONCE, at the top (cross-family
+ * review E3b, finding H1), and the rest of the function uses only those locals: the
+ * time window comes from the authorization snapshot and the one receipt time, and
+ * the SAME snapshot and the SAME receipt time reach the signature leg.
  */
 async function verifyDeviceAnchor(
   slot: SettlementEvidenceSlot,
-  input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519">,
-): Promise<{ ok: true; events: EvidenceEvent[] } | { ok: false; reason: string }> {
-  if (!slot.subject) return { ok: false, reason: "missing-subject" };
-  if (slot.contractId !== undefined && slot.contractId !== slot.subject.jobId) {
+  input: Pick<SettlementEvidenceInput, "registeredSigner" | "verifyEd25519" | "operatorPrincipalId">,
+): Promise<VerifiedDeviceAnchor | { ok: false; reason: string }> {
+  const {
+    subject: rawSubject,
+    contractId,
+    bundleHash,
+    kernelSignature: rawSignature,
+    events,
+    receivedAt,
+    sessionKeyAuthorization: rawAuthorization,
+    assuranceTier,
+    bundleId,
+  } = slot;
+  const { registeredSigner, operatorPrincipalId, verifyEd25519 } = input;
+
+  if (!rawSubject) return { ok: false, reason: "missing-subject" };
+  // A copy: the binding and the delegation scope judge the same job id.
+  const subject: EvidenceSubject = { ...rawSubject };
+  if (contractId !== undefined && contractId !== subject.jobId) {
     return { ok: false, reason: "contract-subject-mismatch" };
   }
+  const kernelSignature = copySignature(rawSignature);
+  // undefined: the slot carries no authorization. null: it carries one that cannot be
+  // decoded; it is handed on as a stand-in so the verifier refuses it as malformed,
+  // where it always did, instead of being read a second time.
+  const authorization =
+    rawAuthorization === undefined || rawAuthorization === null
+      ? undefined
+      : snapshotSessionKeyAuthorization(rawAuthorization);
+  // A session's events lie in [issuedAt, min(expiresAt, receivedAt)] (the delegation
+  // time rule, pcc.evidence.delegation-time-rules.v1), checked on the hashed snapshots.
+  const window =
+    authorization && typeof receivedAt === "number" && isSafeInteger(receivedAt)
+      ? { notBefore: authorization.issuedAt, notAfter: Math.min(authorization.expiresAt, receivedAt) }
+      : undefined;
   const binding = await verifyEvidenceSubjectBinding({
-    bundleHash: slot.bundleHash,
-    events: slot.events ?? [],
-    subject: slot.subject,
+    bundleHash,
+    events: events ?? [],
+    subject: window ? { ...subject, eventTimeWindow: window } : subject,
   });
   if (!binding.ok) return { ok: false, reason: binding.reason };
   const verified = await verifyDeviceSignedEvidence({
-    signature: slot.kernelSignature,
-    bundleHash: slot.bundleHash,
-    registeredSigner: input.registeredSigner,
-    ...(slot.sessionKeyAuthorization
-      ? { sessionKeyAuthorization: slot.sessionKeyAuthorization }
-      : {}),
-    contractId: slot.subject.jobId,
-    ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
+    signature: kernelSignature,
+    bundleHash,
+    registeredSigner,
+    ...(authorization !== undefined ? { sessionKeyAuthorization: authorization ?? UNDECODABLE_AUTHORIZATION } : {}),
+    contractId: subject.jobId,
+    sessionSignedEventCount: binding.events.length,
+    ...(operatorPrincipalId !== undefined ? { operatorPrincipalId } : {}),
+    ...(receivedAt !== undefined ? { receivedAt } : {}),
+    ...(verifyEd25519 ? { verifyEd25519 } : {}),
   });
-  return verified.ok
-    ? { ok: true, events: binding.events }
-    : { ok: false, reason: verified.reason ?? "verify-failed" };
+  if (!verified.ok) return { ok: false, reason: verified.reason ?? "verify-failed" };
+  return {
+    ok: true,
+    bundleHash,
+    kernelSignature,
+    assuranceTier,
+    ...(bundleId !== undefined ? { bundleId } : {}),
+    events: binding.events,
+    ...(authorization ? { sessionKeyAuthorization: authorization } : {}),
+  };
+}
+
+/** A stored row's createdAt (the gateway's receipt time) as Unix seconds, or undefined. */
+export function receivedAtSeconds(createdAt: unknown): number | undefined {
+  if (typeof createdAt !== "string") return undefined;
+  const ms = Date.parse(createdAt);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : undefined;
 }
 
 // ── Recovery: re-verify the pinned settlement anchor ────────────────────────
@@ -575,43 +841,64 @@ export async function verifyPinnedSettlementEvidence(input: {
   row: PinnedEvidenceRow | null | undefined;
   events: readonly EvidenceEnvelopeEvent[];
   registeredSigner: unknown;
+  /** The funded operator's principal id, from an authoritative source (see
+   *  DeviceEvidenceVerifyInput); without it a session-signed anchor fails closed. */
+  operatorPrincipalId?: string;
   verifyEd25519?: VerifyEd25519;
 }): Promise<{ ok: true } | { ok: false; reason: string }> {
-  const { row } = input;
+  // The input and the row are read ONCE, here (cross-family review E3b, finding H1): the
+  // receipt time in particular is read from `createdAt` once, not once to test it and
+  // again to use it.
+  const { jobId, kernelId, row, events, registeredSigner, operatorPrincipalId, verifyEd25519 } = input;
   if (!row) return { ok: false, reason: "no-pinned-evidence" };
-  if (row.jobId !== input.jobId) return { ok: false, reason: "pinned-evidence-job-mismatch" };
-  if (row.kernelId !== input.kernelId) return { ok: false, reason: "pinned-evidence-kernel-mismatch" };
-  if (isDeviceSignedSignature(row.kernelSignature)) {
+  const {
+    id,
+    jobId: rowJobId,
+    stepId,
+    kernelId: rowKernelId,
+    assuranceTier,
+    createdAt,
+    bundleHash,
+    kernelSignature,
+    sessionKeyAuthorization,
+  } = row;
+  if (rowJobId !== jobId) return { ok: false, reason: "pinned-evidence-job-mismatch" };
+  if (rowKernelId !== kernelId) return { ok: false, reason: "pinned-evidence-kernel-mismatch" };
+  if (isDeviceSignedSignature(kernelSignature)) {
+    // Judged as of when the gateway received it, never "now" (review E3 finding 3).
+    const receivedAt = receivedAtSeconds(createdAt);
     const anchor = await verifyDeviceAnchor(
       {
-        bundleHash: row.bundleHash,
-        kernelSignature: row.kernelSignature,
-        assuranceTier: row.assuranceTier,
-        ...(row.sessionKeyAuthorization ? { sessionKeyAuthorization: row.sessionKeyAuthorization } : {}),
-        events: input.events,
+        bundleHash,
+        kernelSignature,
+        assuranceTier,
+        ...(sessionKeyAuthorization ? { sessionKeyAuthorization } : {}),
+        events,
         // The subject /complete used: no settlement unit or challenge, so a pinned row whose
         // events commit either is refused here too (E11 F1).
-        subject: { jobId: input.jobId, kernelId: input.kernelId },
+        subject: { jobId, kernelId },
+        ...(receivedAt !== undefined ? { receivedAt } : {}),
       },
       {
-        registeredSigner: input.registeredSigner,
-        ...(input.verifyEd25519 ? { verifyEd25519: input.verifyEd25519 } : {}),
+        registeredSigner,
+        ...(operatorPrincipalId !== undefined ? { operatorPrincipalId } : {}),
+        ...(verifyEd25519 ? { verifyEd25519 } : {}),
       },
     );
     return anchor.ok ? { ok: true } : { ok: false, reason: anchor.reason };
   }
   const envelope = buildCanonicalEvidenceEnvelope(
     {
-      id: row.id,
-      jobId: row.jobId,
-      stepId: row.stepId,
-      kernelId: row.kernelId,
-      assuranceTier: row.assuranceTier,
-      createdAt: row.createdAt,
-      kernelSignature: row.kernelSignature,
+      id,
+      jobId: rowJobId,
+      stepId,
+      kernelId: rowKernelId,
+      assuranceTier,
+      createdAt,
+      kernelSignature,
     },
-    [...input.events],
+    [...events],
   );
   const recomputed = `sha256:${createHash("sha256").update(envelope).digest("hex")}`;
-  return recomputed === row.bundleHash ? { ok: true } : { ok: false, reason: "pinned-evidence-hash-mismatch" };
+  return recomputed === bundleHash ? { ok: true } : { ok: false, reason: "pinned-evidence-hash-mismatch" };
 }

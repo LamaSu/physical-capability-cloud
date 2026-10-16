@@ -89,6 +89,20 @@ describe("LO-EV-9 evidence subject binding — positive controls", () => {
     ).toMatchObject({ ok: true });
   });
 
+  it("returns each event's id and the events' order as given: neither is committed (E11b LOW)", async () => {
+    const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
+    const reordered = b.events.map((e, i) => ({ ...e, id: `relabelled-${i}` })).reverse();
+    const r = await verifyEvidenceSubjectBinding({ bundleHash: b.bundleHash, events: reordered, subject: subject(JOB_A, NODE_A) });
+    expect(r.ok).toBe(true);
+    const events = (r as { events: EvidenceEvent[] }).events;
+    // The same signed bundleHash verifies with other ids, in another order, and returns them as given.
+    expect(events.map((e) => e.id)).toEqual(reordered.map((e) => e.id));
+    expect(events.map((e) => e.hash)).toEqual(reordered.map((e) => e.hash));
+    // What the bundle commits is the sorted MULTISET of event hashes: a duplicate changes it.
+    expect(events.map((e) => e.hash).sort()).toEqual(b.events.map((e) => e.hash).sort());
+    expect(await hashBundle([b.events[0]!, b.events[0]!])).not.toBe(await hashBundle([b.events[0]!]));
+  });
+
   it("reads JSON-round-tripped events (the stored form) the same way", async () => {
     const b = await kernelSdkShapedBundle(JOB_A, NODE_A);
     const stored = JSON.parse(JSON.stringify(b.events)) as unknown[];

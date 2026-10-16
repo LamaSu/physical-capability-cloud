@@ -7,6 +7,7 @@ import {
 } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -89,6 +90,7 @@ export function SettlementPage() {
   const [status, setStatus] = React.useState<QueueStatus>(MOCK_STATUS);
   const [epochs, setEpochs] = React.useState<EpochSummary[]>(MOCK_EPOCHS);
   const [flushing, setFlushing] = React.useState(false);
+  const [flushNotice, setFlushNotice] = React.useState<string | null>(null);
   const [selectedEpoch, setSelectedEpoch] = React.useState<number | null>(null);
 
   React.useEffect(() => {
@@ -114,8 +116,13 @@ export function SettlementPage() {
 
   const handleFlush = async () => {
     setFlushing(true);
+    setFlushNotice(null);
     try {
-      await authorizedFetch("/api/settlement/flush", { method: "POST" });
+      const result = await authorizedFetch("/api/settlement/flush", { method: "POST" });
+      if (!result.ok) {
+        setFlushNotice(await scopeErrorMessage(result, "/api/settlement/flush", "POST"));
+        return;
+      }
       // Refresh status
       const r = await authorizedFetch("/api/settlement/status");
       const data = await r.json();
@@ -220,6 +227,7 @@ export function SettlementPage() {
             >
               {flushing ? "Flushing..." : `Flush ${status.pending} ops`}
             </button>
+            {flushNotice && <p role="status" className="text-xs text-amber-400/80">{flushNotice}</p>}
             <p className="text-[10px] text-white/40">
               {status.autoFlush
                 ? "Auto-flush triggers on size, value, or age thresholds"

@@ -767,7 +767,10 @@ describe("row-37 proof: POSITIVE + STATES (prod, open gate)", () => {
 
   it("S5 EMPTY: a timed reply in the route's real shape with zero rows shows the empty marker", async () => {
     const h = host!;
-    h.overrides["/api/capabilities"] = { status: 200, json: { ...listBody, items: [], asOf: iso(h.now()) } };
+    // The route's real envelope for an EMPTY collection reports total 0. N110 claims "none" only when
+    // the paging evidence vouches for the whole collection; zero rows under a nonzero total is "no rows
+    // in this window" (pinned in dashboard-ir-list-window.test.ts), so the total must say 0 here too.
+    h.overrides["/api/capabilities"] = { status: 200, json: { ...listBody, items: [], total: 0, hasMore: false, asOf: iso(h.now()) } };
     await h.advance(65_000);
 
     const list = h.q(".pcc-list");

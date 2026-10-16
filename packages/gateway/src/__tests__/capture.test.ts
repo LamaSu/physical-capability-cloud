@@ -53,6 +53,18 @@ import { resolveSession } from "../auth/siwe-auth.js";
 import { CaptureClass } from "@pcc/spec";
 import type { CaptureNonceChallenge } from "@pcc/verifier";
 
+// N31 (#6278): the operator write routes now need operator authority. These tests check body
+// validation, read honesty and decision semantics, not authority (n31-operator-route-ownership
+// does that), so the gateway admin secret stands in for the operator here.
+const N31_ADMIN = "n31-test-admin-secret";
+const ADMIN_HEADERS = { "x-admin-key": N31_ADMIN };
+const PREV_ADMIN_KEY = process.env.PCC_ADMIN_KEY;
+process.env.PCC_ADMIN_KEY = N31_ADMIN;
+afterAll(() => {
+  if (PREV_ADMIN_KEY === undefined) delete process.env.PCC_ADMIN_KEY;
+  else process.env.PCC_ADMIN_KEY = PREV_ADMIN_KEY;
+});
+
 const { captureVerdicts, captureAnchors, operatorPolicies } = schema;
 const mockSession = resolveSession as ReturnType<typeof vi.fn>;
 
@@ -789,6 +801,7 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
   it("accepts minCaptureClass on PATCH", async () => {
     const res = await app.inject({
       method: "PATCH",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-1",
       payload: { minCaptureClass: "CC3" },
     });
@@ -800,6 +813,7 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
   it("accepts requireAnchor on PATCH", async () => {
     const res = await app.inject({
       method: "PATCH",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-2",
       payload: { requireAnchor: true },
     });
@@ -810,11 +824,13 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
   it("merges both CVP fields without clobbering existing policy", async () => {
     await app.inject({
       method: "PATCH",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-3",
       payload: { minCaptureClass: "CC2" },
     });
     const res = await app.inject({
       method: "PATCH",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-3",
       payload: { requireAnchor: true },
     });
@@ -827,6 +843,7 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
   it("GET returns stored minCaptureClass", async () => {
     await app.inject({
       method: "PATCH",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-4",
       payload: { minCaptureClass: "CC4" },
     });
@@ -841,6 +858,7 @@ describe("PATCH /api/operator/policy/:kernelId — CVP fields", () => {
   it("rejects a policy PUT without version:1", async () => {
     const res = await app.inject({
       method: "PUT",
+      headers: ADMIN_HEADERS,
       url: "/api/operator/policy/kernel-cvp-5",
       payload: { requireAnchor: true, approvalMode: "manual" },
     });
