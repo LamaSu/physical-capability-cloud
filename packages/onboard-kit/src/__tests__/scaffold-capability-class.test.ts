@@ -5,12 +5,13 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scaffold } from "../scaffolder.js";
+import { compileTierLadder, type CSD } from "@pcc/spec";
 import type { OnboardConfig } from "../types.js";
 
 const jobId = "job-neutral-1";
 const inputHash = `sha256:${"ab".repeat(32)}`;
 
-function machineConfig(type: "liquid-handler" | "fdm" = "liquid-handler"): OnboardConfig {
+function machineConfig(type: OnboardConfig["capabilities"][number]["type"] = "liquid-handler"): OnboardConfig {
   return {
     kernel: {
       kernelId: "kernel_neutral_test", name: "Neutral Lab", location: { lat: 0, lng: 0 },
@@ -49,6 +50,7 @@ interface Event {
 
 interface AdapterLike {
   readonly accepts?: readonly string[];
+  readonly source: { simulated?: boolean };
   execute(command: { type: string; payload?: Record<string, unknown> }): Promise<{
     success: boolean;
     data?: Record<string, unknown>;
@@ -64,11 +66,11 @@ const scratchDirs: string[] = [];
 const adapters: AdapterLike[] = [];
 
 /** Import the actual generated TypeScript, as the scaffolded sensor tests do. */
-async function neutralAdapter(mockMode = true): Promise<{ adapter: AdapterLike; events: Event[] }> {
+async function neutralAdapter(mockMode = true, config = machineConfig()): Promise<{ adapter: AdapterLike; events: Event[] }> {
   const dir = mkdtempSync(join(tmpdir(), "g1b-scaffold-neutral-"));
   scratchDirs.push(dir);
   const path = join(dir, "liquid-adapter.ts");
-  writeFileSync(path, generated().adapter);
+  writeFileSync(path, generated(config).adapter);
   const { LiquidAdapter } = await import(path) as {
     LiquidAdapter: new (id: string, config: { baseUrl: string; mockMode: boolean }) => AdapterLike;
   };
@@ -87,7 +89,7 @@ async function guideAdapter(resolveInput: (hash: string) => Promise<Uint8Array>,
   if (!code) throw new Error("Expected the guide's machine example");
   const dir = mkdtempSync(join(tmpdir(), "g1b-guide-neutral-"));
   scratchDirs.push(dir);
-  symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(dir, "node_modules"), "dir");
+  symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(dir, "node_modules"), "junction");
   const path = join(dir, "your-machine-adapter.ts");
   writeFileSync(path, code);
   const { YourMachineAdapter } = await import(path) as {
@@ -105,7 +107,7 @@ async function guideAdapter(resolveInput: (hash: string) => Promise<Uint8Array>,
 }
 
 const fetchStub = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) => ({
-  ok: true, status: 200, json: async () => ({}), text: async () => "{}",
+  ok: true, status: 200, json: async () => ({ deviceJobId: "device-staged-777" }), text: async () => "{}",
 }) as Response);
 
 beforeEach(() => {
@@ -123,15 +125,39 @@ afterEach(async () => {
 });
 
 describe("capability-class scaffolding", () => {
-  it("S1: generates the capability's neutral class, complete accepts, and neutral starter tests", () => {
-    const { adapter, tests } = generated();
-    expect(adapter).toContain('readonly type = "liquid-handler" as const');
+  it.each(["liquid-handler", "cnc-3axis", "sla", "laser-cut", "hplc"] as const)("S1: generates %s's neutral class, complete accepts, and neutral starter tests", type => {
+    const { adapter, tests } = generated(machineConfig(type));
+    expect(adapter).toContain(`readonly type = "${type}" as const`);
     expect(adapter).toContain('readonly accepts = ["prepare", "start", "stop", "status"] as const');
     expect(adapter).not.toMatch(/gcode/i);
     expect(adapter).not.toMatch(/fdm/i);
     expect(tests).not.toMatch(/gcode/i);
     expect(tests).not.toMatch(/fdm/i);
   });
+
+  it("L1: pins the active neutral starter test's refusal, ack and job binding assertions", () => {
+    const { tests } = generated();
+    expect(tests).toContain('it("should stage input without actuating and bind execution to the staged job", async () => {');
+    expect(tests).toContain('expect(adapter.accepts).toEqual(["prepare", "start", "stop", "status"]);');
+    expect(tests).toContain('expect((await adapter.execute({ type: "start", payload: { jobId: "test-job" } })).success).toBe(false);');
+    expect(tests).toContain('const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });');
+    expect(tests).toContain('expect(ack.success).toBe(true);');
+    expect(tests).toContain('expect(ack.data).toEqual({ jobId, inputHash, deviceJobId: expect.any(String) });');
+    expect(tests).toContain('expect((ack.data?.deviceJobId as string).length).toBeGreaterThan(0);');
+    expect(tests).toContain('expect(events).toEqual([]);');
+    expect(tests).toContain('expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(true);');
+    expect(tests).toContain('expect(events[0]).toMatchObject({ type: "execution_started", payload: { deviceJobId: ack.data?.deviceJobId } });');
+    expect(tests).toContain('expect((await adapter.execute({ type: "pause", payload: { jobId } })).success).toBe(false);');
+  });
+
+  it.each([true, false])("M1: generated and guide source mark only mockMode=%s as simulated", async mockMode => {
+    const generatedMachine = (await neutralAdapter(mockMode)).adapter;
+    const guideMachine = (await guideAdapter(async () => new Uint8Array(), mockMode)).adapter;
+    for (const machine of [generatedMachine, guideMachine]) {
+      if (mockMode) expect(machine.source.simulated).toBe(true);
+      else expect(machine.source).not.toHaveProperty("simulated");
+    }
+  }, 15000);
 
   it("S2: mock prepare acknowledges exact input identity without evidence, fetch, or state change", async () => {
     const { adapter, events } = await neutralAdapter();
@@ -194,6 +220,7 @@ describe("capability-class scaffolding", () => {
     const { adapter, events } = await neutralAdapter(false);
     const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
     expect(ack.success).toBe(true);
+    expect(ack.data).toEqual({ jobId, inputHash, deviceJobId: "device-staged-777" });
     expect(fetchStub).toHaveBeenCalledTimes(1);
     const [stageUrl, stageRequest] = fetchStub.mock.calls[0]!;
     expect(stageUrl).toBe("http://device.test/stage");
@@ -204,6 +231,38 @@ describe("capability-class scaffolding", () => {
     expect(fetchStub).toHaveBeenCalledTimes(2);
     expect(fetchStub.mock.calls[1]?.[0]).toBe("http://device.test/run");
     expect(fetchStub.mock.calls[1]?.[1]?.method).toBe("POST");
+    expect(JSON.parse(fetchStub.mock.calls[1]![1]!.body as string)).toEqual({ deviceJobId: "device-staged-777" });
+  });
+
+  it("M2: real prepare without a staging endpoint is refused with zero requests", async () => {
+    const config = machineConfig();
+    config.adapters[0]!.endpoints = config.adapters[0]!.endpoints!.filter(endpoint => endpoint.purpose !== "load_program");
+    const { adapter, events } = await neutralAdapter(false, config);
+    expect(await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).toEqual({
+      success: false, message: "prepare: staging is not implemented for this device",
+    });
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+  });
+
+  it.each([undefined, "", 42, null])("M2: real prepare refuses a device reply with invalid deviceJobId %s", async deviceJobId => {
+    const { adapter, events } = await neutralAdapter(false);
+    fetchStub.mockResolvedValueOnce({ ok: true, json: async () => ({ deviceJobId }) } as Response);
+    const result = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+    expect(result.success).toBe(false);
+    expect(result.data).toBeUndefined();
+    expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    expect(fetchStub.mock.calls[0]?.[0]).toBe("http://device.test/stage");
+  });
+
+  it("M2: prepare refuses non-byte inputData before any request", async () => {
+    const { adapter, events } = await neutralAdapter(false);
+    expect((await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData: "not bytes" } })).success).toBe(false);
+    expect(events).toEqual([]);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
   });
 
   it("S6: real prepare stages the exact input bytes as base64", async () => {
@@ -373,5 +432,43 @@ describe("capability-class scaffolding", () => {
     const code = section?.match(/```typescript\n([\s\S]*?)```/)?.[1];
     expect(code).toContain('case "prepare"');
     expect(code).not.toContain('case "load_gcode"');
+  });
+
+  it("M3: guide shows KernelAgent's shipped call and prepare-path follow-up", () => {
+    const guide = readFileSync(new URL("../../AGENT_INSTRUCTIONS.md", import.meta.url), "utf8");
+    const lifecycle = guide.match(/^### 7\.1\b[\s\S]*?(?=^### 7\.2\b)/m)?.[0];
+    expect(lifecycle).toContain('gcodeHash: `sha256_mock_${job.jobId.slice(0, 8)}` as any');
+    expect(lifecycle).toContain('assuranceTier: 1');
+    expect(lifecycle).toContain("KernelAgent does not yet pass inputHash, inputData or tierLadder, so a prepare-path adapter's jobs are refused under it; run prepare-path jobs through JobRunner directly (§3.2) until that follow-up lands.");
+    const legacy = guide.match(/^### 2\.4\b[\s\S]*?(?=^## Step 3\b)/m)?.[0];
+    expect(legacy).toContain("kernel-agent.ts");
+  });
+
+  it("L2: guide evidence example compiles a cumulative ladder and explains settlement pinning", async () => {
+    const guide = readFileSync(new URL("../../AGENT_INSTRUCTIONS.md", import.meta.url), "utf8");
+    const section = guide.match(/^### 8\.4\b[\s\S]*?(?=^## Step 9\b)/m)?.[0];
+    expect(section).toMatch(/only pinned ladders.*document-print-leg.*document-print-and-mail/i);
+    expect(section).toMatch(/network must pin a new class's ladder/i);
+    const code = section?.match(/```typescript\n([\s\S]*?)```/)?.[1];
+    expect(code).toContain('"method_loaded", "execution_completed"');
+    const dir = mkdtempSync(join(tmpdir(), "g1b-guide-evidence-"));
+    scratchDirs.push(dir);
+    symlinkSync(fileURLToPath(new URL("../../node_modules", import.meta.url)), join(dir, "node_modules"), "junction");
+    const path = join(dir, "evidence.ts");
+    writeFileSync(path, `const csd = { url: "pcc://capabilities/test-liquid/v1" };\n${code}\nexport { evidence };\n`);
+    const { evidence } = await import(path) as { evidence: NonNullable<CSD["evidence"]> };
+    expect(evidence.tier0?.required).toEqual(["method_loaded", "execution_completed"]);
+    for (let tier = 1; tier <= 3; tier++) {
+      const previous = evidence[`tier${tier - 1}`]!.required;
+      const current = evidence[`tier${tier}`]!.required;
+      expect(current).toEqual(expect.arrayContaining(previous));
+      expect(current).toHaveLength(previous.length + 1);
+    }
+    for (const tier of Object.values(evidence)) {
+      for (const primitive of tier.primitives ?? []) {
+        if (primitive.bind) expect(tier.required).toContain(primitive.bind);
+      }
+    }
+    await expect(compileTierLadder({ url: "pcc://capabilities/test-liquid/v1", evidence } as CSD)).resolves.toBeDefined();
   });
 });
