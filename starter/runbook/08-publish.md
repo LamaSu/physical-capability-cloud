@@ -23,7 +23,7 @@ The kit is what you built:
 - the research citations;
 - the pcc-node configuration **without any key**.
 
-Never publish `.pcc/api-key`, `.pcc/auth.header`, `.pcc/buyer.header`, `.pcc/node-keys.json` or `.pcc/provision.json`, or anything copied from them.
+Secrets live in `.pcc/`, except the node's signing key at the selected key location: default `~/.pcc-node/keys.json` or `PCC_NODE_KEY_PATH` outside every checkout. Never publish the `.pcc/` directory, its secret files (`api-key`, `auth.header`, `buyer.header`, `node-keys.json`, `provision.json`), the selected node signing-key file, or anything copied from those secrets. Publish only the public kit files listed above.
 
 **Coming:** the kit registry (kits, #397) and the split helper (economics' `computeKitSplit`, #492) will turn this into one publish call, with the exact split shown before you confirm. The rate is the License's `requires.payments[0].rule.bps`, and test mode is `kitRoyaltyMode: preview`. Until they land, record the human's decision exactly:
 ```bash

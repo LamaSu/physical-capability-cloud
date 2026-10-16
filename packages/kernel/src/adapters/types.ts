@@ -58,6 +58,10 @@ export interface MachineAdapter {
    * Cancel the named job while continuing to report it, so its terminal state arrives as evidence.
    * Bound post-cancel polling by a cancel-confirm deadline. If no terminal state arrives,
    * emit execution_failed with origin: "device" and stop polling that job, then quiesce.
+   * The deadline (plus one poll) must expire within the caller's cancelWindowMs. Otherwise
+   * the kernel records its own failure first, and that failure decides the verdict's origin.
+   * Past cancelWindowMs + evidenceQuiesceTimeoutMs, the print fails without a bundle and
+   * the device stays quiescing until the adapter's failure ends the job.
    * quiesceEvidence must still wait while the job's work can emit; the kernel finalizes
    * only after this confirmation, including when it has recorded its own failure event.
    */
@@ -66,7 +70,10 @@ export interface MachineAdapter {
   /** Get current progress (0-100) */
   getProgress(): Promise<number>;
 
-  /** Subscribe to evidence events from this machine */
+  /**
+   * Subscribe to evidence events from this machine.
+   * execution_completed and execution_failed must report terminal states, because the kernel sends no cancel after either one.
+   */
   onEvidence(callback: (event: Omit<EvidenceEvent, "id" | "hash">) => void): void;
 
   /**

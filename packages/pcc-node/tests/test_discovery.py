@@ -602,7 +602,11 @@ class TestDiscoverCommand:
         ]
         with mock.patch("pcc_node.cli.discover_network", return_value=devices), \
              mock.patch("pcc_node.cli.register_kernel") as mock_reg, \
-             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)):
+             mock.patch("pcc_node.cli.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)), \
+             mock.patch("pcc_node.crypto.load_or_create_keys", return_value=("ab" * 16, "cd" * 16)):
+            # The discover flow imports load_or_create_keys inside the function, so the
+            # crypto module's own name is patched too: a test must never read or write
+            # the real ~/.pcc-node key file.
             result = runner.invoke(main, ["discover", "--register", "--api-key", "test-key"])
 
         assert result.exit_code == 0

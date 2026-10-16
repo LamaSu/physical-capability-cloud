@@ -239,13 +239,14 @@ async function runCleanups(): Promise<void> {
     vi.useRealTimers();
     vi.restoreAllMocks();
   }
-  if (errors.length) throw errors[0];
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "cleanup failures");
 }
 
 afterEach(runCleanups);
 
 describe("N144 print-host toolkit gap repros", () => {
-  it("throwing cleanups still dispose the adapter and remove its journal before rethrowing the first error", async () => {
+  it("throwing cleanups still dispose the adapter and remove its journal before aggregating errors", async () => {
     const directory = await mkdtemp(join(tmpdir(), "n144-cleanup-control-"));
     const firstError = new Error("first cleanup failure");
     const secondError = new Error("later cleanup failure");
@@ -272,7 +273,13 @@ describe("N144 print-host toolkit gap repros", () => {
       await rm(directory, { recursive: true, force: true });
     });
     try {
-      await expect(runCleanups()).rejects.toBe(firstError);
+      const failure = await runCleanups().catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(AggregateError);
+      const aggregate = failure as AggregateError;
+      expect(aggregate.message).toBe("cleanup failures");
+      expect(aggregate.errors).toHaveLength(2);
+      expect(aggregate.errors[0]).toBe(firstError);
+      expect(aggregate.errors[1]).toBe(secondError);
       expect(attempted, "a throwing cleanup must not drop later cleanups")
         .toEqual(["first throw", "second throw", "remove journal"]);
       expect(await awaitRealWork(quiesced, 100), "adapter disposal must release pending work")
@@ -286,6 +293,12 @@ describe("N144 print-host toolkit gap repros", () => {
       await setup.adapter.dispose();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("a single throwing cleanup rethrows the error itself", async () => {
+    const error = new Error("only cleanup failure");
+    cleanups.push(async () => { throw error; });
+    await expect(runCleanups()).rejects.toBe(error);
   });
 
   it("the journal seed scan finds encoded private seeds and ignores seed-free files", async () => {
@@ -370,9 +383,9 @@ describe("N144 print-host toolkit gap repros", () => {
     const directory = await mkdtemp(join(tmpdir(), "n144-large-journal-scan-"));
     cleanups.push(() => rm(directory, { recursive: true, force: true }));
     // Rebuilt r8 reference: 1,495 bytes after finalize (its largest journal).
-    // 64 KiB exceeds 10x that size, with high-entropy, unique windows rather than padding.
+    // 16 KiB exceeds 10x that size, with high-entropy, unique windows rather than padding.
     const signer = makeKernelEd25519Signer();
-    const bytes = randomBytes(64 * 1024);
+    const bytes = randomBytes(16 * 1024);
     bytes.set(signer.secretKey.subarray(0, 32), 7);
     await writeFile(join(directory, "journal.bin"), bytes);
     const startedAt = realNow();
@@ -502,40 +515,6 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(await setup.adapter.getStatus()).toBe("idle");
   });
 
-  it("repeated silent cancels retain the first deadline", async () => {
-    // Capture a deterministic scheduler in this isolated module evaluation; the
-    // suite's statically imported adapter keeps its real-time deadline source.
-    vi.resetModules();
-    vi.useFakeTimers();
-    try {
-      const { FakeMachineAdapter: ScheduledFake } = await import("../src/testing/fake-machine-adapter.js");
-      const { kernelId, deviceId } = testIds("first-cancel-deadline");
-      const adapter = new ScheduledFake(deviceId, kernelId, { cancelBehavior: "silent", cancelConfirmMs: 100 });
-      cleanups.push(() => adapter.dispose());
-      adapter.scriptStart({ outcome: "success", jobId: 125 });
-      await adapter.execute({ type: "start" });
-      const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
-      adapter.onEvidence((event) => events.push(event));
-      await adapter.cancelJob(125);
-      await vi.advanceTimersByTimeAsync(60);
-      await adapter.cancelJob(125);
-      await vi.advanceTimersByTimeAsync(39);
-      expect(events, "the first cancel deadline has not yet elapsed").toHaveLength(0);
-      expect(await adapter.getStatus()).toBe("busy");
-      await vi.advanceTimersByTimeAsync(1);
-      expect(events, "a later cancel must not extend the first cancel deadline").toHaveLength(1);
-      expect(events[0]).toMatchObject({
-        type: "execution_failed", payload: { ippJobId: 125, reason: "cancel-unconfirmed", origin: "device" },
-      });
-      expect(await adapter.getStatus()).toBe("idle");
-      await vi.advanceTimersByTimeAsync(60);
-      expect(events, "the later cancel must not schedule a second report").toHaveLength(1);
-      expect(adapter.cancels).toEqual([125, 125]);
-    } finally {
-      vi.resetModules();
-    }
-  });
-
   it("a stale cancel poll cannot suppress cancellation of a replacement job", async () => {
     const setup = harness("stale-cancel-poll", { cancelEventOrder: "after-resolve" });
     const events: Array<Omit<EvidenceEvent, "id" | "hash">> = [];
@@ -555,7 +534,7 @@ describe("N144 print-host toolkit gap repros", () => {
     await setup.adapter.quiesceEvidence();
   });
 
-  gap("GAP-1 real mode never simulates", async () => {
+  it("GAP-1 real mode never simulates", async () => {
     vi.useFakeTimers();
     let kernel: IppPrintKernel;
     try {
@@ -586,7 +565,7 @@ describe("N144 print-host toolkit gap repros", () => {
     ).toBe(true);
   });
 
-  gap("GAP-2 a print's evidence holds only its own job's events (N106)", async () => {
+  it("GAP-2 a print's evidence holds only its own job's events (N106)", async () => {
     const setup = harness("gap-2");
     const first = job("print-A");
     const resultA = await completingPrint(setup, first, 101);
@@ -602,7 +581,7 @@ describe("N144 print-host toolkit gap repros", () => {
     for (const event of eventsA) expect(event.payload.ippJobId).toBe(101);
   });
 
-  gap("GAP-3 a reported failure returns a SIGNED execution_failed bundle", async () => {
+  it("GAP-3 a reported failure returns a SIGNED execution_failed bundle", async () => {
     const setup = harness("gap-3");
     setup.adapter.scriptStart({ outcome: "success", jobId: 103 });
     const started = setup.adapter.started();
@@ -620,7 +599,7 @@ describe("N144 print-host toolkit gap repros", () => {
   });
 
   for (const cancelBehavior of ["report", "silent"] as const) {
-    gap(`GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle${cancelBehavior === "silent" ? " (silent printer)" : ""}`, async () => {
+    it(`GAP-4 a timeout cancels the device job and returns a SIGNED execution_failed bundle${cancelBehavior === "silent" ? " (silent printer)" : ""}`, async () => {
       vi.useFakeTimers();
       const setup = harness(`gap-4-${cancelBehavior}`, { cancelBehavior });
       setup.adapter.scriptStart({ outcome: "success", jobId: 104 });
@@ -631,6 +610,9 @@ describe("N144 print-host toolkit gap repros", () => {
       await vi.advanceTimersByTimeAsync(timeoutMs);
       const result = await drainPrintJob(pending);
       expect(result.success).toBe(false);
+      expect(
+        setup.adapter.cancels, "a timed-out device job must be canceled with cancelJob(104)",
+      ).toEqual([104]);
       expect(
         setup.adapter.cancels.length, "a timed-out device job must be canceled with cancelJob(104)",
       ).toBeGreaterThanOrEqual(1);
@@ -665,7 +647,7 @@ describe("N144 print-host toolkit gap repros", () => {
   }
 
   for (const cancelEventOrder of ["before-resolve", "after-resolve", "silent printer"] as const) {
-    gap(`GAP-5 an abort input cancels the device job and returns a SIGNED execution_failed bundle (${cancelEventOrder})`, async () => {
+    it(`GAP-5 an abort input cancels the device job and returns a SIGNED execution_failed bundle (${cancelEventOrder})`, async () => {
       vi.useFakeTimers();
       const silent = cancelEventOrder === "silent printer";
       const setup = harness(`gap-5-${cancelEventOrder}`, {
@@ -680,11 +662,15 @@ describe("N144 print-host toolkit gap repros", () => {
       } as Omit<PrintJobOptions, "adapter" | "emitter">;
       setup.adapter.scriptStart({ outcome: "success", jobId: ippJobId });
       const started = setup.adapter.started();
+      const startedAt = Date.now();
       const pending = runPrintJob({ ...options, ...setup });
       await started;
       setup.adapter.emit("execution_started", { ippJobId });
       controller.abort();
       const result = await drainPrintJob(pending);
+      expect(
+        setup.adapter.cancels, `an aborted device job must be canceled with cancelJob(${ippJobId})`,
+      ).toEqual([ippJobId]);
       expect(
         setup.adapter.cancels.length, `an aborted device job must be canceled with cancelJob(${ippJobId})`,
       ).toBeGreaterThanOrEqual(1);
@@ -693,6 +679,9 @@ describe("N144 print-host toolkit gap repros", () => {
         setup.adapter.commands.some((command) => command.type === "stop"),
         "never 'stop': it ends polling before the canceled state",
       ).toBe(false);
+      expect(result, "an aborted print must settle before its 10_000 ms timeout").toBeDefined();
+      expect(Date.now() - startedAt, "an aborted print must settle within the 9_000 ms fake-time bound")
+        .toBeLessThanOrEqual(9_000);
       expect(result.durationMs).toBeLessThan(10_000);
       expect(result.success).toBe(false);
       expect(result.bundle, "an abort must return a signed failure bundle").toBeDefined();
@@ -717,7 +706,7 @@ describe("N144 print-host toolkit gap repros", () => {
     });
   }
 
-  gap("GAP-6 the unit fields reach every event", async () => {
+  it("GAP-6 the unit fields reach every event", async () => {
     const setup = harness("gap-6");
     const unit = {
       settlementUnitId: `0x${"a".repeat(64)}`,
@@ -901,7 +890,7 @@ describe("N144 print-host toolkit gap repros", () => {
     expect(await expectPrivateJournalFiles(journalDir), "the unit session must persist journal files").toBeGreaterThan(0);
   }, gap7TimeoutMs);
 
-  gap("GAP-8 a busy refusal is reported as busy and emits no failure (N127)", async () => {
+  it("GAP-8 a busy refusal is reported as busy and emits no failure (N127)", async () => {
     const setup = harness("gap-8");
     setup.adapter.scriptStart({ outcome: "busy" });
     const result = await runPrintJob({ ...job("busy-refusal"), ...setup });

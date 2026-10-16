@@ -37,15 +37,15 @@ describe("CSD Registry API", () => {
   // ── GET /api/csd ────────────────────────────────────────────────
 
   describe("GET /api/csd", () => {
-    it("lists all built-in CSDs (9 loadBuiltinCsds, including the reference vertical's workflow CSD, + the compiled-in dashboard-v1)", async () => {
+    it("lists all built-in CSDs (10 loadBuiltinCsds, including the reference vertical's workflow CSD, + the compiled-in dashboard-v1)", async () => {
       const res = await app.inject({ method: "GET", url: "/api/csd" });
       expect(res.statusCode).toBe(200);
       const body = res.json();
       expect(Array.isArray(body.csds)).toBe(true);
-      // 8 base capability CSDs and the document-print-and-mail workflow CSD (the reference vertical,
+      // 9 base capability CSDs and the document-print-and-mail workflow CSD (the reference vertical,
       // board N64) from loadBuiltinCsds + the On-Ramp dashboard manifest CSD (pcc://artifacts/dashboard/v1)
       // registered in getCsdRegistry.
-      expect(body.csds.length).toBe(10);
+      expect(body.csds.length).toBe(11);
       expect(body.csds.some((c: { url: string }) => c.url === "pcc://capabilities/document-print-and-mail/v1")).toBe(true);
     });
 

@@ -141,6 +141,8 @@ export function makeKernelEd25519Signer(seed?: Uint8Array): KernelEd25519Signer 
 // Print job
 // ---------------------------------------------------------------------------
 
+export const DEFAULT_CANCEL_WINDOW_MS = 30_000;
+
 export interface PrintJobOptions {
   /**
    * The device to drive: an IppAdapter, or any MachineAdapter whose start names its device
@@ -176,6 +178,7 @@ export interface PrintJobOptions {
   signal?: AbortSignal;
   /**
    * Wait for terminal evidence after cancelJob, before recording a kernel failure. Default 30 s.
+   * The adapter's cancel-confirm deadline plus one poll must fit within this window (MachineAdapter.cancelJob).
    * That failure is signed only once the adapter confirms quiescence; a live silent job
    * instead fails without a bundle and leaves the device quiescing.
    */
@@ -219,7 +222,7 @@ export interface PrintCompletion {
 /**
  * Signed failure verdict; binding, recording or handshake failures have no verdict or bundle.
  * When multiple execution_failed events are signed, the first bound failure decides the
- * verdict and its origin; later failures remain in the bundle.
+ * verdict's origin; its kind comes from completion and cancellation, and later failures remain in the bundle.
  */
 export type PrintJobFailure =
   | { kind: "device_reported"; origin: "device" }
@@ -268,8 +271,9 @@ export interface PrintJobResult {
  * Event-driven: it waits for the device's own `execution_completed` (or
  * `execution_failed`) for this print's device job rather than fabricating a completion.
  * A success bundle requires completion without failure. Device failures and contradictions
- * also return signed bundles. Timeout or abort sends cancelJob once, keeps admitting evidence,
- * and records a kernel failure if no terminal evidence arrives within cancelWindowMs.
+ * also return signed bundles. Timeout or abort sends cancelJob once unless the job has already
+ * reported its end, keeps admitting evidence, and records a kernel failure if no terminal
+ * evidence arrives within cancelWindowMs.
  * That event is signed only after the adapter confirms quiescence.
  * Completion after cancel is success carrying cancelRequested; every cancel result carries it.
  * The evidence binding (session, step lease, device job, recording, quiesce) is described at
@@ -326,7 +330,7 @@ async function printOnce(
     assuranceTier = 0,
     timeoutMs = 120_000,
     signal,
-    cancelWindowMs = 30_000,
+    cancelWindowMs = DEFAULT_CANCEL_WINDOW_MS,
     settlementUnitId,
     challengeNonce,
     evidenceQuiesceTimeoutMs = 15_000,

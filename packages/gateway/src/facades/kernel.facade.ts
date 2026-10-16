@@ -379,7 +379,10 @@ export class KernelFacade extends BaseFacade {
         // not mutate someone else's kernel. When actorId is absent (a facade-level
         // unit test with no apiGate wired) there is no owner to check against; the
         // SET-ONCE signer bind still fail-closes via the CAS below.
-        if (actorId && hasRecordedOwner && existing.operatorAddress !== actorId) {
+        if (actorId && (
+          (hasRecordedOwner && existing.operatorAddress !== actorId) ||
+          (!hasRecordedOwner && !authority.admin)
+        )) {
           throw Object.assign(
             new Error(`Authenticated actor does not own kernel '${id}'`),
             { name: "ForbiddenError" },
@@ -390,10 +393,9 @@ export class KernelFacade extends BaseFacade {
           lastHeartbeat: new Date().toISOString(),
           status: "online",
         };
-        // Legacy rows may carry the historical zero-address placeholder rather
-        // than an owner. Their first authenticated mutation claims ownership;
-        // subsequent heartbeats/profile updates are owner-only like new rows.
-        if (actorId && !hasRecordedOwner) updates.operatorAddress = actorId;
+        // Unowned rows are owned by nobody, so non-admin actors are refused above.
+        // Only an admin's update may assign its actor as the operator of such a row.
+        if (actorId && authority.admin && !hasRecordedOwner) updates.operatorAddress = actorId;
         if (body.name) updates.name = body.name;
         // Upsert: physicalAddress accepts the literal string OR the legacy string
         // form of `location`. Object location goes to the `location` column below.
@@ -404,8 +406,8 @@ export class KernelFacade extends BaseFacade {
         }
         // N68: the operator's location choice survives an update that does not name it, so
         // re-registering (as pcc-node does) never silently un-publishes a storefront. A change
-        // to "exact" needs LocationOptInAuthority for the kernel's operator (after a legacy
-        // claim, the claimant); nothing is written when it is refused.
+        // to "exact" needs LocationOptInAuthority for the kernel's operator;
+        // nothing is written when it is refused.
         const currentVisibility = locationVisibilityOf(existing.location);
         const visibility = (requestedVisibility as LocationVisibility | undefined) ?? currentVisibility;
         if (visibility === "exact" && currentVisibility !== "exact") {
@@ -627,6 +629,8 @@ export class KernelFacade extends BaseFacade {
           const capId = `cap-${kernelId}-${capType}`;
           try {
             const existing = repos.capabilities.findById(capId);
+            // Kernel/type pairs can share a generated id; never refresh another kernel's row.
+            if (existing && existing.kernelId !== kernelId) continue;
             if (!existing) {
               repos.capabilities.insert({
                 id: capId,

@@ -196,7 +196,11 @@ export interface SessionKeyAuthorization {
   derivationPath?: string;
 }
 
-/** Requirements for each assurance tier */
+/**
+ * Requirements for each assurance tier. A supplied array carries no policy
+ * provenance: EvidenceVerifier performs a precheck under the caller's ladder.
+ * The oracle selects its ladder from the funded committed program identity.
+ */
 export interface TierEvidenceRequirements {
   tier: AssuranceTier;
   requiredEventTypes: EvidenceEventType[][];  // outer = AND groups, inner = OR within group
@@ -229,7 +233,7 @@ export interface ExecutionProof {
   computedAtBlock: bigint; // Block number when proof was computed
 }
 
-/** Default tier requirements */
+/** Default tier requirements, deeply frozen by the public evidence module's initialization. */
 export const DEFAULT_TIER_REQUIREMENTS: TierEvidenceRequirements[] = [
   {
     tier: 0,
