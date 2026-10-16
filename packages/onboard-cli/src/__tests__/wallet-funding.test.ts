@@ -260,7 +260,7 @@ describe("W2 CLI funding", () => {
     for (const claim of claims) expect(output.join("")).toContain(`eth 0.0001 ${claim.status}`);
     expect(output.join("")).toContain("usdc 1 skipped: cap_reached (global)\n");
     expect(output.join("")).not.toContain("This grant has no USDC claim.");
-    expect(output.join("")).toContain("Run pcc-wallet fund again after 30 s to retry failed claims.\n");
+    expect(output.join("")).toContain(`Run pcc-wallet fund --role agent --label agent --gateway ${ORIGIN} again after 30 s to retry failed claims.\n`);
     expect(output.join("")).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
     expect(errors.join("")).toContain("funding_partial");
   });
@@ -289,7 +289,7 @@ describe("W2 CLI funding", () => {
     for (const value of ["eth", "0.0001", "succeeded", "usdc", "1", "failed"]) expect(text).toContain(value);
     expect(text).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
     expect(text).not.toContain("ready");
-    expect(output.join("")).toContain("pcc-wallet fund again after 30 s");
+    expect(output.join("")).toContain(`Run pcc-wallet fund --role agent --label agent --gateway ${ORIGIN} again after 30 s to retry failed claims.\n`);
   });
   it("pending re-polls the SAME POST path with bounded backoff", async () => {
     store();
@@ -435,7 +435,7 @@ describe("receipt action using fetch spies", () => {
       logs: [], logsBloom: `0x${"00".repeat(256)}`, type: "0x2", status,
     };
   }
-  it.each(["success", "reverted", "timeout", "mismatched hash"] as const)("viem receipt %s", async (status) => {
+  it.each(["success", "reverted", "timeout", "mismatched hash"] as const)("fetch-spy receipt %s", async (status) => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
       const payload = JSON.parse(String(init?.body)) as { method: string; id: number };
       const result = payload.method === "eth_blockNumber" ? "0x1" : status === "timeout" ? null
@@ -474,8 +474,8 @@ describe("receipt action using fetch spies", () => {
     try {
       expect(fetchSpy.mock.calls.length).toBe(callsAtTimeout);
     } finally {
-      // The reproduction leaves viem's watcher running. Let its next receipt
-      // finish so the red run also releases that timer without any real RPC.
+      // If a regression leaves polling active, let its next receipt finish
+      // so the failing run also releases that timer without any real RPC.
       if (fetchSpy.mock.calls.length > callsAtTimeout) {
         cleanupLateWatcher = true;
         await new Promise<void>(resolve => setTimeout(resolve, 1_100));

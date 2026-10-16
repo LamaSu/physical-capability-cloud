@@ -386,6 +386,18 @@ describe("pcc-wallet ceremony", () => {
     expect(prompt).toHaveBeenCalledTimes(1);
   });
 
+  it("prints exact device ed25519 consent text before key creation", async () => {
+    const gateway = await new Gateway({ statuses: ["approved"] }).start();
+    prompt.mockImplementation(async () => {
+      expect(await readdir(walletDir)).toEqual([]);
+      return "create";
+    });
+    expect(await run(gateway, "init", [], "device")).toBe(0);
+    const consent = `pcc wallet init --role device --label wallet-test\nThis creates a NEW wallet key on this computer:\n  file      ${join(walletDir, "wallet-test.json")} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser. No test funds are available for ed25519 keys.\nType "create" to continue:`;
+    expect(stdout.join("\n")).toContain(consent);
+    expect(prompt).toHaveBeenCalledTimes(1);
+  });
+
   it("--yes on a TTY still prompts for create", async () => {
     const gateway = await new Gateway({ statuses: ["approved"] }).start();
     expect(await run(gateway, "init", ["--yes"], "agent", "wallet-test", true)).toBe(0);
@@ -819,7 +831,7 @@ describe("W2 init funding outcome", () => {
     expect(stdout.join("")).toContain("eth 0.0001 failed");
     expect(stdout.join("")).not.toContain("ready");
     expect(stdout.join("")).not.toMatch(/(?:^|\n)funded(?:\n|$)/);
-    expect(stdout.join("")).toContain("pcc-wallet fund again after 30 s");
+    expect(stdout.join("")).toContain(`Run pcc-wallet fund --role agent --label wallet-test --gateway ${gateway.origin} again after 30 s to retry failed claims.\n`);
   });
   it("init pending waits for final claims and receipts before ready", async () => {
     const gateway = await new Gateway({ statuses: ["approved"], fundSequence: [
@@ -971,13 +983,18 @@ describe("public origin for browser approval and signed proof", () => {
     expect((await stored()).gatewayOrigin).toBe(gateway.origin);
     expect(gateway.proofs()).toHaveLength(1);
   });
-  it.each(["http://public.example", "http://localhost.attacker.example", "https://pcc.example/path", "https://pcc.example?x=1"])("refuses unsafe --public-origin %s before prompt, storage or requests", async publicOrigin => {
+  it.each([
+    ["http://public.example", "insecure_public_origin"],
+    ["http://localhost.attacker.example", "insecure_public_origin"],
+    ["https://pcc.example/path", "invalid_public_origin"],
+    ["https://pcc.example?x=1", "invalid_public_origin"],
+  ])("refuses unsafe --public-origin %s before prompt, storage or requests", async (publicOrigin, code) => {
     const gateway = await new Gateway({ statuses: ["approved"] }).start();
     expect(await run(gateway, "init", ["--public-origin", publicOrigin])).toBe(1);
     expect(prompt).not.toHaveBeenCalled();
     expect(await readdir(walletDir)).toEqual([]);
     expect(gateway.requests).toHaveLength(0);
-    expect(stderr.join("")).toMatch(/(?:insecure|invalid)_gateway_origin/);
+    expect(stderr.join("")).toBe(`${code}\n`);
   });
   it("--public-origin accepts loopback HTTP", async () => {
     const publicOrigin = "http://localhost:8080";

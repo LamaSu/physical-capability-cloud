@@ -111,7 +111,9 @@ without funding, and `fund` refuses locally for them. Keys stay in
 `~/.pcc/wallets/<label>.json` (0600, directory 0700), or `PCC_WALLET_DIR`.
 Gateway resolution is the same as onboard. `--public-origin <url>` selects the
 browser approval and signed proof origin; it defaults to the gateway origin
-and follows the same HTTPS or loopback HTTP rule. `--yes` skips typed consent only
+and follows the same HTTPS or loopback HTTP rule. Pass the same `--public-origin`
+again to `link`; without it, the proof check refuses before signing.
+`--yes` skips typed consent only
 on non-TTY stdin; browser approval still requires the human owner.
 Use `link`, `fund`, `status`, `export-address`, or owner-only `revoke`
 (`--api-key` / `PCC_API_KEY`, or Wallets → Unlink in the dashboard).

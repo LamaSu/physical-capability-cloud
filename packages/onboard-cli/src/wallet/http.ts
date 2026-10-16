@@ -4,11 +4,11 @@ import { WalletError } from "./errors.js";
 
 type JsonObject = Record<string, unknown>;
 
-export function validateTransportUrl(value: string, kind: "gateway" | "rpc" = "gateway"): URL {
+export function validateTransportUrl(value: string, kind: "gateway" | "public" | "rpc" = "gateway"): URL {
   let url: URL;
   try { url = new URL(value); } catch { throw new WalletError(`invalid_${kind}_origin`); }
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password
-    || url.search || url.hash || (kind === "gateway" && url.pathname !== "/")) {
+    || url.search || url.hash || (kind !== "rpc" && url.pathname !== "/")) {
     throw new WalletError(`invalid_${kind}_origin`);
   }
   const loopback = url.hostname === "localhost" || url.hostname === "[::1]"

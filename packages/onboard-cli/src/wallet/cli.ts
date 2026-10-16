@@ -241,7 +241,7 @@ async function fundWallet(wallet: WalletRecord, io: WalletRuntime, rpcUrl: strin
     }
     if (result.status === "partial") {
       printClaims(result, io);
-      io.stdout("Run pcc-wallet fund again after 30 s to retry failed claims.\n");
+      io.stdout(`Run pcc-wallet fund --role ${wallet.role} --label ${wallet.label} --gateway ${wallet.gatewayOrigin} again after 30 s to retry failed claims.\n`);
     }
     const receiptDeadline = io.now() + io.receiptTimeoutMs;
     for (const claim of result.claims) {
@@ -269,13 +269,13 @@ async function execute(args: Args, io: WalletRuntime): Promise<number> {
     throw new WalletError("revoke from the dashboard (Wallets → Unlink), or pass an owner API key", 2);
   }
   const origin = gatewayOrigin(args.gateway);
-  const publicOrigin = args.publicOrigin === undefined ? origin : validateTransportUrl(args.publicOrigin).origin;
+  const publicOrigin = args.publicOrigin === undefined ? origin : validateTransportUrl(args.publicOrigin, "public").origin;
   const rpcUrl = args.rpcUrl ?? (process.env.PCC_RPC_URL || "https://sepolia.base.org");
   if (args.command === "init" || args.command === "fund") validateTransportUrl(rpcUrl, "rpc");
   if (args.command === "init") {
     assertWalletAbsent(args.label);
     const keyType = args.keyType ?? (args.role === "agent" ? "secp256k1" : "ed25519");
-    io.stdout(`pcc wallet init --role ${args.role} --label ${args.label}\nThis creates a NEW wallet key on this computer:\n  file      ${walletPath(args.label)} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser; ${keyType === "ed25519" ? "No test funds are available for ed25519 keys." : "then test funds arrive."}\nType "create" to continue:\n`);
+    io.stdout(`pcc wallet init --role ${args.role} --label ${args.label}\nThis creates a NEW wallet key on this computer:\n  file      ${walletPath(args.label)} (mode 0600)\n  network   Base Sepolia (test network). Test funds have no value.\n  custody   only this file. PCC never receives it and cannot recover it.\nNext: your PCC account owner approves the link in a browser${keyType === "ed25519" ? ". No test funds are available for ed25519 keys." : "; then test funds arrive."}\nType "create" to continue:\n`);
     if (!(args.yes && !io.stdinIsTTY) && (await io.prompt()).trim() !== "create") {
       throw new WalletError("creation_cancelled");
     }
