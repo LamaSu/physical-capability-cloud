@@ -210,8 +210,9 @@ describe("FakeDevice evidence honesty", () => {
     const payload = { detail: "before" };
     device.progress(1, payload);
     payload.detail = "after";
-    device.source.simulated = false;
-    device.source.deviceId = "public-source-mutated";
+    expect(() => { device.source.simulated = false; }).toThrow(TypeError);
+    expect(() => { device.source.deviceId = "public-source-mutated"; }).toThrow(TypeError);
+    expect(device.source.simulated).toBe(true);
     device.progress(2);
     device.complete();
     expect(events).toHaveLength(3);

@@ -154,7 +154,7 @@ export class FakeDevice implements MachineAdapter {
     if (!deviceTypes.has(this.deviceType)) throw new Error("invalid deviceType");
     this.kernelId = kernelId;
     // Public adapter metadata is only a snapshot; emissions use the private identity.
-    this.source = { deviceId: id, deviceType: this.deviceType, kernelId, simulated: true };
+    this.source = Object.freeze({ deviceId: id, deviceType: this.deviceType, kernelId, simulated: true });
 
     this.startedType = options.startedType ?? "execution_started";
     this.progressType = options.progressType ?? "execution_progress";
