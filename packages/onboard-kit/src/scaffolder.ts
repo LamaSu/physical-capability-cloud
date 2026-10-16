@@ -243,7 +243,7 @@ export class ${adapter.className} {
   private listeners: Array<(event: Omit<EvidenceEvent, "id" | "hash">) => void> = [];
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private lastProgress = 0;
-${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputData?: Uint8Array } | null = null;
+${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputData: Uint8Array } | null = null;
   private stagedCount = 0;
 `}  private endPolling: (() => void) | null = null;
 
@@ -313,8 +313,9 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
           return { success: false };
         }
         const inputData = command.payload?.inputData;
-        if (inputData !== undefined && !(inputData instanceof Uint8Array)) return { success: false };
-        // Forward exact input bytes as base64 when present; otherwise the device resolves inputHash.
+        if (inputData === undefined) return { success: false, message: "prepare: no input data" };
+        if (!(inputData instanceof Uint8Array)) return { success: false };
+        // Forward exactly the bytes the kernel hashed as base64.
         // Adapt this staging call to your device's real upload API without actuating.
         let deviceJobId: string;
         if (this.config.mockMode) {
@@ -322,14 +323,13 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
         } else {
           ${loadEndpoint
     ? `const response = await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
-            ...(inputData instanceof Uint8Array ? { inputBase64: Buffer.from(inputData).toString("base64") } : {}) }); // Staging only.
+            inputBase64: Buffer.from(inputData).toString("base64") }); // Staging only.
           const staged = await response.json();
           if (typeof staged.deviceJobId !== "string" || staged.deviceJobId.length === 0) return { success: false };
           deviceJobId = staged.deviceJobId;`
     : '// TODO: Stage the input through your device API without actuating.\n          return { success: false, message: "prepare: staging is not implemented for this device" };'}
         }
-        this.staged = { jobId, deviceJobId,
-          ...(inputData instanceof Uint8Array ? { inputData: inputData.slice() } : {}) };
+        this.staged = { jobId, deviceJobId, inputData: inputData.slice() };
         // The kernel records method_loaded from this ack; never emit method_loaded.
         return { success: true, data: { jobId, inputHash, deviceJobId } };
       }`}
@@ -995,7 +995,8 @@ function generateTests(config: OnboardConfig): string {
       expect(events).toEqual([]);
       const jobId = "test-job";
       const inputHash = "sha256:" + "ab".repeat(32);
-      const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash } });
+      const inputData = new TextEncoder().encode("test method");
+      const ack = await adapter.execute({ type: "prepare", payload: { jobId, inputHash, inputData } });
       expect(ack.success).toBe(true);
       expect(ack.data).toEqual({ jobId, inputHash, deviceJobId: expect.any(String) });
       expect((ack.data?.deviceJobId as string).length).toBeGreaterThan(0);

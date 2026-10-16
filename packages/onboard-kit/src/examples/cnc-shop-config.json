@@ -37,8 +37,8 @@
           "method": "POST",
           "path": "/api/programs/upload",
           "purpose": "load_program",
-          "description": "Stage input without actuation: { jobId, inputHash[, inputBase64] }; inputBase64 is optional exact input bytes",
-          "requestBody": { "jobId": "string", "inputHash": "string", "inputBase64": "optional base64 string" }
+          "description": "Stage input without actuation: { jobId, inputHash, inputBase64 }; inputBase64 encodes the exact input bytes",
+          "requestBody": { "jobId": "string", "inputHash": "string", "inputBase64": "base64 string" }
         },
         {
           "method": "POST",
