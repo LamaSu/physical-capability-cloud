@@ -230,6 +230,10 @@ describe("wallet exact W1 proof template", () => {
       .toThrow("refusing to sign: env mismatch");
   });
 
+  it.each(["g3-staging", "pr-123", "a".repeat(32)])("accepts an ed25519 env within W1's syntax: %s", env => {
+    expect(() => validateProofMessage(edMessage({ env }), edWallet, requestId, now)).not.toThrow();
+  });
+
   it.each(["issuedAt", "expirationTime"])("requires exact ISO ed25519 %s bytes", (field) => {
     const value = field === "issuedAt" ? now : now + 600_000;
     expect(() => validateProofMessage(edMessage({ [field]: new Date(value).toUTCString() }), edWallet, requestId, now))
@@ -270,6 +274,10 @@ describe("wallet exact W1 proof template", () => {
   it.each(["", "Test", "test_env", "a".repeat(33)])("refuses SIWE env outside W1's syntax: %s", (env) => {
     expect(() => validateProofMessage(siwe({ resources: [resources[0], `urn:pcc:env:${env}`, ...resources.slice(2)] }), secpWallet, requestId, now))
       .toThrow("refusing to sign: env mismatch");
+  });
+
+  it.each(["g3-staging", "pr-123", "a".repeat(32)])("accepts SIWE env within W1's syntax: %s", env => {
+    expect(() => validateProofMessage(siwe({ resources: [resources[0], `urn:pcc:env:${env}`, ...resources.slice(2)] }), secpWallet, requestId, now)).not.toThrow();
   });
 
   it("refuses a SIWE nonce longer than 64 alphanumeric characters", () => {

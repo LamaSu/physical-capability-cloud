@@ -32,6 +32,7 @@ type StubOptions = {
   createError?: { status: number; body: unknown };
   proofError?: { status: number; body: unknown };
   revokeStatus?: number;
+  revokeBody?: unknown;
   mutateSiwe?: (message: SiweMessage) => void;
   mutateEd?: (message: Record<string, string | number>) => void;
   mutateText?: (message: string) => string;
@@ -184,7 +185,7 @@ class Gateway {
     }
     if (path === `/api/wallets/${LINK_ID}/revoke` && req.method === "POST") {
       if (this.options.revokeStatus === 404) reply(404, { error: "not_found" });
-      else reply(200, { status: "revoked", revokedAt: new Date(clock).toISOString() });
+      else reply(200, this.options.revokeBody ?? { status: "revoked", revokedAt: new Date(clock).toISOString() });
       return;
     }
     reply(404, { error: "not_found" });
@@ -653,7 +654,7 @@ describe("pcc-wallet phishing defence", () => {
 });
 
 describe("gateway transport policy", () => {
-  it.each(["http://pcc.example.com", "http://192.168.1.10", "http://localhost.example"])("refuses insecure gateway %s before prompts, keys or requests", async (gateway) => {
+  it.each(["http://pcc.example.com", "http://192.168.1.10", "http://localhost.example", "http://127.0.0.1.nip.io", "http://127.0.0.1.attacker.example:8080"])("refuses insecure gateway %s before prompts, keys or requests", async (gateway) => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected_http_request"));
     expect(await main(["init", "--gateway", gateway, "--role", "agent", "--label", "wallet-test", "--yes"], runtime())).toBe(1);
     expect(stderr.join("")).toBe("insecure_gateway_origin\n");
@@ -839,6 +840,12 @@ describe("W2 init funding outcome", () => {
 });
 
 describe("W1 final API contract", () => {
+  it.each([{ ok: true }, { status: "pending" }])("revoke refuses a 200 body %j and keeps the stored approval", async revokeBody => {
+    const gateway = await linked({ revokeBody });
+    expect(await run(gateway, "revoke", ["--api-key", "owner-api-token"])).toBe(1);
+    expect(stderr.join("")).toContain("invalid_gateway_response");
+    expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
+  });
   it("anonymous create/proof/fund never use lookup or put user codes in URLs", async () => {
     vi.stubEnv("PCC_API_KEY", "owner-api-token");
     const gateway = await new Gateway({ statuses: ["approved"] }).start();
@@ -871,6 +878,38 @@ describe("W1 final API contract", () => {
     expect(stderr.join("")).toContain("dashboard (Wallets → Unlink)");
     expect((await stored()).link).toMatchObject({ status: "approved", linkId: LINK_ID });
     expect(gateway.requests.some((request) => request.path === "/api/wallets")).toBe(false);
+  });
+});
+
+describe("wallet create and proof response pins", () => {
+  it.each(["\u001b[2JBCDF-GHJK", "BCDF-GHJK\u001b[2J", "bcdf-ghjk", "BCDA-GHJK"])("refuses unsafe userCode %j before signing or printing it", async userCode => {
+    const gateway = await new Gateway({ mutateCreated: created => { created.userCode = userCode; } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toBe("invalid_gateway_response\n");
+    expect(gateway.proofs()).toHaveLength(0);
+    expect(stdout.join("")).not.toContain("Code:");
+    expect(stdout.join("")).not.toContain("\u001b");
+  });
+
+  it("refuses a requestId without the lr_ prefix before signing", async () => {
+    const gateway = await new Gateway({ mutateCreated: created => { created.requestId = "xx_0123456789ABCDEFGHJKMNPQRST"; } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toBe("invalid_gateway_response\n");
+    expect(gateway.proofs()).toHaveLength(0);
+  });
+
+  it.each([BASE_TIME - 1, BASE_TIME])("refuses create expiresAt %s at or before now before signing", async expiresAt => {
+    const gateway = await new Gateway({ mutateCreated: created => { created.expiresAt = new Date(expiresAt).toISOString(); } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toBe("invalid_gateway_response\n");
+    expect(gateway.proofs()).toHaveLength(0);
+  });
+
+  it("refuses a proof response other than awaiting_approval and prints no code", async () => {
+    const gateway = await new Gateway({ proofError: { status: 200, body: { status: "pending_proof" } } }).start();
+    expect(await run(gateway, "init", ["--yes"])).toBe(1);
+    expect(stderr.join("")).toBe("invalid_gateway_response\n");
+    expect(stdout.join("")).not.toContain("Code:");
   });
 });
 
