@@ -96,8 +96,8 @@ function passVector(): Record<ClauseId, ClauseStatus> {
   };
 }
 
-/** Shared scripting for the generator and the kernel's internal test fixtures. */
-export function fakeDeviceConformanceFixture(
+/** Private scripting for generated controls; inspection fixtures live in tests. */
+function fakeDeviceConformanceFixture(
   options: NegativeControlOptions = {},
   wrap?: (device: FakeDevice) => MachineAdapter,
 ) {

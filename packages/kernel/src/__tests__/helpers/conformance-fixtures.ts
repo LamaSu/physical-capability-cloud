@@ -1,7 +1,7 @@
 import type { EvidenceEvent } from "@pcc/spec";
 import type { MachineAdapter } from "../../adapters/types.js";
-import { type FakeDevice, type FakeDeviceOptions } from "../../testing/fake-device.js";
-import { fakeDeviceConformanceFixture } from "../../testing/negative-controls.js";
+import type { ConformanceProfile } from "../../conformance/index.js";
+import { FakeDevice, type FakeDeviceOptions } from "../../testing/fake-device.js";
 import { withFault, type DeviceFault } from "./device-faults.js";
 
 export type DeviceEvent = Omit<EvidenceEvent, "id" | "hash">;
@@ -16,17 +16,49 @@ export function fakeConformanceFixture(options: {
   // Test-only inspection history: one conformance run creates ten adapters.
   // Each test owns its fixture; shipped controls retain devices only weakly.
   const made: Array<{ adapter: MachineAdapter; device: FakeDevice }> = [];
-  const fixture = fakeDeviceConformanceFixture({
-    preset: options.preset,
-    deviceOptions: options.deviceOptions,
-    // Preserve the existing report goldens and bounded-operation edge tests.
-    timing: { cancelConfirmMs: 35, pollMs: 5, jobTimeoutMs: 100, quiesceTimeoutMs: 50, settleMs: 10 },
-  }, (device) => {
+  // Keep arbitrary device behavior available for runner edge tests without
+  // exporting the generator's private fixture or its restricted option policy.
+  const timing = { cancelConfirmMs: 35, pollMs: 5, jobTimeoutMs: 100, quiesceTimeoutMs: 50, settleMs: 10 };
+  const deviceOptions: FakeDeviceOptions = {
+    startedEvent: "inside-start",
+    ...options.deviceOptions,
+    ...(options.preset === undefined ? {} : { preset: options.preset }),
+    cancelConfirmMs: options.deviceOptions?.cancelConfirmMs ?? timing.cancelConfirmMs,
+  };
+  const ipp = deviceOptions.preset === "ipp";
+  const devices = new WeakMap<MachineAdapter, FakeDevice>();
+  const makeAdapter = (): MachineAdapter => {
+    const device = new FakeDevice("conformance-device", "conformance-kernel", deviceOptions);
     const adapter = options.wrap?.(device) ?? (options.fault ? withFault(device, options.fault) : device);
+    devices.set(adapter, device);
     made.push({ adapter, device });
     return adapter;
-  });
-  return { ...fixture, made };
+  };
+  const profile: ConformanceProfile = {
+    name: ipp ? "FakeDevice ipp" : "FakeDevice generic",
+    kind: "physical",
+    mode: "mock",
+    bindingKey: deviceOptions.bindingKey ?? (ipp ? "ippJobId" : "deviceJobId"),
+    declaredCommands: [...(deviceOptions.declaredCommands ?? ["start", "stop", "status"])],
+    busy: "second-start",
+    timing,
+    ...(deviceOptions.completedType === undefined && deviceOptions.failedType === undefined ? {} : {
+      terminalEvents: {
+        completed: [deviceOptions.completedType ?? "execution_completed"],
+        failed: [deviceOptions.failedType ?? "execution_failed"],
+      },
+    }),
+    prepareStart(adapter) {
+      devices.get(adapter)!.scriptStart({ outcome: "accept", deviceJobId: ipp ? 41 : "device-job-1" });
+    },
+    startCommand: (_adapter, { pccJobId }) => ({ type: "start", payload: { pccJobId } }),
+    finish(adapter) {
+      const device = devices.get(adapter)!;
+      device.progress(25);
+      device.complete();
+    },
+  };
+  return { makeAdapter, profile, made };
 }
 
 /** A forwarding adapter retains each device method's original receiver. */
