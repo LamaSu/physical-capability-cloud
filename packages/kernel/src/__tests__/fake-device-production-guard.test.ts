@@ -129,6 +129,8 @@ describe("FakeDevice production isolation", () => {
     ["multi-line import", 'import {\n FakeDevice,\n} from\n "./testing/index.js";', "index.ts", "./testing/index.js"],
     ["export star", 'export * from "./testing/index.js";', "index.ts", "./testing/index.js"],
     ["dynamic import", 'const module = await import("./testing/index.js");', "index.ts", "./testing/index.js"],
+    ["import-equals", 'import module = require("./testing/index.js");', "index.ts", "./testing/index.js"],
+    ["template-literal dynamic import", 'const module = await import(`./testing/index.js`);', "index.ts", "./testing/index.js"],
     ["require", 'const module = require("@pcc/kernel/testing");', "index.ts", "@pcc/kernel/testing"],
     ["deeper relative path", 'import { FakeDevice } from "../testing/fake-device.js";', "adapters/anything.ts", "../testing/fake-device.js"],
     ["package subpath", 'export { FakeDevice } from "@pcc/kernel/testing";', "index.ts", "@pcc/kernel/testing"],

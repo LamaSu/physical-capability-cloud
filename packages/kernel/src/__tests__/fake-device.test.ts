@@ -163,12 +163,40 @@ describe("FakeDevice scripted commands", () => {
     expect(events[0].payload.runId).toBe("original");
   });
 
-  it.each([null, {}, { outcome: "unknown" }, { outcome: "accept" }, { outcome: "accept", deviceJobId: {} }, { outcome: "error", message: 7 }, { outcome: "throw" }])("rejects malformed scripted outcome %j", (outcome) => {
+  it.each([null, {}, { outcome: "unknown" }, { outcome: "accept" }, { outcome: "accept", deviceJobId: {} }, { outcome: "accept", deviceJobId: "" }, { outcome: "accept", deviceJobId: NaN }, { outcome: "accept", deviceJobId: Infinity }, { outcome: "error", message: 7 }, { outcome: "throw" }])("rejects malformed scripted outcome %j", (outcome) => {
     expect(() => fixture().scriptStart(outcome as FakeDeviceStartOutcome)).toThrow();
   });
 });
 
 describe("FakeDevice evidence honesty", () => {
+  it("terminal listener errors reach the caller after releasing the job", async () => {
+    const device = await accepted();
+    const quiescent = device.quiesceEvidence();
+    const failure = new Error("terminal listener failed");
+    device.onEvidence(() => { throw failure; });
+    expect(() => device.complete()).toThrow(failure);
+    expect(await device.getStatus()).toBe("idle");
+    await expect(quiescent).resolves.toBeUndefined();
+  });
+
+  it("ipp start returns both model device-job identifiers", async () => {
+    const device = fixture({ preset: "ipp" });
+    device.scriptStart({ outcome: "accept", deviceJobId: 46 });
+    expect(await device.execute({ type: "start" })).toEqual({ success: true, data: { jobId: 46, ippJobId: 46 } });
+    device.complete();
+  });
+
+  it.each([-1, 100.01, NaN, Infinity, -Infinity, "50"])("rejects out-of-range progress %s without changing evidence or progress", async (n) => {
+    const device = await accepted();
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    expect(() => device.progress(n as number)).toThrow("progress must be between 0 and 100");
+    expect(await device.getProgress()).toBe(0);
+    expect(events).toEqual([]);
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+  });
+
   it.each(["none", "inside-start", "after-start"] as const)("tags started=%s, progress and completion separately", async (startedEvent) => {
     const device = fixture({ startedEvent });
     const events: Emitted[] = [];
@@ -283,6 +311,8 @@ describe("FakeDevice quiescence and cancellation", () => {
     const second: Emitted[] = [];
     const errors: Array<[string, unknown]> = [];
     let reentrantStop: Promise<unknown> | undefined;
+    let reentrantStart: Promise<MachineCommandResult> | undefined;
+    device.scriptStart({ outcome: "accept", deviceJobId: "next-terminal-job" });
     device.onEvidence((event) => {
       first.push(event);
       // Bound a faulty re-entrant emitter so every attempted API can be checked.
@@ -297,6 +327,7 @@ describe("FakeDevice quiescence and cancellation", () => {
         catch (error) { errors.push([api, error]); }
       }
       reentrantStop = device.execute({ type: "stop" }).catch((error: unknown) => error);
+      reentrantStart = device.execute({ type: "start" });
     });
     device.onEvidence((event) => second.push(event));
     if (terminal === "complete" || terminal === "fail") device[terminal]();
@@ -309,10 +340,13 @@ describe("FakeDevice quiescence and cancellation", () => {
       expect(error, api).toMatchObject({ message: expect.stringContaining("no active job") });
     }
     await expect(reentrantStop).resolves.toEqual({ success: true });
+    await expect(reentrantStart).resolves.toEqual({ success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" } });
     const expectedType = terminal === "complete" ? "execution_completed" : "execution_failed";
     expect(first.map((event) => event.type)).toEqual([expectedType]);
     expect(second.map((event) => event.type)).toEqual([expectedType]);
     expect(await device.getStatus()).toBe("idle");
+    expect(await device.execute({ type: "start" })).toEqual({ success: true, data: { jobId: "next-terminal-job" } });
+    device.complete();
   });
 
   it.each([false, true])("refuses complete at progress 100 with next start=%s", async (startNext) => {

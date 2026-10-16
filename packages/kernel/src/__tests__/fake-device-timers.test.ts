@@ -174,3 +174,28 @@ it("warm-up keeps real timer capture while resetModules re-evaluates under fake 
     vi.resetModules();
   }
 });
+
+
+it("faking timers after import does not take control of captured immediates", async () => {
+  vi.resetModules();
+  const { FakeDevice: CapturedDevice } = await import("../testing/fake-device.js");
+  vi.useFakeTimers();
+  const device = new CapturedDevice("real-immediate", "timer-kernel", { cancelEventOrder: "after-resolve" });
+  try {
+    device.scriptStart({ outcome: "accept", deviceJobId: "real" });
+    await device.execute({ type: "start" });
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    await device.cancelJob("real");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(events).toEqual([]);
+    await device.quiesceEvidence();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "execution_failed", payload: { state: "canceled", origin: "device" } });
+  } finally {
+    await device.dispose();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  }
+});
