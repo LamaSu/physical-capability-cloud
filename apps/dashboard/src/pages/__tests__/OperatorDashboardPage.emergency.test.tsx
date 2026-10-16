@@ -14,12 +14,14 @@ import { useUIStore } from "../../stores/ui-store.js";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const RESUME_REFUSED = "Resume was refused for this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header).";
+const RESUME_REFUSED = "Resume was refused for this key. Resuming needs a PCC admin, or proof that you control kernel-nanoclaw's operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate kernel-nanoclaw, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).";
 const RESUME_FAILED = "Resume didn't go through. The kernel is still stopped; try again.";
+const RESUME_UNCONFIRMED = "Resume wasn't confirmed. kernel-nanoclaw may still be stopped, or the resume may have gone through: treat the machine as live, and press Resume Operations again to confirm.";
+const RESUME_CONFIRMATION = "Resume operations on kernel-nanoclaw? Jobs PCC held during the stop can start on the machine.";
 const STOP_FAILED = "The stop didn't go through. kernel-nanoclaw may still be running: use the machine's physical emergency stop, then try again.";
 const STOP_UNCONFIRMED = "The server didn't confirm the stop for kernel-nanoclaw. The machine may still be running: use its physical emergency stop.";
-const STOP_CONFIRMATION = "EMERGENCY STOP for kernel-nanoclaw: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?";
-const STOP_ACTIVE = "EMERGENCY STOP ACTIVE for kernel-nanoclaw: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.";
+const STOP_CONFIRMATION = "EMERGENCY STOP for kernel-nanoclaw: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?";
+const STOP_ACTIVE = "EMERGENCY STOP ACTIVE for kernel-nanoclaw: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.";
 const SERVER_TEXT = "<strong>Untrusted server or network details</strong>";
 const STOPPED = "EMERGENCY STOP ACTIVE";
 
@@ -101,8 +103,10 @@ describe("OperatorDashboardPage emergency controls", () => {
     [403, RESUME_REFUSED],
     [401, "Sign in to resume this kernel."],
     [404, "This kernel or its policy wasn't found, so it can't be resumed here."],
-    [500, RESUME_FAILED],
-    ["network failure", RESUME_FAILED],
+    [400, RESUME_FAILED],
+    [500, RESUME_UNCONFIRMED],
+    [502, RESUME_UNCONFIRMED],
+    ["network failure", RESUME_UNCONFIRMED],
   ] as const)("resume %s keeps stopped and shows its exact message", async (status, message) => {
     await renderPage(true);
     replyWithFailure(status);
@@ -143,7 +147,7 @@ describe("OperatorDashboardPage emergency controls", () => {
     replyWithFailure("network failure");
     await click("Resume Operations");
     expectState(true);
-    expectAlert(RESUME_FAILED);
+    expectAlert(RESUME_UNCONFIRMED);
 
     let resolve!: (value: Response) => void;
     authorizedFetch.mockReturnValueOnce(new Promise<Response>((done) => { resolve = done; }));
@@ -183,6 +187,10 @@ describe("OperatorDashboardPage emergency controls", () => {
     ["200 stopped false", () => new Response(JSON.stringify({ stopped: false, kernelId: "kernel-nanoclaw" }), { status: 200 })],
     ["200 stopped string true", () => new Response(JSON.stringify({ stopped: "true", kernelId: "kernel-nanoclaw" }), { status: 200 })],
     ["200 stopped true for other kernel", () => new Response(JSON.stringify({ stopped: true, kernelId: "other" }), { status: 200 })],
+    ...["kernel-nyc", "kernel-nanoclaw-2", "KERNEL-NANOCLAW", " kernel-nanoclaw"].map((kernelId) => [
+      `200 stopped true for ${JSON.stringify(kernelId)}`,
+      () => new Response(JSON.stringify({ stopped: true, kernelId }), { status: 200 }),
+    ] as const),
   ] as const)("stop %s keeps running and shows unconfirmed copy", async (_label, reply) => {
     await renderPage();
     authorizedFetch.mockResolvedValueOnce(reply());
@@ -218,12 +226,43 @@ describe("OperatorDashboardPage emergency controls", () => {
     expect(window.confirm).toHaveBeenCalledWith(STOP_CONFIRMATION);
   });
 
+  it("resume confirmation dialog warns that held jobs can start with the exact copy", async () => {
+    await renderPage(true);
+    vi.mocked(window.confirm).mockClear();
+    authorizedFetch.mockResolvedValueOnce(response(204));
+    await click("Resume Operations");
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(window.confirm).toHaveBeenCalledWith(RESUME_CONFIRMATION);
+  });
+
+  it("cancelled stop confirmation keeps running without a request or alert", async () => {
+    await renderPage();
+    vi.mocked(window.confirm).mockReturnValue(false);
+    authorizedFetch.mockResolvedValueOnce(confirmedStop());
+    await click("EMERGENCY STOP");
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    expectState(false);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("cancelled resume confirmation keeps stopped without a request or alert", async () => {
+    await renderPage(true);
+    vi.mocked(window.confirm).mockClear().mockReturnValue(false);
+    authorizedFetch.mockResolvedValueOnce(response(204));
+    await click("Resume Operations");
+    expect(window.confirm).toHaveBeenCalledTimes(1);
+    expect(authorizedFetch).not.toHaveBeenCalled();
+    expectState(true);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
   it("rendered emergency states never claim active jobs halted", async () => {
     await renderPage();
-    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted/);
+    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted|refuse new work|queued commands are cancelled/);
     authorizedFetch.mockResolvedValueOnce(confirmedStop());
     await click("EMERGENCY STOP");
     expectState(true);
-    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted/);
+    expect(container.textContent).not.toMatch(/halt all active jobs|All jobs halted|refuse new work|queued commands are cancelled/);
   });
 });

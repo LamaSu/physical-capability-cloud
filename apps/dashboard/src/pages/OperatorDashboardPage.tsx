@@ -54,7 +54,7 @@ export function OperatorDashboardPage() {
   const [estopError, setEstopError] = React.useState<string | null>(null);
 
   async function handleEmergencyStop() {
-    if (!window.confirm(`EMERGENCY STOP for ${TARGET_KERNEL_ID}: PCC will refuse new work and cancel queued commands. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
+    if (!window.confirm(`EMERGENCY STOP for ${TARGET_KERNEL_ID}: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?`)) return;
     setEstopLoading(true);
     setEstopError(null);
     const failureMessage = `The stop didn't go through. ${TARGET_KERNEL_ID} may still be running: use the machine's physical emergency stop, then try again.`;
@@ -84,10 +84,11 @@ export function OperatorDashboardPage() {
   }
 
   async function handleEmergencyResume() {
-    if (!window.confirm(`Resume operations on ${TARGET_KERNEL_ID}?`)) return;
+    if (!window.confirm(`Resume operations on ${TARGET_KERNEL_ID}? Jobs PCC held during the stop can start on the machine.`)) return;
     setEstopLoading(true);
     setEstopError(null);
     const failureMessage = "Resume didn't go through. The kernel is still stopped; try again.";
+    const unconfirmedMessage = `Resume wasn't confirmed. ${TARGET_KERNEL_ID} may still be stopped, or the resume may have gone through: treat the machine as live, and press Resume Operations again to confirm.`;
     try {
       const res = await authorizedFetch("/api/operator/emergency-resume", {
         method: "POST",
@@ -98,15 +99,17 @@ export function OperatorDashboardPage() {
         setEmergencyStopped(false);
       } else {
         setEstopError(res.status === 403
-          ? "Resume was refused for this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header)."
+          ? `Resume was refused for this key. Resuming needs a PCC admin, or proof that you control ${TARGET_KERNEL_ID}'s operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate ${TARGET_KERNEL_ID}, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).`
           : res.status === 401
             ? "Sign in to resume this kernel."
             : res.status === 404
               ? "This kernel or its policy wasn't found, so it can't be resumed here."
-              : failureMessage);
+              : res.status >= 500 && res.status < 600
+                ? unconfirmedMessage
+                : failureMessage);
       }
     } catch {
-      setEstopError(failureMessage);
+      setEstopError(unconfirmedMessage);
     } finally {
       setEstopLoading(false);
     }
@@ -183,7 +186,7 @@ export function OperatorDashboardPage() {
               <div className="flex items-center gap-3">
                 <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />
                 <span className="text-sm text-red-400 font-medium">
-                  EMERGENCY STOP ACTIVE for {TARGET_KERNEL_ID}: new work is refused and queued commands are cancelled. Work already running stops only with the machine's own emergency stop.
+                  {`EMERGENCY STOP ACTIVE for ${TARGET_KERNEL_ID}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`}
                 </span>
               </div>
               <button
