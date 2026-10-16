@@ -131,6 +131,16 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
     });
   }
 
+  for (const status of ["RTSP/1.0 200 OK", "ICE/1.0 200 OK"]) {
+    it(`R8 X1L: production transport refuses ${status} with clean Content-Length framing`, async ({ skip }) => {
+      await withServer((_req, res) => {
+        res.socket?.end(`${status}\r\nContent-Length: 3\r\n\r\nIPP`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toMatchObject({ ok: false, kind: "framing", sent: true });
+      }, skip);
+    });
+  }
+
   for (const [name, prefix] of [
     ["a single leading CRLF", "\r\n"],
     ["a lone leading LF", "\n"],
