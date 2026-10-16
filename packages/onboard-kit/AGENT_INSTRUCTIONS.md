@@ -1089,7 +1089,7 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
    └→ Calls JobRunner.run({
         jobId,
         stepId,
-        inputHash,          // exact input bytes; gcodeHash is its legacy alias
+        inputHash,          // the SHA-256 of the exact input bytes
         assuranceTier,      // 0, 1, 2, or 3
         tierLadder,         // await compileTierLadder(csd)
       })
@@ -1122,7 +1122,7 @@ When a user submits a workflow and funds escrow, the broker dispatches jobs to y
    └→ Includes evidenceBundleHash, summary
 ```
 
-Before any command, the kernel refuses malformed `inputHash`, an `inputData` hash mismatch, or an `accepts` list that lacks `start` or both input commands. It sends no undeclared command. On the prepare path, it also refuses a missing or malformed ladder, or a ladder missing the job's tier, at every tier from 0 to 3. A prepare ack that does not echo `jobId` and `inputHash` exactly with a non-empty `deviceJobId` fails before `start`.
+Before any command, the kernel refuses an `inputData` hash mismatch or an `accepts` list that lacks `start` or both input commands. It sends no undeclared command. On the prepare path only, it applies the strict `inputHash` format check (`sha256:` plus exactly 64 lowercase hex digits); the legacy `load_gcode` path passes the hash through unchanged. The prepare path also refuses a missing or malformed ladder, or a ladder missing the job's tier, at every tier from 0 to 3. A prepare ack that does not echo `jobId` and `inputHash` exactly with a non-empty `deviceJobId` fails before `start`.
 
 ### 7.2 Custom job execution
 
