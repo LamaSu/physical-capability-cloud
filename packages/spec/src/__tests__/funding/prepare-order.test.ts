@@ -56,4 +56,33 @@ describe("prepareFunding: derived terms preserve funded order", () => {
     expect(prepared.typedData.message.acceptedPolicyDigest).toBe(acceptedPolicyDigest);
     expect(chain.sends()).toEqual([]);
   });
+
+  it("refuses termsHash derived from sorted [index 0, index 1] for funded [index 1, index 0] before any RPC", async () => {
+    const roots = { subjectBlockHash: zeroHash, bindingsRoot: computeBindingsRoot([]) };
+    const configure = (configs: UnitConfig[]) => {
+      for (const config of configs) {
+        config.requiredTier = 2;
+        config.requestedTier = 2;
+      }
+      configs.reverse();
+    };
+    const seed = await buildFixture({ configure });
+    expect(seed.configs.map((config) => config.milestoneIndex)).toEqual([1n, 0n]);
+    const termsHash = computeTermsHashV21({ token: seed.usdc, assuranceTier: 2,
+      milestones: [...seed.configs].reverse().map((config) => ({
+        milestoneIndex: config.milestoneIndex, stepId: config.stepId, amount: config.g, deadline: config.reclaimAt,
+      })),
+    });
+    const fx = await buildFixture({ configure, termsHash,
+      acceptedPolicyDigest: computeAcceptedPolicyDigest({ termsHash, ...roots }),
+    }, { payer: seed.payer, operator: seed.operator });
+    const chain = makeChain(fx);
+    await expect(prepareFunding({
+      payload: fx.wire(), wallet: chain.wallet(), publicClient: chain.publicClient,
+      quote: { maxTotalGross: fx.totalGross }, pins: testPins(fx),
+      expect: { ...testExpect(fx), tiers: [2],
+        termsHash: { derive: "v2.1", token: fx.usdc, assuranceTier: 2 }, acceptedPolicyDigest: roots },
+    })).rejects.toMatchObject({ code: "INTENT_MISMATCH", message: expect.stringContaining("termsHash") });
+    expect(chain.state.log).toEqual([]);
+  });
 });
