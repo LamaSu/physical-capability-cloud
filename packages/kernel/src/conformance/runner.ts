@@ -82,19 +82,28 @@ const deviceId = (id: unknown): id is string | number =>
 
 class Session {
   readonly events: Event[] = [];
-  readonly allEvents: Event[] = [];
+  deliveryCount = 0;
+  private snapshotCount = 0;
   collecting = false;
   closed = false;
   private disposal: Promise<void> | undefined;
 
   constructor(readonly adapter: MachineAdapter, readonly fields: ConformanceProfileFields, readonly hooks: ConformanceProfile) {
     adapter.onEvidence((event) => {
-      // Snapshot at delivery: adapters are allowed to reuse their event objects.
-      const snapshot = structuredClone(event);
-      this.allEvents.push(snapshot);
-      if (this.collecting && !this.closed) this.events.push(snapshot);
+      // Count even unsnapshotable evidence in idle, job and closed windows.
+      this.deliveryCount++;
+      try {
+        // Adapters may reuse event objects. Never throw back into their emit loop.
+        const snapshot = structuredClone(event);
+        this.snapshotCount++;
+        if (this.collecting && !this.closed) this.events.push(snapshot);
+      } catch {
+        // The delivery/snapshot mismatch records lost evidence for this clause.
+      }
     });
   }
+
+  get snapshotFailed(): boolean { return this.deliveryCount !== this.snapshotCount; }
 
   isFailed = (event: Event): boolean =>
     event.type === "execution_failed" || this.fields.terminalEvents.failed.includes(event.type);
@@ -148,7 +157,7 @@ class Session {
   }
 
   dispose(): Promise<void> {
-    // Mark the ordinary observation window closed BEFORE cleanup; C7 uses allEvents.
+    // Mark the ordinary observation window closed BEFORE cleanup; C7 uses deliveryCount.
     this.closed = true;
     return this.disposal ??= bounded(() => this.adapter.dispose(), this.fields.timing.quiesceTimeoutMs, "Dispose");
   }
@@ -166,9 +175,9 @@ async function check(id: ClauseId, s: Session): Promise<Outcome> {
   switch (id) {
     case "C1": {
       await s.quiesce();
-      const atIdle = s.allEvents.length;
+      const atIdle = s.deliveryCount;
       await sleep(p.timing.settleMs);
-      if (s.allEvents.length !== atIdle) return fail("Evidence arrived after quiesce resolved.");
+      if (s.deliveryCount !== atIdle) return fail("Evidence arrived after quiesce resolved.");
       s.closed = false;
       await s.start();
       let early = false;
@@ -176,7 +185,7 @@ async function check(id: ClauseId, s: Session): Promise<Outcome> {
       // Attach rejection handling immediately, even while the finish hook waits.
       const quiet = s.quiesce().then(() => {
         early = !s.events.some(s.isTerminal);
-        atResolution = s.allEvents.length;
+        atResolution = s.deliveryCount;
         return undefined;
       }, (error: unknown) => error);
       await sleep(p.timing.pollMs);
@@ -185,7 +194,7 @@ async function check(id: ClauseId, s: Session): Promise<Outcome> {
       if (error) throw error;
       await sleep(p.timing.settleMs);
       if (early) return fail("Quiesce resolved before terminal delivery.");
-      if (s.allEvents.length !== atResolution) return fail("Evidence arrived after quiesce resolved.");
+      if (s.deliveryCount !== atResolution) return fail("Evidence arrived after quiesce resolved.");
       return pass("Quiesce waits for terminal delivery and stays silent.");
     }
     case "C2": {
@@ -270,9 +279,9 @@ async function check(id: ClauseId, s: Session): Promise<Outcome> {
       await s.start();
       if (s.events.some(s.isTerminal)) return fail("Job ended before the running-dispose probe.");
       await s.dispose();
-      const atDispose = s.allEvents.length;
+      const atDispose = s.deliveryCount;
       await sleep(p.timing.settleMs);
-      if (s.allEvents.length !== atDispose) return fail("Evidence arrived after dispose resolved.");
+      if (s.deliveryCount !== atDispose) return fail("Evidence arrived after dispose resolved.");
       return pass("Dispose stays silent with a job running.");
     }
     case "C8": {
@@ -293,12 +302,12 @@ async function check(id: ClauseId, s: Session): Promise<Outcome> {
       const type = COMMAND_TYPES.find((type) => !p.declaredCommands.includes(type));
       if (!type) return na("Profile declares every MachineCommand type.");
       const before = await s.call(() => a.getStatus(), "Status");
-      const count = s.allEvents.length;
+      const count = s.deliveryCount;
       const result = await s.call(() => a.execute({ type }), "Undeclared command");
       await sleep(p.timing.settleMs);
       const after = await s.call(() => a.getStatus(), "Status");
       if (result.success !== false) return fail("Undeclared command was not refused.");
-      if (s.allEvents.length !== count) return fail("Undeclared command emitted evidence.");
+      if (s.deliveryCount !== count) return fail("Undeclared command emitted evidence.");
       if (after !== before) return fail("Undeclared command changed device status.");
       return pass("Undeclared command refuses silently without changing status.");
     }
@@ -333,6 +342,7 @@ export async function runAdapterConformance(makeAdapter: MakeAdapter, profile: C
     } catch (error) {
       outcome = fail(error instanceof ClauseError ? error.message : "Adapter contract probe rejected.");
     } finally {
+      if (session?.snapshotFailed) outcome = fail("Evidence could not be snapshotted at delivery.");
       abandoned = true;
       if (adapter) {
         try {
@@ -342,6 +352,7 @@ export async function runAdapterConformance(makeAdapter: MakeAdapter, profile: C
         }
       }
     }
+    if (session?.snapshotFailed) outcome = fail("Evidence could not be snapshotted at delivery.");
     rows.push({ ...clause, ...outcome! });
   }
   return conformanceReport(fields, rows);
