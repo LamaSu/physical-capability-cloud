@@ -50,20 +50,30 @@ export function OperatorDashboardPage() {
   /* ---------- Emergency Stop state ---------- */
   const [emergencyStopped, setEmergencyStopped] = React.useState(false);
   const [estopLoading, setEstopLoading] = React.useState(false);
+  const [estopError, setEstopError] = React.useState<string | null>(null);
 
   async function handleEmergencyStop() {
     if (!window.confirm("EMERGENCY STOP: This will immediately halt all active jobs on kernel-nanoclaw. Continue?")) return;
     setEstopLoading(true);
+    setEstopError(null);
+    const failureMessage = "The stop didn't go through. The kernel may still be running; try again.";
     try {
-      await authorizedFetch("/api/operator/emergency-stop", {
+      const res = await authorizedFetch("/api/operator/emergency-stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
       });
-      setEmergencyStopped(true);
+      if (res.ok) {
+        setEmergencyStopped(true);
+      } else {
+        setEstopError(res.status === 401
+          ? "Sign in to stop this kernel."
+          : res.status === 403
+            ? "The stop was refused for this key. The kernel may still be running."
+            : failureMessage);
+      }
     } catch {
-      // best-effort — show stopped state anyway for operator safety
-      setEmergencyStopped(true);
+      setEstopError(failureMessage);
     } finally {
       setEstopLoading(false);
     }
@@ -72,15 +82,27 @@ export function OperatorDashboardPage() {
   async function handleEmergencyResume() {
     if (!window.confirm("Resume operations on kernel-nanoclaw?")) return;
     setEstopLoading(true);
+    setEstopError(null);
+    const failureMessage = "Resume didn't go through. The kernel is still stopped; try again.";
     try {
-      await authorizedFetch("/api/operator/emergency-resume", {
+      const res = await authorizedFetch("/api/operator/emergency-resume", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kernelId: "kernel-nanoclaw" }),
       });
-      setEmergencyStopped(false);
+      if (res.ok) {
+        setEmergencyStopped(false);
+      } else {
+        setEstopError(res.status === 403
+          ? "Resume was refused for this key. A wallet sign-in can stop a kernel but can't resume it yet: ask a PCC admin to resume it, or resume through the API with your PCC-issued key and your self-linked wallet (X-PCC-Wallet header)."
+          : res.status === 401
+            ? "Sign in to resume this kernel."
+            : res.status === 404
+              ? "This kernel or its policy wasn't found, so it can't be resumed here."
+              : failureMessage);
+      }
     } catch {
-      // no-op
+      setEstopError(failureMessage);
     } finally {
       setEstopLoading(false);
     }
@@ -179,6 +201,7 @@ export function OperatorDashboardPage() {
               {estopLoading ? "Stopping..." : "EMERGENCY STOP"}
             </button>
           )}
+          {estopError && <p role="alert" className="text-sm text-red-400">{estopError}</p>}
 
           {/* KPIs */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
