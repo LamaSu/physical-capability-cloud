@@ -306,14 +306,14 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
         return { success: true, message: "Program loaded" };
       }` : `case "prepare": {
         // NON-ACTUATING: stage and validate only; no motion, heat, dispense or other device-state change.
+        const inputData = command.payload?.inputData;
+        if (inputData === undefined) return { success: false, message: "prepare: no input data" };
         const jobId = command.payload?.jobId;
         const inputHash = command.payload?.inputHash;
         if (typeof jobId !== "string" || jobId.length === 0 ||
             typeof inputHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(inputHash)) {
           return { success: false };
         }
-        const inputData = command.payload?.inputData;
-        if (inputData === undefined) return { success: false, message: "prepare: no input data" };
         if (!(inputData instanceof Uint8Array)) return { success: false };
         // Forward exactly the bytes the kernel hashed as base64.
         // Adapt this staging call to your device's real upload API without actuating.

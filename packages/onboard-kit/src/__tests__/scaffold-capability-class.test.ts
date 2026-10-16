@@ -241,9 +241,11 @@ describe("capability-class scaffolding", () => {
 
   it.each([true, false])("S6: prepare without input data is refused with zero requests in mockMode=%s", async mockMode => {
     const { adapter, events } = await neutralAdapter(mockMode);
-    expect(await adapter.execute({ type: "prepare", payload: { jobId, inputHash } })).toEqual({
-      success: false, message: "prepare: no input data",
-    });
+    for (const payload of [undefined, { jobId, inputHash }]) {
+      expect(await adapter.execute({ type: "prepare", payload })).toEqual({
+        success: false, message: "prepare: no input data",
+      });
+    }
     expect((await adapter.execute({ type: "start", payload: { jobId } })).success).toBe(false);
     expect(events).toEqual([]);
     expect(fetchStub).toHaveBeenCalledTimes(0);
