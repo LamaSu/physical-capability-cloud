@@ -113,7 +113,7 @@ export class FakeDevice implements MachineAdapter {
   private status: MachineStatus = "idle";
   private currentProgress = 0;
   private active: { id: DeviceJobId; end: () => void } | undefined;
-  private deliveringTerminal = false;
+  private delivering = false;
   private disposed = false;
   private eventNumber = 0;
   private cancelDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -230,7 +230,7 @@ export class FakeDevice implements MachineAdapter {
       return { success: true, data: { status: this.status, progress: this.currentProgress } };
     }
     if (command.type === "stop") {
-      if (this.active && !this.deliveringTerminal) this.fail({ state: "stopped", origin: "device" });
+      if (this.active && !this.delivering) this.fail({ state: "stopped", origin: "device" });
       return { success: true };
     }
     if (command.type !== "start") return { success: true };
@@ -254,7 +254,7 @@ export class FakeDevice implements MachineAdapter {
     if (this.startedEvent === "after-start") {
       // Identity, rather than just the id, prevents a reused id from receiving an old callback.
       void Promise.resolve().then(() => {
-        if (!this.disposed && this.active === job && !this.deliveringTerminal) this.emit(this.startedType);
+        if (!this.disposed && this.active === job && !this.delivering) this.emit(this.startedType);
       });
     }
     return {
@@ -277,7 +277,7 @@ export class FakeDevice implements MachineAdapter {
     }
     this.cancels.push(normalized);
     const job = this.active;
-    if (this.disposed || !job || job.id !== normalized || this.deliveringTerminal) return;
+    if (this.disposed || !job || job.id !== normalized || this.delivering) return;
     if (this.cancelBehavior === "throw") throw new Error("fake device cancel rejected");
     if (this.cancelBehavior === "refuse") return;
     if (this.cancelBehavior === "silent") {
@@ -307,7 +307,7 @@ export class FakeDevice implements MachineAdapter {
 
   emit(type: EvidenceEventType, payload: Record<string, unknown> = {}): void {
     const job = this.active;
-    if (this.disposed || !job || this.deliveringTerminal) throw new Error("fake device has no active job");
+    if (this.disposed || !job || this.delivering) throw new Error("fake device has no active job");
     if (!eventTypes.has(type)) throw new Error("invalid event type");
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("payload must be an object");
     if (Object.hasOwn(payload, "jobId")) throw new Error("payload.jobId is reserved for the PCC job (LO-EV-9)");
@@ -318,25 +318,26 @@ export class FakeDevice implements MachineAdapter {
     }
     const failed = type === this.failedType || type === "execution_failed";
     const terminal = failed || type === this.completedType || type === "execution_completed";
-    const timestamp = this.clock ? this.clock() : new Date(deterministicBase + this.eventNumber);
-    if (!(timestamp instanceof Date) || !Number.isFinite(timestamp.getTime())) throw new Error("clock must return a valid Date");
-    const event: DeviceEvent = {
-      type,
-      timestamp: timestamp.toISOString(),
-      source: { deviceId: this.id, deviceType: this.deviceType, kernelId: this.kernelId, simulated: true },
-      payload: { ...structuredClone(payload), [this.bindingKey]: job.id, mock: true, ...(failed ? { origin: "device" } : {}) },
-    };
-    this.eventNumber += 1;
-    if (typeof event.payload.progress === "number") this.currentProgress = event.payload.progress;
-    if (type === this.completedType || type === "execution_completed") this.currentProgress = 100;
-    if (terminal) this.deliveringTerminal = true;
+    this.delivering = true;
     try {
-      for (const callback of [...this.listeners]) callback(structuredClone(event));
-    } finally {
-      if (terminal) {
-        this.finishWork();
-        this.deliveringTerminal = false;
+      const timestamp = this.clock ? this.clock() : new Date(deterministicBase + this.eventNumber);
+      if (!(timestamp instanceof Date) || !Number.isFinite(timestamp.getTime())) throw new Error("clock must return a valid Date");
+      const event: DeviceEvent = {
+        type,
+        timestamp: timestamp.toISOString(),
+        source: { deviceId: this.id, deviceType: this.deviceType, kernelId: this.kernelId, simulated: true },
+        payload: { ...structuredClone(payload), [this.bindingKey]: job.id, mock: true, ...(failed ? { origin: "device" } : {}) },
+      };
+      this.eventNumber += 1;
+      if (typeof event.payload.progress === "number") this.currentProgress = event.payload.progress;
+      if (type === this.completedType || type === "execution_completed") this.currentProgress = 100;
+      for (const callback of [...this.listeners]) {
+        if (this.disposed) break;
+        callback(structuredClone(event));
       }
+    } finally {
+      if (terminal) this.finishWork(job);
+      this.delivering = false;
     }
   }
 
@@ -374,12 +375,12 @@ export class FakeDevice implements MachineAdapter {
     return { success: false, busy: true, message: "device is busy", data: { busy: true, code: "busy" } };
   }
 
-  private finishWork(): void {
+  private finishWork(job = this.active): void {
+    if (this.active !== job) return;
     if (this.cancelDeadline !== undefined) capturedClearTimeout(this.cancelDeadline);
     if (this.cancelReport !== undefined) capturedClearImmediate(this.cancelReport);
     this.cancelDeadline = undefined;
     this.cancelReport = undefined;
-    const job = this.active;
     this.active = undefined;
     this.status = "idle";
     job?.end();

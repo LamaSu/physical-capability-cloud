@@ -1,7 +1,7 @@
 /** FakeDevice's public contract: adapters/types.ts, outstanding-work.ts and spec/evidence/is-fabricated.ts. */
 import { afterEach, describe, expect, it } from "vitest";
 import { EVIDENCE_DEVICE_TYPES, EVIDENCE_EVENT_TYPES, isFabricated, type EvidenceEvent } from "@pcc/spec";
-import type { MachineCommand } from "../adapters/types.js";
+import type { MachineCommand, MachineCommandResult } from "../adapters/types.js";
 import { FakeDevice, type FakeDeviceOptions, type FakeDeviceStartOutcome } from "../testing/fake-device.js";
 
 type Emitted = Omit<EvidenceEvent, "id" | "hash">;
@@ -313,6 +313,131 @@ describe("FakeDevice quiescence and cancellation", () => {
     expect(first.map((event) => event.type)).toEqual([expectedType]);
     expect(second.map((event) => event.type)).toEqual([expectedType]);
     expect(await device.getStatus()).toBe("idle");
+  });
+
+  it.each([false, true])("refuses complete at progress 100 with next start=%s", async (startNext) => {
+    const device = await accepted();
+    device.scriptStart({ outcome: "accept", deviceJobId: "B" });
+    const events: Emitted[] = [];
+    const errors: unknown[] = [];
+    let next: Promise<MachineCommandResult> | undefined;
+    device.onEvidence((event) => {
+      if (event.type !== "execution_progress") return;
+      try { device.complete(); errors.push(undefined); } catch (error) { errors.push(error); }
+      if (startNext) next = device.execute({ type: "start" });
+    });
+    device.onEvidence((event) => events.push(event));
+    device.progress(100);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: expect.stringContaining("no active job") });
+    if (startNext) await expect(next).resolves.toMatchObject({ success: false, busy: true });
+    expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([["execution_progress", "device-42"]]);
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+    expect(await device.execute({ type: "start" })).toEqual({ success: true, data: { jobId: "B" } });
+    device.complete();
+  });
+
+  it.each(["progress", "terminal"] as const)("refuses fail and a new job from the %s clock", async (emission) => {
+    let device: FakeDevice;
+    let reentered = false;
+    let error: unknown;
+    let next: Promise<MachineCommandResult> | undefined;
+    const events: Emitted[] = [];
+    device = await accepted({ clock: () => {
+      if (!reentered) {
+        reentered = true;
+        try { device.fail(); } catch (caught) { error = caught; }
+        next = device.execute({ type: "start" });
+      }
+      return new Date("2030-01-01T00:00:00Z");
+    } });
+    device.scriptStart({ outcome: "accept", deviceJobId: "B" });
+    device.onEvidence((event) => events.push(event));
+    if (emission === "progress") device.progress(100);
+    else device.complete();
+    expect(error).toMatchObject({ message: expect.stringContaining("no active job") });
+    await expect(next).resolves.toMatchObject({ success: false, busy: true });
+    expect(events.map((event) => [event.type, event.payload.deviceJobId])).toEqual([
+      [emission === "progress" ? "execution_progress" : "execution_completed", "device-42"],
+    ]);
+    if (emission === "progress") device.complete();
+    expect(await device.execute({ type: "start" })).toEqual({ success: true, data: { jobId: "B" } });
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+  });
+
+  it("refuses all emit APIs during nonterminal delivery", async () => {
+    const device = await accepted();
+    const errors: unknown[] = [];
+    let attempted = false;
+    device.onEvidence(() => {
+      if (attempted) return;
+      attempted = true;
+      for (const attempt of [() => device.emit("execution_started"), () => device.progress(1), () => device.complete(), () => device.fail()]) {
+        try { attempt(); errors.push(undefined); } catch (error) { errors.push(error); }
+      }
+    });
+    device.progress(100);
+    expect(errors).toHaveLength(4);
+    for (const error of errors) expect(error).toMatchObject({ message: expect.stringContaining("no active job") });
+    device.complete();
+  });
+
+  it("ignores stop during nonterminal delivery", async () => {
+    const device = await accepted();
+    let stop: Promise<MachineCommandResult> | undefined;
+    device.onEvidence((event) => { if (event.type === "execution_progress") stop = device.execute({ type: "stop" }); });
+    device.progress(100);
+    await expect(stop).resolves.toEqual({ success: true });
+    expect(await device.getStatus()).toBe("busy");
+    device.complete();
+  });
+
+  it("ignores even a throwing cancellation during nonterminal delivery", async () => {
+    const device = await accepted({ cancelBehavior: "throw" });
+    let cancel: Promise<unknown> | undefined;
+    device.onEvidence(() => { cancel = device.cancelJob("device-42").catch((error: unknown) => error); });
+    device.progress(100);
+    await expect(cancel).resolves.toBeUndefined();
+    expect(device.cancels).toEqual(["device-42"]);
+    expect(await device.getStatus()).toBe("busy");
+    await device.dispose();
+  });
+
+  it("stops the current delivery as soon as a listener disposes the device", async () => {
+    const device = await accepted();
+    const observed: Emitted[] = [];
+    device.onEvidence(() => { void device.dispose(); });
+    device.onEvidence((event) => observed.push(event));
+    device.progress(100);
+    expect(observed).toEqual([]);
+    await device.quiesceEvidence();
+  });
+
+  it("a stale finalizer cannot end the replacement job", async () => {
+    const device = await accepted();
+    // Exercise this defensive identity boundary directly: public re-entry is also
+    // refused, so it must not mask a finalizer that accidentally ends a newer job.
+    const lifecycle = device as unknown as {
+      active: { id: string | number; end: () => void };
+      finishWork: (job: { id: string | number; end: () => void }) => void;
+    };
+    const old = lifecycle.active;
+    device.complete();
+    device.scriptStart({ outcome: "accept", deviceJobId: "replacement" });
+    await device.execute({ type: "start" });
+    let idle = false;
+    const quiescent = device.quiesceEvidence().then(() => { idle = true; });
+    lifecycle.finishWork(old);
+    await Promise.resolve();
+    expect(idle).toBe(false);
+    expect(await device.getStatus()).toBe("busy");
+    const events: Emitted[] = [];
+    device.onEvidence((event) => events.push(event));
+    device.complete();
+    await quiescent;
+    expect(events[0].payload.deviceJobId).toBe("replacement");
   });
 
   it.each(["complete", "fail"] as const)("refuses every emit API after %s without invoking listeners", async (terminal) => {
