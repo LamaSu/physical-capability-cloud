@@ -337,18 +337,31 @@ describe("wallet keystore", () => {
     expect(existsSync(walletPath("participant"))).toBe(false);
   });
 
-  it("refuses a directory belonging to another uid", () => {
+  it("refuses the first user-owned path when getuid changes before create", () => {
     mkdirSync(directory, { mode: 0o700 });
     const uid = process.getuid!();
     vi.spyOn(process, "getuid").mockReturnValue(uid + 1);
-    expect(() => create()).toThrow(/owner|owned/);
+    expect(() => create()).toThrow(/^wallet_directory_owner_mismatch/);
   });
 
-  it("refuses a file belonging to another uid", () => {
+  it("refuses the first user-owned path when getuid changes during read", () => {
     create();
     const uid = process.getuid!();
     vi.spyOn(process, "getuid").mockReturnValueOnce(uid).mockReturnValue(uid + 1);
-    expect(() => readWallet("participant")).toThrow(/owner|owned/);
+    expect(() => readWallet("participant")).toThrow(/^wallet_directory_owner_mismatch/);
+  });
+
+  it("refuses an existing wallets directory when only its owner is foreign", () => {
+    mkdirSync(directory, { mode: 0o700 });
+    storageMocks.foreignPath = directory;
+    expect(() => create()).toThrow(/^wallet_directory_owner_mismatch$/);
+    expect(existsSync(walletPath("participant"))).toBe(false);
+  });
+
+  it("refuses a key file when only its owner is foreign", () => {
+    create();
+    storageMocks.foreignPath = walletPath("participant");
+    expect(() => readWallet("participant")).toThrow(/wallet_file_owner_mismatch/);
   });
 
   it("refuses Windows before creating or reading a file", () => {
