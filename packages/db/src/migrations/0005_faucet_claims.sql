@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS faucet_claims (
   token TEXT NOT NULL,
   seq INTEGER NOT NULL,
   account_id TEXT NOT NULL,
+  account_proof TEXT NOT NULL CHECK (account_proof IN ('siwe', 'claimed')),
+  approved_by_key_id TEXT,
   address TEXT NOT NULL,
   chain_id INTEGER NOT NULL,
   amount TEXT NOT NULL,

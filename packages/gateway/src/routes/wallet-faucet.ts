@@ -1,8 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getAddress } from "viem";
 import { requireAuth } from "../auth/require-auth.js";
-import { accountPrincipal } from "./wallets.js";
+import { accountPrincipal, checkApprovalOrigin, siweProvenAddress } from "./wallets.js";
 import { WalletLinkError } from "../services/wallet-links/repository.js";
+import { walletLinkConfig } from "../services/wallet-links/config.js";
+import { FAUCET_PLAN } from "../services/wallet-faucet/plan.js";
 import { createFaucetClientProvider, type FaucetClient } from "../services/wallet-faucet/client.js";
 import { faucetRoutesEnabled } from "../services/wallet-faucet/config.js";
 import {
@@ -102,12 +104,20 @@ export async function walletFaucetRoutes(app: FastifyInstance, options: FaucetOp
     }
     currentFundingLink(link.id, Date.now());
     claims = fundingClaims(link.id);
-    const publicClaims = claims.map(claim => ({ token: claim.token, amount: claim.amount, status: claim.status,
-      ...(claim.status === "succeeded" ? { txHash: claim.tx_hash! } : {}) }));
-    const status = claims.every(claim => claim.status === "succeeded") ? "funded"
-      : claims.some(claim => claim.status === "pending") ? "pending"
-      : claims.some(claim => claim.status === "succeeded") ? "partial" : undefined;
-    if (status) return reply.send({ status, claims: publicClaims });
+    const now = Date.now();
+    const publicClaims = claims.map(claim => {
+      const status = liveLease(claim, now) ? "pending" : claim.status;
+      return { token: claim.token, amount: claim.amount, status,
+        ...(status === "succeeded" ? { txHash: claim.tx_hash! } : {}) };
+    });
+    const status = publicClaims.every(claim => claim.status === "succeeded") ? "funded"
+      : publicClaims.some(claim => claim.status === "pending") ? "pending"
+      : publicClaims.some(claim => claim.status === "succeeded") ? "partial" : undefined;
+    const skipped = link.role === "agent" && !claims.some(claim => claim.token === "usdc")
+      ? FAUCET_PLAN.agent.filter(claim => claim.token === "usdc").map(claim => ({
+        token: claim.token, amount: claim.amount, reason: "cap_reached", cap: "global",
+      })) : undefined;
+    if (status) return reply.send({ status, claims: publicClaims, ...(skipped ? { skipped } : {}) });
     return reply.code(502).send({ error: "faucet_error", errorClass: claims.find(claim => claim.status === "failed")?.error_class ?? "unknown" });
   }
 
@@ -118,7 +128,9 @@ export async function walletFaucetRoutes(app: FastifyInstance, options: FaucetOp
   app.post<{ Params: { linkId: string } }>("/api/wallets/:linkId/fund", {
     ...emptyBodyOptions, onRequest: requireAuth,
   }, async (req, reply) => {
+    checkApprovalOrigin(req, walletLinkConfig().publicOrigin);
+    const provenAddress = siweProvenAddress(req);
     const now = Date.now();
-    return fund(ownerFundingLink(req.params.linkId, accountPrincipal(req), req.apiKeyId ?? null), requestStartedAt.get(req) ?? now, reply);
+    return fund(ownerFundingLink(req.params.linkId, accountPrincipal(req), req.apiKeyId ?? null, provenAddress), requestStartedAt.get(req) ?? now, reply);
   });
 }

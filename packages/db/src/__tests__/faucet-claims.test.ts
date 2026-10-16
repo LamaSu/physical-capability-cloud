@@ -20,16 +20,17 @@ describe("faucet claim migration", () => {
   function insertClaim(overrides: Record<string, unknown> = {}) {
     const claim = {
       link_id: "wl-first", token: "eth", seq: 1, account_id: "account-first",
+      account_proof: "siwe", approved_by_key_id: null,
       address: ADDRESS, chain_id: 84532, amount: "0.0001", status: "pending",
       tx_hash: null, error_class: null, created_at: NOW, updated_at: NOW,
       ...overrides,
     };
     sqlite.prepare(`
       INSERT INTO faucet_claims (
-        link_id, token, seq, account_id, address, chain_id, amount,
+        link_id, token, seq, account_id, account_proof, approved_by_key_id, address, chain_id, amount,
         status, tx_hash, error_class, created_at, updated_at
       ) VALUES (
-        @link_id, @token, @seq, @account_id, @address, @chain_id, @amount,
+        @link_id, @token, @seq, @account_id, @account_proof, @approved_by_key_id, @address, @chain_id, @amount,
         @status, @tx_hash, @error_class, @created_at, @updated_at
       )
     `).run(claim);
@@ -51,6 +52,23 @@ describe("faucet claim migration", () => {
     insertClaim();
     expect(sqlite.prepare("SELECT attempts, lease_until, last_attempt_at FROM faucet_claims").get())
       .toEqual({ attempts: 0, lease_until: null, last_attempt_at: null });
+  });
+
+  it.each([null, "", "SIWE", "proven"])("T21 refuses invalid account_proof %s", accountProof => {
+    expect(() => insertClaim({ account_proof: accountProof }))
+      .toThrow(accountProof === null ? /NOT NULL constraint failed/ : /CHECK constraint failed/);
+  });
+
+  it.each(["siwe", "claimed"])("T21 accepts account_proof %s", accountProof => {
+    expect(() => insertClaim({ account_proof: accountProof })).not.toThrow();
+    expect(sqlite.prepare("SELECT account_proof FROM faucet_claims").get())
+      .toEqual({ account_proof: accountProof });
+  });
+
+  it.each([null, "approving-key"])("T21 accepts approved_by_key_id %s", approvedByKeyId => {
+    expect(() => insertClaim({ approved_by_key_id: approvedByKeyId })).not.toThrow();
+    expect(sqlite.prepare("SELECT approved_by_key_id FROM faucet_claims").get())
+      .toEqual({ approved_by_key_id: approvedByKeyId });
   });
 
   it("refuses duplicate claim keys while allowing different sequence and token", () => {

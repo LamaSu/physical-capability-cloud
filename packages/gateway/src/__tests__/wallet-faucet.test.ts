@@ -18,6 +18,9 @@ import { walletsRoutes } from "../routes/wallets.js";
 import { walletFaucetRoutes } from "../routes/wallet-faucet.js";
 import { CONSENT_SHA256 } from "../services/wallet-links/consent.js";
 import { telemetryLookalikeHook } from "../services/telemetry-privacy.js";
+import {
+  GLOBAL_ETH_CLAIM_CAP, GLOBAL_USDC_CLAIM_CAP, finishFundingClaim, fundingClaims, leaseFundingClaim,
+} from "../services/wallet-faucet/repository.js";
 const path = "/api/wallets/link-requests";
 const owner = { authorization: "Bearer pcc_test_faucet_owner" };
 const other = { authorization: "Bearer pcc_test_faucet_other" };
@@ -92,8 +95,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
-async function create(role: "agent" | "device" = "agent", account = privateKeyToAccount(generatePrivateKey())) {
-  const response = await app.inject({ method: "POST", url: path, payload: { keyType: "secp256k1", address: account.address.toLowerCase(), role, label: "cli", chainId: 84532 } });
+async function create(role: "agent" | "device" = "agent", account = privateKeyToAccount(generatePrivateKey()), kernelId?: string) {
+  const response = await app.inject({ method: "POST", url: path, payload: { keyType: "secp256k1", address: account.address.toLowerCase(), role, label: "cli", chainId: 84532, ...(kernelId ? { kernelId } : {}) } });
   expect(response.statusCode).toBe(201);
   return { account, request: response.json() as {
       requestId: string;
@@ -140,9 +143,9 @@ async function revoke(result: Linked) {
   expect((await app.inject({ method: "POST", url: `/api/wallets/${result.linkId}/revoke`, headers: owner })).statusCode).toBe(200);
 }
 // Raw INSERTs are confined to historical cap fixtures. Live grants use W1/W2 routes.
-function oldClaim(id: string, token: Token, seq: number, address: string, account = "history", age = 0, status = "failed") {
+function oldClaim(id: string, token: Token, seq: number, address: string, account = "history", age = 0, status = "failed", accountProof = "claimed", approvedByKeyId: string | null = "history-key") {
   const stamp = new Date(now - age).toISOString();
-  getStore().db.run(sql`INSERT INTO faucet_claims (link_id, token, seq, account_id, address, chain_id, amount, status, attempts, created_at, updated_at) VALUES (${id}, ${token}, ${seq}, ${account}, ${address}, 84532, ${token === "eth" ? "0.0001" : "1"}, ${status}, 1, ${stamp}, ${stamp})`);
+  getStore().db.run(sql`INSERT INTO faucet_claims (link_id, token, seq, account_id, account_proof, approved_by_key_id, address, chain_id, amount, status, attempts, created_at, updated_at) VALUES (${id}, ${token}, ${seq}, ${account}, ${accountProof}, ${approvedByKeyId}, ${address}, 84532, ${token === "eth" ? "0.0001" : "1"}, ${status}, 1, ${stamp}, ${stamp})`);
 }
 describe("W2 wallet faucet", () => {
   it("2 agent CLI: anonymous empty body funds six ordered claims and real hashes", async () => {
@@ -429,11 +432,9 @@ describe("W2 wallet faucet", () => {
     const result = await linked();
     await refused(`${path}/${result.request.requestId}/fund`, 409, { error: "cap_reached", cap: "account" });
   });
-  it("12 global USDC cap refuses agent; device passes", async () => {
+  it("12 global USDC cap: device passes", async () => {
     for (let i = 0; i < 8; i++)
       oldClaim(`global-${i}`, "usdc", 1, privateKeyToAccount(generatePrivateKey()).address.toLowerCase());
-    const result = await linked();
-    await refused(`${path}/${result.request.requestId}/fund`, 409, { error: "cap_reached", cap: "global" });
     expect((await fund(await linked("device"))).json().status).toBe("funded");
   });
   it("12 rows older than 24h do not count toward any cap", async () => {
@@ -526,4 +527,183 @@ describe("W2 wallet faucet", () => {
     expect((await fund(device, "cli", await build({ env: {} }))).json().status).toBe("pending");
     expect(calls).toHaveLength(n);
   });
+  it("T10 a live retry lease is pending in the claim and rollup", async () => {
+    const result = await linked("device");
+    behavior = async () => { throw {}; };
+    expect((await fund(result)).statusCode).toBe(502);
+    now += 30000;
+    let release!: (value: unknown) => void;
+    let started!: () => void;
+    const firstStarted = new Promise<void>(resolve => { started = resolve; });
+    behavior = async () => {
+      if (calls.length === 6) {
+        started();
+        return new Promise(resolve => { release = resolve; });
+      }
+      return { transactionHash: hash() };
+    };
+    const first = fund(result);
+    await firstStarted;
+    const concurrent = await fund(result, "owner");
+    const callsWhileBlocked = calls.length;
+    release({ transactionHash: hash() });
+    const completed = await first;
+    expect(concurrent.statusCode).toBe(200);
+    expect(concurrent.json()).toEqual({
+      status: "pending",
+      claims: [
+        { token: "eth", amount: "0.0001", status: "pending" },
+        ...Array.from({ length: 4 }, () => ({ token: "eth", amount: "0.0001", status: "failed" })),
+      ],
+    });
+    expect(callsWhileBlocked).toBe(6);
+    expect(completed.statusCode).toBe(200);
+    expect(completed.json().status).toBe("funded");
+  });
+  it("T11(a) the SQL own-lease guard refuses a second lease at the same instant", async () => {
+    const result = await linked("device");
+    expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
+    const claim = fundingClaims(result.linkId)[0]!;
+    expect(leaseFundingClaim(claim, now)).toBeDefined();
+    const before = rows();
+    expect(leaseFundingClaim(claim, now)).toBeUndefined();
+    expect(rows()).toEqual(before);
+    expect(calls).toHaveLength(0);
+  });
+  it("T11(b) the SQL per-link mutex refuses another claim while one is leased", async () => {
+    const result = await linked("device");
+    expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
+    const claims = fundingClaims(result.linkId);
+    expect(leaseFundingClaim(claims[0]!, now)).toBeDefined();
+    const before = rows();
+    expect(leaseFundingClaim(claims[1]!, now)).toBeUndefined();
+    expect(rows()).toEqual(before);
+    expect(calls).toHaveLength(0);
+  });
+  it("T11(c) the SQL link-active guard refuses a revoked link", async () => {
+    const zeroBudget = await build({ attemptBudgetMs: 0 });
+    const first = await linked("device");
+    expect((await fund(first, "cli", zeroBudget)).json().status).toBe("pending");
+    const second = await linked("device");
+    expect((await fund(second, "cli", zeroBudget)).json().status).toBe("pending");
+    await revoke(second);
+    const before = rows();
+    expect(leaseFundingClaim(fundingClaims(second.linkId)[0]!, now)).toBeUndefined();
+    expect(rows()).toEqual(before);
+    expect(calls).toHaveLength(0);
+  });
+  it("T11(d) a stale completion cannot finish a replacement lease", async () => {
+    const result = await linked("device");
+    expect((await fund(result, "cli", await build({ attemptBudgetMs: 0 }))).json().status).toBe("pending");
+    const claim = fundingClaims(result.linkId)[0]!;
+    const firstLease = leaseFundingClaim(claim, now)!;
+    expect(firstLease).toBeDefined();
+    now += 60000;
+    const replacement = leaseFundingClaim(claim, now)!;
+    expect(replacement).toBeDefined();
+    const before = rows();
+    finishFundingClaim(firstLease, hash(), undefined, now);
+    expect(rows()).toEqual(before);
+    expect(calls).toHaveLength(0);
+    const txHash = hash();
+    finishFundingClaim(replacement, txHash, undefined, now);
+    expect(fundingClaims(result.linkId)[0]).toMatchObject({ status: "succeeded", tx_hash: txHash, lease_until: null, attempts: 2 });
+  });
+  it("T12 kernelId never grants owner-route access", async () => {
+    const result = await approve(await create("device", undefined, "account-b"));
+    await refused(`/api/wallets/${result.linkId}/fund`, 404, { error: "link_not_found" }, other, app, {});
+    const response = await fund(result, "owner");
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("funded");
+    expect(response.json().claims).toHaveLength(5);
+  });
+  it("T13 global USDC exhaustion fixes an agent grant at five ETH claims", async () => {
+    for (let i = 0; i < 8; i++)
+      oldClaim(`global-${i}`, "usdc", 1, privateKeyToAccount(generatePrivateKey()).address.toLowerCase());
+    const result = await linked();
+    const response = await fund(result);
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(Object.keys(body).sort()).toEqual(["claims", "skipped", "status"]);
+    expect(body.status).toBe("funded");
+    expect(body.claims).toHaveLength(5);
+    expect(body.claims.every((claim: { token: string; amount: string; status: string; txHash: string }) =>
+      claim.token === "eth" && claim.amount === "0.0001" && claim.status === "succeeded" && /^0x[0-9a-f]{64}$/.test(claim.txHash))).toBe(true);
+    expect(body.skipped).toEqual([{ token: "usdc", amount: "1", reason: "cap_reached", cap: "global" }]);
+    expect(calls.map(call => call.token)).toEqual(Array(5).fill("eth"));
+    expect(rows(result.linkId)).toHaveLength(5);
+    const n = calls.length;
+    expect((await fund(result, "owner")).json()).toEqual(body);
+    expect((await fund(result)).json()).toEqual(body);
+    expect(calls).toHaveLength(n);
+    const device = await fund(await linked("device"));
+    expect(device.statusCode).toBe(200);
+    expect(Object.keys(device.json()).sort()).toEqual(["claims", "status"]);
+    // The grant stays ETH-only even after the historical USDC shortage rolls off.
+    const completedCalls = calls.length;
+    now += 86400001;
+    expect((await fund(result, "owner")).json()).toEqual(body);
+    expect(calls).toHaveLength(completedCalls);
+  });
+  it("T14 seven global USDC rows permit the complete six-claim agent grant", async () => {
+    for (let i = 0; i < 7; i++)
+      oldClaim(`global-${i}`, "usdc", 1, privateKeyToAccount(generatePrivateKey()).address.toLowerCase());
+    const response = await fund(await linked());
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(response.json()).sort()).toEqual(["claims", "status"]);
+    expect(response.json().status).toBe("funded");
+    expect(response.json().claims.map((claim: { token: string }) => claim.token)).toEqual([...Array(5).fill("eth"), "usdc"]);
+  });
+  it.each(["partial", "pending", "failed"] as const)("T15 ETH-only grants preserve the %s response contract", async (outcome) => {
+    for (let i = 0; i < 8; i++)
+      oldClaim(`global-${i}`, "usdc", 1, privateKeyToAccount(generatePrivateKey()).address.toLowerCase());
+    const result = await linked();
+    if (outcome === "partial") behavior = async () => {
+      if (calls.length === 2) throw {};
+      return { transactionHash: hash() };
+    };
+    if (outcome === "failed") behavior = async () => { throw {}; };
+    const response = await fund(result, "cli", outcome === "pending" ? await build({ attemptBudgetMs: 0 }) : app);
+    expect(rows(result.linkId)).toHaveLength(5);
+    if (outcome === "failed") {
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toEqual({ error: "faucet_error", errorClass: "unknown" });
+    } else {
+      expect(response.statusCode).toBe(200);
+      expect(Object.keys(response.json()).sort()).toEqual(["claims", "skipped", "status"]);
+      expect(response.json().status).toBe(outcome);
+      expect(response.json().skipped).toEqual([{ token: "usdc", amount: "1", reason: "cap_reached", cap: "global" }]);
+      expect(response.json().claims.map((claim: { status: string }) => claim.status)).toEqual(
+        outcome === "pending" ? Array(5).fill("pending") : ["succeeded", "failed", "succeeded", "succeeded", "succeeded"],
+      );
+    }
+    expect(calls.map(call => call.token)).toEqual(Array(outcome === "pending" ? 0 : 5).fill("eth"));
+  });
+  it("T16 the global ETH cap is inclusive and refuses either role before USDC", async () => {
+    const address = privateKeyToAccount(generatePrivateKey()).address.toLowerCase();
+    for (let i = 0; i < GLOBAL_ETH_CLAIM_CAP - 5; i++)
+      oldClaim(`ge-${Math.floor(i / 5)}`, "eth", i % 5 + 1, address);
+    const first = await fund(await linked("device"));
+    expect(first.statusCode).toBe(200);
+    expect(first.json().status).toBe("funded");
+    for (const role of ["device", "agent"] as const) {
+      const result = await linked(role);
+      await refused(`${path}/${result.request.requestId}/fund`, 409, { error: "cap_reached", cap: "global" });
+    }
+  });
+  it("T17 global claim cap constants retain their agreed literal values", () => {
+    expect(GLOBAL_ETH_CLAIM_CAP).toBe(800);
+    expect(GLOBAL_USDC_CLAIM_CAP).toBe(8);
+  });
+  it("T18 claimed account caps are independent for each approving credential", async () => {
+    for (let i = 0; i < 3; i++)
+      expect((await fund(await linked("device"))).json().status).toBe("funded");
+    const sameAccount = await linked("device", undefined, same);
+    const response = await app.inject({ method: "POST", url: `/api/wallets/${sameAccount.linkId}/fund`, headers: same, payload: {} });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe("funded");
+    const fourth = await linked("device");
+    await refused(`${path}/${fourth.request.requestId}/fund`, 409, { error: "cap_reached", cap: "account" });
+  });
+
 });

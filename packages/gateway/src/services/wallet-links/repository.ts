@@ -155,7 +155,7 @@ export function decideLinkRequest(id: string, accountId: string, decision: "appr
   }, { behavior: "immediate" });
 }
 
-function ownershipFilter(accountId: string, approvedByKeyId: string | null, provenAddress: string | null) {
+export function ownershipFilter(accountId: string, approvedByKeyId: string | null, provenAddress: string | null) {
   return provenAddress ? sql`lower(account_id) = ${provenAddress.toLowerCase()}` : sql`account_id = ${accountId}
     AND ${approvedByKeyId === null ? sql`approved_by_key_id IS NULL` : sql`approved_by_key_id = ${approvedByKeyId}`}`;
 }
