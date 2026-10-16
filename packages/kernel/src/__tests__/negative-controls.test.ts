@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { isFabricated, type EvidenceEvent } from "@pcc/spec";
 import type { MachineAdapter } from "../adapters/types.js";
 import {
-  CLAUSES, runAdapterConformance, type ClauseId, type ClauseStatus,
+  CLAUSES, runAdapterConformance, type ClauseId, type ClauseStatus, type ConformanceReport,
 } from "../conformance/index.js";
 import {
   generateNegativeControls, SHIPPED_DEVICE_FAULTS,
@@ -56,6 +56,10 @@ function generatedEntries() {
   return [honest, ...controls];
 }
 
+function clauseOutcomes(report: ConformanceReport) {
+  return Object.fromEntries(report.clauses.map(({ id, status, reason }) => [id, { status, reason }]));
+}
+
 interface Delivery {
   event: DeviceEvent;
   afterQuiesce: boolean;
@@ -102,6 +106,13 @@ async function captureWholeRun(entry: NegativeControl) {
 }
 
 describe("generated adapter conformance negative controls", () => {
+  let defaultOutcomes: Map<string, ReturnType<typeof clauseOutcomes>>;
+  beforeAll(async () => {
+    defaultOutcomes = new Map(await Promise.all(generatedEntries().map(async (entry) => [
+      entry.id, clauseOutcomes(await runAdapterConformance(entry.makeAdapter, entry.profile)),
+    ] as const)));
+  });
+
   it.each([
     "progress", "state", "reason", "jobStateReasons", "jobId", "mock", "origin",
     "settlementUnitId", "challengeNonce",
@@ -144,6 +155,7 @@ describe("generated adapter conformance negative controls", () => {
       expect(Object.fromEntries(report.clauses.map(({ id, status }) => [id, status])), entry.id)
         .toEqual(entry.expected);
       expect(entry.expected, entry.id).toEqual(contractVector(entry.fault));
+      expect(clauseOutcomes(report), entry.id).toEqual(defaultOutcomes.get(entry.id));
     }));
   });
 
@@ -211,6 +223,7 @@ describe("generated adapter conformance negative controls", () => {
         expect(Object.fromEntries(report.clauses.map(({ id, status }) => [id, status])), entry.id)
           .toEqual(entry.expected);
         expect(entry.expected, entry.id).toEqual(contractVector(entry.fault));
+        expect(clauseOutcomes(report), entry.id).toEqual(defaultOutcomes.get(entry.id));
       }));
     },
   );
