@@ -65,6 +65,70 @@ function productionSources(directory: string): string[] {
   });
 }
 
+/** All shipped testing code is audited too; it may violate contracts but cannot conceal fabrication. */
+function testingSources(directory: string = testingRoot): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const filename = path.join(directory, entry.name);
+    return entry.isDirectory() ? testingSources(filename) : entry.name.endsWith(".ts") ? [filename] : [];
+  });
+}
+
+type FabricationTag = "simulated" | "mock";
+interface TagViolation { property: FabricationTag; operation: "delete" | "assign"; line: number }
+
+function unwrapExpression(expression: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) ||
+    ts.isTypeAssertionExpression(expression) || ts.isNonNullExpression(expression) ||
+    ts.isSatisfiesExpression(expression)) expression = expression.expression;
+  return expression;
+}
+
+function fabricationTagName(node: ts.Node): FabricationTag | undefined {
+  if (ts.isComputedPropertyName(node)) {
+    const key = unwrapExpression(node.expression);
+    return ts.isStringLiteralLike(key) ? fabricationTagName(key) : undefined;
+  }
+  const name = ts.isIdentifier(node) || ts.isStringLiteralLike(node) ? node.text : undefined;
+  return name === "simulated" || name === "mock" ? name : undefined;
+}
+
+function assignedTag(expression: ts.Expression): FabricationTag | undefined {
+  const target = unwrapExpression(expression);
+  if (ts.isPropertyAccessExpression(target)) return fabricationTagName(target.name);
+  if (ts.isElementAccessExpression(target)) {
+    const key = unwrapExpression(target.argumentExpression);
+    return ts.isStringLiteralLike(key) ? fabricationTagName(key) : undefined;
+  }
+  return undefined;
+}
+
+/** Inspect syntax, not substrings: comments, strings and similarly named properties are harmless. */
+function forbiddenFabricationTagWrites(source: string, filename: string): TagViolation[] {
+  const parsed = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
+  const found: TagViolation[] = [];
+  const record = (node: ts.Node, property: FabricationTag | undefined, operation: TagViolation["operation"]): void => {
+    if (property) found.push({ property, operation, line: parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1 });
+  };
+  const forbiddenValue = (expression: ts.Expression): boolean => {
+    const value = unwrapExpression(expression);
+    return value.kind === ts.SyntaxKind.FalseKeyword ||
+      (ts.isIdentifier(value) && value.text === "undefined") || ts.isVoidExpression(value);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isDeleteExpression(node)) record(node, assignedTag(node.expression), "delete");
+    if (ts.isBinaryExpression(node) &&
+      node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= ts.SyntaxKind.LastAssignment && forbiddenValue(node.right)) {
+      record(node, assignedTag(node.left), "assign");
+    }
+    if ((ts.isPropertyAssignment(node) || ts.isPropertyDeclaration(node)) &&
+      node.initializer && forbiddenValue(node.initializer)) record(node, fabricationTagName(node.name), "assign");
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return found;
+}
+
 describe("FakeDevice production isolation", () => {
   it("scans exactly the independently enumerated production sources", () => {
     // Only the two top-level trees are excluded; nested __tests__ helpers stay scanned.
@@ -184,6 +248,95 @@ describe("FakeDevice production isolation", () => {
     };
     expect(() => createMachineAdapter(device)).toThrow(`Unknown machine adapterType "${adapterType}"`);
     expect(() => createMachineAdapter(device)).toThrow("refusing to fall back to a mock adapter");
+  });
+
+  it("scans every testing source including both shipped fault modules", () => {
+    const scanned = testingSources().sort();
+    const independent = readdirSync(testingRoot, { recursive: true, encoding: "utf8" })
+      .filter((relative) => relative.endsWith(".ts"))
+      .map((relative) => path.join(testingRoot, relative))
+      .filter((filename) => !lstatSync(filename).isDirectory()).sort();
+    expect(scanned).toEqual(independent);
+    // The fault injector and generator are guarded dist inputs, through the existing testing export.
+    expect(scanned.map((filename) => path.relative(testingRoot, filename))).toEqual([
+      "fake-device.ts", "faults.ts", "index.ts", "negative-controls.ts",
+    ]);
+  });
+
+  it("shipped testing sources never remove or falsify fabrication tags", () => {
+    const scanned = testingSources();
+    // An empty or production-only walk must not turn this safety check into a vacuous pass.
+    expect(scanned).toEqual(expect.arrayContaining([
+      path.join(testingRoot, "fake-device.ts"), path.join(testingRoot, "faults.ts"),
+      path.join(testingRoot, "index.ts"), path.join(testingRoot, "negative-controls.ts"),
+    ]));
+    const violations = scanned.flatMap((filename) =>
+      forbiddenFabricationTagWrites(readFileSync(filename, "utf8"), filename).map((violation) => ({
+        file: path.relative(sourceRoot, filename), ...violation,
+      })),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it("shipped testing sources never import Vitest", () => {
+    const violations = testingSources().flatMap((filename) =>
+      vitestSpecifiers(readFileSync(filename, "utf8"), filename).map((specifier) => ({
+        file: path.relative(sourceRoot, filename), specifier,
+      })),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  it.each((["simulated", "mock"] as const).flatMap((property) => [
+    [`delete dot ${property}`, `delete event.source.${property};`, property, "delete"],
+    [`delete bracket ${property}`, `delete event.payload["${property}"];`, property, "delete"],
+    [`delete template ${property}`, `delete event.payload[\`${property}\`];`, property, "delete"],
+    [`assign false dot ${property}`, `event.source.${property} = false;`, property, "assign"],
+    [`assign false bracket ${property}`, `event.payload["${property}"] = false;`, property, "assign"],
+    [`assign undefined dot ${property}`, `event.source.${property} = undefined;`, property, "assign"],
+    [`assign undefined bracket ${property}`, `event.payload["${property}"] = undefined;`, property, "assign"],
+    [`assign void ${property}`, `event.payload["${property}"] = void 0;`, property, "assign"],
+    [`parenthesized assignment ${property}`, `(event.source.${property}) = (false as boolean);`, property, "assign"],
+    [`logical assignment ${property}`, `event.source.${property} &&= false;`, property, "assign"],
+    [`object false ${property}`, `const event = { ${property}: false };`, property, "assign"],
+    [`object undefined ${property}`, `const event = { ["${property}"]: undefined };`, property, "assign"],
+    [`class initializer ${property}`, `class Event { ${property} = undefined; }`, property, "assign"],
+  ]))("fabrication guard catches %s", (_label, source, property, operation) => {
+    expect(forbiddenFabricationTagWrites(source, "scratch.ts")).toEqual([{ property, operation, line: 1 }]);
+  });
+
+  it.each([
+    "delete event.source.simulatedX;",
+    "event.source.simulatedX = false;",
+    'event.payload["mockX"] = undefined;',
+    'const property = "simulated"; const other = "mock";',
+    'const simulated = "other"; event[simulated] = false;',
+    'const text = "delete event.source.simulated; event.payload.mock = false";',
+    "// delete event.source.simulated;\n/* event.payload.mock = undefined; */",
+    "event.source.simulated = true; event.payload.mock = true;",
+    "const event = { simulated: true, mock: true, simulatedX: false, mockX: undefined };",
+  ])("fabrication guard ignores near-miss %s", (source) => {
+    expect(forbiddenFabricationTagWrites(source, "scratch.ts")).toEqual([]);
+  });
+
+  it("testing barrel exposes only the opt-in FakeDevice and conformance self-test surface", () => {
+    const filename = path.join(testingRoot, "index.ts");
+    const parsed = ts.createSourceFile(filename, readFileSync(filename, "utf8"), ts.ScriptTarget.Latest, true);
+    const exports = parsed.statements.filter(ts.isExportDeclaration).map((statement) => ({
+      from: statement.moduleSpecifier && ts.isStringLiteralLike(statement.moduleSpecifier)
+        ? statement.moduleSpecifier.text : undefined,
+      typeOnly: statement.isTypeOnly,
+      names: statement.exportClause && ts.isNamedExports(statement.exportClause)
+        ? statement.exportClause.elements.map((element) => element.name.text) : undefined,
+    }));
+    expect(exports).toEqual([
+      { from: "./fake-device.js", typeOnly: false, names: ["FakeDevice"] },
+      { from: "./fake-device.js", typeOnly: true, names: ["FakeDeviceOptions", "FakeDeviceStartOutcome"] },
+      { from: "./faults.js", typeOnly: false, names: ["SHIPPED_DEVICE_FAULTS", "withDeviceFault"] },
+      { from: "./faults.js", typeOnly: true, names: ["ShippedDeviceFault"] },
+      { from: "./negative-controls.js", typeOnly: false, names: ["generateNegativeControls"] },
+      { from: "./negative-controls.js", typeOnly: true, names: ["NegativeControl", "NegativeControlOptions", "NegativeControls"] },
+    ]);
   });
 
   it("package.json maps exactly one export into dist/testing", () => {
