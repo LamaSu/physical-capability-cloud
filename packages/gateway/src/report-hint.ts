@@ -95,6 +95,7 @@ export function decorateWithReportHint(payload: string, ctx: DecorateArgs): stri
   }
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return payload;
   const rec = obj as Record<string, unknown>;
+  if (ctx.statusCode === 503 && rec.error === "wallet_link_unavailable" && Object.keys(rec).length === 1) return payload;
   if (rec.report_hint) return payload; // already decorated (e.g. by setErrorHandler)
   const hint = buildReportHint({
     url: ctx.url,

@@ -11,6 +11,7 @@
 import type { KernelAuthority } from "./kernel-authority.js";
 
 const WALLET_RE = /^0x[0-9a-fA-F]{40}$/;
+const BUYER_PROOF_SOURCES = new Set(["self-link:agent", "siwe-session"]);
 
 /** Equal strings, or the same 0x address in another letter case (a checksum is encoding, not identity). */
 export function sameIdentity(a: unknown, b: unknown): boolean {
@@ -41,13 +42,15 @@ export type BuyerBinding =
 
 /**
  * The buyer this caller may act for, or the 403 to send. The admin may act for any buyer, named
- * as given. A proven wallet may act only for itself: the buyer is then the proven wallet's own
- * string, because the relay compares the minted scope's holder with it exactly. Anyone else, a
- * claimed key included, is refused.
+ * as given. An agent self-link or SIWE proof may act only for its own wallet: the buyer is then
+ * the proven wallet's own string, because the relay compares the minted scope's holder with it
+ * exactly. Device links and all other proof origins are refused.
  */
-export function bindBuyer(authority: Pick<KernelAuthority, "admin" | "provenWallet">, named: unknown): BuyerBinding {
+export function bindBuyer(authority: Pick<KernelAuthority, "admin" | "provenWallet" | "provenWalletVia">, named: unknown): BuyerBinding {
   if (authority.admin && typeof named === "string" && named.trim().length > 0) return { ok: true, buyer: named };
-  if (authority.provenWallet === null) return { ok: false, status: 403, body: BUYER_PROOF_REQUIRED };
+  if (authority.provenWallet === null || !BUYER_PROOF_SOURCES.has(authority.provenWalletVia ?? "")) {
+    return { ok: false, status: 403, body: BUYER_PROOF_REQUIRED };
+  }
   if (!sameIdentity(named, authority.provenWallet)) return { ok: false, status: 403, body: BUYER_MISMATCH };
   return { ok: true, buyer: authority.provenWallet };
 }

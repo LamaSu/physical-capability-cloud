@@ -20,6 +20,7 @@
 import React, { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { fetchWithKey, gatewayUrl } from "../lib/gateway-base.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 const sg = "'Space Grotesk', sans-serif";
 const inter = "'Inter', sans-serif";
@@ -174,6 +175,11 @@ export function EarnFromYourWorkPage(): React.JSX.Element {
           currency: "USDC",
         }),
       });
+      const notice = await scopeErrorMessage(res, "/api/fiat-ramp/onramp/session", "POST");
+      if (notice) {
+        alert(notice);
+        return;
+      }
       const data = (await res.json().catch(() => ({}))) as {
         url?: string;
         sessionUrl?: string;

@@ -2,6 +2,7 @@ import React from "react";
 import { GlassPanel, GlowBadge, DataCell, EmptyState } from "@pcc/ui";
 import { useUIStore } from "../stores/ui-store.js";
 import { authorizedFetch } from "../lib/authorized-fetch.js";
+import { scopeErrorMessage } from "../lib/scope-notice.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -205,8 +206,8 @@ export function NegotiationSessionPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      .then(async (r) => {
+        if (!r.ok) throw new Error((await scopeErrorMessage(r, "/api/negotiate/session", "POST")) ?? `HTTP ${r.status}`);
         return r.json();
       })
       .then((data) => {

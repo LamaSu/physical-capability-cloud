@@ -39,7 +39,7 @@
     "prerequisites.key-leaked": {
       "phase": "prerequisites",
       "trigger": "An API key, a .pcc header file or a private key was printed, pasted into the conversation, or committed.",
-      "do": "Tell the human. Provision a new key (phase 0 step 4, same email) and rewrite .pcc/api-key and .pcc/auth.header. Then revoke the leaked key: find its id with GET /api/auth/keys (match its prefix) and send DELETE /api/auth/keys/<id> with the new key. Never repeat the leaked value.",
+      "do": "Tell the human. While .pcc/auth.header still holds the leaked key, revoke it with itself: find its id with GET /api/auth/keys (match its prefix) and send DELETE /api/auth/keys/<id>, both with that header. A key can always revoke itself. If no file holds the leaked API key any more, tell the human that only the gateway admin can revoke it now, and give them its prefix if you have it. If the leaked secret is .pcc/node-keys.json, also delete it and .pcc/node-public-key, then run phase 0 step 3 again. Then provision a new key (phase 0 step 4, same email) and rewrite .pcc/api-key and .pcc/auth.header. Never repeat the leaked value.",
       "file": "00-prerequisites.md",
       "section": "4. An operator API key, captured without logging it",
       "report": {

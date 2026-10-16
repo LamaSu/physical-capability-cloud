@@ -6,10 +6,13 @@
  * DELETE /api/auth/keys/:id — revoke a key (requires auth)
  */
 
-import type { FastifyInstance } from "fastify";
-import { classifyProvisionError, provisionApiKey } from "../auth/api-key-auth.js";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { eq, or, schema, sql } from "@pcc/store";
+import { classifyProvisionError, provisionApiKey, resolveApiKey } from "../auth/api-key-auth.js";
+import { authorityOf } from "../auth/kernel-authority.js";
+import { resolveSession } from "../auth/siwe-auth.js";
 import { SELF_SERVICE_KEY_SCOPES } from "../middleware/scope-checker.js";
-import { getRepos } from "../db.js";
+import { getRepos, getStore } from "../db.js";
 import { auditService } from "../services/audit-service.js";
 import { trackServerEvent } from "../services/posthog-service.js";
 import { canProvision } from "../middleware/security-hardening.js";
@@ -19,6 +22,30 @@ import {
   isIdentityWriteEnabled,
   getIdentityRegistryAddress,
 } from "../services/erc8004-identity-write.js";
+
+/**
+ * Only a proven owner or the admin may list or revoke another key of an address.
+ * Owner proof comes from exactly: a verified SIWE cookie or bearer session
+ * resolved by resolveSession; or an unexpired, unrevoked
+ * API key whose metadata.source is "siwe-session", using its stored operatorId.
+ * A request-level proven wallet set by any other proof is not owner proof for managing other keys.
+ */
+export function provenOwnerAddress(req: FastifyRequest): string | null {
+  const session = resolveSession(req);
+  if (session) return session.address.toLowerCase();
+
+  const key = req.apiKeyId ? getRepos().apiKeys.findById(req.apiKeyId) : undefined;
+  if (!key || key.revokedAt || (key.expiresAt !== null && !(Date.parse(key.expiresAt) > Date.now()))) {
+    return null;
+  }
+  try {
+    return JSON.parse(key.metadata ?? "null")?.source === "siwe-session"
+      ? key.operatorId.toLowerCase()
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export async function provisionRoutes(app: FastifyInstance) {
   // ── POST /api/auth/provision ──────────────────────────────────────
@@ -351,19 +378,23 @@ export async function provisionRoutes(app: FastifyInstance) {
   });
 
   // ── GET /api/auth/keys ────────────────────────────────────────────
-  // List active keys for the authenticated operator.
-  // Requires existing API key or SIWE session.
+  // Only a proven owner or the admin may list another key of an address.
   app.get("/api/auth/keys", async (req, reply) => {
-    // Try resolveApiKey directly since this route is before the gate
-    const { resolveApiKey } = await import("../auth/api-key-auth.js");
-    const keyRecord = resolveApiKey(req);
-    const operatorId = keyRecord?.operatorId ?? (req as any).operatorId ?? (req as any).userId;
-    if (!operatorId) {
+    const apiKeyId = req.apiKeyId ?? resolveApiKey(req)?.id;
+    const authority = authorityOf(req);
+    const owner = provenOwnerAddress(req) ?? (authority.admin ? authority.claimed?.toLowerCase() : null);
+    if (!apiKeyId && !owner) {
       return reply.status(401).send({ error: "Authentication required" });
     }
 
     const repo = getRepos().apiKeys;
-    const keys = repo.findByOperator(operatorId);
+    const ownKey = apiKeyId ? repo.findById(apiKeyId) : undefined;
+    const keys = owner
+      ? getStore().db.select().from(schema.apiKeys).where(or(
+        sql`lower(${schema.apiKeys.operatorId}) = ${owner}`,
+        apiKeyId ? eq(schema.apiKeys.id, apiKeyId) : undefined,
+      )).all()
+      : ownKey ? [ownKey] : [];
 
     return reply.send({
       keys: keys.map((k) => ({
@@ -384,10 +415,11 @@ export async function provisionRoutes(app: FastifyInstance) {
   });
 
   // ── DELETE /api/auth/keys/:keyId ──────────────────────────────────
-  // Revoke an API key. Requires auth + must own the key.
+  // Only a proven owner or the admin may revoke another key of an address.
   app.delete("/api/auth/keys/:keyId", async (req, reply) => {
-    const operatorId = (req as any).operatorId ?? (req as any).userId;
-    if (!operatorId) {
+    const owner = provenOwnerAddress(req);
+    const admin = authorityOf(req).admin;
+    if (!req.apiKeyId && !owner && !admin) {
       return reply.status(401).send({ error: "Authentication required" });
     }
 
@@ -395,9 +427,7 @@ export async function provisionRoutes(app: FastifyInstance) {
     const repo = getRepos().apiKeys;
     const key = repo.findById(keyId);
 
-    // Unify 404 and 403 into a single "not found" to prevent key ID enumeration
-    // (red team #11/#54: different status codes leak resource existence).
-    if (!key || key.operatorId !== operatorId) {
+    if (!key || !(key.id === req.apiKeyId || admin || (owner && key.operatorId.toLowerCase() === owner))) {
       return reply.status(404).send({ error: "Key not found" });
     }
 

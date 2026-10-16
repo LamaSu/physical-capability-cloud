@@ -24,6 +24,7 @@ export function actAsJobParty(app: FastifyInstance, principal: string | null = S
     const who = typeof p === "string" ? p : ((req as any).operatorId ?? principal);
     if (who != null) (req as any).operatorId = who;
     (req as any).provenWallet = provenWalletFor(req.headers["x-test-proven-wallet"], who);
+    (req as any).provenWalletVia = req.provenWallet ? "siwe-session" : null;
   });
 }
 
