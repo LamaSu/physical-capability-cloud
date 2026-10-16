@@ -166,6 +166,16 @@ describe("HTTP IPP transport, socket-free", () => {
   });
 
   it.each([
+    ["a single leading CRLF", "\r\n"],
+    ["a lone leading LF", "\n"],
+    ["a lone leading CR", "\r"],
+    ["a single CRLF after 100 Continue", "HTTP/1.1 100 Continue\r\n\r\n\r\n"],
+  ])("R8 N1: accepts valid Content-Length framing after %s", async (_name, prefix) => {
+    const { transport } = scripted(`${prefix}HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nIPP`);
+    expect(await transport(request())).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+  });
+
+  it.each([
     ["leading CRLFs", "\r\n\r\n"],
     ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
   ])("R5 LOW-1: accepts valid Content-Length and chunked framing with %s", async (_name, prefix) => {

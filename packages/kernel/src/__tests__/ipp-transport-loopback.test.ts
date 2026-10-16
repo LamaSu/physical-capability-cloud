@@ -132,6 +132,21 @@ describe("HTTP IPP transport, real loopback sockets (T11)", () => {
   }
 
   for (const [name, prefix] of [
+    ["a single leading CRLF", "\r\n"],
+    ["a lone leading LF", "\n"],
+    ["a lone leading CR", "\r"],
+    ["a single CRLF after 100 Continue", "HTTP/1.1 100 Continue\r\n\r\n\r\n"],
+  ]) {
+    it(`R8 N1: production transport accepts valid Content-Length framing after ${name}`, async ({ skip }) => {
+      await withServer((_req, res) => {
+        res.socket?.end(`${prefix}HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nIPP`);
+      }, async (transport, request) => {
+        expect(await transport(request)).toEqual({ ok: true, httpStatus: 200, body: Buffer.from("IPP") });
+      }, skip);
+    });
+  }
+
+  for (const [name, prefix] of [
     ["leading CRLFs", "\r\n\r\n"],
     ["CRLFs around 100", "\r\nHTTP/1.1 100 Continue\r\n\r\n\r\n\r\n"],
   ]) {
