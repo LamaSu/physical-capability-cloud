@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Event } from "@sentry/node";
 import type { FastifyInstance, InjectOptions } from "fastify";
+import { request as httpRequest } from "node:http";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const sinks = vi.hoisted(() => {
   process.env.SENTRY_DSN = "https://abc123@example.invalid/1";
   process.env.POSTHOG_API_KEY = "wallet-privacy-test";
+  // CI (GITHUB_SHA) and prod (RAILWAY_GIT_COMMIT_SHA) give the SDK a release, which turns on
+  // request-session aggregates; pin one so local runs match CI.
+  process.env.SENTRY_RELEASE = "wallet-sink-test";
   return {
     sentry: [] as unknown[],
     pino: [] as string[],
@@ -335,5 +339,107 @@ describe("wallet request values never reach gateway sinks", () => {
       scan(output, sink);
       expect(leaks, sink).toEqual([]);
     }
+  }, 120_000);
+
+  it("drops wallet HTTP request envelopes over real sockets while preserving control request data", async () => {
+    const client = Sentry.getClient()!;
+    for (const integration of ["RequestData", "Http", "Console"]) {
+      expect(client.getIntegrationByName(integration), integration).toBeDefined();
+    }
+    // Real HTTP requests exercise the default server span and RequestData
+    // instrumentation. Check their request fields below so the synthetic
+    // onResponse spans cannot satisfy the capture control on their own.
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const port = (app.server.address() as { port: number }).port;
+    const send = (method: string, path: string, headers: Record<string, string>, body?: unknown): Promise<{ status: number; text: string }> =>
+      new Promise((resolve, reject) => {
+        const payload = body === undefined ? undefined : JSON.stringify(body);
+        const request = httpRequest({ host: "127.0.0.1", port, method, path, headers: {
+          ...headers,
+          ...(payload === undefined ? {} : {
+            "content-type": "application/json", "content-length": String(Buffer.byteLength(payload)),
+          }),
+        } }, response => {
+          let text = "";
+          response.setEncoding("utf8");
+          response.on("data", chunk => { text += chunk; });
+          response.on("end", () => resolve({ status: response.statusCode ?? 0, text }));
+        });
+        request.on("error", reject);
+        if (payload !== undefined) request.write(payload);
+        request.end();
+      });
+    const marker = "tr_9f8e7d6c5b4a39281706f5e4d3c2b1a0";
+    const control = "ctrl_00112233445566778899aabbccddeeff";
+    const queryControl = "ctrl2_ffeeddccbbaa99887766554433221100";
+    const marked = {
+      authorization: `Bearer ${KEY}`, "user-agent": marker, "x-request-id": marker,
+      referer: `https://example.invalid/${marker}`, "x-review-marker": marker,
+      "accept-language": marker, "x-forwarded-for": "198.51.100.9", origin: "https://capability.network",
+    };
+    expect(await Sentry.flush(3000)).toBe(true);
+    sinks.sentry.length = 0;
+    const account = privateKeyToAccount(generatePrivateKey());
+    const created = await send("POST", `${PATH}?m=${marker}`, marked, {
+      keyType: "secp256k1", address: account.address, role: "device", label: marker, chainId: 84532,
+    });
+    expect(created.status, created.text).toBe(201);
+    const request = JSON.parse(created.text);
+    const signature = await account.signMessage({ message: request.message });
+    const proof = await send("POST", `${PATH}/${request.requestId}/proof?m=${marker}`, marked, { signature });
+    expect(proof.status, proof.text).toBe(200);
+    expect((await send("GET", `${PATH}/${request.requestId}?m=${marker}`, marked)).status).toBe(200);
+    expect((await send("POST", `${PATH}/lookup?m=${marker}`, marked, { userCode: request.userCode })).status).toBe(200);
+    const { CONSENT_SHA256 } = await import("../services/wallet-links/consent.js");
+    const approved = await send("POST", `${PATH}/${request.requestId}/approve?m=${marker}`, marked, {
+      userCode: request.userCode, decision: "approve", consentSha256: CONSENT_SHA256,
+    });
+    expect(approved.status, approved.text).toBe(200);
+    const linkId = JSON.parse(approved.text).linkId;
+    expect((await send("GET", `/api/wallets?m=${marker}`, marked)).status).toBe(200);
+    expect((await send("POST", `/api/wallets/${linkId}/revoke?m=${marker}`, marked, {})).status).toBe(200);
+    await send("GET", `${PATH}/${marker}?m=${marker}`, marked);
+    await send("GET", `/api/wallets/unrouted/${marker}?m=${marker}`, marked);
+    await send("OPTIONS", `${PATH}/${marker}?m=${marker}`, { ...marked, "access-control-request-method": "POST" });
+    await send("GET", `${PATH}/%41${marker}?m=${marker}`, marked);
+    expect(await Sentry.flush(3000)).toBe(true);
+    const walletItems = (sinks.sentry as Array<[unknown, Array<[{ type: string }, unknown]>]>)
+      .flatMap(([, items]) => items);
+    // The default SDK may report dropped counts in a client_report and, with a
+    // release set (CI, prod), request counts in a sessions aggregate; neither
+    // carries request data (the secrets scan below covers both). No event,
+    // transaction, span or other wallet request payload may reach transport.
+    expect(walletItems.filter(([header]) => header.type !== "client_report" && header.type !== "sessions")).toEqual([]);
+
+    await send("GET", `/api/health?m=${control}`, {
+      "user-agent": control, "x-request-id": control, "x-review-marker": control,
+    });
+    await send("GET", `/api/health?/api/wallets/${queryControl}`, { "user-agent": queryControl });
+    expect(await Sentry.flush(3000)).toBe(true);
+    const captured = JSON.stringify(sinks.sentry);
+    expect(captured, "control request data must reach Sentry").toContain(control);
+    expect(captured, "a wallet-looking query must not mute a non-wallet request").toContain(queryControl);
+    const controlItems = (sinks.sentry as Array<[unknown, Array<[{ type: string }, Event]>]>)
+      .flatMap(([, items]) => items);
+    const healthUserAgents = controlItems
+      .filter(([header, event]) => header.type === "transaction" && event.transaction === "GET /api/health")
+      // Node supplies lowercase header names; accept other SDK casing as well.
+      .map(([, event]) => Object.entries(event.request?.headers ?? {})
+        .find(([name]) => name.toLowerCase() === "user-agent")?.[1]);
+    expect(healthUserAgents,
+      "real SDK request capture must be active for the control so the wallet-zero assertion is not vacuous").toContain(control);
+    expect(healthUserAgents,
+      "real SDK request capture must be active for the wallet-looking query control so the wallet-zero assertion is not vacuous").toContain(queryControl);
+    for (const userAgent of [control, queryControl]) {
+      expect(controlItems.some(([header, event]) => header.type === "transaction"
+        && event.transaction === "GET /api/health"
+        && event.contexts?.trace?.op === "http.server"
+        && Object.entries(event.request?.headers ?? {})
+          .find(([name]) => name.toLowerCase() === "user-agent")?.[1] === userAgent),
+      "real http.server span path must be active for each control transaction").toBe(true);
+    }
+    const secrets = [marker, KEY, request.requestId, request.userCode, request.userCode.replace("-", ""),
+      linkId, account.address, account.address.toLowerCase(), signature];
+    expect(secrets.filter(value => captured.includes(value))).toEqual([]);
   }, 120_000);
 });

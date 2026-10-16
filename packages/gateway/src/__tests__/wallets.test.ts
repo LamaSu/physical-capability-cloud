@@ -355,6 +355,18 @@ describe("W1 wallet ceremony", () => {
       .toEqual({ created_by_key_id: "owner" });
   });
 
+  it.each(["lookup", "proof", "poll"] as const)("X-PCC-API-Key alongside valid Authorization preserves %s", async endpoint => {
+    const { account, request } = endpoint === "proof" ? await create() : await proved();
+    const headers = { ...owner, "x-pcc-api-key": "pcc_test_wallet_other" };
+    const response = endpoint === "lookup" ? await lookup(request.userCode, headers)
+      : endpoint === "proof" ? await app.inject({ method: "POST", url: `${path}/${request.requestId}/proof`, headers,
+        payload: { signature: await account.signMessage({ message: request.message }) } })
+      : await app.inject({ url: `${path}/${request.requestId}`, headers });
+    expect(response.statusCode).toBe(200);
+    if (endpoint === "lookup") expect(response.json()).toMatchObject({ requestId: request.requestId, address: account.address });
+    else expect(response.json()).toEqual({ status: endpoint === "proof" ? "awaiting_approval" : "authorization_pending" });
+  });
+
   it("scopeChecker enforces POST /api/wallets/** endpoint scopes for an owner key without wildcard", async () => {
     const { request } = await proved();
     getRepos().governance.insertEndpointScope({ id: "wallet-scope-rule", method: "POST", routePattern: "/api/wallets/**",
@@ -960,5 +972,67 @@ describe("W1 wallet ceremony", () => {
       const text = readFileSync(source, "utf8").replace(/^.*const KEY_MATERIAL_FIELD.*$/m, "");
       expect(text).not.toMatch(/\b(?:private_?key|mnemonic|seed(?:_?phrase)?)\b/i);
     }
+  });
+});
+
+describe("SIWE principals reach only their own address", () => {
+  it("B's cookie, session key and invalid key with cookie cannot list or revoke A's link", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const { account, request } = await proved({ role: "device" });
+    const approval = await approve(request, skA.headers);
+    expect(approval.statusCode).toBe(200);
+    const linkId = approval.json().linkId;
+    const b = await signIn();
+    const skB = await mintSessionKey(b.headers);
+    const invalidWithCookie = { ...b.headers, authorization: "Bearer pcc_test_not_a_real_key" };
+    for (const headers of [b.headers, skB.headers, invalidWithCookie]) {
+      const listed = await app.inject({ url: "/api/wallets", headers });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toEqual({ links: [] });
+      const refused = await revoke(linkId, headers);
+      expect(refused.statusCode).toBe(404);
+      expect(refused.json()).toEqual({ error: "not_found" });
+    }
+    expect(await resolveActiveWalletLink({ address: account.address, chainId: 84532 })).toMatchObject({ linkId, accountProof: "siwe" });
+    const listedByA = await app.inject({ url: "/api/wallets", headers: a.headers });
+    expect(listedByA.statusCode).toBe(200);
+    expect(listedByA.json().links).toHaveLength(1);
+    // Invalid-key fallback uses the cookie session, so Origin is checked before ownership.
+    expect((await revoke(linkId, { ...invalidWithCookie, origin: "https://evil.example" })).statusCode).toBe(403);
+  });
+});
+
+describe("SIWE principals: near-miss addresses and cookie-approved links", () => {
+  it("a near-miss address and another account cannot list or revoke A's key- and cookie-approved links", async () => {
+    const a = await signIn();
+    const skA = await mintSessionKey(a.headers);
+    const viaKey = await approve((await proved({ role: "device" })).request, skA.headers);
+    const viaCookie = await approve((await proved({ role: "device" })).request, a.headers);
+    expect([viaKey.statusCode, viaCookie.statusCode]).toEqual([200, 200]);
+    const linkIds = [viaKey.json().linkId, viaCookie.json().linkId];
+    // Same address as A except the last hex digit: kills prefix/partial-address widenings.
+    const nearMiss = a.account.address.slice(0, -1) + (a.account.address.endsWith("0") ? "1" : "0");
+    const near = sessionHeaders("near-miss-session", nearMiss as typeof a.account.address);
+    const nearKey = await mintSessionKey(near);
+    const b = await signIn();
+    for (const headers of [b.headers, near, nearKey.headers]) {
+      const listed = await app.inject({ url: "/api/wallets", headers });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toEqual({ links: [] });
+      for (const linkId of linkIds) expect((await revoke(linkId, headers)).statusCode).toBe(404);
+    }
+    expect((await app.inject({ url: "/api/wallets", headers: a.headers })).json().links).toHaveLength(2);
+  });
+});
+
+describe("X-PCC-API-Key never changes the lookup principal", () => {
+  it("lookup with X-PCC-API-Key equals the same lookup without it", async () => {
+    const { request } = await proved();
+    const plain = await lookup(request.userCode);
+    const withHeader = await lookup(request.userCode, { ...owner, "x-pcc-api-key": "pcc_test_wallet_other" });
+    expect(withHeader.statusCode).toBe(200);
+    expect(withHeader.json()).toEqual(plain.json());
+    expect(withHeader.json().consent.text).toContain("account-a");
   });
 });
