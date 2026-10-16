@@ -97,7 +97,7 @@ export function issueKernelRegistrationChallenge(
       `Register this key as the signing key of PCC kernel ${kernelId}. Consent: kernel-registration v1.\n\n` +
       `URI: ${publicOrigin}/kernels/register\nVersion: 1\nChain ID: ${chainId}\nNonce: ${nonce}\n` +
       `Issued At: ${issuedAt}\nExpiration Time: ${expiresAt}\nRequest ID: ${challengeId}\nResources:\n` +
-      `- urn:pcc:kernel-registration:${challengeId}\n- urn:pcc:kernel:${kernelId}\n- urn:pcc:env:${env}`
+      `- urn:pcc:kernel-registration:${challengeId}\n- urn:pcc:kernel:${encodeURIComponent(kernelId)}\n- urn:pcc:env:${env}`
     : Buffer.from("PCC-KERNEL-REG-V1\n" + canonicalize({
       challengeId, kernelId, nonce, env, chainId, domain, issuedAt, expiresAt, publicKey: signer.publicKey,
     }), "utf8").toString("base64");
@@ -109,10 +109,7 @@ export function issueKernelRegistrationChallenge(
       WHERE consumed_at IS NULL AND expires_at > ${issuedAt} AND
         ((${createdByKeyId} IS NOT NULL AND created_by_key_id = ${createdByKeyId}) OR
          (${createdByKeyId} IS NULL AND created_by_session_identity = ${sessionIdentity}))`)!.count;
-    const signerCount = db.get<{ count: number }>(sql`SELECT count(*) AS count FROM kernel_registration_challenges
-      WHERE consumed_at IS NULL AND expires_at > ${issuedAt} AND kernel_id = ${kernelId}
-        AND algorithm = ${signer.algorithm} AND lower(signer) = ${signerValue(signer).toLowerCase()}`)!.count;
-    if (principalCount >= OPEN_CHALLENGE_LIMIT || signerCount >= OPEN_CHALLENGE_LIMIT) {
+    if (principalCount >= OPEN_CHALLENGE_LIMIT) {
       return false;
     }
     db.run(sql`INSERT INTO kernel_registration_challenges

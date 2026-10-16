@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "@pcc/store";
 import { randomUUID } from "node:crypto";
+import { createSiweMessage, parseSiweMessage } from "viem/siwe";
 import { provisionApiKey } from "../auth/api-key-auth.js";
 import { getRepos, getStore } from "../db.js";
 import { kernelSigningProofMessage } from "@pcc/kernel";
-import { verifyKernelRegistrationProof } from "../auth/kernel-registration.js";
+import { issueKernelRegistrationChallenge, verifyKernelRegistrationProof } from "../auth/kernel-registration.js";
 import {
   ED_A, ED_B, ED_SIGNER, EVM_A, EVM_B, EVM_SIGNER, legacyEdProof,
   registrationFixture, signEd, signerFields, type RegistrationFixture,
@@ -18,6 +19,15 @@ describe("kernel registration challenges", () => {
   it("requires authentication to issue a challenge", async () => {
     const response = await fixture.app.inject({ method: "POST", url: "/api/kernels/registration-challenges", payload: { kernelId: "authenticated", signer: ED_SIGNER } });
     expect(response.statusCode).toBe(401);
+  });
+
+  it("refuses direct challenge issuance without an API key or wallet session", () => {
+    expect(() => issueKernelRegistrationChallenge({ kernelId: "anonymous-issuer", signer: ED_SIGNER }, {
+      admin: false, provenWallet: null, claimed: null,
+    })).toThrowError(expect.objectContaining({
+      name: "ForbiddenError", message: "Kernel registration proof is invalid, expired, or already consumed",
+    }));
+    expect(getStore().db.get(sql`SELECT id FROM kernel_registration_challenges`)).toBeUndefined();
   });
 
   it.each([{ scopes: [] }, { scopes: ["requestor"] }])("allows an authenticated API key with scopes $scopes to issue a challenge", async ({ scopes }) => {
@@ -77,7 +87,10 @@ describe("kernel registration challenges", () => {
     { label: "reserved Ed25519 prefix", body: { kernelId: "ED25519:key", signer: ED_SIGNER } },
     { label: "invalid public key", body: { kernelId: "invalid-challenge", signer: { algorithm: "ed25519", publicKey: "bad-key" } } },
   ])("refuses a malformed challenge request: $label", async ({ body }) => {
-    const response = await fixture.app.inject({ method: "POST", url: "/api/kernels/registration-challenges", headers: fixture.headers(), payload: body });
+    const response = await fixture.app.inject({
+      method: "POST", url: "/api/kernels/registration-challenges",
+      headers: { ...fixture.headers(), "content-type": "application/json" }, payload: JSON.stringify(body),
+    });
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toBe("invalid_registration_challenge");
   });
@@ -126,10 +139,31 @@ describe("kernel registration challenges", () => {
       `Issued At: ${issuedAt}`, `Expiration Time: ${challenge.expiresAt}`, `Request ID: ${challenge.challengeId}`,
       "Resources:", `- urn:pcc:kernel-registration:${challenge.challengeId}`, "- urn:pcc:kernel:evm-envelope", "- urn:pcc:env:prod",
     ].join("\n"));
+    const parsed = parseSiweMessage(challenge.message);
+    expect(createSiweMessage(parsed as Parameters<typeof createSiweMessage>[0])).toBe(challenge.message);
     const signature = await EVM_A.signMessage({ message: challenge.message });
     const response = await fixture.register("evm-envelope", { ...signerFields(EVM_SIGNER), registrationProof: { challengeId: challenge.challengeId, signature } });
     expect(response.statusCode).toBe(201);
     expect(response.json().kernel.signingKey).toEqual(EVM_SIGNER);
+  });
+
+  it("URI-encodes special kernel ids in SIWE resources and round-trips the signed message", async () => {
+    const kernelId = 'k{|}^"<>`x';
+    const challenge = await fixture.issue(kernelId, EVM_SIGNER);
+    const parsed = parseSiweMessage(challenge.message);
+    expect(parsed.resources).toEqual([
+      `urn:pcc:kernel-registration:${challenge.challengeId}`,
+      `urn:pcc:kernel:${encodeURIComponent(kernelId)}`,
+      "urn:pcc:env:prod",
+    ]);
+    expect(createSiweMessage(parsed as Parameters<typeof createSiweMessage>[0])).toBe(challenge.message);
+    const signature = await EVM_A.signMessage({ message: challenge.message });
+    const response = await fixture.register(kernelId, {
+      ...signerFields(EVM_SIGNER), registrationProof: { challengeId: challenge.challengeId, signature },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().kernel.signingKey).toEqual(EVM_SIGNER);
+    expect(fixture.row(kernelId)?.id).toBe(kernelId);
   });
 
   it.each([
@@ -228,6 +262,29 @@ describe("kernel registration challenges", () => {
       .toEqual({ consumed_at: expect.any(String) });
   });
 
+  it.each([EVM_A.address, EVM_A.address.toLowerCase()])("refuses a key claiming the session wallet %s from redeeming its challenge", async (claimedWallet) => {
+    const issuer = sessionHeaders(EVM_A.address);
+    const issued = await fixture.app.inject({
+      method: "POST", url: "/api/kernels/registration-challenges", headers: issuer,
+      payload: { kernelId: "session-claimed-key", signer: ED_SIGNER },
+    });
+    expect(issued.statusCode).toBe(201);
+    const challenge = issued.json();
+    const proof = { ...signerFields(ED_SIGNER), registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message) } };
+    const claimingKey = provisionApiKey({ operatorId: claimedWallet }).rawKey;
+    const denied = await fixture.register("session-claimed-key", proof, fixture.headers(claimingKey));
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().message).toBe("Kernel registration proof is invalid, expired, or already consumed");
+    expect(fixture.row("session-claimed-key")).toBeUndefined();
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: null });
+    const accepted = await fixture.register("session-claimed-key", proof, issuer);
+    expect(accepted.statusCode).toBe(201);
+    expect(accepted.json().kernel.signingKey).toEqual(ED_SIGNER);
+    expect(getStore().db.get(sql`SELECT consumed_at FROM kernel_registration_challenges WHERE id = ${challenge.challengeId}`))
+      .toEqual({ consumed_at: expect.any(String) });
+  });
+
   it("caps open challenges at five per API key across kernels and signers", async () => {
     for (let index = 0; index < 5; index++) await fixture.issue(`principal-cap-${index}`);
     const denied = await fixture.app.inject({
@@ -252,18 +309,35 @@ describe("kernel registration challenges", () => {
     expect(getStore().db.get(sql`SELECT count(*) AS count FROM kernel_registration_challenges`)).toEqual({ count: 5 });
   });
 
-  it("caps open challenges per kernel and signer across issuing principals", async () => {
-    for (let index = 0; index < 6; index++) {
-      const key = provisionApiKey({ operatorId: `pair-issuer-${index}` }).rawKey;
-      const response = await fixture.app.inject({
-        method: "POST", url: "/api/kernels/registration-challenges", headers: fixture.headers(key),
-        payload: { kernelId: "pair-cap", signer: ED_SIGNER },
-      });
-      expect(response.statusCode).toBe(index < 5 ? 201 : 429);
-      if (index === 5) expect(response.json().error).toBe("registration_challenge_limit");
+  it("keeps owner, admin and proven-owner issuance available when another principal fills its signer slots", async () => {
+    const kernelId = "pair-cap";
+    expect((await fixture.register(kernelId, await fixture.proof(kernelId))).statusCode).toBe(201);
+    const listed = (await fixture.app.inject({ method: "GET", url: "/api/kernels" })).json().kernels
+      .find((kernel: { id: string }) => kernel.id === kernelId);
+    expect(listed.signingKey).toEqual(ED_SIGNER);
+    const attackerKey = provisionApiKey({ operatorId: "pair-issuer", scopes: [] }).rawKey;
+    const requestChallenge = (headers: Record<string, string>) => fixture.app.inject({
+      method: "POST", url: "/api/kernels/registration-challenges", headers,
+      payload: { kernelId, signer: listed.signingKey },
+    });
+    for (let index = 0; index < 5; index++) {
+      expect((await requestChallenge(fixture.headers(attackerKey))).statusCode).toBe(201);
     }
-    expect(getStore().db.get(sql`SELECT count(*) AS count FROM kernel_registration_challenges`)).toEqual({ count: 5 });
-    expect((await fixture.issue("pair-cap", EVM_SIGNER)).challengeId).toEqual(expect.any(String));
+    expect(getStore().db.get(sql`SELECT count(*) AS count FROM kernel_registration_challenges WHERE consumed_at IS NULL`))
+      .toEqual({ count: 5 });
+    const owner = await requestChallenge(fixture.headers());
+    expect(owner.statusCode).toBe(201);
+    const challenge = owner.json();
+    const response = await fixture.register(kernelId, {
+      ...signerFields(ED_SIGNER), name: "Owner re-registered",
+      registrationProof: { challengeId: challenge.challengeId, signature: signEd(challenge.message) },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().kernel.signingKey).toEqual(ED_SIGNER);
+    expect(fixture.row(kernelId)?.name).toBe("Owner re-registered");
+    expect((await requestChallenge(fixture.adminHeaders)).statusCode).toBe(201);
+    expect((await requestChallenge(fixture.provenHeaders)).statusCode).toBe(201);
+    expect((await fixture.issue(kernelId, EVM_SIGNER)).challengeId).toEqual(expect.any(String));
   });
 
   it("does not count consumed challenges toward the open cap", async () => {
@@ -273,7 +347,7 @@ describe("kernel registration challenges", () => {
     expect(getStore().db.get(sql`SELECT count(*) AS count FROM kernel_registration_challenges`)).toEqual({ count: 6 });
   });
 
-  it("prunes expired challenges at issuance and frees the principal and signer caps", async () => {
+  it("prunes expired challenges at issuance and frees the principal cap", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     for (let index = 0; index < 5; index++) await fixture.issue("expired-slots");
     vi.setSystemTime(Date.now() + 600_000);

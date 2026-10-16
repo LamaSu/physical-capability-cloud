@@ -70,6 +70,9 @@ export async function kernelRoutes(app: FastifyInstance) {
       const challenge = issueKernelRegistrationChallenge(req.body, authorityOf(req));
       return reply.code(201).send(challenge);
     } catch (error) {
+      if (error instanceof Error && error.name === "ForbiddenError") {
+        return reply.code(403).send({ error: "FORBIDDEN", message: error.message });
+      }
       if (error instanceof Error && error.name === "RegistrationChallengeLimitError") {
         return reply.code(429).send({ error: "registration_challenge_limit", message: error.message });
       }

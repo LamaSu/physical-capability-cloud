@@ -158,6 +158,37 @@ describe("kernel upsert owner authority", () => {
     expect(fixture.row(id)).toEqual(before);
   });
 
+  it.each(["self-link:device", "admin-mint", ""])("refuses exact-location creation from proof source '%s'", async (provenWalletVia) => {
+    const id = "unapproved-exact-create";
+    const headers = { ...fixture.provenHeaders, "x-test-proven-wallet-via": provenWalletVia };
+    const response = await fixture.register(id, {
+      operatorAddress: OWNER, locationVisibility: "exact", location: { lat: 37.7, lng: -122.4 },
+    }, headers);
+    expect(response.statusCode).toBe(403);
+    expect(response.json().message).toBe(
+      `Publishing the exact location of kernel '${id}' needs the X-Admin-Key header, ` +
+      "or a wallet you proved (SIWE) that is the kernel's operator",
+    );
+    expect(fixture.row(id)).toBeUndefined();
+  });
+
+  it("refuses an exact-location update with a bound signer's fresh proof and an unapproved proven owner wallet", async () => {
+    const id = "unapproved-exact-update";
+    expect((await fixture.register(id, await fixture.proof(id))).statusCode).toBe(201);
+    const before = fixture.row(id);
+    const headers = { ...fixture.provenHeaders, "x-test-proven-wallet-via": "admin-mint" };
+    const response = await fixture.register(id, {
+      ...await fixture.proof(id), name: "Unapproved exact profile",
+      locationVisibility: "exact", location: { lat: 37.7, lng: -122.4 },
+    }, headers);
+    expect(response.statusCode).toBe(403);
+    expect(response.json().message).toBe(
+      `Publishing the exact location of kernel '${id}' needs the X-Admin-Key header, ` +
+      "or a wallet you proved (SIWE) that is the kernel's operator",
+    );
+    expect(fixture.row(id)).toEqual(before);
+  });
+
   it("requires a valid proof even when the admin requests a first signer bind", async () => {
     expect((await fixture.register("admin-invalid-bind")).statusCode).toBe(201);
     const challenge = await fixture.issue("admin-invalid-bind");

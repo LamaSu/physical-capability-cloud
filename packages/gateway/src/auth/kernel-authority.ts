@@ -48,8 +48,7 @@ export interface KernelAuthority {
 /**
  * True only when X-Admin-Key equals PCC_ADMIN_KEY, compared in constant time (both SHA-256'd to
  * fixed-length digests). An unset or blank PCC_ADMIN_KEY, or a missing, empty or repeated header,
- * grants nothing in any environment. (Same rule as routes/kernels.ts; WP-A #326 adds the shared
- * helper, auth/admin-key.ts.)
+ * grants nothing in any environment. Kernel routes use this check through authorityOf.
  */
 function hasAdminSecret(provided: unknown, expected: string | undefined = process.env.PCC_ADMIN_KEY): boolean {
   if (typeof expected !== "string" || expected.trim().length === 0) return false;
