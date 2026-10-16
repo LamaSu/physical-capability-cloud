@@ -31,6 +31,11 @@
       "types": "./dist/evidence-storage-factory.d.ts",
       "import": "./dist/evidence-storage-factory.js",
       "default": "./dist/evidence-storage-factory.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance/index.d.ts",
+      "import": "./dist/conformance/index.js",
+      "default": "./dist/conformance/index.js"
     }
   },
   "scripts": {
