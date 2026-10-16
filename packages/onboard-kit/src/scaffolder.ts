@@ -313,18 +313,20 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
           return { success: false };
         }
         const inputData = command.payload?.inputData;
+        if (inputData !== undefined && !(inputData instanceof Uint8Array)) return { success: false };
         // Forward exact input bytes as base64 when present; otherwise the device resolves inputHash.
         // Adapt this staging call to your device's real upload API without actuating.
-        if (!this.config.mockMode) {
+        let deviceJobId: string;
+        if (this.config.mockMode) {
+          deviceJobId = \`mock-\${++this.stagedCount}\`;
+        } else {
           ${loadEndpoint
-    ? `await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
-            ...(inputData instanceof Uint8Array ? { inputBase64: Buffer.from(inputData).toString("base64") } : {}) }); // Staging only.`
-    : '// TODO: Stage the input through your device API without actuating.'}
+    ? `const staged = await this.apiPost("${loadEndpoint.path}", { jobId, inputHash,
+            ...(inputData instanceof Uint8Array ? { inputBase64: Buffer.from(inputData).toString("base64") } : {}) }); // Staging only.
+          if (typeof staged.deviceJobId !== "string" || staged.deviceJobId.length === 0) return { success: false };
+          deviceJobId = staged.deviceJobId;`
+    : '// TODO: Stage the input through your device API without actuating.\n          return { success: false, message: "prepare: staging is not implemented for this device" };'}
         }
-        // TODO (real mode): use the device's own id for the staged job.
-        const deviceJobId = this.config.mockMode
-          ? \`mock-\${++this.stagedCount}\`
-          : \`\${this.id}-\${++this.stagedCount}\`;
         this.staged = { jobId, deviceJobId,
           ...(inputData instanceof Uint8Array ? { inputData: inputData.slice() } : {}) };
         // The kernel records method_loaded from this ack; never emit method_loaded.
@@ -333,10 +335,11 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
 
       case "start": {
         ${legacy ? "" : `if (!this.staged || command.payload?.jobId !== this.staged.jobId) return { success: false };
+        const { deviceJobId } = this.staged;
         if (!this.config.mockMode) {`}
         ${legacy ? "" : "  "}${startEndpoint
-    ? `await this.apiPost("${startEndpoint.path}", {});`
-    : `// TODO: Start your device\n        ${legacy ? "" : "  "}// await this.apiPost("/api/job/start", {});`}
+    ? `await this.apiPost("${startEndpoint.path}", ${legacy ? "{}" : "{ deviceJobId }"});`
+    : `// TODO: Start your device\n        ${legacy ? "" : "  "}// await this.apiPost("/api/job/start", ${legacy ? "{}" : "{ deviceJobId }"});`}
         ${legacy ? "" : "}"}
 
         this.emit({
@@ -421,7 +424,7 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
     return res.json();
   }
 
-  private async apiPost(path: string, body: Record<string, unknown>): Promise<void> {
+  private async apiPost(path: string, body: Record<string, unknown>): Promise<${legacy ? "void" : "Record<string, unknown>"}> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.config.apiKey) headers["X-Api-Key"] = this.config.apiKey;
 
@@ -431,6 +434,7 @@ ${legacy ? "" : `  private staged: { jobId: string; deviceJobId: string; inputDa
       body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(\`POST \${path}: \${res.status}\`);
+    ${legacy ? "" : "return res.json();"}
   }
 
   // ── Polling ─────────────────────────────────────────────────────
