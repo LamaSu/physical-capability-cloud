@@ -172,6 +172,7 @@ function expectDecisionRequest(action: Action) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kernelId: MACHINE_ID }),
+      signal: expect.any(AbortSignal),
     } : { method: "POST" },
   );
 }

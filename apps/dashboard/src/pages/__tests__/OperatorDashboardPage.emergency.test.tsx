@@ -138,6 +138,7 @@ describe("OperatorDashboardPage emergency controls", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kernelId: MACHINE_ID }),
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -158,6 +159,7 @@ describe("OperatorDashboardPage emergency controls", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kernelId: MACHINE_ID }),
+      signal: expect.any(AbortSignal),
     });
   });
 

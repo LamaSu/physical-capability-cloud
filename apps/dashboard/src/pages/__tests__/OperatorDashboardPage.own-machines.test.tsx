@@ -213,8 +213,10 @@ describe("OperatorDashboardPage signed-in operator's machines", () => {
     expect(postedIds("/api/operator/emergency-resume")).toEqual([LATHE.id]);
     expect(machine(LATHE.name).textContent).not.toContain("EMERGENCY STOP ACTIVE");
     expect(authorizedFetch.mock.calls.filter(([url]) => url !== "/api/agent/me")).toEqual([
-      ["/api/operator/emergency-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kernelId: LATHE.id }) }],
-      ["/api/operator/emergency-resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kernelId: LATHE.id }) }],
+      ["/api/operator/emergency-stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kernelId: LATHE.id }),
+        signal: expect.any(AbortSignal) }],
+      ["/api/operator/emergency-resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kernelId: LATHE.id }),
+        signal: expect.any(AbortSignal) }],
     ]);
   });
 

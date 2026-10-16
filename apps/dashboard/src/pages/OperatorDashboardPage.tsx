@@ -19,45 +19,56 @@ import {
 
 const tabs = ["inbox", "overview", "approvals", "earnings", "certifications", "maintenance"] as const;
 
+function operatorPrincipal(state: ReturnType<typeof useAuthStore.getState>): string {
+  return state.sessionKeyId
+    ? JSON.stringify(["session", state.sessionEpoch, state.address?.toLowerCase()])
+    : JSON.stringify(["key", state.keyEpoch, state.sessionEpoch, state.address?.toLowerCase()]);
+}
+
 function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof kernelsOf>; loading: boolean }) {
   const [outcomes, setOutcomes] = React.useState<Record<string, {
     stopped: boolean;
     pending: "stop" | "resume" | null;
     error: string | null;
   }>>({});
-  const [busy, setBusy] = React.useState(false);
-  const inFlight = React.useRef(false);
+  const inFlight = React.useRef(new Set<string>());
+  const labelCounts = new Map<string, number>();
+  if (Array.isArray(kernels)) {
+    for (const machine of kernels) {
+      const label = machineLabel(machine);
+      labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+    }
+  }
+  const targetLabel = (machine: OperatorMachine) => (labelCounts.get(machineLabel(machine)) ?? 0) > 1
+    ? `${machineLabel(machine)} (${machine.id})` : machineLabel(machine);
 
-  async function stop(targets: OperatorMachine[]) {
-    if (inFlight.current) return;
-    const names = targets.map(machineLabel).join(", ");
+  async function stop(requestedTargets: OperatorMachine[]) {
+    const targets = requestedTargets.filter((machine) => !inFlight.current.has(machine.id));
+    if (targets.length === 0) return;
+    const names = targets.map(targetLabel).join(", ");
     const confirmation = targets.length === 1
       ? `EMERGENCY STOP for ${names}: PCC stops handing work to this machine and cancels its queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with the machine's own emergency stop. Continue?`
       : `EMERGENCY STOP for ${targets.length} machines (${names}): PCC stops handing work to these machines and cancels their queued device commands. Queued jobs are held, not cancelled, and can start when you resume. Work already running stops only with each machine's own emergency stop. Continue?`;
     if (!window.confirm(confirmation)) return;
-    inFlight.current = true;
-    setBusy(true);
+    for (const machine of targets) inFlight.current.add(machine.id);
     setOutcomes((prev) => ({
       ...prev,
       ...Object.fromEntries(targets.map((machine) => [machine.id, { stopped: prev[machine.id]?.stopped === true, pending: "stop", error: null }])),
     }));
     await Promise.all(targets.map(async (machine) => {
       const result = await emergencyStop(machine);
+      inFlight.current.delete(machine.id);
       setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: result.ok || prev[machine.id]?.stopped === true, pending: null, error: result.error } }));
     }));
-    inFlight.current = false;
-    setBusy(false);
   }
 
   async function resume(machine: OperatorMachine) {
-    if (inFlight.current || !window.confirm(`Resume operations on ${machineLabel(machine)}? Jobs PCC held during the stop can start on the machine.`)) return;
-    inFlight.current = true;
-    setBusy(true);
+    if (inFlight.current.has(machine.id) || !window.confirm(`Resume operations on ${targetLabel(machine)}? Jobs PCC held during the stop can start on the machine.`)) return;
+    inFlight.current.add(machine.id);
     setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: true, pending: "resume", error: null } }));
     const result = await emergencyResume(machine);
+    inFlight.current.delete(machine.id);
     setOutcomes((prev) => ({ ...prev, [machine.id]: { stopped: !result.ok, pending: null, error: result.error } }));
-    inFlight.current = false;
-    setBusy(false);
   }
 
   if (loading) {
@@ -78,7 +89,7 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof k
       {kernels.length > 1 && (
         <button
           onClick={() => void stop(kernels)}
-          disabled={busy}
+          disabled={kernels.every((machine) => Boolean(outcomes[machine.id]?.pending))}
           className="w-full rounded-lg border border-red-400/40 px-4 py-3 text-sm font-medium text-red-400 hover:bg-red-400/10 disabled:opacity-40"
         >
           EMERGENCY STOP: all of your machines
@@ -88,8 +99,9 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof k
         const label = machineLabel(machine);
         const outcome = outcomes[machine.id];
         return (
-          <section key={machine.id} aria-label={`Emergency controls for ${label}`} className="rounded-lg border border-red-400/30 px-4 py-3 space-y-2">
+          <section key={machine.id} aria-label={`Emergency controls for ${targetLabel(machine)}`} className="rounded-lg border border-red-400/30 px-4 py-3 space-y-2">
             <div className="text-sm font-medium text-white/70">{label}</div>
+            {(labelCounts.get(label) ?? 0) > 1 && <div className="text-xs font-mono text-white/50">{machine.id}</div>}
             {outcome?.stopped ? (
               <span className="text-sm text-red-400 font-medium">
                 {`EMERGENCY STOP ACTIVE for ${label}: PCC is holding this machine's jobs and has cancelled its queued device commands. Held jobs can start when you resume. Work already running stops only with the machine's own emergency stop.`}
@@ -101,7 +113,7 @@ function EmergencyStopPanel({ kernels, loading }: { kernels: ReturnType<typeof k
             )}
             <button
               onClick={() => void (outcome?.stopped ? resume(machine) : stop([machine]))}
-              disabled={busy}
+              disabled={Boolean(outcome?.pending)}
               className="rounded-lg border border-red-400/30 px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-400/10 disabled:opacity-40"
             >
               {outcome?.pending === "stop" ? `Stopping ${label}...`
@@ -151,7 +163,10 @@ export function OperatorDashboardPage() {
   const keyEpoch = useAuthStore((state) => state.keyEpoch);
   const sessionEpoch = useAuthStore((state) => state.sessionEpoch);
   const address = useAuthStore((state) => state.address);
-  const identity = JSON.stringify([keyEpoch, sessionEpoch, address]);
+  // A session-key renewal changes the credential, not the principal. The mint
+  // restores sessionKeyId synchronously after adopting the key; React batches
+  // those store updates. Pasted-key changes still require a fresh panel.
+  const identity = useAuthStore(operatorPrincipal);
   const machines = useQuery({
     queryKey: ["operator-machines", keyEpoch, sessionEpoch, address],
     queryFn: async ({ signal }) => {
@@ -169,6 +184,10 @@ export function OperatorDashboardPage() {
   const [approvals, setApprovals] = React.useState<Approval[]>([]);
   const [approvalsLoading, setApprovalsLoading] = React.useState(false);
   const [approvalsError, setApprovalsError] = React.useState<string | null>(null);
+  const [approvalSignIn, setApprovalSignIn] = React.useState<string | null>(null);
+  const decisionNotice = approvalSignIn === identity ? OPERATOR_SIGN_IN_NOTICE : null;
+
+  React.useEffect(() => { setApprovalSignIn(null); }, [identity]);
 
   const fetchApprovals = React.useCallback(async () => {
     setApprovalsLoading(true);
@@ -198,9 +217,10 @@ export function OperatorDashboardPage() {
         method: "POST",
       });
       if (await requiresOperatorSignIn(res)) {
-        setApprovalsError(OPERATOR_SIGN_IN_NOTICE);
+        if (operatorPrincipal(useAuthStore.getState()) === identity) setApprovalSignIn(identity);
         return;
       }
+      if (res.ok) setApprovalSignIn((principal) => principal === identity ? null : principal);
       setApprovals((prev) => prev.filter((a) => a.id !== id));
     } catch {
       // silently fail — next auto-refresh will reconcile
@@ -327,13 +347,13 @@ export function OperatorDashboardPage() {
             </GlassPanel>
           )}
 
-          {approvalsError && (
+          {(decisionNotice || approvalsError) && (
             <GlassPanel padding="md">
-              <span className="text-xs text-red-400">Error: {approvalsError}</span>
+              <span className="text-xs text-red-400">Error: {decisionNotice || approvalsError}</span>
             </GlassPanel>
           )}
 
-          {!approvalsLoading && !approvalsError && approvals.length === 0 && (
+          {!approvalsLoading && !approvalsError && !decisionNotice && approvals.length === 0 && (
             <GlassPanel padding="lg" className="text-center">
               <div className="text-sm text-white/30">No pending approvals.</div>
               <div className="text-xs text-white/20 mt-1">

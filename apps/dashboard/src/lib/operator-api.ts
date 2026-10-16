@@ -43,27 +43,46 @@ export function machineLabel(machine: OperatorMachine): string {
 
 type EmergencyResult = { ok: boolean; error: string | null };
 
+async function withEmergencyTimeout(request: (signal: AbortSignal) => Promise<EmergencyResult>): Promise<EmergencyResult> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("Emergency request timed out"));
+    }, 15_000);
+  });
+  try {
+    return await Promise.race([request(controller.signal), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** A stop is confirmed only by a 2xx and stopped:true for the exact requested machine. */
 export async function emergencyStop(machine: OperatorMachine): Promise<EmergencyResult> {
   const label = machineLabel(machine);
   const failureMessage = `The stop didn't go through. ${label} may still be running: use the machine's physical emergency stop, then try again.`;
   try {
-    const res = await authorizedFetch("/api/operator/emergency-stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kernelId: machine.id }),
+    return await withEmergencyTimeout(async (signal) => {
+      const res = await authorizedFetch("/api/operator/emergency-stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kernelId: machine.id }),
+        signal,
+      });
+      const body = await res.json().catch(() => null);
+      if (res.ok && body?.stopped === true && body?.kernelId === machine.id) {
+        return { ok: true, error: null };
+      }
+      return { ok: false, error: res.ok
+        ? `The server didn't confirm the stop for ${label}. The machine may still be running: use its physical emergency stop.`
+        : res.status === 401
+          ? `Sign in to stop ${label}. Until then, use the machine's physical emergency stop.`
+          : res.status === 403
+            ? `The stop was refused for this key. ${label} may still be running: use the machine's physical emergency stop.`
+            : failureMessage };
     });
-    const body = await res.json().catch(() => null);
-    if (res.ok && body?.stopped === true && body?.kernelId === machine.id) {
-      return { ok: true, error: null };
-    }
-    return { ok: false, error: res.ok
-      ? `The server didn't confirm the stop for ${label}. The machine may still be running: use its physical emergency stop.`
-      : res.status === 401
-        ? `Sign in to stop ${label}. Until then, use the machine's physical emergency stop.`
-        : res.status === 403
-          ? `The stop was refused for this key. ${label} may still be running: use the machine's physical emergency stop.`
-          : failureMessage };
   } catch {
     return { ok: false, error: failureMessage };
   }
@@ -75,22 +94,25 @@ export async function emergencyResume(machine: OperatorMachine): Promise<Emergen
   const failureMessage = `Resume didn't go through. ${label} is still stopped; try again.`;
   const unconfirmedMessage = `Resume wasn't confirmed. ${label} may still be stopped, or the resume may have gone through: treat the machine as live, and press Resume Operations again to confirm.`;
   try {
-    const res = await authorizedFetch("/api/operator/emergency-resume", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kernelId: machine.id }),
+    return await withEmergencyTimeout(async (signal) => {
+      const res = await authorizedFetch("/api/operator/emergency-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kernelId: machine.id }),
+        signal,
+      });
+      if (res.ok) return { ok: true, error: null };
+      if (await requiresOperatorSignIn(res)) return { ok: false, error: OPERATOR_SIGN_IN_NOTICE };
+      return { ok: false, error: res.status === 403
+        ? `Resume was refused for this key. Resuming needs a PCC admin, or proof that you control ${label}'s operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate ${label}, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).`
+        : res.status === 401
+          ? `Sign in to resume ${label}.`
+          : res.status === 404
+            ? `${label} or its policy wasn't found, so it can't be resumed here.`
+            : res.status >= 500 && res.status < 600
+              ? unconfirmedMessage
+              : failureMessage };
     });
-    if (res.ok) return { ok: true, error: null };
-    if (await requiresOperatorSignIn(res)) return { ok: false, error: OPERATOR_SIGN_IN_NOTICE };
-    return { ok: false, error: res.status === 403
-      ? `Resume was refused for this key. Resuming needs a PCC admin, or proof that you control ${label}'s operator wallet; a wallet sign-in isn't that proof yet. Ask a PCC admin to resume it, or, if you operate ${label}, resume through the API with a PCC-issued key and its self-linked operator wallet (X-PCC-Wallet header).`
-      : res.status === 401
-        ? `Sign in to resume ${label}.`
-        : res.status === 404
-          ? `${label} or its policy wasn't found, so it can't be resumed here.`
-          : res.status >= 500 && res.status < 600
-            ? unconfirmedMessage
-            : failureMessage };
   } catch {
     return { ok: false, error: unconfirmedMessage };
   }
