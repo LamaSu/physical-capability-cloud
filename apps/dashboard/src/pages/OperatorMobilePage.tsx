@@ -109,10 +109,10 @@ async function uploadPhoto(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image: base64, sha256: hash, notes }),
   });
-  if (!res.ok) throw new Error("The photo wasn't stored.");
+  if (!res.ok) throw new Error("The photo couldn't be confirmed as stored.");
   const result: unknown = await res.json();
   if (!isRecord(result) || !isNonEmptyString(result.cid) || !isScore(result.antiSpoofScore)) {
-    throw new Error("The photo wasn't stored.");
+    throw new Error("The photo couldn't be confirmed as stored.");
   }
   return { cid: result.cid, antiSpoofScore: result.antiSpoofScore };
 }
@@ -123,10 +123,10 @@ async function comparePhoto(base64: string, jobId: string): Promise<CompareResul
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image: base64, jobId }),
   });
-  if (!res.ok) throw new Error("The comparison didn't run.");
+  if (!res.ok) throw new Error("No comparison result came back.");
   const result: unknown = await res.json();
   if (!isRecord(result) || typeof result.match !== "boolean" || !isScore(result.similarity)) {
-    throw new Error("The comparison didn't run.");
+    throw new Error("No comparison result came back.");
   }
   return { match: result.match, similarity: result.similarity };
 }
@@ -141,10 +141,10 @@ async function reportIssue(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ image: base64, text, jobId }),
   });
-  if (!res.ok) throw new Error("The issue wasn't submitted.");
+  if (!res.ok) throw new Error("The issue couldn't be confirmed as submitted.");
   const result: unknown = await res.json();
   if (!isRecord(result) || !isNonEmptyString(result.issueId)) {
-    throw new Error("The issue wasn't submitted.");
+    throw new Error("The issue couldn't be confirmed as submitted.");
   }
   return { issueId: result.issueId };
 }
@@ -200,7 +200,7 @@ function CameraTab() {
       setUploadResult(result);
       setMode("result");
     } catch {
-      setError("The photo wasn't stored.");
+      setError("The photo couldn't be confirmed as stored.");
       setMode("preview");
     }
   }, [preview, hash, notes]);
@@ -215,7 +215,7 @@ function CameraTab() {
       setCompareResult(result);
       setMode("result");
     } catch {
-      setError("The comparison didn't run.");
+      setError("No comparison result came back.");
       setMode("preview");
     }
   }, [preview, issueJobId]);
@@ -230,7 +230,7 @@ function CameraTab() {
       setIssueId(result.issueId);
       setMode("result");
     } catch {
-      setError("The issue wasn't submitted.");
+      setError("The issue couldn't be confirmed as submitted.");
       setMode("preview");
     }
   }, [preview, issueText, issueJobId]);
@@ -338,7 +338,7 @@ function CameraTab() {
                 className="w-full py-4 rounded-2xl bg-emerald-500 text-black font-semibold
                            text-base active:scale-[0.97] transition-transform disabled:opacity-50"
               >
-                Upload to IPFS
+                Record photo
               </button>
             </>
           )}
@@ -412,10 +412,10 @@ function CameraTab() {
                 <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-black text-xs font-bold">
                   ✓
                 </div>
-                <span className="text-sm font-semibold text-emerald-400">Uploaded</span>
+                <span className="text-sm font-semibold text-emerald-400">Photo recorded</span>
               </div>
               <div>
-                <div className="text-[10px] text-white/30 mb-1">IPFS CID</div>
+                <div className="text-[10px] text-white/30 mb-1">Photo ID</div>
                 <div className="text-xs font-mono text-white/60 break-all">{uploadResult.cid}</div>
               </div>
               <div>
@@ -594,23 +594,8 @@ function JobsTab() {
             onTap={(id) => setExpandedJob(expandedJob === id ? null : id)}
           />
           {expandedJob === job.id && (
-            <div className="mt-1 ml-4 rounded-b-2xl bg-white/[0.02] border border-t-0 border-white/[0.06] p-4 space-y-2">
-              <div className="text-[10px] text-white/30 uppercase tracking-wider mb-2">
-                Evidence Timeline
-              </div>
-              {[
-                { label: "Job queued", time: "0s" },
-                { label: "Material loaded", time: "+2m" },
-                { label: "Printing started", time: "+3m" },
-                { label: "Layer 42 snapshot", time: "+12m" },
-                { label: "Layer 88 snapshot", time: "+24m" },
-              ].map((evt, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/60 shrink-0" />
-                  <div className="flex-1 text-xs text-white/50">{evt.label}</div>
-                  <div className="text-[10px] font-mono text-white/30">{evt.time}</div>
-                </div>
-              ))}
+            <div className="mt-1 ml-4 text-xs text-white/30">
+              No evidence timeline is available here.
             </div>
           )}
         </div>

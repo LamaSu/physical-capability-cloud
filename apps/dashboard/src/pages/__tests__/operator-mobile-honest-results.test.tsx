@@ -24,15 +24,15 @@ const operations = {
     valid: [job], wrong: [{ ...job, title: 123 }],
   },
   upload: {
-    path: "/api/photo/upload", error: "The photo wasn't stored.",
+    path: "/api/photo/upload", error: "The photo couldn't be confirmed as stored.",
     valid: upload, wrong: { ...upload, cid: 123 },
   },
   compare: {
-    path: "/api/photo/compare", error: "The comparison didn't run.",
+    path: "/api/photo/compare", error: "No comparison result came back.",
     valid: comparison, wrong: { ...comparison, match: "false" },
   },
   issue: {
-    path: "/api/issues", error: "The issue wasn't submitted.",
+    path: "/api/issues", error: "The issue couldn't be confirmed as submitted.",
     valid: issue, wrong: { issueId: 123 },
   },
 } as const;
@@ -92,7 +92,7 @@ async function start(operation: Operation) {
 }
 
 async function submit(operation: Operation) {
-  const label = { jobs: "Retry", upload: "Upload to IPFS", compare: "Compare to Reference", issue: "Send Report" }[operation];
+  const label = { jobs: "Retry", upload: "Record photo", compare: "Compare to Reference", issue: "Send Report" }[operation];
   await click(label);
 }
 
@@ -106,7 +106,7 @@ function expectNoFabrication() {
 function expectFailure(operation: Operation) {
   expectNoFabrication();
   expect(host.textContent).toContain(operations[operation].error);
-  for (const value of ["Uploaded", "IPFS CID", "Anti-spoof Score", "Similarity", "Matches Reference", "Mismatch Detected", "Issue Reported"]) {
+  for (const value of ["Photo recorded", "Photo ID", "Uploaded", "IPFS CID", "Anti-spoof Score", "Similarity", "Matches Reference", "Mismatch Detected", "Issue Reported"]) {
     expect(host.textContent).not.toContain(value);
   }
   for (const value of [upload.cid, issue.issueId, job.title]) expect(host.textContent).not.toContain(value);
@@ -141,6 +141,54 @@ afterEach(async () => {
 });
 
 describe("operator mobile honest results", () => {
+  it("jobs rejects a valid jobs array returned with 503", async () => {
+    fetchMock.mockResolvedValue(response([job], 503));
+    await start("jobs");
+    expectFailure("jobs");
+  });
+
+  it("jobs rejects a malformed second job after a valid first job", async () => {
+    fetchMock.mockResolvedValue(response([job, { ...job, id: "server-job-2", title: 123 }]));
+    await start("jobs");
+    expectFailure("jobs");
+  });
+
+  it("expanded server job shows no invented evidence timeline", async () => {
+    fetchMock.mockResolvedValue(response([job]));
+    await start("jobs");
+    await click(`${job.title}${job.status}Progress37%Elapsed: 2m`);
+    expect(host.textContent).toContain(job.title);
+    for (const entry of ["Evidence Timeline", "Job queued", "Material loaded", "Printing started", "Layer 42 snapshot", "Layer 88 snapshot"]) {
+      expect(host.textContent).not.toContain(entry);
+    }
+    expect(host.textContent).toContain("No evidence timeline is available here.");
+  });
+
+  it.each(["upload", "compare", "issue"] as const)("%s reports an unconfirmed malformed 2xx without denying server action", async (operation) => {
+    fetchMock.mockResolvedValue(response({}));
+    await start(operation);
+    expectFailure(operation);
+    expect(host.textContent).not.toMatch(/wasn't stored|didn't run|wasn't submitted/);
+  });
+
+  it("photo recording action uses Record photo", async () => {
+    fetchMock.mockResolvedValue(response({}, 503));
+    await start("upload");
+    button("Record photo");
+    expect(host.textContent).not.toContain("Upload to IPFS");
+  });
+
+  it("photo success labels the server hash as Photo ID", async () => {
+    const photoId = `photo:${LOCAL_HASH}`;
+    fetchMock.mockResolvedValue(response({ ...upload, cid: photoId }));
+    await start("upload");
+    expect(host.textContent).toContain(photoId);
+    expect(host.textContent).not.toContain("IPFS CID");
+    expect(host.textContent).not.toContain("Uploaded");
+    expect(host.textContent).toContain("Photo recorded");
+    expect(host.textContent).toContain("Photo ID");
+  });
+
   for (const operation of Object.keys(operations) as Operation[]) {
     it(`${operation} rejects non-2xx without inventing success`, async () => {
       fetchMock.mockResolvedValue(response({ ...operations[operation].valid, error: SERVER_TEXT }, 503));
@@ -256,14 +304,17 @@ describe("operator mobile honest results", () => {
     expect(host.textContent).not.toContain(operations.jobs.error);
   });
 
-  it.each([0, 0.73, 1])("upload retry shows only the server CID and score %s", async (antiSpoofScore) => {
+  it.each([0, 0.73, 1])("upload retry shows only the server photo ID and score %s", async (antiSpoofScore) => {
     fetchMock.mockResolvedValue(response({}, 503));
     await start("upload");
     expectFailure("upload");
     fetchMock.mockResolvedValue(response({ ...upload, antiSpoofScore }));
     await submit("upload");
     expect(host.textContent).not.toContain(operations.upload.error);
-    expect(host.textContent).toContain("Uploaded");
+    expect(host.textContent).toContain("Photo recorded");
+    expect(host.textContent).toContain("Photo ID");
+    expect(host.textContent).not.toContain("Uploaded");
+    expect(host.textContent).not.toContain("IPFS CID");
     expect(host.textContent).toContain(upload.cid);
     expect(host.textContent).toContain(`${antiSpoofScore * 100}%`);
     expect(host.textContent).not.toContain(LOCAL_HASH);
