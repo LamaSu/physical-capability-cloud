@@ -441,6 +441,19 @@ describe("G capability ladders", () => {
     const result = await f.run({ assuranceTier: 2 }); expect(result.success).toBe(false);
     expect(result.error).toBe("Tier 2 requirements not met: Missing one of: calibration_record, Need at least 4 events, have 3");
   });
+  it("X-12 tier 2 checks the snapshot after the caller removes calibration_record", async () => {
+    const f = setup(); const mutable = structuredClone(ladder);
+    f.machine.events = ["instrument_result", "execution_completed"];
+    f.machine.beforeStart = () => {
+      const tier = mutable.tiers.find((entry) => entry.tier === 2)!;
+      tier.requiredEventTypes = tier.requiredEventTypes.filter((group) => !group.includes("calibration_record"));
+      tier.minimumEvents = tier.requiredEventTypes.length;
+    };
+    const result = await f.run({ assuranceTier: 2, tierLadder: mutable });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Tier 2 requirements not met: Missing one of: calibration_record, Need at least 4 events, have 3");
+    expect(f.bundles).toEqual([]);
+  });
   it("G3 fabricated events never count toward the ladder", async () => {
     const f = setup(); f.machine.events = [...events]; f.machine.source.simulated = true;
     const result = await f.run({ assuranceTier: 2 }); expect(result.success).toBe(false);
