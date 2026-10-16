@@ -279,6 +279,14 @@ describe("smart-account signature verifier", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(otherResult).toEqual({ ok: false, reason: "unavailable" });
       expect(requests).toHaveLength(coldFull);
+      // So is a 65-byte signature that is not the claimed address's EOA signature: it falls through to the cap.
+      const stranger = privateKeyToAccount(generatePrivateKey());
+      const fallthrough = check(await stranger.signMessage({ message }));
+      extra.push(fallthrough);
+      let fallthroughResult: unknown = "pending";
+      void fallthrough.then(result => { fallthroughResult = result; });
+      await vi.waitFor(() => expect(fallthroughResult).toEqual({ ok: false, reason: "unavailable" }), { timeout: 1000 });
+      expect(requests).toHaveLength(coldFull);
       first.held.forEach((call, index) => {
         if (index < 8) call.resolve("0x01");
         else call.reject(Object.assign(new Error("execution reverted"), { code: 3, data: "0x12345678" }));
